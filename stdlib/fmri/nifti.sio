@@ -148,6 +148,26 @@ fn nifti_str_byte_u8(src: [i8; 0], idx: i64) -> i64 {
     if raw < 0 { raw + 256 } else { raw }
 }
 
+// 🚨 Acessor de byte com limite EXPLÍCITO, e não `src.len()`.
+//
+// `read_file` devolve um ponteiro terminado em NUL sobre um buffer que JÁ CONTÉM o arquivo
+// inteiro — o `read` leu tudo, o NUL só marca o fim para consumidores de texto. Mas `.len()` é
+// `strlen`, então num binário ele para no primeiro zero. Na fixture NIfTI de 384 bytes isso
+// acontece no offset 2: `read_file(...).len()` devolvia **2**, e todo byte a partir daí lia 0.
+//
+// Consequência: a pista NIfTI nativa NUNCA conseguiu ler um arquivo real. Ficou escondido porque
+// o único teste que a exercitava chamava `run_fmri_pipeline_gate`, que não existia, e o
+// compilador devolvia 0 em silêncio. Cadeia inteira revelada pelo E201 (28/29-ago-2026).
+//
+// O limite correto vem de `file_size(path)`, que é syscall `stat` e não se importa com NUL.
+fn nifti_byte_at(src: [i8; 0], idx: i64, limit: i64) -> i64 {
+    if idx < 0 || idx >= limit {
+        return 0
+    }
+    let raw = src[idx as usize] as i64
+    if raw < 0 { raw + 256 } else { raw }
+}
+
 fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with Panic, Div, Mut, Div, Mut, Panic, IO {
     let size = file_size(path)
     if size <= 0 {
@@ -158,15 +178,13 @@ fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with
     }
 
     let raw = read_file(path)
-    let raw_len = raw.len() as i64
-    if raw_len < size {
-        return nifti_error_code(NiftiError::TruncatedFile)
-    }
-
+    // ⚠️ NÃO usar `raw.len()` aqui: é strlen, e num binário ele para no primeiro NUL — na
+    // fixture NIfTI isso é o offset 2, e a checagem abaixo rejeitava TODO arquivo binário como
+    // truncado. O tamanho verdadeiro veio de `file_size` (stat) e está em `size`.
     out.len = size
     var i: i64 = 0
     while i < size {
-        out.data[i as usize] = nifti_str_byte_u8(raw, i) as u8
+        out.data[i as usize] = nifti_byte_at(raw, i, size) as u8
         i = i + 1
     }
     0

@@ -1,0 +1,382 @@
+//! stdlib/ot/swow_orc.sio — Native exact Ollivier–Ricci curvature over a SWOW edge list.
+//!
+//! Pipeline (all native, no scipy/Julia in any numeric path):
+//!   read_file CSV -> intern words (insertion order) -> dedup undirected adjacency
+//!   -> union-find LCC (re-index LCC nodes in first-appearance order, 0-based)
+//!   -> BFS hop distances -> lazy-walk measure (alpha=1/2, uniform, exact Rational)
+//!   -> exact W1 via stdlib/ot/transport_exact -> kappa = 1 - W1  (edges have d=1).
+//!
+//! Node id convention matches the reference: insertion order among LCC nodes, 0-based.
+
+use math::rational::*
+use ot::transport_exact::*
+
+let ORC_NB: i64 = 262144           // hash buckets
+
+// ---- word table ------------------------------------------------------------
+pub var ORC_CH:    [i64; 1048576] = [0; 1048576]   // copied word bytes
+pub var ORC_WST:   [i64; 131072]  = [0; 131072]    // word start in ORC_CH
+pub var ORC_WLEN:  [i64; 131072]  = [0; 131072]    // word length
+pub var ORC_NW:    i64 = 0
+pub var ORC_CHLEN: i64 = 0
+var ORC_HB:   [i64; 262144] = [0 - 1; 262144]      // hash bucket heads
+var ORC_HNXT: [i64; 131072] = [0 - 1; 131072]
+
+// ---- adjacency (full graph) ------------------------------------------------
+var ORC_AH:  [i64; 131072]  = [0 - 1; 131072]      // adjacency head per node
+var ORC_ATO: [i64; 4194304]                         = [0; 4194304]
+var ORC_ANX: [i64; 4194304]                         = [0 - 1; 4194304]
+var ORC_AEC: i64 = 0
+pub var ORC_DEG: [i64; 131072] = [0; 131072]
+pub var ORC_NE:  i64 = 0           // undirected edge count (full graph)
+
+// ---- LCC -------------------------------------------------------------------
+var ORC_UF:    [i64; 131072] = [0; 131072]
+pub var ORC_LID:   [i64; 131072] = [0 - 1; 131072] // full-id -> lcc-id (or -1)
+pub var ORC_L2F:   [i64; 131072] = [0 - 1; 131072] // lcc-id -> full-id
+pub var ORC_LCC_N: i64 = 0
+pub var ORC_LCC_M: i64 = 0
+
+// ---- BFS -------------------------------------------------------------------
+var ORC_DIST: [i64; 131072] = [0 - 1; 131072]
+var ORC_Q:    [i64; 131072] = [0; 131072]
+var ORC_MARK: [i64; 131072] = [0; 131072]   // timestamp marker for common-neighbor test
+var ORC_MT:   i64 = 0
+
+// ============================================================================
+// Word interning
+// ============================================================================
+fn orc_hash(s: str, start: i64, len: i64) -> i64 with Mut, Panic {
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < len {
+        h = (h ^ s[(start + i) as usize]) * 1099511628211
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    return h
+}
+
+fn orc_streq(s: str, start: i64, cstart: i64, len: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < len {
+        if s[(start + i) as usize] != ORC_CH[(cstart + i) as usize] { return false; }
+        i = i + 1
+    }
+    return true
+}
+
+// Intern substring s[start..start+len); returns its insertion-order id.
+fn orc_intern(s: str, start: i64, len: i64) -> i64 with Mut, Div, Panic {
+    let h = orc_hash(s, start, len)
+    let b = h % ORC_NB
+    var id = ORC_HB[b as usize]
+    while id >= 0 {
+        if ORC_WLEN[id as usize] == len {
+            if orc_streq(s, start, ORC_WST[id as usize], len) { return id; }
+        }
+        id = ORC_HNXT[id as usize]
+    }
+    let nid = ORC_NW
+    var k: i64 = 0
+    while k < len { ORC_CH[(ORC_CHLEN + k) as usize] = s[(start + k) as usize]; k = k + 1; }
+    ORC_WST[nid as usize] = ORC_CHLEN
+    ORC_WLEN[nid as usize] = len
+    ORC_CHLEN = ORC_CHLEN + len
+    ORC_HNXT[nid as usize] = ORC_HB[b as usize]
+    ORC_HB[b as usize] = nid
+    ORC_NW = nid + 1
+    return nid
+}
+
+// Lookup an existing word; returns id or -1 (does NOT insert).
+pub fn orc_lookup(s: str, start: i64, len: i64) -> i64 with Mut, Div, Panic {
+    let h = orc_hash(s, start, len)
+    let b = h % ORC_NB
+    var id = ORC_HB[b as usize]
+    while id >= 0 {
+        if ORC_WLEN[id as usize] == len {
+            if orc_streq(s, start, ORC_WST[id as usize], len) { return id; }
+        }
+        id = ORC_HNXT[id as usize]
+    }
+    return 0 - 1
+}
+
+// ============================================================================
+// Graph build (dedup undirected)
+// ============================================================================
+pub fn orc_has_edge(u: i64, v: i64) -> bool with Mut, Panic {
+    var e = ORC_AH[u as usize]
+    while e >= 0 {
+        if ORC_ATO[e as usize] == v { return true; }
+        e = ORC_ANX[e as usize]
+    }
+    return false
+}
+
+fn orc_add_dir(u: i64, v: i64) with Mut, Panic {
+    ORC_ATO[ORC_AEC as usize] = v
+    ORC_ANX[ORC_AEC as usize] = ORC_AH[u as usize]
+    ORC_AH[u as usize] = ORC_AEC
+    ORC_AEC = ORC_AEC + 1
+}
+
+fn orc_add_edge(u: i64, v: i64) with Mut, Panic {
+    if orc_has_edge(u, v) { return; }
+    orc_add_dir(u, v)
+    orc_add_dir(v, u)
+    ORC_DEG[u as usize] = ORC_DEG[u as usize] + 1
+    ORC_DEG[v as usize] = ORC_DEG[v as usize] + 1
+    ORC_NE = ORC_NE + 1
+}
+
+// Parse a SWOW CSV "source,target,weight" (skip header). Build dedup graph.
+pub fn orc_load_csv(path: str) -> i64 with IO, Mut, Div, Panic {
+    let s = read_file(path)
+    let n = s.len() as i64
+    var i: i64 = 0
+    // skip header line
+    while i < n {
+        if s[i as usize] == 10 { i = i + 1; i = n + n; }
+        else { i = i + 1; }
+    }
+    if i >= n + n { i = i - n - n; } else { i = 0; }
+    // (i now points just past the first newline, or 0 if none)
+    var pos: i64 = 0
+    // find first newline robustly
+    var hn: i64 = 0
+    while hn < n { if s[hn as usize] == 10 { pos = hn + 1; hn = n; } else { hn = hn + 1; } }
+    i = pos
+    while i < n {
+        // source field
+        let s0 = i
+        while i < n && s[i as usize] != 44 && s[i as usize] != 10 { i = i + 1; }
+        let l0 = i - s0
+        if i < n && s[i as usize] == 44 {
+            i = i + 1
+            let s1 = i
+            while i < n && s[i as usize] != 44 && s[i as usize] != 10 { i = i + 1; }
+            let l1 = i - s1
+            // skip to end of line
+            while i < n && s[i as usize] != 10 { i = i + 1; }
+            if i < n { i = i + 1; }
+            if l0 > 0 && l1 > 0 {
+                let u = orc_intern(s, s0, l0)
+                let v = orc_intern(s, s1, l1)
+                if u != v { orc_add_edge(u, v); }
+            }
+        } else {
+            while i < n && s[i as usize] != 10 { i = i + 1; }
+            if i < n { i = i + 1; }
+        }
+    }
+    return ORC_NW
+}
+
+// ============================================================================
+// LCC via union-find, then re-index LCC nodes in first-appearance (id) order.
+// ============================================================================
+fn orc_find(x: i64) -> i64 with Mut, Panic {
+    var r = x
+    while ORC_UF[r as usize] != r { r = ORC_UF[r as usize]; }
+    var c = x
+    while ORC_UF[c as usize] != r { let nx = ORC_UF[c as usize]; ORC_UF[c as usize] = r; c = nx; }
+    return r
+}
+
+pub fn orc_build_lcc() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ORC_NW { ORC_UF[i as usize] = i; i = i + 1; }
+    i = 0
+    while i < ORC_NW {
+        var e = ORC_AH[i as usize]
+        while e >= 0 {
+            let j = ORC_ATO[e as usize]
+            let ri = orc_find(i)
+            let rj = orc_find(j)
+            if ri != rj { ORC_UF[ri as usize] = rj; }
+            e = ORC_ANX[e as usize]
+        }
+        i = i + 1
+    }
+    // component sizes
+    var best_root: i64 = 0 - 1
+    var best_sz: i64 = 0 - 1
+    i = 0
+    while i < ORC_NW {
+        if orc_find(i) == i {
+            // count members
+            var cnt: i64 = 0
+            var j: i64 = 0
+            while j < ORC_NW { if orc_find(j) == i { cnt = cnt + 1; } j = j + 1; }
+            if cnt > best_sz { best_sz = cnt; best_root = i; }
+        }
+        i = i + 1
+    }
+    // assign LCC ids in first-appearance order
+    var lid: i64 = 0
+    i = 0
+    while i < ORC_NW {
+        if orc_find(i) == best_root {
+            ORC_LID[i as usize] = lid
+            ORC_L2F[lid as usize] = i
+            lid = lid + 1
+        }
+        i = i + 1
+    }
+    ORC_LCC_N = lid
+    // LCC edge count
+    var m: i64 = 0
+    i = 0
+    while i < ORC_NW {
+        if ORC_LID[i as usize] >= 0 {
+            var e = ORC_AH[i as usize]
+            while e >= 0 {
+                let j = ORC_ATO[e as usize]
+                if j > i && ORC_LID[j as usize] >= 0 { m = m + 1; }
+                e = ORC_ANX[e as usize]
+            }
+        }
+        i = i + 1
+    }
+    ORC_LCC_M = m
+}
+
+// full-id of an LCC node id
+pub fn orc_lcc_node(lcc_id: i64) -> i64 with Mut, Panic { return ORC_L2F[lcc_id as usize]; }
+
+// ============================================================================
+// BFS hop distances from full-id src; fills ORC_DIST (full-id indexed), -1 if unreachable.
+// ============================================================================
+fn orc_bfs(src: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ORC_NW { ORC_DIST[i as usize] = 0 - 1; i = i + 1; }
+    ORC_DIST[src as usize] = 0
+    var qh: i64 = 0
+    var qt: i64 = 0
+    ORC_Q[0] = src; qt = 1
+    while qh < qt {
+        let u = ORC_Q[qh as usize]
+        qh = qh + 1
+        var e = ORC_AH[u as usize]
+        while e >= 0 {
+            let v = ORC_ATO[e as usize]
+            if ORC_DIST[v as usize] < 0 {
+                ORC_DIST[v as usize] = ORC_DIST[u as usize] + 1
+                ORC_Q[qt as usize] = v; qt = qt + 1
+            }
+            e = ORC_ANX[e as usize]
+        }
+    }
+}
+
+// Exact hop distance between supports a,b of an EDGE (u~v): guaranteed <= 3,
+// since d(a,b) <= d(a,u) + d(u,v) + d(v,b) <= 1 + 1 + 1. Computed in O(deg) via
+// adjacency + a common-neighbor test — no BFS (so dense hub graphs stay fast).
+fn orc_dist_le3(a: i64, b: i64) -> i64 with Mut, Panic {
+    if a == b { return 0; }
+    if orc_has_edge(a, b) { return 1; }
+    ORC_MT = ORC_MT + 1
+    var e = ORC_AH[a as usize]
+    while e >= 0 { ORC_MARK[ORC_ATO[e as usize] as usize] = ORC_MT; e = ORC_ANX[e as usize]; }
+    var f = ORC_AH[b as usize]
+    while f >= 0 {
+        if ORC_MARK[ORC_ATO[f as usize] as usize] == ORC_MT { return 2; }
+        f = ORC_ANX[f as usize]
+    }
+    return 3
+}
+
+// kth neighbor (full-id) of full-id u, k in [0, deg(u))
+fn orc_neighbor(u: i64, k: i64) -> i64 with Mut, Panic {
+    var e = ORC_AH[u as usize]
+    var c: i64 = 0
+    while e >= 0 {
+        if c == k { return ORC_ATO[e as usize]; }
+        c = c + 1
+        e = ORC_ANX[e as usize]
+    }
+    return 0 - 1
+}
+
+// ============================================================================
+// Exact kappa for an edge between two full-ids u, v (assumes u~v, d=1).
+// Lazy walk alpha=1/2 uniform: mass(self)=1/2, mass(each nbr)=1/(2*deg).
+// Returns Rational kappa = 1 - W1. W1 stored in ORC_LAST_W1.
+// ============================================================================
+pub var ORC_LAST_W1_NUM: i64 = 0
+pub var ORC_LAST_W1_DEN: i64 = 1
+
+// Per-edge exact kappa over the whole LCC (filled by orc_compute_all_kappa).
+pub var ORC_EK_N: [i64; 2097152] = [0; 2097152]   // kappa numerator per edge
+pub var ORC_EK_D: [i64; 2097152] = [1; 2097152]   // kappa denominator per edge
+pub var ORC_EU:   [i64; 2097152] = [0; 2097152]   // edge endpoint u (lcc id)
+pub var ORC_EV:   [i64; 2097152] = [0; 2097152]   // edge endpoint v (lcc id)
+pub var ORC_NEDGE: i64 = 0
+
+// Build support arrays into OT buffers and compute. Support = [self] ++ neighbors.
+pub fn orc_kappa_edge(u: i64, v: i64) -> Rational with Mut, Div, Panic {
+    let du = ORC_DEG[u as usize]
+    let dv = ORC_DEG[v as usize]
+    let ns = du + 1
+    let nd = dv + 1
+    // supply masses (u side)
+    OT_SNUM[0] = 1; OT_SDEN[0] = 2
+    var i: i64 = 1
+    while i <= du { OT_SNUM[i as usize] = 1; OT_SDEN[i as usize] = 2 * du; i = i + 1; }
+    // demand masses (v side)
+    OT_DNUM[0] = 1; OT_DDEN[0] = 2
+    var j: i64 = 1
+    while j <= dv { OT_DNUM[j as usize] = 1; OT_DDEN[j as usize] = 2 * dv; j = j + 1; }
+    // Precompute support full-ids: index 0 -> self, index 1+k -> kth neighbor.
+    var SU: [i64; 1024] = [0; 1024]
+    var SV: [i64; 1024] = [0; 1024]
+    SU[0] = u; SV[0] = v
+    var a: i64 = 1
+    var eu = ORC_AH[u as usize]
+    while eu >= 0 { SU[a as usize] = ORC_ATO[eu as usize]; a = a + 1; eu = ORC_ANX[eu as usize]; }
+    var b: i64 = 1
+    var ev = ORC_AH[v as usize]
+    while ev >= 0 { SV[b as usize] = ORC_ATO[ev as usize]; b = b + 1; ev = ORC_ANX[ev as usize]; }
+    // cost matrix = exact hop distance (<=3) among supports, no BFS.
+    a = 0
+    while a < ns {
+        b = 0
+        while b < nd {
+            OT_COST[(a * nd + b) as usize] = orc_dist_le3(SU[a as usize], SV[b as usize])
+            b = b + 1
+        }
+        a = a + 1
+    }
+    let w1 = w1_rational(ns, nd)
+    ORC_LAST_W1_NUM = w1.num
+    ORC_LAST_W1_DEN = w1.den
+    return rat_sub(rat_one(), w1)
+}
+
+// Compute exact kappa for EVERY LCC edge; fill ORC_EK_N/ORC_EK_D/ORC_EU/ORC_EV.
+pub fn orc_compute_all_kappa() with Mut, Div, Panic {
+    ORC_NEDGE = 0
+    var i: i64 = 0
+    while i < ORC_NW {
+        if ORC_LID[i as usize] >= 0 {
+            var e = ORC_AH[i as usize]
+            while e >= 0 {
+                let j = ORC_ATO[e as usize]
+                if j > i {
+                    if ORC_LID[j as usize] >= 0 {
+                        let k = orc_kappa_edge(i, j)
+                        ORC_EK_N[ORC_NEDGE as usize] = k.num
+                        ORC_EK_D[ORC_NEDGE as usize] = k.den
+                        ORC_EU[ORC_NEDGE as usize] = ORC_LID[i as usize]
+                        ORC_EV[ORC_NEDGE as usize] = ORC_LID[j as usize]
+                        ORC_NEDGE = ORC_NEDGE + 1
+                    }
+                }
+                e = ORC_ANX[e as usize]
+            }
+        }
+        i = i + 1
+    }
+}

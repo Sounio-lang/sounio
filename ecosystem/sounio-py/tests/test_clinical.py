@@ -9,7 +9,6 @@ import pytest
 test_dir = pathlib.Path(__file__).parent
 repo_root = test_dir.parent
 python_pkg = repo_root / "python"
-sys.path.insert(0, str(python_pkg))
 
 from sounio.integrations.clinical import (
     read_sdtm_domain,

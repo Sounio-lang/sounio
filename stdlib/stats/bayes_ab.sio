@@ -1,0 +1,179 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bayes_ab.sio — Bayesian A/B test for two proportions
+//
+// Given conjugate Beta posteriors for two rates, computes the posterior
+// probability that one exceeds the other — the decision quantity a Bayesian A/B
+// test actually reports (in place of a p-value):
+//
+//   bayes_ab(aA, bA, aB, bB) -> ABResult
+//
+// For pA ~ Beta(αA, βA), pB ~ Beta(αB, βB) (αB a positive integer), the exact
+// closed form (Miller) is
+//   P(pB > pA) = Σ_{i=0}^{αB−1}  B(αA+i, βA+βB)
+//                                 / [ (βB+i)·B(1+i, βB)·B(αA, βA) ].
+//
+// Pure Sounio: beta functions via inline Lanczos log-gamma; a finite sum. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Miller (2015) "Formulas for Bayesian A/B testing"; Berry & Fristedt (1985).
+
+module stats::bayes_ab
+
+fn ab_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ab_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ab_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ab_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * ab_ln(tt) - tt + ab_ln(a)
+}
+
+// ln B(a,b) = lgamma(a)+lgamma(b)-lgamma(a+b)
+fn ab_lbeta(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    return ab_lgamma(a) + ab_lgamma(b) - ab_lgamma(a + b)
+}
+
+pub struct ABResult {
+    pub prob_b_gt_a: f64,   // P(pB > pA)
+    pub prob_a_gt_b: f64,   // P(pA > pB)
+    pub mean_a: f64,        // αA/(αA+βA)
+    pub mean_b: f64,        // αB/(αB+βB)
+}
+
+/// Bayesian A/B test: posterior P(pB > pA) for two Beta posteriors.
+///
+/// Parâmetros: aA,bA — Beta params for A; aB,bB — for B (aB a positive integer).
+/// Retorno: ABResult (prob_b_gt_a, prob_a_gt_b, mean_a, mean_b).
+/// Referências: Miller (2015).
+pub fn bayes_ab(aA: f64, bA: f64, aB: f64, bB: f64) -> ABResult with Mut, Div, Panic {
+    if aA <= 0.0 || bA <= 0.0 || aB <= 0.0 || bB <= 0.0 {
+        return ABResult { prob_b_gt_a: 0.5, prob_a_gt_b: 0.5, mean_a: 0.0, mean_b: 0.0 }
+    }
+    let lbeta_a = ab_lbeta(aA, bA)
+    // number of terms = floor(aB)
+    var kmax = 0
+    while ((kmax + 1) as f64) <= aB { kmax = kmax + 1 }
+    var prob = 0.0
+    var i = 0
+    while i < kmax {
+        let fi = i as f64
+        // term = B(aA+i, bA+bB) / [ (bB+i)·B(1+i, bB)·B(aA,bA) ]
+        let ln_num = ab_lbeta(aA + fi, bA + bB)
+        let ln_den = ab_ln(bB + fi) + ab_lbeta(1.0 + fi, bB) + lbeta_a
+        prob = prob + ab_exp(ln_num - ln_den)
+        i = i + 1
+    }
+    if prob > 1.0 { prob = 1.0 }
+    if prob < 0.0 { prob = 0.0 }
+    let mean_a = aA / (aA + bA)
+    let mean_b = aB / (aB + bB)
+    return ABResult { prob_b_gt_a: prob, prob_a_gt_b: 1.0 - prob, mean_a: mean_a, mean_b: mean_b }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Beta(2,1) vs Beta(1,1): P(pB>pA) = 2/3 (analytic).
+fn test_two_thirds() -> bool with IO, Mut, Div, Panic {
+    let r = bayes_ab(1.0, 1.0, 2.0, 1.0)
+    var ok = true
+    ok = check(1, approx(r.prob_b_gt_a, 0.666667, 1.0e-4)) && ok
+    ok = check(2, approx(r.prob_a_gt_b, 0.333333, 1.0e-4)) && ok
+    return ok
+}
+
+// identical posteriors Beta(5,5) vs Beta(5,5): P = 0.5 by symmetry.
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    let r = bayes_ab(5.0, 5.0, 5.0, 5.0)
+    var ok = true
+    ok = check(10, approx(r.prob_b_gt_a, 0.5, 1.0e-4)) && ok
+    ok = check(11, approx(r.mean_b, 0.5, 1.0e-9)) && ok
+    return ok
+}
+
+// well-separated: B = Beta(20,2) (mean ~0.91), A = Beta(2,20) (mean ~0.09).
+// P(pB>pA) essentially 1.
+fn test_separated() -> bool with IO, Mut, Div, Panic {
+    let r = bayes_ab(2.0, 20.0, 20.0, 2.0)
+    var ok = true
+    ok = check(20, r.prob_b_gt_a > 0.999) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_two_thirds() && ok
+    ok = test_symmetric() && ok
+    ok = test_separated() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

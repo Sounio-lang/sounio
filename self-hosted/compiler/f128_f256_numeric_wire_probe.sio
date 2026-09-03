@@ -1,0 +1,243 @@
+use check::numeric_format::*
+use ir::numeric_payload::*
+use ir::numeric_payload_wire::*
+
+fn probe_put_u16(wire: &! IrNumericPayloadWireBuffer, offset: i64, value: i64) with Mut, Panic, Div {
+    (*wire).bytes[offset] = (value & 255) as i8
+    (*wire).bytes[offset + 1] = ((value >> 8) & 255) as i8
+}
+
+fn probe_put_i64(wire: &! IrNumericPayloadWireBuffer, offset: i64, value: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        (*wire).bytes[offset + i] = ((value >> (i * 8)) & 255) as i8
+        i = i + 1
+    }
+}
+
+fn byte_is(wire: &IrNumericPayloadWireBuffer, offset: i64, expected: i64) -> bool with Mut, Panic, Div {
+    (((*wire).bytes[offset] as i64) & 255) == expected
+}
+
+fn pool_matches(
+    pool: &IrWideNumericPayloadPool,
+    limbs128: [i64; 8],
+    limbs256: [i64; 8],
+) -> bool with Mut, Panic, Div {
+    if (*pool).payload_count != 2 || (*pool).limb_count != 6 { return false }
+    if (*pool).entries[0].format_id != numeric_format_binary128_id() { return false }
+    if (*pool).entries[0].limb_start != 0 || (*pool).entries[0].limb_count != 2 { return false }
+    if (*pool).entries[1].format_id != numeric_format_binary256_id() { return false }
+    if (*pool).entries[1].limb_start != 2 || (*pool).entries[1].limb_count != 4 { return false }
+    if (*pool).limbs[0] != limbs128[0] || (*pool).limbs[1] != limbs128[1] { return false }
+    var i: i64 = 0
+    while i < 4 {
+        if (*pool).limbs[(i + 2) as usize] != limbs256[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn status_is(status: IrNumericPayloadWireStatus, code: i64, offset: i64) -> bool {
+    status.code == code && status.byte_offset == offset
+}
+
+fn sentinel_matches(pool: &IrWideNumericPayloadPool, limbs128: [i64; 8]) -> bool with Mut, Panic, Div {
+    if (*pool).payload_count != 1 || (*pool).limb_count != 2 { return false }
+    if (*pool).entries[0].format_id != numeric_format_binary128_id() { return false }
+    if (*pool).entries[0].limb_start != 0 || (*pool).entries[0].limb_count != 2 { return false }
+    (*pool).limbs[0] == limbs128[0] && (*pool).limbs[1] == limbs128[1]
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var source = ir_empty_wide_numeric_payload_pool()
+    let limbs128: [i64; 8] = [72623859790382856, -1, 0, 0, 0, 0, 0, 0]
+    let limbs256: [i64; 8] = [2387509390608836392, -2, 4702394921427289928, -3, 0, 0, 0, 0]
+    let (id128, add128) = ir_wide_numeric_payload_pool_add(
+        &! source, numeric_format_binary128_id(), limbs128, 2
+    )
+    if id128 != 0 || add128 != IR_WIDE_NUMERIC_OK { return 1 }
+    let (id256, add256) = ir_wide_numeric_payload_pool_add(
+        &! source, numeric_format_binary256_id(), limbs256, 4
+    )
+    if id256 != 1 || add256 != IR_WIDE_NUMERIC_OK { return 2 }
+
+    var wire = ir_empty_numeric_payload_wire_buffer()
+    let encode_status = ir_numeric_payload_wire_encode(&source, &! wire)
+    if !status_is(encode_status, IR_NUMERIC_WIRE_OK, 0) { return 3 }
+    if wire.len != 136 { return 4 }
+    if !byte_is(&wire, 0, 83) || !byte_is(&wire, 1, 78) { return 5 }
+    if !byte_is(&wire, 2, 87) || !byte_is(&wire, 3, 80) { return 6 }
+    if !byte_is(&wire, 4, 1) || !byte_is(&wire, 5, 0) { return 7 }
+    if !byte_is(&wire, 6, 40) || !byte_is(&wire, 7, 0) { return 8 }
+    if !byte_is(&wire, 8, 136) || !byte_is(&wire, 9, 0) { return 9 }
+    if !byte_is(&wire, 16, 2) || !byte_is(&wire, 24, 6) { return 10 }
+    // Independent canonical Adler-32 oracle for this exact 136-byte fixture:
+    // 0x57941ddc, zero-extended into the 8-byte checksum slot.
+    if !byte_is(&wire, 32, 220) || !byte_is(&wire, 33, 29) { return 41 }
+    if !byte_is(&wire, 34, 148) || !byte_is(&wire, 35, 87) { return 42 }
+    if !byte_is(&wire, 36, 0) || !byte_is(&wire, 37, 0) { return 43 }
+    if !byte_is(&wire, 38, 0) || !byte_is(&wire, 39, 0) { return 44 }
+    // First raw word is 0x0102030405060708, encoded little-endian at byte 88.
+    if !byte_is(&wire, 88, 8) || !byte_is(&wire, 89, 7) { return 11 }
+    if !byte_is(&wire, 94, 2) || !byte_is(&wire, 95, 1) { return 12 }
+    // The next limb is -1: its high bit and every serialized byte are set.
+    if !byte_is(&wire, 96, 255) || !byte_is(&wire, 103, 255) { return 13 }
+    // f256 limb 1 is -2, proving high-bit raw transport beyond f128.
+    if !byte_is(&wire, 112, 254) || !byte_is(&wire, 119, 255) { return 14 }
+
+    var decoded = ir_empty_wide_numeric_payload_pool()
+    decoded.entries[10] = IrWideNumericPayloadEntry { format_id: 999, limb_start: 77, limb_count: 88 }
+    decoded.limbs[100] = 42
+    let decode_status = ir_numeric_payload_wire_decode(&wire, &! decoded)
+    if !status_is(decode_status, IR_NUMERIC_WIRE_OK, 0) { return 15 }
+    if !pool_matches(&decoded, limbs128, limbs256) { return 16 }
+    if decoded.entries[10].format_id != 0 || decoded.entries[10].limb_start != -1 { return 39 }
+    if decoded.entries[10].limb_count != 0 || decoded.limbs[100] != 0 { return 40 }
+
+    var reencoded = ir_empty_numeric_payload_wire_buffer()
+    let reencode_status = ir_numeric_payload_wire_encode(&decoded, &! reencoded)
+    if reencode_status.code != IR_NUMERIC_WIRE_OK || reencoded.len != wire.len { return 17 }
+    var wi: i64 = 0
+    while wi < wire.len {
+        if reencoded.bytes[wi] != wire.bytes[wi] { return 18 }
+        wi = wi + 1
+    }
+
+    var destination_sentinel = ir_empty_wide_numeric_payload_pool()
+    let (sentinel_id, sentinel_add) = ir_wide_numeric_payload_pool_add(
+        &! destination_sentinel, numeric_format_binary128_id(), limbs128, 2
+    )
+    if sentinel_id != 0 || sentinel_add != IR_WIDE_NUMERIC_OK { return 19 }
+
+    var bad_magic = wire
+    bad_magic.bytes[0] = 0
+    let s_magic = ir_numeric_payload_wire_decode(&bad_magic, &! destination_sentinel)
+    if !status_is(s_magic, IR_NUMERIC_WIRE_ERR_BAD_MAGIC, 0) { return 20 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 21 }
+
+    var bad_version = wire
+    probe_put_u16(&! bad_version, 4, 2)
+    let s_version = ir_numeric_payload_wire_decode(&bad_version, &! destination_sentinel)
+    if !status_is(s_version, IR_NUMERIC_WIRE_ERR_BAD_VERSION, 4) { return 22 }
+
+    var bad_header = wire
+    probe_put_u16(&! bad_header, 6, 32)
+    let s_header = ir_numeric_payload_wire_decode(&bad_header, &! destination_sentinel)
+    if !status_is(s_header, IR_NUMERIC_WIRE_ERR_BAD_HEADER, 6) { return 23 }
+
+    var short_header = wire
+    short_header.len = 39
+    let s_short_header = ir_numeric_payload_wire_decode(&short_header, &! destination_sentinel)
+    if !status_is(s_short_header, IR_NUMERIC_WIRE_ERR_TRUNCATED, 39) { return 24 }
+
+    var short_body = wire
+    short_body.len = 135
+    let s_short_body = ir_numeric_payload_wire_decode(&short_body, &! destination_sentinel)
+    if !status_is(s_short_body, IR_NUMERIC_WIRE_ERR_TRUNCATED, 135) { return 25 }
+
+    var bad_payload_count = wire
+    probe_put_i64(&! bad_payload_count, 16, 257)
+    let s_payload_count = ir_numeric_payload_wire_decode(&bad_payload_count, &! destination_sentinel)
+    if !status_is(s_payload_count, IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 16) { return 26 }
+
+    var bad_limb_count = wire
+    probe_put_i64(&! bad_limb_count, 24, 1025)
+    let s_limb_count = ir_numeric_payload_wire_decode(&bad_limb_count, &! destination_sentinel)
+    if !status_is(s_limb_count, IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 24) { return 27 }
+
+    var negative_payload_count = wire
+    probe_put_i64(&! negative_payload_count, 16, -1)
+    let s_negative_payload_count = ir_numeric_payload_wire_decode(&negative_payload_count, &! destination_sentinel)
+    if !status_is(s_negative_payload_count, IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 16) { return 52 }
+
+    var negative_limb_count = wire
+    probe_put_i64(&! negative_limb_count, 24, -1)
+    let s_negative_limb_count = ir_numeric_payload_wire_decode(&negative_limb_count, &! destination_sentinel)
+    if !status_is(s_negative_limb_count, IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 24) { return 53 }
+
+    var bad_length = wire
+    probe_put_i64(&! bad_length, 16, 1)
+    let s_length = ir_numeric_payload_wire_decode(&bad_length, &! destination_sentinel)
+    if !status_is(s_length, IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8) { return 28 }
+
+    var negative_length = wire
+    probe_put_i64(&! negative_length, 8, -1)
+    let s_negative_length = ir_numeric_payload_wire_decode(&negative_length, &! destination_sentinel)
+    if !status_is(s_negative_length, IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8) { return 37 }
+
+    var excessive_length = wire
+    probe_put_i64(&! excessive_length, 8, 16385)
+    let s_excessive_length = ir_numeric_payload_wire_decode(&excessive_length, &! destination_sentinel)
+    if !status_is(s_excessive_length, IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8) { return 38 }
+
+    var oversized_wire = wire
+    oversized_wire.len = 16385
+    let s_oversized_wire = ir_numeric_payload_wire_decode(&oversized_wire, &! destination_sentinel)
+    if !status_is(s_oversized_wire, IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8) { return 54 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 55 }
+
+    var trailing = wire
+    trailing.bytes[136] = 42
+    trailing.len = 137
+    let s_trailing = ir_numeric_payload_wire_decode(&trailing, &! destination_sentinel)
+    if !status_is(s_trailing, IR_NUMERIC_WIRE_ERR_TRAILING_BYTES, 136) { return 29 }
+
+    var unknown_format = wire
+    probe_put_i64(&! unknown_format, 40, 999)
+    let reseal_unknown = ir_numeric_payload_wire_reseal_canonical(&! unknown_format)
+    if reseal_unknown.code != IR_NUMERIC_WIRE_OK { return 45 }
+    let s_unknown = ir_numeric_payload_wire_decode(&unknown_format, &! destination_sentinel)
+    if !status_is(s_unknown, IR_NUMERIC_WIRE_ERR_UNKNOWN_FORMAT, 40) { return 30 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 56 }
+
+    var bad_span = wire
+    probe_put_i64(&! bad_span, 48, 1)
+    let reseal_span = ir_numeric_payload_wire_reseal_canonical(&! bad_span)
+    if reseal_span.code != IR_NUMERIC_WIRE_OK { return 46 }
+    let s_span = ir_numeric_payload_wire_decode(&bad_span, &! destination_sentinel)
+    if !status_is(s_span, IR_NUMERIC_WIRE_ERR_NONCANONICAL_SPAN, 48) { return 31 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 57 }
+
+    var bad_entry_count = wire
+    probe_put_i64(&! bad_entry_count, 56, 4)
+    let reseal_count = ir_numeric_payload_wire_reseal_canonical(&! bad_entry_count)
+    if reseal_count.code != IR_NUMERIC_WIRE_OK { return 47 }
+    let s_entry_count = ir_numeric_payload_wire_decode(&bad_entry_count, &! destination_sentinel)
+    if !status_is(s_entry_count, IR_NUMERIC_WIRE_ERR_NONCANONICAL_COUNT, 56) { return 32 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 58 }
+
+    var tampered_payload = wire
+    tampered_payload.bytes[88] = 9
+    let s_tamper = ir_numeric_payload_wire_decode(&tampered_payload, &! destination_sentinel)
+    if !status_is(s_tamper, IR_NUMERIC_WIRE_ERR_CHECKSUM, 32) { return 33 }
+    if !sentinel_matches(&destination_sentinel, limbs128) { return 34 }
+
+    var corrupt_source = source
+    corrupt_source.entries[0].limb_count = 4
+    var untouched_wire = ir_empty_numeric_payload_wire_buffer()
+    untouched_wire.len = 7
+    untouched_wire.bytes[0] = 42
+    let s_source = ir_numeric_payload_wire_encode(&corrupt_source, &! untouched_wire)
+    if !status_is(s_source, IR_NUMERIC_WIRE_ERR_SOURCE_POOL, 0) { return 35 }
+    if untouched_wire.len != 7 || !byte_is(&untouched_wire, 0, 42) { return 36 }
+
+    var reseal_short = wire
+    reseal_short.len = 39
+    reseal_short.bytes[32] = 42
+    reseal_short.bytes[39] = 43
+    let s_reseal_short = ir_numeric_payload_wire_reseal_canonical(&! reseal_short)
+    if !status_is(s_reseal_short, IR_NUMERIC_WIRE_ERR_TRUNCATED, 39) { return 48 }
+    if !byte_is(&reseal_short, 32, 42) || !byte_is(&reseal_short, 39, 43) { return 49 }
+
+    var reseal_oversize = wire
+    reseal_oversize.len = 16385
+    reseal_oversize.bytes[32] = 44
+    reseal_oversize.bytes[39] = 45
+    let s_reseal_oversize = ir_numeric_payload_wire_reseal_canonical(&! reseal_oversize)
+    if !status_is(s_reseal_oversize, IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8) { return 50 }
+    if !byte_is(&reseal_oversize, 32, 44) || !byte_is(&reseal_oversize, 39, 45) { return 51 }
+
+    println("PASS f128_f256_numeric_wire_probe bytes=136 payloads=2 limbs=6 le=exact high_bit=exact checksum=adler32:57941ddc roundtrip=byte_exact decode_negative=18 encode_negative=1 reseal_negative=2 destination=transactional")
+    0
+}

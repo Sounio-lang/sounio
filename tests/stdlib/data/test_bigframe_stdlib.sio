@@ -1,0 +1,77 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_GATE_OK
+// Run-proof for stdlib/data/bigframe.sio — a HEAP-BACKED columnar f64 DataFrame.
+//
+// Proves the 64x1024 cap of the fixed data::dataframe is BROKEN: we build a
+// 2-column BigFrame and push 100000 rows (>> 1024). All sums stay f64-exact
+// because every partial sum is an integer < 2^53.
+//
+// NATIVE + lean_single only (heap). Compile with:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+use data::bigframe::*
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < 0.0000001
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    let n: i64 = 100000
+
+    // 2 columns, preallocate 16 rows so we exercise heap_realloc growth heavily.
+    var bf = bf_new(2, 16)
+
+    var row: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        let fi = i as f64
+        row[0] = fi          // col0[i] = i
+        row[1] = fi * 2.0    // col1[i] = 2i
+        bf_push_row(&!bf, &row, 2)
+        i = i + 1
+    }
+
+    var pass = 1
+
+    // (1) row count reflects all 100000 pushes — 1024 cap is gone.
+    if bf_nrows(&bf) != n { pass = 0 }
+    if bf_ncols(&bf) != 2 { pass = 0 }
+
+    // (2) col0 sum == n*(n-1)/2 (exact integer in f64).
+    let nf = n as f64
+    let oracle_sum = nf * (nf - 1.0) / 2.0        // 4999950000
+    if !approx_eq(bf_col_sum(&bf, 0), oracle_sum) { pass = 0 }
+
+    // (3) col1 sum == 2 * that.
+    if !approx_eq(bf_col_sum(&bf, 1), oracle_sum * 2.0) { pass = 0 }
+
+    // (4) col0 mean == (n-1)/2.
+    let oracle_mean = (nf - 1.0) / 2.0            // 49999.5
+    if !approx_eq(bf_col_mean(&bf, 0), oracle_mean) { pass = 0 }
+
+    // (5) spot cells: first, an interior, and last row.
+    if !approx_eq(bf_get(&bf, 0, 0), 0.0) { pass = 0 }
+    if !approx_eq(bf_get(&bf, 54321, 0), 54321.0) { pass = 0 }
+    if !approx_eq(bf_get(&bf, 54321, 1), 108642.0) { pass = 0 }
+    if !approx_eq(bf_get(&bf, n - 1, 0), (n - 1) as f64) { pass = 0 }
+
+    // (6) bf_set overwrites a cell.
+    bf_set(&!bf, 7, 0, 999.0)
+    if !approx_eq(bf_get(&bf, 7, 0), 999.0) { pass = 0 }
+
+    bf_free(&!bf)
+
+    print("nrows=")
+    print_int(bf_nrows_pre(n))
+    print("\n")
+    if pass == 1 {
+        print("BIGFRAME_GATE_OK\n")
+    } else {
+        print("BIGFRAME_FAIL\n")
+    }
+    return 0
+}
+
+// helper so we can echo the achieved row count (bf freed above)
+fn bf_nrows_pre(n: i64) -> i64 { n }

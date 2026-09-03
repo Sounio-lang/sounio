@@ -36,6 +36,7 @@ Start with these current-state maps before diving into older deep reports:
 - [Self-Hosted Compiler](implementation/SELF_HOSTED_COMPILER.md)
 - [Tooling Summary](implementation/TOOLING_SUMMARY.md)
 - [Developer Workflow](contributor-guide/DEVELOPER_WORKFLOW.md)
+- [Foundry/Slurm Handoff](ops/foundry_slurm_handoff.md)
 
 ### Additional internals and design notes
 - [Technical Report](compiler/TECHNICAL_REPORT.md)
@@ -46,7 +47,7 @@ Start with these current-state maps before diving into older deep reports:
 - [LLVM Codegen](architecture/LLVM_CODEGEN.md)
 - [GPU Runtime](features/GPU_RUNTIME.md)
 - [Async Runtime](architecture/ASYNC_RUNTIME.md)
-- [Roadmap](architecture/COMPILER_ROADMAP.md)
+- [Roadmap](archived/COMPILER_ROADMAP.md)
 - [Paper Artifact Packaging Spec](implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md)
 - [Website Design System & UI Components](../website/README.md)
 

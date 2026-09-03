@@ -23,7 +23,12 @@
 //   JCGM 100:2008 §5.1: Law of propagation of uncertainty
 //   Rowland & Tozer (2011) "Clinical Pharmacokinetics" Ch.8
 
-use ode::epistemic_pk_fit::{PKFitResult, epistemic_pk_gauss_newton}
+use ode::epistemic_pk_fit::{
+    PKFitResult,
+    epistemic_pk_gauss_newton,
+    pk_conc_dual_val,
+    pk_conc_dual_dot,
+}
 use autodiff::epistemic_dual::{
     EpistemicDual,
     edual_new, edual_const,
@@ -267,6 +272,7 @@ pub struct PKPDFitResult {
 // =============================================================================
 
 pub fn epistemic_pkpd_fit(
+    out: &!PKPDFitResult,
     obs_t: [f64; 6],
     obs_c: [f64; 6],
     obs_cu: [f64; 6],
@@ -278,13 +284,25 @@ pub fn epistemic_pkpd_fit(
     ke_init: f64,
     emax_init: f64,
     ec50_init: f64,
-) -> PKPDFitResult with Mut, Div, Panic {
+) with Mut, Div, Panic {
     let k95 = 1.96
 
     // --- Step 1: Fit PK ---
-    let pk = epistemic_pk_gauss_newton(
-        obs_t, obs_c, obs_cu, dose, vd, ka_init, ke_init
-    )
+    var pk: PKFitResult
+    pk.ka = 0.0
+    pk.u_ka = 0.0
+    pk.ka_lo95 = 0.0
+    pk.ka_hi95 = 0.0
+    pk.ke = 0.0
+    pk.u_ke = 0.0
+    pk.ke_lo95 = 0.0
+    pk.ke_hi95 = 0.0
+    pk.rms_residual = 0.0
+    pk.sens_ka_pct = 0.0
+    pk.sens_ke_pct = 0.0
+    pk.converged = 0
+    pk.iterations = 0
+    epistemic_pk_gauss_newton(&!pk, obs_t, obs_c, obs_cu, dose, vd, ka_init, ke_init)
 
     // --- Step 2: Compute C_pred(t) with uncertainty from (ka, ke) ---
     var c_pred: [f64; 6] = [0.0; 6]
@@ -316,18 +334,13 @@ pub fn epistemic_pkpd_fit(
     let t_peak = obs_t[3]   // t=4h
 
     // Get dC/dka and dC/dke at t_peak via forward-mode AD
-    let c_dka = pk_conc_epis(t_peak,
-        edual_new(pk.ka, 1.0, pk.u_ka, 0.0),
-        edual_new(pk.ke, 0.0, pk.u_ke, 0.0),
-        dose, vd)
-    let c_dke = pk_conc_epis(t_peak,
-        edual_new(pk.ka, 0.0, pk.u_ka, 0.0),
-        edual_new(pk.ke, 1.0, pk.u_ke, 0.0),
-        dose, vd)
-
-    let c_pk = c_dka.val
-    let dc_dka = c_dka.dot
-    let dc_dke = c_dke.dot
+    let ka_d_ka = edual_new(pk.ka, 1.0, pk.u_ka, 0.0)
+    let ke_d_ka = edual_new(pk.ke, 0.0, pk.u_ke, 0.0)
+    let ka_d_ke = edual_new(pk.ka, 0.0, pk.u_ka, 0.0)
+    let ke_d_ke = edual_new(pk.ke, 1.0, pk.u_ke, 0.0)
+    let c_pk = pk_conc_dual_val(t_peak, ka_d_ka, ke_d_ka, dose, vd)
+    let dc_dka = pk_conc_dual_dot(t_peak, ka_d_ka, ke_d_ka, dose, vd)
+    let dc_dke = pk_conc_dual_dot(t_peak, ka_d_ke, ke_d_ke, dose, vd)
 
     // dE/dC at fitted params
     let de_dc = emax_j_c(c_pk, emax, ec50)
@@ -358,23 +371,32 @@ pub fn epistemic_pkpd_fit(
 
     let conv_pd_i32 = if conv_pd > 0.5 { 1 } else { 0 }
 
-    PKPDFitResult {
-        ka: pk.ka, u_ka: pk.u_ka,
-        ka_lo95: pk.ka - k95 * pk.u_ka, ka_hi95: pk.ka + k95 * pk.u_ka,
-        ke: pk.ke, u_ke: pk.u_ke,
-        ke_lo95: pk.ke - k95 * pk.u_ke, ke_hi95: pk.ke + k95 * pk.u_ke,
-        rms_pk: pk.rms_residual,
-        emax: emax, u_emax: u_emax,
-        emax_lo95: emax - k95 * u_emax, emax_hi95: emax + k95 * u_emax,
-        ec50: ec50, u_ec50: u_ec50,
-        ec50_lo95: ec50 - k95 * u_ec50, ec50_hi95: ec50 + k95 * u_ec50,
-        rms_pd: rms_pd,
-        e_peak: e_peak, u_e_peak: u_e_peak,
-        sens_ka_pct: s_ka, sens_ke_pct: s_ke,
-        sens_emax_pct: s_emax, sens_ec50_pct: s_ec50,
-        converged_pk: pk.converged,
-        converged_pd: conv_pd_i32,
-    }
+    out.ka = pk.ka
+    out.u_ka = pk.u_ka
+    out.ka_lo95 = pk.ka - k95 * pk.u_ka
+    out.ka_hi95 = pk.ka + k95 * pk.u_ka
+    out.ke = pk.ke
+    out.u_ke = pk.u_ke
+    out.ke_lo95 = pk.ke - k95 * pk.u_ke
+    out.ke_hi95 = pk.ke + k95 * pk.u_ke
+    out.rms_pk = pk.rms_residual
+    out.emax = emax
+    out.u_emax = u_emax
+    out.emax_lo95 = emax - k95 * u_emax
+    out.emax_hi95 = emax + k95 * u_emax
+    out.ec50 = ec50
+    out.u_ec50 = u_ec50
+    out.ec50_lo95 = ec50 - k95 * u_ec50
+    out.ec50_hi95 = ec50 + k95 * u_ec50
+    out.rms_pd = rms_pd
+    out.e_peak = e_peak
+    out.u_e_peak = u_e_peak
+    out.sens_ka_pct = s_ka
+    out.sens_ke_pct = s_ke
+    out.sens_emax_pct = s_emax
+    out.sens_ec50_pct = s_ec50
+    out.converged_pk = pk.converged
+    out.converged_pd = conv_pd_i32
 }
 
 // =============================================================================
@@ -401,11 +423,38 @@ fn test_pkpd_fit_converges() with Mut, Div, Panic {
     let obs_e: [f64; 6] = [0.424, 0.514, 0.646, 0.604, 0.520, 0.319]
     let obs_eu: [f64; 6] = [0.012, 0.016, 0.019, 0.019, 0.015, 0.010]
 
-    let result = epistemic_pkpd_fit(
-        obs_t, obs_c, obs_cu, obs_e, obs_eu,
+    var result: PKPDFitResult
+    result.ka = 0.0
+    result.u_ka = 0.0
+    result.ka_lo95 = 0.0
+    result.ka_hi95 = 0.0
+    result.ke = 0.0
+    result.u_ke = 0.0
+    result.ke_lo95 = 0.0
+    result.ke_hi95 = 0.0
+    result.rms_pk = 0.0
+    result.emax = 0.0
+    result.u_emax = 0.0
+    result.emax_lo95 = 0.0
+    result.emax_hi95 = 0.0
+    result.ec50 = 0.0
+    result.u_ec50 = 0.0
+    result.ec50_lo95 = 0.0
+    result.ec50_hi95 = 0.0
+    result.rms_pd = 0.0
+    result.e_peak = 0.0
+    result.u_e_peak = 0.0
+    result.sens_ka_pct = 0.0
+    result.sens_ke_pct = 0.0
+    result.sens_emax_pct = 0.0
+    result.sens_ec50_pct = 0.0
+    result.converged_pk = 0
+    result.converged_pd = 0
+    epistemic_pkpd_fit(
+        &!result, obs_t, obs_c, obs_cu, obs_e, obs_eu,
         100.0, 10.0,
-        0.6, 0.25,   // PK init (1.2x true)
-        1.2, 3.6,    // PD init (1.2x true)
+        0.6, 0.25,
+        1.2, 3.6,
     )
 
     // PK convergence

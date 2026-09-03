@@ -1,0 +1,96 @@
+//@ run-pass
+//@ requires: madaros
+use asn1::der::*
+use net::socket::*
+
+fn main() with IO {
+    // Inner SEQUENCE content: INTEGER(2) = 02 01 02 (3 bytes), then
+    // OCTET_STRING(3 bytes AA BB CC) = 04 03 AA BB CC (5 bytes). Inner
+    // SEQUENCE content length = 3 + 5 = 8 bytes. Inner SEQUENCE TLV =
+    // 30 08 <8 bytes> = 10 bytes total.
+    //
+    // Outer SEQUENCE content: INTEGER(1) = 02 01 01 (3 bytes), then the
+    // 10-byte inner SEQUENCE TLV, then a trailing OCTET_STRING(2 bytes
+    // DD EE) = 04 02 DD EE (4 bytes) that the test skips without reading.
+    // Outer content length = 3 + 10 + 4 = 17 bytes. Outer TLV = 30 11
+    // <17 bytes> = 19 bytes total (0x11 = 17).
+    let total_len: i64 = 19
+    let buf = rawbuf_new(total_len)
+    let bytes = [
+        0x30, 0x11,                   // outer SEQUENCE, len 17
+        0x02, 0x01, 0x01,             // INTEGER(1)
+        0x30, 0x08,                   // inner SEQUENCE, len 8
+        0x02, 0x01, 0x02,             // INTEGER(2)
+        0x04, 0x03, 0xAA, 0xBB, 0xCC, // OCTET STRING, 3 bytes
+        0x04, 0x02, 0xDD, 0xEE,       // trailing OCTET STRING, 2 bytes (skipped)
+    ]
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    let top = der_reader_new(&buf, 0, total_len)
+    let (top1, outer_tag, s0) = der_read_tlv(&top)
+    assert(s0 == DER_OK)
+    assert(outer_tag.tag_number == DER_TAG_SEQUENCE)
+    assert(outer_tag.constructed == true)
+    assert(outer_tag.content_len == 17)
+
+    let (outer, e0) = der_enter(&top, &outer_tag)
+    assert(e0 == DER_OK)
+    assert(outer.pos == outer_tag.content_start)
+    assert(outer.end == outer_tag.content_start + outer_tag.content_len)
+
+    // First field: INTEGER(1).
+    let (_, int_tag, s1) = der_read_tlv(&outer)
+    assert(s1 == DER_OK)
+    assert(int_tag.tag_number == DER_TAG_INTEGER)
+    assert(int_tag.content_len == 1)
+
+    // Second field: the nested SEQUENCE -- descend into it.
+    let (after_int, an0) = der_next(&outer, &int_tag)
+    assert(an0 == DER_OK)
+    let (_, inner_seq_tag, s2) = der_read_tlv(&after_int)
+    assert(s2 == DER_OK)
+    assert(inner_seq_tag.tag_number == DER_TAG_SEQUENCE)
+    assert(inner_seq_tag.constructed == true)
+    assert(inner_seq_tag.content_len == 8)
+
+    let (inner, e1) = der_enter(&after_int, &inner_seq_tag)
+    assert(e1 == DER_OK)
+
+    let (_, inner_int_tag, s3) = der_read_tlv(&inner)
+    assert(s3 == DER_OK)
+    assert(inner_int_tag.tag_number == DER_TAG_INTEGER)
+    assert(inner_int_tag.content_len == 1)
+
+    let (after_inner_int, an1) = der_next(&inner, &inner_int_tag)
+    assert(an1 == DER_OK)
+    let (_, inner_octet_tag, s4) = der_read_tlv(&after_inner_int)
+    assert(s4 == DER_OK)
+    assert(inner_octet_tag.tag_number == DER_TAG_OCTET_STRING)
+    assert(inner_octet_tag.content_len == 3)
+    let (after_inner_octet, an2) = der_next(&after_inner_int, &inner_octet_tag)
+    assert(an2 == DER_OK)
+    assert(der_at_end(&after_inner_octet) == true)
+
+    // Back at the outer level: the third field is the trailing OCTET
+    // STRING. Skip it without reading its content.
+    let (after_nested, an3) = der_next(&after_int, &inner_seq_tag)
+    assert(an3 == DER_OK)
+    let (after_nested2, trailing_tag, s5) = der_read_tlv(&after_nested)
+    assert(s5 == DER_OK)
+    assert(trailing_tag.tag_number == DER_TAG_OCTET_STRING)
+    assert(trailing_tag.content_len == 2)
+
+    let (skipped, sk) = der_skip(&after_nested, &trailing_tag)
+    assert(sk == DER_OK)
+    assert(der_at_end(&skipped) == true)
+
+    // der_enter on a primitive tag must be rejected.
+    let (_, bad_enter) = der_enter(&outer, &int_tag)
+    assert(bad_enter == DER_ERR_NOT_CONSTRUCTED)
+
+    println("asn1_navigate: all cases passed")
+}

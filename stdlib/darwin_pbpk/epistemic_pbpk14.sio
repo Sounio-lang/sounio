@@ -75,9 +75,20 @@ fn metrics_empty() -> PBPK14Metrics {
 fn simulate_14(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> PBPK14Metrics with Mut, Div, Panic {
     let c0 = dose_mg / prm.v_blood
     var st = PBPKState14 {
-        blood: c0, liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
-        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
-        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+        blood: c0,
+        liver: 0.0,
+        kidney: 0.0,
+        brain: 0.0,
+        heart: 0.0,
+        lung: 0.0,
+        muscle: 0.0,
+        adipose: 0.0,
+        gut: 0.0,
+        skin: 0.0,
+        bone: 0.0,
+        spleen: 0.0,
+        pancreas: 0.0,
+        other: 0.0
     }
 
     let cfg = default_ode_config()
@@ -421,11 +432,79 @@ pub fn ep14_rapamycin_priors() -> EpPrior14 with Mut {
 }
 
 // ============================================================================
+// EXTENDED EPISTEMIC PRIORS (10 parameters)
+// ============================================================================
+// Adds three analytical sources beyond the 7 FD-perturbable mechanistic params:
+//   [7] R-R 14-tissue logP aggregate  — coherent Kp uncertainty via Vaidyanathan 2001
+//   [8] GNN fu inference uncertainty  — 3-layer dense GNN σ_W=0.01 forward pass
+//   [9] Neural correction σ_W         — hybrid ODE 3-comp, α_neural=0.3
+//
+// These three sources are NOT perturb-able via the 14-comp FD Jacobian (they are
+// independent of PBPKParams14 field values). ep14_run() treats them as zero-
+// sensitivity FD entries (n=7 perturbation loop, 3 extra priors for GUM reporting).
+//
+// Pre-computed sensitivities for u(C_blood(24h)) using the monoexponential
+// approximation at the nominal operating point (same derivation as
+// dissertation_hybrid_demo.sio, Vd_eff=97.9 L, C(24h)≈941 ng/mL):
+//   u_rr_agg  = 524.95 ng/mL  (R-R coherent logP sum over all 14 tissues)
+//   u_gnn_fu  =   2.11 ng/mL  (GNN fu uncertainty propagated to C)
+//   u_neural  =  16.83 ng/mL  (hybrid ODE neural correction)
+
+pub struct EpPrior14Extended {
+    mean: [f64; 12],
+    variance: [f64; 12],
+    confidence: [f64; 12],
+    n: i32,
+    // Pre-computed analytical contributions to u(C_blood(24h)) [ng/mL]
+    // (Not perturbed via FD; combined analytically with FD GUM result)
+    u_rr_agg_ngml: f64,
+    u_gnn_fu_ngml: f64,
+    u_gnn_cl_ngml: f64,
+    u_neural_ngml: f64,
+}
+
+pub fn ep14_rapamycin_priors_extended() -> EpPrior14Extended with Mut {
+    var m: [f64; 12] = [0.0; 12]
+    var v: [f64; 12] = [0.0; 12]
+    var c: [f64; 12] = [0.0; 12]
+
+    // Parameters 0-6: same as ep14_rapamycin_priors()
+    m[0] = 12.4;   v[0] = 54.76;    c[0] = 0.65   // cl_hepatic
+    m[1] = 0.3;    v[1] = 0.0025;   c[1] = 0.50   // cl_renal
+    m[2] = 0.08;   v[2] = 0.0004;   c[2] = 0.72   // fu_plasma
+    m[3] = 0.08;   v[3] = 0.000625; c[3] = 0.63   // kp_brain
+    m[4] = 8.0;    v[4] = 4.0;      c[4] = 0.60   // kp_liver
+    m[5] = 4.0;    v[5] = 1.0;      c[5] = 0.55   // kp_kidney
+    m[6] = 0.3;    v[6] = 0.09;     c[6] = 0.40   // kp_adipose
+
+    // Parameter 7: R-R 14-tissue logP aggregate
+    // Mean = aggregate u_C (pre-computed); variance = u_C^2; conf = 0.70
+    m[7] = 524.95; v[7] = 524.95 * 524.95; c[7] = 0.70
+
+    // Parameter 8: GNN fu inference uncertainty (propagated to C_blood)
+    m[8] = 2.11;   v[8] = 2.11 * 2.11;     c[8] = 0.60
+
+    // Parameter 9: GNN CL inference uncertainty
+    m[9] = 0.00017; v[9] = 0.00017 * 0.00017; c[9] = 0.60
+
+    // Parameter 10: Neural correction sigma_W (hybrid ODE)
+    m[10] = 16.83; v[10] = 16.83 * 16.83; c[10] = 0.60
+
+    EpPrior14Extended {
+        mean: m, variance: v, confidence: c, n: 11,
+        u_rr_agg_ngml: 524.95,
+        u_gnn_fu_ngml: 2.11,
+        u_gnn_cl_ngml: 0.00017,
+        u_neural_ngml: 16.83,
+    }
+}
+
+// ============================================================================
 // MAIN — TEST SUITE
 // ============================================================================
 // 8 tests validating GUM propagation through the 14-compartment model.
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn ep14_selftest_main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
     println("  Epistemic PBPK 14-Compartment — GUM Uncertainty Propagation")
     println("  Drug: Rapamycin (Sirolimus)")

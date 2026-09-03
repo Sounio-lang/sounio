@@ -1,0 +1,116 @@
+---
+title: "Building a PK Model"
+description: "Define pharmacokinetic parameters as typed structs with effect annotations"
+series: "drug-dosing"
+order: 2
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-01-intro"]
+topic_id: "website.tutorials.el.drug-dosing-02-pk-model"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.el.drug-dosing-02-pk-model"
+---
+# Επεξεργασία Ενός Μοναδροποιητικού Μονάδου
+
+Μία Ενός Μονάδου Ενός Μονάδου Επεξεργασίας (PK) περιγράφει την κατανόηση που έχει ένα φάρμα στην σώστηρα. Είναι από τρία κεντρικά παραμέτρους:
+
+- **Κατακατάργηση (CL)**: πως γρήγος το σώστηρ προκαλεί την εξαφαίρεση του φάρμα (L/h)
+- **Ολικός Ουράνος (Vd)**: το δουλικό τουράνος που το φάρμα διαναλώνει (L)
+- **Ηλικία Ηλιουργίας (t½)**: χρόνος για την μικροποίηση της κυλικής κατανόησης (h)
+
+Είναι συνδυασμός των δύο: `t½ = 0.693 × Vd / CL`.
+
+## Ορισμός του Μονάδου
+
+Σουνίο, ανταποδίνει τους παραμέτρους PK ως μία στρογγυλοποίηση:
+
+```sio
+struct PKParams {
+    clearance: f64,    // L/h
+    volume: f64,       // L
+    dose: f64,         // mg
+    tau: f64,          // διαδοσίας διάστημα, ώρες
+}
+```
+
+Πια γράψουμε συνθέσεις που υπολογίζουν τις απόδοσεις προσπελωμένες. Παρακαλούμε σημερωθείτε τις εφαρμογές συνδυασμών:
+
+```sio
+fn half_life(pk: PKParams) -> f64 with Div {
+    0.693 * pk.volume / pk.clearance
+}
+
+fn elimination_rate(pk: PKParams) -> f64 with Div {
+    pk.clearance / pk.volume
+}
+
+fn peak_concentration(pk: PKParams) -> f64 with Div {
+    // Cmax επόμενο μετά την πρώτη δοσία (IV bolus, 1-Ολικός)
+    pk.dose / pk.volume
+}
+
+fn trough_concentration(pk: PKParams, ke: f64) -> f64 with Div, Mut, Panic {
+    // Cmin στην κατάσταση σταθερότητας
+    let cmax = peak_concentration(pk)
+    let numerator = cmax * exp_approx(0.0 - ke * pk.tau)
+    let denominator = 1.0 - exp_approx(0.0 - ke * pk.tau)
+    numerator / denominator
+}
+```
+
+Μία συνθέση δηλώνει τις συγκεκριμένες εφαρμογές που χρειάζεται:
+- `with Div` — εκτελεί διαίρεση (μπορεί να διαιρέσει από το ζερό αν CL = 0)
+- `with Mut` — χρησιμοποιεί διανομιστικά δεδομένα ενωθείτως
+- `with Panic` — μπορεί να προσδοθεί συνδυασμός στους δεδομένους της στρογγυλοποίησης
+
+## Υπολογίση Επιθετικού Σενάριου
+
+Να δούμε τους δύο παραπάνω με ένα σφαλματιστικό σενάριο του Βανκομυσιν:
+
+```sio
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let pk = PKParams {
+        clearance: 4.5,  // L/h (τυπικά για το Βανκομυσιν)
+        volume: 50.0,    // L
+        dose: 1000.0,    // mg
+        tau: 12.0,       // διαδοσίας διάστημα 12 ώρες
+    }
+
+    let ke = elimination_rate(pk)
+    let t_half = half_life(pk)
+    let cmax = peak_concentration(pk)
+    let cmin = trough_concentration(pk, ke)
+
+    print("Ηλικία Ηλιουργίας: ")
+    println(t_half)            // ~7.7 ώρες
+    print("Πικός Κατάνομας (Cmax): ")
+    println(cmax)              // 20.0 mg/L
+    print("Τροχικός Κατάνομας (Cmin): ")
+    println(cmin)              // ~6.8 mg/L
+
+    0
+}
+```
+
+## Το Πρόβλημα: Εκκρυμμένη Δυστυχία
+
+Η επεξεργασία προσφέρει δεδομένα προσαρμόστευτα: Cmin = 6.8 mg/L. Αλλά πως στοιχείται η τομή αυτής; Είναι η τομή της κατακατάργησης 4.5 L/h προκλήθηκε από μέσο της κυμετικής του πολιτισμού

@@ -1,0 +1,126 @@
+// stdlib/darwin_pbpk/compartments/coronary_smc.sio
+// Coronary smooth-muscle sub-compartment — 5%-mass carve-out of heart.
+//
+// Background
+// ----------
+// The dissertation §4.5.3 claim is that the Cypher drug-eluting stent
+// targets coronary smooth-muscle cells (SMCs) in the arterial media, NOT
+// the bulk of myocardium. Whole-heart C_v is therefore a poor proxy for
+// the drug exposure the SMCs actually see — locally elevated by direct
+// stent contact (Higuchi diffusion from the polymer coating), then partly
+// washed out by coronary perfusion.
+//
+// PBPK28 currently uses heart (organ index 4) as the coronary_smc proxy;
+// this module implements the proper sub-compartment carve-out described
+// in gap_report items `coronary_smc_status` and `cypher_flocal`. The
+// PBPK28 parity gate (Sounio ↔ Node) continues to exercise the heart-
+// proxy approximation pending JS engine adoption — §4.5.3 cites this
+// module as the canonical formulation and the parity ref as the
+// currently-validated approximation.
+//
+// Model
+// -----
+//   V_csmc       = 0.05 · V_heart   (5% mass carve-out, ~16.5 mL out of 330 mL)
+//   Q_csmc       = (V_csmc/V_heart) · Q_heart  (volume-proportional perfusion)
+//   Kp_csmc      = Kp_heart  (SMC partitioning ≈ myocardium average)
+//   f_local      = 0.30  (Cypher stent: 30% of Higuchi flux deposits in SMC
+//                         contact zone; 70% washes systemically via the
+//                         capillary bed before reaching the SMC layer.
+//                         Sehgal 1995 / Sousa 2001 estimate band.)
+//
+// ODE per timestep dt (perfusion-limited well-stirred + local Higuchi source):
+//
+//   dC_csmc/dt = (Q_csmc / V_csmc) · (C_blood − C_csmc / Kp_csmc)
+//              + f_local · release_rate(t) / V_csmc
+//
+// The caller routes (1 − f_local) · release_rate(t) into the systemic
+// blood ODE so total mass is conserved across the split.
+//
+// Stage G-ε-17. gap-report claims `coronary_smc_status` (this module),
+// `cypher_flocal` (f_local parameter).
+
+// ─── Parameter record ───────────────────────────────────────────────────────
+pub struct CoronarySmcParams {
+    v_csmc:  f64,    // L, sub-compartment volume
+    q_csmc:  f64,    // L/h, perfusion into sub-compartment
+    kp_csmc: f64,    // tissue:blood partition coefficient
+    f_local: f64,    // 0..1, fraction of Higuchi flux routed locally
+}
+
+// Rapamycin / Cypher stent default parameters.
+//   V_heart = 0.33 L (ICRP standard man) → V_csmc = 0.0165 L
+//   Q_heart = 16.0 L/h (coronary flow)   → Q_csmc =  0.80 L/h
+//   Kp_csmc = 2.30 (inherits Kp_heart for rapamycin)
+//   f_local = 0.30 (Cypher band — see header note)
+pub fn coronary_smc_default_params() -> CoronarySmcParams {
+    CoronarySmcParams {
+        v_csmc:  0.0165,
+        q_csmc:  0.80,
+        kp_csmc: 2.30,
+        f_local: 0.30,
+    }
+}
+
+// Parameter ctor for non-default scenarios (sensitivity sweeps).
+pub fn coronary_smc_params(v_csmc: f64, q_csmc: f64, kp_csmc: f64,
+                       f_local: f64) -> CoronarySmcParams {
+    CoronarySmcParams { v_csmc: v_csmc, q_csmc: q_csmc, kp_csmc: kp_csmc, f_local: f_local }
+}
+
+// ─── State record ───────────────────────────────────────────────────────────
+pub struct CoronarySmcState {
+    c:               f64,   // drug concentration in sub-compartment, mg/L
+    deposited_mass:  f64,   // cumulative mg deposited locally (audit)
+}
+
+pub fn coronary_smc_state_zero() -> CoronarySmcState {
+    CoronarySmcState { c: 0.0, deposited_mass: 0.0 }
+}
+
+// ─── Step kernel ────────────────────────────────────────────────────────────
+// Explicit Euler half-step on the sub-compartment ODE with two source terms.
+// Caller is responsible for:
+//   (a) passing `c_blood` from the systemic compartment at the same instant,
+//   (b) routing `coronary_smc_systemic_flux(p, rr)` into the blood ODE so
+//       total drug mass is conserved.
+pub fn coronary_smc_step(s: CoronarySmcState, p: CoronarySmcParams,
+                     c_blood: f64, release_rate_mg_per_h: f64,
+                     dt: f64) -> CoronarySmcState with Mut, Div {
+    let perfusion  = (p.q_csmc / p.v_csmc) * (c_blood - s.c / p.kp_csmc)
+    let local_flux = p.f_local * release_rate_mg_per_h / p.v_csmc
+    let dcdt = perfusion + local_flux
+
+    var r = s
+    r.c = s.c + dt * dcdt
+    if r.c < 0.0 { r.c = 0.0 }
+    r.deposited_mass = s.deposited_mass + dt * p.f_local * release_rate_mg_per_h
+    return r
+}
+
+// ─── Release-routing helpers ────────────────────────────────────────────────
+// Local fraction routed into the SMC sub-compartment.
+pub fn coronary_smc_local_flux(p: CoronarySmcParams,
+                           release_rate_mg_per_h: f64) -> f64 {
+    return p.f_local * release_rate_mg_per_h
+}
+
+// Systemic fraction routed into the blood ODE (1 − f_local). The caller
+// adds (this / V_blood) to dC_blood/dt for mass conservation across the split.
+pub fn coronary_smc_systemic_flux(p: CoronarySmcParams,
+                              release_rate_mg_per_h: f64) -> f64 {
+    return (1.0 - p.f_local) * release_rate_mg_per_h
+}
+
+// ─── Mass-balance audit ─────────────────────────────────────────────────────
+// True iff |local + systemic − total_released| is below an absolute floor
+// (1e-12 mg) or a 0.1 % relative threshold. The relative tolerance covers
+// explicit-Euler truncation against the analytical Higuchi cumulative; pass
+// an exact-integral driver (release_step_amount) to get to 1e-12 absolute.
+pub fn coronary_smc_mass_balance_ok(s: CoronarySmcState, systemic_mass: f64,
+                                total_released: f64) -> bool with Mut {
+    let computed = s.deposited_mass + systemic_mass
+    var diff = computed - total_released
+    if diff < 0.0 { diff = 0.0 - diff }
+    if total_released < 1.0e-9 { return diff < 1.0e-12 }
+    return (diff / total_released) < 1.0e-3
+}

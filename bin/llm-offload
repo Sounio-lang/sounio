@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# bin/llm-offload — Task-aware wrapper over scripts/mcp/llm-offload.sh.
+#
+# Usage:
+#   llm-offload -t <task> -p <provider> [-i <file>]
+#   llm-offload -t <task> -p <provider> < input
+#   llm-offload --list-tasks
+#   llm-offload --list-providers
+#   llm-offload --status            # which keys are set
+#   llm-offload --raw <prompt-file> [providers...]   # passthrough to scripts/mcp/llm-offload.sh
+#
+# Tasks (in .claude/offload-tasks/):
+#   expand        Outline -> prose (papers, dissertation chapters)
+#   scaffold      Spec -> boilerplate (ETL, SQL, LaTeX, .sio)
+#   review        Devil's-advocate code/paper review
+#   paraphrase    Tone/length rewrite
+#   math-review   PK / GUM / p-box / Lean theorem audit
+#
+# Providers: see `llm-offload --list-providers` (driven by scripts/mcp/llm-offload.sh).
+#
+# Default routing (see .claude/offload-routing.md):
+#   expand       -> gemini   (long-context)
+#   scaffold     -> deepseek (code-strong)
+#   review       -> deepseek (code) or xai/grok (math/blunt)
+#   paraphrase   -> minimax  (Anthropic-compat) [requires MINIMAX_API_KEY]
+#   math-review  -> xai zai  (fan-out: Grok 4.3 + Z.AI GLM — independent second opinion; default for all agents)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TASKS_DIR="$ROOT/.claude/offload-tasks"
+RAW_SCRIPT="$ROOT/scripts/mcp/llm-offload.sh"
+
+# Default provider per task.
+default_provider_for() {
+    case "$1" in
+        expand)      echo "gemini" ;;
+        scaffold)    echo "deepseek" ;;
+        review)      echo "deepseek" ;;
+        paraphrase)  echo "minimax" ;;
+        math-review) echo "xai zai" ;;   # fan-out default: Grok 4.3 + Z.AI GLM (independent providers)
+        *)           echo "" ;;
+    esac
+}
+
+# --- Subcommands -----------------------------------------------------------
+
+list_tasks() {
+    echo "Available tasks (in $TASKS_DIR):"
+    for f in "$TASKS_DIR"/*.md; do
+        [[ -f "$f" ]] || continue
+        local name purpose
+        name="$(basename "$f" .md)"
+        purpose="$(grep -m1 '^# Use case:' "$f" | sed 's/^# Use case: //')"
+        printf "  %-14s  %s\n" "$name" "$purpose"
+    done
+    echo
+    echo "Routing defaults (override with -p):"
+    for t in expand scaffold review paraphrase math-review; do
+        printf "  %-14s -> %s\n" "$t" "$(default_provider_for "$t")"
+    done
+}
+
+list_providers() {
+    # Pull provider list from the raw script's header comment block.
+    sed -n '/^# Available providers:/,/^#$/p' "$RAW_SCRIPT" | sed 's/^# \?//'
+}
+
+status() {
+    echo "=== llm-offload status ==="
+    local env_file=""
+    for _f in "${SOUNIO_KEYS_ENV:-}" "$HOME/.sounio-keys.env" "/workspace/.home/openvscode-server/.sounio-keys.env"; do
+        if [[ -n "$_f" && -f "$_f" ]]; then env_file="$_f"; break; fi
+    done
+    if [[ -f "$env_file" ]]; then
+        echo "Keys file: $env_file"
+        local have_keys
+        have_keys=$(awk -F= '/^[A-Z_]+_KEY=/ || /^export [A-Z_]+_KEY=/ {gsub("export ",""); print $1}' "$env_file" | sort -u)
+        echo "Keys set:"
+        for k in $have_keys; do
+            echo "  + $k"
+        done
+        for k in DEEPSEEK_API_KEY XAI_API_KEY ZAI_API_KEY GROQ_API_KEY OPENROUTER_API_KEY MINIMAX_API_KEY; do
+            if ! grep -qE "^(export +)?$k=" "$env_file"; then
+                echo "  - $k (missing)"
+            fi
+        done
+    else
+        echo "Keys file: $env_file (NOT FOUND)"
+    fi
+    echo
+    echo "Tasks dir:  $TASKS_DIR"
+    echo "Raw driver: $RAW_SCRIPT"
+}
+
+# --- Argument parsing ------------------------------------------------------
+
+case "${1:-}" in
+    ""|-h|--help|help)
+        sed -n '2,30p' "$0"
+        exit 0
+        ;;
+    --list-tasks)     list_tasks; exit 0 ;;
+    --list-providers) list_providers; exit 0 ;;
+    --status)         status; exit 0 ;;
+    --raw)
+        shift
+        exec "$RAW_SCRIPT" "$@"
+        ;;
+esac
+
+TASK=""
+PROVIDER=""
+INPUT=""
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--task)      TASK="$2"; shift 2 ;;
+        -p|--provider)  PROVIDER="$2"; shift 2 ;;
+        -i|--input)     INPUT="$2"; shift 2 ;;
+        --)             shift; EXTRA_ARGS+=("$@"); break ;;
+        *)              echo "Unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "$TASK" ]]; then
+    echo "ERROR: -t <task> required (try --list-tasks)" >&2
+    exit 2
+fi
+
+TASK_PROMPT="$TASKS_DIR/$TASK.md"
+if [[ ! -f "$TASK_PROMPT" ]]; then
+    echo "ERROR: unknown task '$TASK'. Available:" >&2
+    list_tasks >&2
+    exit 2
+fi
+
+if [[ -z "$PROVIDER" ]]; then
+    PROVIDER="$(default_provider_for "$TASK")"
+fi
+if [[ -z "$PROVIDER" ]]; then
+    echo "ERROR: no default provider for task '$TASK'; pass -p" >&2
+    exit 2
+fi
+
+# Read user input from -i file or stdin.
+if [[ -n "$INPUT" ]]; then
+    if [[ ! -f "$INPUT" ]]; then
+        echo "ERROR: input file not found: $INPUT" >&2
+        exit 2
+    fi
+    USER_INPUT="$(cat "$INPUT")"
+elif [[ ! -t 0 ]]; then
+    USER_INPUT="$(cat)"
+else
+    echo "ERROR: no input. Use -i <file> or pipe text into stdin." >&2
+    exit 2
+fi
+
+# Compose: task prompt + delimiter + user input.
+COMPOSED="$(mktemp -t llm-offload-prompt-XXXXXX.md)"
+trap 'rm -f "$COMPOSED"' EXIT
+
+{
+    cat "$TASK_PROMPT"
+    echo
+    echo "---"
+    echo "INPUT:"
+    echo
+    echo "$USER_INPUT"
+} > "$COMPOSED"
+
+echo "=== Task: $TASK | Provider(s): $PROVIDER ==="
+# $PROVIDER may be a space-separated fan-out set (e.g. math-review -> "xai zai").
+read -ra _PROVIDERS <<< "$PROVIDER"
+exec "$RAW_SCRIPT" "$COMPOSED" "${_PROVIDERS[@]}"

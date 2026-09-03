@@ -1,0 +1,113 @@
+// R.2.4 Phase C — Statistical sanity for canonical PCG64 backend.
+//
+// For each of {Uniform(0,1), Normal(0,1), Exponential(rate=1)} draw N
+// samples, compute empirical mean and variance, compare against theoretical
+// (μ, σ²). Tolerances follow CLT 4σ_M (mean) and 6σ_V (variance) bands at
+// N=20000 — comfortably loose to avoid flake while still catching the
+// degenerate "stuck stream" failure mode that motivated R.2.4 in the first
+// place (broken PCG64 collapsed to a delta after the first step).
+
+use stdlib::random::distributions::{
+    DstPcg64, dst_pcg64_new,
+    Uniform, uniform_new, uniform_sample,
+    Normal, normal_new, normal_sample,
+    Exponential, exponential_new, exponential_sample,
+}
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn report(label: i64, n: i64, mean: f64, vrnc: f64,
+          theo_mean: f64, theo_var: f64,
+          tol_mean: f64, tol_var: f64) -> i64
+    with IO, Mut, Div, Panic
+{
+    println(label)
+    println(n)
+    println(mean)
+    println(theo_mean)
+    println(vrnc)
+    println(theo_var)
+    let dm = fabs(mean - theo_mean)
+    let dv = fabs(vrnc - theo_var)
+    let pass_mean = if dm < tol_mean { 1 } else { 0 }
+    let pass_var  = if dv < tol_var  { 1 } else { 0 }
+    println(pass_mean)
+    println(pass_var)
+    return pass_mean * pass_var
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let n: i64 = 20000
+    let nf = n as f64
+
+    var rng = dst_pcg64_new(31415)
+    var fails: i64 = 0
+
+    // ── 1. Uniform(0,1) ─────────────────────────────────────────────────
+    let unif = uniform_new(0.0, 1.0)
+    var sum1: f64 = 0.0
+    var sq1: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let r = uniform_sample(unif, rng)
+        rng = r.0
+        sum1 = sum1 + r.1
+        sq1 = sq1 + r.1 * r.1
+        i = i + 1
+    }
+    let m1 = sum1 / nf
+    let v1 = sq1 / nf - m1 * m1
+    // U(0,1): μ=0.5, σ²=1/12≈0.0833. CLT σ_M = sqrt(σ²/N) ≈ 0.00204.
+    // Tolerance: 4σ_M ≈ 0.008 on mean; loose 0.01 on variance.
+    if report(1, n, m1, v1, 0.5, 0.08333333333333333, 0.01, 0.01) == 0 {
+        fails = fails + 1
+    }
+
+    // ── 2. Normal(0,1) ─────────────────────────────────────────────────
+    let nrm = normal_new(0.0, 1.0)
+    var sum2: f64 = 0.0
+    var sq2: f64 = 0.0
+    i = 0
+    while i < n {
+        let r = normal_sample(nrm, rng)
+        rng = r.0
+        sum2 = sum2 + r.1
+        sq2 = sq2 + r.1 * r.1
+        i = i + 1
+    }
+    let m2 = sum2 / nf
+    let v2 = sq2 / nf - m2 * m2
+    // N(0,1): μ=0, σ²=1. σ_M = 1/sqrt(N) ≈ 0.00707.
+    // Tolerance: 4σ_M ≈ 0.03 on mean; 0.05 on variance.
+    if report(2, n, m2, v2, 0.0, 1.0, 0.03, 0.05) == 0 {
+        fails = fails + 1
+    }
+
+    // ── 3. Exponential(rate=1) ─────────────────────────────────────────
+    let exp1 = exponential_new(1.0)
+    var sum3: f64 = 0.0
+    var sq3: f64 = 0.0
+    i = 0
+    while i < n {
+        let r = exponential_sample(exp1, rng)
+        rng = r.0
+        sum3 = sum3 + r.1
+        sq3 = sq3 + r.1 * r.1
+        i = i + 1
+    }
+    let m3 = sum3 / nf
+    let v3 = sq3 / nf - m3 * m3
+    // Exp(1): μ=1, σ²=1. σ_M = 1/sqrt(N) ≈ 0.00707.
+    // Tolerance: 4σ_M ≈ 0.03 on mean; 0.06 on variance (Exp variance is noisier).
+    if report(3, n, m3, v3, 1.0, 1.0, 0.03, 0.06) == 0 {
+        fails = fails + 1
+    }
+
+    println(0 - 1)
+    println(fails)
+    return fails
+}

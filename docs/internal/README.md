@@ -14,6 +14,7 @@ This directory contains process artifacts, sprint reports, implementation notes,
 ## Contents
 
 - `implementation/` — internal implementation reports, checklists, sprint artifacts, and migration summaries
+- `garden/` — internal Garden seeds, templates, and lineage notes for ideas that are not yet public claims or implementation gates
 
 ## Historical artifacts
 

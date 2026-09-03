@@ -1,0 +1,214 @@
+// stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio — Venlafaxine XR end-to-end scenario
+//
+// SISTEMA 2 controlled-release witness:
+//   matrix_er (Korsmeyer-Peppas) → GI absorption → parent PBPK28
+//   → CYP2D6 formation → ODV PBPK28 → ODV/parent PGx readout
+//
+// Operator splitting per step (Lie-Trotter, same pattern as semaglutide_sc_depot):
+//   1. Matrix releases dissolved dose to gut pool
+//   2. First-order absorption (ka) from gut pool → parent blood input
+//   3. Parent PBPK28 CN step + CYP2D6 formation sink → ODV blood input
+//   4. ODV PBPK28 CN step
+//
+// Literature anchors: Gohel 2008 (matrix), Wang 2022 (ka, F), Klamerus 1999 (CL),
+// Kirchheiner 2006 (ODV/parent ratios).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+
+struct VenlafaxineXrScenario {
+    parent: PBPKState28,
+    odv:    PBPKState28,
+    gut_mg: f64,
+    pheno:  i32,
+}
+
+fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+    VenlafaxineXrScenario {
+        parent: pbpk28_state_zero(),
+        odv:    pbpk28_state_zero(),
+        gut_mg: 0.0,
+        pheno:  pheno,
+    }
+}
+
+fn vfx_parent_params(pheno: i32) -> PBPKParams28 with Mut, Div, Panic {
+    var p = pbpk28_params_venlafaxine_parent()
+    p.cl_central = venlafaxine_cl_parent_central_pgx(pheno)
+    return p
+}
+
+fn vfx_odv_params(pheno: i32) -> PBPKParams28 with Mut, Div, Panic {
+    var p = pbpk28_params_venlafaxine_odv()
+    p.cl_central = venlafaxine_cl_odv_pgx(pheno)
+    return p
+}
+
+// Formation rate parent → ODV (mg/h) proportional to parent blood concentration.
+fn vfx_formation_rate_mg_h(cb_parent: f64, pheno: i32) -> f64 with Div, Panic {
+    let cl_form = vfx_cl_form_odv_adjusted(pheno)
+    // Scale: CL_form [L/h] × C_b [mg/L] ≈ mg/h elimination flux at SS.
+    return cl_form * cb_parent
+}
+
+fn vfx_strang_step(
+    scen: VenlafaxineXrScenario,
+    rel: MatrixReleaseModel,
+    t_start: f64,
+    dt: f64
+) -> VenlafaxineXrScenario with Mut, Div, Panic {
+    let pp = vfx_parent_params(scen.pheno)
+    let op = vfx_odv_params(scen.pheno)
+    let vb = pp.v_ref[0]
+    let f_abs = venlafaxine_f_oral_xr()
+    let ka = venlafaxine_ka_abs()
+
+    // 1. Matrix dissolution → gut pool (mg)
+    let rel_amt = matrix_step_amount(rel, t_start, dt)
+    var gut = scen.gut_mg + rel_amt
+
+    // 2. First-order absorption from gut pool; F applied to absorbed fraction.
+    let frac_abs = 1.0 - mer_exp_neg(0.0 - ka * dt)
+    let absorb_amt = f_abs * gut * frac_abs
+    gut = gut - absorb_amt
+    if gut < 0.0 { gut = 0.0 }
+
+    let parent_input = absorb_amt / dt
+
+    // 3. Parent transport with absorption input only.
+    var out_parent = pbpk28_full_cn_step(scen.parent, pp, parent_input, dt)
+
+    // 4. CYP2D6 formation at liver (organ 1): drain parent liver pool, feed ODV.
+    let c_liver = pbpk28_organ_average(out_parent, pp, 1)
+    let form_mg = vfx_formation_rate_mg_h(c_liver, scen.pheno) * dt
+    let v_liver = pp.v_ref[1]
+    out_parent.cv[1] = out_parent.cv[1] - form_mg / v_liver
+    if out_parent.cv[1] < 0.0 { out_parent.cv[1] = 0.0 }
+    if out_parent.cv[0] < 0.0 { out_parent.cv[0] = 0.0 }
+    let odv_input = form_mg / dt
+    var out_odv = pbpk28_full_cn_step(scen.odv, op, odv_input, dt)
+
+    VenlafaxineXrScenario {
+        parent: out_parent,
+        odv:    out_odv,
+        gut_mg: gut,
+        pheno:  scen.pheno,
+    }
+}
+
+// Taylor exp for negative arguments (shared pattern with semaglutide scenario).
+fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x >= 0.0 { return 1.0 }
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * x / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return y
+}
+
+// Steady-state ODV/parent ratio (PD-equivalent readout).
+// Uses total-body mass ratio (parent vs ODV) — robust when blood Cv is near zero
+// after XR redistribution to tissues (clinical analog: AUC-weighted metabolite ratio).
+pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+    let pp = vfx_parent_params(scen.pheno)
+    let op = vfx_odv_params(scen.pheno)
+    let mp = pbpk28_total_mass(scen.parent, pp)
+    let mo = pbpk28_total_mass(scen.odv, op)
+    if mp < 1.0e-12 { return 0.0 }
+    return mo / mp
+}
+
+pub fn vfx_integrate_to(
+    scen: VenlafaxineXrScenario,
+    rel: MatrixReleaseModel,
+    t_start: f64,
+    t_end: f64,
+    dt: f64
+) -> VenlafaxineXrScenario with Mut, Div, Panic {
+    var s = scen
+    var t = t_start
+    while t < t_end - 0.5 * dt {
+        s = vfx_strang_step(s, rel, t, dt)
+        t = t + dt
+    }
+    return s
+}
+
+// ─── Runnable validation (library self-check) ───────────────────────────────
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Venlafaxine XR — matrix release → parent/ODV PBPK28 scenario")
+    println("======================================================================")
+
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let dt = 0.5
+    let t_end = 120.0
+
+    var passed = 0
+    var failed = 0
+
+    // Phenotype ordering: PM < NM < UM (Kirchheiner 2006 ODV/parent Css)
+    var scen_pm = vfx_scenario_init(0)
+    scen_pm = vfx_integrate_to(scen_pm, rel, 0.0, t_end, dt)
+    let ratio_pm = vfx_odv_parent_ratio(scen_pm)
+
+    var scen_nm = vfx_scenario_init(2)
+    scen_nm = vfx_integrate_to(scen_nm, rel, 0.0, t_end, dt)
+    let ratio_nm = vfx_odv_parent_ratio(scen_nm)
+
+    var scen_um = vfx_scenario_init(3)
+    scen_um = vfx_integrate_to(scen_um, rel, 0.0, t_end, dt)
+    let ratio_um = vfx_odv_parent_ratio(scen_um)
+
+    println("PM ratio:")
+    println(ratio_pm)
+    println("NM ratio:")
+    println(ratio_nm)
+    println("UM ratio:")
+    println(ratio_um)
+    let order_ok = ratio_pm < ratio_nm && ratio_nm < ratio_um
+    if order_ok {
+        println("  [PASS] CYP2D6 phenotype ordering PM < NM < UM")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected PM < NM < UM ordering")
+        failed = failed + 1
+    }
+
+    if ratio_um > 2.0 {
+        println("  [PASS] UM ratio elevated (Kirchheiner 2006: 10.3)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected UM ratio > 2.0")
+        failed = failed + 1
+    }
+
+    // Matrix mass: gut + body mass bounded by released dose
+    let released = matrix_cumulative(rel, t_end)
+    println("Released dose (mg):")
+    println(released)
+    if released > 10.0 && released <= 75.0 {
+        println("  [PASS] matrix release in expected range")
+        passed = passed + 1
+    } else {
+        println("  FAIL: unexpected released dose")
+        failed = failed + 1
+    }
+
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    if failed == 0 {
+        println("PASS")
+    }
+    println("======================================================================")
+    return failed as i32
+}

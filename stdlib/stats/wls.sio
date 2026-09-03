@@ -1,0 +1,166 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/wls.sio — weighted least-squares regression (one predictor)
+//
+// Straight-line regression with per-observation weights — the right fit when
+// the measurement variance is not constant (heteroscedastic assay data, where
+// wᵢ ∝ 1/σᵢ²):
+//
+//   wls_fit(x, y, w, n) -> WLSFit
+//
+// Minimising Σ wᵢ(yᵢ − b₀ − b₁xᵢ)² gives, with D = Sw·Swxx − Swx²,
+//   b₁ = (Sw·Swxy − Swx·Swy)/D,   b₀ = (Swxx·Swy − Swx·Swxy)/D,
+//   σ̂² = Σwᵢ(yᵢ−ŷᵢ)²/(n−2),  Var(b₁) = σ̂²·Sw/D,  Var(b₀) = σ̂²·Swxx/D,
+// and the weighted R² = 1 − SSRw/SSTw.
+//
+// Pure Sounio: inline sqrt; two flat passes (weighted sums, then residuals);
+// no external dependency, no nested data-array calls.
+//
+// References:
+//   Draper & Smith, "Applied Regression Analysis" 3e, §2.11 (weighted LS).
+
+module stats::wls
+
+fn wl_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct WLSFit {
+    pub b0: f64,
+    pub b1: f64,
+    pub se0: f64,
+    pub se1: f64,
+    pub r_squared: f64,  // weighted R²
+}
+
+/// Weighted least-squares straight-line fit.
+///
+/// Parâmetros: x, y — data; w — non-negative weights; n — size (>=3, <=256).
+/// Retorno: WLSFit (b0, b1, se0, se1, weighted R²).
+/// Referências: Draper & Smith §2.11.
+pub fn wls_fit(x: &[f64; 256], y: &[f64; 256], w: &[f64; 256], n: i32) -> WLSFit with Mut, Div, Panic {
+    if n < 3 { return WLSFit { b0: 0.0, b1: 0.0, se0: 0.0, se1: 0.0, r_squared: 0.0 } }
+    var sw = 0.0
+    var swx = 0.0
+    var swy = 0.0
+    var swxx = 0.0
+    var swxy = 0.0
+    var i = 0
+    while i < n {
+        let wi = w[i as usize]
+        let xi = x[i as usize]
+        let yi = y[i as usize]
+        sw = sw + wi
+        swx = swx + wi * xi
+        swy = swy + wi * yi
+        swxx = swxx + wi * xi * xi
+        swxy = swxy + wi * xi * yi
+        i = i + 1
+    }
+    let det = sw * swxx - swx * swx
+    if det <= 1.0e-300 && det >= 0.0 - 1.0e-300 {
+        return WLSFit { b0: 0.0, b1: 0.0, se0: 0.0, se1: 0.0, r_squared: 0.0 }
+    }
+    let b1 = (sw * swxy - swx * swy) / det
+    let b0 = (swxx * swy - swx * swxy) / det
+    let ybar = swy / sw
+    // weighted residual and total sums of squares
+    var ssr = 0.0
+    var sst = 0.0
+    var j = 0
+    while j < n {
+        let wi = w[j as usize]
+        let xi = x[j as usize]
+        let yi = y[j as usize]
+        let fit = b0 + b1 * xi
+        let rr = yi - fit
+        ssr = ssr + wi * rr * rr
+        let dt = yi - ybar
+        sst = sst + wi * dt * dt
+        j = j + 1
+    }
+    let sigma2 = ssr / ((n - 2) as f64)
+    let var1 = sigma2 * sw / det
+    let var0 = sigma2 * swxx / det
+    var se1 = 0.0
+    var se0 = 0.0
+    if var1 > 0.0 { se1 = wl_sqrt(var1) }
+    if var0 > 0.0 { se0 = wl_sqrt(var0) }
+    var r2 = 0.0
+    if sst > 1.0e-300 { r2 = 1.0 - ssr / sst }
+    return WLSFit { b0: b0, b1: b1, se0: se0, se1: se1, r_squared: r2 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect line y=2x+1, uniform weights: b0=1, b1=2, R²=1, SE=0.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0
+    w[0]=1.0; w[1]=1.0; w[2]=1.0; w[3]=1.0
+    let r = wls_fit(&x, &y, &w, 4)
+    var ok = true
+    ok = check(1, approx(r.b0, 1.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.b1, 2.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.r_squared, 1.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.se1, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+// weights matter: (0,0),(1,1),(2,10) with w=(1,1,0.01) downweights the outlier.
+// Sw=2.01,Swx=1.02,Swy=1.1,Swxx=1.04,Swxy=1.2; D=1.05.
+// b1=(2.01·1.2-1.02·1.1)/1.05=1.29/1.05=1.228571; b0=(1.04·1.1-1.02·1.2)/1.05=-0.076190.
+// (unweighted OLS slope would be 5 — the weights pull it to ~1.23.)
+fn test_weighted() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0
+    y[0]=0.0; y[1]=1.0; y[2]=10.0
+    w[0]=1.0; w[1]=1.0; w[2]=0.01
+    let r = wls_fit(&x, &y, &w, 3)
+    var ok = true
+    ok = check(10, approx(r.b1, 1.228571, 1.0e-5)) && ok
+    ok = check(11, approx(r.b0, 0.0 - 0.076190, 1.0e-5)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_weighted() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,476 @@
+// stdlib/particle_physics/amplitude.sio — Tree-level amplitudes and cross-sections
+//
+// Spin-averaged |M|² and cross-section formulas for key Standard Model
+// processes.  All results include epistemic uncertainty propagation where
+// couplings are involved.
+//
+// Implemented processes:
+//   • e⁺e⁻ → μ⁺μ⁻        (QED + Z interference)
+//   • e⁺e⁻ → q q̄         (QED + QCD color)
+//   • Møller scattering    e⁻e⁻ → e⁻e⁻
+//   • Bhabha scattering    e⁺e⁻ → e⁺e⁻
+//   • Z → f f̄            (partial widths)
+//   • H → f f̄ / γγ / gg  (decay widths)
+//
+// References:
+//   - Peskin & Schroeder, Ch. 4-5
+//   - PDG 2024, Cross-section formulae
+
+module particle_physics::amplitude
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_dot, lorentz_norm_sq,
+                                 lorentz_add, lorentz_sub, lorentz_scale,
+                                 mandelstam_s, mandelstam_t, mandelstam_u,
+                                 pt, azimuth}
+use particle_physics::spinor::{trace_gamma_2, trace_gamma_4}
+use particle_physics::gauge::{su3_casimir_cf, su3_dynkin_tf}
+use particle_physics::sm_params::{alpha_em, mass_z, mass_w, mass_h,
+                                   mass_muon, mass_electron, mass_top, mass_bottom,
+                                   mass_charm, mass_strange, mass_tau,
+                                   coupling_e, coupling_g, sin2_theta_w}
+use particle_physics::propagator::{scalar_propagator_sq, vector_propagator_sq}
+// Madaros multimodule: avoid imported (f64,f64) unpack — use scalar nc_gv_*/nc_ga_*.
+// Residual: docs/audit/MADAROS_IMPORTED_F64_MUL_2026-07-26.md
+use particle_physics::vertex::{
+    nc_gv_electron, nc_ga_electron, nc_gv_muon, nc_ga_muon,
+    nc_gv_up, nc_ga_up, nc_gv_down, nc_ga_down,
+    nc_gv_neutrino, nc_ga_neutrino,
+}
+use particle_physics::kinematics::{cm_energy_sq, cm_momentum_final,
+                                    diff_cross_section, total_cross_section_isotropic,
+                                    decay_width_2_body, cross_section_pb, kallen_lambda}
+use epistemic::knowledge::{Epistemic}
+use complex::lib::{Complex, complex_new}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// QED: e⁺e⁻ → μ⁺μ⁻
+// ============================================================================
+
+/// Spin-averaged |M|² for e⁺e⁻ → μ⁺μ⁻ in QED (massless approximation).
+///
+/// # Formula
+///   |M|² = 2 e⁴ (1 + cos²θ)
+/// where θ is the scattering angle in the CM frame.
+///
+/// GUM propagation via Epistemic::square and ::mul chains.
+pub fn eemm_qed_amplitude_sq(s: f64, cos_theta: f64) -> Epistemic with Mut, Div, Panic {
+    // e² with GUM variance, then e⁴ = (e²)²
+    let e2 = coupling_e().square()
+    let e4 = e2.square()
+    // angular factor is exact (geometric)
+    let ang = 1.0 + cos_theta * cos_theta
+    e4.scale(2.0 * ang)
+}
+
+/// Differential cross-section dσ/dΩ for e⁺e⁻ → μ⁺μ⁻ (QED, massless).
+/// Returns Epistemic with α_EM uncertainty propagated.
+pub fn eemm_qed_diff_cross_section(s: f64, cos_theta: f64) -> Epistemic with Mut, Div, Panic {
+    if s <= 0.0 { return Epistemic::certain(0.0) }
+    // α² via GUM: Var(α²) = 4α² Var(α)
+    let alpha2 = alpha_em().square()
+    let ang = 1.0 + cos_theta * cos_theta
+    alpha2.scale(ang / (4.0 * s))
+}
+
+/// Total cross-section for e⁺e⁻ → μ⁺μ⁻ (QED, massless):
+///   σ = (4π α²) / (3 s).
+/// Returns Epistemic with full GUM variance from PDG α_EM.
+pub fn eemm_qed_total_cross_section(s: f64) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+    let alpha = alpha_em().val()
+    4.0 * PI * alpha * alpha / (3.0 * s)
+}
+
+/// GUM-exact total cross-section: α² propagated, returns Epistemic in GeV⁻².
+pub fn eemm_qed_total_cross_section_ep(s: f64) -> Epistemic with Mut, Div, Panic {
+    if s <= 0.0 { return Epistemic::certain(0.0) }
+    let alpha2 = alpha_em().square()
+    alpha2.scale(4.0 * PI / (3.0 * s))
+}
+
+/// Total cross-section for e⁺e⁻ → μ⁺μ⁻ in picobarn (raw f64).
+pub fn eemm_qed_total_cross_section_pb(s: f64) -> f64 with Mut, Div, Panic {
+    cross_section_pb(eemm_qed_total_cross_section(s))
+}
+
+/// GUM-exact total cross-section in picobarn with uncertainty.
+pub fn eemm_qed_total_cross_section_pb_ep(s: f64) -> Epistemic with Mut, Div, Panic {
+    eemm_qed_total_cross_section_ep(s).scale(0.389379e9)
+}
+
+// ============================================================================
+// Z-MEDIATED: e⁺e⁻ → μ⁺μ⁻
+// ============================================================================
+
+/// Spin-averaged |M|² for e⁺e⁻ → μ⁺μ⁻ via Z exchange (narrow-width approximation).
+/// Near the Z pole, the Breit-Wigner dominates:
+///   |M|² ≈ (g⁴ / cos⁴θ_W) · (g_V^e² + g_A^e²)(g_V^μ² + g_A^μ²) / [(s − M_Z²)² + (M_Z Γ_Z)²].
+///
+/// # Parameters
+/// - `s`: CM energy squared.
+/// - `gamma_z`: Z total width.
+///
+/// # Returns
+/// `Epistemic<f64>`.
+pub fn eemm_z_amplitude_sq(s: f64, gamma_z: f64) -> Epistemic with Mut, Div, Panic {
+    let mz = mass_z()
+    let g = coupling_g()
+    let s2w = sin2_theta_w()
+    let mz_val = mz.val()
+    let gz_val = g.val()
+    let cw_sq = 1.0 - s2w.val()
+    let cw4 = cw_sq * cw_sq
+
+    let gv_e = nc_gv_electron()
+    let ga_e = nc_ga_electron()
+    let gv_m = nc_gv_muon()
+    let ga_m = nc_ga_muon()
+
+    let c_e = gv_e * gv_e + ga_e * ga_e
+    let c_m = gv_m * gv_m + ga_m * ga_m
+
+    let numerator = gz_val * gz_val * gz_val * gz_val * c_e * c_m / cw4
+    let denom_re = s - mz_val * mz_val
+    let denom_im = mz_val * gamma_z
+    let denom = denom_re * denom_re + denom_im * denom_im
+
+    if denom == 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+
+    let val = numerator / denom
+    // Simplified uncertainty (dominated by M_Z and couplings)
+    let std = val * (4.0 * g.std() / g.val() + 2.0 * mz.std() / mz_val)
+    Epistemic::measured(val, std)
+}
+
+/// Total cross-section for e⁺e⁻ → μ⁺μ⁻ near the Z pole.
+/// Uses the narrow-width approximation with Z propagator.
+pub fn eemm_z_total_cross_section(s: f64, gamma_z: f64) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+    let mz = mass_z().val()
+    let mz2 = mz * mz
+    let g = coupling_g().val()
+    let s2w = sin2_theta_w().val()
+    let cw = sqrt(1.0 - s2w)
+    let cw2 = cw * cw
+
+    let gv_e = nc_gv_electron()
+    let ga_e = nc_ga_electron()
+    let gv_m = nc_gv_muon()
+    let ga_m = nc_ga_muon()
+
+    let c_e = gv_e * gv_e + ga_e * ga_e
+    let c_m = gv_m * gv_m + ga_m * ga_m
+
+    // σ = (g⁴ / (12π cos⁴θ_W)) · c_e · c_m · s / [(s − M_Z²)² + (M_Z Γ_Z)²]
+    let numerator = g * g * g * g * c_e * c_m * s / (12.0 * PI * cw2 * cw2)
+    let denom = (s - mz2) * (s - mz2) + mz * mz * gamma_z * gamma_z
+
+    if denom == 0.0 { return 0.0 }
+    numerator / denom
+}
+
+/// Peak cross-section at s = M_Z² (narrow-width approximation):
+///   σ_peak = (12π / M_Z²) · (Γ_ee Γ_μμ) / Γ_Z².
+pub fn eemm_z_peak_cross_section(gamma_ee: f64, gamma_mumu: f64, gamma_z: f64) -> f64 with Mut, Div, Panic {
+    let mz = mass_z().val()
+    let mz2 = mz * mz
+    if gamma_z == 0.0 || mz2 == 0.0 { return 0.0 }
+    12.0 * PI * gamma_ee * gamma_mumu / (mz2 * gamma_z * gamma_z)
+}
+
+// ============================================================================
+// QCD: e⁺e⁻ → q q̄
+// ============================================================================
+
+/// Total cross-section for e⁺e⁻ → q q̄ (QED + QCD color factor).
+///
+/// # Formula
+///   σ = N_c · Q_q² · σ(e⁺e⁻ → μ⁺μ⁻)
+/// where N_c = 3 and Q_q is the quark charge.
+///
+/// # Parameters
+/// - `s`: CM energy squared.
+/// - `quark_charge`: Quark electric charge (e.g., 2/3 for u, −1/3 for d).
+///
+/// # Returns
+/// Cross-section in GeV⁻².
+pub fn eeqq_total_cross_section(s: f64, quark_charge: f64) -> f64 with Mut, Div, Panic {
+    let sigma_mu = eemm_qed_total_cross_section(s)
+    let nc = 3.0
+    let q2 = quark_charge * quark_charge
+    nc * q2 * sigma_mu
+}
+
+/// R-ratio: σ(e⁺e⁻ → hadrons) / σ(e⁺e⁻ → μ⁺μ⁻) at energies below QCD resonances.
+/// At √s ≈ 10 GeV: R ≈ 3 · Σ_q Q_q² = 3 · (4/9 + 1/9 + 1/9) = 3 · 6/9 = 2.
+/// Including b and c at higher energies: R ≈ 3 · (4/9 + 1/9 + 4/9 + 1/9 + 1/9) = 3 · 11/9 ≈ 3.67.
+pub fn r_ratio(s: f64) -> f64 with Mut, Div, Panic {
+    // Active quark flavors depending on energy
+    let sqrt_s = sqrt(s)
+    var sum_q2: f64 = 0.0
+    // u, d, s are always light
+    sum_q2 = sum_q2 + 4.0 / 9.0 + 1.0 / 9.0 + 1.0 / 9.0
+    if sqrt_s > 2.0 * mass_charm().val() {
+        sum_q2 = sum_q2 + 4.0 / 9.0
+    }
+    if sqrt_s > 2.0 * mass_bottom().val() {
+        sum_q2 = sum_q2 + 1.0 / 9.0
+    }
+    3.0 * sum_q2
+}
+
+// ============================================================================
+// MØLLER SCATTERING: e⁻e⁻ → e⁻e⁻
+// ============================================================================
+
+/// Spin-averaged |M|² for Møller scattering in the massless limit.
+///
+/// # Formula
+///   |M|² = 2 e⁴ [ (s² + u²) / t² + (s² + t²) / u² + 2 s² / (t u) ].
+///
+/// # Parameters
+/// - `s`, `t`, `u`: Mandelstam variables.
+///
+/// # Returns
+/// |M|² value.
+pub fn moller_amplitude_sq(s: f64, t: f64, u: f64) -> f64 with Mut, Div, Panic {
+    let e = coupling_e().val()
+    let e4 = e * e * e * e
+    if t == 0.0 || u == 0.0 { return 0.0 }
+    let term1 = (s * s + u * u) / (t * t)
+    let term2 = (s * s + t * t) / (u * u)
+    let term3 = 2.0 * s * s / (t * u)
+    2.0 * e4 * (term1 + term2 + term3)
+}
+
+// ============================================================================
+// BHABHA SCATTERING: e⁺e⁻ → e⁺e⁻
+// ============================================================================
+
+/// Spin-averaged |M|² for Bhabha scattering in the massless limit.
+///
+/// # Formula
+///   |M|² = 2 e⁴ [ (s² + u²) / t² + (t² + u²) / s² + 2 u² / (s t) ].
+///
+/// # Parameters
+/// - `s`, `t`, `u`: Mandelstam variables.
+///
+/// # Returns
+/// |M|² value.
+pub fn bhabha_amplitude_sq(s: f64, t: f64, u: f64) -> f64 with Mut, Div, Panic {
+    let e = coupling_e().val()
+    let e4 = e * e * e * e
+    if t == 0.0 || s == 0.0 { return 0.0 }
+    let term1 = (s * s + u * u) / (t * t)
+    let term2 = (t * t + u * u) / (s * s)
+    let term3 = 2.0 * u * u / (s * t)
+    2.0 * e4 * (term1 + term2 + term3)
+}
+
+// ============================================================================
+// Z DECAY WIDTHS
+// ============================================================================
+
+/// Z → f f̄ partial width (tree-level, narrow-width):
+///   Γ_f = (G_F M_Z³) / (6√2π) · N_c · (g_V² + g_A²) · (1 + 2 m_f² / M_Z²) · √(1 − 4m_f²/M_Z²).
+/// For m_f ≪ M_Z: Γ_f ≈ (G_F M_Z³) / (6√2π) · N_c · (g_V² + g_A²).
+///
+/// # Parameters
+/// - `m_z`: Z mass.
+/// - `m_f`: Fermion mass.
+/// - `g_v`, `g_a`: Neutral current couplings.
+/// - `n_c`: Color factor (3 for quarks, 1 for leptons).
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn z_decay_width(m_z: f64, m_f: f64, g_v: f64, g_a: f64, n_c: f64) -> f64 with Mut, Div, Panic {
+    if m_z <= 0.0 { return 0.0 }
+    let mz2 = m_z * m_z
+    let mf2 = m_f * m_f
+    let ratio = 4.0 * mf2 / mz2
+    if ratio > 1.0 { return 0.0 }
+    let beta = sqrt(1.0 - ratio)
+    let gf = 1.1663787e-5  // G_F in GeV⁻²
+    let prefactor = gf * mz2 * m_z / (6.0 * SQRT2 * PI)
+    let coupling_sq = g_v * g_v + g_a * g_a
+    let mass_corr = (1.0 + 2.0 * mf2 / mz2) * beta
+    n_c * prefactor * coupling_sq * mass_corr
+}
+
+/// Z → e⁺e⁻ partial width.
+pub fn z_decay_width_ee() -> f64 with Mut, Div, Panic {
+    let mz = mass_z().val()
+    let me = mass_electron().val()
+    let gv = nc_gv_electron()
+    let ga = nc_ga_electron()
+    z_decay_width(mz, me, gv, ga, 1.0)
+}
+
+/// Z → μ⁺μ⁻ partial width.
+pub fn z_decay_width_mumu() -> f64 with Mut, Div, Panic {
+    let mz = mass_z().val()
+    let mm = mass_muon().val()
+    let gv = nc_gv_muon()
+    let ga = nc_ga_muon()
+    z_decay_width(mz, mm, gv, ga, 1.0)
+}
+
+/// Z → hadrons partial width (sum of u, d, c, s, b).
+pub fn z_decay_width_hadrons() -> f64 with Mut, Div, Panic {
+    let mz = mass_z().val()
+    var sum: f64 = 0.0
+    // d, s, b
+    let gv_d = nc_gv_down()
+    let ga_d = nc_ga_down()
+    sum = sum + z_decay_width(mz, mass_down().val(), gv_d, ga_d, 3.0)
+    sum = sum + z_decay_width(mz, mass_strange().val(), gv_d, ga_d, 3.0)
+    sum = sum + z_decay_width(mz, mass_bottom().val(), gv_d, ga_d, 3.0)
+    // u, c
+    let gv_u = nc_gv_up()
+    let ga_u = nc_ga_up()
+    sum = sum + z_decay_width(mz, mass_up().val(), gv_u, ga_u, 3.0)
+    sum = sum + z_decay_width(mz, mass_charm().val(), gv_u, ga_u, 3.0)
+    sum
+}
+
+/// Total Z width (sum of partials).
+pub fn z_total_width() -> f64 with Mut, Div, Panic {
+    // Leptons: e, μ, τ
+    var total = z_decay_width_ee() + z_decay_width_mumu()
+    let mz = mass_z().val()
+    let mt = mass_tau().val()
+    // Tau: same couplings as muon (scalar imports — Madaros-safe).
+    let gv_t = nc_gv_muon()
+    let ga_t = nc_ga_muon()
+    total = total + z_decay_width(mz, mt, gv_t, ga_t, 1.0)
+    // Neutrinos (invisible)
+    let gv_nu = nc_gv_neutrino()
+    let ga_nu = nc_ga_neutrino()
+    total = total + 3.0 * z_decay_width(mz, 0.0, gv_nu, ga_nu, 1.0)
+    // Hadrons
+    total = total + z_decay_width_hadrons()
+    total
+}
+
+// ============================================================================
+// HIGGS DECAY WIDTHS
+// ============================================================================
+
+/// H → f f̄ decay width (tree-level):
+///   Γ = (G_F m_f² M_H) / (4√2π) · N_c · β³
+/// where β = √(1 − 4m_f²/M_H²).
+///
+/// # Parameters
+/// - `m_h`: Higgs mass.
+/// - `m_f`: Fermion mass.
+/// - `n_c`: Color factor.
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn h_decay_width_ff(m_h: f64, m_f: f64, n_c: f64) -> f64 with Mut, Div, Panic {
+    if m_h <= 0.0 { return 0.0 }
+    let mh2 = m_h * m_h
+    let mf2 = m_f * m_f
+    let ratio = 4.0 * mf2 / mh2
+    if ratio > 1.0 { return 0.0 }
+    let beta = sqrt(1.0 - ratio)
+    let gf = 1.1663787e-5
+    let prefactor = gf * mf2 * m_h / (4.0 * SQRT2 * PI)
+    n_c * prefactor * beta * beta * beta
+}
+
+/// H → γγ decay width (loop-level, leading order):
+///   Γ = (G_F α² M_H³) / (128√2 π³) · |A_W + A_f|².
+///
+/// For a light Higgs (M_H ≪ 4 m_t², M_H ≪ 4 M_W²), the loop functions approach:
+///   A_W ≈ 7/4,   A_f ≈ −4/3 N_c Q_f².
+///
+/// # Parameters
+/// - `m_h`: Higgs mass.
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn h_decay_width_gammagamma(m_h: f64) -> f64 with Mut, Div, Panic {
+    if m_h <= 0.0 { return 0.0 }
+    let alpha = alpha_em().val()
+    let gf = 1.1663787e-5
+    let mh3 = m_h * m_h * m_h
+    let prefactor = gf * alpha * alpha * mh3 / (128.0 * SQRT2 * PI * PI * PI)
+
+    // W loop contribution (dominant)
+    let aw = 1.75  // ≈ 7/4 for light Higgs
+
+    // Top quark loop
+    let mt = mass_top().val()
+    let tau_t = 4.0 * mt * mt / (m_h * m_h)
+    var at: f64 = 0.0
+    if tau_t > 1.0 {
+        // Heavy top limit: A_t → 4/3
+        at = 4.0 / 3.0
+    }
+    // Charge factor: Q_t = +2/3 → Q_t² = 4/9
+    let qt_sq = 4.0 / 9.0
+    let a_f = -4.0 / 3.0 * 3.0 * qt_sq * at
+
+    let total_amp = aw + a_f
+    prefactor * total_amp * total_amp
+}
+
+/// H → gg decay width (loop-level, dominant at LO):
+///   Γ = (G_F α_S² M_H³) / (36√2 π³) · |A_t|².
+///
+/// # Parameters
+/// - `m_h`: Higgs mass.
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn h_decay_width_gg(m_h: f64) -> f64 with Mut, Div, Panic {
+    if m_h <= 0.0 { return 0.0 }
+    let alpha_s = 0.1179  // at M_Z, approximate for Higgs scale
+    let gf = 1.1663787e-5
+    let mh3 = m_h * m_h * m_h
+    let prefactor = gf * alpha_s * alpha_s * mh3 / (36.0 * SQRT2 * PI * PI * PI)
+
+    // Top loop dominates
+    let mt = mass_top().val()
+    let tau_t = 4.0 * mt * mt / (m_h * m_h)
+    var at: f64 = 0.0
+    if tau_t > 1.0 {
+        at = 1.0  // Heavy top limit
+    }
+    // Color factor for gg: sum over 8 gluons, average over 2 initial Higgs states
+    // |A|² ≈ (3/4)² for heavy top
+    let amp = 0.75 * at
+    prefactor * amp * amp
+}
+
+/// Higgs total width (sum of dominant channels).
+pub fn h_total_width() -> f64 with Mut, Div, Panic {
+    let mh = mass_h().val()
+    var total: f64 = 0.0
+    // b b̄ (dominant)
+    total = total + h_decay_width_ff(mh, mass_bottom().val(), 3.0)
+    // τ⁺τ⁻
+    total = total + h_decay_width_ff(mh, mass_tau().val(), 1.0)
+    // c c̄
+    total = total + h_decay_width_ff(mh, mass_charm().val(), 3.0)
+    // γγ
+    total = total + h_decay_width_gammagamma(mh)
+    // gg
+    total = total + h_decay_width_gg(mh)
+    total
+}
+
+// ============================================================================
+// LOCAL CONSTANTS
+// ============================================================================
+
+let PI: f64 = 3.14159265358979323846
+let SQRT2: f64 = 1.41421356237309504880

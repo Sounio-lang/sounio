@@ -7,7 +7,83 @@
 // Type compatibility — must be symmetric
 // ============================================================
 
-fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+// Feature B: an Invariant<T,G> type is lowered (in check.sio) to a TyNamed whose name
+// is "Invariant<rank>" (rank 1..4 = DiffInf<Diff1<BiLip<Homeo), optionally followed by
+// "$<frame>" for the 3-arg Invariant<T,G,F>. Decode that rank here (raw bytes, so this
+// stays above types_compatible with no forward reference); returns 0 for any other
+// type. Used so Invariant arithmetic/comparison resolves on the inner T and so the
+// inner T is not erased from compatibility.
+fn compat_invariant_name_prefix(n: Name) -> bool with Panic, Div {
+    if n.len < 10 { return false }
+    if (n.buf[0] as i64) != 73 { return false }    // I
+    if (n.buf[1] as i64) != 110 { return false }   // n
+    if (n.buf[2] as i64) != 118 { return false }   // v
+    if (n.buf[3] as i64) != 97 { return false }    // a
+    if (n.buf[4] as i64) != 114 { return false }   // r
+    if (n.buf[5] as i64) != 105 { return false }   // i
+    if (n.buf[6] as i64) != 97 { return false }    // a
+    if (n.buf[7] as i64) != 110 { return false }   // n
+    if (n.buf[8] as i64) != 116 { return false }   // t
+    // a frame suffix, if any, must start with '$' at position 10
+    if n.len > 10 && (n.buf[10] as i64) != 36 { return false }
+    true
+}
+
+pub fn compat_invariant_rank(ty: TypeEntry) -> i64 with Panic, Div {
+    if ty.kind != TypeKind::TyNamed { return 0 }
+    let n = ty.name
+    if !compat_invariant_name_prefix(n) { return 0 }
+    let d = n.buf[9] as i64
+    if d >= 49 && d <= 52 { return d - 48 }
+    0
+}
+
+// Two Invariant types share a frame iff BOTH carry a frame suffix ("$<frame>") and the
+// suffixes are identical. A frameless Invariant (2-arg Invariant<T,G>) is treated as an
+// unknown, distinct frame, so it never matches anything — the binop gate then falls
+// back to the conservative cross-frame rule.
+pub fn compat_invariant_same_frame(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div {
+    if compat_invariant_rank(a) == 0 || compat_invariant_rank(b) == 0 { return false }
+    let na = a.name
+    let nb = b.name
+    if na.len <= 11 || nb.len <= 11 { return false }   // no (or empty) frame on one side
+    if na.len != nb.len { return false }
+    var i: i64 = 11
+    while i < na.len {
+        if (na.buf[i as usize] as i64) != (nb.buf[i as usize] as i64) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// A7: integer-width coercion (matches lean_single's permissiveness).
+// Classifies the "narrow" machine integer kinds by signedness family so that an
+// i32 branch/operand and an i64 branch/operand type-check by widening to the
+// wider type. Returns 1 for the signed narrow family {i8,i32,i64}, 2 for the
+// unsigned narrow family {u8,u32,u64}, 0 for anything else (incl. the wide
+// i128/u128 kinds, which keep their exact bit-width check — the i128≠i256
+// soundness hole stays closed). Cross-signedness (i32 vs u32) is deliberately
+// NOT widened, so a genuine signed/unsigned mismatch is still rejected.
+fn int_width_family(k: TypeKind) -> i64 with Panic, Div {
+    if k == TypeKind::TyI8 { return 1 }
+    if k == TypeKind::TyI32 { return 1 }
+    if k == TypeKind::TyI64 { return 1 }
+    if k == TypeKind::TyU8 { return 2 }
+    if k == TypeKind::TyU32 { return 2 }
+    if k == TypeKind::TyU64 { return 2 }
+    0
+}
+
+// Two narrow integer types are mutually compatible iff they share a signedness
+// family. The exact-kind cases are already handled above; this covers the
+// mixed-width cases (i32<->i64, i8<->i32, u32<->u64, ...).
+pub fn int_widths_compatible(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div {
+    let fa = int_width_family(a.kind)
+    if fa == 0 { return false }
+    fa == int_width_family(b.kind)
+}
+
+pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     // Wildcard types: compatible with anything (check BOTH sides)
     if a.kind == TypeKind::TyError || b.kind == TypeKind::TyError {
         return true
@@ -38,6 +114,14 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
     if a.kind == TypeKind::TyU64 && b.kind == TypeKind::TyU64 {
         return true
     }
+    // Wide ints: same signedness AND same width (clifford_p carries bit-width).
+    // Closes the i128 != i256 soundness hole.
+    if a.kind == TypeKind::TyI128 && b.kind == TypeKind::TyI128 {
+        return a.clifford_p == b.clifford_p
+    }
+    if a.kind == TypeKind::TyU128 && b.kind == TypeKind::TyU128 {
+        return a.clifford_p == b.clifford_p
+    }
     if a.kind == TypeKind::TyF32 && b.kind == TypeKind::TyF32 {
         return true
     }
@@ -46,6 +130,9 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         if a.unit_id >= 0 && b.unit_id >= 0 {
             return a.unit_id == b.unit_id
         }
+        return true
+    }
+    if wide_float_format_identity_compatible(a, b) {
         return true
     }
     if a.kind == TypeKind::TyBool && b.kind == TypeKind::TyBool {
@@ -61,8 +148,49 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         return true
     }
 
+    // A7: narrow integer width coercion (i32<->i64, i8<->i32, u32<->u64, ...).
+    // Same signedness family only; wide i128/u128 keep their exact bit-width
+    // check above so the i128≠i256 hole stays closed.
+    if int_widths_compatible(a, b) {
+        return true
+    }
+
     // Named types: names must match
     if a.kind == TypeKind::TyNamed && b.kind == TypeKind::TyNamed {
+        // Feature B: Invariant<T,G[,F]> mangles G (and an optional frame F) into the
+        // name but carries T in `inner`. Compatibility is by GROUP RANK + inner T — NOT
+        // the full mangled name: the FRAME is deliberately ignored here so two same-group
+        // invariants in different frames stay "compatible", and the binop comparability
+        // gate (check.sio) decides accept/reject from the frame relation. Comparing rank
+        // (not name) also keeps the inner T from being erased (Invariant<f64,G> ≠
+        // Invariant<i64,G>).
+        let ra = compat_invariant_rank(a)
+        let rb = compat_invariant_rank(b)
+        if ra > 0 && rb > 0 {
+            if ra != rb { return false }   // different invariance group → incompatible
+            match a.inner {
+                Some(ai) => match b.inner {
+                    Some(bi) => return types_compatible(*ai, *bi),
+                    None => return false,
+                },
+                None => return false,
+            }
+        }
+        // Seq<T>: name "Seq" with element in `inner`. Must not collapse to bare name
+        // equality (that would make Seq<i64> ~ Seq<f64>). Bare Seq (no inner) is a
+        // soft wildcard against a concrete Seq<T> so seq_new() can type against an
+        // annotated binding.
+        if is_seq_type(a) && is_seq_type(b) {
+            match a.inner {
+                None => return true
+                Some(_) => {
+                    match b.inner {
+                        None => return true
+                        Some(_) => return types_compatible_inner(a.inner, b.inner)
+                    }
+                }
+            }
+        }
         return name_eq(a.name, b.name)
     }
 
@@ -83,6 +211,12 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         return types_compatible_inner(a.inner, b.inner)
     }
     if a.kind == TypeKind::TyRefMut && b.kind == TypeKind::TyRefMut {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+    if a.kind == TypeKind::TyRawPtr && b.kind == TypeKind::TyRawPtr {
+        if a.name.buf[0] != b.name.buf[0] {
+            return false
+        }
         return types_compatible_inner(a.inner, b.inner)
     }
     if a.kind == TypeKind::TySlice && b.kind == TypeKind::TySlice {
@@ -470,7 +604,7 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
     // DPBudget (Sprint 21 DP): same ε_total; ε_spent must not exceed ε_total
     if a.kind == TypeKind::TyDPBudget && b.kind == TypeKind::TyDPBudget {
         if a.knowledge_epsilon != b.knowledge_epsilon { return false }
-        if a.array_size > a.knowledge_epsilon { return false }
+        if (a.array_size as f64) > a.knowledge_epsilon { return false }
         return types_compatible_inner(a.inner, b.inner)
     }
 
@@ -661,7 +795,7 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
     false
 }
 
-fn types_compatible_inner(a: Option<Box<TypeEntry>>, b: Option<Box<TypeEntry>>) -> bool with Mut, Panic, Div, Alloc {
+pub fn types_compatible_inner(a: Option<Box<TypeEntry>>, b: Option<Box<TypeEntry>>) -> bool with Mut, Panic, Div, Alloc {
     match a {
         None => {
             match b {
@@ -678,7 +812,7 @@ fn types_compatible_inner(a: Option<Box<TypeEntry>>, b: Option<Box<TypeEntry>>) 
     }
 }
 
-fn tuple_types_compatible(a: Option<Box<TypeEntryList>>, b: Option<Box<TypeEntryList>>) -> bool with Mut, Panic, Div, Alloc {
+pub fn tuple_types_compatible(a: Option<Box<TypeEntryList>>, b: Option<Box<TypeEntryList>>) -> bool with Mut, Panic, Div, Alloc {
     match a {
         None => {
             match b {
@@ -705,38 +839,71 @@ fn tuple_types_compatible(a: Option<Box<TypeEntryList>>, b: Option<Box<TypeEntry
 // Type kind queries
 // ============================================================
 
-fn is_numeric_type(ty: TypeEntry) -> bool {
+pub fn is_numeric_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyI8 || ty.kind == TypeKind::TyI32 || ty.kind == TypeKind::TyI64 ||
+    ty.kind == TypeKind::TyI128 ||
     ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64 ||
+    ty.kind == TypeKind::TyU128 ||
     ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64
 }
 
-fn is_integer_type(ty: TypeEntry) -> bool {
+pub fn is_integer_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyI8 || ty.kind == TypeKind::TyI32 || ty.kind == TypeKind::TyI64 ||
-    ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64
+    ty.kind == TypeKind::TyI128 ||
+    ty.kind == TypeKind::TyU8 || ty.kind == TypeKind::TyU32 || ty.kind == TypeKind::TyU64 ||
+    ty.kind == TypeKind::TyU128
 }
 
-fn is_float_type(ty: TypeEntry) -> bool {
+pub fn is_float_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64
 }
 
-fn is_bool_type(ty: TypeEntry) -> bool {
+// Wide-float identity exists before its value semantics. Keep these types out
+// of is_numeric_type until operations, status, and rounding are implemented.
+pub fn is_wide_float_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyF128 || ty.kind == TypeKind::TyF256
+}
+
+pub fn f128_f256_compatibility_probe_code() -> i64 with Mut, Panic, Div, Alloc {
+    let t128 = ty_f128()
+    let t256 = ty_f256()
+    let f64 = ty_f64()
+    if !types_compatible(t128, t128) { return 40 }
+    if !types_compatible(t256, t256) { return 41 }
+    if types_compatible(t128, t256) || types_compatible(t256, t128) { return 42 }
+    if types_compatible(t128, f64) || types_compatible(f64, t128) { return 43 }
+    if types_compatible(t256, f64) || types_compatible(f64, t256) { return 44 }
+    if is_numeric_type(t128) || is_numeric_type(t256) { return 45 }
+    if is_float_type(t128) || is_float_type(t256) { return 46 }
+    if !is_wide_float_type(t128) || !is_wide_float_type(t256) { return 47 }
+    0
+}
+
+pub fn is_bool_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyBool
 }
 
-fn is_error_or_unknown(ty: TypeEntry) -> bool {
+pub fn is_error_or_unknown(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyError || ty.kind == TypeKind::TyUnknown || ty.kind == TypeKind::TyNever
 }
 
-fn compat_is_hyper_type(ty: TypeEntry) -> bool {
+pub fn compat_is_hyper_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyHyper
+}
+
+// Primitive scalar kinds that can be the receiver of a trait/inherent method
+// (impl R for i64 { fn m(self, ...) }). These types have empty .name, so
+// method resolution disambiguates on kind via fn_sig_table_find_method_semantic.
+// Excludes TyString (handled by its own builtin-method branch) and aggregates.
+pub fn is_primitive_receiver_type(ty: TypeEntry) -> bool {
+    is_numeric_type(ty) || ty.kind == TypeKind::TyBool || ty.kind == TypeKind::TyChar
 }
 
 // ============================================================
 // Binary operator result types
 // ============================================================
 
-fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
     // If either side is error/unknown/never, propagate
     if is_error_or_unknown(left) {
         return left
@@ -744,10 +911,27 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
     if is_error_or_unknown(right) {
         return right
     }
+    if is_wide_float_type(left) || is_wide_float_type(right) {
+        return ty_error()
+    }
+
+    // Feature B: Invariant<T,G> arithmetic/comparison resolves on the inner T (an
+    // opaque TyNamed is not numeric, which would otherwise make every op ty_error and
+    // false-reject the §4.4 ratio). The group-comparability gate is enforced separately
+    // in check.sio; here we only compute the result type on the unwrapped operands.
+    if compat_invariant_rank(left) > 0 && compat_invariant_rank(right) > 0 {
+        match left.inner {
+            Some(li) => match right.inner {
+                Some(ri) => return binary_result_type(op, *li, *ri),
+                None => {},
+            },
+            None => {},
+        }
+    }
 
     match op {
         // Arithmetic: both numeric, result = left type
-        OpAdd => {
+        BinaryOp::OpAdd => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
@@ -758,7 +942,7 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
                 ty_error()
             }
         }
-        OpSub => {
+        BinaryOp::OpSub => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -767,7 +951,7 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
                 ty_error()
             }
         }
-        OpMul => {
+        BinaryOp::OpMul => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -776,7 +960,7 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
                 ty_error()
             }
         }
-        OpDiv => {
+        BinaryOp::OpDiv => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
@@ -785,7 +969,7 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
                 ty_error()
             }
         }
-        OpRem => {
+        BinaryOp::OpRem => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
             } else {
@@ -794,42 +978,42 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         }
 
         // Comparison: both same type, result = bool
-        OpEq => {
+        BinaryOp::OpEq => {
             if types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpNe => {
+        BinaryOp::OpNe => {
             if types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpLt => {
+        BinaryOp::OpLt => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpLe => {
+        BinaryOp::OpLe => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpGt => {
+        BinaryOp::OpGt => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpGe => {
+        BinaryOp::OpGe => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 ty_bool()
             } else {
@@ -838,14 +1022,14 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         }
 
         // Logical: both bool, result = bool
-        OpAnd => {
+        BinaryOp::OpAnd => {
             if is_bool_type(left) && is_bool_type(right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpOr => {
+        BinaryOp::OpOr => {
             if is_bool_type(left) && is_bool_type(right) {
                 ty_bool()
             } else {
@@ -853,45 +1037,49 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
             }
         }
 
-        // Bitwise: both i64, result = i64
-        OpBitAnd => {
+        // Bitwise: both integer, result = LEFT operand type (#638: the old always-i64
+        // result poisoned every i32 shift/mask context, e.g. `let half = 1 << (bits-1)`
+        // with bits: i32 — the whole f64 Cayley-Dickson layer failed to import).
+        // Acceptance domain unchanged (both integer, mixed widths still accepted);
+        // only the RESULT type follows the left operand, mirroring the arithmetic arms.
+        BinaryOp::OpBitAnd => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
-        OpBitOr => {
+        BinaryOp::OpBitOr => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
-        OpBitXor => {
+        BinaryOp::OpBitXor => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
-        OpShl => {
+        BinaryOp::OpShl => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
-        OpShr => {
+        BinaryOp::OpShr => {
             if is_integer_type(left) && is_integer_type(right) {
-                ty_i64()
+                left
             } else {
                 ty_error()
             }
         }
 
         // Concat: arrays or strings
-        OpConcat => {
+        BinaryOp::OpConcat => {
             if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
                 ty_string()
             } else if left.kind == TypeKind::TyArray && right.kind == TypeKind::TyArray {
@@ -902,8 +1090,8 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         }
 
         // Range
-        OpRange => ty_unit()
-        OpRangeInclusive => ty_unit()
+        BinaryOp::OpRange => ty_unit()
+        BinaryOp::OpRangeInclusive => ty_unit()
     }
 }
 
@@ -911,29 +1099,38 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
 // Unary operator result types
 // ============================================================
 
-fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Alloc {
+pub fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Alloc {
     if is_error_or_unknown(operand) {
         return operand
     }
+    if is_wide_float_type(operand) {
+        return ty_error()
+    }
 
     match op {
-        OpNeg => {
+        UnaryOp::OpNeg => {
             if is_numeric_type(operand) {
                 operand
             } else {
                 ty_error()
             }
         }
-        OpNot => {
+        UnaryOp::OpNot => {
             if is_bool_type(operand) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
-        OpRef => ty_ref(operand)
-        OpRefMut => ty_ref_mut(operand)
-        OpDeref => {
+        UnaryOp::OpRef => ty_ref(operand)
+        UnaryOp::OpRefMut => ty_ref_mut(operand)
+        UnaryOp::OpDeref => {
+            if operand.kind == TypeKind::TyRawPtr {
+                match operand.inner {
+                    Some(inner_ty) => return *inner_ty,
+                    None => return ty_error()
+                }
+            }
             match operand.inner {
                 Some(inner_ty) => *inner_ty
                 None => ty_error()
@@ -947,7 +1144,7 @@ fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Alloc {
 // ============================================================
 
 // Hyper binary result: both must be same algebra (or Cayley-Dickson widening)
-fn hyper_binary_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
+pub fn hyper_binary_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
     // Same algebra: result is same type
     if left.algebra_kind == right.algebra_kind {
         // Clifford: signatures must match
@@ -970,7 +1167,7 @@ fn hyper_binary_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with
 }
 
 // Division: only allowed for division algebras (R, C, H, O)
-fn hyper_division_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
+pub fn hyper_division_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
     let result = hyper_binary_result_type(left, right)
     if result.kind == TypeKind::TyError {
         return result
@@ -990,14 +1187,14 @@ fn hyper_division_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry wi
 // Compound assignment to binary operator
 // ============================================================
 
-fn compound_assign_to_binop(op: AssignOp) -> BinaryOp {
+pub fn compound_assign_to_binop(op: AssignOp) -> BinaryOp {
     match op {
-        AssignAdd => BinaryOp::OpAdd
-        AssignSub => BinaryOp::OpSub
-        AssignMul => BinaryOp::OpMul
-        AssignDiv => BinaryOp::OpDiv
-        AssignRem => BinaryOp::OpRem
-        AssignEq => BinaryOp::OpAdd  // should not happen, fallback
+        AssignOp::AssignAdd => BinaryOp::OpAdd
+        AssignOp::AssignSub => BinaryOp::OpSub
+        AssignOp::AssignMul => BinaryOp::OpMul
+        AssignOp::AssignDiv => BinaryOp::OpDiv
+        AssignOp::AssignRem => BinaryOp::OpRem
+        AssignOp::AssignEq => BinaryOp::OpAdd  // should not happen, fallback
     }
 }
 
@@ -1005,71 +1202,71 @@ fn compound_assign_to_binop(op: AssignOp) -> BinaryOp {
 // Name helpers for builtin type checking
 // ============================================================
 
-fn name_matches_str1(n: Name, a: i64) -> bool with Panic, Div {
+pub fn name_matches_str1(n: Name, a: i64) -> bool with Panic, Div {
     if n.len != 1 { return false }
     (n.buf[0] as i64) == a
 }
 
-fn name_matches_str2(n: Name, a: i64, b: i64) -> bool with Panic, Div {
+pub fn name_matches_str2(n: Name, a: i64, b: i64) -> bool with Panic, Div {
     if n.len != 2 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b
 }
 
-fn name_matches_str3(n: Name, a: i64, b: i64, c: i64) -> bool with Panic, Div {
+pub fn name_matches_str3(n: Name, a: i64, b: i64, c: i64) -> bool with Panic, Div {
     if n.len != 3 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c
 }
 
-fn name_matches_str4(n: Name, a: i64, b: i64, c: i64, d: i64) -> bool with Panic, Div {
+pub fn name_matches_str4(n: Name, a: i64, b: i64, c: i64, d: i64) -> bool with Panic, Div {
     if n.len != 4 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d
 }
 
-fn name_matches_str5(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64) -> bool with Panic, Div {
+pub fn name_matches_str5(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64) -> bool with Panic, Div {
     if n.len != 5 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e
 }
 
-fn name_matches_str6(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> bool with Panic, Div {
+pub fn name_matches_str6(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> bool with Panic, Div {
     if n.len != 6 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e && (n.buf[5] as i64) == f
 }
 
-fn name_matches_str7(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> bool with Panic, Div {
+pub fn name_matches_str7(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> bool with Panic, Div {
     if n.len != 7 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g
 }
 
-fn name_matches_str8(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> bool with Panic, Div {
+pub fn name_matches_str8(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> bool with Panic, Div {
     if n.len != 8 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h
 }
 
-fn name_matches_str9(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> bool with Panic, Div {
+pub fn name_matches_str9(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> bool with Panic, Div {
     if n.len != 9 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h && (n.buf[8] as i64) == i
 }
 
-fn name_matches_str10(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) -> bool with Panic, Div {
+pub fn name_matches_str10(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) -> bool with Panic, Div {
     if n.len != 10 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d && (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h && (n.buf[8] as i64) == i && (n.buf[9] as i64) == j
 }
 
-fn name_matches_str11(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64) -> bool with Panic, Div {
+pub fn name_matches_str11(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64) -> bool with Panic, Div {
     if n.len != 11 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
     (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k
 }
 
-fn name_matches_str12(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64) -> bool with Panic, Div {
+pub fn name_matches_str12(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64) -> bool with Panic, Div {
     if n.len != 12 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
     (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l
 }
 
-fn name_matches_str13(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64) -> bool with Panic, Div {
+pub fn name_matches_str13(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64) -> bool with Panic, Div {
     if n.len != 13 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1077,7 +1274,7 @@ fn name_matches_str13(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[12] as i64) == m
 }
 
-fn name_matches_str14(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64) -> bool with Panic, Div {
+pub fn name_matches_str14(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64) -> bool with Panic, Div {
     if n.len != 14 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1085,7 +1282,7 @@ fn name_matches_str14(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[12] as i64) == m && (n.buf[13] as i64) == o
 }
 
-fn name_matches_str15(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64) -> bool with Panic, Div {
+pub fn name_matches_str15(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64) -> bool with Panic, Div {
     if n.len != 15 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1093,7 +1290,7 @@ fn name_matches_str15(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p
 }
 
-fn name_matches_str16(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64) -> bool with Panic, Div {
+pub fn name_matches_str16(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64) -> bool with Panic, Div {
     if n.len != 16 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1101,7 +1298,7 @@ fn name_matches_str16(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p && (n.buf[15] as i64) == q
 }
 
-fn name_matches_str17(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64) -> bool with Panic, Div {
+pub fn name_matches_str17(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64) -> bool with Panic, Div {
     if n.len != 17 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1110,7 +1307,7 @@ fn name_matches_str17(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[16] as i64) == r
 }
 
-fn name_matches_str18(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64) -> bool with Panic, Div {
+pub fn name_matches_str18(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64) -> bool with Panic, Div {
     if n.len != 18 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1119,7 +1316,7 @@ fn name_matches_str18(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[16] as i64) == r && (n.buf[17] as i64) == s
 }
 
-fn name_matches_str19(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64) -> bool with Panic, Div {
+pub fn name_matches_str19(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64) -> bool with Panic, Div {
     if n.len != 19 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1128,7 +1325,7 @@ fn name_matches_str19(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[16] as i64) == r && (n.buf[17] as i64) == s && (n.buf[18] as i64) == t
 }
 
-fn name_matches_str20(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64) -> bool with Panic, Div {
+pub fn name_matches_str20(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64) -> bool with Panic, Div {
     if n.len != 20 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1137,7 +1334,7 @@ fn name_matches_str20(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[16] as i64) == r && (n.buf[17] as i64) == s && (n.buf[18] as i64) == t && (n.buf[19] as i64) == u
 }
 
-fn name_matches_str21(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64) -> bool with Panic, Div {
+pub fn name_matches_str21(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64) -> bool with Panic, Div {
     if n.len != 21 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1147,7 +1344,7 @@ fn name_matches_str21(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[20] as i64) == v
 }
 
-fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64, w: i64) -> bool with Panic, Div {
+pub fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64, w: i64) -> bool with Panic, Div {
     if n.len != 22 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
     (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
@@ -1158,56 +1355,104 @@ fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
 }
 
 // "i8" = [105, 56]
-fn name_is_i8(n: Name) -> bool with Panic, Div {
+pub fn name_is_i8(n: Name) -> bool with Panic, Div {
     name_matches_str2(n, 105, 56)
 }
 
 // "i32" = [105, 51, 50]
-fn name_is_i32(n: Name) -> bool with Panic, Div {
+pub fn name_is_i32(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 105, 51, 50)
 }
 
 // "i64" = [105, 54, 52]
-fn name_is_i64(n: Name) -> bool with Panic, Div {
+pub fn name_is_i64(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 105, 54, 52)
 }
 
 // "u8" = [117, 56]
-fn name_is_u8(n: Name) -> bool with Panic, Div {
+pub fn name_is_u8(n: Name) -> bool with Panic, Div {
     name_matches_str2(n, 117, 56)
 }
 
 // "u32" = [117, 51, 50]
-fn name_is_u32(n: Name) -> bool with Panic, Div {
+pub fn name_is_u32(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 117, 51, 50)
 }
 
 // "u64" = [117, 54, 52]
-fn name_is_u64(n: Name) -> bool with Panic, Div {
+pub fn name_is_u64(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 117, 54, 52)
 }
 
+// "i128" = [105, 49, 50, 56]
+pub fn name_is_i128(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 105, 49, 50, 56)
+}
+
+// "u128" = [117, 49, 50, 56]
+pub fn name_is_u128(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 117, 49, 50, 56)
+}
+
+// Arbitrary wide-int name parse: 'i'/'u' followed by all-decimal-digits.
+// Returns the bit width (>0) or 0 if the name is not an iN/uN form.
+// Signedness is the caller's job (first byte 105='i' signed, 117='u' unsigned).
+// The all-digit guard prevents swallowing identifiers like `input`, `usize`, `i32x4`.
+pub fn name_wide_int_bits(n: Name) -> i64 with Panic, Div {
+    if n.len < 2 { return 0 }
+    let c0 = n.buf[0] as i64
+    if c0 != 105 && c0 != 117 { return 0 }
+    var bits: i64 = 0
+    var i: i64 = 1
+    while i < n.len {
+        let d = n.buf[i as usize] as i64
+        if d < 48 || d > 57 { return 0 }
+        bits = bits * 10 + (d - 48)
+        i = i + 1
+    }
+    if bits <= 0 { return 0 }
+    bits
+}
+
+// "usize" = [117, 115, 105, 122, 101]. lean_single (the oracle) collapses every
+// integer width — i32/u32/i64/u64/usize — to a single integer type code, so the
+// faithful mapping is to the canonical integer (i64). Without this, `x as usize`
+// lowered to ty_named("usize") (a TyNamed) and array-index checks rejected it (E014).
+pub fn name_is_usize(n: Name) -> bool with Panic, Div {
+    name_matches_str5(n, 117, 115, 105, 122, 101)
+}
+
 // "f32" = [102, 51, 50]
-fn name_is_f32(n: Name) -> bool with Panic, Div {
+pub fn name_is_f32(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 102, 51, 50)
 }
 
 // "f64" = [102, 54, 52]
-fn name_is_f64(n: Name) -> bool with Panic, Div {
+pub fn name_is_f64(n: Name) -> bool with Panic, Div {
     name_matches_str3(n, 102, 54, 52)
 }
 
+// "f128" = [102, 49, 50, 56]
+pub fn name_is_f128(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 102, 49, 50, 56)
+}
+
+// "f256" = [102, 50, 53, 54]
+pub fn name_is_f256(n: Name) -> bool with Panic, Div {
+    name_matches_str4(n, 102, 50, 53, 54)
+}
+
 // "bool" = [98, 111, 111, 108]
-fn name_is_bool(n: Name) -> bool with Panic, Div {
+pub fn name_is_bool(n: Name) -> bool with Panic, Div {
     name_matches_str4(n, 98, 111, 111, 108)
 }
 
 // "char" = [99, 104, 97, 114]
-fn name_is_char(n: Name) -> bool with Panic, Div {
+pub fn name_is_char(n: Name) -> bool with Panic, Div {
     name_matches_str4(n, 99, 104, 97, 114)
 }
 
 // "string" = [115, 116, 114, 105, 110, 103]
-fn name_is_string(n: Name) -> bool with Panic, Div {
+pub fn name_is_string(n: Name) -> bool with Panic, Div {
     name_matches_str6(n, 115, 116, 114, 105, 110, 103)
 }

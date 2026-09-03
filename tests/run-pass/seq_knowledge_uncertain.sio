@@ -1,0 +1,36 @@
+//@ run-pass
+//@ description: seq_push_uncertain into a Seq<Knowledge<f64>> stores a real Knowledge element
+//
+// Regression for the Lane C SIGSEGV: seq_push_uncertain passed its raw f64 `value`
+// to seq_materialize_push_value, which — because type_is_struct_like(0, knowledge_hash)
+// is true — heap-copied 24 bytes treating the f64 bits as a Knowledge-block pointer and
+// crashed. The fix assembles a real Knowledge block {value@0, variance@8, confidence@16}
+// from the (value, confidence, variance) scalars (same representation as .push(measure(..)))
+// and materializes that, so per-element reads work and the additive header aggregate
+// (Σ variance, min confidence) is preserved. (Seq<i64>/Seq<f64> were never affected;
+// see seq_epistemic.sio.)
+
+fn main() with IO, Alloc, Mut, Epistemic {
+    var s: Seq<Knowledge<f64>> = seq_new()
+    seq_push_uncertain(s, 10.0, 0.9, 4.0)
+    seq_push_uncertain(s, 20.0, 0.8, 1.0)
+    seq_push_uncertain(s, 30.0, 0.95, 0.25)
+
+    var i: i64 = 0
+    var sum: f64 = 0.0
+    while i < s.count() {
+        sum = sum + acknowledge(s[i], "batch read")
+        i = i + 1
+    }
+
+    // aggregate read-back (header Σvariance / min-confidence) must not crash
+    let agg = seq_len(s)
+    let n: i64 = acknowledge(agg, "count")
+
+    var ok: i64 = 1
+    if s.count() != 3 { ok = 0 }
+    if n != 3 { ok = 0 }
+    if sum < 59.999 || sum > 60.001 { ok = 0 }   // 10 + 20 + 30
+
+    if ok == 1 { print("seq_knowledge_uncertain: PASS\n") } else { print("seq_knowledge_uncertain: FAIL\n") }
+}

@@ -84,74 +84,56 @@ while IFS=$'\t' read -r case_id program_path expected_stdout kind; do
   fi
 done <"$MANIFEST"
 
-python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$ACCEL_DIR/artifacts/epistemic_accel_spine.v1.json" "$MANIFEST" "$RUNTIME_SOUC" "$pass_count" "$not_run_count" "$fail_count" "$OUT_DIR" <<'PY'
-import csv
-import hashlib
-import json
-import pathlib
-import sys
+# ── summary JSON assembly (replaces python3 heredoc) ─────────────────────
+__gate_sha256() { sha256sum "$1" 2>/dev/null | cut -c1-64 || echo ""; }
 
-summary_path = pathlib.Path(sys.argv[1])
-results_path = pathlib.Path(sys.argv[2])
-accel_summary_path = pathlib.Path(sys.argv[3])
-manifest_path = pathlib.Path(sys.argv[4])
-runtime_souc = sys.argv[5]
-pass_count = int(sys.argv[6])
-not_run_count = int(sys.argv[7])
-fail_count = int(sys.argv[8])
-out_dir = pathlib.Path(sys.argv[9])
+if [[ "$fail_count" -gt 0 ]]; then
+    STATUS_VAL="fail"
+elif [[ "$not_run_count" -gt 0 ]]; then
+    STATUS_VAL="partial"
+else
+    STATUS_VAL="pass"
+fi
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-rows = []
-with open(results_path, "r", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f, delimiter="\t"))
-
-status = "pass"
-if fail_count:
-    status = "fail"
-elif not_run_count:
-    status = "partial"
-
-payload = {
-    "schema": "sounio.native_v2_epistemic_gpu_runtime_parity.v1",
-    "status": status,
-    "target": "x86_64-linux+cuda-runtime",
-    "fallback_path": "none",
-    "host_callback": "none",
-    "runtime_souc_path": runtime_souc,
-    "manifest": str(manifest_path),
-    "manifest_sha256": sha256(manifest_path) if manifest_path.exists() else "",
-    "accel_spine_summary": str(accel_summary_path),
-    "accel_spine_summary_sha256": sha256(accel_summary_path) if accel_summary_path.exists() else "",
-    "pass_count": pass_count,
-    "not_run_count": not_run_count,
-    "fail_count": fail_count,
-    "results_tsv": str(results_path),
-    "artifact_dir": str(out_dir),
-    "cases": rows,
-    "remaining_boundaries": [
-        "CUDA driver runtime is required for runtime parity rows" if not_run_count else "",
-        "this gate does not prove tensor-core performance, ROCm, Metal, WebGPU, or DDC",
-        "public GPU PTX f64 op selection still uses the legalization bridge until the pinned artifact is source-rebuilt",
-    ],
-}
-payload["remaining_boundaries"] = [x for x in payload["remaining_boundaries"] if x]
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if fail_count:
-    raise SystemExit(1)
-PY
-
-summary_status="$(python3 - "$SUMMARY_JSON" <<'PY'
-import json, sys
-print(json.load(open(sys.argv[1]))["status"])
-PY
+# Convert TSV (case_id, program, status, detail, kind) to JSON array
+CASES_JSON="$(
+  {
+    awk -F'\t' 'NR>1 && !/^[[:space:]]*#/ && NF {
+      printf "{\"case_id\":\"%s\",\"detail\":\"%s\",\"kind\":\"%s\",\"program\":\"%s\",\"status\":\"%s\"}\n", $1, $4, $5, $2, $3
+    }' "$RESULTS_TSV"
+  } | ./bin/kretikos json-emit-array
 )"
+
+# Conditional CUDA boundary
+if [[ "$not_run_count" -gt 0 ]]; then
+    CUDA_BOUND="CUDA driver runtime is required for runtime parity rows|"
+else
+    CUDA_BOUND=""
+fi
+MANIFEST_SHA="$(__gate_sha256 "$MANIFEST")"
+ACCEL_SHA="$(__gate_sha256 "$ACCEL_DIR/artifacts/epistemic_accel_spine.v1.json")"
+
+./bin/kretikos json-emit \
+    --string "accel_spine_summary=$ACCEL_DIR/artifacts/epistemic_accel_spine.v1.json" \
+    --string "accel_spine_summary_sha256=$ACCEL_SHA" \
+    --string "artifact_dir=$OUT_DIR" \
+    --raw-json "cases=$CASES_JSON" \
+    --string "fallback_path=none" \
+    --int "fail_count=$fail_count" \
+    --string "host_callback=none" \
+    --string "manifest=$MANIFEST" \
+    --string "manifest_sha256=$MANIFEST_SHA" \
+    --int "not_run_count=$not_run_count" \
+    --int "pass_count=$pass_count" \
+    --array-strings "remaining_boundaries=${CUDA_BOUND}this gate does not prove tensor-core performance, ROCm, Metal, WebGPU, or DDC|public GPU PTX f64 op selection still uses the legalization bridge until the pinned artifact is source-rebuilt" \
+    --string "results_tsv=$RESULTS_TSV" \
+    --string "runtime_souc_path=$RUNTIME_SOUC" \
+    --string "schema=sounio.native_v2_epistemic_gpu_runtime_parity.v1" \
+    --string "status=$STATUS_VAL" \
+    --string "target=x86_64-linux+cuda-runtime" \
+    > "$SUMMARY_JSON" || exit 1
+
+summary_status="$(./bin/kretikos kaxi-validate-evidence "$SUMMARY_JSON" --print-or-empty status)"
 
 echo "[native-v2-gpu-runtime] status=$summary_status summary=$SUMMARY_JSON"
 if [[ "$summary_status" == "fail" ]]; then

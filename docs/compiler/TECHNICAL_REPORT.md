@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.techn
 
 # Native GPU Octonion Support for Deep Learning: A Compiler-First Approach
 
+> **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but the GPU/PTX & Metal codegen now lives in `self-hosted/gpu/` (`lower_to_ptx.sio`, `kretikos_emit_ptx.sio`, `kretikos_emit_metal.sio`); tests and benchmarks are `.sio` under `tests/` and `benchmarks/` (no Criterion.rs / cargo). Do not look for the `.rs` paths below.
+
+
 **Authors**: Sounio Development Team
 **Preprint v1.0** — January 2026
 

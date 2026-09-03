@@ -1,0 +1,77 @@
+//! Cast a DataFrame column to a target numeric type.
+//!
+//! Every DataFrame cell is stored as f64, so `astype` casts the VALUES of a column to look like a
+//! target type, selected by a type code:
+//!   0 = float   identity (no change)
+//!   1 = int     truncate toward zero        (3.7 -> 3, -3.7 -> -3)
+//!   2 = round   round to nearest, half away from zero  (3.5 -> 4, -2.5 -> -3)
+//!   3 = bool    0.0 if the cell is 0.0, else 1.0
+//! The result is still an f64 store; the cast normalizes the values (e.g. whole numbers for int).
+//!
+//! All verbs are functional: they return a new DataFrame and leave the input unchanged. Column names
+//! are preserved. Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+// Cast v to the target type code (see the module header for the codes).
+fn cast_val(v: f64, ty: i64) -> f64 with Mut, Div, Panic {
+    if ty == 1 { return (v as i64) as f64 }                                  // truncate toward zero
+    if ty == 2 {                                                             // round half away from zero
+        if v >= 0.0 { return ((v + 0.5) as i64) as f64 }
+        return ((v - 0.5) as i64) as f64
+    }
+    if ty == 3 { if v != 0.0 { return 1.0 } return 0.0 }                     // bool
+    v                                                                        // 0 = float / identity
+}
+
+// Copy df's column names onto out (both have the same column count).
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc {
+        df_set_col_name(out, c, df_get_col_name(df, c))
+        c = c + 1
+    }
+}
+
+/// Return a copy of `df` with column `col` cast to type `ty` (0 float, 1 int/truncate, 2 round,
+/// 3 bool). Other columns and all row structure are preserved; the input is unchanged and column
+/// names are kept.
+pub fn df_astype(df: &DataFrame, col: i64, ty: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            var v = df_get(df, r, c)
+            if c == col { v = cast_val(v, ty) }
+            row[c as usize] = v
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    copy_col_names(df, &!out)
+    out
+}
+
+/// Like df_astype but casts EVERY column to the same type `ty`.
+pub fn df_astype_all(df: &DataFrame, ty: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var out = df_new(nc)
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            row[c as usize] = cast_val(df_get(df, r, c), ty)
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    copy_col_names(df, &!out)
+    out
+}

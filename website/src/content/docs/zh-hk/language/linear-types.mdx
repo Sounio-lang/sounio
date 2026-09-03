@@ -1,0 +1,97 @@
+---
+title: "线性类型 & 所有权"
+description: "通过线性类型、排他引用和移动语义进行资源管理。"
+weight: 14
+category: "语言"
+topic_id: "website.docs.language.linear-types"
+authority: "website_only"
+audience: "用户"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
+---
+
+# 线性类型 & 所有权
+
+Sounio 通过线性类型强制执行资源安全。一个线性值必须恰好使用一次：你不能静默地丢弃文件句柄、数据库连接或 GPU 缓冲区。编译器会拒绝忘记消耗线性资源的程序。
+
+## 线性结构体
+
+将结构体标记为 `linear` 以要求恰好一次消耗：
+
+```sio
+linear struct FileHandle {
+    fd: i32
+}
+
+fn open_file(path: &str) -> FileHandle with IO {
+    // 操作系统级别的打开；返回一个线性句柄
+    FileHandle { fd: sys_open(path) }
+}
+
+fn close_file(handle: FileHandle) with IO {
+    sys_close(handle.fd)
+    // handle 在这里被消耗 — 编译器满意
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    // 如果我们忘记调用 close_file(h)，编译器会拒绝这个程序。
+    close_file(h)
+}
+```
+
+如果你移除了 `close_file(h)` 调用，编译器会发出错误：线性值 `h` 没有被消耗。
+
+## 引用：共享 vs 排他
+
+Sounio 使用 `&T` 表示共享（只读）引用，使用 `&!T` 表示排他（可变）引用。这不是 Rust 的 `&mut` — `&!` 符号表示排他访问。
+
+```sio
+fn read_value(r: &i64) -> i64 {
+    *r
+}
+
+fn increment(r: &!i64) {
+    *r = *r + 1
+}
+
+fn main() with IO {
+    var x = 10
+    println(read_value(&x))   // 共享借用
+    increment(&!x)            // 排他借用
+    println(x)                // 打印 11
+}
+```
+
+编译器会阻止将排他引用与同一值的任何其他引用进行别名化。
+
+## 移动语义
+
+非 `Copy` 值在赋值时会被移动。移动后，原始绑定不再有效：
+
+```sio
+fn consume(h: FileHandle) with IO {
+    close_file(h)
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    consume(h)
+    // h 在这里不再有效 — 使用它是一个编译错误
+}
+```
+
+## 线性放松
+
+某些类型是线性的而非严格的线性：它们必须被使用 *至多* 一次，但可以静默丢弃。标准标量类型（`i32`、`i64`、`f64`、`bool`）是 `Copy` 并且可以自由使用。没有 `linear` 关键字自定义的结构体遵循移动语义，但不需要被消耗。
+
+## 所有权检查的位置
+
+所有权检查器在 `self-hosted/check/ownership.sio` 中实现，并在类型检查后运行。它跟踪哪些绑定已被移动，哪些被借用，并强制执行 `linear struct` 类型的线性合约。
+
+## 注意事项
+
+- 非线性结构体中的嵌套线性字段被递归跟踪。
+- 当前检查器尚未处理 `match` 分支或闭包中涉及线性值的所有模式 — 请参阅功能状态页面以了解当前覆盖范围。
+- `&!` 通过 Cranelift JIT 的突变有已知限制：对于必须对调用者可见的突变，请偏好按值返回模式。

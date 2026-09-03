@@ -29,11 +29,13 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_BIN" --version
 "$SOUC_BIN" info
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 ```
 
-In this repo snapshot, `bin/souc` is the conservative default for local work from the repository checkout. It selects the host artifact automatically, exposes compatibility commands for `check/run/compile/build`, and still supports the raw self-hosted compiler interface when you want explicit `<source> <output>` invocation.
+In this repo snapshot, `bin/souc` is the conservative local default and routes to **Madaros**.
+If you explicitly need the legacy bootstrap engine for compatibility checks, set `SOUNIO_SOUC_ENGINE=lean_single` on the command invocation.
+It selects the host artifact automatically, exposes compatibility commands for `check/run/compile/build`, and still supports the raw self-hosted compiler interface when you want explicit `<source> <output>` invocation.
 
 There is also a separate checked Linux `x86_64` GPU/JIT artifact for GPU-specific workflows:
 
@@ -52,11 +54,11 @@ scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
 
 ## 2. Start With Conservative Artifact Smokes
 
-The most reliable way to validate the checked self-hosted artifact is to use the compatibility commands while still proving the compiler can rebuild itself.
+The most reliable way to validate the checked self-hosted artifact is to run compatibility smoke checks from `bin/souc`.
 
 ```bash
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-madaros-smoke
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 ```
 
@@ -86,7 +88,7 @@ Compile it:
 
 The gate-backed public summary in this repo is:
 
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip / 82 total`
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `251 pass / 0 fail / 0 skip / 251 total`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`: `pass` for the current GPU runtime smoke set on the checked GPU lane
@@ -132,7 +134,25 @@ let time: f64<s> = 9.58 s
 let speed = distance / time
 ```
 
-### 5. Effects
+### 5. Demos Interativas Rápidas (PPM / Unidades / GUM / Portas)
+
+Para experimentar os recursos únicos de ciência e metrologia do Sounio diretamente neste checkout, execute as seguintes demonstrações interativas nativas:
+
+```bash
+# Demo 1: Verificação dimensional estática (compilação aceita)
+./bin/souc run demo_unidades.sio
+
+# Demo 2: Propagação analítica de incertezas em tempo real (ISO GUM)
+./bin/souc run demo_incerteza.sio
+
+# Demo 3: Portas de confiança dinâmicas (Sucesso - guarda aceita)
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_sucesso.sio /tmp/demo3_sucesso.sio && ./bin/souc run /tmp/demo3_sucesso.sio
+
+# Demo 4: Portas de confiança dinâmicas (Rejeição - asserção falha no runtime)
+bash scripts/ontology/expand_knowledge_runtime_guards.sh demo_portas_rejeicao.sio /tmp/demo3_rejeicao.sio && ./bin/souc run /tmp/demo3_rejeicao.sio
+```
+
+### 6. Effects
 
 ```sounio
 fn read_file(path: &str) -> String with IO {

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, type KeyboardEvent } from 'react';
 
 interface LiveCodeBlockProps {
   initialCode: string;
@@ -72,7 +72,7 @@ export default function LiveCodeBlock({
     }
   }, [code]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       runCode();

@@ -1,0 +1,99 @@
+// examples/pbpk_viz/rapamycin_anova_genotype.sio
+// One-way ANOVA of rapamycin trough by CYP3A5 genotype (slow *3/*3, standard
+// *1/*3, fast *1/*1), 6 subjects each. Group means with 95% Student-t confidence
+// intervals, the grand mean, and the F / eta-squared readout — does genotype
+// explain the trough variation?
+//   souc run examples/pbpk_viz/rapamycin_anova_genotype.sio -> rapamycin_anova_genotype.png
+use image::pure::types::{Image, image_new}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_hline, plot_point, plot_errbar, plot_axes, plot_text_sc, draw_number}
+use image::pure::png::{png_write}
+use stats::anova::{anova_oneway, AnovaResult}
+use stats::student_t::{t_mean_ci, TCI}
+
+fn grp_mean(data: &[f64; 256], off: i64, m: i64) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < m { s = s + data[(off + i) as usize]; i = i + 1 }
+    return s / (m as f64)
+}
+
+fn grp_sd(data: &[f64; 256], off: i64, m: i64) -> f64 with Mut, Div, Panic {
+    let mu = grp_mean(data, off, m)
+    var ss = 0.0
+    var i = 0
+    while i < m {
+        let d = data[(off + i) as usize] - mu
+        ss = ss + d * d
+        i = i + 1
+    }
+    let v = ss / ((m - 1) as f64)
+    if v <= 0.0 { return 0.0 }
+    var y = v
+    var k = 0
+    while k < 24 { y = 0.5 * (y + v / y); k = k + 1 }
+    return y
+}
+
+fn main() with IO, Mut, Div, Panic {
+    // measured troughs (ng/mL), 6 subjects per genotype
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    // slow *3/*3
+    data[0]=12.1; data[1]=14.8; data[2]=13.2; data[3]=15.9; data[4]=11.7; data[5]=13.5
+    // standard *1/*3
+    data[6]=8.4;  data[7]=9.9;  data[8]=7.6;  data[9]=10.2; data[10]=8.8; data[11]=9.1
+    // fast *1/*1
+    data[12]=5.1; data[13]=6.3; data[14]=4.8; data[15]=5.9; data[16]=6.7; data[17]=5.4
+    sizes[0]=6; sizes[1]=6; sizes[2]=6
+
+    let r = anova_oneway(&data, &sizes, 3)
+
+    // grand mean for the reference line
+    var gsum = 0.0
+    var gi = 0
+    while gi < 18 { gsum = gsum + data[gi as usize]; gi = gi + 1 }
+    let grand = gsum / 18.0
+
+    let w = 1200; let h = 760
+    var img = image_new(w as i32, h as i32)
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, 0.5, 3.5, 0.0, 20.0)
+    plot_grid(&!img, &a, 6, 8, 0xEEEEEE)
+    plot_hline(&!img, &a, grand, 0xB8B8B8)   // grand mean
+    plot_axes(&!img, &a, 6, 8, 0x555555, 3)
+
+    let colors: [i64; 3] = [0xC0392B, 0x2E8B57, 0x1F5FA8]   // slow / std / fast
+    var g = 0
+    while g < 3 {
+        let off = (g * 6) as i64
+        let mu = grp_mean(&data, off, 6)
+        let sd = grp_sd(&data, off, 6)
+        let ci: TCI = t_mean_ci(mu, sd, 6, 0.95)
+        let xg = (g + 1) as f64
+        // individual points, faint
+        var j = 0
+        while j < 6 {
+            plot_point(&!img, &a, xg - 0.14, data[(off + j) as usize], 0xBFCAD4, 3)
+            j = j + 1
+        }
+        // 95% t-CI bar + mean marker
+        plot_errbar(&!img, &a, xg, ci.lo, ci.hi, colors[g as usize])
+        plot_point(&!img, &a, xg, mu, colors[g as usize], 6)
+        g = g + 1
+    }
+
+    let _t1 = plot_text_sc(&!img, "Rapamycin trough by CYP3A5 genotype (one-way ANOVA)", 150, 40, 0x111111, 3)
+    let _t2 = plot_text_sc(&!img, "genotype: 1 slow  2 standard  3 fast", 380, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "trough (ng/mL)", 150, 78, 0x333333, 3)
+    // F and eta-squared readout
+    let _lf = plot_text_sc(&!img, "F", 250, 150, 0x666666, 3)
+    let _nf = draw_number(&!img, r.f_stat, 2, 300, 150, 0x111111, 3)
+    let _le = plot_text_sc(&!img, "eta2", 250, 185, 0x666666, 3)
+    let _ne = draw_number(&!img, r.eta_squared, 3, 340, 185, 0x111111, 3)
+
+    let ok = png_write("rapamycin_anova_genotype.png", &img)
+    print("F="); print(r.f_stat); print(" p="); print(r.p_value)
+    print(" eta2="); print(r.eta_squared)
+    print(" df=("); print(r.df_between); print(","); print(r.df_within); print(")")
+    print(" wrote="); print(ok); print("\n")
+}

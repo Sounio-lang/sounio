@@ -1,9 +1,35 @@
 # Sounio Parallel Agent Handoff
 
 Status: active
-Updated: 2026-04-25
+Updated: 2026-05-10
 Workspace: `/workspace/sounio`
 Safe branch: `integration/sounio-dev-ready-base`
+
+## ACTIVE: 6-Agent Lane Assignment (2026-05-10)
+
+A 6-agent coordination overlay is active. See
+`.agent-orchestration/coordination/6_lane_assignment.md` for the full
+matrix, file-set ownership, build targets, and merge order.
+
+| # | Lane                     | Owner       | Branch                              | Worktree                                |
+|---|--------------------------|-------------|-------------------------------------|-----------------------------------------|
+| 1 | golden-recapture         | Claude #1   | `coord/lane-1-golden-recapture`     | `/workspace/sounio-lane-1-goldens`      |
+| 2 | dissertation-evidence    | Codex #1    | `coord/lane-2-dissertation-evidence`| `/workspace/sounio-lane-2-dissertation` |
+| 3 | paper-168-cohomological  | Claude #2   | `coord/lane-3-paper-168`            | `/workspace/sounio-lane-3-paper168`     |
+| 4 | nv2-compiler-hardening   | Codex #2    | `coord/lane-4-nv2-hardening`        | `/workspace/sounio-lane-4-nv2`          |
+| 5 | python-extermination Φ5  | Codex #3    | `coord/lane-5-phase5-recognizer`    | `/workspace/sounio-lane-5-phase5`       |
+| 6 | integration-shepherd     | Claude A    | `main`                              | `/workspace/sounio` (canonical)         |
+
+Merge order when multiple lanes are PR-ready: 1 → 4 → 5 → 2 → 3.
+Lane 4 must serialize against Lane 1 on `bin/souc-linux-x86_64`.
+
+**Out of scope** (continue independent, not part of the 6):
+`garden/above-stars`, `cursor/quaternionic-ssm-88c0`,
+`worktree-agent-a04d29d914b22568f`.
+
+Live CLAIMs: `artifacts/omega/agent_handoff.log.md`.
+
+
 
 This handoff is the shared startup packet for Codex, Claude Code, Roo, Cursor,
 Kimi, and Beagle-context agents working in the Sounio repository.

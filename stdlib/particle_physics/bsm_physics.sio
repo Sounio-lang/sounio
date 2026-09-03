@@ -1,0 +1,276 @@
+// ============================================================================
+// BSM PHYSICS — Beyond the Standard Model simplified models
+// ============================================================================
+//
+// Simplified models for dark matter, supersymmetry, and extra dimensions.
+// These are "effective" models: heavy new physics is integrated out, leaving
+// a small set of couplings and masses that can be constrained by collider data.
+//
+// References:
+// - Goodman & Wheater, "Constraints on Dark Matter from Colliders" (2010)
+// - Buchmueller et al., "Simplified Models for LHC New Physics Searches" (2014)
+// - Abercrombie et al., "Dark Matter Benchmark Models" (2015)
+
+module particle_physics::bsm_physics
+
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_sub, lorentz_dot, lorentz_mass, lorentz_scale}
+use particle_physics::sm_params::{mass_z, mass_w, alpha_em, sin2_theta_w, mass_top}
+use particle_physics::cross_section::{mandelstam_s, flux_factor_2body}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// Dark Matter Simplified Models
+// ============================================================================
+
+/// Dark matter candidate particle.
+/// `mass` in GeV, `spin` = 0 (scalar), 0.5 (fermion), 1 (vector).
+/// `coupling` g_q is the mediator-DM coupling.
+pub struct DMCandidate {
+    pub mass: f64,
+    pub spin: f64,
+    pub coupling: f64,
+}
+
+/// Mediator between SM and dark sector.
+/// `mass` in GeV, `width` in GeV.
+/// `mtype` = 0 (vector, e.g. Z'), 1 (scalar, e.g. s), 2 (axial-vector), 3 (pseudo-scalar).
+pub struct Mediator {
+    pub mass: f64,
+    pub width: f64,
+    pub mtype: i64,
+    pub g_dm: f64,    // coupling to DM
+    pub g_sm: f64,    // coupling to SM quarks
+}
+
+/// Axial-vector mediator (Z'-like) — common simplified model.
+pub fn mediator_zprime(m_med: f64, g_dm: f64, g_q: f64) -> Mediator {
+    let gq_sq = g_q * g_q
+    let width_sm = 3.0 * 5.0 * gq_sq * m_med / (12.0 * 3.141592653589793)
+    return Mediator { mass: m_med, width: width_sm, mtype: 2, g_dm: g_dm, g_sm: g_q }
+}
+
+/// Scalar mediator (s-channel).
+pub fn mediator_scalar(m_med: f64, g_dm: f64, g_q: f64) -> Mediator {
+    let gq_sq = g_q * g_q
+    let width_sm = 3.0 * 5.0 * gq_sq * m_med / (8.0 * 3.141592653589793)
+    return Mediator { mass: m_med, width: width_sm, mtype: 1, g_dm: g_dm, g_sm: g_q }
+}
+
+// ============================================================================
+// SUSY Simplified Models
+// ============================================================================
+
+/// SUSY particle: squark or gluino.
+pub struct SUSYParticle {
+    pub pdg_code: i64,
+    pub mass: f64,
+    pub is_colored: i64,   // 1 = squark/gluino, 0 = neutralino/chargino
+}
+
+/// Neutralino (dark-matter candidate in R-parity conserving SUSY).
+pub fn neutralino_1(mass: f64) -> SUSYParticle {
+    return SUSYParticle { pdg_code: 1000022, mass: mass, is_colored: 0 }
+}
+
+/// Light-flavor squark (degenerate u_L, d_L, etc.).
+pub fn squark_l(mass: f64) -> SUSYParticle {
+    return SUSYParticle { pdg_code: 1000001, mass: mass, is_colored: 1 }
+}
+
+/// Gluino.
+pub fn gluino(mass: f64) -> SUSYParticle {
+    return SUSYParticle { pdg_code: 1000021, mass: mass, is_colored: 1 }
+}
+
+// ============================================================================
+// Cross Sections for Simplified Models
+// ============================================================================
+
+/// Parton-level cross section for p p -> chi chi + jet (mono-jet) via
+/// s-channel axial-vector mediator, at LO.
+/// Returns sigma in pb.
+pub fn xs_monojet_lo(m_dm: f64, m_med: f64, g_q: f64, g_chi: f64, et_min: f64) -> f64 {
+    if m_med <= 0.0 || et_min <= 0.0 { return 0.0 }
+    let gev2pb = 0.389379e9     // GeV^-2 -> pb
+    let suppression = m_med * m_med / (m_med * m_med + et_min * et_min)
+    let alpha_s = 0.1
+    let prefactor = alpha_s * g_q * g_q * g_chi * g_chi / (m_med * m_med * m_med * m_med)
+    let phase_space = et_min * et_min
+    let xs = prefactor * phase_space * suppression * suppression * gev2pb
+    if xs < 0.0 { return 0.0 }
+    return xs
+}
+
+/// Drell-Yan cross section for Z' -> l+ l-.
+/// Returns sigma in pb for a narrow-width vector resonance.
+pub fn xs_zprime_dilepton(m_zp: f64, width_zp: f64, g_q: f64, g_l: f64) -> f64 {
+    if m_zp <= 0.0 || width_zp <= 0.0 { return 0.0 }
+    let prod_xs = 0.1 * g_q * g_q * 1.0e6 / (m_zp * m_zp)
+    let br_ll = 2.0 * g_l * g_l / (10.0 * g_q * g_q + 2.0 * g_l * g_l)
+    return prod_xs * br_ll * 1.0e-3
+}
+
+/// Squark-pair production cross section at LO (approximate).
+/// Returns sigma in pb.
+pub fn xs_squark_pair_lo(m_squark: f64, sqrts: f64) -> f64 with Mut, Div, Panic {
+    if m_squark <= 0.0 || sqrts <= 2.0 * m_squark { return 0.0 }
+    let pi = 3.141592653589793
+    let alpha_s = 0.1
+    let gev2pb = 0.389379e9
+    let beta_sq = 1.0 - 4.0 * m_squark * m_squark / (sqrts * sqrts)
+    if beta_sq <= 0.0 { return 0.0 }
+    let beta = sqrt(beta_sq)
+    let xs = (pi * alpha_s * alpha_s) / (12.0 * m_squark * m_squark) * beta * beta * beta
+    return xs * gev2pb
+}
+
+/// Gluino-pair production cross section at LO (approximate).
+/// Returns sigma in pb.
+pub fn xs_gluino_pair_lo(m_gluino: f64, sqrts: f64) -> f64 with Mut, Div, Panic {
+    if m_gluino <= 0.0 || sqrts <= 2.0 * m_gluino { return 0.0 }
+    let pi = 3.141592653589793
+    let alpha_s = 0.1
+    let gev2pb = 0.389379e9
+    let beta_sq = 1.0 - 4.0 * m_gluino * m_gluino / (sqrts * sqrts)
+    if beta_sq <= 0.0 { return 0.0 }
+    let beta = sqrt(beta_sq)
+    let xs = (9.0 * pi * alpha_s * alpha_s) / (4.0 * m_gluino * m_gluino) * beta
+    return xs * gev2pb
+}
+
+// ============================================================================
+// Signal/Background Discrimination Observables
+// ============================================================================
+
+/// MET (missing transverse energy) from a pair of DM candidates.
+pub fn met_monojet_approx(m_dm: f64, pT_recoil: f64) -> f64 {
+    let denom = pT_recoil * pT_recoil + 4.0 * m_dm * m_dm
+    if denom <= 0.0 { return 0.0 }
+    return pT_recoil * (1.0 - 2.0 * m_dm * m_dm / denom)
+}
+
+/// Effective mass m_eff = sum_jet pT + MET. Common SUSY search variable.
+pub fn m_eff(jet_pts: &[f64; 16], n_jets: i64, met: f64) -> f64 {
+    var sum: f64 = met
+    var i: i64 = 0
+    while i < n_jets {
+        sum = sum + jet_pts[i as usize]
+        i = i + 1
+    }
+    return sum
+}
+
+/// MT2 (stransverse mass) for two identical invisible particles of mass m_inv.
+pub fn mt2_symmetric(p1: LorentzVector, p2: LorentzVector, met_px: f64, met_py: f64, m_inv: f64) -> f64 with Mut, Div, Panic {
+    let et1 = p1.t
+    let et2 = p2.t
+    let px1 = p1.x
+    let py1 = p1.y
+    let px2 = p2.x
+    let py2 = p2.y
+    let m2 = 2.0 * (et1 * et2 - px1 * px2 - py1 * py2)
+    var mt2_0: f64 = 0.0
+    if m2 > 0.0 { mt2_0 = sqrt(m2) }
+    return mt2_0 + m_inv * m_inv
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_mediator_properties() -> bool {
+    let med = mediator_zprime(1000.0, 1.0, 0.25)
+    if med.mass != 1000.0 { return false }
+    if med.mtype != 2 { return false }
+    if med.g_dm != 1.0 { return false }
+    if med.g_sm != 0.25 { return false }
+    if med.width <= 0.0 { return false }
+    return true
+}
+
+pub fn test_scalar_mediator() -> bool {
+    let med = mediator_scalar(500.0, 0.5, 0.1)
+    if med.mass != 500.0 { return false }
+    if med.mtype != 1 { return false }
+    if med.width <= 0.0 { return false }
+    return true
+}
+
+pub fn test_susy_particles() -> bool {
+    let chi = neutralino_1(100.0)
+    if chi.pdg_code != 1000022 { return false }
+    if chi.mass != 100.0 { return false }
+    if chi.is_colored != 0 { return false }
+
+    let sq = squark_l(1500.0)
+    if sq.pdg_code != 1000001 { return false }
+    if sq.mass != 1500.0 { return false }
+    if sq.is_colored != 1 { return false }
+
+    let gl = gluino(2000.0)
+    if gl.pdg_code != 1000021 { return false }
+    if gl.mass != 2000.0 { return false }
+    return true
+}
+
+pub fn test_xs_monojet_positive() -> bool {
+    let xs = xs_monojet_lo(10.0, 1000.0, 0.25, 1.0, 200.0)
+    if xs < 0.0 { return false }
+    if xs == 0.0 { return false }
+    return true
+}
+
+pub fn test_xs_monojet_zero_below_threshold() -> bool {
+    let xs = xs_monojet_lo(10.0, 0.0, 0.25, 1.0, 200.0)
+    if xs != 0.0 { return false }
+    return true
+}
+
+pub fn test_xs_zprime_dilepton() -> bool {
+    let xs = xs_zprime_dilepton(3000.0, 100.0, 0.1, 0.1)
+    if xs < 0.0 { return false }
+    return true
+}
+
+pub fn test_xs_squark_pair() -> bool with Mut, Div, Panic {
+    let xs = xs_squark_pair_lo(1500.0, 13000.0)
+    if xs < 0.0 { return false }
+    let xs2 = xs_squark_pair_lo(7000.0, 13000.0)
+    if xs2 != 0.0 { return false }
+    return true
+}
+
+pub fn test_xs_gluino_pair() -> bool with Mut, Div, Panic {
+    let xs = xs_gluino_pair_lo(2000.0, 13000.0)
+    if xs < 0.0 { return false }
+    let xs2 = xs_gluino_pair_lo(7000.0, 13000.0)
+    if xs2 != 0.0 { return false }
+    return true
+}
+
+pub fn test_m_eff() -> bool {
+    var pts: [f64; 16] = [100.0, 80.0, 60.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let meff = m_eff(&pts, 4, 200.0)
+    if meff != 480.0 { return false }
+    return true
+}
+
+pub fn test_mt2_symmetric() -> bool with Mut, Div, Panic {
+    let p1 = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let p2 = lorentz_new(100.0, -50.0, 0.0, 0.0)
+    let mt2 = mt2_symmetric(p1, p2, 0.0, 0.0, 0.0)
+    if mt2 <= 0.0 { return false }
+    return true
+}
+
+pub fn test_met_monojet() -> bool {
+    let met = met_monojet_approx(50.0, 300.0)
+    if met < 0.0 { return false }
+    if met > 300.0 { return false }
+    return true
+}

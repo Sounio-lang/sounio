@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import { useScroll } from 'framer-motion';
 
 export function EpistemicFluidCanvas() {
@@ -17,13 +17,48 @@ export function EpistemicFluidCanvas() {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
+    // Static backdrop instead of continuous particle animation.
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const paintStill = () => {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        const gradient = ctx.createLinearGradient(0, 0, rect.width, rect.height);
+        gradient.addColorStop(0, '#020617');
+        gradient.addColorStop(0.48, '#071f36');
+        gradient.addColorStop(1, '#0b1020');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, rect.width, rect.height);
+
+        const nodes = [
+          [0.18, 0.3, 34, 'rgba(214, 179, 90, 0.2)'],
+          [0.42, 0.62, 50, 'rgba(64, 196, 255, 0.16)'],
+          [0.72, 0.38, 42, 'rgba(238, 214, 145, 0.18)'],
+          [0.84, 0.74, 28, 'rgba(125, 211, 252, 0.14)'],
+        ] as const;
+
+        for (const [x, y, radius, color] of nodes) {
+          ctx.beginPath();
+          ctx.arc(rect.width * x, rect.height * y, radius, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+        }
+      };
+      paintStill();
+      window.addEventListener('resize', paintStill);
+      return () => window.removeEventListener('resize', paintStill);
+    }
+
     let animationFrameId: number;
     let isPlaying = false;
     let width = 0;
     let height = 0;
     let orderProgress = 0;
 
-    const unsubscribe = scrollYProgress.onChange((v) => {
+    const unsubscribe = scrollYProgress.on('change', (v) => {
       orderProgress = v; // 0 to 1
     });
 

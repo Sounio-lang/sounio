@@ -1,0 +1,209 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/fisher_exact.sio — Fisher's exact test for a 2×2 table
+//
+// The exact small-sample test of association, valid where the chi-squared
+// approximation is not (expected cell counts < 5):
+//
+//   fisher_exact(a, b, c, d) -> FisherResult      table [[a,b],[c,d]]
+//
+// Conditioning on the margins, each table has hypergeometric probability
+//   P(a) = C(r1,a)·C(r2,c) / C(N,c1)
+//        = r1! r2! c1! c2! / ( N! a! b! c! d! ).
+// The two-sided p sums the probabilities of every table (same margins) with
+// P ≤ P(observed); the one-sided tails sum a′ ≥ a and a′ ≤ a. The sample odds
+// ratio is a·d / (b·c).
+//
+// Pure Sounio: log-factorials via inline Lanczos log-gamma, summed in the
+// probability domain; no external dependency, no nested data-array calls.
+//
+// References:
+//   Fisher (1934); Agresti, "Categorical Data Analysis" 3e, §3.5.
+
+module stats::fisher_exact
+
+fn fe_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / fe_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn fe_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn fe_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * fe_ln(tt) - tt + fe_ln(a)
+}
+
+// log(k!) = lgamma(k+1)
+fn fe_logfact(k: i64) -> f64 with Mut, Div, Panic {
+    if k <= 1 { return 0.0 }
+    return fe_lgamma((k as f64) + 1.0)
+}
+
+pub struct FisherResult {
+    pub p_two: f64,       // two-sided p-value
+    pub p_greater: f64,   // one-sided (a' >= a)
+    pub p_less: f64,      // one-sided (a' <= a)
+    pub odds_ratio: f64,  // sample OR a·d/(b·c)
+}
+
+// hypergeometric probability of cell value av given fixed margins.
+fn fe_prob(av: i64, r1: i64, r2: i64, c1v: i64, cN: i64, base: f64) -> f64 with Mut, Div, Panic {
+    let bv = r1 - av
+    let cv = c1v - av
+    let dv = r2 - cv
+    if av < 0 || bv < 0 || cv < 0 || dv < 0 { return 0.0 }
+    let lp = base - fe_logfact(av) - fe_logfact(bv) - fe_logfact(cv) - fe_logfact(dv)
+    return fe_exp(lp)
+}
+
+/// Fisher's exact test for the 2×2 table [[a,b],[c,d]].
+///
+/// Parâmetros: a,b,c,d — the four non-negative cell counts.
+/// Retorno: FisherResult (p_two, p_greater, p_less, odds_ratio).
+/// Referências: Fisher (1934); Agresti §3.5.
+pub fn fisher_exact(a: i64, b: i64, c: i64, d: i64) -> FisherResult with Mut, Div, Panic {
+    let r1 = a + b
+    let r2 = c + d
+    let c1v = a + c
+    let c2v = b + d
+    let cN = a + b + c + d
+    if cN <= 0 {
+        return FisherResult { p_two: 1.0, p_greater: 1.0, p_less: 1.0, odds_ratio: 0.0 }
+    }
+    // constant part of log P: r1! r2! c1! c2! / N!
+    let base = fe_logfact(r1) + fe_logfact(r2) + fe_logfact(c1v) + fe_logfact(c2v) - fe_logfact(cN)
+    let p_obs = fe_prob(a, r1, r2, c1v, cN, base)
+    // range of a': max(0, c1 - r2) .. min(r1, c1)
+    var lo = 0
+    if c1v - r2 > 0 { lo = (c1v - r2) as i32 }
+    var hi = r1
+    if c1v < r1 { hi = c1v }
+    var p_two = 0.0
+    var p_greater = 0.0
+    var p_less = 0.0
+    let tol = p_obs * 1.0000001 + 1.0e-12
+    var av = lo
+    while (av as i64) <= hi {
+        let p = fe_prob(av as i64, r1, r2, c1v, cN, base)
+        if p <= tol { p_two = p_two + p }
+        if (av as i64) >= a { p_greater = p_greater + p }
+        if (av as i64) <= a { p_less = p_less + p }
+        av = av + 1
+    }
+    if p_two > 1.0 { p_two = 1.0 }
+    if p_greater > 1.0 { p_greater = 1.0 }
+    if p_less > 1.0 { p_less = 1.0 }
+    var or = 0.0
+    let bf = b as f64
+    let cf = c as f64
+    if bf > 0.0 && cf > 0.0 { or = ((a as f64) * (d as f64)) / (bf * cf) }
+    return FisherResult { p_two: p_two, p_greater: p_greater, p_less: p_less, odds_ratio: or }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// tea-test style [[3,1],[1,3]]: margins all 4, N=8, C(8,4)=70.
+// P(a) for a=0..4: 1/70,16/70,36/70,16/70,1/70. Observed a=3, P=16/70=0.228571.
+// two-sided = tables with P<=0.228571 = (1+16+16+1)/70 = 34/70 = 0.485714.
+// one-sided (a'>=3) = (16+1)/70 = 17/70 = 0.242857. OR = 9.
+fn test_tea() -> bool with IO, Mut, Div, Panic {
+    let r = fisher_exact(3, 1, 1, 3)
+    var ok = true
+    ok = check(1, approx(r.p_two, 0.485714, 1.0e-5)) && ok
+    ok = check(2, approx(r.p_greater, 0.242857, 1.0e-5)) && ok
+    ok = check(3, approx(r.odds_ratio, 9.0, 1.0e-9)) && ok
+    return ok
+}
+
+// strong association [[9,1],[1,9]]: two-sided p tiny, OR=81.
+fn test_significant() -> bool with IO, Mut, Div, Panic {
+    let r = fisher_exact(9, 1, 1, 9)
+    var ok = true
+    ok = check(10, r.p_two < 0.01) && ok
+    ok = check(11, approx(r.odds_ratio, 81.0, 1.0e-6)) && ok
+    return ok
+}
+
+// no association [[5,5],[5,5]]: p_two = 1, OR = 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    let r = fisher_exact(5, 5, 5, 5)
+    var ok = true
+    ok = check(20, approx(r.p_two, 1.0, 1.0e-6)) && ok
+    ok = check(21, approx(r.odds_ratio, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_tea() && ok
+    ok = test_significant() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

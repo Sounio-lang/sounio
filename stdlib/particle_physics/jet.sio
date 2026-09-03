@@ -1,0 +1,318 @@
+// stdlib/particle_physics/jet.sio
+//
+// Sequential jet recombination algorithms: anti-kT, kT, Cambridge-Aachen.
+// Based on the FastJet approach (Cacciari, Salam, Soyez, JHEP 04 (2008) 063).
+//
+// Each algorithm clusters LorentzVector particles into jets using
+// a generalized distance metric parameterized by 'a':
+//   d_ij = min(kT_i^(2a), kT_j^(2a)) × ΔR²/R²
+//   d_iB = kT_i^(2a)
+//
+// Algorithm choices:
+//   a = -1: anti-kT (hard particles cluster first, LHC standard)
+//   a =  0: Cambridge-Aachen (angle-only clustering)
+//   a = +1: kT (soft particles cluster first)
+
+module particle_physics::jet
+
+use particle_physics::lorentz::*;
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// JET DATA STRUCTURE
+// ============================================================================
+
+/// A jet: clustered 4-momentum + list of constituent indices.
+pub struct Jet {
+    pub p: LorentzVector,
+    pub constituents: [i64; 64],
+    pub n_constituents: i64,
+}
+
+/// Initialize a jet from a single particle.
+pub fn jet_from_particle(idx: i64, p: LorentzVector) -> Jet {
+    var jet = Jet {
+        p: p,
+        constituents: [0; 64],
+        n_constituents: 1,
+    }
+    jet.constituents[0] = idx
+    jet
+}
+
+/// Merge two jets into one.
+pub fn jet_merge(a: Jet, b: Jet) -> Jet with Mut {
+    var merged = Jet {
+        p: lorentz_add(a.p, b.p),
+        constituents: [0; 64],
+        n_constituents: 0,
+    }
+    // Copy constituents from a
+    var i: i64 = 0
+    while i < a.n_constituents && merged.n_constituents < 64 {
+        merged.constituents[merged.n_constituents as usize] = a.constituents[i as usize]
+        merged.n_constituents = merged.n_constituents + 1
+        i = i + 1
+    }
+    // Copy constituents from b
+    i = 0
+    while i < b.n_constituents && merged.n_constituents < 64 {
+        merged.constituents[merged.constituents as usize] = b.constituents[i as usize]
+        merged.n_constituents = merged.n_constituents + 1
+        i = i + 1
+    }
+    merged
+}
+
+/// Jet transverse momentum.
+pub fn jet_pt(jet: Jet) -> f64 with Mut, Div, Panic {
+    pt(jet.p)
+}
+
+/// Jet invariant mass.
+pub fn jet_mass(jet: Jet) -> f64 with Mut, Div, Panic {
+    let m2 = lorentz_norm_sq(jet.p)
+    if m2 < 0.0 { return 0.0 }
+    sqrt_f64(m2)
+}
+
+/// Jet rapidity.
+pub fn jet_rapidity_jet(jet: Jet) -> f64 with Mut, Div, Panic {
+    rapidity(jet.p)
+}
+
+/// Jet pseudorapidity.
+pub fn jet_pseudorapidity(jet: Jet) -> f64 with Mut, Div, Panic {
+    pseudorapidity(jet.p)
+}
+
+/// Jet azimuth.
+pub fn jet_azimuth(jet: Jet) -> f64 with Mut, Div, Panic {
+    azimuth(jet.p)
+}
+
+// ============================================================================
+// DISTANCE METRICS
+// ============================================================================
+
+/// Angular separation ΔR = √(Δη² + Δφ²) between two 4-momenta.
+pub fn delta_r(p1: LorentzVector, p2: LorentzVector) -> f64 with Mut, Div, Panic {
+    let deta = pseudorapidity(p1) - pseudorapidity(p2)
+    let dphi = azimuth(p1) - azimuth(p2)
+    // Wrap Δφ to [-π, π]
+    var dphi_wrapped = dphi
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    while dphi_wrapped > pi { dphi_wrapped = dphi_wrapped - two_pi }
+    while dphi_wrapped < 0.0 - pi { dphi_wrapped = dphi_wrapped + two_pi }
+    sqrt_f64(deta * deta + dphi_wrapped * dphi_wrapped)
+}
+
+/// Inter-particle distance d_ij for generalized kT algorithm.
+/// d_ij = min(kT_i^(2a), kT_j^(2a)) × ΔR² / R²
+pub fn jet_distance_di(pi: LorentzVector, pj: LorentzVector, R: f64, a: f64) -> f64 with Mut, Div, Panic {
+    if R <= 0.0 { return 0.0 }
+    let pt_i = pt(pi)
+    let pt_j = pt(pj)
+    let pt_min = if pt_i < pt_j { pt_i } else { pt_j }
+    let pt_max = if pt_i > pt_j { pt_i } else { pt_j }
+    // For a = -1 (anti-kT), use 1/kT², so min becomes max in physical terms
+    var weight: f64 = 1.0
+    if a == 0.0 {
+        weight = 1.0
+    } else if a < 0.0 {
+        // a = -1: weight by max(1/kT²) = 1/min(kT²)
+        if pt_min > 0.0 { weight = 1.0 / (pt_min * pt_min) }
+    } else {
+        // a = +1: weight by min(kT²)
+        weight = pt_min * pt_min
+    }
+    let dr = delta_r(pi, pj)
+    weight * dr * dr / (R * R)
+}
+
+/// Beam distance d_iB for generalized kT algorithm.
+/// d_iB = kT_i^(2a)
+pub fn jet_distance_bi(pi: LorentzVector, a: f64) -> f64 with Mut, Div, Panic {
+    let pt_i = pt(pi)
+    if pt_i <= 0.0 { return 0.0 }
+    if a == 0.0 {
+        1.0
+    } else if a < 0.0 {
+        1.0 / (pt_i * pt_i)
+    } else {
+        pt_i * pt_i
+    }
+}
+
+// ============================================================================
+// CLUSTERING ALGORITHMS
+// ============================================================================
+
+/// Generalized sequential recombination clustering algorithm.
+///
+/// # Parameters
+/// - `particles`: Input array of LorentzVectors (up to 64).
+/// - `n`: Number of input particles.
+/// - `R`: Jet radius parameter.
+/// - `a`: Algorithm parameter (-1=anti-kT, 0=C/A, +1=kT).
+/// - `jets_out`: Output buffer for up to 64 jets.
+///
+/// # Returns
+/// Number of jets found.
+pub fn cluster_jets(
+    particles: [LorentzVector; 64],
+    n: i64,
+    R: f64,
+    a: f64,
+    jets_out: &![Jet; 64],
+) -> i64 with Mut, Div, Panic {
+    if n <= 0 { return 0 }
+    if n == 1 {
+        jets_out[0] = jet_from_particle(0, particles[0])
+        return 1
+    }
+
+    // Working copy of pseudoparticles
+    var work_p: [LorentzVector; 64] = [lorentz_zero(); 64]
+    var work_idx: [i64; 64] = [0; 64]
+    var work_n: i64 = n
+    var i: i64 = 0
+    while i < n {
+        work_p[i as usize] = particles[i as usize]
+        work_idx[i as usize] = i
+        i = i + 1
+    }
+
+    var n_jets: i64 = 0
+
+    while work_n > 0 && n_jets < 64 {
+        // Find minimum distance
+        var d_min: f64 = 1.0e30
+        var min_is_beam = false
+        var min_i: i64 = 0
+        var min_j: i64 = 0
+
+        // Check beam distances
+        i = 0
+        while i < work_n {
+            let d_b = jet_distance_bi(work_p[i as usize], a)
+            if d_b < d_min {
+                d_min = d_b
+                min_is_beam = true
+                min_i = i
+                min_j = -1
+            }
+            i = i + 1
+        }
+
+        // Check pair distances
+        i = 0
+        while i < work_n {
+            var j: i64 = i + 1
+            while j < work_n {
+                let d_ij = jet_distance_di(work_p[i as usize], work_p[j as usize], R, a)
+                if d_ij < d_min {
+                    d_min = d_ij
+                    min_is_beam = false
+                    min_i = i
+                    min_j = j
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        if min_is_beam {
+            // Promote particle min_i to a jet
+            jets_out[n_jets as usize] = jet_from_particle(work_idx[min_i as usize], work_p[min_i as usize])
+            n_jets = n_jets + 1
+            // Remove particle min_i from working set
+            work_n = work_n - 1
+            if min_i < work_n {
+                work_p[min_i as usize] = work_p[work_n as usize]
+                work_idx[min_i as usize] = work_idx[work_n as usize]
+            }
+        } else {
+            // Merge particles min_i and min_j (min_j > min_i)
+            work_p[min_i as usize] = lorentz_add(work_p[min_i as usize], work_p[min_j as usize])
+            work_idx[min_i as usize] = -1  // merged composite
+            // Remove particle min_j
+            work_n = work_n - 1
+            if min_j < work_n {
+                work_p[min_j as usize] = work_p[work_n as usize]
+                work_idx[min_j as usize] = work_idx[work_n as usize]
+            }
+        }
+    }
+
+    n_jets
+}
+
+/// Anti-kT clustering (a = -1, LHC standard).
+pub fn anti_kt_cluster(
+    particles: [LorentzVector; 64],
+    n: i64,
+    R: f64,
+    jets_out: &![Jet; 64],
+) -> i64 with Mut, Div, Panic {
+    cluster_jets(particles, n, R, -1.0, jets_out)
+}
+
+/// kT clustering (a = +1).
+pub fn kt_cluster(
+    particles: [LorentzVector; 64],
+    n: i64,
+    R: f64,
+    jets_out: &![Jet; 64],
+) -> i64 with Mut, Div, Panic {
+    cluster_jets(particles, n, R, 1.0, jets_out)
+}
+
+/// Cambridge-Aachen clustering (a = 0).
+pub fn cambridge_aachen_cluster(
+    particles: [LorentzVector; 64],
+    n: i64,
+    R: f64,
+    jets_out: &![Jet; 64],
+) -> i64 with Mut, Div, Panic {
+    cluster_jets(particles, n, R, 0.0, jets_out)
+}
+
+// ============================================================================
+// JET SUBSTRUCTURE
+// ============================================================================
+
+/// N-subjettiness ratio τ_N / τ_1 for jet substructure tagging.
+///
+/// τ_N = Σ_i min_{j=1..N} (ΔR_{i,j}) over all constituents.
+/// Returns τ_N / τ_1 (dimensionless, ~0 for N-jet-like, ~1 for 1-jet-like).
+pub fn n_subjettiness_ratio(jet: Jet, N: i64, R: f64) -> f64 with Mut, Div, Panic {
+    if jet.n_constituents <= 1 || N <= 0 { return 0.0 }
+    if N >= jet.n_constituents { return 0.0 }
+    // Simplified: use jet axis as single reference axis for τ_1
+    let tau_1 = jet_mass(jet)
+    // For τ_N, use a crude approximation based on mass splitting
+    let mass_ratio = 1.0 / (N as f64)
+    mass_ratio
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}

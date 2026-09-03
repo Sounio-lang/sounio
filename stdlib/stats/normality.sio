@@ -1,0 +1,160 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/normality.sio — Jarque-Bera omnibus normality test
+//
+// A moment-based test of normality from a sample's skewness and kurtosis — the
+// analytic complement to the visual qq_normal check:
+//
+//   normality(x, n) -> NormalityResult
+//
+// With population central moments m₂,m₃,m₄ and s=√m₂:
+//   skewness  S = m₃ / s³
+//   kurtosis  K = m₄ / m₂²         (normal → 3; excess = K − 3)
+//   Jarque-Bera  JB = n/6 · ( S² + (K−3)²/4 )   ~  χ²(2)  under H₀,
+// so the p-value has the closed form  p = e^{−JB/2}  (χ²₂ survival).
+//
+// Pure Sounio: inline sqrt/exp; single pass for the mean, one pass for the
+// moments; no external dependency, no nested data-array calls.
+//
+// References:
+//   Jarque & Bera (1987) Int. Stat. Rev. 55:163; Bowman & Shenton (1975).
+
+module stats::normality
+
+fn nm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn nm_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / nm_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+pub struct NormalityResult {
+    pub skewness: f64,   // m3 / s^3
+    pub kurtosis: f64,   // m4 / m2^2 (normal = 3)
+    pub excess: f64,     // kurtosis - 3
+    pub jb: f64,         // Jarque-Bera statistic
+    pub p: f64,          // p-value, chi-squared(2) survival = exp(-JB/2)
+}
+
+/// Jarque-Bera omnibus normality test on a sample.
+///
+/// Parâmetros: x — sample; n — size (>=4 for a meaningful test, <=256).
+/// Retorno: NormalityResult (skewness, kurtosis, excess, jb, p).
+/// Referências: Jarque & Bera (1987).
+pub fn normality(x: &[f64; 256], n: i32) -> NormalityResult with Mut, Div, Panic {
+    if n < 2 {
+        return NormalityResult { skewness: 0.0, kurtosis: 0.0, excess: 0.0 - 3.0, jb: 0.0, p: 1.0 }
+    }
+    let nf = n as f64
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + x[i as usize]; i = i + 1 }
+    let mean = sum / nf
+    var m2 = 0.0
+    var m3 = 0.0
+    var m4 = 0.0
+    var j = 0
+    while j < n {
+        let d = x[j as usize] - mean
+        let d2 = d * d
+        m2 = m2 + d2
+        m3 = m3 + d2 * d
+        m4 = m4 + d2 * d2
+        j = j + 1
+    }
+    m2 = m2 / nf
+    m3 = m3 / nf
+    m4 = m4 / nf
+    if m2 <= 0.0 {
+        // constant sample: no dispersion, perfectly degenerate
+        return NormalityResult { skewness: 0.0, kurtosis: 0.0, excess: 0.0 - 3.0, jb: 0.0, p: 1.0 }
+    }
+    let s = nm_sqrt(m2)
+    let skew = m3 / (s * s * s)
+    let kurt = m4 / (m2 * m2)
+    let excess = kurt - 3.0
+    let jb = nf / 6.0 * (skew * skew + excess * excess / 4.0)
+    let p = nm_exp(0.0 - jb / 2.0)   // chi-squared(2) survival
+    return NormalityResult { skewness: skew, kurtosis: kurt, excess: excess, jb: jb, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {2,4,4,4,5,5,7,9}: mean 5, m2=4, m3=42/8=5.25, m4=356/8=44.5.
+// skew=5.25/8=0.65625; kurt=44.5/16=2.78125; excess=-0.21875.
+// JB = 8/6·(0.65625² + 0.21875²/4) = 1.333333·0.442627 = 0.590169.
+// p = exp(-0.295085) = 0.744493.
+fn test_normality() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=4.0; x[3]=4.0; x[4]=5.0; x[5]=5.0; x[6]=7.0; x[7]=9.0
+    let r = normality(&x, 8)
+    var ok = true
+    ok = check(1, approx(r.skewness, 0.65625, 1.0e-5)) && ok
+    ok = check(2, approx(r.kurtosis, 2.78125, 1.0e-5)) && ok
+    ok = check(3, approx(r.excess, 0.0 - 0.21875, 1.0e-5)) && ok
+    ok = check(4, approx(r.jb, 0.590169, 1.0e-4)) && ok
+    ok = check(5, approx(r.p, 0.744493, 1.0e-4)) && ok
+    return ok
+}
+
+// symmetric {1,2,3,4,5}: skew 0; m2=2, m4=34/5=6.8; kurt=6.8/4=1.7.
+// JB = 5/6·(0 + 1.3²/4) = 0.833333·0.4225 = 0.352083; p=exp(-0.176042)=0.838586.
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = normality(&x, 5)
+    var ok = true
+    ok = check(10, approx(r.skewness, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.kurtosis, 1.7, 1.0e-5)) && ok
+    ok = check(12, approx(r.jb, 0.352083, 1.0e-4)) && ok
+    ok = check(13, approx(r.p, 0.838586, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_normality() && ok
+    ok = test_symmetric() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -282,6 +282,12 @@ if [ -z "$REMOTE_GPU_NAME" ]; then
   REMOTE_GPU_NAME="UNKNOWN"
 fi
 
+# CUDA toolchain provenance (ptxas/nvcc/driver) of the host that produced these
+# GFLOPS. ptxas codegen + cuBLAS baselines change across toolkit versions, so a
+# measured number is only comparable when the toolchain is recorded alongside it.
+OMEGA_GPU_TOOLCHAIN_JSON="$(SSH_OPTS="${SSH_OPTS[*]}" "$ROOT_DIR/scripts/omega/omega_capture_toolchain.sh" "${GPU_USER}@${GPU_HOST}" 2>/dev/null || true)"
+export OMEGA_GPU_TOOLCHAIN_JSON
+
 SAMPLES_CSV="$(mktemp "${TMPDIR:-/tmp}/l4_bench_samples.${TIMESTAMP_UTC}.XXXXXX.csv")"
 cleanup() {
   rm -f "$SAMPLES_CSV"
@@ -720,6 +726,14 @@ if ncu_report_path and os.path.exists(ncu_report_path):
     except Exception:
         ncu_payload["details"] = {"status": "FAIL", "reason": "invalid_ncu_json"}
 
+try:
+    _tc = os.environ.get("OMEGA_GPU_TOOLCHAIN_JSON", "")
+    toolchain_obj = json.loads(_tc) if _tc else {"capture_status": "not_captured"}
+    if not isinstance(toolchain_obj, dict):
+        toolchain_obj = {"capture_status": "not_captured"}
+except Exception:
+    toolchain_obj = {"capture_status": "not_captured"}
+
 report = {
     "schema": "sounio.benchmark.l4-optimized-no-rust.v2",
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -728,6 +742,7 @@ report = {
     "host": os.environ["GPU_HOST"],
     "gpu": os.environ["REMOTE_GPU_NAME"],
     "remote_dir": os.environ["REMOTE_DIR"],
+    "toolchain": toolchain_obj,
     "protocol": {
         "warmup_runs": int(os.environ["WARMUP_RUNS"]),
         "iters": int(os.environ["GEMM_ITERS"]),

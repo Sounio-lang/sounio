@@ -1,0 +1,366 @@
+// Graphics Surface — Pixel-based drawing canvas
+//
+// A 256×256 RGBA surface for raster drawing.
+// Scales to larger resolutions via tiling (deferred to Phase 2 per design doc).
+//
+// NOTE: Due to a compiler limitation with mutable references to structs
+// containing large arrays, write operations take/return Surface by value.
+// Read operations use &Surface.
+
+use graphics::drawing::{Color}
+
+pub struct Surface {
+    pub width: i64,
+    pub height: i64,
+    pub r: [i64; 65536],
+    pub g: [i64; 65536],
+    pub b: [i64; 65536],
+    pub a: [i64; 65536],
+}
+
+pub fn surface_new(w: i64, h: i64) -> Surface {
+    Surface {
+        width: w,
+        height: h,
+        r: [0; 65536],
+        g: [0; 65536],
+        b: [0; 65536],
+        a: [255; 65536],
+    }
+}
+
+// Return a surface cleared to the given color.
+pub fn surface_clear(s: Surface, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    let total = out.width * out.height
+    var i: i64 = 0
+    while i < total {
+        out.r[i] = c.r
+        out.g[i] = c.g
+        out.b[i] = c.b
+        out.a[i] = c.a
+        i = i + 1
+    }
+    out
+}
+
+// Set a single pixel. Returns updated surface.
+pub fn surface_set_pixel(s: Surface, x: i64, y: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if x >= 0 && x < out.width && y >= 0 && y < out.height {
+        let idx = y * out.width + x
+        out.r[idx] = c.r
+        out.g[idx] = c.g
+        out.b[idx] = c.b
+        out.a[idx] = c.a
+    }
+    out
+}
+
+// Batch pixel setting — set up to 256 pixels in one pass.
+// Eliminates the 2MB-per-pixel Surface copy overhead of repeated surface_set_pixel calls.
+pub fn surface_set_pixels_batch(s: Surface, xs: &[i64; 256], ys: &[i64; 256], n: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    var i: i64 = 0
+    while i < n && i < 256 {
+        let x = xs[i]
+        let y = ys[i]
+        if x >= 0 && x < out.width && y >= 0 && y < out.height {
+            let idx = y * out.width + x
+            out.r[idx] = c.r
+            out.g[idx] = c.g
+            out.b[idx] = c.b
+            out.a[idx] = c.a
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Batch rectangle draw — same semantics as surface_draw_rect, explicitly named for bulk pipelines.
+pub fn surface_draw_rect_batch(s: Surface, x: i64, y: i64, w: i64, h: i64, c: Color) -> Surface with Mut, Panic, Div {
+    surface_draw_rect(s, x, y, w, h, c)
+}
+
+pub fn surface_get_pixel_r(s: &Surface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= s.width || y < 0 || y >= s.height { return 0 }
+    let idx = y * s.width + x
+    s.r[idx]
+}
+
+pub fn surface_get_pixel_g(s: &Surface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= s.width || y < 0 || y >= s.height { return 0 }
+    let idx = y * s.width + x
+    s.g[idx]
+}
+
+pub fn surface_get_pixel_b(s: &Surface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= s.width || y < 0 || y >= s.height { return 0 }
+    let idx = y * s.width + x
+    s.b[idx]
+}
+
+pub fn surface_get_pixel_a(s: &Surface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= s.width || y < 0 || y >= s.height { return 255 }
+    let idx = y * s.width + x
+    s.a[idx]
+}
+
+// Bresenham line drawing (same algorithm as render::rasterizer).
+// Returns updated surface.
+pub fn surface_draw_line(s: Surface, x0: i64, y0: i64, x1: i64, y1: i64, c: Color) -> Surface with Mut, Panic, Div {
+    var out = s
+    var cx = x0
+    var cy = y0
+    var dx = x1 - x0
+    var dy = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy = if y0 < y1 { 1 } else { 0 - 1 }
+    var err = dx - dy
+
+    var steps = 0
+    let max_steps = dx + dy + 1
+    while steps < max_steps {
+        if cx >= 0 && cx < out.width && cy >= 0 && cy < out.height {
+            let idx = cy * out.width + cx
+            out.r[idx] = c.r
+            out.g[idx] = c.g
+            out.b[idx] = c.b
+            out.a[idx] = c.a
+        }
+        if cx == x1 && cy == y1 { steps = max_steps }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+        steps = steps + 1
+    }
+    out
+}
+
+// Filled rectangle (clipped to surface bounds).
+// Returns updated surface.
+pub fn surface_draw_rect(s: Surface, x: i64, y: i64, w: i64, h: i64, c: Color) -> Surface with Mut, Panic, Div {
+    var out = s
+    var dy = 0
+    while dy < h {
+        var dx = 0
+        while dx < w {
+            let px = x + dx
+            let py = y + dy
+            if px >= 0 && px < out.width && py >= 0 && py < out.height {
+                let idx = py * out.width + px
+                out.r[idx] = c.r
+                out.g[idx] = c.g
+                out.b[idx] = c.b
+                out.a[idx] = c.a
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+    out
+}
+
+// ============================================================================
+// ADVANCED DRAWING PRIMITIVES (for epistemic glyphs and decay viz)
+// ============================================================================
+
+/// Draw a filled circle (midpoint circle algorithm + horizontal spans).
+/// Returns updated surface.
+pub fn surface_draw_circle_filled(s: Surface, cx: i64, cy: i64, radius: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if radius <= 0 { return out }
+
+    var x: i64 = 0
+    var y: i64 = radius
+    var d: i64 = 3 - 2 * radius
+
+    while x <= y {
+        // 8-way symmetry spans
+        out = draw_hline(out, cx - x, cx + x, cy + y, c)
+        out = draw_hline(out, cx - x, cx + x, cy - y, c)
+        out = draw_hline(out, cx - y, cx + y, cy + x, c)
+        out = draw_hline(out, cx - y, cx + y, cy - x, c)
+
+        x = x + 1
+        if d > 0 {
+            y = y - 1
+            d = d + 4 * (x - y) + 10
+        } else {
+            d = d + 4 * x + 6
+        }
+    }
+    out
+}
+
+fn draw_hline(s: Surface, x0: i64, x1: i64, y: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if y < 0 || y >= out.height { return out }
+    var x = x0
+    while x <= x1 {
+        if x >= 0 && x < out.width {
+            let idx = y * out.width + x
+            out.r[idx] = c.r
+            out.g[idx] = c.g
+            out.b[idx] = c.b
+            out.a[idx] = c.a
+        }
+        x = x + 1
+    }
+    out
+}
+
+/// Draw circle outline only.
+pub fn surface_draw_circle_outline(s: Surface, cx: i64, cy: i64, radius: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if radius <= 0 { return out }
+
+    var x: i64 = 0
+    var y: i64 = radius
+    var d: i64 = 3 - 2 * radius
+
+    while x <= y {
+        // 8 symmetric points — direct array writes for performance
+        let p1x = cx + x; let p1y = cy + y
+        if p1x >= 0 && p1x < out.width && p1y >= 0 && p1y < out.height {
+            let idx = p1y * out.width + p1x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p2x = cx - x; let p2y = cy + y
+        if p2x >= 0 && p2x < out.width && p2y >= 0 && p2y < out.height {
+            let idx = p2y * out.width + p2x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p3x = cx + x; let p3y = cy - y
+        if p3x >= 0 && p3x < out.width && p3y >= 0 && p3y < out.height {
+            let idx = p3y * out.width + p3x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p4x = cx - x; let p4y = cy - y
+        if p4x >= 0 && p4x < out.width && p4y >= 0 && p4y < out.height {
+            let idx = p4y * out.width + p4x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p5x = cx + y; let p5y = cy + x
+        if p5x >= 0 && p5x < out.width && p5y >= 0 && p5y < out.height {
+            let idx = p5y * out.width + p5x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p6x = cx - y; let p6y = cy + x
+        if p6x >= 0 && p6x < out.width && p6y >= 0 && p6y < out.height {
+            let idx = p6y * out.width + p6x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p7x = cx + y; let p7y = cy - x
+        if p7x >= 0 && p7x < out.width && p7y >= 0 && p7y < out.height {
+            let idx = p7y * out.width + p7x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+        let p8x = cx - y; let p8y = cy - x
+        if p8x >= 0 && p8x < out.width && p8y >= 0 && p8y < out.height {
+            let idx = p8y * out.width + p8x
+            out.r[idx] = c.r; out.g[idx] = c.g; out.b[idx] = c.b; out.a[idx] = c.a
+        }
+
+        x = x + 1
+        if d > 0 {
+            y = y - 1
+            d = d + 4 * (x - y) + 10
+        } else {
+            d = d + 4 * x + 6
+        }
+    }
+    out
+}
+
+/// Very simple dashed line (pattern: 4 on, 3 off).
+/// Good enough for provenance arrows and uncertainty indicators in the scaffold.
+pub fn surface_draw_dashed_line(s: Surface, x0: i64, y0: i64, x1: i64, y1: i64, c: Color) -> Surface with Mut, Panic, Div {
+    var out = s
+    var cx = x0
+    var cy = y0
+    var dx = x1 - x0
+    var dy = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy = if y0 < y1 { 1 } else { 0 - 1 }
+    var err = dx - dy
+
+    var steps = 0
+    let max_steps = dx + dy + 1
+    var dash_counter: i64 = 0
+
+    while steps < max_steps {
+        let on = (dash_counter % 7) < 4
+        if on {
+            if cx >= 0 && cx < out.width && cy >= 0 && cy < out.height {
+                let idx = cy * out.width + cx
+                out.r[idx] = c.r
+                out.g[idx] = c.g
+                out.b[idx] = c.b
+                out.a[idx] = c.a
+            }
+        }
+        dash_counter = dash_counter + 1
+
+        if cx == x1 && cy == y1 { steps = max_steps }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+        steps = steps + 1
+    }
+    out
+}
+
+/// Draw a filled diamond (rotated square) centered at (cx, cy).
+pub fn surface_draw_diamond_filled(s: Surface, cx: i64, cy: i64, radius: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if radius <= 0 { return out }
+
+    // Simple diamond using 4 triangles approximated by lines + fill rects is overkill.
+    // Use vertical + horizontal spans for a clean diamond.
+    var r = radius
+    var i: i64 = 0
+    while i <= r {
+        let w = r - i
+        // top half
+        out = draw_hline(out, cx - w, cx + w, cy - i, c)
+        // bottom half
+        out = draw_hline(out, cx - w, cx + w, cy + i, c)
+        i = i + 1
+    }
+    out
+}
+
+/// Draw a simple filled triangle pointing up, centered at base.
+pub fn surface_draw_triangle_up_filled(s: Surface, cx: i64, cy: i64, size: i64, c: Color) -> Surface with Mut, Panic {
+    var out = s
+    if size <= 0 { return out }
+
+    var h = size
+    var half = size / 2
+    var row: i64 = 0
+    while row < h {
+        let w = (row * half) / h
+        out = draw_hline(out, cx - w, cx + w, cy - half + row, c)
+        row = row + 1
+    }
+    out
+}
+
+fn main() -> i32 with IO { 0 }

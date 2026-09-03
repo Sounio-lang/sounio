@@ -1,0 +1,177 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/jackknife.sio — leave-one-out jackknife bias & standard error
+//
+// The deterministic resampling estimator of a statistic's bias and standard
+// error, from the n leave-one-out recomputations:
+//
+//   jackknife_mean(x, n)     -> JackResult
+//   jackknife_variance(x, n) -> JackResult      (biased ÷n variance as θ̂)
+//
+// With θ̂ the full-sample statistic and θ̂_(i) leaving out point i,
+//   θ̄ = mean θ̂_(i),
+//   bias = (n−1)(θ̄ − θ̂),   θ̂_jack = θ̂ − bias = n·θ̂ − (n−1)·θ̄,
+//   SE   = √( (n−1)/n · Σ(θ̂_(i) − θ̄)² ).
+// For the mean the jackknife SE reduces exactly to s/√n; for the ÷n variance the
+// jackknife recovers the unbiased ÷(n−1) estimate.
+//
+// Pure Sounio: leave-one-out recomputation in O(n²); inline sqrt. No external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Quenouille (1949); Tukey (1958); Efron & Tibshirani, "An Introduction to
+//   the Bootstrap", ch.11.
+
+module stats::jackknife
+
+fn jk_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct JackResult {
+    pub estimate: f64,   // bias-corrected jackknife estimate
+    pub theta: f64,      // full-sample statistic θ̂
+    pub bias: f64,       // (n-1)(θ̄ - θ̂)
+    pub se: f64,         // jackknife standard error
+}
+
+/// Jackknife bias & SE for the sample mean.
+///
+/// Parâmetros: x — data; n — size (>=2).
+/// Retorno: JackResult (estimate, theta = mean, bias = 0, se = s/√n).
+pub fn jackknife_mean(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic {
+    if n < 2 { return JackResult { estimate: 0.0, theta: 0.0, bias: 0.0, se: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let theta = s / nf
+    // leave-one-out means: mean_(i) = (S - x_i)/(n-1)
+    var sum_loo = 0.0
+    var j = 0
+    while j < n {
+        let mi = (s - x[j as usize]) / (nf - 1.0)
+        sum_loo = sum_loo + mi
+        j = j + 1
+    }
+    let tbar = sum_loo / nf
+    var ss = 0.0
+    var k = 0
+    while k < n {
+        let mi = (s - x[k as usize]) / (nf - 1.0)
+        let d = mi - tbar
+        ss = ss + d * d
+        k = k + 1
+    }
+    let se = jk_sqrt((nf - 1.0) / nf * ss)
+    let bias = (nf - 1.0) * (tbar - theta)
+    return JackResult { estimate: theta - bias, theta: theta, bias: bias, se: se }
+}
+
+// biased (÷m) variance of the first m entries of a buffer, excluding index skip.
+fn loo_variance(x: &[f64; 256], n: i32, skip: i32) -> f64 with Mut, Div, Panic {
+    let m = (n - 1) as f64
+    var s = 0.0
+    var i = 0
+    while i < n { if i != skip { s = s + x[i as usize] } i = i + 1 }
+    let mean = s / m
+    var ss = 0.0
+    var j = 0
+    while j < n { if j != skip { let d = x[j as usize] - mean; ss = ss + d * d } j = j + 1 }
+    return ss / m
+}
+
+/// Jackknife bias & SE for the (÷n biased) sample variance.
+///
+/// Parâmetros: x — data; n — size (>=3).
+/// Retorno: JackResult (estimate = bias-corrected variance, theta, bias, se).
+pub fn jackknife_variance(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic {
+    if n < 3 { return JackResult { estimate: 0.0, theta: 0.0, bias: 0.0, se: 0.0 } }
+    let nf = n as f64
+    // full-sample biased variance
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let theta = ss / nf
+    // leave-one-out variances
+    var sum_loo = 0.0
+    var a = 0
+    while a < n { sum_loo = sum_loo + loo_variance(x, n, a); a = a + 1 }
+    let tbar = sum_loo / nf
+    var ssq = 0.0
+    var b = 0
+    while b < n { let d = loo_variance(x, n, b) - tbar; ssq = ssq + d * d; b = b + 1 }
+    let se = jk_sqrt((nf - 1.0) / nf * ssq)
+    let bias = (nf - 1.0) * (tbar - theta)
+    return JackResult { estimate: theta - bias, theta: theta, bias: bias, se: se }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// mean of {1,2,3,4,5}: theta=3, bias=0, se=s/sqrt(n)=sqrt(10/(5·4))=sqrt(0.5)=0.707107.
+fn test_mean() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = jackknife_mean(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.theta, 3.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.bias, 0.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.se, 0.707107, 1.0e-5)) && ok
+    ok = check(4, approx(r.estimate, 3.0, 1.0e-9)) && ok
+    return ok
+}
+
+// variance of {1,2,3,4,5}: biased theta=2, jackknife estimate=2.5 (=unbiased),
+// bias=-0.5, se=sqrt((4/5)·1.367188)=sqrt(1.09375)=1.045825.
+fn test_variance() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = jackknife_variance(&x, 5)
+    var ok = true
+    ok = check(10, approx(r.theta, 2.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.estimate, 2.5, 1.0e-6)) && ok
+    ok = check(12, approx(r.bias, 0.0 - 0.5, 1.0e-6)) && ok
+    ok = check(13, approx(r.se, 1.045825, 1.0e-5)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_mean() && ok
+    ok = test_variance() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

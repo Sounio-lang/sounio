@@ -1,0 +1,173 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/central_tendency.sio — the mean family
+//
+// The classical measures of central tendency beyond the arithmetic mean — each
+// the right average for a different kind of quantity:
+//
+//   arithmetic_mean(x, n)   geometric_mean(x, n)   harmonic_mean(x, n)   rms(x, n)
+//
+//   AM = (1/n)Σxᵢ,   GM = exp((1/n)Σ ln xᵢ),   HM = n / Σ(1/xᵢ),
+//   RMS = √((1/n)Σxᵢ²).
+// The geometric mean suits ratios and growth rates; the harmonic mean suits
+// rates and averaged speeds; and always HM ≤ GM ≤ AM ≤ RMS for positive data.
+//
+// Pure Sounio: inline ln/exp/sqrt; one pass each. No external dependency, no
+// nested data-array calls.
+//
+// References:
+//   Kenney & Keeping, "Mathematics of Statistics" 3e.
+
+module stats::central_tendency
+
+fn ct_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ct_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ct_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ct_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+/// Arithmetic mean.
+pub fn arithmetic_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    return s / (n as f64)
+}
+
+/// Geometric mean (positive data): exp(mean(ln x)).
+pub fn geometric_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i < n {
+        if x[i as usize] <= 0.0 { return 0.0 }
+        s = s + ct_ln(x[i as usize])
+        i = i + 1
+    }
+    return ct_exp(s / (n as f64))
+}
+
+/// Harmonic mean (positive data): n / Σ(1/x).
+pub fn harmonic_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i < n {
+        if x[i as usize] <= 0.0 { return 0.0 }
+        s = s + 1.0 / x[i as usize]
+        i = i + 1
+    }
+    if s <= 0.0 { return 0.0 }
+    return (n as f64) / s
+}
+
+/// Root-mean-square (quadratic mean): √(mean(x²)).
+pub fn rms(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize] * x[i as usize]; i = i + 1 }
+    return ct_sqrt(s / (n as f64))
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,4}: AM=7/3=2.333333; GM=8^(1/3)=2; HM=3/1.75=1.714286; RMS=√7=2.645751.
+fn test_means() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=4.0
+    var ok = true
+    ok = check(1, approx(arithmetic_mean(&x, 3), 2.333333, 1.0e-5)) && ok
+    ok = check(2, approx(geometric_mean(&x, 3), 2.0, 1.0e-5)) && ok
+    ok = check(3, approx(harmonic_mean(&x, 3), 1.714286, 1.0e-5)) && ok
+    ok = check(4, approx(rms(&x, 3), 2.645751, 1.0e-5)) && ok
+    return ok
+}
+
+// ordering HM <= GM <= AM <= RMS holds.
+fn test_ordering() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=8.0; x[2]=18.0; x[3]=32.0
+    let hm = harmonic_mean(&x, 4)
+    let gm = geometric_mean(&x, 4)
+    let am = arithmetic_mean(&x, 4)
+    let rm = rms(&x, 4)
+    return check(10, hm <= gm && gm <= am && am <= rm)
+}
+
+// equal values -> all means equal that value.
+fn test_equal() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=5.0; x[1]=5.0; x[2]=5.0
+    var ok = true
+    ok = check(20, approx(geometric_mean(&x, 3), 5.0, 1.0e-5)) && ok
+    ok = check(21, approx(harmonic_mean(&x, 3), 5.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_means() && ok
+    ok = test_ordering() && ok
+    ok = test_equal() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

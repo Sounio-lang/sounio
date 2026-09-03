@@ -1,0 +1,1539 @@
+//! stdlib/theorem/cdcl.sio
+//!
+//! A modern CDCL SAT core for Sounio — DRAT/DRUP-certified.
+//!
+//! Lineage: the scalable successor of the bounded DPLL(T) in smt.sio and the
+//! standalone 1-UIP proof-of-concept examples/erdos/cdcl_proof.sio. The 1-UIP
+//! conflict analysis, backjump and DRUP emission are ported from that verified POC
+//! (every emitted proof is replayed by the independent native RUP checker AND
+//! external drat-trim — a bug in the CDCL bookkeeping cannot fake a VERIFIED). On
+//! top of that correct kernel this module layers, in verifiable milestones, the
+//! machinery that separates a competition CDCL solver from a basic DPLL:
+//!   1a (this) — clean struct-based API, MiniSat-style phase saving (default-false),
+//!               built-in RUP self-verifier.
+//!   1b — two-watched-literals unit propagation (O(1) amortized, replaces O(n) scan)
+//!   1c — VSIDS activity branching
+//!   1d — LBD/glue + 3-tier clause-database reduction
+//!   1e — Luby + Glucose-EMA restarts, target phasing
+//!
+//! ARCHITECTURE NOTE: all solver state lives in the CdclCtx STRUCT, threaded by
+//! `&!CdclCtx`, exactly like smt.sio's SmtContext. This is mandatory, not stylistic:
+//! the madaros-relocgate compiler MISCOMPILES module-global arrays across an import
+//! boundary (they compile but SIGSEGV at runtime on first access). Struct fields are
+//! addressed through the caller's reference and work correctly. Do NOT reintroduce
+//! top-level `var` array globals here.
+//!
+//! Scope honesty: instance size is bounded by fixed arrays (no dynamic memory yet),
+//! targeting the sizes Sounio can represent today, NOT million-variable SAT-Competition
+//! instances. The aim is the first DRAT-certified modern CDCL core in a self-hosted
+//! language, and a fair substrate for the sampled-polarity vs target-phasing
+//! experiment (Phase 2).
+//!
+//! DIMACS-style signed literals: variable v in 1..nvars; literal +v = v true, -v = v false.
+
+// ---- capacities (bounded; raised in Phase 4 with dynamic memory) ----
+//   MAXV = 1024 variables (var-indexed arrays), MAXC = 16384 clauses,
+//   MAXL = 65536 literal pool. Clause buffer passed in is [i64; 1024].
+
+pub struct CdclCtx {
+    nvars: i32,
+    nclauses: i32,
+    // use_watched MUST live at a low struct offset: a setter write to a scalar field
+    // near the END of this large struct silently does not take effect (the same
+    // high-offset field-access miscompile that motivated hoisting watch_head/wnext).
+    // Kept here (3rd field) so cdcl_set_watched and the main-loop read are reliable.
+    use_watched: i32,            // 0 = full-scan propagate (DEFAULT, robust+correct).
+                                 // 1 = two-watched-literals propagate_watched.
+    // two-watched-literals arrays placed FIRST (low struct offset): the compiler
+    // miscomputes field access at very high offsets for large stack-local structs,
+    // which silently corrupted watched propagation when wnext sat near the struct end.
+    watch_head: [i32; 2050],
+    wnext: [i32; 32768],
+    cstart: [i32; 16384],
+    clen: [i32; 16384],
+    clits: [i64; 65536],
+
+    // assignment / trail
+    assign: [i32; 1024],        // 0 unknown, 1 true, -1 false (var 1-indexed)
+    vlevel: [i32; 1024],
+    reason: [i32; 1024],        // clause idx that implied v, or -1 (decision/none)
+    saved_phase: [i32; 1024],   // phase saving: last assigned sign, default -1 (false)
+    trail_lit: [i64; 1024],     // assigned literals, in order (true literal)
+    trail_len: i32,
+    trail_lim: [i32; 1024],     // trail_lim[L] = first trail index of level L
+    cur_level: i32,
+
+    // conflict analysis scratch
+    seen: [i32; 1024],
+    learnt: [i64; 1024],
+    llen: i32,
+
+    // DRUP proof
+    p_n: i32,
+    p_start: [i32; 16384],
+    p_len: [i32; 16384],
+    p_lits: [i64; 65536],
+
+    // VSIDS activity branching (Milestone 1c)
+    activity: [f64; 1024],
+    var_inc: f64,
+
+    // Polarity arms (Phase 2 experiment): phase_mode selects the arm —
+    //   0 = saved-phase (ARM A, default), 1 = target-phasing (ARM B, SOTA baseline),
+    //   2 = Beta-Bernoulli Thompson sampling (ARM C, the novel sampled-polarity arm).
+    phase_mode: i32,
+    target: [i32; 1024],        // ARM B: snapshot of the largest conflict-free trail (0=unset, ±1)
+    best_trail_len: i32,
+    phase_alpha: [f64; 1024],   // ARM C: Beta(alpha,beta) posterior of P(true is good for v)
+    phase_beta: [f64; 1024],
+
+    // Clause-DB reduction + restarts (Milestone 1d/1e)
+    n_original: i32,            // clauses [0, n_original) are original — never deleted
+    lbd: [i32; 16384],          // per-clause Literal Block Distance (glue); 0 for originals
+    restart_limit: i64,         // conflicts allowed before the next restart+reduce
+    confl_since_restart: i64,
+    n_restarts: i64,
+
+    n_conflicts: i64,
+    n_decisions: i64,
+    conflict_cap: i64,
+
+    // two-watched-literals propagation (Milestone 1b) — watch_head/wnext declared at top;
+    // use_watched moved to a low offset (3rd field) so its setter write is reliable.
+    qhead: i32,                  // BFS cursor into the trail for incremental propagation
+    top_conflict: i32,           // 1 = level-0 conflict detected at clause-add (contradictory/empty unit)
+    dbg_stale: i32,              // TEMP diagnostic: count of broken watch-list invariants
+    proof_overflow: i32,         // 1 = DRUP proof buffer (p_*) filled — proof truncated, can't RUP-verify
+}
+
+/// Public: construct a fresh solver context.
+pub fn cdcl_new() -> CdclCtx {
+    return CdclCtx {
+        nvars: 0,
+        nclauses: 0,
+        cstart: [0; 16384],
+        clen: [0; 16384],
+        clits: [0; 65536],
+        assign: [0; 1024],
+        vlevel: [0; 1024],
+        reason: [0; 1024],
+        saved_phase: [(0 - 1) as i32; 1024],
+        trail_lit: [0; 1024],
+        trail_len: 0,
+        trail_lim: [0; 1024],
+        cur_level: 0,
+        seen: [0; 1024],
+        learnt: [0; 1024],
+        llen: 0,
+        p_n: 0,
+        p_start: [0; 16384],
+        p_len: [0; 16384],
+        p_lits: [0; 65536],
+        activity: [0.0; 1024],
+        var_inc: 1.0,
+        phase_mode: 0,
+        target: [0; 1024],
+        best_trail_len: 0,
+        phase_alpha: [1.0; 1024],
+        phase_beta: [1.0; 1024],
+        n_original: 0,
+        lbd: [0; 16384],
+        restart_limit: 100,
+        confl_since_restart: 0,
+        n_restarts: 0,
+        n_conflicts: 0,
+        n_decisions: 0,
+        conflict_cap: 5000000,
+        watch_head: [(0 - 1) as i32; 2050],
+        wnext: [(0 - 1) as i32; 32768],
+        qhead: 0,
+        use_watched: 0,
+        top_conflict: 0,
+        dbg_stale: 0,
+        proof_overflow: 0,
+    }
+}
+
+/// Public: reset an existing context to the fresh state IN PLACE, so one large
+/// CdclCtx allocation can be reused across many instances/arms within a single
+/// process. This is the supported path for a pure-Sounio multi-instance harness:
+/// calling cdcl_new() repeatedly returns a large struct by value (SRET) each time,
+/// which triggers the documented multi-instance large-struct codegen corruption.
+/// Reusing one allocation via cdcl_reset avoids the repeated SRET entirely.
+/// Clears every var-indexed array, the watch lists, and all counters; the flat
+/// clause / proof pools are append-only and reset via their counters (nclauses,
+/// p_n), so they need no per-slot clearing.
+pub fn cdcl_reset(ctx: &!CdclCtx) with Mut {
+    ctx.nvars = 0
+    ctx.nclauses = 0
+    ctx.n_original = 0
+    ctx.trail_len = 0
+    ctx.cur_level = 0
+    ctx.llen = 0
+    ctx.p_n = 0
+    ctx.qhead = 0
+    ctx.var_inc = 1.0
+    ctx.phase_mode = 0
+    ctx.best_trail_len = 0
+    ctx.restart_limit = 100
+    ctx.confl_since_restart = 0
+    ctx.n_restarts = 0
+    ctx.n_conflicts = 0
+    ctx.n_decisions = 0
+    ctx.conflict_cap = 5000000
+    ctx.use_watched = 0
+    ctx.top_conflict = 0
+    ctx.dbg_stale = 0
+    ctx.proof_overflow = 0
+    // var-indexed arrays (1..1024)
+    var v: i32 = 0
+    while v < 1024 {
+        ctx.assign[v] = 0
+        ctx.vlevel[v] = 0
+        ctx.reason[v] = 0
+        ctx.saved_phase[v] = (0 - 1) as i32
+        ctx.seen[v] = 0
+        ctx.target[v] = 0
+        ctx.activity[v] = 0.0
+        ctx.phase_alpha[v] = 1.0
+        ctx.phase_beta[v] = 1.0
+        ctx.trail_lit[v] = 0
+        ctx.trail_lim[v] = 0
+        ctx.learnt[v] = 0
+        v = v + 1
+    }
+    // watch lists
+    var i: i32 = 0
+    while i < 2050 { ctx.watch_head[i] = (0 - 1) as i32  i = i + 1 }
+    i = 0
+    while i < 32768 { ctx.wnext[i] = (0 - 1) as i32  i = i + 1 }
+}
+
+/// Phase-4 heap hook (bounded solver: no-op). Structured ablation harnesses call
+/// this before reuse so the same entry point works with the lean_single heap build
+/// documented in docs/research/cdcl-phase4-dynamic-memory-feasibility-2026-06-30.md.
+/// True heap allocation is NOT implemented here — see that doc for the staged plan.
+pub fn cdcl_heap_init(ctx: &!CdclCtx) with Mut {
+    let _ = ctx.nvars
+}
+
+// ============================================================================
+//  Core helpers
+// ============================================================================
+
+fn lit_var(l: i64) -> i32 {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+
+// value of a literal under current assignment: 1 true, -1 false, 0 unknown.
+fn litval(ctx: &!CdclCtx, l: i64) -> i32 {
+    let v = lit_var(l)
+    var a = ctx.assign[v]
+    if l < 0 { a = 0 - a }
+    return a
+}
+
+// Watch-list literal code: code(l) = 2*v + (l<0 ? 1 : 0), all-positive arithmetic.
+// For v in 1..1024, code ranges [2..2049]. (Milestone 1b.)
+fn lit_code(l: i64) -> i32 {
+    let v = lit_var(l)
+    var s: i32 = 0
+    if l < 0 { s = 1 }
+    return 2 * v + s
+}
+
+fn enqueue(ctx: &!CdclCtx, lit: i64, rs: i32) with Mut {
+    let v = lit_var(lit)
+    if lit < 0 { ctx.assign[v] = (0 - 1) as i32 } else { ctx.assign[v] = 1 }
+    ctx.vlevel[v] = ctx.cur_level
+    ctx.reason[v] = rs
+    ctx.trail_lit[ctx.trail_len] = lit
+    ctx.trail_len = ctx.trail_len + 1
+}
+
+// Full-scan unit propagation (Milestone 1a; replaced by two-watched-literals in 1b).
+// Returns conflicting clause index, or -1 at fixpoint.
+fn propagate(ctx: &!CdclCtx) -> i32 with Mut {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < ctx.nclauses {
+            // BVE-deleted clauses are marked lbd == CLAUSE_DELETED and skipped by the
+            // SOLVER's propagation; the RUP verifier (propagate_noenq) does NOT check
+            // this flag, so it still sees the original clause intact (RUP is monotone
+            // in the DB, so keeping the eliminated clauses in the verifier is sound).
+            if ctx.lbd[c] != 1000000 {
+                let st = ctx.cstart[c]
+                let ln = ctx.clen[c]
+                var sat: i32 = 0
+                var unassigned: i32 = 0
+                var last_lit: i64 = 0
+                var k: i32 = 0
+                while k < ln {
+                    let l = ctx.clits[st + k]
+                    let val = litval(ctx, l)
+                    if val == 1 { sat = 1 }
+                    if val == 0 { unassigned = unassigned + 1  last_lit = l }
+                    k = k + 1
+                }
+                if sat == 0 {
+                    if unassigned == 0 { return c }
+                    if unassigned == 1 {
+                        enqueue(ctx, last_lit, c)
+                        changed = 1
+                    }
+                }
+            }
+            c = c + 1
+        }
+    }
+    return (0 - 1) as i32
+}
+
+// Two-watched-literals unit propagation (Milestone 1b). Processes the trail from
+// qhead to trail_len; returns the index of a conflicting clause, or -1 at fixpoint.
+// The two watched literals of clause c are clits[cstart[c]] (slot 0) and
+// clits[cstart[c]+1] (slot 1); watch_head[code(q)] heads the intrusive list of
+// clauses watching literal q, linked via wnext[2*c+slot].
+fn propagate_watched(ctx: &!CdclCtx) -> i32 with Mut {
+    var conflict: i32 = (0 - 1) as i32
+
+    while ctx.qhead < ctx.trail_len && conflict < 0 {
+        let p = ctx.trail_lit[ctx.qhead]      // p just became TRUE
+        ctx.qhead = ctx.qhead + 1
+        let falselit = 0 - p                  // the literal that is now FALSE
+        let fl = lit_code(falselit)           // list key = clauses watching falselit
+
+        var cur: i32 = ctx.watch_head[fl]
+        var prev: i32 = (0 - 1) as i32
+        var prev_slot: i32 = 0
+
+        while cur >= 0 && conflict < 0 {
+            let st = ctx.cstart[cur]
+
+            // slot of falselit in cur (invariant: falselit is one of cur's 2 watched lits)
+            var slot: i32 = 1
+            if ctx.clits[st] == falselit { slot = 0 }
+            let next = ctx.wnext[2 * cur + slot]      // SAVE before any relink overwrites it
+
+            let oidx = st + (1 - slot)
+            let other = ctx.clits[oidx]               // the OTHER watched literal
+            // NOTE: bind `ov` ONCE here. enqueue() below mutates the assignment of
+            // `other`, so re-reading litval(other) after the enqueue would spuriously
+            // flip the conflict test true (the original 1b bug). In this branch
+            // ov ∈ {0,-1} only — case A consumed ov==1 — so the unit/conflict tests
+            // below are mutually exclusive on the pre-enqueue value.
+            let ov = litval(ctx, other)
+            var keep: i32 = 0                          // keep this watch + advance prev
+
+            // case A: clause already satisfied by its other watched literal
+            if ov == 1 { keep = 1 }
+
+            // case B: not satisfied — hunt for a replacement watch in positions 2..clen-1
+            if keep == 0 {
+                let cl = ctx.clen[cur]
+                var found_k: i32 = (0 - 1) as i32
+                var k: i32 = 2
+                while k < cl {
+                    if found_k < 0 {
+                        let l = ctx.clits[st + k]
+                        if litval(ctx, l) != (0 - 1) as i32 { found_k = k }  // not FALSE => valid watch
+                    }
+                    k = k + 1
+                }
+
+                // B1: replacement found — swap it into the watched slot and relink
+                if found_k >= 0 {
+                    let newlit = ctx.clits[st + found_k]
+                    ctx.clits[st + slot] = newlit          // watched slot now holds the new (non-false) lit
+                    ctx.clits[st + found_k] = falselit     // old false lit demoted out of the watch window
+                    // unlink cur from falselit's list (prev-pointer + prev-slot)
+                    if prev < 0 { ctx.watch_head[fl] = next }
+                    if prev >= 0 { ctx.wnext[2 * prev + prev_slot] = next }
+                    // push cur onto newlit's list at the SAME slot it now occupies
+                    let nc = lit_code(newlit)
+                    ctx.wnext[2 * cur + slot] = ctx.watch_head[nc]
+                    ctx.watch_head[nc] = cur
+                    // keep stays 0 => prev NOT advanced (cur was removed)
+                }
+
+                // B2: no replacement — clause is unit (force other) or conflict.
+                // Mutually exclusive on the PRE-enqueue value ov (∈ {0,-1}).
+                if found_k < 0 {
+                    if ov == 0 {
+                        enqueue(ctx, other, cur)           // unit: keep watch
+                        keep = 1
+                    }
+                    if ov < 0 {
+                        conflict = cur                     // other FALSE => conflict
+                    }
+                }
+            }
+
+            if keep == 1 { prev = cur  prev_slot = slot }   // kept clause becomes the new predecessor
+            cur = next                                       // advance
+        }
+    }
+
+    return conflict
+}
+
+// DBG-INSTRUMENTED clone of propagate_watched (temporary diagnostic). Records
+// branch markers into seen[] (unused during isolated propagation) so the main
+// module can read them — printing integers from inside this imported module
+// SIGSEGVs (cross-module `as string` codegen). Markers (first clause visited):
+//   seen[0] = outer falselit iterations
+//   seen[1] = total clauses visited (inner iterations)
+//   seen[2] = slot (first clause)
+//   seen[3] = (1-slot) index (first clause)
+//   seen[4] = other (first clause)             [stored +100 to keep nonneg-ish]
+//   seen[5] = litval(other) (first clause)     [stored +10]
+//   seen[6] = keep after caseA (first clause)
+//   seen[7] = found_k (first clause)
+//   seen[8] = 1 if reached "if found_k<0" block, 2 if enqueue ran, 3 if conflict ran
+//   seen[9] = conflict result
+//   seen[10] = clen(first clause)
+pub fn propagate_watched_dbg(ctx: &!CdclCtx) -> i32 with Mut {
+    var i0: i32 = 0
+    while i0 < 16 { ctx.seen[i0] = (0 - 99) as i32  i0 = i0 + 1 }
+    ctx.qhead = 0
+    var conflict: i32 = (0 - 1) as i32
+    var first: i32 = 1
+    var outer: i32 = 0
+    var visited: i32 = 0
+    while ctx.qhead < ctx.trail_len && conflict < 0 {
+        outer = outer + 1
+        let p = ctx.trail_lit[ctx.qhead]
+        ctx.qhead = ctx.qhead + 1
+        let falselit = 0 - p
+        let fl = lit_code(falselit)
+        var cur: i32 = ctx.watch_head[fl]
+        var prev: i32 = (0 - 1) as i32
+        var prev_slot: i32 = 0
+        while cur >= 0 && conflict < 0 {
+            visited = visited + 1
+            let st = ctx.cstart[cur]
+            var slot: i32 = 1
+            if ctx.clits[st] == falselit { slot = 0 }
+            let next = ctx.wnext[2 * cur + slot]
+            let other = ctx.clits[st + (1 - slot)]
+            var keep: i32 = 0
+            if litval(ctx, other) == 1 { keep = 1 }
+            if first == 1 {
+                ctx.seen[2] = slot
+                ctx.seen[3] = 1 - slot
+                ctx.seen[4] = (other as i32) + 100
+                ctx.seen[5] = litval(ctx, other) + 10
+                ctx.seen[6] = keep
+                ctx.seen[10] = ctx.clen[cur]
+            }
+            if keep == 0 {
+                var found_k: i32 = (0 - 1) as i32
+                var k: i32 = 2
+                while k < ctx.clen[cur] {
+                    if found_k < 0 {
+                        let l = ctx.clits[st + k]
+                        if litval(ctx, l) != (0 - 1) as i32 { found_k = k }
+                    }
+                    k = k + 1
+                }
+                if first == 1 { ctx.seen[7] = found_k }
+                if found_k >= 0 {
+                    let newlit = ctx.clits[st + found_k]
+                    ctx.clits[st + slot] = newlit
+                    ctx.clits[st + found_k] = falselit
+                    if prev < 0 { ctx.watch_head[fl] = next }
+                    if prev >= 0 { ctx.wnext[2 * prev + prev_slot] = next }
+                    ctx.wnext[2 * cur + slot] = ctx.watch_head[lit_code(newlit)]
+                    ctx.watch_head[lit_code(newlit)] = cur
+                }
+                if found_k < 0 {
+                    if first == 1 { ctx.seen[8] = 1 }
+                    if litval(ctx, other) == 0 {
+                        if first == 1 { ctx.seen[8] = 2 }
+                        enqueue(ctx, other, cur)
+                        keep = 1
+                    }
+                    if litval(ctx, other) != 0 {
+                        if first == 1 { ctx.seen[8] = 3 }
+                        conflict = cur
+                    }
+                }
+            }
+            if first == 1 { first = 0 }
+            if keep == 1 { prev = cur  prev_slot = slot }
+            cur = next
+        }
+    }
+    ctx.seen[0] = outer
+    ctx.seen[1] = visited
+    ctx.seen[9] = conflict
+    return conflict
+}
+pub fn cdcl_dbg_seen(ctx: &!CdclCtx, i: i32) -> i32 { return ctx.seen[i] }
+
+// ============================================================================
+//  Clause database
+// ============================================================================
+
+fn db_add_raw(ctx: &!CdclCtx, arr: &[i64; 1024], n: i32) -> i32 with Mut {
+    if ctx.nclauses >= 16384 { return (0 - 1) as i32 }
+    let idx = ctx.nclauses
+    var start: i32 = 0
+    if idx > 0 { start = ctx.cstart[idx - 1] + ctx.clen[idx - 1] }
+    if (start as i64) + (n as i64) > 65536 { return (0 - 1) as i32 }
+    ctx.cstart[idx] = start
+    ctx.clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        ctx.clits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > ctx.nvars { ctx.nvars = v }
+        i = i + 1
+    }
+    ctx.nclauses = idx + 1
+    ctx.lbd[idx] = 0                              // original clause (sentinel: never deleted)
+    // two-watched-literals setup (Milestone 1b)
+    if n == 0 { ctx.top_conflict = 1 }            // empty original clause => level-0 UNSAT
+    if n == 1 {
+        let l0 = ctx.clits[start]
+        let v = lit_var(l0)
+        var want: i32 = 1
+        if l0 < 0 { want = (0 - 1) as i32 }
+        let a0 = ctx.assign[v]                      // snapshot BEFORE enqueue mutates it
+        if a0 == 0 { enqueue(ctx, l0, idx) }        // assert the unit at level 0 (cur_level defaults 0)
+        if a0 != 0 { if a0 != want { ctx.top_conflict = 1 } }   // contradictory unit
+    }
+    if n >= 2 {
+        let w0 = ctx.clits[start]
+        let w1 = ctx.clits[start + 1]
+        ctx.wnext[2 * idx + 0] = ctx.watch_head[lit_code(w0)]
+        ctx.watch_head[lit_code(w0)] = idx
+        ctx.wnext[2 * idx + 1] = ctx.watch_head[lit_code(w1)]
+        ctx.watch_head[lit_code(w1)] = idx
+    }
+    return idx
+}
+
+// Literal Block Distance (glue) of the current learnt clause = number of distinct
+// decision levels among its literals. Computed before backjump (vlevels still valid).
+// O(llen^2) distinct-count — fine since learnt clauses are short.
+fn compute_lbd(ctx: &!CdclCtx) -> i32 {
+    var lbd: i32 = 0
+    var i: i32 = 0
+    while i < ctx.llen {
+        let lvi = ctx.vlevel[lit_var(ctx.learnt[i])]
+        var seen_before: i32 = 0
+        var j: i32 = 0
+        while j < i {
+            if ctx.vlevel[lit_var(ctx.learnt[j])] == lvi { seen_before = 1 }
+            j = j + 1
+        }
+        if seen_before == 0 { lbd = lbd + 1 }
+        i = i + 1
+    }
+    return lbd
+}
+
+// Append the current learnt clause (learnt[0..llen]) to the clause DB.
+fn db_add_learnt(ctx: &!CdclCtx) -> i32 with Mut {
+    // TWL second-watch ordering: place the highest-decision-level non-asserting
+    // literal at learnt[1] (the proof was already emitted; RUP is order-independent
+    // and learnt[0], the UIP, is never moved). Runs before backjump while vlevels
+    // are still valid.
+    if ctx.llen >= 2 {
+        var best_j: i32 = 1
+        var best_lv: i32 = ctx.vlevel[lit_var(ctx.learnt[1])]
+        var jj: i32 = 2
+        while jj < ctx.llen {
+            let lv = ctx.vlevel[lit_var(ctx.learnt[jj])]
+            if lv > best_lv { best_lv = lv  best_j = jj }
+            jj = jj + 1
+        }
+        let tmp = ctx.learnt[1]
+        ctx.learnt[1] = ctx.learnt[best_j]
+        ctx.learnt[best_j] = tmp
+    }
+    if ctx.nclauses >= 16384 { return (0 - 1) as i32 }
+    let idx = ctx.nclauses
+    var start: i32 = 0
+    if idx > 0 { start = ctx.cstart[idx - 1] + ctx.clen[idx - 1] }
+    if (start as i64) + (ctx.llen as i64) > 65536 { return (0 - 1) as i32 }
+    ctx.cstart[idx] = start
+    ctx.clen[idx] = ctx.llen
+    var i: i32 = 0
+    while i < ctx.llen {
+        ctx.clits[start + i] = ctx.learnt[i]
+        i = i + 1
+    }
+    ctx.nclauses = idx + 1
+    ctx.lbd[idx] = compute_lbd(ctx)              // glue score for reduction tiering
+    // watch hookup (len>=2 only; a unit learnt clause stays unwatched and is
+    // asserted by the solver loop's enqueue(uip))
+    if ctx.llen >= 2 {
+        let w0 = ctx.clits[start]        // = learnt[0], the asserting UIP literal
+        let w1 = ctx.clits[start + 1]    // = highest-level literal of the rest
+        ctx.wnext[2 * idx + 0] = ctx.watch_head[lit_code(w0)]
+        ctx.watch_head[lit_code(w0)] = idx
+        ctx.wnext[2 * idx + 1] = ctx.watch_head[lit_code(w1)]
+        ctx.watch_head[lit_code(w1)] = idx
+    }
+    return idx
+}
+
+// Explicitly (re)initialize the watch arrays in place via while-loops. The big
+// struct-literal array initializers in cdcl_new() are unreliable across the
+// by-value struct return (the tail of wnext/watch_head can come back stale), which
+// silently corrupts watched propagation. Callers MUST run this after cdcl_new().
+pub fn cdcl_init_watches(ctx: &!CdclCtx) with Mut {
+    var i: i32 = 0
+    while i < 2050 { ctx.watch_head[i] = (0 - 1) as i32  i = i + 1 }
+    i = 0
+    while i < 32768 { ctx.wnext[i] = (0 - 1) as i32  i = i + 1 }
+}
+
+/// Public: add an original clause from a caller-owned literal buffer.
+/// Returns the clause index, or -1 on overflow.
+pub fn cdcl_add_clause(ctx: &!CdclCtx, arr: &[i64; 1024], n: i32) -> i32 with Mut {
+    return db_add_raw(ctx, arr, n)
+}
+
+// ============================================================================
+//  DRUP proof emission
+// ============================================================================
+
+fn emit_proof_clause(ctx: &!CdclCtx) with Mut {
+    let idx = ctx.p_n
+    var start: i32 = 0
+    if idx > 0 { start = ctx.p_start[idx - 1] + ctx.p_len[idx - 1] }
+    // bound-check: never write past the proof buffer (would corrupt adjacent struct
+    // memory). On overflow, mark the proof truncated and stop emitting.
+    if idx >= 16384 { ctx.proof_overflow = 1  return }
+    if (start as i64) + (ctx.llen as i64) > 65536 { ctx.proof_overflow = 1  return }
+    ctx.p_start[idx] = start
+    ctx.p_len[idx] = ctx.llen
+    var i: i32 = 0
+    while i < ctx.llen { ctx.p_lits[start + i] = ctx.learnt[i]  i = i + 1 }
+    ctx.p_n = idx + 1
+}
+
+fn emit_empty(ctx: &!CdclCtx) with Mut {
+    let idx = ctx.p_n
+    var start: i32 = 0
+    if idx > 0 { start = ctx.p_start[idx - 1] + ctx.p_len[idx - 1] }
+    if idx >= 16384 { ctx.proof_overflow = 1  return }
+    ctx.p_start[idx] = start
+    ctx.p_len[idx] = 0
+    ctx.p_n = idx + 1
+}
+
+// ============================================================================
+//  Inprocessing: failed-literal probing (Phase 3a)
+// ============================================================================
+// Assume a literal l at a scratch level, unit-propagate; if that derives a
+// conflict, l is a "failed literal" and ¬l is forced. ¬l is RUP (assuming l
+// unit-propagates to a conflict is exactly the RUP/AT witness), so emitting it
+// as a DRUP unit lemma keeps the in-language RUP verifier valid. Probing only
+// strengthens the formula (adds forced units) → fewer search conflicts, same
+// verdict; the external z3 oracle is unaffected (it re-checks the original CNF).
+
+fn emit_unit_lemma(ctx: &!CdclCtx, l: i64) with Mut {
+    let idx = ctx.p_n
+    var start: i32 = 0
+    if idx > 0 { start = ctx.p_start[idx - 1] + ctx.p_len[idx - 1] }
+    if idx >= 16384 { ctx.proof_overflow = 1  return }
+    if (start as i64) + 1 > 65536 { ctx.proof_overflow = 1  return }
+    ctx.p_start[idx] = start
+    ctx.p_len[idx] = 1
+    ctx.p_lits[start] = l
+    ctx.p_n = idx + 1
+}
+
+// Assume `l` at scratch level 1, propagate, then fully undo back to the level-0
+// trail. Returns 1 iff assuming l yields a conflict (l is a failed literal).
+fn probe_lit(ctx: &!CdclCtx, l: i64) -> i32 with Mut {
+    let save = ctx.trail_len
+    ctx.cur_level = 1
+    enqueue(ctx, l, (0 - 1) as i32)
+    let confl = propagate(ctx)
+    while ctx.trail_len > save {
+        ctx.trail_len = ctx.trail_len - 1
+        let q = ctx.trail_lit[ctx.trail_len]
+        let v = lit_var(q)
+        ctx.assign[v] = 0
+        ctx.vlevel[v] = 0
+        ctx.reason[v] = (0 - 1) as i32
+    }
+    ctx.cur_level = 0
+    if confl >= 0 { return 1 }
+    return 0
+}
+
+// Force the level-0 unit `l`: emit its DRUP lemma, add it as a (permanent) unit
+// clause (which enqueues it), then propagate. Returns 1 iff a level-0 conflict
+// results (UNSAT).
+fn force_unit(ctx: &!CdclCtx, l: i64) -> i32 with Mut {
+    emit_unit_lemma(ctx, l)
+    var arr: [i64; 1024] = [0 as i64; 1024]
+    arr[0] = l
+    let _ = db_add_raw(ctx, &arr, 1)     // enqueues at level 0 (cur_level == 0 here)
+    if propagate(ctx) >= 0 { return 1 }
+    return 0
+}
+
+// Run failed-literal probing to fixpoint at level 0. Returns 1 if UNSAT proven.
+fn cdcl_probe(ctx: &!CdclCtx) -> i32 with Mut {
+    if ctx.top_conflict == 1 { return 1 }
+    if propagate(ctx) >= 0 { return 1 }       // existing level-0 units already conflict
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var v: i32 = 1
+        while v <= ctx.nvars {
+            if ctx.assign[v] == 0 {
+                let fp = probe_lit(ctx, v as i64)            // assume +v
+                let fm = probe_lit(ctx, 0 - (v as i64))      // assume -v
+                if fp == 1 {
+                    if fm == 1 { return 1 }                  // both polarities fail => UNSAT
+                    if force_unit(ctx, 0 - (v as i64)) == 1 { return 1 }
+                    changed = 1
+                }
+                if fp == 0 {
+                    if fm == 1 {
+                        if force_unit(ctx, v as i64) == 1 { return 1 }
+                        changed = 1
+                    }
+                }
+            }
+            v = v + 1
+        }
+    }
+    return 0
+}
+
+/// Public: run failed-literal probing on the current formula BEFORE cdcl_solve.
+/// Adds RUP-derivable units (DRUP-emitted) and sets top_conflict if probing proves
+/// UNSAT (so a following cdcl_solve emits the empty clause). Returns 1 if UNSAT.
+/// Controlled by an explicit call (no struct toggle — new scalar struct fields do
+/// not read back reliably on this compiler when the struct is this large).
+pub fn cdcl_run_probe(ctx: &!CdclCtx) -> i32 with Mut {
+    let r = cdcl_probe(ctx)
+    if r == 1 { ctx.top_conflict = 1 }
+    return r
+}
+
+// ============================================================================
+//  Inprocessing: bounded variable elimination (BVE, Phase 3c)
+// ============================================================================
+// Eliminate a variable v by resolution: replace all clauses on v with the set of
+// non-tautological resolvents (cp on +v) x (cn on -v). Each resolvent (A v B) from
+// (v v A),(¬v v B) is RUP (assume ¬A,¬B → both clauses force v and ¬v → conflict),
+// so resolvents are DRUP-emitted and the in-language RUP verifier stays valid. The
+// eliminated clauses are marked lbd==1000000 (skipped by the SOLVER's propagate;
+// the verifier keeps them — RUP is monotone in the DB, so that is sound). Bounded:
+// only eliminate when the resolvent count does not exceed |P|+|N| (no clause growth).
+
+// Emit an explicit clause (arr[0..n]) as a DRUP lemma.
+fn emit_clause_lemma(ctx: &!CdclCtx, arr: &[i64; 1024], n: i32) with Mut {
+    let idx = ctx.p_n
+    var start: i32 = 0
+    if idx > 0 { start = ctx.p_start[idx - 1] + ctx.p_len[idx - 1] }
+    if idx >= 16384 { ctx.proof_overflow = 1  return }
+    if (start as i64) + (n as i64) > 65536 { ctx.proof_overflow = 1  return }
+    ctx.p_start[idx] = start
+    ctx.p_len[idx] = n
+    var i: i32 = 0
+    while i < n { ctx.p_lits[start + i] = arr[i]  i = i + 1 }
+    ctx.p_n = idx + 1
+}
+
+// Try to eliminate variable v. Returns 1 if elimination derives the empty clause
+// (UNSAT), else 0. No-op if v is assigned, absent, too connected, or not beneficial.
+// Resolvent construction is inlined (the compiler rejects mutable array-ref params),
+// writing into a local rbuf; rtaut flags a tautological (skipped) resolvent.
+fn bve_try(ctx: &!CdclCtx, v: i32) -> i32 with Mut {
+    if ctx.assign[v] != 0 { return 0 }
+    var pidx: [i32; 64] = [0 as i32; 64]
+    var nidx: [i32; 64] = [0 as i32; 64]
+    var np: i32 = 0
+    var nn: i32 = 0
+    var c: i32 = 0
+    while c < ctx.nclauses {
+        if ctx.lbd[c] != 1000000 {
+            let s = ctx.cstart[c]
+            let l2 = ctx.clen[c]
+            var hasp: i32 = 0
+            var hasn: i32 = 0
+            var k: i32 = 0
+            while k < l2 {
+                let lit = ctx.clits[s + k]
+                if lit_var(lit) == v {
+                    if lit > 0 { hasp = 1 }
+                    if lit < 0 { hasn = 1 }
+                }
+                k = k + 1
+            }
+            if hasp == 1 { if np >= 64 { return 0 }  pidx[np] = c  np = np + 1 }
+            if hasn == 1 { if nn >= 64 { return 0 }  nidx[nn] = c  nn = nn + 1 }
+        }
+        c = c + 1
+    }
+    if np == 0 { return 0 }
+    if nn == 0 { return 0 }
+    if np > 16 { return 0 }
+    if nn > 16 { return 0 }
+    var rbuf: [i64; 1024] = [0 as i64; 1024]
+    // pass 1: count non-tautological resolvents; bail if any is too long
+    var res_count: i32 = 0
+    var i: i32 = 0
+    while i < np {
+        var j: i32 = 0
+        while j < nn {
+            let cp = pidx[i as usize]
+            let cn = nidx[j as usize]
+            var rlen: i32 = 0
+            var rtaut: i32 = 0
+            let sp = ctx.cstart[cp]  let lp = ctx.clen[cp]
+            let sn = ctx.cstart[cn]  let lnn = ctx.clen[cn]
+            // part 1: cp's literals except var v (original clauses are dup/taut-free)
+            var kk: i32 = 0
+            while kk < lp {
+                let l: i64 = ctx.clits[(sp + kk) as usize]
+                if lit_var(l) != v { rbuf[rlen as usize] = l + 0  rlen = rlen + 1 }
+                kk = kk + 1
+            }
+            // part 2: cn's literals except v; dedup + tautology checked against cp by
+            // scanning the SOURCE clause, NOT rbuf (reading then writing the same local
+            // array in one scope is rejected by the compiler — quirk).
+            kk = 0
+            while kk < lnn {
+                let l: i64 = ctx.clits[(sn + kk) as usize]
+                if lit_var(l) != v {
+                    var dup: i32 = 0
+                    var taut: i32 = 0
+                    var k2: i32 = 0
+                    while k2 < lp {
+                        let lp2: i64 = ctx.clits[(sp + k2) as usize]
+                        if lit_var(lp2) != v {
+                            if lp2 == l { dup = 1 }
+                            if lp2 == (0 - l) { taut = 1 }
+                        }
+                        k2 = k2 + 1
+                    }
+                    if taut == 1 { rtaut = 1 }
+                    if dup == 0 { if taut == 0 { rbuf[rlen as usize] = l + 0  rlen = rlen + 1 } }
+                }
+                kk = kk + 1
+            }
+            if rtaut == 0 {
+                if rlen > 10 { return 0 }
+                res_count = res_count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if res_count > np + nn { return 0 }      // would grow the formula → skip
+    // pass 2: rebuild + add resolvents (DRUP lemma + DB clause)
+    i = 0
+    while i < np {
+        var j: i32 = 0
+        while j < nn {
+            let cp = pidx[i as usize]
+            let cn = nidx[j as usize]
+            var rlen: i32 = 0
+            var rtaut: i32 = 0
+            let sp = ctx.cstart[cp]  let lp = ctx.clen[cp]
+            let sn = ctx.cstart[cn]  let lnn = ctx.clen[cn]
+            // part 1: cp's literals except var v (original clauses are dup/taut-free)
+            var kk: i32 = 0
+            while kk < lp {
+                let l: i64 = ctx.clits[(sp + kk) as usize]
+                if lit_var(l) != v { rbuf[rlen as usize] = l + 0  rlen = rlen + 1 }
+                kk = kk + 1
+            }
+            // part 2: cn's literals except v; dedup + tautology checked against cp by
+            // scanning the SOURCE clause, NOT rbuf (reading then writing the same local
+            // array in one scope is rejected by the compiler — quirk).
+            kk = 0
+            while kk < lnn {
+                let l: i64 = ctx.clits[(sn + kk) as usize]
+                if lit_var(l) != v {
+                    var dup: i32 = 0
+                    var taut: i32 = 0
+                    var k2: i32 = 0
+                    while k2 < lp {
+                        let lp2: i64 = ctx.clits[(sp + k2) as usize]
+                        if lit_var(lp2) != v {
+                            if lp2 == l { dup = 1 }
+                            if lp2 == (0 - l) { taut = 1 }
+                        }
+                        k2 = k2 + 1
+                    }
+                    if taut == 1 { rtaut = 1 }
+                    if dup == 0 { if taut == 0 { rbuf[rlen as usize] = l + 0  rlen = rlen + 1 } }
+                }
+                kk = kk + 1
+            }
+            if rtaut == 0 {
+                emit_clause_lemma(ctx, &rbuf, rlen)
+                let _ = db_add_raw(ctx, &rbuf, rlen)
+                if rlen == 0 { return 1 }     // empty resolvent => UNSAT
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // mark the eliminated clauses deleted (solver-side)
+    i = 0
+    while i < np { ctx.lbd[pidx[i]] = 1000000  i = i + 1 }
+    i = 0
+    while i < nn { ctx.lbd[nidx[i]] = 1000000  i = i + 1 }
+    return 0
+}
+
+/// Public: run bounded variable elimination BEFORE cdcl_solve. Adds RUP resolvents
+/// (DRUP-emitted) and marks eliminated clauses deleted (solver-only via an lbd sentinel;
+/// the RUP verifier keeps the originals intact). Sets top_conflict if BVE proves UNSAT.
+/// Returns 1 if UNSAT. Off by default (opt-in via this explicit call). Verdicts are
+/// correct and the DRUP proof RUP self-verifies on both random 3-SAT and pigeonhole.
+/// NB: on the bounded instances here BVE does NOT reduce conflicts (it can hurt PHP by
+/// destroying its structure) — it is a correct, certified pass, not a win at these sizes.
+pub fn cdcl_run_bve(ctx: &!CdclCtx) -> i32 with Mut {
+    if propagate(ctx) >= 0 { ctx.top_conflict = 1  return 1 }
+    var v: i32 = 1
+    while v <= ctx.nvars {
+        if bve_try(ctx, v) == 1 { ctx.top_conflict = 1  return 1 }
+        v = v + 1
+    }
+    return 0
+}
+
+// ============================================================================
+//  Inprocessing: clause vivification (Phase 3b)
+// ============================================================================
+// Asymmetric clause strengthening. For clause C = (l_0..l_{k-1}), assume the
+// negations ¬l_0, ¬l_1, ... at a scratch level, unit-propagating after each. If
+// assuming ¬l_0..¬l_i derives a conflict, then (l_0 ∨ .. ∨ l_i) is implied — a
+// shorter clause. It is RUP (its negation is exactly the assumption set that just
+// unit-propagated to a conflict), so it is DRUP-emitted and the in-language RUP
+// verifier stays valid. The original C is marked deleted via the lbd sentinel
+// (propagate skips it; the verifier keeps it — see the BVE note). Conservative:
+// only the all-unassigned-prefix case (stop at the first already-assigned literal),
+// which keeps the strengthened clause exactly (l_0..l_i) with no bookkeeping.
+
+// Vivify one clause. Returns 1 if it derives the empty clause (cannot here — the
+// shortest strengthening is a unit), else 0. Leaves the level-0 trail clean.
+fn vivify_clause(ctx: &!CdclCtx, c: i32) -> i32 with Mut {
+    let st = ctx.cstart[c]
+    let ln = ctx.clen[c]
+    let save = ctx.trail_len
+    ctx.cur_level = 1
+    var conflict_at: i32 = (0 - 1) as i32
+    var i: i32 = 0
+    while i < ln {
+        let li: i64 = ctx.clits[(st + i) as usize]
+        let val = litval(ctx, li)
+        if val != 0 { i = ln }                 // already assigned → stop (no clean shortening)
+        if val == 0 {
+            enqueue(ctx, 0 - li, (0 - 1) as i32)
+            let cf = propagate(ctx)
+            if cf >= 0 { conflict_at = i  i = ln }   // ¬l_0..¬l_i conflict ⇒ (l_0..l_i) implied
+            i = i + 1
+        }
+    }
+    // undo the scratch trail back to the level-0 prefix
+    while ctx.trail_len > save {
+        ctx.trail_len = ctx.trail_len - 1
+        let q = ctx.trail_lit[ctx.trail_len]
+        let vq = lit_var(q)
+        ctx.assign[vq] = 0
+        ctx.vlevel[vq] = 0
+        ctx.reason[vq] = (0 - 1) as i32
+    }
+    ctx.cur_level = 0
+    if conflict_at >= 0 {
+        let newlen = conflict_at + 1
+        if newlen < ln {                       // strictly shorter ⇒ worth strengthening
+            var buf: [i64; 1024] = [0 as i64; 1024]
+            var m: i32 = 0
+            while m < newlen { buf[m as usize] = ctx.clits[(st + m) as usize] + 0  m = m + 1 }
+            emit_clause_lemma(ctx, &buf, newlen)
+            let _ = db_add_raw(ctx, &buf, newlen)
+            ctx.lbd[c] = 1000000               // delete the original (solver skips; verifier keeps)
+        }
+    }
+    return 0
+}
+
+/// Public: run clause vivification BEFORE cdcl_solve. Strengthens original clauses
+/// with RUP-derived shorter clauses (DRUP-emitted), marking the originals deleted.
+/// Returns 1 if UNSAT. Off by default (opt-in). RUP self-verifies; like the other
+/// inprocessing passes it does not necessarily reduce conflicts at these sizes.
+pub fn cdcl_run_vivify(ctx: &!CdclCtx) -> i32 with Mut {
+    if propagate(ctx) >= 0 { ctx.top_conflict = 1  return 1 }
+    let limit = ctx.nclauses                   // only vivify clauses present before this pass
+    var c: i32 = 0
+    while c < limit {
+        if ctx.lbd[c] != 1000000 {
+            let ln = ctx.clen[c]
+            if ln >= 3 { if ln <= 12 {
+                let _r = vivify_clause(ctx, c)
+            } }
+        }
+        c = c + 1
+    }
+    return 0
+}
+
+// ============================================================================
+//  VSIDS activity (Milestone 1c)
+// ============================================================================
+
+// Bump variable v's activity by the current increment; rescale all activities
+// down if it grows too large (lazy O(1)-amortized decay, MiniSat/smt.sio style).
+fn bump_var(ctx: &!CdclCtx, v: i32) with Mut {
+    ctx.activity[v] = ctx.activity[v] + ctx.var_inc
+    if ctx.activity[v] > 1.0e15 {
+        var i: i32 = 1
+        while i <= ctx.nvars { ctx.activity[i] = ctx.activity[i] * 1.0e-15  i = i + 1 }
+        ctx.var_inc = ctx.var_inc * 1.0e-15
+    }
+}
+
+// ============================================================================
+//  1-UIP conflict analysis + backjump (ported from the verified POC)
+// ============================================================================
+
+// Fills learnt[0..llen] (learnt[0] = asserting UIP literal), emits it as a DRUP
+// lemma, returns the backjump level.
+fn analyze(ctx: &!CdclCtx, confl: i32) -> i32 with Mut {
+    var pathC: i32 = 0
+    ctx.llen = 1               // reserve learnt[0] for the UIP literal
+    var p: i64 = 0             // 0 = undefined (no variable is 0)
+    var ci: i32 = confl
+    var index: i32 = ctx.trail_len - 1
+
+    var go: i32 = 1
+    while go == 1 {
+        let st = ctx.cstart[ci]
+        let ln = ctx.clen[ci]
+        var k: i32 = 0
+        while k < ln {
+            let q = ctx.clits[st + k]
+            let vq = lit_var(q)
+            var skip: i32 = 0
+            if p != 0 { if vq == lit_var(p) { skip = 1 } }
+            if skip == 0 {
+                if ctx.seen[vq] == 0 {
+                    if ctx.vlevel[vq] > 0 {
+                        ctx.seen[vq] = 1
+                        bump_var(ctx, vq)
+                        if ctx.vlevel[vq] >= ctx.cur_level {
+                            pathC = pathC + 1
+                        } else {
+                            ctx.learnt[ctx.llen] = q
+                            ctx.llen = ctx.llen + 1
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+        while index >= 0 && ctx.seen[lit_var(ctx.trail_lit[index])] == 0 { index = index - 1 }
+        if index < 0 { return (0 - 99) as i32 }   // analyze fault: no seen literal on trail
+        p = ctx.trail_lit[index]
+        ctx.seen[lit_var(p)] = 0
+        pathC = pathC - 1
+        if pathC <= 0 {
+            go = 0
+        } else {
+            ci = ctx.reason[lit_var(p)]
+            index = index - 1
+        }
+    }
+    ctx.learnt[0] = 0 - p
+
+    var btlevel: i32 = 0
+    var j: i32 = 1
+    while j < ctx.llen {
+        let lv = ctx.vlevel[lit_var(ctx.learnt[j])]
+        if lv > btlevel { btlevel = lv }
+        j = j + 1
+    }
+    j = 1
+    while j < ctx.llen { ctx.seen[lit_var(ctx.learnt[j])] = 0  j = j + 1 }
+
+    emit_proof_clause(ctx)
+    return btlevel
+}
+
+fn backjump(ctx: &!CdclCtx, btlevel: i32) with Mut {
+    let target = ctx.trail_lim[btlevel + 1]
+    var i: i32 = ctx.trail_len - 1
+    while i >= target {
+        let v = lit_var(ctx.trail_lit[i])
+        ctx.saved_phase[v] = ctx.assign[v]   // phase saving: remember the polarity tried
+        ctx.assign[v] = 0
+        ctx.reason[v] = (0 - 1) as i32
+        ctx.vlevel[v] = 0
+        i = i - 1
+    }
+    ctx.trail_len = target
+    ctx.cur_level = btlevel
+    ctx.qhead = ctx.trail_len   // resume incremental propagation from the truncated trail
+}
+
+// ============================================================================
+//  Branching (Milestone 1a: first-unassigned; VSIDS in 1c)
+// ============================================================================
+
+// VSIDS: among unassigned variables, pick the one of highest activity
+// (linear max-scan; a binary heap is a later performance milestone).
+fn pick_branch_var(ctx: &!CdclCtx) -> i32 {
+    var best: i32 = 0
+    var best_act: f64 = 0.0 - 1.0
+    var v: i32 = 1
+    while v <= ctx.nvars {
+        if ctx.assign[v] == 0 {
+            if ctx.activity[v] > best_act { best_act = ctx.activity[v]  best = v }
+        }
+        v = v + 1
+    }
+    return best
+}
+
+// Decision literal for variable v, honoring the saved phase (default false).
+// ---- deterministic math for ARM C Beta-TS sampling (ported from smt.sio) ----
+fn cdcl_hash_f64(v: i32, step: i32) -> f64 with Div {
+    var h: i32 = (v * 1664525 + step * 22695477 + 1013904223) as i32
+    h = (h ^ (h / 32768)) as i32
+    h = (h * 1664525 + 1013904223) as i32
+    h = (h ^ (h / 16384)) as i32
+    let h30 = h % 1073741824
+    var hpos: i32 = h30
+    if hpos < 0 { hpos = 0 - hpos }
+    if hpos == 0 { hpos = 1 }
+    let u = (hpos as f64) * 0.000000000931322575
+    if u < 0.001 { return 0.001 }
+    if u > 0.999 { return 0.999 }
+    return u
+}
+fn cdcl_sqrt_f64(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    var r: f64 = x
+    if r > 1.0 { r = r * 0.5 }
+    var i: i32 = 0
+    while i < 6 { r = (r + x / r) * 0.5  i = i + 1 }
+    return r
+}
+fn cdcl_ln_f64(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 - 1000.0 }
+    var m: f64 = x
+    var n: i32 = 0
+    while m >= 2.0 { m = m * 0.5  n = n + 1 }
+    while m < 1.0 { m = m * 2.0  n = n - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    let s = y * (1.0 + y2 * (0.33333333333 + y2 * (0.2 + y2 * (0.14285714286 +
+            y2 * (0.11111111111 + y2 * (0.09090909091 + y2 * (0.07692307692 +
+            y2 * (0.06666666667 + y2 * (0.05882352941 + y2 * 0.05263157895)))))))))
+    let ln_2: f64 = 0.69314718055994530941
+    return 2.0 * s + (n as f64) * ln_2
+}
+
+// Decision literal for variable v under the active polarity arm.
+fn decide_lit(ctx: &!CdclCtx, v: i32) -> i64 with Div {
+    // ARM B (target-phasing): use the target snapshot if set, else fall back to saved phase.
+    if ctx.phase_mode == 1 {
+        if ctx.target[v] == 1 { return v as i64 }
+        if ctx.target[v] == (0 - 1) as i32 { return 0 - (v as i64) }
+    }
+    // ARM C (Beta-Bernoulli Thompson sampling): sample N(mu_p, sigma_p^2), true if >= 0.5.
+    // mu_p = alpha/(alpha+beta), sigma_p = sqrt(mu(1-mu)/n_sum) — identical to smt.sio phase_mode=1.
+    if ctx.phase_mode == 2 {
+        let alpha_v = ctx.phase_alpha[v]
+        let beta_v = ctx.phase_beta[v]
+        let n_sum = alpha_v + beta_v
+        let mu_p = alpha_v / n_sum
+        let var_p = mu_p * (1.0 - mu_p) / n_sum
+        let sigma_p = cdcl_sqrt_f64(var_p)
+        let step = ctx.n_decisions as i32
+        let u_mag = cdcl_hash_f64(v + 64, step)
+        let u_sgn = cdcl_hash_f64(v + 96, step)
+        let z_abs = cdcl_sqrt_f64((0.0 - 2.0) * cdcl_ln_f64(u_mag))
+        var sign_p: f64 = 1.0
+        if u_sgn < 0.5 { sign_p = 0.0 - 1.0 }
+        let p_sample = mu_p + sign_p * z_abs * sigma_p
+        if p_sample < 0.5 { return 0 - (v as i64) }
+        return v as i64
+    }
+    // ARM A (saved-phase, default).
+    if ctx.saved_phase[v] == 1 { return v as i64 }
+    return 0 - (v as i64)
+}
+
+// ARM B: snapshot the current assignment as the target whenever we reach a new
+// conflict-free trail high-water mark (the "largest conflict-free trail prefix").
+fn update_target(ctx: &!CdclCtx) with Mut {
+    if ctx.trail_len > ctx.best_trail_len {
+        ctx.best_trail_len = ctx.trail_len
+        var v: i32 = 1
+        while v <= ctx.nvars { ctx.target[v] = ctx.assign[v]  v = v + 1 }
+    }
+}
+
+// ARM C: on a conflict, bump the Beta posterior of every variable in the learnt
+// clause by whether its current (pre-backjump) assignment contributed to the conflict:
+//   assign[v] > 0 (true was bad)  -> phase_beta[v]  += 1
+//   assign[v] < 0 (false was bad) -> phase_alpha[v] += 1
+fn beta_update(ctx: &!CdclCtx) with Mut {
+    var j: i32 = 0
+    while j < ctx.llen {
+        let v = lit_var(ctx.learnt[j])
+        if ctx.assign[v] > 0 { ctx.phase_beta[v] = ctx.phase_beta[v] + 1.0 }
+        if ctx.assign[v] < 0 { ctx.phase_alpha[v] = ctx.phase_alpha[v] + 1.0 }
+        j = j + 1
+    }
+}
+
+// ============================================================================
+//  Restart + clause-database reduction (Milestone 1d/1e)
+// ============================================================================
+
+// Current write position in the literal pool (= end of the last clause).
+fn pool_pos(ctx: &!CdclCtx) -> i32 {
+    if ctx.nclauses == 0 { return 0 }
+    let last = ctx.nclauses - 1
+    return ctx.cstart[last] + ctx.clen[last]
+}
+
+// Restart to decision level 0 (discard the partial assignment, keep saved phases and
+// the Beta/target state) and reduce the learnt-clause DB: keep all original clauses
+// plus low-LBD ("glue", LBD<=3) learnt clauses, drop the rest, compacting the flat
+// literal pool. Safe to run anywhere: it fully unassigns first, so no reason[] entry
+// can dangle to a renumbered clause. The DRUP proof (p_*) is untouched — it keeps every
+// emitted lemma, so dropping solver-side clauses cannot invalidate verification.
+fn restart_and_reduce(ctx: &!CdclCtx) with Mut, Div {
+    // 1) unassign everything (keep saved_phase / target / Beta posteriors)
+    var v: i32 = 1
+    while v <= ctx.nvars {
+        if ctx.assign[v] != 0 { ctx.saved_phase[v] = ctx.assign[v] }
+        ctx.assign[v] = 0
+        ctx.reason[v] = (0 - 1) as i32
+        ctx.vlevel[v] = 0
+        v = v + 1
+    }
+    ctx.trail_len = 0
+    ctx.cur_level = 0
+    ctx.qhead = 0
+
+    // 2) compact: keep originals + LBD<=3 learnt clauses, drop the rest
+    var w: i32 = 0      // write cursor into the literal pool
+    var wc: i32 = 0     // write cursor into the clause table
+    var c: i32 = 0
+    while c < ctx.nclauses {
+        var keep: i32 = 0
+        if c < ctx.n_original { keep = 1 }
+        if ctx.lbd[c] <= 3 { keep = 1 }
+        // NB: do NOT drop BVE-deleted clauses (lbd==1000000) here. Dropping them would
+        // renumber/compact the originals, breaking the [0, orig_nc) layout that
+        // cdcl_verify replays the DRUP proof against (manifested as rup=-1 on PHP after
+        // a restart). propagate already skips them via the sentinel, so the solver gets
+        // the elimination benefit without dropping them from the array.
+        if keep == 1 {
+            let st = ctx.cstart[c]
+            let ln = ctx.clen[c]
+            var k: i32 = 0
+            while k < ln { ctx.clits[w + k] = ctx.clits[st + k]  k = k + 1 }
+            ctx.cstart[wc] = w
+            ctx.clen[wc] = ln
+            ctx.lbd[wc] = ctx.lbd[c]
+            w = w + ln
+            wc = wc + 1
+        }
+        c = c + 1
+    }
+    ctx.nclauses = wc
+
+    // 2.5) REBUILD the watch lists from scratch. Compaction just renumbered clause
+    // indices AND moved literal-pool positions, so every watch_head/wnext pointer
+    // (which is keyed by clause index + slot) is now stale. Without this rebuild the
+    // watched propagator reads garbage after the first restart — manifesting as an
+    // analyze trail-walk underflow (result=4) or an invalid DRUP proof (rup=-1) on
+    // PHP K_6+. All variables are unassigned at this point, so re-watching slot 0/1 of
+    // every surviving clause re-establishes a valid two-watched invariant. (This does
+    // NOT alter which clauses survive — the clause-keeping logic in step 2 is intact.)
+    var wi: i32 = 0
+    while wi < 2050 { ctx.watch_head[wi] = (0 - 1) as i32  wi = wi + 1 }
+    wi = 0
+    while wi < 32768 { ctx.wnext[wi] = (0 - 1) as i32  wi = wi + 1 }
+    var rc: i32 = 0
+    while rc < ctx.nclauses {
+        if ctx.clen[rc] >= 2 {
+            if ctx.lbd[rc] != 1000000 {        // skip BVE-deleted clauses (kept in array, not watched)
+                let st = ctx.cstart[rc]
+                let w0 = ctx.clits[st]
+                let w1 = ctx.clits[st + 1]
+                let c0 = lit_code(w0)
+                let c1 = lit_code(w1)
+                ctx.wnext[2 * rc + 0] = ctx.watch_head[c0]
+                ctx.watch_head[c0] = rc
+                ctx.wnext[2 * rc + 1] = ctx.watch_head[c1]
+                ctx.watch_head[c1] = rc
+            }
+        }
+        rc = rc + 1
+    }
+
+    // 3) schedule the next restart (geometric growth)
+    ctx.n_restarts = ctx.n_restarts + 1
+    ctx.confl_since_restart = 0
+    ctx.restart_limit = ctx.restart_limit + ctx.restart_limit / 2
+}
+
+// ============================================================================
+//  Main CDCL loop
+// ============================================================================
+
+/// Public: solve the current clause DB.
+/// Returns 1 = SAT, 0 = UNSAT (DRUP proof accumulated in p_*), 2 = conflict cap hit,
+/// 3 = bounded clause DB exhausted (instance too hard for 1a without clause reduction).
+pub fn cdcl_solve(ctx: &!CdclCtx) -> i32 with Mut, Div {
+    ctx.cur_level = 0
+    ctx.trail_lim[0] = 0
+    ctx.qhead = 0
+    if ctx.top_conflict == 1 { emit_empty(ctx)  return 0 }
+    ctx.n_original = ctx.nclauses   // originals (+ any probing units added pre-solve)
+    var loops: i32 = 1
+    while loops == 1 {
+        var confl: i32 = (0 - 1) as i32
+        if ctx.use_watched == 1 { confl = propagate_watched(ctx) }
+        if ctx.use_watched == 0 { confl = propagate(ctx) }
+        if confl >= 0 {
+            ctx.n_conflicts = ctx.n_conflicts + 1
+            if ctx.n_conflicts > ctx.conflict_cap { return 2 }
+            if ctx.cur_level == 0 {
+                emit_empty(ctx)
+                return 0
+            }
+            let bt = analyze(ctx, confl)
+            if bt < 0 { return 4 }   // analyze fault (trail-walk underflow) — should not happen
+            beta_update(ctx)         // ARM C: Beta posterior update (pre-backjump, assignments valid)
+            ctx.var_inc = ctx.var_inc * 1.0526315789473685   // VSIDS decay (= 1/0.95 per conflict)
+            let lidx = db_add_learnt(ctx)
+            if lidx < 0 { return 3 }   // bounded clause DB exhausted (needs 1d reduction)
+            backjump(ctx, bt)
+            let uip = ctx.learnt[0]
+            enqueue(ctx, uip, lidx)
+            // restart + clause-DB reduction (1d/1e): on schedule or pool pressure
+            ctx.confl_since_restart = ctx.confl_since_restart + 1
+            var do_restart: i32 = 0
+            if ctx.confl_since_restart >= ctx.restart_limit { do_restart = 1 }
+            if pool_pos(ctx) > 60000 { do_restart = 1 }
+            if do_restart == 1 { restart_and_reduce(ctx) }
+        } else {
+            update_target(ctx)       // ARM B: refresh target snapshot at this conflict-free fixpoint
+            let x = pick_branch_var(ctx)
+            if x == 0 { return 1 }
+            ctx.n_decisions = ctx.n_decisions + 1
+            ctx.cur_level = ctx.cur_level + 1
+            ctx.trail_lim[ctx.cur_level] = ctx.trail_len
+            let dl = decide_lit(ctx, x)
+            enqueue(ctx, dl, (0 - 1) as i32)
+        }
+    }
+    return 2
+}
+
+// ============================================================================
+//  Independent RUP checker (replays p_* against the original formula)
+// ============================================================================
+
+fn reset_assign_full(ctx: &!CdclCtx) with Mut {
+    var i: i32 = 0
+    while i <= ctx.nvars { ctx.assign[i] = 0  i = i + 1 }
+}
+
+fn rup_add_lemma(ctx: &!CdclCtx, pst: i32, pln: i32) with Mut {
+    if ctx.nclauses >= 16384 { return }
+    let idx = ctx.nclauses
+    var start: i32 = 0
+    if idx > 0 { start = ctx.cstart[idx - 1] + ctx.clen[idx - 1] }
+    if (start as i64) + (pln as i64) > 65536 { return }
+    ctx.cstart[idx] = start
+    ctx.clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { ctx.clits[start + i] = ctx.p_lits[pst + i]  i = i + 1 }
+    ctx.nclauses = idx + 1
+}
+
+// Propagation for the RUP checker: assigns implied units (level 0), returns 1 on
+// conflict. Independent of trail/levels — pure clause logic.
+fn propagate_noenq(ctx: &!CdclCtx) -> i32 with Mut {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < ctx.nclauses {
+            let st = ctx.cstart[c]
+            let ln = ctx.clen[c]
+            var sat: i32 = 0
+            var un: i32 = 0
+            var last: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = ctx.clits[st + k]
+                let v = lit_var(l)
+                var a = ctx.assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { un = un + 1  last = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if un == 0 { return 1 }
+                if un == 1 {
+                    let v = lit_var(last)
+                    if last < 0 { ctx.assign[v] = (0 - 1) as i32 } else { ctx.assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+
+/// Public: verify the accumulated DRUP proof against clauses [0, orig_nc).
+/// Returns 1 = VERIFIED UNSAT, 0 = proof did not reach the empty clause,
+/// -1 = a lemma failed the RUP check (proof INVALID).
+/// NOTE: destructive — appends lemmas into the clause DB; call after cdcl_solve,
+/// on a context you will not solve again.
+pub fn cdcl_verify(ctx: &!CdclCtx, orig_nc: i32) -> i32 with Mut {
+    if ctx.proof_overflow == 1 { return (0 - 2) as i32 }   // proof truncated — verdict trusted via external crosscheck
+    ctx.nclauses = orig_nc
+    var pi: i32 = 0
+    while pi < ctx.p_n {
+        let pst = ctx.p_start[pi]
+        let pln = ctx.p_len[pi]
+        reset_assign_full(ctx)
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = ctx.p_lits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = (0 - 1) as i32
+            if l < 0 { want = 1 }
+            if ctx.assign[v] != 0 { if ctx.assign[v] != want { taut = 1 } }
+            ctx.assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 { ok = 1 } else {
+            let cf = propagate_noenq(ctx)
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return (0 - 1) as i32 }
+        if pln == 0 { return 1 }
+        rup_add_lemma(ctx, pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+// ============================================================================
+//  Accessors
+// ============================================================================
+
+pub fn cdcl_nvars(ctx: &!CdclCtx) -> i32 { return ctx.nvars }
+pub fn cdcl_nclauses(ctx: &!CdclCtx) -> i32 { return ctx.nclauses }
+/// Public: clause introspection (for emitting DIMACS to an external oracle).
+/// Valid for c in [0, nclauses); k in [0, cdcl_clause_len(ctx,c)).
+pub fn cdcl_clause_len(ctx: &!CdclCtx, c: i32) -> i32 { return ctx.clen[c] }
+pub fn cdcl_clause_lit(ctx: &!CdclCtx, c: i32, k: i32) -> i64 { return ctx.clits[ctx.cstart[c] + k] }
+pub fn cdcl_n_conflicts(ctx: &!CdclCtx) -> i64 { return ctx.n_conflicts }
+pub fn cdcl_n_decisions(ctx: &!CdclCtx) -> i64 { return ctx.n_decisions }
+pub fn cdcl_proof_len(ctx: &!CdclCtx) -> i32 { return ctx.p_n }
+pub fn cdcl_n_restarts(ctx: &!CdclCtx) -> i64 { return ctx.n_restarts }
+
+/// Return the final SAT assignment for a one-based DIMACS variable.
+/// Values are 1=true, -1=false, and 0=unassigned/out of range.
+pub fn cdcl_assignment(ctx: &!CdclCtx, var_id: i32) -> i32 {
+    if var_id <= 0 { return 0 }
+    if var_id >= 1024 { return 0 }
+    return ctx.assign[var_id]
+}
+
+/// Read-only access to the accumulated DRUP trace. These accessors let a thin
+/// host driver serialize the native proof without exposing mutable solver state.
+pub fn cdcl_proof_clause_len(ctx: &!CdclCtx, proof_idx: i32) -> i32 {
+    if proof_idx < 0 { return 0 - 1 }
+    if proof_idx >= ctx.p_n { return 0 - 1 }
+    return ctx.p_len[proof_idx]
+}
+
+pub fn cdcl_proof_clause_lit(ctx: &!CdclCtx, proof_idx: i32, lit_idx: i32) -> i64 {
+    if proof_idx < 0 { return 0 }
+    if proof_idx >= ctx.p_n { return 0 }
+    let len = ctx.p_len[proof_idx]
+    if lit_idx < 0 { return 0 }
+    if lit_idx >= len { return 0 }
+    return ctx.p_lits[ctx.p_start[proof_idx] + lit_idx]
+}
+
+/// Public: set the conflict cap (default 5_000_000).
+pub fn cdcl_set_conflict_cap(ctx: &!CdclCtx, cap: i64) with Mut { ctx.conflict_cap = cap }
+
+/// Public: select the polarity arm — 0 = saved-phase (default), 1 = target-phasing,
+/// 2 = Beta-Bernoulli Thompson sampling. Set before cdcl_solve.
+pub fn cdcl_set_phase_mode(ctx: &!CdclCtx, mode: i32) with Mut { ctx.phase_mode = mode }
+pub fn cdcl_set_restart_limit(ctx: &!CdclCtx, lim: i64) with Mut { ctx.restart_limit = lim }
+
+/// Public: select propagation engine — 1 = two-watched (default), 0 = full-scan (cross-check).
+/// Enable / disable two-watched-literals propagation. These write a LITERAL to the
+/// field unconditionally — under madaros-relocgate a `ctx.field = <param>` store (or
+/// a store guarded by a `<param>`-based condition) to this large struct does not
+/// reliably take effect, while an unconditional `ctx.field = <literal>` store does.
+/// (Diagnosed via a set+read round-trip: literal store sticks, param store does not.)
+pub fn cdcl_enable_watched(ctx: &!CdclCtx) with Mut { ctx.use_watched = 1 }
+pub fn cdcl_disable_watched(ctx: &!CdclCtx) with Mut { ctx.use_watched = 0 }
+
+/// Back-compat setter. Routes through the literal-store enable/disable above so the
+/// write actually takes effect (do not write `ctx.use_watched = on` here — it won't).
+pub fn cdcl_set_watched(ctx: &!CdclCtx, on: i32) with Mut {
+    if on == 1 { cdcl_enable_watched(ctx) }
+    if on != 1 { cdcl_disable_watched(ctx) }
+}
+
+// TEMP probe accessors (diagnostic; remove)
+pub fn cdcl_dbg_uw(ctx: &!CdclCtx) -> i32 { return ctx.use_watched }
+pub fn cdcl_dbg_tc(ctx: &!CdclCtx) -> i32 { return ctx.top_conflict }
+pub fn cdcl_dbg_wh2(ctx: &!CdclCtx) -> i32 { return ctx.watch_head[2] }
+pub fn cdcl_dbg_stale(ctx: &!CdclCtx) -> i32 { return ctx.dbg_stale }
+
+// ===========================================================================
+// Differential-oracle hooks (diagnostic): let a harness drive the raw
+// propagators on an externally-supplied partial assignment, so full-scan
+// and watched can be compared on the SAME state. Enqueue at level 0 only.
+// ===========================================================================
+pub fn cdcl_dbg_enqueue_lvl0(ctx: &!CdclCtx, lit: i64) with Mut {
+    ctx.cur_level = 0
+    enqueue(ctx, lit, (0 - 1) as i32)
+}
+pub fn cdcl_dbg_propagate_full(ctx: &!CdclCtx) -> i32 with Mut { return propagate(ctx) }
+pub fn cdcl_dbg_propagate_watched(ctx: &!CdclCtx) -> i32 with Mut {
+    ctx.qhead = 0
+    return propagate_watched(ctx)
+}
+pub fn cdcl_dbg_assign(ctx: &!CdclCtx, v: i32) -> i32 { return ctx.assign[v] }
+pub fn cdcl_dbg_trail_len(ctx: &!CdclCtx) -> i32 { return ctx.trail_len }
+pub fn cdcl_dbg_trail_lit(ctx: &!CdclCtx, i: i32) -> i64 { return ctx.trail_lit[i] }
+pub fn cdcl_dbg_clen(ctx: &!CdclCtx, c: i32) -> i32 { return ctx.clen[c] }
+pub fn cdcl_dbg_clit(ctx: &!CdclCtx, c: i32, k: i32) -> i64 { return ctx.clits[ctx.cstart[c] + k] }
+pub fn cdcl_dbg_watch_head(ctx: &!CdclCtx, code: i32) -> i32 { return ctx.watch_head[code] }
+pub fn cdcl_dbg_wnext(ctx: &!CdclCtx, i: i32) -> i32 { return ctx.wnext[i] }
+pub fn cdcl_dbg_litcode(l: i64) -> i32 { return lit_code(l) }
+pub fn cdcl_dbg_litval(ctx: &!CdclCtx, l: i64) -> i32 { return litval(ctx, l) }

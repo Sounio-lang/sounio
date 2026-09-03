@@ -255,140 +255,38 @@ fn hc_alloc_sixteen(s: HypercomplexPtxState) -> (HypercomplexPtxState, SixteenVe
 // Returns +1 or -1 for the sign of e_i * e_j.
 // e_0 is the identity so sign is always +1 when either index is 0.
 // e_i * e_i = -1 for i > 0.
+// Recursive Cayley–Dickson twist sign σ(i,j,bits) ∈ {+1,−1} — canonical Convention X
+// (matches stdlib cd_sigma; see stdlib/algebra/README.md). Migrated from the former Fano-triple
+// table (Convention Y, e1·e2=+e4) so GPU octonion multiplication agrees with the CPU (e1·e2=+e3).
+fn gpu_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return gpu_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return gpu_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return gpu_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - gpu_oct_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - gpu_oct_cd_sigma(0, a_lo, bits - 1) }
+    gpu_oct_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
 fn oct_mul_sign(i: i64, j: i64) -> i64 {
-    // Identity element
-    if i == 0 { return 1 }
-    if j == 0 { return 1 }
-    // Self-product: e_i * e_i = -1
-    if i == j { return -1 }
-
-    // Fano plane line (1,2,4): e1*e2=+e4, e2*e4=+e1, e4*e1=+e2
-    if i == 1 && j == 2 { return 1 }
-    if i == 2 && j == 1 { return -1 }
-    if i == 2 && j == 4 { return 1 }
-    if i == 4 && j == 2 { return -1 }
-    if i == 4 && j == 1 { return 1 }
-    if i == 1 && j == 4 { return -1 }
-
-    // Fano plane line (2,3,5): e2*e3=+e5, e3*e5=+e2, e5*e2=+e3
-    if i == 2 && j == 3 { return 1 }
-    if i == 3 && j == 2 { return -1 }
-    if i == 3 && j == 5 { return 1 }
-    if i == 5 && j == 3 { return -1 }
-    if i == 5 && j == 2 { return 1 }
-    if i == 2 && j == 5 { return -1 }
-
-    // Fano plane line (3,4,6): e3*e4=+e6, e4*e6=+e3, e6*e3=+e4
-    if i == 3 && j == 4 { return 1 }
-    if i == 4 && j == 3 { return -1 }
-    if i == 4 && j == 6 { return 1 }
-    if i == 6 && j == 4 { return -1 }
-    if i == 6 && j == 3 { return 1 }
-    if i == 3 && j == 6 { return -1 }
-
-    // Fano plane line (4,5,7): e4*e5=+e7, e5*e7=+e4, e7*e4=+e5
-    if i == 4 && j == 5 { return 1 }
-    if i == 5 && j == 4 { return -1 }
-    if i == 5 && j == 7 { return 1 }
-    if i == 7 && j == 5 { return -1 }
-    if i == 7 && j == 4 { return 1 }
-    if i == 4 && j == 7 { return -1 }
-
-    // Fano plane line (5,6,1): e5*e6=+e1, e6*e1=+e5, e1*e5=+e6  (wait: cyclic)
-    // (a,b,c)=(5,6,1): e5*e6=+e1, e6*e1=+e5, e1*e5=+e6
-    if i == 5 && j == 6 { return 1 }
-    if i == 6 && j == 5 { return -1 }
-    if i == 6 && j == 1 { return 1 }
-    if i == 1 && j == 6 { return -1 }
-    if i == 1 && j == 5 { return 1 }
-    if i == 5 && j == 1 { return -1 }
-
-    // Fano plane line (6,7,2): e6*e7=+e2, e7*e2=+e6, e2*e6=+e7
-    if i == 6 && j == 7 { return 1 }
-    if i == 7 && j == 6 { return -1 }
-    if i == 7 && j == 2 { return 1 }
-    if i == 2 && j == 7 { return -1 }
-    if i == 2 && j == 6 { return 1 }
-    if i == 6 && j == 2 { return -1 }
-
-    // Fano plane line (7,1,3): e7*e1=+e3, e1*e3=+e7, e3*e7=+e1
-    if i == 7 && j == 1 { return 1 }
-    if i == 1 && j == 7 { return -1 }
-    if i == 1 && j == 3 { return 1 }
-    if i == 3 && j == 1 { return -1 }
-    if i == 3 && j == 7 { return 1 }
-    if i == 7 && j == 3 { return -1 }
-
-    // Should not reach here for valid indices 0..7
-    0
+    // Canonical Convention X sign via the Cayley–Dickson cocycle (XOR index).
+    gpu_oct_cd_sigma(i, j, 3)
 }
 
 // Returns index k such that e_i * e_j = sign * e_k.
 // When i==0: result is e_j. When j==0: result is e_i.
 // When i==j && i>0: result is e_0 (scalar, with sign -1).
 fn oct_mul_basis(i: i64, j: i64) -> i64 {
-    if i == 0 { return j }
-    if j == 0 { return i }
-    if i == j { return 0 }
-
-    // Fano line (1,2,4)
-    if i == 1 && j == 2 { return 4 }
-    if i == 2 && j == 1 { return 4 }
-    if i == 2 && j == 4 { return 1 }
-    if i == 4 && j == 2 { return 1 }
-    if i == 4 && j == 1 { return 2 }
-    if i == 1 && j == 4 { return 2 }
-
-    // Fano line (2,3,5)
-    if i == 2 && j == 3 { return 5 }
-    if i == 3 && j == 2 { return 5 }
-    if i == 3 && j == 5 { return 2 }
-    if i == 5 && j == 3 { return 2 }
-    if i == 5 && j == 2 { return 3 }
-    if i == 2 && j == 5 { return 3 }
-
-    // Fano line (3,4,6)
-    if i == 3 && j == 4 { return 6 }
-    if i == 4 && j == 3 { return 6 }
-    if i == 4 && j == 6 { return 3 }
-    if i == 6 && j == 4 { return 3 }
-    if i == 6 && j == 3 { return 4 }
-    if i == 3 && j == 6 { return 4 }
-
-    // Fano line (4,5,7)
-    if i == 4 && j == 5 { return 7 }
-    if i == 5 && j == 4 { return 7 }
-    if i == 5 && j == 7 { return 4 }
-    if i == 7 && j == 5 { return 4 }
-    if i == 7 && j == 4 { return 5 }
-    if i == 4 && j == 7 { return 5 }
-
-    // Fano line (5,6,1)
-    if i == 5 && j == 6 { return 1 }
-    if i == 6 && j == 5 { return 1 }
-    if i == 6 && j == 1 { return 5 }
-    if i == 1 && j == 6 { return 5 }
-    if i == 1 && j == 5 { return 6 }
-    if i == 5 && j == 1 { return 6 }
-
-    // Fano line (6,7,2)
-    if i == 6 && j == 7 { return 2 }
-    if i == 7 && j == 6 { return 2 }
-    if i == 7 && j == 2 { return 6 }
-    if i == 2 && j == 7 { return 6 }
-    if i == 2 && j == 6 { return 7 }
-    if i == 6 && j == 2 { return 7 }
-
-    // Fano line (7,1,3)
-    if i == 7 && j == 1 { return 3 }
-    if i == 1 && j == 7 { return 3 }
-    if i == 1 && j == 3 { return 7 }
-    if i == 3 && j == 1 { return 7 }
-    if i == 3 && j == 7 { return 1 }
-    if i == 7 && j == 3 { return 1 }
-
-    // Unreachable for valid 0..7 inputs
-    0
+    // e_i·e_j lands in e_{i⊕j} (XOR indexing) — Convention X.
+    i ^ j
 }
 
 // ============================================================================

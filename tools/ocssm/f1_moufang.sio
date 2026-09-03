@@ -1,0 +1,180 @@
+// tools/ocssm/f1_moufang.sio
+//
+// F1 — Moufang/alternativity test for the homology functor F: C_dial → C_𝕆.
+//
+// Plan reference: project_octonion_homology_functor.md M3 (wk 11–12).
+// Preprint reference: ocssm_preprint_skeleton.md §6.1.
+//
+// CONTRACT:
+//
+//   For an alternative algebra (𝕆 is alternative, by Artin's theorem),
+//   the associator [x, x, v] vanishes identically:
+//
+//     [x, x, v] = (x · x) · v − x · (x · v) = 0  for all x, v ∈ 𝕆
+//
+//   The F1 statistic is the empirical mean over repetition triples
+//   (u_i = u_j, v) of the normalised associator norm:
+//
+//     τ_alt(u, v) = ‖[e(u), e(u), e(v)]‖ / (‖e(u)‖² · ‖e(v)‖)
+//
+//   Threshold: τ_alt ≤ 10⁻¹² over the corpus to PASS.
+//   Mou threshold: τ_mou ≤ 10⁻¹¹ for the Moufang identity (degenerate case).
+//
+//   The plan also requires CONTRAST ≥ 10³ against a no-R1-R7 control
+//   (random sign-tensor algebra). That control test is a separate run;
+//   this file computes only the τ_alt statistic.
+//
+// CURRENT STATE (M3 scaffold — landed 2026-04-30):
+//
+//   The corpus loader (SWDA) is not yet wired. This run uses a synthetic
+//   8-utterance trajectory with planted hash repetitions to exercise the
+//   F1 algorithm end-to-end. The output is the F1 statistic; on real 𝕆
+//   the value is bounded by f64 machine epsilon (~10⁻¹⁵), well below
+//   τ_alt = 10⁻¹².
+//
+//   This file defines the F1 algorithm. The corpus binding lives in
+//   `tools/ocssm/swda_loader.py` (M3a, not yet shipped). The intended
+//   data-flow is:
+//
+//     SWDA CSV → swda_loader.py → hashes.bin → f1_moufang.sio reads bin
+//
+//   For now we hand-build the trajectory inside main().
+
+use stdlib::math::pure::*
+use stdlib::dialogue::trajectory::*
+use stdlib::dialogue::embed::*
+use stdlib::algebra::octonion::*
+
+// ============================================================================
+// THRESHOLDS
+// ============================================================================
+//
+// We work in squared form throughout — the F1 statistic
+//   τ_alt = ‖[x,x,y]‖ / (‖x‖² · ‖y‖)
+// becomes
+//   τ_alt² = ‖[x,x,y]‖² / (‖x‖⁴ · ‖y‖²)
+// and the threshold τ_alt ≤ 1e-12 becomes τ_alt² ≤ 1e-24. This avoids the
+// stdlib sqrt's poor convergence for very small inputs (Newton starts at
+// y₀ = x and would need ~56 iterations to converge from way-below-true-
+// sqrt; stdlib runs only 20). Statistics are mathematically equivalent.
+
+// Decimal literals beyond ~17 zeros parse as 0.0 in this compiler — use
+// multiplicative construction. 1e-24 = 1 / (1e6)^4; 1e-22 = 1e-24 * 100.
+fn f1_tau_alt_sq() -> f64 with Mut, Div, Panic {
+    let m: f64 = 1000000.0
+    return 1.0 / (m * m * m * m)
+}
+fn f1_tau_mou_sq() -> f64 with Mut, Div, Panic {
+    return f1_tau_alt_sq() * 100.0
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn f1_norm_sq(v: &[f64; 8]) -> f64 {
+    return v[0]*v[0] + v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
+         + v[4]*v[4] + v[5]*v[5] + v[6]*v[6] + v[7]*v[7]
+}
+
+// τ_alt² for a single triple (x, x, y)
+fn f1_alt_stat_sq(x: &[f64; 8], y: &[f64; 8]) -> f64 with Mut, Div, Panic, NonAssoc, NaturalityG2 {
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(x, x, y, &!assoc)
+    let num_sq: f64 = f1_norm_sq(&assoc)
+    let x_sq: f64 = f1_norm_sq(x)
+    let y_sq: f64 = f1_norm_sq(y)
+    let den_sq: f64 = x_sq * x_sq * y_sq
+    if den_sq < 0.0000000000000001 { return 0.0 }
+    return num_sq / den_sq
+}
+
+// ============================================================================
+// AGGREGATE OVER A TRAJECTORY
+// ============================================================================
+//
+// Iterates pairs (i, j), j > i; if hashes match, picks v from a third
+// non-matching utterance and accumulates τ_alt. Returns the empirical
+// mean. If no repetition triples found, returns 0.0 (caller should
+// interpret as N/A).
+
+pub fn f1_compute_sq(t: &Trajectory) -> f64 with Mut, Div, Panic, NonAssoc, NaturalityG2 {
+    let n: i64 = traj_len(t)
+    if n < 3 { return 0.0 }
+
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            let hi: i64 = traj_hash(t, i)
+            let hj: i64 = traj_hash(t, j)
+            if hi == hj {
+                // find a third utterance with a different hash
+                var k: i64 = 0
+                var v_idx: i64 = -1
+                while k < n {
+                    let hk: i64 = traj_hash(t, k)
+                    if hk != hi { v_idx = k; k = n }
+                    k = k + 1
+                }
+                if v_idx >= 0 {
+                    var x: [f64; 8] = [0.0; 8]
+                    var y: [f64; 8] = [0.0; 8]
+                    embed_into(hi, &x)
+                    embed_into(traj_hash(t, v_idx), &y)
+                    sum = sum + f1_alt_stat_sq(&x, &y)
+                    count = count + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return 0.0 }
+    return sum / (count as f64)
+}
+
+// ============================================================================
+// MAIN — synthetic 8-utterance trajectory with planted repetitions
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Div, Panic, NonAssoc, NaturalityG2 {
+    var t: Trajectory = traj_empty()
+
+    // u0 hash 100 — A speaks
+    // u1 hash 200 — B replies
+    // u2 hash 100 — A repeats (rep pair 0)
+    // u3 hash 300 — B speaks
+    // u4 hash 200 — B repeats (rep pair 1)
+    // u5 hash 400 — A speaks
+    // u6 hash 300 — B repeats (rep pair 2)
+    // u7 hash 500 — A speaks
+    let _n0: i64 = traj_push(&t, 0, 100, 1, 0, 8)
+    let _n1: i64 = traj_push(&t, 1, 200, 1, 0, 8)
+    let _n2: i64 = traj_push(&t, 0, 100, 1, 0, 8)
+    let _n3: i64 = traj_push(&t, 1, 300, 1, 0, 8)
+    let _n4: i64 = traj_push(&t, 1, 200, 1, 0, 8)
+    let _n5: i64 = traj_push(&t, 0, 400, 1, 0, 8)
+    let _n6: i64 = traj_push(&t, 1, 300, 1, 0, 8)
+    let _n7: i64 = traj_push(&t, 0, 500, 1, 0, 8)
+
+    let stat_sq: f64 = f1_compute_sq(&t)
+    let thresh: f64 = f1_tau_alt_sq()
+
+    // Display: ratio = stat_sq / thresh. Below 1.0 means PASS.
+    var ratio: f64 = 0.0
+    if thresh > 0.0 { ratio = stat_sq / thresh }
+    print("F1 stat / threshold = "); println(ratio)
+
+    var ok: i64 = 1
+    if stat_sq >= thresh { ok = 0 }
+
+    if ok == 1 {
+        print("PASS  (tau_alt_sq < 1e-24, i.e. tau_alt < 1e-12)\n")
+    } else {
+        print("FAIL  (tau_alt_sq >= 1e-24)\n")
+    }
+    return 0
+}

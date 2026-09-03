@@ -10,7 +10,7 @@
 //
 // Usage:
 //   var t = csv_table_new()
-//   let rc = csv_parse(&input, input_len, &!t, 44u8)   // 44 = ','
+//   let rc = csv_parse(&input, input_len, &!t, (44 as u8))   // 44 = ','
 //   assert(rc == 0)
 //   let m = csv_col_mean(&t, 0)
 
@@ -52,7 +52,7 @@ pub struct CsvTable {
     pub max_rows:    i32,               // fixed: CSV_MAX_ROWS
     pub max_cols:    i32,               // fixed: CSV_MAX_COLS
     pub has_header:  i32,               // 0 = no, 1 = yes
-    pub header_bytes: [[u8; 32]; 16],  // column names
+    pub header_bytes: [u8; 512],       // column names, flattened: col * 32 + byte
     pub header_lens: [i32; 16],         // byte length of each name
 }
 
@@ -69,7 +69,7 @@ pub fn csv_table_new() -> CsvTable {
         max_rows:     256,
         max_cols:     16,
         has_header:   0,
-        header_bytes: [[0u8; 32]; 16],
+        header_bytes: [0u8; 512],
         header_lens:  [0; 16],
     }
 }
@@ -119,12 +119,12 @@ pub fn csv_table_add_row(t: &!CsvTable, values: &[f64; 16], n_cols: i32) with Mu
 
 // True when c is ASCII alphabetic (header-detection heuristic).
 fn is_alpha(c: u8) -> bool {
-    (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8)
+    (c >= (65 as u8) && c <= (90 as u8)) || (c >= (97 as u8) && c <= (122 as u8))
 }
 
 // True when c is a decimal digit.
 fn is_digit(c: u8) -> bool {
-    c >= 48u8 && c <= 57u8
+    c >= (48 as u8) && c <= (57 as u8)
 }
 
 // Raise 10.0 to integer power n  (n >= 0).
@@ -138,37 +138,48 @@ fn pow10(n: i32) -> f64 {
     r
 }
 
-/// Parse an f64 from bytes[start..end) (exclusive end).
-/// Handles optional leading '-', integer part, optional '.' + fraction.
-/// Returns 0.0 for an empty range.
-fn parse_f64(bytes: &[u8; 4096], start: i32, end: i32) -> f64 with Mut, Div, Panic {
-    if start >= end { return 0.0 }
+/// Field-buffer capacity for a single numeric CSV cell (see NOTE below).
+const CSV_FIELD_CAP: i32 = 64
 
-    var pos: i32 = start
+/// Parse an f64 from a *field-local* buffer buf[0..n) (index 0 based).
+/// Handles optional leading '-', integer part, optional '.' + fraction.
+//
+// NOTE (compiler workaround, do not "simplify" away): the caller MUST copy the
+// field's bytes into a fresh local buffer and call this with the copy — never pass
+// csv_parse's `input` ref straight through with a nonzero start. The current
+// lean_single backend miscompiles the integer-digit loop of a function that indexes
+// a *re-passed* `&[u8; N]` ref at a nonzero start offset: it accumulates nothing, so
+// every CSV field after column 0 parsed as 0.0. Parsing from a local buffer at
+// start 0 (and doing the offset copy in csv_parse, which owns the ref directly)
+// dodges the defect. Minimal repro filed for the compiler owner.
+fn parse_num(buf: &[u8; 64], n: i32) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+
+    var i: i32 = 0
     var neg: i32 = 0
 
     // Sign
-    if bytes[pos as usize] == 45u8 {   // '-'
+    if buf[0] == (45 as u8) {   // '-'
         neg = 1
-        pos = pos + 1
+        i = 1
     }
 
     // Integer part
     var int_part: f64 = 0.0
-    while pos < end && is_digit(bytes[pos as usize]) {
-        int_part = int_part * 10.0 + ((bytes[pos as usize] as i32) - 48) as f64
-        pos = pos + 1
+    while i < n && is_digit(buf[i as usize]) {
+        int_part = int_part * 10.0 + ((buf[i as usize] as i32) - 48) as f64
+        i = i + 1
     }
 
     // Fractional part
     var frac: f64 = 0.0
-    if pos < end && bytes[pos as usize] == 46u8 {   // '.'
-        pos = pos + 1
+    if i < n && buf[i as usize] == (46 as u8) {   // '.'
+        i = i + 1
         var denom: f64 = 10.0
-        while pos < end && is_digit(bytes[pos as usize]) {
-            frac = frac + ((bytes[pos as usize] as i32) - 48) as f64 / denom
+        while i < n && is_digit(buf[i as usize]) {
+            frac = frac + ((buf[i as usize] as i32) - 48) as f64 / denom
             denom = denom * 10.0
-            pos = pos + 1
+            i = i + 1
         }
     }
 
@@ -181,9 +192,26 @@ fn parse_f64(bytes: &[u8; 4096], start: i32, end: i32) -> f64 with Mut, Div, Pan
 // CSV parser
 // =============================================================================
 
+/// Parse a CSV held in a `string` (e.g. the result of the `read_file` builtin) into `table`.
+/// Copies up to 4096 bytes of the string into a byte buffer and delegates to `csv_parse`, so a
+/// file on disk can be loaded in two calls:  `let s = read_file(path); csv_parse_string(s, &!t, ',')`.
+pub fn csv_parse_string(input: string, table: &!CsvTable, delimiter: u8) -> i32
+    with Mut, Div, Panic
+{
+    var buf: [u8; 4096] = [0u8; 4096]
+    let n = str_len(input)
+    var i: i64 = 0
+    while i < n && i < 4096 {
+        buf[i as usize] = str_char_at(input, i) as u8
+        i = i + 1
+    }
+    let used: i32 = if n < 4096 { n as i32 } else { 4096 }
+    csv_parse(&buf, used, table, delimiter)
+}
+
 /// Parse CSV bytes into table.
 ///
-/// - Delimiter is typically 44u8 (','). CR (\r) before \n is skipped.
+/// - Delimiter is typically (44 as u8) (','). CR (\r) before \n is skipped.
 /// - If the first non-whitespace character is alphabetic the entire first line
 ///   is treated as a header row (column names stored in table.header_bytes).
 /// - Only numeric rows are stored in table.data.
@@ -196,7 +224,7 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
 
     // Detect header: peek at first byte
     var scan_hdr: i32 = 0
-    while scan_hdr < input_len && (input[scan_hdr as usize] == 32u8 || input[scan_hdr as usize] == 9u8) {
+    while scan_hdr < input_len && (input[scan_hdr as usize] == (32 as u8) || input[scan_hdr as usize] == (9 as u8)) {
         scan_hdr = scan_hdr + 1
     }
     let first_is_alpha: i32 = if scan_hdr < input_len && is_alpha(input[scan_hdr as usize]) { 1 } else { 0 }
@@ -210,25 +238,26 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
         var field_start: i32 = pos
         while pos < input_len {
             let c = input[pos as usize]
-            if c == 10u8 || c == 13u8 {
+            if c == (10 as u8) || c == (13 as u8) {
                 // end of header line — store last field
                 if col < 16 {
                     var fs: i32 = field_start
                     var fe: i32 = pos
                     // trim trailing CR
-                    if fe > fs && input[(fe - 1) as usize] == 13u8 { fe = fe - 1 }
+                    if fe > fs && input[(fe - 1) as usize] == (13 as u8) { fe = fe - 1 }
                     let flen = fe - fs
                     let copy_len = if flen < 32 { flen } else { 31 }
+                    let hbase = col * 32
                     var hc: i32 = 0
                     while hc < copy_len {
-                        table.header_bytes[col as usize][hc as usize] = input[(fs + hc) as usize]
+                        table.header_bytes[(hbase + hc) as usize] = input[(fs + hc) as usize]
                         hc = hc + 1
                     }
                     table.header_lens[col as usize] = copy_len
                     col = col + 1
                 }
                 // skip \r\n
-                if c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+                if c == (13 as u8) && (pos + 1) < input_len && input[(pos + 1) as usize] == (10 as u8) {
                     pos = pos + 2
                 } else {
                     pos = pos + 1
@@ -241,9 +270,10 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
                     var fe: i32 = pos
                     let flen = fe - fs
                     let copy_len = if flen < 32 { flen } else { 31 }
+                    let hbase = col * 32
                     var hc: i32 = 0
                     while hc < copy_len {
-                        table.header_bytes[col as usize][hc as usize] = input[(fs + hc) as usize]
+                        table.header_bytes[(hbase + hc) as usize] = input[(fs + hc) as usize]
                         hc = hc + 1
                     }
                     table.header_lens[col as usize] = copy_len
@@ -262,16 +292,20 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
     var col_count: i32 = 0      // columns seen in current row
     var n_cols_expected: i32 = 0  // established from first data row
     var row_vals: [f64; 16] = [0.0; 16]
+    // Per-field scratch buffer. Fields are copied here (by csv_parse's own direct
+    // indexing of `input`) before parsing, so parse_num never indexes a re-passed
+    // ref at a nonzero offset — see the NOTE on parse_num.
+    var fieldbuf: [u8; 64] = [0u8; 64]
     var field_start: i32 = pos
 
     while pos <= input_len {
         // Use input_len as sentinel: treat end-of-buffer like newline
-        let c: u8 = if pos < input_len { input[pos as usize] } else { 10u8 }
+        let c: u8 = if pos < input_len { input[pos as usize] } else { (10 as u8) }
 
-        if c == 10u8 || c == 13u8 {
+        if c == (10 as u8) || c == (13 as u8) {
             // end of field and end of row
             var fe: i32 = pos
-            if c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+            if c == (13 as u8) && (pos + 1) < input_len && input[(pos + 1) as usize] == (10 as u8) {
                 // \r\n  — fe points before \r
                 fe = pos
             }
@@ -279,7 +313,15 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
             let field_len = fe - field_start
             if field_len > 0 || col_count > 0 {
                 if col_count < 16 {
-                    row_vals[col_count as usize] = parse_f64(input, field_start, fe)
+                    // copy field bytes into local scratch, then parse from index 0
+                    var fn_len: i32 = 0
+                    var fq: i32 = field_start
+                    while fq < fe && fn_len < 64 {
+                        fieldbuf[fn_len as usize] = input[fq as usize]
+                        fq = fq + 1
+                        fn_len = fn_len + 1
+                    }
+                    row_vals[col_count as usize] = parse_num(&fieldbuf, fn_len)
                     col_count = col_count + 1
                 }
                 // store row
@@ -305,7 +347,7 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
                 col_count = 0
             }
             // advance past \r\n or \n
-            if pos < input_len && c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+            if pos < input_len && c == (13 as u8) && (pos + 1) < input_len && input[(pos + 1) as usize] == (10 as u8) {
                 pos = pos + 2
             } else {
                 pos = pos + 1
@@ -314,7 +356,15 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
         } else if c == delimiter {
             // end of field, not end of row
             if col_count < 16 {
-                row_vals[col_count as usize] = parse_f64(input, field_start, pos)
+                // copy field bytes into local scratch, then parse from index 0
+                var fn_len: i32 = 0
+                var fq: i32 = field_start
+                while fq < pos && fn_len < 64 {
+                    fieldbuf[fn_len as usize] = input[fq as usize]
+                    fq = fq + 1
+                    fn_len = fn_len + 1
+                }
+                row_vals[col_count as usize] = parse_num(&fieldbuf, fn_len)
                 col_count = col_count + 1
             }
             pos = pos + 1
@@ -339,7 +389,7 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
 // pos.  Returns the new pos.
 fn write_i32_digits(n: i32, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic {
     if n == 0 {
-        out[pos as usize] = 48u8   // '0'
+        out[pos as usize] = (48 as u8)   // '0'
         return pos + 1
     }
     // Collect digits in reverse, then flip
@@ -371,7 +421,7 @@ fn write_f64(val: f64, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic 
 
     // Sign
     if v < 0.0 {
-        out[p as usize] = 45u8   // '-'
+        out[p as usize] = (45 as u8)   // '-'
         p = p + 1
         v = 0.0 - v
     }
@@ -383,7 +433,7 @@ fn write_f64(val: f64, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic 
     // Fractional part — 6 digits max
     let frac = v - (int_part as f64)
     if frac > 0.000001 {
-        out[p as usize] = 46u8   // '.'
+        out[p as usize] = (46 as u8)   // '.'
         p = p + 1
 
         // Scale up to 6 decimal places
@@ -408,7 +458,7 @@ fn write_f64(val: f64, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic 
         }
         // Find last non-zero digit
         var last: i32 = 5
-        while last > 0 && digits6[last as usize] == 48u8 {
+        while last > 0 && digits6[last as usize] == (48 as u8) {
             last = last - 1
         }
         var di: i32 = 0
@@ -428,7 +478,7 @@ fn write_f64(val: f64, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic 
 
 /// Serialize table to CSV bytes in out[0..].
 ///
-/// - delimiter is written between fields (typically 44u8 = ',')
+/// - delimiter is written between fields (typically (44 as u8) = ',')
 /// - header row is written first when table.has_header == 1
 /// - Returns the total number of bytes written, or -1 on overflow.
 pub fn csv_serialize(table: &CsvTable, out: &![u8; 4096], delimiter: u8) -> i32 with Mut, Div, Panic {
@@ -444,17 +494,18 @@ pub fn csv_serialize(table: &CsvTable, out: &![u8; 4096], delimiter: u8) -> i32 
                 p = p + 1
             }
             let hlen = table.header_lens[c as usize]
+            let hbase = c * 32
             var hc: i32 = 0
             while hc < hlen {
                 if p >= 4096 { return 0 - 1 }
-                out[p as usize] = table.header_bytes[c as usize][hc as usize]
+                out[p as usize] = table.header_bytes[(hbase + hc) as usize]
                 p = p + 1
                 hc = hc + 1
             }
             c = c + 1
         }
         if p >= 4096 { return 0 - 1 }
-        out[p as usize] = 10u8   // '\n'
+        out[p as usize] = (10 as u8)   // '\n'
         p = p + 1
     }
 
@@ -474,7 +525,7 @@ pub fn csv_serialize(table: &CsvTable, out: &![u8; 4096], delimiter: u8) -> i32 
             c = c + 1
         }
         if p >= 4096 { return 0 - 1 }
-        out[p as usize] = 10u8   // '\n'
+        out[p as usize] = (10 as u8)   // '\n'
         p = p + 1
         r = r + 1
     }
@@ -497,7 +548,7 @@ fn write_f64_buf(val: f64, b: &!CsvBuf, pos: i32) -> i32 with Mut, Div, Panic {
     var v: f64 = val
 
     if v < 0.0 {
-        b.bytes[p as usize] = 45u8
+        b.bytes[p as usize] = (45 as u8)
         p = p + 1
         v = 0.0 - v
     }
@@ -507,7 +558,7 @@ fn write_f64_buf(val: f64, b: &!CsvBuf, pos: i32) -> i32 with Mut, Div, Panic {
     var tmp: [u8; 12] = [0u8; 12]
     var k: i32 = 0
     if int_part == 0 {
-        b.bytes[p as usize] = 48u8
+        b.bytes[p as usize] = (48 as u8)
         p = p + 1
     } else {
         var vi: i32 = int_part
@@ -526,7 +577,7 @@ fn write_f64_buf(val: f64, b: &!CsvBuf, pos: i32) -> i32 with Mut, Div, Panic {
 
     let frac = v - (int_part as f64)
     if frac > 0.000001 {
-        b.bytes[p as usize] = 46u8
+        b.bytes[p as usize] = (46 as u8)
         p = p + 1
         var full6: i32 = (frac * 1000000.0) as i32
         var digits6: [u8; 6] = [0u8; 6]
@@ -538,7 +589,7 @@ fn write_f64_buf(val: f64, b: &!CsvBuf, pos: i32) -> i32 with Mut, Div, Panic {
             d = d - 1
         }
         var last: i32 = 5
-        while last > 0 && digits6[last as usize] == 48u8 {
+        while last > 0 && digits6[last as usize] == (48 as u8) {
             last = last - 1
         }
         var di: i32 = 0
@@ -565,17 +616,18 @@ pub fn csv_serialize_buf(table: &CsvTable, b: &!CsvBuf, delimiter: u8) -> i32 wi
                 p = p + 1
             }
             let hlen = table.header_lens[c as usize]
+            let hbase = c * 32
             var hc: i32 = 0
             while hc < hlen {
                 if p >= 4096 { return 0 - 1 }
-                b.bytes[p as usize] = table.header_bytes[c as usize][hc as usize]
+                b.bytes[p as usize] = table.header_bytes[(hbase + hc) as usize]
                 p = p + 1
                 hc = hc + 1
             }
             c = c + 1
         }
         if p >= 4096 { return 0 - 1 }
-        b.bytes[p as usize] = 10u8
+        b.bytes[p as usize] = (10 as u8)
         p = p + 1
     }
 
@@ -594,7 +646,7 @@ pub fn csv_serialize_buf(table: &CsvTable, b: &!CsvBuf, delimiter: u8) -> i32 wi
             c = c + 1
         }
         if p >= 4096 { return 0 - 1 }
-        b.bytes[p as usize] = 10u8
+        b.bytes[p as usize] = (10 as u8)
         p = p + 1
         r = r + 1
     }
@@ -672,4 +724,23 @@ pub fn csv_col_max(t: &CsvTable, col: i32) -> f64 {
         r = r + 1
     }
     m
+}
+
+/// Serialize `table` to CSV and write it to `path` on disk, returning the number of bytes written
+/// (or -1 on overflow). Companion to `csv_parse_string`: together they give a file <-> table
+/// round-trip.  The bytes are copied into an [i8] buffer before the write_file builtin, because
+/// write_file marshals [i8] correctly but not [u8] on the current backend.
+pub fn csv_write_file(table: &CsvTable, path: string, delimiter: u8) -> i32 with Mut, Div, Panic {
+    var out: [u8; 4096] = [0u8; 4096]
+    let n = csv_serialize(table, &!out, delimiter)
+    if n < 0 { return 0 - 1 }
+    var i8buf: [i8; 4096] = [0i8; 4096]
+    var i: i64 = 0
+    while i < (n as i64) && i < 4096 {
+        i8buf[i as usize] = out[i as usize] as i8
+        i = i + 1
+    }
+    let rc = write_file(path, i8buf, n as i64)
+    if rc < 0 { return 0 - 1 }
+    n
 }

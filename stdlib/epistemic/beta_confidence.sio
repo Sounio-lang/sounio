@@ -1,0 +1,364 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/epistemic/beta_confidence.sio — R3 composition rule for Beta confidence
+//
+// Founder 2026-08-20: the epistemic value carries a Beta(α, β) posterior, not
+// a scalar confidence. THIS FILE IS THE RULE. It does not migrate the 26
+// scalar sites and does not touch darwin_pbpk.
+//
+// Two channels, two algebras:
+//   (value, uncertainty)  — GUM / JCGM 100:2008
+//   (conf_alpha, conf_beta) — evidence. Not GUM.
+//
+// Goldens: python3 scripts/dev/beta_confidence_oracle.py
+// (fractions.Fraction + decimal prec=80; no mpmath required)
+
+fn bc_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn bc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn bc_max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+pub struct EpistemicBeta {
+    value: f64,
+    uncertainty: f64,
+    conf_alpha: f64,
+    conf_beta: f64,
+}
+
+pub fn eb_valid(e: &EpistemicBeta) -> i64 {
+    if e.conf_alpha > 0.0 && e.conf_beta > 0.0 && e.uncertainty >= 0.0 { 1 } else { 0 }
+}
+
+pub fn eb_n(e: &EpistemicBeta) -> f64 {
+    e.conf_alpha + e.conf_beta
+}
+
+pub fn eb_mean(e: &EpistemicBeta) -> f64 with Div, Panic {
+    let n = e.conf_alpha + e.conf_beta
+    if n <= 0.0 { return 0.0 }
+    e.conf_alpha / n
+}
+
+// Uniform Beta(1,1) is zero evidence (prior weight W = 1).
+pub fn eb_zero_evidence(value: f64, uncertainty: f64) -> EpistemicBeta {
+    EpistemicBeta { value: value, uncertainty: uncertainty, conf_alpha: 1.0, conf_beta: 1.0 }
+}
+
+pub fn eb_new(value: f64, uncertainty: f64, conf_alpha: f64, conf_beta: f64) -> EpistemicBeta {
+    EpistemicBeta { value: value, uncertainty: uncertainty, conf_alpha: conf_alpha, conf_beta: conf_beta }
+}
+
+// Q4. Scalar lift. Not reversible: c=500 with n=2 is Beta(1,1); with n=2000
+// is Beta(1000,1000). n is a ruling, not recoverable from c.
+// Returns invalid (α=0) if the lift would hit the axis.
+pub fn eb_from_scalar(value: f64, uncertainty: f64, c_permille: f64, n: f64) -> EpistemicBeta {
+    if n <= 0.0 {
+        return EpistemicBeta { value: value, uncertainty: uncertainty, conf_alpha: 0.0, conf_beta: 1.0 }
+    }
+    let mu = c_permille / 1000.0
+    if mu <= 0.0 || mu >= 1.0 {
+        return EpistemicBeta { value: value, uncertainty: uncertainty, conf_alpha: 0.0, conf_beta: 1.0 }
+    }
+    EpistemicBeta {
+        value: value,
+        uncertainty: uncertainty,
+        conf_alpha: mu * n,
+        conf_beta: (1.0 - mu) * n,
+    }
+}
+
+pub fn eb_to_scalar(e: &EpistemicBeta) -> f64 with Div, Panic {
+    eb_mean(e) * 1000.0
+}
+
+// Independent evidence fusion of the SAME Bernoulli (not arithmetic).
+// α' = αa + αb − W, β' = βa + βb − W, W = 1.
+pub fn eb_fuse_independent(a: &EpistemicBeta, b: &EpistemicBeta) -> EpistemicBeta {
+    let aa = a.conf_alpha + b.conf_alpha - 1.0
+    let bb = a.conf_beta + b.conf_beta - 1.0
+    EpistemicBeta {
+        value: a.value,
+        uncertainty: a.uncertainty,
+        conf_alpha: aa,
+        conf_beta: bb,
+    }
+}
+
+// The forbidden naive add: α' = αa+αb. Saboteur. Not the rule.
+pub fn eb_fuse_naive(a: &EpistemicBeta, b: &EpistemicBeta) -> EpistemicBeta {
+    EpistemicBeta {
+        value: a.value,
+        uncertainty: a.uncertainty,
+        conf_alpha: a.conf_alpha + b.conf_alpha,
+        conf_beta: a.conf_beta + b.conf_beta,
+    }
+}
+
+fn eb_moment_match(mu: f64, var: f64) -> (f64, f64) with Div, Panic {
+    if var <= 0.0 {
+        return (mu * 1.0e9, (1.0 - mu) * 1.0e9)
+    }
+    let n = mu * (1.0 - mu) / var - 1.0
+    if n <= 0.0 {
+        return (1.0, 1.0)
+    }
+    (mu * n, (1.0 - mu) * n)
+}
+
+fn eb_beta_m2(alpha: f64, beta: f64) -> f64 with Div, Panic {
+    let n = alpha + beta
+    alpha * (alpha + 1.0) / (n * (n + 1.0))
+}
+
+fn eb_beta_m3(alpha: f64, beta: f64) -> f64 with Div, Panic {
+    let n = alpha + beta
+    alpha * (alpha + 1.0) * (alpha + 2.0) / (n * (n + 1.0) * (n + 2.0))
+}
+
+fn eb_beta_m4(alpha: f64, beta: f64) -> f64 with Div, Panic {
+    let n = alpha + beta
+    alpha * (alpha + 1.0) * (alpha + 2.0) * (alpha + 3.0) / (n * (n + 1.0) * (n + 2.0) * (n + 3.0))
+}
+
+// Reliability AND: C' = Ca · Cb, then moment-match to a Beta.
+// The product of two Betas is not Beta. First two moments are matched
+// exactly (in exact arithmetic). Third-moment relative error is the bound.
+pub fn eb_and_match(a: &EpistemicBeta, b: &EpistemicBeta) -> EpistemicBeta with Mut, Div, Panic {
+    let mu = eb_mean(a) * eb_mean(b)
+    let m2 = eb_beta_m2(a.conf_alpha, a.conf_beta) * eb_beta_m2(b.conf_alpha, b.conf_beta)
+    let var = m2 - mu * mu
+    let pair = eb_moment_match(mu, var)
+    EpistemicBeta {
+        value: a.value,
+        uncertainty: a.uncertainty,
+        conf_alpha: pair.0,
+        conf_beta: pair.1,
+    }
+}
+
+pub fn eb_and_rel3(a: &EpistemicBeta, b: &EpistemicBeta, fitted: &EpistemicBeta) -> f64 with Div, Panic {
+    let m3_true = eb_beta_m3(a.conf_alpha, a.conf_beta) * eb_beta_m3(b.conf_alpha, b.conf_beta)
+    let m3_fit = eb_beta_m3(fitted.conf_alpha, fitted.conf_beta)
+    if m3_true <= 0.0 { return 0.0 }
+    bc_abs(m3_fit - m3_true) / m3_true
+}
+
+// Q1. Independent sum of two measurements.
+// GUM on (value, u). Evidence: derived AND (not fusion — the sum is not
+// more-confirmed than both operands).
+pub fn eb_add_independent(a: &EpistemicBeta, b: &EpistemicBeta) -> EpistemicBeta with Mut, Div, Panic {
+    let anded = eb_and_match(a, b)
+    let u = bc_sqrt(a.uncertainty * a.uncertainty + b.uncertainty * b.uncertainty)
+    EpistemicBeta {
+        value: a.value + b.value,
+        uncertainty: u,
+        conf_alpha: anded.conf_alpha,
+        conf_beta: anded.conf_beta,
+    }
+}
+
+// Q3. Same origin: x + x. GUM with ρ = 1. Evidence unchanged.
+// Summing Beta(1,1) with itself is not Beta(2,2).
+// Saboteur (2026-08-20): rewriting α'=2α failed tests 12,13,16,17,18,53.
+pub fn eb_add_same_origin(a: &EpistemicBeta) -> EpistemicBeta {
+    EpistemicBeta {
+        value: a.value + a.value,
+        uncertainty: a.uncertainty + a.uncertainty,
+        conf_alpha: a.conf_alpha,
+        conf_beta: a.conf_beta,
+    }
+}
+
+pub fn eb_scale(a: &EpistemicBeta, c: f64) -> EpistemicBeta with Mut {
+    EpistemicBeta {
+        value: a.value * c,
+        uncertainty: bc_abs(c) * a.uncertainty,
+        conf_alpha: a.conf_alpha,
+        conf_beta: a.conf_beta,
+    }
+}
+
+// Q2. Independent product. GUM first-order on u.
+// Exact independent variance adds ua² ub². That dropped term is the error.
+pub fn eb_mul_independent(a: &EpistemicBeta, b: &EpistemicBeta) -> EpistemicBeta with Mut, Div, Panic {
+    let anded = eb_and_match(a, b)
+    let gum_var = b.value * b.value * a.uncertainty * a.uncertainty + a.value * a.value * b.uncertainty * b.uncertainty
+    EpistemicBeta {
+        value: a.value * b.value,
+        uncertainty: bc_sqrt(gum_var),
+        conf_alpha: anded.conf_alpha,
+        conf_beta: anded.conf_beta,
+    }
+}
+
+pub fn eb_mul_dropped_var(a: &EpistemicBeta, b: &EpistemicBeta) -> f64 {
+    a.uncertainty * a.uncertainty * b.uncertainty * b.uncertainty
+}
+
+pub fn eb_mul_exact_var(a: &EpistemicBeta, b: &EpistemicBeta) -> f64 {
+    let gum = b.value * b.value * a.uncertainty * a.uncertainty + a.value * a.value * b.uncertainty * b.uncertainty
+    gum + eb_mul_dropped_var(a, b)
+}
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS [")
+        print(label)
+        print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL [")
+        print(label)
+        print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d2 = bc_abs(a - b)
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_q1_gum_add() with IO, Mut, Div, Panic {
+    let a = eb_new(1.0, 0.1, 2.0, 2.0)
+    let b = eb_new(2.0, 0.2, 3.0, 1.0)
+    let s = eb_add_independent(&a, &b)
+    chk(1, near(s.value, 3.0, 1.0e-12))
+    chk(2, near(s.uncertainty, 0.22360679774997896, 1.0e-12))
+    chk(3, near(s.conf_alpha, 1.8571428571428572, 1.0e-9))
+    chk(4, near(s.conf_beta, 3.0952380952380953, 1.0e-9))
+    let r3 = eb_and_rel3(&a, &b, &s)
+    chk(5, if r3 < 0.002 { 1 } else { 0 })
+}
+
+fn test_q3_same_origin() with IO, Mut, Div, Panic {
+    let z = eb_zero_evidence(1.0, 0.1)
+    let twice = eb_add_same_origin(&z)
+    chk(10, near(twice.value, 2.0, 1.0e-12))
+    chk(11, near(twice.uncertainty, 0.2, 1.0e-12))
+    chk(12, near(twice.conf_alpha, 1.0, 1.0e-15))
+    chk(13, near(twice.conf_beta, 1.0, 1.0e-15))
+    let naive = eb_fuse_naive(&z, &z)
+    chk(14, near(naive.conf_alpha, 2.0, 1.0e-15))
+    chk(15, near(naive.conf_beta, 2.0, 1.0e-15))
+    chk(16, if twice.conf_alpha != naive.conf_alpha { 1 } else { 0 })
+    let strong = eb_new(1.0, 0.1, 1000.0, 1000.0)
+    let s2 = eb_add_same_origin(&strong)
+    chk(17, near(s2.conf_alpha, 1000.0, 1.0e-12))
+    chk(18, near(s2.conf_beta, 1000.0, 1.0e-12))
+    let fused = eb_fuse_independent(&strong, &strong)
+    chk(19, near(fused.conf_alpha, 1999.0, 1.0e-12))
+    chk(20, near(fused.conf_beta, 1999.0, 1.0e-12))
+    chk(21, if s2.conf_alpha != fused.conf_alpha { 1 } else { 0 })
+}
+
+fn test_q2_mul_error() with IO, Mut, Div, Panic {
+    let a = eb_new(2.0, 0.1, 2.0, 2.0)
+    let b = eb_new(3.0, 0.2, 2.0, 2.0)
+    let p = eb_mul_independent(&a, &b)
+    chk(30, near(p.value, 6.0, 1.0e-12))
+    let gum_var = 3.0 * 3.0 * 0.1 * 0.1 + 2.0 * 2.0 * 0.2 * 0.2
+    chk(31, near(p.uncertainty, bc_sqrt(gum_var), 1.0e-12))
+    let dropped = eb_mul_dropped_var(&a, &b)
+    let exact = eb_mul_exact_var(&a, &b)
+    chk(32, near(dropped, 0.0004, 1.0e-18))
+    chk(33, if dropped / exact < 0.002 { 1 } else { 0 })
+    let r3 = eb_and_rel3(&a, &b, &p)
+    chk(34, if r3 < 0.01 { 1 } else { 0 })
+}
+
+fn test_q4_scalar() with IO, Mut, Div, Panic {
+    let w = eb_from_scalar(1.0, 0.1, 500.0, 2.0)
+    chk(40, eb_valid(&w))
+    chk(41, near(w.conf_alpha, 1.0, 1.0e-15))
+    chk(42, near(w.conf_beta, 1.0, 1.0e-15))
+    let s = eb_from_scalar(1.0, 0.1, 500.0, 2000.0)
+    chk(43, near(s.conf_alpha, 1000.0, 1.0e-12))
+    chk(44, near(s.conf_beta, 1000.0, 1.0e-12))
+    chk(45, if w.conf_alpha != s.conf_alpha { 1 } else { 0 })
+    let nine = eb_from_scalar(1.0, 0.1, 900.0, 2.0)
+    chk(46, near(nine.conf_alpha, 1.8, 1.0e-12))
+    chk(47, near(nine.conf_beta, 0.2, 1.0e-12))
+    let axis = eb_from_scalar(1.0, 0.1, 1000.0, 2.0)
+    chk(48, if eb_valid(&axis) == 0 { 1 } else { 0 })
+    let zero_c = eb_from_scalar(1.0, 0.1, 0.0, 2.0)
+    chk(49, if eb_valid(&zero_c) == 0 { 1 } else { 0 })
+}
+
+fn test_edges() with IO, Mut, Div, Panic {
+    let bad = eb_new(1.0, 0.1, 0.0, 1.0)
+    chk(50, if eb_valid(&bad) == 0 { 1 } else { 0 })
+    let badb = eb_new(1.0, 0.1, 1.0, 0.0)
+    chk(51, if eb_valid(&badb) == 0 { 1 } else { 0 })
+    let huge = eb_new(1.0, 0.1, 1000000.0, 1000000.0)
+    chk(52, eb_valid(&huge))
+    let h2 = eb_add_same_origin(&huge)
+    chk(53, near(h2.conf_alpha, 1000000.0, 1.0e-6))
+    let zfuse = eb_fuse_independent(&eb_zero_evidence(0.0, 0.0), &eb_zero_evidence(0.0, 0.0))
+    chk(54, near(zfuse.conf_alpha, 1.0, 1.0e-15))
+    chk(55, near(zfuse.conf_beta, 1.0, 1.0e-15))
+    let scale = eb_scale(&eb_new(1.0, 0.1, 4.0, 6.0), 2.0)
+    chk(56, near(scale.value, 2.0, 1.0e-15))
+    chk(57, near(scale.uncertainty, 0.2, 1.0e-15))
+    chk(58, near(scale.conf_alpha, 4.0, 1.0e-15))
+}
+
+fn test_and_goldens() with IO, Mut, Div, Panic {
+    let a = eb_new(0.0, 0.0, 1.0, 1.0)
+    let b = eb_new(0.0, 0.0, 1.0, 1.0)
+    let m = eb_and_match(&a, &b)
+    chk(60, near(m.conf_alpha, 0.7142857142857143, 1.0e-9))
+    chk(61, near(m.conf_beta, 2.142857142857143, 1.0e-9))
+    let a2 = eb_new(0.0, 0.0, 5.0, 1.0)
+    let b2 = eb_new(0.0, 0.0, 1.0, 5.0)
+    let m2 = eb_and_match(&a2, &b2)
+    chk(62, near(m2.conf_alpha, 0.9893048128342246, 1.0e-9))
+    chk(63, near(m2.conf_beta, 6.133689839572193, 1.0e-9))
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0
+    CNT[1] = 0
+    print("─── beta_confidence R3 rule ───\n")
+    test_q1_gum_add()
+    test_q3_same_origin()
+    test_q2_mul_error()
+    test_q4_scalar()
+    test_edges()
+    test_and_goldens()
+    print("─── ")
+    print(CNT[0])
+    print("/")
+    print(CNT[0] + CNT[1])
+    print(" PASS ───\n")
+    if CNT[1] == 0 {
+        print("ALL PASS\n")
+        0
+    } else {
+        1
+    }
+}

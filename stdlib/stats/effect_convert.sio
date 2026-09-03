@@ -1,0 +1,136 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/effect_convert.sio — conversions between effect-size metrics
+//
+// Meta-analysis routinely needs one effect-size scale expressed on another; this
+// gives the standard conversions between Cohen's d, the correlation r, the
+// (log) odds ratio and Hedges' g:
+//
+//   d_to_r(d)          r_to_d(r)
+//   d_to_logor(d)      logor_to_d(lor)
+//   hedges_g(d, df)
+//
+//   r = d/√(d²+4),   d = 2r/√(1−r²)            (equal-n)
+//   ln OR = d·π/√3,  d = ln OR·√3/π            (Cox logit method)
+//   g = d·J,  J = 1 − 3/(4·df − 1)             (small-sample bias correction)
+//
+// Pure Sounio: inline sqrt/exp. No external dependency, no nested data-array calls.
+//
+// References:
+//   Borenstein et al., "Introduction to Meta-Analysis" (2009), ch.7; Hedges (1981).
+
+module stats::effect_convert
+
+fn ec_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ec_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ec_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+/// Cohen's d → Pearson r (equal group sizes).
+pub fn d_to_r(d: f64) -> f64 with Mut, Div, Panic {
+    return d / ec_sqrt(d * d + 4.0)
+}
+
+/// Pearson r → Cohen's d.
+pub fn r_to_d(r: f64) -> f64 with Mut, Div, Panic {
+    let den = ec_sqrt(1.0 - r * r)
+    if den <= 1.0e-300 { return 0.0 }
+    return 2.0 * r / den
+}
+
+/// Cohen's d → log odds ratio (Cox logit method).
+pub fn d_to_logor(d: f64) -> f64 {
+    let PI = 3.141592653589793
+    let SQRT3 = 1.7320508075688772
+    return d * PI / SQRT3
+}
+
+/// log odds ratio → Cohen's d.
+pub fn logor_to_d(lor: f64) -> f64 {
+    let PI = 3.141592653589793
+    let SQRT3 = 1.7320508075688772
+    return lor * SQRT3 / PI
+}
+
+/// Cohen's d → odds ratio.
+pub fn d_to_or(d: f64) -> f64 with Mut, Div, Panic {
+    return ec_exp(d_to_logor(d))
+}
+
+/// Hedges' g: the small-sample bias-corrected d (df = n1+n2-2).
+pub fn hedges_g(d: f64, df: i32) -> f64 {
+    if df < 2 { return d }
+    let j = 1.0 - 3.0 / (4.0 * (df as f64) - 1.0)
+    return d * j
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// d=0.5: r=0.5/sqrt(4.25)=0.242536; logOR=0.5·π/√3=0.9068997; OR=exp(0.9068997)=2.476632.
+// hedges g (df=10) = 0.5·(1-3/39)=0.5·0.923077=0.461538.
+fn test_convert() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(1, approx(d_to_r(0.5), 0.242536, 1.0e-5)) && ok
+    ok = check(2, approx(d_to_logor(0.5), 0.906900, 1.0e-5)) && ok
+    ok = check(3, approx(d_to_or(0.5), 2.476632, 1.0e-4)) && ok
+    ok = check(4, approx(hedges_g(0.5, 10), 0.461538, 1.0e-5)) && ok
+    return ok
+}
+
+// round trips: r_to_d(d_to_r(d)) = d; logor_to_d(d_to_logor(d)) = d.
+fn test_roundtrip() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(10, approx(r_to_d(d_to_r(0.8)), 0.8, 1.0e-5)) && ok
+    ok = check(11, approx(logor_to_d(d_to_logor(1.2)), 1.2, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_convert() && ok
+    ok = test_roundtrip() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

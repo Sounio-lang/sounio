@@ -1,0 +1,235 @@
+// stdlib/particle_physics/standard_model.sio — Standard Model configuration
+//
+// Aggregates all SM parameters, couplings, CKM and PMNS matrices into a
+// single configuration struct.  Provides derived quantities (e.g., ρ parameter,
+// effective sin²θ_W) and consistency checks (unitarity, etc.).
+//
+// References:
+//   - PDG 2024, Standard Model
+//   - CKM fitter: http://ckmfitter.in2p3.fr/
+
+module particle_physics::standard_model
+
+use epistemic::knowledge::{Epistemic}
+use particle_physics::sm_params::{
+    alpha_em, alpha_s_mz, sin2_theta_w,
+    coupling_e, coupling_g, coupling_gp, coupling_gs,
+    mass_z, mass_w, mass_h,
+    mass_top, mass_bottom, mass_charm, mass_strange, mass_down, mass_up,
+    mass_tau, mass_muon, mass_electron,
+    v_ud, v_us, v_ub, v_cd, v_cs, v_cb, v_tb, v_ts, v_td,
+    lambda_qcd,
+}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// STANDARD MODEL CONFIG
+// ============================================================================
+
+/// Complete Standard Model parameter set.
+pub struct StandardModel {
+    // Gauge couplings
+    pub alpha_em: Epistemic,
+    pub alpha_s_mz: Epistemic,
+    pub sin2_theta_w: Epistemic,
+    pub e: Epistemic,
+    pub g: Epistemic,
+    pub gp: Epistemic,
+    pub gs: Epistemic,
+
+    // Boson masses
+    pub m_z: Epistemic,
+    pub m_w: Epistemic,
+    pub m_h: Epistemic,
+
+    // Quark masses
+    pub m_top: Epistemic,
+    pub m_bottom: Epistemic,
+    pub m_charm: Epistemic,
+    pub m_strange: Epistemic,
+    pub m_down: Epistemic,
+    pub m_up: Epistemic,
+
+    // Lepton masses
+    pub m_tau: Epistemic,
+    pub m_muon: Epistemic,
+    pub m_electron: Epistemic,
+
+    // CKM matrix (3×3 magnitudes, flat row-major)
+    pub ckm: [f64; 9],
+    pub ckm_unc: [f64; 9],
+
+    // PMNS matrix (3×3 magnitudes, flat row-major)
+    pub pmns: [f64; 9],
+
+    // Higgs VEV
+    pub v: f64,
+
+    // QCD scale
+    pub lambda_qcd: Epistemic,
+}
+
+/// Build the StandardModel from current PDG values.
+pub fn standard_model_new() -> StandardModel with Mut, Div, Panic {
+    let vud = v_ud()
+    let vus = v_us()
+    let vub = v_ub()
+    let vcd = v_cd()
+    let vcs = v_cs()
+    let vcb = v_cb()
+    let vtb = v_tb()
+    let vts = v_ts()
+    let vtd = v_td()
+
+    var ckm_arr: [f64; 9] = [0.0; 9]
+    ckm_arr[0] = vud.val(); ckm_arr[1] = vus.val(); ckm_arr[2] = vub.val()
+    ckm_arr[3] = vcd.val(); ckm_arr[4] = vcs.val(); ckm_arr[5] = vcb.val()
+    ckm_arr[6] = vtd.val(); ckm_arr[7] = vts.val(); ckm_arr[8] = vtb.val()
+
+    var ckm_unc_arr: [f64; 9] = [0.0; 9]
+    ckm_unc_arr[0] = vud.std(); ckm_unc_arr[1] = vus.std(); ckm_unc_arr[2] = vub.std()
+    ckm_unc_arr[3] = vcd.std(); ckm_unc_arr[4] = vcs.std(); ckm_unc_arr[5] = vcb.std()
+    ckm_unc_arr[6] = vtd.std(); ckm_unc_arr[7] = vts.std(); ckm_unc_arr[8] = vtb.std()
+
+    StandardModel {
+        alpha_em: alpha_em(),
+        alpha_s_mz: alpha_s_mz(),
+        sin2_theta_w: sin2_theta_w(),
+        e: coupling_e(),
+        g: coupling_g(),
+        gp: coupling_gp(),
+        gs: coupling_gs(),
+        m_z: mass_z(),
+        m_w: mass_w(),
+        m_h: mass_h(),
+        m_top: mass_top(),
+        m_bottom: mass_bottom(),
+        m_charm: mass_charm(),
+        m_strange: mass_strange(),
+        m_down: mass_down(),
+        m_up: mass_up(),
+        m_tau: mass_tau(),
+        m_muon: mass_muon(),
+        m_electron: mass_electron(),
+        ckm: ckm_arr,
+        ckm_unc: ckm_unc_arr,
+        pmns: pmns_matrix_default(),
+        v: 246.22,
+        lambda_qcd: lambda_qcd(),
+    }
+}
+
+/// Get CKM element magnitude |V_ij| where i,j ∈ {0,1,2}.
+pub fn ckm_get(sm: StandardModel, i: i64, j: i64) -> f64 {
+    sm.ckm[i * 3 + j]
+}
+
+/// Get CKM element uncertainty.
+pub fn ckm_unc_get(sm: StandardModel, i: i64, j: i64) -> f64 {
+    sm.ckm_unc[i * 3 + j]
+}
+
+/// Get PMNS element |U_ij|.
+pub fn pmns_get(sm: StandardModel, i: i64, j: i64) -> f64 {
+    sm.pmns[i * 3 + j]
+}
+
+/// Check CKM unitarity (first row): |V_ud|² + |V_us|² + |V_ub|² ≈ 1.
+pub fn ckm_unitarity_row1(sm: StandardModel) -> f64 {
+    let vud = ckm_get(sm, 0, 0)
+    let vus = ckm_get(sm, 0, 1)
+    let vub = ckm_get(sm, 0, 2)
+    vud * vud + vus * vus + vub * vub
+}
+
+/// Check CKM unitarity (second row): |V_cd|² + |V_cs|² + |V_cb|² ≈ 1.
+pub fn ckm_unitarity_row2(sm: StandardModel) -> f64 {
+    let vcd = ckm_get(sm, 1, 0)
+    let vcs = ckm_get(sm, 1, 1)
+    let vcb = ckm_get(sm, 1, 2)
+    vcd * vcd + vcs * vcs + vcb * vcb
+}
+
+/// Check CKM unitarity (third row): |V_td|² + |V_ts|² + |V_tb|² ≈ 1.
+pub fn ckm_unitarity_row3(sm: StandardModel) -> f64 {
+    let vtd = ckm_get(sm, 2, 0)
+    let vts = ckm_get(sm, 2, 1)
+    let vtb = ckm_get(sm, 2, 2)
+    vtd * vtd + vts * vts + vtb * vtb
+}
+
+/// Electroweak ρ parameter: ρ = M_W² / (M_Z² cos²θ_W).
+/// SM prediction: ρ ≈ 1 (at tree level).
+pub fn rho_parameter(sm: StandardModel) -> f64 with Mut, Div, Panic {
+    let mz = sm.m_z.val()
+    let mw = sm.m_w.val()
+    let s2w = sm.sin2_theta_w.val()
+    let c2w = 1.0 - s2w
+    if mz == 0.0 || c2w == 0.0 { return 0.0 }
+    mw * mw / (mz * mz * c2w)
+}
+
+/// Weak mixing angle in the on-shell scheme:
+///   sin²θ_W = 1 − M_W² / M_Z².
+pub fn sin2_theta_w_onshell(sm: StandardModel) -> f64 with Mut, Div, Panic {
+    let mz = sm.m_z.val()
+    let mw = sm.m_w.val()
+    if mz == 0.0 { return 0.0 }
+    1.0 - mw * mw / (mz * mz)
+}
+
+// ============================================================================
+// PMNS MATRIX (approximate central values)
+// ============================================================================
+
+/// Default PMNS matrix magnitudes (PDG 2024 approximate).
+/// Row-major: [ν_e, ν_μ, ν_τ] × [e, μ, τ].
+fn pmns_matrix_default() -> [f64; 9] with Mut {
+    // Approximate values from PDG 2024
+    // sin²θ_12 ≈ 0.307, sin²θ_23 ≈ 0.546, sin²θ_13 ≈ 0.0220
+    // cosθ_12 ≈ 0.832, cosθ_23 ≈ 0.674, cosθ_13 ≈ 0.989
+    let c12 = 0.832
+    let s12 = 0.555
+    let c23 = 0.674
+    let s23 = 0.739
+    let c13 = 0.989
+    let s13 = 0.149
+
+    var arr: [f64; 9] = [0.0; 9]
+    arr[0] = c12 * c13
+    arr[1] = s12 * c13
+    arr[2] = s13
+    arr[3] = 0.0 - s12 * c23 - c12 * s23 * s13
+    arr[4] = c12 * c23 - s12 * s23 * s13
+    arr[5] = s23 * c13
+    arr[6] = s12 * s23 - c12 * c23 * s13
+    arr[7] = 0.0 - c12 * s23 - s12 * c23 * s13
+    arr[8] = c23 * c13
+    arr
+}
+
+// ============================================================================
+// WEINBERG ANGLE RELATIONS
+// ============================================================================
+
+/// g = e / sinθ_W.
+pub fn weak_g_from_sm(sm: StandardModel) -> f64 with Mut, Div, Panic {
+    let e_val = sm.e.val()
+    let s2w = sm.sin2_theta_w.val()
+    let sw = sqrt(s2w)
+    if sw == 0.0 { return 0.0 }
+    e_val / sw
+}
+
+/// g′ = e / cosθ_W.
+pub fn weak_gp_from_sm(sm: StandardModel) -> f64 with Mut, Div, Panic {
+    let e_val = sm.e.val()
+    let s2w = sm.sin2_theta_w.val()
+    let cw = sqrt(1.0 - s2w)
+    if cw == 0.0 { return 0.0 }
+    e_val / cw
+}

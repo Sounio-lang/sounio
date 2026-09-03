@@ -1,0 +1,205 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/cohen_kappa.sio — Cohen's kappa (chance-corrected agreement)
+//
+// Inter-rater / method agreement for categorical ratings, correcting for the
+// agreement expected by chance — the categorical counterpart of Bland-Altman.
+//
+//   cohen_kappa(table, k, conf)                -> KappaResult   (unweighted)
+//   cohen_kappa_weighted(table, k, wtype, conf)-> KappaResult   (0=linear, 1=quadratic)
+//
+// κ = (p_o − p_e)/(1 − p_e), with observed agreement p_o = Σ w_ij p_ij and chance
+// agreement p_e = Σ w_ij p_i· p·_j (w_ii = 1; off-diagonal w from the weight
+// scheme). SE by Fleiss's large-sample approximation; interpretation by Landis &
+// Koch (1977): <0 poor, .00–.20 slight, .21–.40 fair, .41–.60 moderate, .61–.80
+// substantial, .81–1 almost perfect (codes 0..5).
+//
+// `table` is the k×k count matrix, row-major (k ≤ 16); rows = rater A, cols = rater B.
+//
+// Pure Sounio; the only dependency is the normal quantile (special::erf).
+//
+// References:
+//   Cohen (1960) "A coefficient of agreement for nominal scales"
+//   Cohen (1968) "Weighted kappa"; Landis & Koch (1977)
+
+module stats::cohen_kappa
+
+use special::erf::{normal_quantile}
+
+pub struct KappaResult {
+    pub kappa: f64,
+    pub p_observed: f64,
+    pub p_expected: f64,
+    pub se: f64,
+    pub ci_lo: f64,
+    pub ci_hi: f64,
+    pub interpretation: i64,   // Landis-Koch code 0..5, or -1 for negative kappa
+}
+
+fn ck_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ck_landis_koch(kappa: f64) -> i64 {
+    if kappa < 0.0 { return 0 - 1 }
+    if kappa <= 0.20 { return 0 }
+    if kappa <= 0.40 { return 1 }
+    if kappa <= 0.60 { return 2 }
+    if kappa <= 0.80 { return 3 }
+    return 4
+}
+
+// weight w_ij: identity (unweighted), linear, or quadratic (agreement weights).
+fn ck_weight(i: i32, j: i32, k: i32, wtype: i32) -> f64 {
+    if i == j { return 1.0 }
+    if wtype < 0 { return 0.0 }              // unweighted: off-diagonal = 0
+    let dif = if i > j { (i - j) as f64 } else { (j - i) as f64 }
+    let km1 = (k - 1) as f64
+    if wtype == 0 { return 1.0 - dif / km1 }              // linear
+    return 1.0 - (dif * dif) / (km1 * km1)                // quadratic
+}
+
+fn ck_core(table: &[f64; 256], k: i32, wtype: i32, conf: f64) -> KappaResult with Mut, Div, Panic {
+    // totals
+    var n = 0.0
+    var rowsum: [f64; 16] = [0.0; 16]
+    var colsum: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < k {
+        var j = 0
+        while j < k {
+            let v = table[(i * k + j) as usize]
+            rowsum[i as usize] = rowsum[i as usize] + v
+            colsum[j as usize] = colsum[j as usize] + v
+            n = n + v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n <= 0.0 {
+        return KappaResult { kappa: 0.0, p_observed: 0.0, p_expected: 0.0, se: 0.0, ci_lo: 0.0, ci_hi: 0.0, interpretation: 0 }
+    }
+
+    var po = 0.0
+    var pe = 0.0
+    var a = 0
+    while a < k {
+        var b = 0
+        while b < k {
+            let w = ck_weight(a, b, k, wtype)
+            po = po + w * table[(a * k + b) as usize] / n
+            pe = pe + w * (rowsum[a as usize] / n) * (colsum[b as usize] / n)
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    var kappa = 0.0
+    if pe < 1.0 { kappa = (po - pe) / (1.0 - pe) }
+
+    // Fleiss large-sample SE. Exact for the UNWEIGHTED kappa; for weighted kappa
+    // it is only an approximation (the true weighted variance is more involved) —
+    // the kappa point estimate is correct, but treat the weighted SE/CI as rough.
+    var se = 0.0
+    if pe < 1.0 && n > 0.0 {
+        se = ck_sqrt(po * (1.0 - po) / n) / (1.0 - pe)
+    }
+    let z = normal_quantile(0.5 + conf / 2.0)
+    return KappaResult {
+        kappa: kappa, p_observed: po, p_expected: pe, se: se,
+        ci_lo: kappa - z * se, ci_hi: kappa + z * se,
+        interpretation: ck_landis_koch(kappa),
+    }
+}
+
+/// Unweighted Cohen's kappa.
+pub fn cohen_kappa(table: &[f64; 256], k: i32, conf: f64) -> KappaResult with Mut, Div, Panic {
+    return ck_core(table, k, 0 - 1, conf)
+}
+
+/// Weighted Cohen's kappa: wtype 0 = linear, 1 = quadratic. The kappa value is
+/// exact; its SE/CI are approximate (the Fleiss formula is for unweighted kappa).
+pub fn cohen_kappa_weighted(table: &[f64; 256], k: i32, wtype: i32, conf: f64) -> KappaResult with Mut, Div, Panic {
+    return ck_core(table, k, wtype, conf)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 2x2 [[20,5],[10,15]]. N=50. po=35/50=0.7. rows 25,25; cols 30,20.
+// pe=(25·30+25·20)/2500=0.5. kappa=(0.7-0.5)/0.5=0.4 (fair->moderate boundary, code 1).
+fn test_2x2() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=20.0; t[1]=5.0; t[2]=10.0; t[3]=15.0
+    let r = cohen_kappa(&t, 2, 0.95)
+    var ok = true
+    ok = check(1, approx(r.p_observed, 0.7, 1.0e-12)) && ok
+    ok = check(2, approx(r.p_expected, 0.5, 1.0e-12)) && ok
+    ok = check(3, approx(r.kappa, 0.4, 1.0e-12)) && ok
+    ok = check(4, r.interpretation == 1) && ok       // fair (0.21-0.40)
+    return ok
+}
+
+// perfect agreement diagonal -> kappa = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=30.0; t[1]=0.0; t[2]=0.0; t[3]=0.0; t[4]=20.0; t[5]=0.0; t[6]=0.0; t[7]=0.0; t[8]=10.0
+    let r = cohen_kappa(&t, 3, 0.95)
+    var ok = true
+    ok = check(10, approx(r.kappa, 1.0, 1.0e-9)) && ok
+    ok = check(11, r.interpretation == 4) && ok      // almost perfect
+    return ok
+}
+
+// weighted quadratic differs from unweighted when off-diagonal is near the diagonal.
+// 3x3 with adjacent disagreement: quadratic kappa > unweighted kappa.
+fn test_weighted() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=10.0; t[1]=5.0; t[2]=0.0
+    t[3]=3.0;  t[4]=12.0; t[5]=2.0
+    t[6]=0.0;  t[7]=4.0;  t[8]=14.0
+    let ru = cohen_kappa(&t, 3, 0.95)
+    let rq = cohen_kappa_weighted(&t, 3, 1, 0.95)
+    var ok = true
+    // quadratic weights credit near-diagonal disagreement -> higher kappa
+    ok = check(20, rq.kappa > ru.kappa) && ok
+    ok = check(21, ru.kappa > 0.0 && ru.kappa < 1.0) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_2x2() && ok
+    ok = test_perfect() && ok
+    ok = test_weighted() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

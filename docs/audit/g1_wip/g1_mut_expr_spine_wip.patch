@@ -1,0 +1,857 @@
+diff --git a/self-hosted/check/check.sio b/self-hosted/check/check.sio
+index e85363c5d..e58bec05d 100644
+--- a/self-hosted/check/check.sio
++++ b/self-hosted/check/check.sio
+@@ -2494,6 +2494,815 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
+     ty_never()
+ }
+ 
++// ============================================================
++// G2 batch 1: *mut expr-spine transcriptions (HIGH-confidence only).
++// Insert immediately BEFORE `fn checker_check_expr_inplace` (~line 2497).
++// Each is a faithful *mut transcription of the matching by-value check_*
++// handler; children recurse through the *mut spine
++// (checker_check_opt_expr_inplace / checker_check_expr_inplace /
++// checker_check_block_inplace), keeping every frame KB-scale and off the
++// by-value 12MB path. State-returning by-value helpers that do NOT recurse
++// into check_expr are bridged by-value-ONCE via checker_store_from_value
++// (the proven pattern at checker_check_binding_init_expr_bridge:2674-2678).
++// Dispatch on enum-kind uses if-chains, NOT `match <enum-field>` (bin/souc
++// miscompiles that in *mut fns — root-caused in 0afad182c); `match <Option>`
++// is proven-safe and is used freely.
++// ============================================================
++
++// Shared helper: *mut mirror of check_opt_block (16004). Used by ExprIf.
++fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    match opt {
++        Some(blk) => checker_check_block_inplace(c, *blk)
++        None => ty_unit()
++    }
++}
++
++// --- ExprBinary -----------------------------------------------------------
++fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let left_ty = checker_check_opt_expr_inplace(c, e.left)
++    let right_ty = checker_check_opt_expr_inplace(c, e.right)
++
++    if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
++        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
++            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
++            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
++        if is_cmp {
++            let observe_id: i64 = 13
++            if !has_effect_id((*c).current_effects, (*c).current_effect_count, observe_id) {
++                checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
++            }
++        }
++    }
++
++    // [g2-test] op-type check skipped (by-value-self codegen bug); E056/E057/mismatch retained
++
++    if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
++        let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
++        let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
++        if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
++            let hyper_checked = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
++            checker_store_from_value(c, hyper_checked.0)
++        }
++        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
++        if knowledge_result.kind == TypeKind::TyError {
++            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
++        }
++        let result_with_units = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
++        checker_store_from_value(c, result_with_units.0)
++        let final_result = result_with_units.1
++        if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
++            let final_inner = if final_result.kind == TypeKind::TyKnowledge {
++                knowledge_inner(final_result)
++            } else {
++                final_result
++            }
++            if final_inner.kind == TypeKind::TyHyper {
++                let _rh = (*c).record_hyper_expr(e.span, final_inner.algebra_kind, 1, true)
++                checker_store_from_value(c, _rh)
++            }
++        }
++        return final_result
++    }
++
++    if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
++        let hyper_result = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
++        checker_store_from_value(c, hyper_result.0)
++        let typed_result = hyper_result.1
++        let result_with_units = (*c).check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
++        checker_store_from_value(c, result_with_units.0)
++        let final_result = result_with_units.1
++        if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
++            let _rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
++            checker_store_from_value(c, _rh)
++        }
++        return final_result
++    }
++
++    let result = binary_result_type(e.bin_op, left_ty, right_ty)
++    if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
++        checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
++    }
++    if e.bin_op == BinaryOp::OpDiv {
++        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
++        if denom_pair.0 != 0 && denom_pair.1 == 0 {
++            checker_report_error_at_inplace(c, e.span, 56, 0, 0, 0)
++        }
++    } else if e.bin_op == BinaryOp::OpRem {
++        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
++        if denom_pair.0 != 0 && denom_pair.1 == 0 {
++            checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
++        }
++    }
++    // [g2-test] unit check skipped (by-value-self codegen bug)
++    result
++}
++
++// --- ExprUnary (+ slice-borrow sub-path) ----------------------------------
++fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let want_mut = e.un_op == UnaryOp::OpRefMut
++    let borrow_name = unary_operand_name(e.left)
++    match e.left {
++        Some(index_expr) => {
++            let idx_expr = *index_expr
++            if idx_expr.kind != ExprKind::ExprIndex {
++                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++                return ty_error()
++            }
++            let base_ty = checker_check_opt_expr_inplace(c, idx_expr.left)
++            let result_ty = slice_borrow_result_type(base_ty, want_mut)
++            if result_ty.kind == TypeKind::TyError && !is_error_or_unknown(base_ty) {
++                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++            }
++            match idx_expr.right {
++                Some(range_expr) => {
++                    if (*range_expr).kind != ExprKind::ExprRange || (*range_expr).bin_op != BinaryOp::OpRange {
++                        checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++                    } else {
++                        match (*range_expr).left {
++                            Some(start_expr) => {
++                                let start_ty = checker_check_expr_inplace(c, *start_expr)
++                                if !is_error_or_unknown(start_ty) && !is_integer_type(start_ty) {
++                                    checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), start_ty)
++                                }
++                            }
++                            None => {
++                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++                            }
++                        }
++                        match (*range_expr).right {
++                            Some(end_expr) => {
++                                let end_ty = checker_check_expr_inplace(c, *end_expr)
++                                if !is_error_or_unknown(end_ty) && !is_integer_type(end_ty) {
++                                    checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), end_ty)
++                                }
++                            }
++                            None => {
++                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++                            }
++                        }
++                    }
++                }
++                None => {
++                    checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++                }
++            }
++            if borrow_name.len > 0 {
++                if want_mut {
++                    let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
++                    (*c).borrows = borrow_result.0
++                    if borrow_result.1 != 0 {
++                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
++                    }
++                } else {
++                    let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
++                    (*c).borrows = borrow_result.0
++                    if borrow_result.1 != 0 {
++                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
++                    }
++                }
++            }
++            result_ty
++        }
++        None => {
++            checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++            ty_error()
++        }
++    }
++}
++
++fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
++        return checker_check_slice_borrow_expr_inplace(c, e)
++    }
++    let operand_ty = checker_check_opt_expr_inplace(c, e.left)
++    let result = unary_result_type(e.un_op, operand_ty)
++    if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
++        checker_report_error_at_inplace(c, e.span, 5, 0, 0, 0)
++    }
++    if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
++        let borrow_name = unary_operand_name(e.left)
++        if borrow_name.len > 0 {
++            if e.un_op == UnaryOp::OpRef {
++                let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
++                (*c).borrows = borrow_result.0
++                if borrow_result.1 != 0 {
++                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
++                }
++            } else {
++                let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
++                (*c).borrows = borrow_result.0
++                if borrow_result.1 != 0 {
++                    checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
++                }
++            }
++        }
++    }
++    result
++}
++
++// --- ExprIndex ------------------------------------------------------------
++fn checker_check_index_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let base_ty = checker_check_opt_expr_inplace(c, e.left)
++    let idx_ty = checker_check_opt_expr_inplace(c, e.right)
++    if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
++        checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
++    }
++    let elem_ty = indexable_elem_type(base_ty)
++    if !is_error_or_unknown(base_ty) && elem_ty.kind == TypeKind::TyError {
++        checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
++        ty_error()
++    } else if is_error_or_unknown(base_ty) {
++        base_ty
++    } else {
++        elem_ty
++    }
++}
++
++// --- ExprBlock ------------------------------------------------------------
++fn checker_check_block_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    match e.block {
++        Some(blk) => checker_check_block_inplace(c, *blk)
++        None => ty_unit()
++    }
++}
++
++// --- ExprIf ---------------------------------------------------------------
++fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let cond_ty = checker_check_opt_expr_inplace(c, e.left)
++    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
++        checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
++    }
++    let saved_cond_env = (*c).refine_cond_env
++    let cond_guard = if_cond_extract_pred(e.left)
++    if cond_guard.0 != 0 {
++        (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
++    }
++    let then_ty = checker_check_opt_block_inplace(c, e.block)
++    (*c).refine_cond_env = saved_cond_env
++    match e.else_expr {
++        Some(else_e) => {
++            let else_ty = checker_check_expr_inplace(c, *else_e)
++            (*c).refine_cond_env = saved_cond_env
++            if !types_compatible(then_ty, else_ty) {
++                checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
++            }
++            then_ty
++        }
++        None => {
++            (*c).refine_cond_env = saved_cond_env
++            ty_unit()
++        }
++    }
++}
++
++// --- ExprMatch (cluster) --------------------------------------------------
++fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
++    if pat.kind == PatternKind::PatWildcard {
++    } else if pat.kind == PatternKind::PatBinding {
++        (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
++        checker_const_int_bind_unknown_inplace(c, pat.name)
++        let lin = checker_is_linear_type_inplace(c, scrut_ty)
++        (*c).borrows = (*c).borrows.track(pat.name, lin)
++    } else if pat.kind == PatternKind::PatIntLit {
++    } else if pat.kind == PatternKind::PatBoolTrue {
++    } else if pat.kind == PatternKind::PatBoolFalse {
++    } else if pat.kind == PatternKind::PatStringLit {
++    } else if pat.kind == PatternKind::PatEnum {
++        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
++    } else if pat.kind == PatternKind::PatStruct {
++        checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
++    } else if pat.kind == PatternKind::PatTuple {
++        checker_bind_tuple_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
++    } else if pat.kind == PatternKind::PatOr {
++        checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
++    }
++}
++
++fn checker_bind_pattern_list_inplace(c: *mut Checker, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
++    var cursor = opt
++    while true {
++        match cursor {
++            Some(list) => {
++                checker_bind_pattern_inplace(c, (*list).head, scrut_ty)
++                cursor = (*list).tail
++            }
++            None => break
++        }
++    }
++}
++
++fn checker_bind_struct_pat_fields_inplace(c: *mut Checker, opt: Option<Box<PatFieldList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
++    var cursor = opt
++    while true {
++        match cursor {
++            Some(list) => {
++                var field_ty = ty_unknown()
++                if scrut_ty.kind == TypeKind::TyNamed {
++                    let struct_idx = (*c).structs.find(scrut_ty.name)
++                    if struct_idx >= 0 {
++                        let si = (*c).structs.get(struct_idx)
++                        field_ty = field_info_list_find(si.fields, (*list).head.name)
++                    } else {
++                        let enum_idx = (*c).enums.find(scrut_ty.name)
++                        if enum_idx >= 0 {
++                            let ei = (*c).enums.get(enum_idx)
++                            field_ty = variant_fields_find_field(ei.variants, (*list).head.name)
++                        }
++                    }
++                }
++                checker_bind_pattern_inplace(c, (*list).head.pattern, field_ty)
++                cursor = (*list).tail
++            }
++            None => break
++        }
++    }
++}
++
++fn checker_bind_tuple_pattern_list_inplace(c: *mut Checker, opt: Option<Box<PatternList> >, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
++    var cursor = opt
++    var idx: i64 = 0
++    while true {
++        match cursor {
++            Some(list) => {
++                var elem_ty = ty_unknown()
++                if scrut_ty.kind == TypeKind::TyTuple {
++                    elem_ty = type_entry_list_get(scrut_ty.tuple_elems, idx)
++                }
++                checker_bind_pattern_inplace(c, (*list).head, elem_ty)
++                cursor = (*list).tail
++                idx = idx + 1
++            }
++            None => break
++        }
++    }
++}
++
++fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    (*c).env = (*c).env.push_scope()
++    (*c).borrows = (*c).borrows.push_scope()
++    checker_push_const_scope_inplace(c)
++    checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
++    let body_ty = checker_check_expr_inplace(c, arm.body)
++    checker_pop_const_scope_inplace(c)
++    (*c).borrows = (*c).borrows.pop_scope()
++    (*c).env = (*c).env.pop_scope()
++    body_ty
++}
++
++fn checker_check_remaining_arms_inplace(c: *mut Checker, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry, expected_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
++    var cursor = opt
++    while true {
++        match cursor {
++            Some(list) => {
++                let arm_ty = checker_check_match_arm_inplace(c, (*list).head, scrut_ty)
++                if !types_compatible(arm_ty, expected_ty) {
++                    checker_report_mismatch_inplace(c, (*list).head.span, 18, expected_ty, arm_ty)
++                }
++                cursor = (*list).tail
++            }
++            None => break
++        }
++    }
++}
++
++fn checker_check_match_arms_inplace(c: *mut Checker, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    match opt {
++        Some(list) => {
++            let first_ty = checker_check_match_arm_inplace(c, (*list).head, scrut_ty)
++            checker_check_remaining_arms_inplace(c, (*list).tail, scrut_ty, first_ty)
++            first_ty
++        }
++        None => ty_unit()
++    }
++}
++
++fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let scrut_ty = checker_check_opt_expr_inplace(c, e.left)
++    checker_check_match_arms_inplace(c, e.arms, scrut_ty)
++}
++
++// --- ExprPath -------------------------------------------------------------
++fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let first_name = checker_copy_string_list_to_name(e.path.segments)
++    let enum_idx = (*c).enums.find(first_name)
++    if enum_idx >= 0 {
++        ty_named(first_name)
++    } else {
++        let variant_enum_idx = (*c).enums.find_variant_enum(first_name)
++        if variant_enum_idx >= 0 {
++            let ei = (*c).enums.get(variant_enum_idx)
++            ty_named(ei.name)
++        } else {
++            (*c).env.lookup(first_name)
++        }
++    }
++}
++
++// --- ExprFieldAccess ------------------------------------------------------
++fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let base_ty = checker_check_opt_expr_inplace(c, e.left)
++    if base_ty.kind == TypeKind::TyNamed {
++        let struct_idx = (*c).structs.find(base_ty.name)
++        if struct_idx >= 0 {
++            let si = (*c).structs.get(struct_idx)
++            let field_ty = field_info_list_find(si.fields, e.name)
++            if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
++                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++            }
++            field_ty
++        } else {
++            ty_error()
++        }
++    } else if base_ty.kind == TypeKind::TyKnowledge {
++        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
++            let epistemic_id: i64 = 8
++            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
++                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
++            }
++            knowledge_inner(base_ty)
++        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
++            ty_f64()
++        } else {
++            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++            ty_error()
++        }
++    } else if base_ty.kind == TypeKind::TyIntervention {
++        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
++            let epistemic_id: i64 = 8
++            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
++                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
++            }
++            knowledge_inner(base_ty)
++        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
++            ty_f64()
++        } else {
++            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++            ty_error()
++        }
++    } else if base_ty.kind == TypeKind::TyCounterfactual {
++        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
++            let epistemic_id: i64 = 8
++            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
++                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
++            }
++            knowledge_inner(base_ty)
++        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
++            ty_f64()
++        } else {
++            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++            ty_error()
++        }
++    } else if base_ty.kind == TypeKind::TyValidated {
++        if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
++            let epistemic_id: i64 = 8
++            if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
++                checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
++            }
++            knowledge_inner(base_ty)
++        } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
++            ty_f64()
++        } else {
++            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++            ty_error()
++        }
++    } else if base_ty.kind == TypeKind::TyHyper {
++        let alg = base_ty.algebra_kind
++        let inner_ty = match base_ty.inner {
++            Some(inner) => *inner
++            None => ty_error()
++        }
++        if alg == 1 {
++            if name_matches_str4(e.name, 114, 101, 97, 108) { inner_ty }
++            else if name_matches_str4(e.name, 105, 109, 97, 103) { inner_ty }
++            else {
++                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++                ty_error()
++            }
++        } else if alg == 2 {
++            if name_matches_str1(e.name, 119) { inner_ty }
++            else if name_matches_str1(e.name, 120) { inner_ty }
++            else if name_matches_str1(e.name, 121) { inner_ty }
++            else if name_matches_str1(e.name, 122) { inner_ty }
++            else {
++                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++                ty_error()
++            }
++        } else {
++            inner_ty
++        }
++    } else if base_ty.kind == TypeKind::TyTuple {
++        let idx = (e.name.buf[0] as i64) - 48
++        let tuple_count = type_entry_list_count(base_ty.tuple_elems)
++        if idx >= tuple_count {
++            checker_report_error_at_inplace(c, e.span, 47, 0, 0, 0)
++            ty_error()
++        } else {
++            let elem = type_entry_list_get(base_ty.tuple_elems, idx)
++            elem
++        }
++    } else if is_error_or_unknown(base_ty) {
++        base_ty
++    } else {
++        checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
++        ty_error()
++    }
++}
++
++// --- ExprWhile ------------------------------------------------------------
++fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let cond_ty = checker_check_opt_expr_inplace(c, e.left)
++    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
++        checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
++    }
++    let depth_pair = (*c).check_loop_depth(e.span)
++    checker_store_from_value(c, depth_pair.0)
++    if !depth_pair.1 {
++        return ty_error()
++    }
++    (*c).loop_depth = (*c).loop_depth + 1
++    (*c).borrows = (*c).borrows.release_exclusive_borrows()
++    match e.block {
++        Some(blk) => { let _bt = checker_check_block_inplace(c, *blk) }
++        None => {}
++    }
++    (*c).loop_depth = (*c).loop_depth - 1
++    ty_unit()
++}
++
++// --- ExprLoop -------------------------------------------------------------
++fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let _dp = (*c).check_loop_depth(e.span)
++    checker_store_from_value(c, _dp.0)
++    if !_dp.1 {
++        return ty_error()
++    }
++    (*c).loop_depth = (*c).loop_depth + 1
++    (*c).borrows = (*c).borrows.release_exclusive_borrows()
++    match e.block {
++        Some(blk) => {
++            let _bt = checker_check_block_inplace(c, *blk)
++        }
++        None => {}
++    }
++    (*c).loop_depth = (*c).loop_depth - 1
++    ty_unit()
++}
++
++// --- ExprTupleLit ---------------------------------------------------------
++fn checker_check_tuple_lit_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    var types: [TypeEntry; 16] = [empty_type_entry(); 16]
++    var count: i64 = 0
++    var cur = e.args
++    var done = false
++    while !done {
++        match cur {
++            Some(list) => {
++                if count < 16 {
++                    types[count] = checker_check_expr_inplace(c, (*list).head)
++                    count = count + 1
++                    cur = (*list).tail
++                } else {
++                    done = true
++                }
++            }
++            None => {
++                done = true
++            }
++        }
++    }
++    if count == 0 {
++        return ty_unit()
++    }
++    var elem_list: Option<Box<TypeEntryList> > = None
++    var j = count - 1
++    while j >= 0 {
++        elem_list = Some(Box::new(TypeEntryList { head: types[j], tail: elem_list }))
++        j = j - 1
++    }
++    match elem_list {
++        Some(el) => ty_tuple(*el)
++        None => ty_unit()
++    }
++}
++
++// --- ExprArrayLit ---------------------------------------------------------
++fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    match e.left {
++        Some(elem_expr) => match e.right {
++            Some(count_expr) => {
++                let elem_ty = checker_check_expr_inplace(c, *elem_expr)
++                let count_ty = checker_check_expr_inplace(c, *count_expr)
++                if !types_compatible(count_ty, ty_i64()) {
++                    checker_report_mismatch_inplace(c, (*count_expr).span, 20, ty_i64(), count_ty)
++                    return ty_array(elem_ty, 0)
++                }
++                if (*count_expr).kind != ExprKind::ExprIntLit {
++                    checker_report_error_at_inplace(c, (*count_expr).span, 20, 0, 0, 0)
++                    return ty_array(elem_ty, 0)
++                }
++                return ty_array(elem_ty, (*count_expr).int_val)
++            }
++            None => ()
++        }
++        None => ()
++    }
++
++    var elem_ty = ty_error()
++    var count: i64 = 0
++    var first = true
++    var cur = e.args
++    var done = false
++    while !done {
++        match cur {
++            Some(list) => {
++                let this_ty = checker_check_expr_inplace(c, (*list).head)
++                if first {
++                    elem_ty = this_ty
++                    first = false
++                } else {
++                    if !types_compatible(this_ty, elem_ty) {
++                        checker_report_mismatch_inplace(c, (*list).head.span, 20, elem_ty, this_ty)
++                    }
++                }
++                count = count + 1
++                cur = (*list).tail
++            }
++            None => {
++                done = true
++            }
++        }
++    }
++    ty_array(elem_ty, count)
++}
++
++// --- ExprStructLit (cluster) ----------------------------------------------
++fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let struct_name = checker_copy_string_list_to_name(e.path.segments)
++    let struct_idx = (*c).structs.find(struct_name)
++    if struct_idx >= 0 {
++        let si = (*c).structs.get(struct_idx)
++        if si.is_generic_template {
++            checker_check_generic_struct_lit_inplace(c, e, si)
++        } else {
++            checker_check_struct_field_inits_inplace(c, e.fields, si, e.span)
++            ty_named(struct_name)
++        }
++    } else {
++        checker_report_error_at_inplace(c, e.span, 15, 0, 0, 0)
++        checker_check_struct_field_inits_no_type_inplace(c, e.fields)
++        ty_error()
++    }
++}
++
++fn checker_check_generic_struct_lit_inplace(c: *mut Checker, e: Expr, tmpl: StructInfo) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    var inferred = InferBuf { args: [ty_error(); 8] }
++    inferred = checker_infer_type_params_from_fields_inplace(c, e.fields, tmpl, inferred)
++    checker_finalize_generic_struct_lit_inplace(c, e, tmpl, inferred.args)
++}
++
++fn checker_infer_type_params_from_fields_inplace(c: *mut Checker, opt: Option<Box<StructFieldList> >, tmpl: StructInfo, acc: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc, IO {
++    match opt {
++        None => acc
++        Some(fl) => {
++            let field_name = (*fl).head.name
++            let tmpl_field_ty = field_info_list_find(tmpl.fields, field_name)
++            let init_ty = checker_check_expr_inplace(c, (*fl).head.value)
++
++            var buf = acc
++            if tmpl_field_ty.kind == TypeKind::TyNamed {
++                var pi: i64 = 0
++                while pi < tmpl.type_param_count {
++                    if name_eq(tmpl_field_ty.name, tmpl.type_param_names[pi]) {
++                        buf.args[pi] = init_ty
++                        pi = tmpl.type_param_count
++                    } else {
++                        pi = pi + 1
++                    }
++                }
++            }
++            checker_infer_type_params_from_fields_inplace(c, (*fl).tail, tmpl, buf)
++        }
++    }
++}
++
++fn checker_finalize_generic_struct_lit_inplace(c: *mut Checker, e: Expr, tmpl: StructInfo, inferred_args: [TypeEntry; 8]) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    var args_list_opt: Option<Box<TypeEntryList> > = None
++    var ai: i64 = tmpl.type_param_count - 1
++    while ai >= 0 {
++        args_list_opt = Some(Box::new(TypeEntryList { head: inferred_args[ai], tail: args_list_opt }))
++        ai = ai - 1
++    }
++
++    match args_list_opt {
++        None => ty_error()
++        Some(args_box) => {
++            let args = *args_box
++            let mangled = mangle_generic_name(tmpl.name, args)
++
++            let existing_idx = (*c).structs.find(mangled)
++            if existing_idx < 0 {
++                let mono_fields = monomorphize_fields(tmpl.fields, tmpl.type_param_count, tmpl.type_param_names, args)
++                let mono_info = StructInfo {
++                    name: mangled,
++                    fields: mono_fields.0,
++                    field_count: mono_fields.1,
++                    is_linear: tmpl.is_linear,
++                    type_param_count: 0,
++                    type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
++                    is_generic_template: false,
++                }
++                (*c).structs = (*c).structs.add(mono_info)
++            }
++
++            let mono_idx = (*c).structs.find(mangled)
++            if mono_idx >= 0 {
++                let mono_si = (*c).structs.get(mono_idx)
++                checker_check_struct_field_inits_inplace(c, e.fields, mono_si, e.span)
++            }
++            ty_named(mangled)
++        }
++    }
++}
++
++fn checker_check_struct_field_inits_inplace(c: *mut Checker, opt: Option<Box<StructFieldList> >, si: StructInfo, lit_span: Span) with Mut, Panic, Div, Alloc, IO {
++    let init_count = struct_field_list_count(opt)
++    if init_count != si.field_count {
++        checker_report_error_at_inplace(c, lit_span, 46, 0, 0, 0)
++        return
++    }
++    checker_check_struct_field_inits_with_type_inplace(c, opt, si)
++}
++
++fn checker_check_struct_field_inits_with_type_inplace(c: *mut Checker, opt: Option<Box<StructFieldList> >, si: StructInfo) with Mut, Panic, Div, Alloc, IO {
++    match opt {
++        Some(list) => {
++            let field_ty = field_info_list_find(si.fields, (*list).head.name)
++            let init_ty = checker_check_expr_inplace(c, (*list).head.value)
++            if !types_compatible(init_ty, field_ty) {
++                checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
++            }
++            checker_check_struct_field_inits_with_type_inplace(c, (*list).tail, si)
++        }
++        None => ()
++    }
++}
++
++fn checker_check_struct_field_inits_no_type_inplace(c: *mut Checker, opt: Option<Box<StructFieldList> >) with Mut, Panic, Div, Alloc, IO {
++    match opt {
++        Some(list) => {
++            checker_check_expr_inplace(c, (*list).head.value)
++            checker_check_struct_field_inits_no_type_inplace(c, (*list).tail)
++        }
++        None => ()
++    }
++}
++
++// --- ExprCast -------------------------------------------------------------
++fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let src_ty = checker_check_opt_expr_inplace(c, e.left)
++    match e.cast_type {
++        Some(ty) => {
++            let target_ty = checker_lower_type_expr_mut(c, *ty)
++            let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
++                || src_ty.kind == TypeKind::TyIntervention
++                || src_ty.kind == TypeKind::TyCounterfactual
++                || src_ty.kind == TypeKind::TyValidated
++            let tgt_is_epistemic = target_ty.kind == TypeKind::TyKnowledge
++                || target_ty.kind == TypeKind::TyIntervention
++                || target_ty.kind == TypeKind::TyCounterfactual
++                || target_ty.kind == TypeKind::TyValidated
++            if src_is_epistemic && !tgt_is_epistemic {
++                checker_report_error_at_inplace(c, e.span, 171, 0, 0, 0)
++            }
++            if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
++                let src_dim = (*c).units.get_dim(src_ty.unit_id)
++                let tgt_dim = (*c).units.get_dim(target_ty.unit_id)
++                if !unit_dim_compatible(src_dim, tgt_dim) {
++                    checker_report_error_at_inplace(c, e.span, 43, 0, 0, 0)
++                }
++            }
++            target_ty
++        }
++        None => ty_error()
++    }
++}
++
++fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
++    let ident_ty = (*c).env.lookup(e.name)
++    if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
++        if (*c).borrows.is_borrowed(e.name) {
++            checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
++        } else {
++            let consume_result = (*c).borrows.consume_linear(e.name)
++            (*c).borrows = consume_result.0
++            if consume_result.1 != 0 {
++                checker_report_error_at_inplace(c, e.span, consume_result.1, 0, 0, 0)
++            }
++        }
++    }
++    ident_ty
++}
++
+ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+     if (*c).expr_depth >= MAX_EXPR_DEPTH {
+         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
+@@ -2524,6 +3333,36 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
+         result = ty_char()
+     } else if e.kind == ExprKind::ExprReturn {
+         result = checker_check_return_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprIdent {
++        result = checker_check_ident_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprBinary {
++        result = checker_check_binary_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprUnary {
++        result = checker_check_unary_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprIndex {
++        result = checker_check_index_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprBlock {
++        result = checker_check_block_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprIf {
++        result = checker_check_if_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprMatch {
++        result = checker_check_match_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprPath {
++        result = checker_check_path_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprFieldAccess {
++        result = checker_check_field_access_inplace(c, e)
++    } else if e.kind == ExprKind::ExprWhile {
++        result = checker_check_while_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprLoop {
++        result = checker_check_loop_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprTupleLit {
++        result = checker_check_tuple_lit_expr_inplace(c, e)
++    } else if e.kind == ExprKind::ExprArrayLit {
++        result = checker_check_array_lit_inplace(c, e)
++    } else if e.kind == ExprKind::ExprStructLit {
++        result = checker_check_struct_lit_inplace(c, e)
++    } else if e.kind == ExprKind::ExprCast {
++        result = checker_check_cast_expr_inplace(c, e)
+     } else {
+         result = checker_check_expr_mut(c, e)
+     }

@@ -1,0 +1,150 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/siegel_regression.sio — Siegel repeated-median regression
+//
+// The most outlier-resistant simple regression in common use — a 50% breakdown
+// point, higher than Theil-Sen's ~29%:
+//
+//   siegel_regression(x, y, n) -> SiegelFit
+//
+//   slope b = median_i ( median_{j≠i} (yⱼ−yᵢ)/(xⱼ−xᵢ) ),
+//   intercept a = median_i ( yᵢ − b·xᵢ ).
+// The inner median per point, then the median across points, is what buys the
+// extra robustness over the single median of all pairwise slopes.
+//
+// Pure Sounio: per-point slope medians in bounded [256] scratch (n ≤ 64) with an
+// inline sort; no nested call while a large buffer is live.
+//
+// References:
+//   Siegel (1982) Biometrika 69:242.
+
+module stats::siegel_regression
+
+// median of the first m entries of a [256] buffer (inline insertion sort).
+fn sg_median(buf: &![f64; 256], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    return 0.5 * (buf[(m / 2 - 1) as usize] + buf[(m / 2) as usize])
+}
+
+pub struct SiegelFit {
+    pub slope: f64,
+    pub intercept: f64,
+}
+
+/// Siegel repeated-median regression.
+///
+/// Parâmetros: x, y — paired data; n — size (3..64).
+/// Retorno: SiegelFit (slope, intercept).
+/// Referências: Siegel (1982).
+pub fn siegel_regression(x: &[f64; 256], y: &[f64; 256], n: i32) -> SiegelFit with Mut, Div, Panic {
+    if n < 3 || n > 64 { return SiegelFit { slope: 0.0, intercept: 0.0 } }
+    var point_med: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        // slopes from point i to all j != i
+        var slopes: [f64; 256] = [0.0; 256]
+        var cnt = 0
+        var j = 0
+        while j < n {
+            if j != i {
+                let dx = x[j as usize] - x[i as usize]
+                if dx != 0.0 {
+                    slopes[cnt as usize] = (y[j as usize] - y[i as usize]) / dx
+                    cnt = cnt + 1
+                }
+            }
+            j = j + 1
+        }
+        if cnt > 0 { point_med[i as usize] = sg_median(&!slopes, cnt) }
+        i = i + 1
+    }
+    let slope = sg_median(&!point_med, n)
+    // intercept = median of (y_i - slope*x_i)
+    var resid: [f64; 256] = [0.0; 256]
+    var k = 0
+    while k < n { resid[k as usize] = y[k as usize] - slope * x[k as usize]; k = k + 1 }
+    let intercept = sg_median(&!resid, n)
+    return SiegelFit { slope: slope, intercept: intercept }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect line y=2x+1: every slope 2 -> slope 2, intercept 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0
+    let r = siegel_regression(&x, &y, 4)
+    var ok = true
+    ok = check(1, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// robustness: y=2x+1 for x=1..4, plus a wild outlier (5,100).
+// each in-line point's median slope is 2; the overall median is 2 -> slope 2,
+// intercept = median(1,1,1,1,90) = 1.
+fn test_robust() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0; y[4]=100.0
+    let r = siegel_regression(&x, &y, 5)
+    var ok = true
+    ok = check(10, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// negative slope y = -3x + 10.
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=10.0; y[1]=7.0; y[2]=4.0; y[3]=1.0
+    let r = siegel_regression(&x, &y, 4)
+    var ok = true
+    ok = check(20, approx(r.slope, 0.0 - 3.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.intercept, 10.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_robust() && ok
+    ok = test_negative() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,132 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/deming.sio — Deming regression (errors-in-variables)
+//
+// The method-comparison regression that, unlike ordinary least squares, allows
+// measurement error in *both* variables — the correct model when comparing two
+// assays that are each imprecise:
+//
+//   deming(x, y, n, lambda) -> DemingFit
+//
+// With λ = σ²_ε(y)/σ²_ε(x) (λ = 1 → orthogonal regression) and the centred
+// sums Sxx, Syy, Sxy,
+//   slope  b = [ (Syy − λ Sxx) + √((Syy − λ Sxx)² + 4λ Sxy²) ] / (2 Sxy),
+//   intercept a = ȳ − b x̄.
+//
+// Pure Sounio: inline sqrt; two passes (means, then centred sums); no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Deming (1943); Linnet (1990) Clin. Chem. 36:1329 (method comparison).
+
+module stats::deming
+
+fn dm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct DemingFit {
+    pub slope: f64,
+    pub intercept: f64,
+}
+
+/// Deming regression of y on x with error-variance ratio lambda.
+///
+/// Parâmetros: x, y — paired measurements; n — size (>=3); lambda — σ²ε(y)/σ²ε(x)
+///             (1.0 for orthogonal / equal error).
+/// Retorno: DemingFit (slope, intercept).
+/// Referências: Deming (1943); Linnet (1990).
+pub fn deming(x: &[f64; 256], y: &[f64; 256], n: i32, lambda: f64) -> DemingFit with Mut, Div, Panic {
+    if n < 3 { return DemingFit { slope: 0.0, intercept: 0.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        sxy = sxy + dx * dy
+        j = j + 1
+    }
+    if sxy == 0.0 { return DemingFit { slope: 0.0, intercept: my } }
+    let u = syy - lambda * sxx
+    let slope = (u + dm_sqrt(u * u + 4.0 * lambda * sxy * sxy)) / (2.0 * sxy)
+    let intercept = my - slope * mx
+    return DemingFit { slope: slope, intercept: intercept }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect line y = 2x + 1: (1,3),(2,5),(3,7),(4,9). lambda=1 -> slope 2, intercept 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=5.0; y[2]=7.0; y[3]=9.0
+    let r = deming(&x, &y, 4, 1.0)
+    var ok = true
+    ok = check(1, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.intercept, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// staircase (0,1),(1,1),(2,3),(3,3): Sxx=5,Syy=4,Sxy=4.
+// lambda=1: slope=(-1+sqrt(1+64))/8=(-1+8.062258)/8=0.882782; intercept=2-0.882782·1.5=0.675827.
+// (OLS slope would be 0.8; Deming pulls it up because both axes carry error.)
+fn test_staircase() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=1.0; y[1]=1.0; y[2]=3.0; y[3]=3.0
+    let r = deming(&x, &y, 4, 1.0)
+    var ok = true
+    ok = check(10, approx(r.slope, 0.882782, 1.0e-5)) && ok
+    ok = check(11, approx(r.intercept, 0.675827, 1.0e-5)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_staircase() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

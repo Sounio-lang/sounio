@@ -1,0 +1,87 @@
+// Sounio emitter for a complete, runnable WMMA octonion-multiply kernel PTX (Convention X).
+// The kernel loads the left-multiply matrix L(a) (16x16 f16, built by the host as
+// L(a)[k][j]=σ(k^j,j)·a[k^j]) and B (16x16 f16), does one wmma m16n16k16 tile, and stores
+// the f32 product D = L(a)·B = the octonion products. Matches the nvcc ground-truth PTX.
+// Emits programmatically (fragment register lists built by loop) — this is the emitter body
+// that ports into self-hosted/gpu/kernels/hmma_signs.sio.
+
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    var digits = ""
+    var x = n
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var c = "0"
+        if d == 1 { c = "1" }
+        if d == 2 { c = "2" }
+        if d == 3 { c = "3" }
+        if d == 4 { c = "4" }
+        if d == 5 { c = "5" }
+        if d == 6 { c = "6" }
+        if d == 7 { c = "7" }
+        if d == 8 { c = "8" }
+        if d == 9 { c = "9" }
+        digits = str_concat(c, digits)
+        x = x / 10
+    }
+    digits
+}
+
+fn reg_list(prefix: string, start: i64, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(s, prefix)
+        s = str_concat(s, i64_to_string(start + i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+fn repeat_reg(reg: string, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(s, reg)
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    print(".version 9.0\n")
+    print(".target sm_121\n")
+    print(".address_size 64\n\n")
+    print(".visible .entry sounio_oct_mul_wmma(\n")
+    print("    .param .u64 .ptr .align 1 p_lmat,\n")
+    print("    .param .u64 .ptr .align 1 p_b,\n")
+    print("    .param .u64 .ptr .align 1 p_out\n")
+    print(")\n{\n")
+    print("    .reg .b32 %r<18>;\n")
+    print("    .reg .b32 %f<10>;\n")
+    print("    .reg .b64 %rd<7>;\n\n")
+    print("    ld.param.u64 %rd1, [p_lmat];\n")
+    print("    ld.param.u64 %rd2, [p_b];\n")
+    print("    ld.param.u64 %rd3, [p_out];\n")
+    print("    cvta.to.global.u64 %rd4, %rd1;\n")
+    print("    cvta.to.global.u64 %rd5, %rd2;\n")
+    print("    cvta.to.global.u64 %rd6, %rd3;\n")
+    print("    mov.b32 %r1, 16;\n")
+
+    let aFrag = reg_list("%r", 2, 8)      // {%r2..%r9}
+    let bFrag = reg_list("%r", 10, 8)     // {%r10..%r17}
+    let dFrag = reg_list("%f", 2, 8)      // {%f2..%f9}
+    let cZero = repeat_reg("%f1", 8)      // {%f1 x8}
+
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 ")
+    print(aFrag) print(", [%rd4], %r1;\n")
+    print("    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 ")
+    print(bFrag) print(", [%rd5], %r1;\n")
+    print("    mov.f32 %f1, 0f00000000;\n")
+    print("    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    print(dFrag) print(", ") print(aFrag) print(", ") print(bFrag) print(", ") print(cZero) print(";\n")
+    print("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    print(dFrag) print(", %r1;\n")
+    print("    ret;\n}\n")
+}

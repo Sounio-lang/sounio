@@ -1,0 +1,199 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bayes_conjugate.sio — conjugate Bayesian updates with credible sets
+//
+// The epistemic counterpart to the frequentist tools: given a conjugate prior and
+// data, return the exact posterior and a credible interval — a probability
+// statement about the parameter, not a coverage statement about the procedure.
+//
+//   beta_binomial(a0, b0, k, n, conf)                    -> BetaPosterior
+//   normal_normal(m0, v0, xbar, lik_var, n_obs, conf)    -> NormalPosterior
+//
+// Beta-Binomial:  Beta(a0,b0) prior + k successes / n trials -> Beta(a0+k, b0+n-k);
+//   credible interval from the Beta quantiles (bisection on the incomplete beta).
+// Normal-Normal (known likelihood variance):
+//   posterior var vn = 1/(1/v0 + n/σ²),  mean mn = vn·(m0/v0 + n·x̄/σ²);
+//   credible interval mn ± z·√vn.
+//
+// Pure Sounio; dependencies: incomplete beta (special::beta) and the normal
+// quantile (special::erf).
+//
+// References:
+//   Gelman et al. (2013) "Bayesian Data Analysis" 3rd ed., Ch. 2
+//   Bernardo & Smith (1994) "Bayesian Theory"
+
+module stats::bayes_conjugate
+
+use special::beta::{ibeta}
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL
+// ============================================================================
+
+fn bc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+// Beta quantile by bisection on the forward (reliable) incomplete beta.
+fn bc_beta_quantile(a: f64, b: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0 }
+    var lo = 0.0
+    var hi = 1.0
+    var i = 0
+    while i < 60 {
+        let mid = 0.5 * (lo + hi)
+        if ibeta(a, b, mid) < p { lo = mid } else { hi = mid }
+        i = i + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+// ============================================================================
+// RESULT TYPES
+// ============================================================================
+
+pub struct BetaPosterior {
+    pub alpha: f64,      // posterior a0 + k
+    pub beta: f64,       // posterior b0 + n - k
+    pub mean: f64,       // a/(a+b)
+    pub mode: f64,       // (a-1)/(a+b-2) for a,b>1, else -1
+    pub variance: f64,   // ab/((a+b)²(a+b+1))
+    pub cred_lo: f64,    // credible interval, lower
+    pub cred_hi: f64,    // credible interval, upper
+}
+
+pub struct NormalPosterior {
+    pub mean: f64,       // posterior mean
+    pub variance: f64,   // posterior variance
+    pub sd: f64,         // posterior sd
+    pub cred_lo: f64,    // credible interval, lower
+    pub cred_hi: f64,    // credible interval, upper
+}
+
+// ============================================================================
+// BETA-BINOMIAL
+// ============================================================================
+
+/// Beta-Binomial conjugate update: Beta(a0,b0) prior, k successes in n trials.
+///
+/// Parâmetros: a0,b0 — prior Beta parameters (>0); k,n — successes/trials;
+///             conf — credible level (e.g. 0.95).
+/// Retorno: BetaPosterior (updated a,b, mean, mode, variance, credible interval).
+/// Referências: Gelman et al. (2013) §2.
+pub fn beta_binomial(a0: f64, b0: f64, k: i64, n: i64, conf: f64) -> BetaPosterior with Mut, Div, Panic {
+    let a = a0 + (k as f64)
+    let b = b0 + ((n - k) as f64)
+    let s = a + b
+    let mean = a / s
+    var mode = 0.0 - 1.0
+    if a > 1.0 && b > 1.0 { mode = (a - 1.0) / (s - 2.0) }
+    let variance = a * b / (s * s * (s + 1.0))
+    let alpha = 1.0 - conf
+    let cred_lo = bc_beta_quantile(a, b, alpha / 2.0)
+    let cred_hi = bc_beta_quantile(a, b, 1.0 - alpha / 2.0)
+    return BetaPosterior { alpha: a, beta: b, mean: mean, mode: mode,
+                           variance: variance, cred_lo: cred_lo, cred_hi: cred_hi }
+}
+
+// ============================================================================
+// NORMAL-NORMAL (known likelihood variance)
+// ============================================================================
+
+/// Normal-Normal conjugate update with a known likelihood variance.
+///
+/// Parâmetros: m0,v0 — prior mean/variance; xbar — data mean; lik_var — σ² of one
+///             observation; n_obs — number of observations; conf — credible level.
+/// Retorno: NormalPosterior (mean, variance, sd, credible interval).
+/// Referências: Gelman et al. (2013) §2.5.
+pub fn normal_normal(m0: f64, v0: f64, xbar: f64, lik_var: f64, n_obs: i64, conf: f64) -> NormalPosterior with Mut, Div, Panic {
+    let nf = n_obs as f64
+    let prec = 1.0 / v0 + nf / lik_var
+    let vn = 1.0 / prec
+    let mn = vn * (m0 / v0 + nf * xbar / lik_var)
+    let sd = bc_sqrt(vn)
+    let z = normal_quantile(0.5 + conf / 2.0)
+    return NormalPosterior { mean: mn, variance: vn, sd: sd,
+                             cred_lo: mn - z * sd, cred_hi: mn + z * sd }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Uniform prior Beta(1,1) + 8/10 -> Beta(9,3). mean=0.75, mode=0.8,
+// var = 27/(144·13) = 0.0144231. 95% credible ~ [0.482, 0.940].
+fn test_beta_binomial() -> bool with IO, Mut, Div, Panic {
+    let p = beta_binomial(1.0, 1.0, 8, 10, 0.95)
+    var ok = true
+    ok = check(1, approx(p.alpha, 9.0, 1.0e-12)) && ok
+    ok = check(2, approx(p.beta, 3.0, 1.0e-12)) && ok
+    ok = check(3, approx(p.mean, 0.75, 1.0e-12)) && ok
+    ok = check(4, approx(p.mode, 0.8, 1.0e-12)) && ok
+    ok = check(5, approx(p.variance, 0.0144231, 1.0e-6)) && ok
+    // credible interval brackets the mean and lies in (0,1)
+    ok = check(6, p.cred_lo > 0.0 && p.cred_lo < p.mean) && ok
+    ok = check(7, p.cred_hi > p.mean && p.cred_hi < 1.0) && ok
+    // posterior mean must satisfy ibeta(a,b, cred_hi) ≈ 0.975
+    return ok
+}
+
+// Normal-Normal: prior N(0,1), xbar=2, lik_var=1, n=4.
+// vn=1/(1+4)=0.2, mn=0.2·(0+8)=1.6, sd=0.4472136.
+// 95% credible: 1.6 ± 1.959964·0.4472136 = 1.6 ± 0.8765 -> [0.723486, 2.476514]
+fn test_normal_normal() -> bool with IO, Mut, Div, Panic {
+    let p = normal_normal(0.0, 1.0, 2.0, 1.0, 4, 0.95)
+    var ok = true
+    ok = check(10, approx(p.mean, 1.6, 1.0e-9)) && ok
+    ok = check(11, approx(p.variance, 0.2, 1.0e-9)) && ok
+    ok = check(12, approx(p.sd, 0.4472136, 1.0e-6)) && ok
+    ok = check(13, approx(p.cred_lo, 0.723486, 1.0e-4)) && ok
+    ok = check(14, approx(p.cred_hi, 2.476514, 1.0e-4)) && ok
+    return ok
+}
+
+// Credible interval round-trip: ibeta(a,b, cred_hi) = 0.975 for Beta(9,3).
+fn test_credible_roundtrip() -> bool with IO, Mut, Div, Panic {
+    let p = beta_binomial(1.0, 1.0, 8, 10, 0.95)
+    var ok = true
+    ok = check(20, approx(bc_beta_quantile(9.0, 3.0, 0.975), p.cred_hi, 1.0e-9)) && ok
+    ok = check(21, approx(bc_beta_quantile(9.0, 3.0, 0.025), p.cred_lo, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_beta_binomial() && ok
+    ok = test_normal_normal() && ok
+    ok = test_credible_roundtrip() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

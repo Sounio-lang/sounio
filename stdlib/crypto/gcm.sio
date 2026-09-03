@@ -1,0 +1,352 @@
+//! stdlib/crypto/gcm.sio — AES-GCM (Galois/Counter Mode) authenticated
+//! encryption, built on Task 1's `crypto::aes` forward-cipher-only AES.
+//!
+//! Reference: NIST SP 800-38D, "Recommendation for Block Cipher Modes of
+//! Operation: Galois/Counter Mode (GCM) and GMAC", November 2007.
+//!   https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf
+//! GHASH multiplication follows section 6.3's bit-at-a-time algorithm
+//! (identical to Algorithm 1 of McGrew & Viega, "The Galois/Counter Mode of
+//! Operation (GCM)", the NIST-hosted primary source fetched and read
+//! 2026-08-25: https://csrc.nist.rip/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-spec.pdf).
+//! Tag construction (AAD/ciphertext zero-padding to 16-byte boundaries,
+//! independently, followed by a final block of 64-bit BIG-ENDIAN BIT
+//! lengths) follows SP 800-38D section 6.4/6.5 and McGrew-Viega section 2.
+//!
+//! GHASH bit ordering (read directly from the primary source, not from
+//! memory): Algorithm 1 in the McGrew-Viega paper numbers bits of a
+//! 128-bit block 0..127 MSB-first -- bit 0 is the most significant bit of
+//! the first byte (byte index 0), matching the block's natural big-endian
+//! in-memory byte layout. `rightshift(V)` shifts the ENTIRE 128-bit value
+//! one bit towards the least-significant end (i.e. bit i-1 gets what bit i
+//! had, for 1<=i<=127, and the new bit 0 is 0) -- a normal big-endian
+//! shift-right of the 16-byte array, propagating each byte's LSB into the
+//! next-lower-index byte's MSB. The reduction constant R has its leftmost
+//! (i.e. byte-0) eight bits equal to 11100001 (0xE1) and the remaining 120
+//! bits zero. Algorithm 1's loop body, per iteration i=0..127:
+//!   1. if bit i of Y (the second multiplicand, MSB-first) is 1: Z ^= V
+//!   2. test bit 127 of V (the LSB of the whole 128-bit value, i.e. the
+//!      LSB of byte 15) BEFORE shifting
+//!   3. V = rightshift(V); if the bit tested in step 2 was 1, V ^= R
+//! This is the "reversed" convention the task brief warns about: naive
+//! GF(2^n) multiplication code often shifts LEFT and reduces from the
+//! high end using a low-end-anchored irreducible-polynomial constant: GCM
+//! instead shifts RIGHT (towards the conventional numeric LSB) and applies
+//! R at byte 0 (the numeric MSB side), because GCM's own bit-numbering
+//! convention places bit index 0 at the numeric MSB rather than the LSB.
+//! Implemented and independently re-verified below against McGrew-Viega
+//! Test Case 2 (AES-128, all-zero key/plaintext/IV, empty AAD) and Test
+//! Case 16 (AES-256, real plaintext + AAD, 96-bit IV) -- see
+//! tests/run-pass/gcm_seal_open.sio and gcm_seal_open_256.sio.
+
+use hash::word32::*
+use net::socket::*
+use crypto::aes::*
+
+pub const GCM_TAG_LEN: i64 = 16
+pub const GCM_NONCE_LEN: i64 = 12
+
+// ============================================================================
+// GHASH: multiplication in GF(2^128), reduction polynomial
+// x^128 + x^7 + x^2 + x + 1 (NIST SP 800-38D sec 6.3 / McGrew-Viega
+// Algorithm 1). All byte arithmetic is carried in i64 with explicit
+// masking, never shifted directly on a `u8` local -- this compiler's `u8`
+// shifts do not wrap at 8 bits (see stdlib/crypto/aes.sio's header note),
+// so shifting a raw u8 would silently corrupt every carry computed here.
+// ============================================================================
+
+fn ghash_multiply(x: &[u8;16], h: &[u8;16]) -> [u8;16] {
+    var z: [u8;16] = [(0 as u8);16]
+    // Element-by-element copy, NOT `var v: [u8;16] = *x` (final
+    // whole-plan review, Finding 3): a bare dereference of a
+    // `&[u8;16]` reference aliases the caller's array on this compiler
+    // rather than copying it (same defect documented at
+    // `gcm_increment_counter` below, and in docs/handoff/
+    // souc_v0800_defects.md). `v` is only ever read below, never
+    // written, so every existing call site happens to be safe today --
+    // but a future caller that reads `*x` again after this call would
+    // see silently corrupted data if `v` aliased it. Copy explicitly so
+    // this function stays safe regardless of future call sites.
+    var v: [u8;16] = [(0 as u8);16]
+    var vi: i64 = 0
+    while vi < 16 {
+        v[vi as usize] = x[vi as usize]
+        vi = vi + 1
+    }
+
+    var byte_idx: i64 = 0
+    while byte_idx < 16 {
+        let hbyte = (h[byte_idx as usize] as i64) & 255
+        var bit_idx: i64 = 7
+        while bit_idx >= 0 {
+            let bit = (hbyte >> bit_idx) & 1
+            if bit == 1 {
+                var k: i64 = 0
+                while k < 16 {
+                    let zb = (z[k as usize] as i64) & 255
+                    let vb = (v[k as usize] as i64) & 255
+                    z[k as usize] = (zb ^ vb) as u8
+                    k = k + 1
+                }
+            }
+
+            // Test bit 127 of V (LSB of the whole 128-bit value, i.e. the
+            // LSB of byte 15) BEFORE shifting -- per Algorithm 1's order.
+            let lsb = (v[15] as i64) & 1
+
+            // rightshift(V): shift the entire 16-byte big-endian value one
+            // bit towards the LSB end. Each byte's outgoing LSB becomes the
+            // next-lower-index byte's incoming MSB.
+            var m: i64 = 15
+            while m >= 1 {
+                let cur = (v[m as usize] as i64) & 255
+                let prev = (v[(m - 1) as usize] as i64) & 255
+                let carry_in = prev & 1
+                v[m as usize] = (((cur >> 1) | (carry_in << 7)) & 255) as u8
+                m = m - 1
+            }
+            let top = (v[0] as i64) & 255
+            v[0] = (top >> 1) as u8
+
+            if lsb == 1 {
+                let newtop = (v[0] as i64) & 255
+                v[0] = (newtop ^ 0xE1) as u8
+            }
+
+            bit_idx = bit_idx - 1
+        }
+        byte_idx = byte_idx + 1
+    }
+    z
+}
+
+// GHASH_H(A || 0^v || C || 0^u || [len(A)]_64 || [len(C)]_64), per
+// SP 800-38D sec 6.4: AAD and ciphertext are each independently zero-padded
+// to a 16-byte boundary, then a final 16-byte block encodes len(AAD) and
+// len(ciphertext) as 64-bit BIG-ENDIAN BIT counts (byte length * 8) each.
+fn ghash(h: &[u8;16], aad: &RawBuf, aad_len: i64, ciphertext: &RawBuf, ciphertext_len: i64) -> [u8;16] with IO {
+    var y: [u8;16] = [(0 as u8);16]
+
+    var apos: i64 = 0
+    while apos < aad_len {
+        var block: [u8;16] = [(0 as u8);16]
+        var b: i64 = 0
+        while b < 16 && apos + b < aad_len {
+            block[b as usize] = (rawbuf_get(aad, apos + b) & 255) as u8
+            b = b + 1
+        }
+        var i: i64 = 0
+        while i < 16 {
+            let yb = (y[i as usize] as i64) & 255
+            let xb = (block[i as usize] as i64) & 255
+            y[i as usize] = (yb ^ xb) as u8
+            i = i + 1
+        }
+        y = ghash_multiply(&y, h)
+        apos = apos + 16
+    }
+
+    var cpos: i64 = 0
+    while cpos < ciphertext_len {
+        var block: [u8;16] = [(0 as u8);16]
+        var b: i64 = 0
+        while b < 16 && cpos + b < ciphertext_len {
+            block[b as usize] = (rawbuf_get(ciphertext, cpos + b) & 255) as u8
+            b = b + 1
+        }
+        var i: i64 = 0
+        while i < 16 {
+            let yb = (y[i as usize] as i64) & 255
+            let xb = (block[i as usize] as i64) & 255
+            y[i as usize] = (yb ^ xb) as u8
+            i = i + 1
+        }
+        y = ghash_multiply(&y, h)
+        cpos = cpos + 16
+    }
+
+    // Final block: len(AAD) and len(C), each as 64-bit big-endian BIT
+    // counts (multiply the byte length by 8 first).
+    var lenblock: [u8;16] = [(0 as u8);16]
+    let aad_bits = aad_len * 8
+    let ct_bits = ciphertext_len * 8
+    var k: i64 = 0
+    while k < 8 {
+        let shift = (7 - k) * 8
+        lenblock[k as usize] = ((aad_bits >> shift) & 255) as u8
+        k = k + 1
+    }
+    var k2: i64 = 0
+    while k2 < 8 {
+        let shift = (7 - k2) * 8
+        lenblock[(8 + k2) as usize] = ((ct_bits >> shift) & 255) as u8
+        k2 = k2 + 1
+    }
+    var i2: i64 = 0
+    while i2 < 16 {
+        let yb = (y[i2 as usize] as i64) & 255
+        let xb = (lenblock[i2 as usize] as i64) & 255
+        y[i2 as usize] = (yb ^ xb) as u8
+        i2 = i2 + 1
+    }
+    y = ghash_multiply(&y, h)
+
+    y
+}
+
+// Increments only the low 32 bits of a 16-byte counter block (the high 96
+// bits, which hold the nonce in GCM's 12-byte-nonce construction, never
+// change during a single seal/open call) -- uses word32.sio's add32, never
+// native u32, per this plan's Global Constraints.
+//
+// Counter-wrap note: `add32` wraps this 32-bit counter mod 2^32 after
+// 2^32 16-byte blocks (~64GB per invocation) -- unreachable for
+// realistic TLS record sizes, but a wrap would collide the counter back
+// onto J0 (counter value 0, reserved for the tag-encryption block in
+// gcm_seal/gcm_open below), which would be catastrophic if it were ever
+// reached.
+fn gcm_increment_counter(block: &[u8;16]) -> [u8;16] {
+    let low32 = ((block[12] as i64) << 24) | ((block[13] as i64) << 16) | ((block[14] as i64) << 8) | (block[15] as i64)
+    let incremented = add32(low32, 1)
+    // Deliberately NOT `var result = *block` followed by mutation: this
+    // compiler's local `[u8;N]` arrays are boxed GC handles (see
+    // stdlib/net/socket.sio's header note), and `*block` on a `&[u8;16]`
+    // was empirically found (2026-08-25, this task) to hand back an ALIAS
+    // of the caller's array rather than an independent copy -- mutating
+    // `result[12..15]` below then corrupted the caller's original block
+    // in place (observed: gcm_seal's J0, used later to encrypt the tag,
+    // silently changed after gcm_ctr_crypt ran, producing a wrong tag
+    // against Test Case 2 while GHASH/AES themselves were both already
+    // independently verified correct). Building `result` element-by-element
+    // from scalar `u8` reads avoids ever copying the handle itself.
+    var result: [u8;16] = [(0 as u8);16]
+    var i: i64 = 0
+    while i < 16 { result[i as usize] = block[i as usize]; i = i + 1 }
+    result[12] = ((incremented >> 24) & 255) as u8
+    result[13] = ((incremented >> 16) & 255) as u8
+    result[14] = ((incremented >> 8) & 255) as u8
+    result[15] = (incremented & 255) as u8
+    result
+}
+
+// XORs `data` with the AES-CTR keystream generated from j0+1, j0+2, ...
+// (the standard GCM convention: J0 itself is reserved for encrypting the
+// tag, never used to encrypt data).
+fn gcm_ctr_crypt(round_keys: &AesRoundKeys, j0: &[u8;16], data: &RawBuf, data_len: i64) -> RawBuf with IO {
+    let out = rawbuf_new(data_len + 8)
+    var counter = gcm_increment_counter(j0)
+    var pos: i64 = 0
+    while pos < data_len {
+        let keystream = aes_encrypt_block(round_keys, &counter)
+        var b: i64 = 0
+        while b < 16 && pos + b < data_len {
+            let d = rawbuf_get(data, pos + b)
+            let ks = (keystream[b as usize] as i64) & 255
+            rawbuf_set(&out, pos + b, d ^ ks)
+            b = b + 1
+        }
+        counter = gcm_increment_counter(&counter)
+        pos = pos + 16
+    }
+    out
+}
+
+pub fn gcm_seal(
+    round_keys: &AesRoundKeys,
+    nonce: &[u8;12],
+    plaintext: &RawBuf,
+    plaintext_len: i64,
+    aad: &RawBuf,
+    aad_len: i64,
+) -> (RawBuf, i64) with IO {
+    let zero_block: [u8;16] = [(0 as u8);16]
+    let h = aes_encrypt_block(round_keys, &zero_block)
+
+    var j0: [u8;16] = [(0 as u8);16]
+    var i: i64 = 0
+    while i < 12 { j0[i as usize] = nonce[i as usize]; i = i + 1 }
+    j0[15] = 1   // 12-byte-nonce construction: J0 = nonce || 0^31 || 1
+
+    let ciphertext = gcm_ctr_crypt(round_keys, &j0, plaintext, plaintext_len)
+    let hash = ghash(&h, aad, aad_len, &ciphertext, plaintext_len)
+    let ek_j0 = aes_encrypt_block(round_keys, &j0)
+
+    var tag: [u8;16] = [(0 as u8);16]
+    var t: i64 = 0
+    while t < 16 {
+        let hb = (hash[t as usize] as i64) & 255
+        let eb = (ek_j0[t as usize] as i64) & 255
+        tag[t as usize] = (hb ^ eb) as u8
+        t = t + 1
+    }
+
+    let out = rawbuf_new(plaintext_len + GCM_TAG_LEN + 8)
+    var c: i64 = 0
+    while c < plaintext_len { rawbuf_set(&out, c, rawbuf_get(&ciphertext, c)); c = c + 1 }
+    var g: i64 = 0
+    while g < 16 { rawbuf_set(&out, plaintext_len + g, (tag[g as usize] as i64) & 255); g = g + 1 }
+
+    (out, plaintext_len + GCM_TAG_LEN)
+}
+
+pub fn gcm_open(
+    round_keys: &AesRoundKeys,
+    nonce: &[u8;12],
+    ciphertext_with_tag: &RawBuf,
+    ciphertext_with_tag_len: i64,
+    aad: &RawBuf,
+    aad_len: i64,
+) -> (RawBuf, bool) with IO {
+    if ciphertext_with_tag_len < GCM_TAG_LEN {
+        return (rawbuf_new(8), false)
+    }
+    let plaintext_len = ciphertext_with_tag_len - GCM_TAG_LEN
+
+    let zero_block: [u8;16] = [(0 as u8);16]
+    let h = aes_encrypt_block(round_keys, &zero_block)
+    var j0: [u8;16] = [(0 as u8);16]
+    var i: i64 = 0
+    while i < 12 { j0[i as usize] = nonce[i as usize]; i = i + 1 }
+    j0[15] = 1
+
+    let ciphertext_only = rawbuf_new(plaintext_len + 8)
+    var c: i64 = 0
+    while c < plaintext_len { rawbuf_set(&ciphertext_only, c, rawbuf_get(ciphertext_with_tag, c)); c = c + 1 }
+
+    let hash = ghash(&h, aad, aad_len, &ciphertext_only, plaintext_len)
+    let ek_j0 = aes_encrypt_block(round_keys, &j0)
+    var expected_tag: [u8;16] = [(0 as u8);16]
+    var t: i64 = 0
+    while t < 16 {
+        let hb = (hash[t as usize] as i64) & 255
+        let eb = (ek_j0[t as usize] as i64) & 255
+        expected_tag[t as usize] = (hb ^ eb) as u8
+        t = t + 1
+    }
+
+    // Constant-time comparison, per this plan's Global Constraints: OR all
+    // byte differences together, branch on the accumulator exactly once --
+    // never a short-circuiting per-byte if/== comparison that could exit
+    // early and leak timing information about which byte first differed.
+    var diff: i64 = 0
+    var d: i64 = 0
+    while d < 16 {
+        let received = rawbuf_get(ciphertext_with_tag, plaintext_len + d) & 255
+        let expected = (expected_tag[d as usize] as i64) & 255
+        diff = diff | (received ^ expected)
+        d = d + 1
+    }
+
+    // Always run the CTR decryption regardless of tag outcome (uniform
+    // work, and simpler control flow), but only ever return it when the
+    // tag matched -- on mismatch we return an explicitly zeroed buffer,
+    // never the real (possibly forged) plaintext, per fail-closed AEAD
+    // discipline.
+    let plaintext = gcm_ctr_crypt(round_keys, &j0, &ciphertext_only, plaintext_len)
+    if diff != 0 {
+        let zeroed = rawbuf_new(plaintext_len + 8)
+        var z: i64 = 0
+        while z < plaintext_len { rawbuf_set(&zeroed, z, 0); z = z + 1 }
+        return (zeroed, false)
+    }
+    (plaintext, true)
+}

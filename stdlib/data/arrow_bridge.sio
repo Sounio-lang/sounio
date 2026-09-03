@@ -1,0 +1,99 @@
+//! Sounio -> Python/Arrow interop bridge (Campaign C4, first step).
+//!
+//! Exports a `data::dataframe::DataFrame` to a flat little-endian columnar
+//! binary file ("SIO1" format) that the companion Python reader
+//! (scripts/research/arrow_bridge_bridge.py) parses into a pyarrow.Table
+//! (or a numpy / struct reconstruction when pyarrow/numpy are absent).
+//!
+//! EXACTNESS: every f64 cell is emitted losslessly via the `f64_to_bits`
+//! compiler intrinsic (pure IEEE-754 reinterpret) followed by an explicit
+//! 8-iteration little-endian byte-split into an [i8; N] buffer written with
+//! the `write_file` builtin. This is a bit-exact round trip -- verified end
+//! to end (compile + run + Python readback asserting exact float equality).
+//!
+//! SCOPE (v1): write-only from Sounio's side (there is no reverse
+//! bits->f64 intrinsic in the compiler today, and the DataFrame stores only
+//! f64), single flat file, all columns dtype f64 (tag 0). The dtype tag and
+//! i64 name-id table are emitted so a later integer fast-path and a real
+//! string table can be added without breaking the header layout.
+//!
+//! SIO1 layout (all little-endian):
+//!   [0..4)   magic  = "SIO1" (bytes 0x53 0x49 0x4F 0x31)
+//!   [4..8)   version i32 = 1
+//!   [8..16)  n_rows i64
+//!   [16..24) n_cols i64
+//!   [24 .. 24 + 8*ncols)                 col name_ids i64[] (df_get_col_name)
+//!   [.. + 8*ncols)                       dtype tag per col i64 (0 = f64)
+//!   [.. + 8*nrows*ncols)                 column-major f64 bits i64[]
+//!                                        (full column of nrows before next)
+
+use data::dataframe::{DataFrame, df_get, df_nrows, df_ncols, df_get_col_name}
+
+// Max SIO1 buffer: 24-byte header + 8*64 name-ids + 8*64 dtype tags +
+// 8*1024*64 data cells = 525336 bytes. Matches DataFrame's 64x1024 cap.
+fn sio1_max_bytes() -> i64 { 525336 }
+
+// Write an i64 as 8 little-endian bytes into buf starting at `off`.
+// Returns the next free offset (off + 8).
+fn put_i64_le(buf: &![i8; 525336], off: i64, val: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        buf[off + i] = ((val >> (i * 8)) & 0xFF) as i8
+        i = i + 1
+    }
+    return off + 8
+}
+
+/// Serialize `df` to `path` in SIO1 columnar binary format.
+/// Returns the number of bytes written (>= 0 on success, < 0 on I/O error).
+pub fn df_write_sio1(df: &DataFrame, path: string) -> i64 with Mut, Panic, IO, Div {
+    let nrows = df_nrows(df)
+    let ncols = df_ncols(df)
+
+    var buf: [i8; 525336] = [0; 525336]
+
+    // --- Header ---
+    // magic "SIO1"
+    buf[0] = 0x53 as i8   // 'S'
+    buf[1] = 0x49 as i8   // 'I'
+    buf[2] = 0x4F as i8   // 'O'
+    buf[3] = 0x31 as i8   // '1'
+    // version i32 = 1 (little-endian, 4 bytes)
+    buf[4] = 1 as i8
+    buf[5] = 0 as i8
+    buf[6] = 0 as i8
+    buf[7] = 0 as i8
+
+    var off: i64 = 8
+    off = put_i64_le(&!buf, off, nrows)   // [8..16)
+    off = put_i64_le(&!buf, off, ncols)   // [16..24)
+
+    // --- Column name IDs (i64 each) ---
+    var c: i64 = 0
+    while c < ncols {
+        off = put_i64_le(&!buf, off, df_get_col_name(df, c))
+        c = c + 1
+    }
+
+    // --- Column dtype tags (0 = f64; DataFrame stores f64 only) ---
+    c = 0
+    while c < ncols {
+        off = put_i64_le(&!buf, off, 0)
+        c = c + 1
+    }
+
+    // --- Column-major data: bit-exact f64 -> i64 bits, LE ---
+    c = 0
+    while c < ncols {
+        var r: i64 = 0
+        while r < nrows {
+            let bits = f64_to_bits(df_get(df, r, c))
+            off = put_i64_le(&!buf, off, bits)
+            r = r + 1
+        }
+        c = c + 1
+    }
+
+    // `off` is now the exact total byte length.
+    return write_file(path, buf, off)
+}

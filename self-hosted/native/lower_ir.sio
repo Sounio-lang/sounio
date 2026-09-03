@@ -3,7 +3,8 @@
 module native::lower_ir
 
 use parser::ast::{BinaryOp, UnaryOp}
-use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction}
+use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX}
+use ir::algebra::*
 use native::regalloc::*
 use native::encode::*
 use native::reloc::*
@@ -41,11 +42,11 @@ pub fn preg_to_x86_reg(preg: i64) -> i64 {
 pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     // 1. Build RaSimpleInstr array from IR instructions
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     let count = func.instr_count
     var i = 0
-    while i < count && i < 128 {
-        let instr = func.instrs[i as usize]
+    while i < count && i < RA_MAX_SIMPLE_INSTRS && i < 4096 {
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         ra_instrs[i as usize] = ra_simple_instr(instr.dst, instr.src1, instr.src2)
         i = i + 1
     }
@@ -57,7 +58,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
     while v < state.count {
         let interval = state.intervals[v as usize]
         let vreg = interval.vreg
-        if vreg >= 0 && vreg < 512 {
+        if vreg >= 0 && vreg < NC_MAX_VREGS {
             if interval.assigned_preg >= 0 {
                 // Map logical preg to x86 reg number
                 c.vreg_to_preg[vreg as usize] = preg_to_x86_reg(interval.assigned_preg)
@@ -72,7 +73,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
     var pi = 0
     while pi < func.param_count {
         let pvreg = func.param_regs[pi as usize]
-        if pvreg >= 0 && pvreg < 512 {
+        if pvreg >= 0 && pvreg < NC_MAX_VREGS {
             c.vreg_to_preg[pvreg as usize] = -2    // RA_UNASSIGNED: use stack fallback
         }
         pi = pi + 1
@@ -83,7 +84,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
 // Load vreg to rax. Uses the physical register if allocated, else falls back to stack slot.
 pub fn nc_load_vreg_to_rax(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if vreg < 0 || vreg >= 512 {
+    if vreg < 0 || vreg >= NC_MAX_VREGS {
         c.code = emit_xor_rax_rax(c.code)
         return c
     }
@@ -106,7 +107,7 @@ pub fn nc_load_vreg_to_rax(nc: NativeCompiler, vreg: i64) -> NativeCompiler with
 // Store rax to vreg. Uses the physical register if allocated, else falls back to stack slot.
 pub fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if vreg < 0 || vreg >= 512 {
+    if vreg < 0 || vreg >= NC_MAX_VREGS {
         return c
     }
     let preg = c.vreg_to_preg[vreg as usize]
@@ -132,7 +133,7 @@ pub fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler wit
 pub fn nc_min_frame_size(nc: NativeCompiler, func: IrFunction) -> i64 with Mut, Panic, Div {
     var max_stack_vreg: i64 = -1
     var v: i64 = 0
-    while v < func.reg_count && v < 512 {
+    while v < func.reg_count && v < NC_MAX_VREGS {
         if nc.vreg_to_preg[v as usize] < 0 {
             max_stack_vreg = v
         }
@@ -149,7 +150,7 @@ pub fn nc_min_frame_size(nc: NativeCompiler, func: IrFunction) -> i64 with Mut, 
 // Instruction dispatch
 // ============================================================================
 
-pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div, Alloc {
+pub fn lower_instr(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div, Alloc {
     if instr.op == IrOpcode::IrLoadImm {
         lower_load_imm(nc, instr)
     } else if instr.op == IrOpcode::IrLoadBool {
@@ -193,7 +194,7 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     } else if instr.op == IrOpcode::IrBranchFalse {
         lower_branch_false(nc, instr)
     } else if instr.op == IrOpcode::IrNop {
-        nc
+
     } else if instr.op == IrOpcode::IrVecAddF64 {
         lower_vec_add(nc, instr)
     } else if instr.op == IrOpcode::IrVecMulF64 {
@@ -298,23 +299,23 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     } else if instr.op == IrOpcode::IrDebugGuard {
         // IrDebugGuard: debug-mode policy guard — NOP stub for bootstrap (Sprint 28)
         // Full implementation (UCOMISD + UD2 trap) will be wired when binary is rebuilt
-        nc
+
     } else if instr.op == IrOpcode::IrProfCounter {
         // Sprint 45: INC QWORD PTR [RIP+disp32] — counter increment
         // Encoding: 48 FF 05 <disp32> (7 bytes, replaces Sprint 44 NOP)
         // disp32 patched by apply_relocations() targeting .data[counter_id * 8]
         let counter_id = instr.imm_i64
-        var c = nc
+        var c = (*nc)
         c.code = emit_byte(c.code, 0x48)   // REX.W
         c.code = emit_byte(c.code, 0xFF)   // INC r/m64
         c.code = emit_byte(c.code, 0x05)   // ModR/M: [RIP+disp32], /0
         let disp_offset = c.code.len
         c.code = emit_u32_le(c.code, 0)    // placeholder disp32
         c.relocs = add_data_section_reloc(c.relocs, disp_offset, c.prof_counter_data_base + (counter_id * 8))
-        c
+        (*nc) = c
     } else if instr.op == IrOpcode::IrLoadFnRef {
         // Sprint 228: Load function address via LEA rax, [RIP + disp32] with relocation
-        var c = nc
+        var c = (*nc)
         let fn_target = instr.fn_id
         // LEA rax, [RIP + disp32]:  48 8D 05 <disp32>
         c.code = emit_byte(c.code, 0x48)   // REX.W
@@ -329,7 +330,7 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
         if instr.dst >= 0 {
             c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
         }
-        c
+        (*nc) = c
     } else if instr.op == IrOpcode::IrJ3OJordanMul {
         lower_j3o_jordan_mul(nc, instr)
     } else if instr.op == IrOpcode::IrJ3OTrace {
@@ -360,7 +361,7 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
         lower_q_deform(nc, instr)
     } else if instr.op == IrOpcode::IrCallIndirect {
         // Sprint 228: Indirect function call through register
-        var c = nc
+        var c = (*nc)
         let argc = instr.arg_count
         // Push arguments (same as direct call)
         c = push_arg_list(c, instr.call_args)
@@ -382,10 +383,28 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
         if instr.dst >= 0 {
             c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
         }
-        c
+        (*nc) = c
+    } else if instr.op == IrOpcode::IrLoadGlobal {
+        var c = (*nc)
+        let abs_addr = BSS_BASE_LINUX + instr.imm_i64
+        c.code = emit_mov_reg_imm(c.code, 0, abs_addr)
+        c.code = emit_load_rax_mem_rax(c.code)
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        (*nc) = c
+    } else if instr.op == IrOpcode::IrStoreGlobal {
+        var c = (*nc)
+        let abs_addr = BSS_BASE_LINUX + instr.imm_i64
+        if instr.src1 >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        }
+        c.code = emit_mov_reg_imm(c.code, 3, abs_addr)
+        c.code = emit_store_rax_mem_rbx_disp32(c.code, 0)
+        (*nc) = c
     } else {
         // Unsupported opcode — skip silently for bootstrap
-        nc
+
     }
 }
 
@@ -393,8 +412,8 @@ pub fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
 // Heap allocation
 // ============================================================================
 
-pub fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_alloc(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Return pointer to start of newly allocated object in dst slot.
     // Heap objects are backed by RuntimeContext.heap_cursor in memory.
@@ -419,15 +438,15 @@ pub fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     c.code = emit_mov_reg_imm(c.code, 1, alloc_size)
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Struct fields
 // ============================================================================
 
-pub fn lower_field_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_field_get(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Compute address: base + field_idx * 8, load value to rax
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))   // rax = base
@@ -437,11 +456,11 @@ pub fn lower_field_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wit
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_field_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_field_set(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Store source value into [base + field_idx * 8]
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))  // rax = base
@@ -450,15 +469,15 @@ pub fn lower_field_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wit
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))  // rax = src value
     c.code = emit_mov_reg_imm(c.code, 3, instr.field_idx)                 // rbx = field_idx
     c.code = emit_store_rax_mem_rdx_rbx8(c.code)                           // [rdx + rbx*8] = rax
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Arrays and indexing
 // ============================================================================
 
-pub fn lower_index_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_index_get(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Compute address: base + idx*8, load element into rax
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))  // rax = base
@@ -470,11 +489,11 @@ pub fn lower_index_get(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wit
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_index_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_index_set(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Store source value into array element at idx: [base + idx*8] = value
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))  // rax = base
@@ -483,34 +502,34 @@ pub fn lower_index_set(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wit
     c.code = emit_mov_rbx_rax(c.code)                                     // rbx = idx
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.imm_i64)) // rax = src
     c.code = emit_store_rax_mem_rdx_rbx8(c.code)                           // [rdx + rbx*8] = rax
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Load immediate / boolean
 // ============================================================================
 
-pub fn lower_load_imm(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_load_imm(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c.code = emit_mov_rax_imm(c.code, instr.imm_i64)
     if instr.dst >= 0 {
         c = nc_store_rax_to_vreg(c, instr.dst)
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_load_bool(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_load_bool(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let val = instr.imm_i64   // 1 for true, 0 for false
     c.code = emit_mov_rax_imm(c.code, val)
     if instr.dst >= 0 {
         c = nc_store_rax_to_vreg(c, instr.dst)
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_load_float(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let bits = f64_to_bits(instr.imm_f64)
 
     // Place f64 constant in .rodata (8-byte aligned)
@@ -529,15 +548,15 @@ pub fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
         c.is_float_reg[instr.dst as usize] = 1
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Sprint 87: int-to-float (CVTSI2SD) and float-to-int (CVTTSD2SI)
 // ============================================================================
 
-pub fn lower_int_to_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_int_to_float(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     // Load integer source → rax
     c = nc_load_vreg_to_rax(c, instr.src1)
     // CVTSI2SD xmm0, rax — convert i64 to f64
@@ -548,11 +567,11 @@ pub fn lower_int_to_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
         c.is_float_reg[instr.dst as usize] = 1
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_float_to_int(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_float_to_int(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     // Load float source bits → rax, then move to xmm0
     c = nc_load_vreg_to_rax(c, instr.src1)
     c.code = emit_movq_xmm0_rax(c.code)
@@ -562,18 +581,18 @@ pub fn lower_float_to_int(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
         c.is_float_reg[instr.dst as usize] = 0
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Load string literal (RIP-relative addressing)
 // ============================================================================
 
-pub fn lower_load_string(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_load_string(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Add string to .rodata, get offset
-    c.rodata = string_table_add(c.rodata, instr.name.buf, instr.name.len)
+    c.rodata = string_table_add(c.rodata, ir_name_at(instr.name_id).buf, ir_name_at(instr.name_id).len)
     let str_offset = c.rodata.last_offset
 
     // Emit LEA rax, [rip + disp32] with placeholder
@@ -593,24 +612,24 @@ pub fn lower_load_string(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
 
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Copy
 // ============================================================================
 
-pub fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_copy(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c = nc_load_vreg_to_rax(c, instr.src1)
     if instr.dst >= 0 {
         c = nc_store_rax_to_vreg(c, instr.dst)
         // Propagate float type tracking
-        if instr.src1 >= 0 && instr.src1 < 512 {
+        if instr.src1 >= 0 && instr.src1 < NC_MAX_VREGS {
             c.is_float_reg[instr.dst as usize] = c.is_float_reg[instr.src1 as usize]
         }
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -641,8 +660,8 @@ pub fn is_comparison_op(op: BinaryOp) -> i64 {
 //       for now.  Will diverge when peephole passes land.
 //
 // Float binary operation: xmm0 = LHS, xmm1 = RHS, result in rax
-pub fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn emit_float_binop_code(nc: &! NativeCompiler, op: BinaryOp) with Mut, Panic, Div {
+    var c = (*nc)
 
     if op == BinaryOp::OpAdd {
         c.code = emit_addsd_xmm0_xmm1(c.code)
@@ -682,7 +701,7 @@ pub fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler
         c.code = emit_movzx_rax_al(c.code)
     }
 
-    c
+    (*nc) = c
 }
 
 // Sprint 38: Strategy query helpers for native codegen
@@ -713,14 +732,14 @@ pub fn lower_ir_load_float_binop_operands(
 
     // Load lhs to xmm0: if it's an integer, convert via CVTSI2SD; else bit-move
     c = nc_load_vreg_to_rax(c, lhs)
-    if lhs >= 0 && lhs < 512 && c.is_float_reg[lhs as usize] == 0 {
+    if lhs >= 0 && lhs < NC_MAX_VREGS && c.is_float_reg[lhs as usize] == 0 {
         c.code = emit_cvtsi2sd_xmm0_rax(c.code)
     } else {
         c.code = emit_movq_xmm0_rax(c.code)
     }
     // Load rhs to xmm1: same pattern
     c = nc_load_vreg_to_rax(c, rhs)
-    if rhs >= 0 && rhs < 512 && c.is_float_reg[rhs as usize] == 0 {
+    if rhs >= 0 && rhs < NC_MAX_VREGS && c.is_float_reg[rhs as usize] == 0 {
         // Need rhs in xmm1, not xmm0 — use CVTSI2SD then move to xmm1
         c.code = emit_cvtsi2sd_xmm0_rax(c.code)
         c.code = emit_movq_rax_xmm0(c.code)     // xmm0 bits → rax
@@ -731,17 +750,17 @@ pub fn lower_ir_load_float_binop_operands(
     c
 }
 
-pub fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_ir_binop(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Check if either operand is float
     var is_float = 0
-    if instr.src1 >= 0 && instr.src1 < 512 {
+    if instr.src1 >= 0 && instr.src1 < NC_MAX_VREGS {
         if c.is_float_reg[instr.src1 as usize] == 1 {
             is_float = 1
         }
     }
-    if instr.src2 >= 0 && instr.src2 < 512 {
+    if instr.src2 >= 0 && instr.src2 < NC_MAX_VREGS {
         if c.is_float_reg[instr.src2 as usize] == 1 {
             is_float = 1
         }
@@ -754,7 +773,7 @@ pub fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
             && ir_native_strategy_can_commute_float_binop(c.current_strategy, instr.bin_op)
 
         c = lower_ir_load_float_binop_operands(c, instr, swap_operands)
-        c = emit_float_binop_code(c, instr.bin_op)
+        emit_float_binop_code(&!c, instr.bin_op)
         let is_cmp = is_comparison_op(instr.bin_op)
 
         // Store result (in rax) to dst slot/register
@@ -777,18 +796,18 @@ pub fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
         c.code = emit_pop_rbx(c.code)
 
         // Now rbx = LHS, rax = RHS
-        c = emit_binop_code(c, instr.bin_op)
+        emit_binop_code(&!c, instr.bin_op)
 
         // Store result (in rax) to dst slot/register
         if instr.dst >= 0 {
             c = nc_store_rax_to_vreg(c, instr.dst)
         }
     }
-    c
+    (*nc) = c
 }
 
-pub fn emit_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn emit_binop_code(nc: &! NativeCompiler, op: BinaryOp) with Mut, Panic, Div {
+    var c = (*nc)
 
     if op == BinaryOp::OpAdd {
         // rax = rbx + rax
@@ -857,15 +876,15 @@ pub fn emit_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with 
         c.code = emit_sar_rax_cl(c.code)
     }
 
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Unary operations
 // ============================================================================
 
-pub fn lower_unaryop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_unaryop(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c = nc_load_vreg_to_rax(c, instr.src1)
 
     if instr.un_op == UnaryOp::OpNeg {
@@ -883,15 +902,15 @@ pub fn lower_unaryop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     if instr.dst >= 0 {
         c = nc_store_rax_to_vreg(c, instr.dst)
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Return
 // ============================================================================
 
-pub fn lower_return(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_return(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Load return value into rax
     if instr.src1 >= 0 {
@@ -903,7 +922,7 @@ pub fn lower_return(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with M
     // Jump to epilogue (will be patched)
     c = record_return_jump(c)
 
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -928,8 +947,8 @@ pub fn push_arg_list(c: NativeCompiler, args: Option<Box<IrRegList>>) -> NativeC
     }
 }
 
-pub fn lower_call(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div, Alloc {
-    var c = nc
+pub fn lower_call(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div, Alloc {
+    var c = (*nc)
     let argc = instr.arg_count
 
     // Push all arguments left-to-right onto the stack by walking call_args
@@ -957,12 +976,12 @@ pub fn lower_call(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
 
-    c
+    (*nc) = c
 }
 
 // Sprint 108: extern "C" fn call — SysV ABI, extern reloc
-pub fn lower_call_extern(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div, Alloc {
-    var c = nc
+pub fn lower_call_extern(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div, Alloc {
+    var c = (*nc)
     let argc = instr.arg_count
     c = push_arg_list(c, instr.call_args)
     var i = argc - 1
@@ -975,25 +994,27 @@ pub fn lower_call_extern(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
     c.code = emit_call_rel32_placeholder(c.code)
     let er_idx = c.extern_relocs.count
     if er_idx < 128 {
-        c.extern_relocs.entries[er_idx as usize] = ExternReloc { offset: call_pos + 1, sym_buf: instr.name.buf, sym_len: instr.name.len }
+        c.extern_relocs.entries[er_idx as usize] = ExternReloc { offset: call_pos + 1, sym_buf: ir_name_at(instr.name_id).buf, sym_len: ir_name_at(instr.name_id).len }
         c.extern_relocs.count = er_idx + 1
     }
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
 // Labels and branches
 // ============================================================================
 
-pub fn lower_label(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    record_label(nc, instr.label_id)
+pub fn lower_label(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
+    c = record_label(c, instr.label_id)
+    (*nc) = c
 }
 
-pub fn lower_jump(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_jump(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let label_id = instr.label_id
 
     // Check if label is already defined (backward jump)
@@ -1013,11 +1034,11 @@ pub fn lower_jump(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
             c = record_label_patch(c, label_id, jmp_pos + 1)
         }
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_branch_true(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_branch_true(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Load condition into rax, test it
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
@@ -1040,11 +1061,11 @@ pub fn lower_branch_true(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
             c = record_label_patch(c, label_id, jnz_pos + 2)
         }
     }
-    c
+    (*nc) = c
 }
 
-pub fn lower_branch_false(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_branch_false(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
 
     // Load condition into rax, test it
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
@@ -1067,14 +1088,14 @@ pub fn lower_branch_false(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
             c = record_label_patch(c, label_id, jz_pos + 2)
         }
     }
-    c
+    (*nc) = c
 }
 
 // Simplified lowering: CodeBuffer-only API for test harnesses
 pub fn lower_ir_instr(buf: CodeBuffer, instr: IrInstr) -> CodeBuffer with Mut, Panic, Div, Alloc {
     var c = compiler_new()
     c.code = buf
-    c = lower_instr(c, instr)
+    lower_instr(&!c, instr)
     c.code
 }
 
@@ -1208,8 +1229,8 @@ pub fn emit_vbroadcastsd(buf: CodeBuffer, dst: i64, src: i64, vl_code: i64, mask
 
 // IrVecAddF64 → EVEX VADDPD {xmm|ymm|zmm}_dst, src1, src2
 //   label_id > 0 activates opmask k{label_id}
-pub fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_add(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mk = instr.label_id & 7
     let zb = instr.imm_flags & 1
@@ -1218,12 +1239,12 @@ pub fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     } else {
         c.code = emit_evex_pd_rr(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl)
     }
-    c
+    (*nc) = c
 }
 
 // IrVecMulF64 → EVEX VMULPD {xmm|ymm|zmm}_dst, src1, src2
-pub fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_mul(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mk = instr.label_id & 7
     let zb = instr.imm_flags & 1
@@ -1232,13 +1253,13 @@ pub fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     } else {
         c.code = emit_evex_pd_rr(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl)
     }
-    c
+    (*nc) = c
 }
 
 // IrVecFmaF64 → EVEX VFMADD231PD {xmm|ymm|zmm}_dst, src1, src2
 //   Semantics: dst = src1 * src2 + dst  (form 231)
-pub fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_fma(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mk = instr.label_id & 7
     let zb = instr.imm_flags & 1
@@ -1247,12 +1268,12 @@ pub fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     } else {
         c.code = emit_evex_pd_rr(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl)
     }
-    c
+    (*nc) = c
 }
 
 // IrVecSubF64 → EVEX VSUBPD {xmm|ymm|zmm}_dst, src1, src2
-pub fn lower_vec_sub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_sub(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mk = instr.label_id & 7
     let zb = instr.imm_flags & 1
@@ -1261,13 +1282,13 @@ pub fn lower_vec_sub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     } else {
         c.code = emit_evex_pd_rr(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl)
     }
-    c
+    (*nc) = c
 }
 
 // IrVecMinMaxPD → EVEX VMINMAXPD {xmm|ymm|zmm}_dst, src1, src2, imm8
 //   MAP5 opcode 0x52; field_idx carries the imm8 predicate (0=min, 1=max, …)
-pub fn lower_vec_minmax(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_minmax(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let pred = instr.field_idx & 0xFF
     let mk   = instr.label_id & 7
@@ -1280,7 +1301,7 @@ pub fn lower_vec_minmax(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
     } else {
         c.code = emit_evex_pd_rr_imm8(c.code, 5, 0x52, instr.dst, instr.src1, instr.src2, vl, pred)
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -1319,31 +1340,31 @@ pub fn emit_vex3_k_unary(buf: CodeBuffer, opcode: i64, dst: i64, src: i64) -> Co
 }
 
 // IrMaskAnd → KANDW k_dst, k_src1, k_src2
-pub fn lower_mask_and(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_mask_and(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c.code = emit_vex3_k_binary(c.code, 0x41, instr.dst, instr.src1, instr.src2)
-    c
+    (*nc) = c
 }
 
 // IrMaskOr → KORW k_dst, k_src1, k_src2
-pub fn lower_mask_or(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_mask_or(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c.code = emit_vex3_k_binary(c.code, 0x45, instr.dst, instr.src1, instr.src2)
-    c
+    (*nc) = c
 }
 
 // IrMaskNot → KNOTW k_dst, k_src  (src1 used as source)
-pub fn lower_mask_not(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_mask_not(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c.code = emit_vex3_k_unary(c.code, 0x44, instr.dst, instr.src1)
-    c
+    (*nc) = c
 }
 
 // IrMaskMov → KMOVW k_dst, k_src  (src1 used as source)
-pub fn lower_mask_mov(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_mask_mov(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     c.code = emit_vex3_k_unary(c.code, 0x90, instr.dst, instr.src1)
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -1353,30 +1374,30 @@ pub fn lower_mask_mov(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
 // IrVecPermilPD → EVEX VPERMILPD (reg-reg)
 //   EVEX.66.0F38.W1 0D /r  (map=2, opcode=0x0D)
 //   src1 = control register, src2 = data register
-pub fn lower_vec_permil(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_permil(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     c.code = emit_evex_pd_rr(c.code, 2, 0x0D, instr.dst, instr.src1, instr.src2, vl)
-    c
+    (*nc) = c
 }
 
 // IrVecPermilPDImm → EVEX VPERMILPD (imm8)
 //   EVEX.66.0F3A.W1 05 /r ib  (map=3, opcode=0x05)
 //   src2 = data register; field_idx = imm8 permutation control
 //   src1 = 15 encodes vvvv=1111 (no NDS register — 2-operand form)
-pub fn lower_vec_permil_imm(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_permil_imm(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let ctrl = instr.field_idx & 0xFF
     c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, instr.dst, 15, instr.src2, vl, ctrl)
-    c
+    (*nc) = c
 }
 
 // IrVecAddSubPD → EVEX VADDSUBPD
 //   EVEX.66.0F.W1 D0 /r  (map=1, opcode=0xD0)
 //   dst[i] = src1[i] + src2[i] for even lanes, src1[i] - src2[i] for odd lanes
-pub fn lower_vec_addsub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_addsub(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mk = instr.label_id & 7
     let zb = instr.imm_flags & 1
@@ -1385,7 +1406,7 @@ pub fn lower_vec_addsub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
     } else {
         c.code = emit_evex_pd_rr(c.code, 1, 0xD0, instr.dst, instr.src1, instr.src2, vl)
     }
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -1421,8 +1442,8 @@ pub fn lower_vec_addsub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
 //   VFMADD231PD r_a, r_q1x, q2
 //   VADDSUBPD   dst, r_a, r_b
 //   VPERMILPD imm8=0x00: identity (keep component order)
-pub fn lower_hyper_mul_q(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_mul_q(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let q1    = instr.src1
     let q2    = instr.src2
     let dst   = instr.dst
@@ -1446,7 +1467,7 @@ pub fn lower_hyper_mul_q(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
     c.code = emit_evex_pd_rr(c.code, 1, 0xD0, dst, r_a, r_b, 1)
     // Step 8: identity permute (component order already correct after VADDSUBPD)
     //         omitted — VADDSUBPD already produces [w,x,y,z] layout
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -1457,13 +1478,13 @@ pub fn lower_hyper_mul_q(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
 // IrVecXorPD → EVEX VXORPD
 //   EVEX.NDS.66.0F.W1 57 /r  (map=1, opcode=0x57)
 //   Same EVEX structure as VADDPD (map=1, 0x58). Mask + z-bit threaded from instr.
-pub fn lower_vec_xor(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_xor(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mask = instr.label_id & 7
     let zb   = instr.imm_flags & 1
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, instr.dst, instr.src1, instr.src2, vl, mask, zb)
-    c
+    (*nc) = c
 }
 
 // IrVecPermpd → EVEX VPERMPD (register-indexed form)
@@ -1471,13 +1492,13 @@ pub fn lower_vec_xor(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
 //   3-operand: dst=permuted data, src1=control/index vector, src2=source data
 //   Supports arbitrary 4-lane (YMM) or 8-lane (ZMM) f64 permutations.
 //   NOTE: distinct from VPERMPD imm8 form (map=3, opcode=0x01) in avx512.sio.
-pub fn lower_vec_permpd(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_vec_permpd(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
     let mask = instr.label_id & 7
     let zb   = instr.imm_flags & 1
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, instr.dst, instr.src1, instr.src2, vl, mask, zb)
-    c
+    (*nc) = c
 }
 
 // IrHyperConjugateO → octonion conjugate: negate e₁–e₇, keep e₀
@@ -1489,8 +1510,8 @@ pub fn lower_vec_permpd(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
 //   sign_mask_lo = (0x0000…, 0x8000…, 0x8000…, 0x8000…)
 //   sign_mask_hi = (0x8000…, 0x8000…, 0x8000…, 0x8000…)
 //   Both stored consecutively in r15-relative constant table (boot pattern).
-pub fn lower_hyper_conjugate_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_conjugate_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl      = if instr.imm_i64 > 0 { instr.imm_i64 } else { 1 }
     let sign_r  = (instr.label_id >> 4) & 0xF   // YMM index of sign_mask_lo
     let mask_k  = instr.label_id & 7
@@ -1503,7 +1524,7 @@ pub fn lower_hyper_conjugate_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst_lo, src_lo, sign_r, vl, mask_k, zb)
     // VXORPD dst_hi, src_hi, sign_mask_hi  → sign_mask_hi is sign_r+1
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst_hi, src_hi, sign_r + 1, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -1600,8 +1621,8 @@ pub fn emit_quat_mul_r(buf: CodeBuffer, q1: i64, q2: i64, out: i64, sc1: i64, sc
 //
 // Instruction count: 2 (col 0) + 4×7 (cols 1-7) + 1 (store) = 31
 // Byte count:        2×6       + 28×6              + 6        = 186
-pub fn lower_hyper_mul_o_fano(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_mul_o_fano(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2   // ZMM (8 f64 lanes)
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -1654,12 +1675,12 @@ pub fn lower_hyper_mul_o_fano(nc: NativeCompiler, instr: IrInstr) -> NativeCompi
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
     // Final store with masking: VMOVAPD dst{mask_k}{z}, accum  (opcode 0x28, src1=0→vvvv=1111)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrHyperMulO (Cayley-Dickson, kept for reference — no longer on dispatch path post-3.6.1)
-pub fn lower_hyper_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_mul_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl      = 1   // YMM for all operations
     let sign_r  = (instr.label_id >> 4) & 0xF   // YMM index of sign-flip constant
     let mask_k  = instr.label_id & 7
@@ -1695,7 +1716,7 @@ pub fn lower_hyper_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
     c.code = emit_quat_mul_r(c.code, a_hi, conj_bl, tmp_qcq, sc1, sc2, sc3)
     // Step 32: dst_hi = VADDPD{mask_k}{z}(tmp_pp, tmp_qcq)  — masked output
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, tmp_pp, tmp_qcq, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 //
@@ -1750,8 +1771,8 @@ pub fn emit_fano_inline(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
 // Total: 4×31 (Fano) + 2 (conjugate) + 2 (add/sub) = 128 EVEX instructions
 // Bytes: 128×6 = 768
 //
-pub fn lower_hyper_mul_s(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_mul_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2   // ZMM
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -1788,7 +1809,7 @@ pub fn lower_hyper_mul_s(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
     c.code = emit_fano_inline(c.code, beta_b, conj_c, p2_accum, t_bj, t_aj, ctrl_base)
     // Step 8: dst_hi = p3 + p4  (with masking)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, p1_accum, p2_accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrAssociator → octonion associator [a,b,c] = (ab)c − a(bc)
@@ -1815,8 +1836,8 @@ pub fn lower_hyper_mul_s(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
 //
 // Total: 4×31 (Fano) + 1 (VSUBPD) = 125 EVEX instructions / ~750 bytes
 //
-pub fn lower_associator(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_associator(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2   // ZMM
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -1841,7 +1862,7 @@ pub fn lower_associator(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
     c.code = emit_fano_inline(c.code, a, t_bc, t_abc2, t_bj, t_aj, ctrl_base)
     // Step 5: dst = (a*b)*c − a*(b*c)  (VSUBPD with masking, 1 instr)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst, t_abc, t_abc2, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrAssociatorVariance → Door β variance-of-associator correction
@@ -1855,8 +1876,8 @@ pub fn lower_associator(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
 // imm_flags bit 1 = fano_exact: 1 → Fano path (1 EVEX), 0 → non-Fano path (~128 EVEX)
 // imm_f64 = σ² (combined variance from KnowledgeOctonion.eps, set by type-checker)
 //
-pub fn lower_assoc_variance(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_assoc_variance(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2   // ZMM
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -1903,7 +1924,7 @@ pub fn lower_assoc_variance(nc: NativeCompiler, instr: IrInstr) -> NativeCompile
         // Step 8: dst = ||[a,b,c]||² × σ²  (VMULPD, 1 EVEX)
         c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, dst, t_ab, vl, mask_k, zb)
     }
-    c
+    (*nc) = c
 }
 
 // IrSedZDCheck → sedenion zero-divisor gate (type-level annotation)
@@ -1917,7 +1938,7 @@ pub fn lower_assoc_variance(nc: NativeCompiler, instr: IrInstr) -> NativeCompile
 // the compiler carries the 84 ZD pair table from algebra.sio and applies it before
 // any code is emitted for sedenion multiplication.
 //
-pub fn lower_sed_zd_check(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_sed_zd_check(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     // Type-level annotation: lowers to transparent copy at machine level.
     // The real work happens in the type-checker (ir_sed_is_canonical_zd in algebra.sio).
     lower_copy(nc, instr)
@@ -1942,7 +1963,7 @@ pub fn lower_sed_zd_check(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
 // The opcode definition, register layout contract, and F₄ symmetry integration are the
 // primary Phase 5 deliverable.
 //
-pub fn lower_j3o_jordan_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_j3o_jordan_mul(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     // Bootstrap placeholder: lower to identity copy of diagonal (base ZMM).
     // Full 9-octonion-product matrix multiply is deferred to Phase 5b (requires
     // preloaded Fano constants for 9 simultaneous emit_fano_inline calls per product).
@@ -1961,7 +1982,7 @@ pub fn lower_j3o_jordan_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompile
 //   3. VPERMILPD t3, t2, imm8=1      — move lane 1 to lane 0
 //   4. VADDPD{k}{z} dst, t2, t3     — final sum in lane 0, broadcast via outer mask
 //
-pub fn lower_j3o_trace(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_j3o_trace(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     // Bootstrap placeholder: copy diagonal register to dst.
     // Full 3-lane addition is implemented in Phase 5b.
     lower_copy(nc, instr)
@@ -1972,7 +1993,7 @@ pub fn lower_j3o_trace(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wit
 // Valid over non-associative algebras by alternativity (Artin's theorem).
 // ~1200 EVEX instructions; deferred to Phase 5b.
 //
-pub fn lower_j3o_det(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_j3o_det(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     // Phase 5b placeholder: Freudenthal cubic form, ~1200 instructions.
     lower_copy(nc, instr)
 }
@@ -1997,7 +2018,7 @@ pub fn lower_j3o_det(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
 // generated by the full algebra lowering pass. The scalar version demonstrates the
 // epistemic return type and the escape-time computation contract.
 //
-pub fn lower_fractal_escape(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_fractal_escape(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     // For the bootstrap lowering: treat as a transparent copy of src1 to dst.
     // The full algebra-specialized loop lowering is implemented in the fractal gate test
     // which uses pure Sounio code (not the IR opcode directly) to demonstrate the concept.
@@ -2023,8 +2044,8 @@ pub fn lower_fractal_escape(nc: NativeCompiler, instr: IrInstr) -> NativeCompile
 //
 // IrHyperExprInfo (attached by caller): grade_mask = (1 << k), grade_known = true
 //
-pub fn lower_clifford_grade_sel(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_clifford_grade_sel(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2   // ZMM (multivector up to Cl(5,0) = 32 components)
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -2034,7 +2055,7 @@ pub fn lower_clifford_grade_sel(nc: NativeCompiler, instr: IrInstr) -> NativeCom
     // VANDPD dst, src1, grade_mask_zmm — zero non-grade-k lanes
     // Encoding: EVEX.512.66.0F.W1 54 /r  (map=1, opcode=0x54 = VANDPD)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src1, grade_mask_zmm, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrCliffordGradeMul → geometric product with grade-mask propagation
@@ -2068,7 +2089,7 @@ pub fn lower_clifford_grade_sel(nc: NativeCompiler, instr: IrInstr) -> NativeCom
 //
 // SOTA claim: first compiler where the Clifford geometric product is grade-aware at IR level —
 // ir_clifford_grade_product fires during lowering and prunes dead-grade result components.
-pub fn lower_clifford_grade_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_clifford_grade_mul(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     let vl           = 2   // ZMM
     let grade_mask_a = instr.imm_i64 & 0xFF
     let grade_mask_b = (instr.imm_i64 >> 8) & 0xFF
@@ -2076,13 +2097,13 @@ pub fn lower_clifford_grade_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCom
     let grade_out    = ir_clifford_grade_product(grade_mask_a, grade_mask_b, max_grade)
     if grade_out == 0 {
         // Case 1: dead-grade — result is exactly zero in every lane.
-        var c = nc
+        var c = (*nc)
         let dst = instr.dst
         c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst, dst, dst, vl, 0, 0)  // VXORPD
-        c
+        (*nc) = c
     } else if grade_mask_a == 1 {
         // Case 2: scalar × multivector — broadcast scalar lane, multiply all.
-        var c = nc
+        var c = (*nc)
         let dst    = instr.dst
         let src1   = instr.src1
         let src2   = instr.src2
@@ -2091,7 +2112,7 @@ pub fn lower_clifford_grade_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCom
         let sc     = dst + 2   // scratch ZMM for broadcast
         c.code = emit_vbroadcastsd(c.code, sc, src1, vl, 0, 0)                            // VBROADCASTSD
         c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst, sc, src2, vl, mask_k, zb)    // VMULPD
-        c
+        (*nc) = c
     } else {
         // Case 3: general grade-sparse product — scaffold preserving grade annotation.
         lower_copy(nc, instr)
@@ -2110,8 +2131,8 @@ pub fn lower_clifford_grade_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCom
 //     Maximum ambiguity about which branch wins → blended variance.
 //
 // Lowering uses VMINPD for value and either VMINPD (certain) or VADDPD+scale (critical).
-pub fn lower_tropical_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_tropical_add(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2   // ZMM
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2141,7 +2162,7 @@ pub fn lower_tropical_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
         c.code = emit_vbroadcastsd(c.code, q_zmm, 0, vl, 0, 0)                            // VBROADCASTSD 0.25
         c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, dst_eps, dst_eps, q_zmm, vl, mask_k, zb)  // VMULPD
     }
-    c
+    (*nc) = c
 }
 
 // IrTropicalMul — Door Ω: tropical multiplication (ordinary +) with GUM uncertainty.
@@ -2152,8 +2173,8 @@ pub fn lower_tropical_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
 // enabling tropical algebraic identities in the e-graph (distributivity over IrTropicalAdd,
 // idempotent annihilator, etc.).
 // Lowering: 2 VADDPD (val and eps).
-pub fn lower_tropical_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_tropical_mul(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl      = 2   // ZMM
     let mask_k  = instr.label_id & 7
     let zb      = instr.imm_flags & 1
@@ -2167,7 +2188,7 @@ pub fn lower_tropical_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val, a_val, b_val, vl, mask_k, zb)
     // eps_out = eps_a + eps_b  (VADDPD, 1 EVEX — GUM addition rule)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_eps, a_eps, b_eps, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrFreeConvolve — Door Σ: free convolution of Knowledge values via R-transform.
@@ -2184,8 +2205,8 @@ pub fn lower_tropical_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler 
 //
 // Lowering: 2 VADDPD (val and sigma_sq).  Same arithmetic as GUM addition; distinction
 // is the distribution_class annotation carried in imm_flags bit 1.
-pub fn lower_free_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_free_convolve(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2   // ZMM
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2201,7 +2222,7 @@ pub fn lower_free_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
     // sigma_sq_out = σ²_a + σ²_b       (VADDPD, 1 EVEX — R-transform additivity)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // ─── Door Δ: Muraki's Independence Pentagon ──────────────────────────────────
@@ -2217,8 +2238,8 @@ pub fn lower_free_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler
 // for use by downstream epistemic gates and the Lean formal proof.
 //
 // Formal guarantee: MurakiPentagon.lean  `boolean_m4_minimal`, `muraki_classification_complete`
-pub fn lower_boolean_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_boolean_convolve(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2234,7 +2255,7 @@ pub fn lower_boolean_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompi
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
     // sigma_sq_out = σ²_a + σ²_b   (VADDPD — variance additivity, same for all 5 types)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrMonotoneConvolve — Door Δ: Monotone ⊳ convolution (Muraki's most exotic type).
@@ -2248,8 +2269,8 @@ pub fn lower_boolean_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompi
 // The asymmetric ordering is carried in dist_class = 0b11 and the swap flag for downstream gates.
 //
 // Formal guarantee: MurakiPentagon.lean  `monotone_clt_arcsine`, `muraki_classification_complete`
-pub fn lower_monotone_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_monotone_convolve(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2265,7 +2286,7 @@ pub fn lower_monotone_convolve(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_val,  a_val,  b_val,  vl, mask_k, zb)
     // sigma_sq_out = σ²_a + σ²_b   (VADDPD — variance additivity, same for all 5 types)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_sgsq, a_sgsq, b_sgsq, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // ─── Door Φ: Wasserstein Transport + Ollivier-Ricci Curvature ─────────────────
@@ -2326,14 +2347,16 @@ pub fn lower_wasserstein_inline(nc: NativeCompiler, vl: i64, mask_k: i64, zb: i6
 // imm_flags bit 0 = z-bit
 //
 // Formal guarantee: WassersteinORC.lean  `wasserstein_triangle_inequality`
-pub fn lower_wasserstein_dist(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+pub fn lower_wasserstein_dist(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     let vl     = 2
     let mask_k = instr.label_id & 7
     let zb     = instr.imm_flags & 1
-    lower_wasserstein_inline(nc, vl, mask_k, zb,
+    var c = (*nc)
+    c = lower_wasserstein_inline(c, vl, mask_k, zb,
         instr.dst, instr.dst + 1,
         instr.src1, instr.src1 + 1,
         instr.src2, instr.src2 + 1)
+    (*nc) = c
 }
 
 // IrORC — Door Φ: Ollivier-Ricci curvature κ(x,y) = 1 − W₁(mₓ,mᵧ)/d(x,y).
@@ -2347,8 +2370,8 @@ pub fn lower_wasserstein_dist(nc: NativeCompiler, instr: IrInstr) -> NativeCompi
 // Uses dst+8 and dst+9 as broadcast scratch for (1/d) and (1.0).
 //
 // Formal guarantee: WassersteinORC.lean  `orc_positive_implies_mixing_bound`
-pub fn lower_orc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_orc(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl     = 2
     let mask_k = instr.label_id & 7
     let zb     = instr.imm_flags & 1
@@ -2381,7 +2404,7 @@ pub fn lower_orc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
     c.code = emit_vbroadcastsd(c.code, one_zmm, 0, vl, 0, 0)
     // Step 5: κ = 1.0 − W₁/d   (VSUBPD one_zmm, dst)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst, one_zmm, dst, vl, mask_k, zb)  // VSUBPD κ
-    c
+    (*nc) = c
 }
 
 // ─── Door Ξ: q-deformed Arithmetic / Quantum Groups ───────────────────────────
@@ -2402,8 +2425,8 @@ pub fn lower_orc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
 // q encoding: imm_f64 = q as f64. Fast path: if q = 1.0 exactly, emit 1 VMULPD only.
 //
 // Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
-pub fn lower_q_deform(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_q_deform(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl     = 2
     let mask_k = instr.label_id & 7
     let zb     = instr.imm_flags & 1
@@ -2439,7 +2462,7 @@ pub fn lower_q_deform(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
         let comm = instr.src2 + 1
         c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, dst, sc, comm, vl, mask_k, zb)
     }
-    c
+    (*nc) = c
 }
 
 // IrHyperNormSqO → octonion norm-squared: Σeᵢ² for i=0..7
@@ -2456,8 +2479,8 @@ pub fn lower_q_deform(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with
 //   6. VPERMPD sc, sum, imm8=0x4E      — swap 128-bit halves (indices [2,3,0,1])  (7 bytes)
 //   7. VADDPD{mask_k}{z} dst, sum, sc  — all 4 lanes = total norm²  (6 bytes)
 // Byte count: 3×6 + 2×7 + 2×6 = 18 + 14 + 12 = 44
-pub fn lower_hyper_norm_sq_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_hyper_norm_sq_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl      = 1   // YMM
     let mask_k  = instr.label_id & 7
     let zb      = instr.imm_flags & 1
@@ -2481,7 +2504,7 @@ pub fn lower_hyper_norm_sq_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x01, lo_sq, 15, sum, vl, 0x4E)
     // Step 7: VADDPD{mask_k}{z} dst, sum, lo_sq  — masked output
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst, sum, lo_sq, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // ============================================================================
@@ -2497,8 +2520,8 @@ pub fn lower_hyper_norm_sq_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
 // VANDPD (map=1, opcode=0x54): dst = src AND imag_mask
 //   imag_mask ZMM: lane 0 = 0x0000000000000000, lanes 1-7 = 0xFFFFFFFFFFFFFFFF
 // 1 instruction / 6 bytes
-pub fn lower_g2_project_im_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_g2_project_im_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2507,7 +2530,7 @@ pub fn lower_g2_project_im_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     let dst      = instr.dst
     // VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrG2ApplyGenO — apply a 7×7 matrix (𝔤₂ generator) to Im(𝕆) via column-major multiply
@@ -2526,8 +2549,8 @@ pub fn lower_g2_project_im_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
 // Convention: bcast ctrls at col_base-7 .. col_base-1 (7 ZMMs before the columns).
 //
 // 16 instructions / 96 bytes: 1 + 7×2 + 1
-pub fn lower_g2_apply_gen_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_g2_apply_gen_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2564,15 +2587,15 @@ pub fn lower_g2_apply_gen_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompile
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
     // Final store: VMOVAPD dst{mask_k}{z}, accum  (map=1, opcode=0x28, src1=0 → vvvv=1111)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrG2DenseO — G₂-equivariant dense layer: project + apply + store
 // Composes IrG2ProjectImO (1 instr) + IrG2ApplyGenO (16 instr) = 17 instr / 102 bytes
 // The weight matrix (Σ αₖ Dₖ, 14 learnable scalars → one 7×7 matrix) is precomputed
 // by the frontend and loaded into col_base+0..6 ZMMs before this instruction.
-pub fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_g2_dense_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2605,7 +2628,7 @@ pub fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
     // Final store: VMOVAPD dst{mask_k}{z}, accum
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrG2EquivDenseKernelO — G₂-equivariant dense kernel with IEEE-754-2019 robustness (H3.8)
@@ -2626,8 +2649,8 @@ pub fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler wi
 //   bcast_base = col_base - 7  (7 broadcast-ctrl ZMMs immediately before column ZMMs)
 //
 // VMINMAXPD (MAP5 opcode 0x52) imm8=0x00: minimum, propagate NaN → cleans up fp edge cases.
-pub fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_g2_equiv_dense_kernel_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl       = 2   // ZMM
     let mask_k   = instr.label_id & 7
     let zb       = instr.imm_flags & 1
@@ -2664,7 +2687,7 @@ pub fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> Nati
     c.code = b
     // Step 5: masked store — VMOVAPD{k}{z} dst, accum  (map=1, opcode=0x28, src1=0→vvvv=1111)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE8RootReflectO — E₈ Weyl group root reflection (H3.9)
@@ -2695,8 +2718,8 @@ pub fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> Nati
 //     ctrl_base+2: ZMM with permutation [1,0,3,2,5,4,7,6]
 //   mask_k   = label_id & 7
 //   z-bit    = imm_flags & 1  (applied only to final VFNMADD)
-pub fn lower_e8_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e8_root_reflect_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2   // ZMM
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2722,7 +2745,7 @@ pub fn lower_e8_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     // 8. VFNMADD231PD v{mask_k}{z}, t, α  → v = v − t·α = s_α(v)
     //   VFNMADD231PD: map=2, opcode=0xBC   semantics: dst = dst − src1*src2
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrF4RootReflectO — F₄ Weyl group root reflection (H4.0)
@@ -2735,8 +2758,8 @@ pub fn lower_e8_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
 // ZMM layout: lanes 0-3 carry the 4 Cartan coordinates, lanes 4-7 = 0.
 // The 8-lane tree reduction works unchanged — zeroed lanes add zero.
 // Same encoding as IrE8RootReflectO.  8 instructions / 48 bytes.
-pub fn lower_f4_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_f4_root_reflect_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2761,7 +2784,7 @@ pub fn lower_f4_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
     // 8. VFNMADD231PD v{mask_k}{z}, t, α  → v = v − t·α
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE6RootReflectO — E₆ Weyl group root reflection (H4.0)
@@ -2769,8 +2792,8 @@ pub fn lower_f4_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
 // E₆: 78-dimensional exceptional Lie algebra, rank 6, 72 roots, simply-laced.
 // ZMM layout: lanes 0-5 carry 6 Cartan coordinates, lanes 6-7 = 0.
 // Same algorithm as E₈.  8 instructions / 48 bytes.
-pub fn lower_e6_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e6_root_reflect_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2787,7 +2810,7 @@ pub fn lower_e6_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE7RootReflectO — E₇ Weyl group root reflection (H4.0)
@@ -2795,8 +2818,8 @@ pub fn lower_e6_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
 // E₇: 133-dimensional exceptional Lie algebra, rank 7, 126 roots, simply-laced.
 // ZMM layout: lanes 0-6 carry 7 Cartan coordinates, lane 7 = 0.
 // Same algorithm as E₈.  8 instructions / 48 bytes.
-pub fn lower_e7_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e7_root_reflect_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl        = 2
     let mask_k    = instr.label_id & 7
     let zb        = instr.imm_flags & 1
@@ -2813,7 +2836,7 @@ pub fn lower_e7_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrF4CartanMulO — F₄ Cartan matrix multiply, 4×4 (H4.0)
@@ -2828,8 +2851,8 @@ pub fn lower_e7_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeComp
 //
 // 4 column ZMMs at col_base+0..3, broadcast ctrls at col_base-4..col_base-1.
 // 10 instructions / 60 bytes: 1 VXORPD + 4×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
-pub fn lower_f4_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_f4_cartan_mul_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -2855,7 +2878,7 @@ pub fn lower_f4_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
     // VMOVAPD dst{mask_k}{z}, accum
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE6CartanMulO — E₆ Cartan matrix multiply, 6×6 (H4.0)
@@ -2870,8 +2893,8 @@ pub fn lower_f4_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
 //
 // 6 column ZMMs at col_base+0..5, broadcast ctrls at col_base-6..col_base-1.
 // 14 instructions / 84 bytes: 1 VXORPD + 6×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
-pub fn lower_e6_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e6_cartan_mul_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -2903,7 +2926,7 @@ pub fn lower_e6_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
     // VMOVAPD dst{mask_k}{z}, accum
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE7CartanMulO — E₇ Cartan matrix multiply, 7×7 (H4.0)
@@ -2919,8 +2942,8 @@ pub fn lower_e6_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
 //
 // 7 column ZMMs at col_base+0..6, broadcast ctrls at col_base-7..col_base-1.
 // 16 instructions / 96 bytes: 1 VXORPD + 7×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
-pub fn lower_e7_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e7_cartan_mul_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -2949,7 +2972,7 @@ pub fn lower_e7_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
     // VMOVAPD dst{mask_k}{z}, accum
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }
 
 // IrE8CartanMulO — E₈ Cartan matrix multiply, 8×8 (H4.0)
@@ -2966,8 +2989,8 @@ pub fn lower_e7_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
 //
 // 8 column ZMMs at col_base+0..7, broadcast ctrls at col_base-8..col_base-1.
 // 18 instructions / 108 bytes: 1 VXORPD + 8×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
-pub fn lower_e8_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+pub fn lower_e8_cartan_mul_o(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
     let vl         = 2
     let mask_k     = instr.label_id & 7
     let zb         = instr.imm_flags & 1
@@ -2998,5 +3021,5 @@ pub fn lower_e8_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompil
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 7, vl, 0, 0)
     // VMOVAPD dst{mask_k}{z}, accum
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
-    c
+    (*nc) = c
 }

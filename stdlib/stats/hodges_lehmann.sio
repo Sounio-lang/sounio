@@ -1,0 +1,156 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/hodges_lehmann.sio — Hodges-Lehmann location estimators
+//
+// The robust location estimators paired with the Wilcoxon tests — more
+// efficient than the median, far more resistant than the mean:
+//
+//   hl_one(x, n)          -> f64   median of Walsh averages (xᵢ+xⱼ)/2, i ≤ j
+//   hl_two(x, nx, y, ny)  -> f64   median of pairwise differences xᵢ − yⱼ
+//
+// hl_one is the point estimate that inverts the one-sample Wilcoxon signed-rank
+// test; hl_two is the Hodges-Lehmann shift that inverts the Mann-Whitney test.
+//
+// Pure Sounio: the pairwise set is materialised into a bounded [2080] scratch
+// (so n ≤ 64 one-sample, nx·ny ≤ 2080 two-sample) and its median is taken with
+// an *inline* insertion sort — no nested call while the big buffer is live.
+//
+// References:
+//   Hodges & Lehmann (1963) Ann. Math. Stat. 34:598.
+
+module stats::hodges_lehmann
+
+// median of the first m entries of a [2080] buffer, sorted in place (inline
+// insertion sort — deliberately not a helper call, to keep the big buffer from
+// being live across a frame boundary).
+fn hl_buffer_median(buf: &![f64; 2080], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key {
+            buf[(j + 1) as usize] = buf[j as usize]
+            j = j - 1
+        }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    let a = buf[(m / 2 - 1) as usize]
+    let b = buf[(m / 2) as usize]
+    return 0.5 * (a + b)
+}
+
+/// One-sample Hodges-Lehmann estimator: median of the Walsh averages.
+///
+/// Parâmetros: x — sample; n — size (2..64).
+/// Retorno: HL location estimate.
+/// Referências: Hodges & Lehmann (1963).
+pub fn hl_one(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    if n > 64 { return 0.0 }
+    var buf: [f64; 2080] = [0.0; 2080]
+    var m = 0
+    var i = 0
+    while i < n {
+        var j = i
+        while j < n {
+            buf[m as usize] = 0.5 * (x[i as usize] + x[j as usize])
+            m = m + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return hl_buffer_median(&!buf, m)
+}
+
+/// Two-sample Hodges-Lehmann shift: median of the pairwise differences.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes (nx·ny ≤ 2080).
+/// Retorno: HL shift estimate (location of x relative to y).
+/// Referências: Hodges & Lehmann (1963).
+pub fn hl_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic {
+    if nx < 1 || ny < 1 { return 0.0 }
+    if nx * ny > 2080 { return 0.0 }
+    var buf: [f64; 2080] = [0.0; 2080]
+    var m = 0
+    var i = 0
+    while i < nx {
+        var j = 0
+        while j < ny {
+            buf[m as usize] = x[i as usize] - y[j as usize]
+            m = m + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return hl_buffer_median(&!buf, m)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4}: Walsh averages sorted 1,1.5,2,2,2.5,2.5,3,3,3.5,4 (10 values) ->
+// median = (2.5+2.5)/2 = 2.5.
+fn test_hl_one() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    return check(1, approx(hl_one(&x, 4), 2.5, 1.0e-9))
+}
+
+// robustness: {1,2,3,4,100}. Walsh median stays near the bulk (5.5), not the
+// mean (22).  Computed value: 3.0.
+fn test_hl_one_robust() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=100.0
+    return check(2, approx(hl_one(&x, 5), 3.0, 1.0e-9))
+}
+
+// two-sample: x={1,2,3}, y={4,6}. diffs sorted -5,-4,-3,-3,-2,-1 -> median -3.
+fn test_hl_two() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=4.0; y[1]=6.0
+    return check(10, approx(hl_two(&x, 3, &y, 2), 0.0 - 3.0, 1.0e-9))
+}
+
+// symmetric shift: y = x + 5 -> HL shift = -5.
+fn test_hl_two_shift() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 4 { x[i as usize] = (i + 1) as f64; y[i as usize] = (i + 6) as f64; i = i + 1 }
+    return check(20, approx(hl_two(&x, 4, &y, 4), 0.0 - 5.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_hl_one() && ok
+    ok = test_hl_one_robust() && ok
+    ok = test_hl_two() && ok
+    ok = test_hl_two_shift() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

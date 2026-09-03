@@ -83,3 +83,4 @@ async function run() {
 }
 
 await run();
+await import('./check-unguarded-numerals.mjs');

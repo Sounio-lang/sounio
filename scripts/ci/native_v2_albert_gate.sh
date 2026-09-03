@@ -10,7 +10,7 @@ echo "[native-v2-albert] out=$OUT_DIR"
 echo "[native-v2-albert] IrJ3OJordanMul: first compiler with native Albert algebra J₃(O) primitive"
 echo "[native-v2-albert] J₃(O): 27-dim, automorphism group F₄, unique exceptional simple Jordan algebra"
 echo "[native-v2-albert] Test: Jordan identity (D²)∘D = D∘(D²) for diagonal elements"
-echo "[native-v2-albert] Connection: arxiv:2006.16265 — 3 fermion generations ↔ 3×3 block structure"
+echo "[native-v2-albert] Connection: arxiv:2006.16265 -- 3 fermion generations ↔ 3×3 block structure"
 
 MANIFEST_FILE="$(mktemp /tmp/albert-manifest.XXXXXX.tsv)"
 cat >"$MANIFEST_FILE" <<'EOF'

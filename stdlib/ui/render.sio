@@ -1,0 +1,126 @@
+// stdlib/ui/render.sio — Widget rendering and event dispatch
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_rect, canvas_draw_text}
+use display::event::{Event, EV_MOUSE_PRESS, EV_MOUSE_RELEASE, EV_MOTION}
+use ui::widget::{Widget, UiState, WIDGET_PANEL, WIDGET_BUTTON, WIDGET_LABEL,
+                  ui_widget_hit, ui_hit_test}
+
+// ============================================================
+// Render one widget onto a canvas
+// ============================================================
+
+fn ui_render_widget(wid: Widget, state: &UiState, c: &!Canvas) with Mut, Div {
+    // Determine background colour (buttons highlight on hover/press)
+    var r = wid.bg_r
+    var g = wid.bg_g
+    var b = wid.bg_b
+
+    if wid.kind == WIDGET_BUTTON {
+        if wid.id == state.pressed_id {
+            // Darken pressed button
+            r = r * 6 / 10
+            g = g * 6 / 10
+            b = b * 6 / 10
+        } else if wid.id == state.hovered_id {
+            // Lighten hovered button
+            let dr = (255 - r) / 4
+            let dg = (255 - g) / 4
+            let db = (255 - b) / 4
+            r = r + dr
+            g = g + dg
+            b = b + db
+        }
+    }
+
+    // Background fill
+    canvas_fill_rect(c, wid.x, wid.y, wid.w, wid.h, r, g, b)
+
+    // Border for buttons
+    if wid.kind == WIDGET_BUTTON {
+        canvas_draw_rect(c, wid.x, wid.y, wid.w, wid.h, 200, 200, 220)
+    }
+
+    // Text (centred vertically; left-padded by 4px for labels)
+    if wid.text_len > 0 {
+        let text_h = 8
+        let ty = wid.y + (wid.h - text_h) / 2
+        let tx = if wid.kind == WIDGET_BUTTON {
+            let text_w = wid.text_len * 8
+            wid.x + (wid.w - text_w) / 2
+        } else {
+            wid.x + 4
+        }
+        // Repack text into a [i8; 256] for canvas_draw_text
+        var text_buf: [i8; 256] = [0; 256]
+        var i: i64 = 0
+        while i < wid.text_len {
+            text_buf[i as usize] = wid.text[i as usize]
+            i = i + 1
+        }
+        canvas_draw_text(c, &text_buf, wid.text_len, tx, ty,
+                         wid.fg_r, wid.fg_g, wid.fg_b)
+    }
+}
+
+// ============================================================
+// Render all widgets in order (painter's algorithm)
+// ============================================================
+
+pub fn ui_render(widgets: &[Widget; 64], n: i64, state: &UiState, c: &!Canvas) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        ui_render_widget(widgets[i as usize], state, c)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Handle one event and update UiState
+// ============================================================
+
+pub fn ui_handle_event(ev: Event, widgets: &[Widget; 64], n: i64, state: &!UiState) with Mut {
+    // Reset per-frame click
+    state.clicked_id = 0 - 1
+
+    if ev.kind == EV_MOTION {
+        state.mouse_x = ev.x
+        state.mouse_y = ev.y
+        let hit_idx = ui_hit_test(widgets, n, ev.x, ev.y)
+        state.hovered_id = if hit_idx >= 0 {
+            widgets[hit_idx as usize].id
+        } else {
+            0 - 1
+        }
+    } else if ev.kind == EV_MOUSE_PRESS {
+        state.mouse_x = ev.x
+        state.mouse_y = ev.y
+        let hit_idx = ui_hit_test(widgets, n, ev.x, ev.y)
+        if hit_idx >= 0 {
+            state.pressed_id = widgets[hit_idx as usize].id
+        }
+    } else if ev.kind == EV_MOUSE_RELEASE {
+        state.mouse_x = ev.x
+        state.mouse_y = ev.y
+        // A click completes if release is over the same widget
+        let hit_idx = ui_hit_test(widgets, n, ev.x, ev.y)
+        if hit_idx >= 0 {
+            let hid = widgets[hit_idx as usize].id
+            if hid == state.pressed_id {
+                state.clicked_id = hid
+            }
+        }
+        state.pressed_id = 0 - 1
+    }
+}
+
+// ============================================================
+// Query helpers
+// ============================================================
+
+pub fn ui_was_clicked(state: &UiState, id: i64) -> bool {
+    state.clicked_id == id
+}
+
+pub fn ui_is_hovered(state: &UiState, id: i64) -> bool {
+    state.hovered_id == id
+}

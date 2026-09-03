@@ -1,0 +1,303 @@
+// examples/epistemic/affine_nonassoc_demo.sio
+//
+// FRONTIER DEMONSTRATOR — affine arithmetic over a non-associative algebra,
+// with non-associativity carried as a noise symbol in the SAME affine budget
+// as correlated input uncertainty.
+//
+// Self-contained (no imports) so it builds + RUNS via the verified lean_single lane:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/epistemic/affine_nonassoc_demo.sio
+// The current Madaros default path still segfaults on this demo, so keep the
+// executable claim scoped to the lean_single engine until that lane catches up.
+//
+// An affine octonion is   x = x0 + Σ_k  d_k · ε_k     (k = 0..NSYM-1)
+// where ε_k are shared scalar noise symbols (unit variance) and the
+// coefficients x0, d_k are OCTONION-valued ([f64;8]). Two values that share a
+// symbol ε_k are CORRELATED through it; a symbol that appears with equal and
+// opposite coefficients cancels exactly (zero covariance). Variance is the one
+// budget   Var(x) = Σ_k ‖d_k‖².
+//
+// Three claims, each asserted numerically:
+//   (1) EXACT CONDITIONING = ZERO COVARIANCE. x − x carries variance 0 in the
+//       affine model; the independence-assuming scalar model reports 2·Var(x).
+//   (2) CORRELATION HONESTY. Sharing a symbol changes the sum's variance versus
+//       treating the two operands as independent — the affine form tracks it,
+//       a scalar variance budget cannot.
+//   (3) NON-ASSOCIATIVITY IS A NOISE-SYMBOL PERTURBATION. For a triple product
+//       a·b·c where a carries a noise symbol, the ε-coefficient of ((a·b)·c)
+//       and of (a·(b·c)) DIFFER by exactly the associator [a1,b0,c0]. The
+//       order-ambiguity does not live in a separate scalar add-on — it is
+//       distributed across the symbol row and stays correlated with the input
+//       that owns the symbol. (This is the N=3 hand-calc, verified by running.)
+
+// ───────────────────────── octonion primitives (inlined) ─────────────────────
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var r0 = a[0] * b[0]
+    r0 = r0 - a[1] * b[1] - a[2] * b[2] - a[3] * b[3]
+    r0 = r0 - a[4] * b[4] - a[5] * b[5] - a[6] * b[6] - a[7] * b[7]
+    out[0] = r0
+    var r1 = a[0] * b[1] + a[1] * b[0]
+    r1 = r1 + a[2] * b[3] - a[3] * b[2]
+    r1 = r1 + a[4] * b[5] - a[5] * b[4]
+    r1 = r1 - a[6] * b[7] + a[7] * b[6]
+    out[1] = r1
+    var r2 = a[0] * b[2] + a[2] * b[0]
+    r2 = r2 - a[1] * b[3] + a[3] * b[1]
+    r2 = r2 + a[4] * b[6] - a[6] * b[4]
+    r2 = r2 + a[5] * b[7] - a[7] * b[5]
+    out[2] = r2
+    var r3 = a[0] * b[3] + a[3] * b[0]
+    r3 = r3 + a[1] * b[2] - a[2] * b[1]
+    r3 = r3 + a[4] * b[7] - a[7] * b[4]
+    r3 = r3 - a[5] * b[6] + a[6] * b[5]
+    out[3] = r3
+    var r4 = a[0] * b[4] + a[4] * b[0]
+    r4 = r4 - a[1] * b[5] + a[5] * b[1]
+    r4 = r4 - a[2] * b[6] + a[6] * b[2]
+    r4 = r4 - a[3] * b[7] + a[7] * b[3]
+    out[4] = r4
+    var r5 = a[0] * b[5] + a[5] * b[0]
+    r5 = r5 + a[1] * b[4] - a[4] * b[1]
+    r5 = r5 - a[2] * b[7] + a[7] * b[2]
+    r5 = r5 + a[3] * b[6] - a[6] * b[3]
+    out[5] = r5
+    var r6 = a[0] * b[6] + a[6] * b[0]
+    r6 = r6 + a[1] * b[7] - a[7] * b[1]
+    r6 = r6 + a[2] * b[4] - a[4] * b[2]
+    r6 = r6 - a[3] * b[5] + a[5] * b[3]
+    out[6] = r6
+    var r7 = a[0] * b[7] + a[7] * b[0]
+    r7 = r7 - a[1] * b[6] + a[6] * b[1]
+    r7 = r7 + a[2] * b[5] - a[5] * b[2]
+    r7 = r7 + a[3] * b[4] - a[4] * b[3]
+    out[7] = r7
+}
+
+fn oct_norm_sq(a: &[f64; 8]) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { sum = sum + a[i] * a[i]; i = i + 1 }
+    sum
+}
+
+fn oct_associator(a: &[f64; 8], b: &[f64; 8], c: &[f64; 8], out: &![f64; 8])
+    with Mut, Div, NonAssoc {
+    var ab: [f64; 8] = [0.0; 8]
+    oct_mul(a, b, &!ab)
+    var ab_c: [f64; 8] = [0.0; 8]
+    oct_mul(&ab, c, &!ab_c)
+    var bc: [f64; 8] = [0.0; 8]
+    oct_mul(b, c, &!bc)
+    var a_bc: [f64; 8] = [0.0; 8]
+    oct_mul(a, &bc, &!a_bc)
+    var i: i64 = 0
+    while i < 8 { out[i] = ab_c[i] - a_bc[i]; i = i + 1 }
+}
+
+// ───────────────────────── affine octonion form ──────────────────────────────
+// NSYM noise symbols; coefficient of symbol k lives at co[k*8 + c].
+
+struct AffOct {
+    c0: [f64; 8],    // central octonion value
+    co: [f64; 32],   // 4 symbols × 8 components
+}
+
+fn aff_zero() -> AffOct {
+    AffOct { c0: [0.0; 8], co: [0.0; 32] }
+}
+
+fn aff_set_central(a: &!AffOct, v: &[f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { a.c0[c] = v[c]; c = c + 1 }
+}
+
+fn aff_set_sym(a: &!AffOct, k: i64, coeff: &[f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { a.co[k * 8 + c] = coeff[c]; c = c + 1 }
+}
+
+fn aff_get_sym(a: &AffOct, k: i64, out: &![f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out[c] = a.co[k * 8 + c]; c = c + 1 }
+}
+
+// A leaf: central value v, perturbed along octonion direction `coeff` by symbol k.
+fn aff_leaf(v: &[f64; 8], k: i64, coeff: &[f64; 8]) -> AffOct with Mut {
+    var a = aff_zero()
+    aff_set_central(&!a, v)
+    aff_set_sym(&!a, k, coeff)
+    a
+}
+
+// One variance budget: Σ_k ‖d_k‖² over all noise symbols.
+fn aff_variance(a: &AffOct) -> f64 with Mut {
+    var total: f64 = 0.0
+    var k: i64 = 0
+    while k < 4 {
+        var d: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!d)
+        total = total + oct_norm_sq(&d)
+        k = k + 1
+    }
+    total
+}
+
+fn aff_sub(a: &AffOct, b: &AffOct, out: &!AffOct) with Mut {
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = a.c0[c] - b.c0[c]; c = c + 1 }
+    var i: i64 = 0
+    while i < 32 { out.co[i] = a.co[i] - b.co[i]; i = i + 1 }
+}
+
+fn aff_add(a: &AffOct, b: &AffOct, out: &!AffOct) with Mut {
+    var c: i64 = 0
+    while c < 8 { out.c0[c] = a.c0[c] + b.c0[c]; c = c + 1 }
+    var i: i64 = 0
+    while i < 32 { out.co[i] = a.co[i] + b.co[i]; i = i + 1 }
+}
+
+// First-order affine octonion product (preserves octonion ORDER, hence
+// non-associativity).  central = a0·b0 ; ∂/∂ε_k = a0·d_k(b) + d_k(a)·b0.
+fn aff_mul(a: &AffOct, b: &AffOct, out: &!AffOct) with Mut, Div, NonAssoc {
+    var a0: [f64; 8] = [0.0; 8]
+    var b0: [f64; 8] = [0.0; 8]
+    var c: i64 = 0
+    while c < 8 { a0[c] = a.c0[c]; b0[c] = b.c0[c]; c = c + 1 }
+
+    var prod: [f64; 8] = [0.0; 8]
+    oct_mul(&a0, &b0, &!prod)
+    aff_set_central(out, &prod)
+
+    var k: i64 = 0
+    while k < 4 {
+        var da: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!da)
+        var db: [f64; 8] = [0.0; 8]
+        aff_get_sym(b, k, &!db)
+        // a0 · db  +  da · b0
+        var t1: [f64; 8] = [0.0; 8]
+        oct_mul(&a0, &db, &!t1)
+        var t2: [f64; 8] = [0.0; 8]
+        oct_mul(&da, &b0, &!t2)
+        var sum: [f64; 8] = [0.0; 8]
+        var c2: i64 = 0
+        while c2 < 8 { sum[c2] = t1[c2] + t2[c2]; c2 = c2 + 1 }
+        aff_set_sym(out, k, &sum)
+        k = k + 1
+    }
+}
+
+fn f_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn scaled(x: f64) -> i64 { (x * 1000000.0) as i64 }
+
+// ───────────────────────────────── demo ─────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    var fails: i64 = 0
+
+    // ── Claim 1: exact conditioning = zero covariance ──
+    // x = v + d·ε0 .   x − x  must have variance 0 (symbol cancels), whereas the
+    // independence-assuming scalar model would report Var(x)+Var(x) = 2‖d‖².
+    var v: [f64; 8] = [0.0; 8]
+    v[0] = 3.0
+    v[1] = 1.0
+    var d: [f64; 8] = [0.0; 8]
+    d[1] = 0.2          // noise direction along e1, ‖d‖² = 0.04
+    let x = aff_leaf(&v, 0, &d)
+    let var_x = aff_variance(&x)
+
+    var xmx = aff_zero()
+    aff_sub(&x, &x, &!xmx)
+    let var_xmx = aff_variance(&xmx)
+    let scalar_indep_model = var_x + var_x   // what a scalar budget is forced to say
+
+    println("── Claim 1: exact conditioning = zero covariance ──")
+    print(scaled(var_x))      ; println("   = Var(x)  (×1e6)")
+    print(scaled(scalar_indep_model)); println("   = scalar-model Var(x−x), independence assumed")
+    print(scaled(var_xmx))    ; println("   = affine    Var(x−x)  → exact zero")
+    if f_abs(var_xmx) < 0.000000001 { println("  PASS: affine collapses correlated difference to 0") }
+    else { println("  FAIL"); fails = fails + 1 }
+    if scalar_indep_model > 0.0000001 { println("  (scalar model overstates by 2·Var(x) — the lie)") }
+
+    // ── Claim 2: correlation honesty ──
+    // Same magnitude budget on two leaves, combined two ways:
+    //   shared symbol  (correlated)   vs   distinct symbols (independent).
+    var w: [f64; 8] = [0.0; 8]
+    w[0] = 2.0
+    w[2] = 1.0
+    let y_shared = aff_leaf(&w, 0, &d)   // shares ε0 with x
+    let y_indep  = aff_leaf(&w, 1, &d)   // own symbol ε1
+
+    var sum_corr = aff_zero()
+    aff_add(&x, &y_shared, &!sum_corr)
+    var sum_ind = aff_zero()
+    aff_add(&x, &y_indep, &!sum_ind)
+    let var_corr = aff_variance(&sum_corr)   // ‖d+d‖² = 4‖d‖²
+    let var_ind  = aff_variance(&sum_ind)    // ‖d‖²+‖d‖² = 2‖d‖²
+
+    println("")
+    println("── Claim 2: correlation honesty (Var of x+y) ──")
+    print(scaled(var_corr)); println("   = correlated  (shared ε0): 4‖d‖²")
+    print(scaled(var_ind)) ; println("   = independent (own ε1):   2‖d‖²")
+    if var_corr > var_ind + 0.0000001 { println("  PASS: shared-symbol correlation raises variance — tracked, not assumed") }
+    else { println("  FAIL"); fails = fails + 1 }
+
+    // ── Claim 3: non-associativity is a noise-symbol perturbation ──
+    // a = a0 + a1·ε0 ;  b, c exact (no symbols).
+    // ε0-coefficient of ((a·b)·c) is (a1·b0)·c0 ; of (a·(b·c)) is a1·(b0·c0).
+    // Their difference must equal the associator [a1, b0, c0].
+    var a0: [f64; 8] = [0.0; 8]
+    a0[0] = 1.0                 // a central = 1
+    var a1: [f64; 8] = [0.0; 8]
+    a1[1] = 1.0                 // a noise direction = e1
+    var b0: [f64; 8] = [0.0; 8]
+    b0[2] = 1.0                 // b = e2
+    var c0: [f64; 8] = [0.0; 8]
+    c0[4] = 1.0                 // c = e4   ([e1,e2,e4] is non-Fano → associator ≠ 0)
+
+    let a = aff_leaf(&a0, 0, &a1)
+    var b = aff_zero(); aff_set_central(&!b, &b0)
+    var cc = aff_zero(); aff_set_central(&!cc, &c0)
+
+    var ab = aff_zero(); aff_mul(&a, &b, &!ab)
+    var ab_c = aff_zero(); aff_mul(&ab, &cc, &!ab_c)       // ((a·b)·c)
+    var bc = aff_zero(); aff_mul(&b, &cc, &!bc)
+    var a_bc = aff_zero(); aff_mul(&a, &bc, &!a_bc)        // (a·(b·c))
+
+    var coeff_left: [f64; 8] = [0.0; 8]
+    aff_get_sym(&ab_c, 0, &!coeff_left)
+    var coeff_right: [f64; 8] = [0.0; 8]
+    aff_get_sym(&a_bc, 0, &!coeff_right)
+
+    // measured spread between associations, on the noise coefficient
+    var spread: [f64; 8] = [0.0; 8]
+    var c3: i64 = 0
+    while c3 < 8 { spread[c3] = coeff_left[c3] - coeff_right[c3]; c3 = c3 + 1 }
+
+    // the algebra's own associator [a1, b0, c0]
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(&a1, &b0, &c0, &!assoc)
+
+    var max_diff: f64 = 0.0
+    var c4: i64 = 0
+    while c4 < 8 {
+        let dd = f_abs(spread[c4] - assoc[c4])
+        if dd > max_diff { max_diff = dd }
+        c4 = c4 + 1
+    }
+    let assoc_mag = oct_norm_sq(&assoc)
+
+    println("")
+    println("── Claim 3: non-associativity perturbs the noise symbol ──")
+    print(scaled(assoc_mag)); println("   = ‖associator‖²  (>0 ⇒ genuinely non-associative triple)")
+    print(scaled(max_diff)) ; println("   = max |coeff-spread − associator| over components (→0)")
+    if assoc_mag > 0.0000001 && max_diff < 0.000000001 {
+        println("  PASS: ε0-coefficient spread between ((ab)c) and (a(bc)) == [a1,b0,c0]")
+        println("        the order-ambiguity rides the SAME symbol as a's input uncertainty")
+    } else { println("  FAIL"); fails = fails + 1 }
+
+    println("")
+    if fails == 0 { println("ALL CLAIMS VERIFIED"); return 0 }
+    print(fails); println(" claim(s) FAILED")
+    return 1
+}

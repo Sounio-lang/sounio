@@ -1,0 +1,3935 @@
+module eisa::bridge_x86
+
+use eisa::format::*
+use eisa::core::*
+
+// =============================================================================
+// EISA E4 — real per-opcode AOT bridge.
+//
+// bridge_translate compiles a validated .eisax image into a freestanding
+// x86-64 ELF whose stdout is byte-identical to the EVM (evm.sio) reference.
+// The generated program computes every lane (val, err.hi, err.lo, u) at
+// runtime in SSE2 machine code — no receipt text is baked. Only the
+// translation-time constants of the receipt line (prog hash, gate count,
+// register index, field labels) are baked; the numeric bit-fields are
+// decomposed from the runtime f64 registers in machine code.
+//
+// -----------------------------------------------------------------------------
+// Memory model (single PT_LOAD, mapped RWX; documented choice: "writable
+// extension" — the one segment is both executable and writable, and the state
+// block lives inside it, zero-initialised from the file image).
+//
+//   file offset  vaddr (BASE=0x400000)   content
+//   0x000        0x400000                ELF header (64)
+//   0x040        0x400040                program header (56)
+//   0x080        0x400080                STATE region (STATE_SIZE bytes, zero)
+//   0x080+SS     ...                     baked string blob (labels only)
+//   after strings                        code (subroutines then main; entry=main)
+//
+// STATE layout (disp is relative to rbx = 0x400080):
+//   regs:   16 * (val,ehi,elo,u = 4*f64) at r*32 + L*8            [0   .. 512)
+//   reg poison: 16 * i64                  at 512 + r*8            [512 .. 640)
+//   mem:    8  * 4*f64                     at 640 + s*32 + L*8     [640 .. 896)
+//   mem poison: 8 * i64                    at 896 + s*8            [896 .. 960)
+//   scratch: 64 * f64                      at 960 + i*8            [960 ..1472)
+//   RAW_D=1472  DEC_SIGN=1480  DEC_EXP=1488  DEC_MANT=1496
+//   DIGIT buffer [1504 .. 1536); DIGIT_END=1536 = STATE_SIZE
+//
+// Per-opcode template byte cost (approx, measured empirically via objdump):
+//   econst ~ 60 B, estore/eload ~ 60 B, egate ~ 210 B (calls into shared subs),
+//   eadd/esub ~ 520 B, emul ~ 640 B, ediv ~ 900 B, esqrt ~ 760 B.
+//   Shared subroutines emitted once: print_uint ~ 90 B, decompose_print ~ 260 B,
+//   newton_sqrt ~ 150 B.
+//
+// Register discipline: rbx holds the state base for the whole program; SSE
+// temporaries live in xmm0..xmm7; integer scratch in rax/rcx/rdx/rsi/rdi.
+// All floating templates replay eisa::core / math::dd64 op sequences in the
+// exact same order, so the produced bits equal the EVM's bit-for-bit.
+//
+// v0 caveats (math-review 2026-07-05, /tmp/llm-offload-rw4le6):
+//   * u-lane poison test is the raw sign bit (bit 63), which classifies
+//     u == -0.0 as poisoned, whereas the EVM reference uses the IEEE
+//     comparison u < 0.0 which is FALSE for -0.0. Latent divergence — the
+//     v0 corpus never produces -0.0 in the u lane. v1 fix: normalise the
+//     u sign at write (maxsd with +0.0) before the bit test.
+//   * Bit-identity with the EVM assumes both sides run scalar SSE2 under
+//     RN with FTZ/DAZ clear (MXCSR default) and no FMA contraction; the
+//     lean_single backend satisfies this today.
+//   * Tamper sensitivity alone proves translator determinism, not real
+//     computation; the anti-vacuity lane of the conformance gate (receipt
+//     value digits absent from ELF bytes) is the load-bearing witness.
+//
+// -----------------------------------------------------------------------------
+// v1 pipeline (V1d): version-dispatched in bridge_translate; the v0 path is
+// byte-untouched (sha256-pinned against the pre-V1d golden corpus). The v1
+// path adds branch templates (ebr = jmp rel32; ebrz = ucomisd + je; ebrn =
+// ucomisd + jb, NaN falls through in both), poison-check-before-compare with
+// a sticky br_poisoned byte (I6), frail counting after normalisation and
+// poison-check but before the direction decision (band = max(u, |ehi|),
+// count iff band > 0 and |val| <= band), per-instruction fuel guard before
+// each effect, and a fuel-stop epilogue that emits the v=2 stop=fuel receipt
+// (poisoned=1, gate count NOT incremented) with last_written_reg loaded
+// dynamically from state (e0 fallback when nothing was written). u-lane
+// writes on the v1 path canonicalise -0.0 to +0.0 via an explicit bit
+// compare-and-rewrite template. Receipts carry v=2 and the frail= suffix;
+// stop=fuel only on the exhaustion receipt.
+//
+// Branch offsets use single-pass emission with a rel32 patch list resolved
+// after all templates are placed (NOT a measure-then-reemit two-pass; the
+// patch list is semantically equivalent for static targets).
+//
+// v1 state layout (highreg migration): register indices are TOTAL over
+// 0..63 and memory slots over 0..31 via reg_*_off_v1 / mem_*_off_v1. Low
+// indices (r < 16, s < 8) resolve into the v0-compatible block so v0 bytes
+// stay pinned; high indices resolve into the disjoint v1 block
+// (v1_reg_base..v1_state_size). Every v1 template — emov, eload, estore,
+// eadd, esub, emul, ediv, esqrt, econst, egate, ebrz/ebrn poison+frail,
+// fuel guard, u-lane -0.0 normalisation, and the fuel-stop epilogue's
+// dynamic last_written snapshot — goes through these total maps, so any
+// dst/a/b in 0..63 is supported (conformance: v1-arith-high, v1-fuel-high,
+// v1-branch-high gate lanes; e20 econst+egate trail is v1-highreg).
+//
+// v1 caveats (post-highreg, honest limitations):
+//   * The fuel-stop receipt's last-written snapshot (sc slots 36/55/61-63)
+//     is refreshed at write effects and at the EVM's canonicalisation
+//     points (poisoned gate/estore/branch); the equivalence argument
+//     assumes registers never hold non-canonical bad lanes with a clear
+//     poison flag, which both sides guarantee by construction.
+//   * v1 images are capped by the 131072-byte emission buffer; large
+//     n_code images can overflow it and return status 3 (no lane pins the
+//     boundary).
+// =============================================================================
+
+pub struct BridgeMeta {
+    pub len: i64,
+    pub status: i64,
+}
+
+struct Strs {
+    pub p0off: [i64; 8],
+    pub p0len: [i64; 8],
+    pub se: i64,
+    pub sm: i64,
+    pub ro: i64,
+    pub rolen: i64,
+    pub lu: i64,
+    pub lulen: i64,
+    pub po: i64,
+    pub polen: i64,
+    pub nl: i64,
+    pub endpos: i64,
+}
+
+struct StrsV1 {
+    pub se: i64,
+    pub sm: i64,
+    pub pfx: i64,
+    pub pfxlen: i64,
+    pub reg: i64,
+    pub reglen: i64,
+    pub val: i64,
+    pub vallen: i64,
+    pub ro: i64,
+    pub rolen: i64,
+    pub lu: i64,
+    pub lulen: i64,
+    pub po: i64,
+    pub polen: i64,
+    pub frail: i64,
+    pub fraillen: i64,
+    pub stopfuel: i64,
+    pub stopfuellen: i64,
+    pub nl: i64,
+    pub endpos: i64,
+}
+
+// Receipt v3 string blob (qd128 err lane): four roundoff labels ro0..ro3.
+struct StrsV2 {
+    pub se: i64,
+    pub sm: i64,
+    pub pfx: i64,
+    pub pfxlen: i64,
+    pub reg: i64,
+    pub reglen: i64,
+    pub val: i64,
+    pub vallen: i64,
+    pub ro0: i64,
+    pub ro0len: i64,
+    pub ro1: i64,
+    pub ro1len: i64,
+    pub ro2: i64,
+    pub ro2len: i64,
+    pub ro3: i64,
+    pub ro3len: i64,
+    pub lu: i64,
+    pub lulen: i64,
+    pub po: i64,
+    pub polen: i64,
+    pub frail: i64,
+    pub fraillen: i64,
+    pub stopfuel: i64,
+    pub stopfuellen: i64,
+    pub nl: i64,
+    pub endpos: i64,
+}
+
+// ---- geometry constants -----------------------------------------------------
+fn c_base() -> i64 { 4194304 }        // 0x400000
+fn c_state_off() -> i64 { 128 }
+fn c_state_size() -> i64 { 1536 }
+fn c_strings_off() -> i64 { 1664 }    // 128 + 1536
+fn c_state_vaddr() -> i64 { 4194432 } // BASE + 128
+
+// v1 state layout (kept separate so v0 bytes stay untouched)
+fn v1_reg_base() -> i64 { 2048 }
+fn v1_poison_base() -> i64 { 4096 }
+fn v1_mem_base() -> i64 { 4608 }
+fn v1_mem_poison_base() -> i64 { 5632 }
+fn v1_rl(r: i64, lane: i64) -> i64 { v1_reg_base() + r * 32 + lane * 8 }
+fn v1_rp(r: i64) -> i64 { v1_poison_base() + r * 8 }
+// v1 runtime counters live in the v0 scratch region (sc slots 32-36, 55,
+// 61-63), NOT in the v1 block: sc(32)=fuel_left, sc(33)=gate_count,
+// sc(34)=frail_count, sc(35)=br_poisoned, sc(36)=last_written idx,
+// sc(55)=last poison, sc(61..63)=last val/ehi/u snapshot.
+fn v1_state_size() -> i64 { 6400 }
+fn v1_strings_off() -> i64 { 6656 }
+
+fn d_raw() -> i64 { 1472 }
+fn d_sign() -> i64 { 1480 }
+fn d_exp() -> i64 { 1488 }
+fn d_mant() -> i64 { 1496 }
+fn d_digit_end() -> i64 { 1536 }
+
+fn rl(r: i64, lane: i64) -> i64 { r * 32 + lane * 8 }
+fn rp(r: i64) -> i64 { 512 + r * 8 }
+fn ml(s: i64, lane: i64) -> i64 { 640 + s * 32 + lane * 8 }
+fn mp(s: i64) -> i64 { 896 + s * 8 }
+fn sc(i: i64) -> i64 { 960 + i * 8 }
+
+// ---- total register/memory offset maps (v1 path, r in 0..63, s in 0..31) ----
+// Low indices live in the v0-compatible block, high indices in the v1 block.
+// These functions are TOTAL over the v1 index space; every v1 template must go
+// through them so the state layout can never be partially migrated again.
+fn reg_val_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 0) } else { v1_rl(r, 0) }
+}
+
+fn reg_ehi_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 1) } else { v1_rl(r, 1) }
+}
+
+fn reg_elo_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 2) } else { v1_rl(r, 2) }
+}
+
+fn reg_u_off_v1(r: i64) -> i64 {
+    if r < 16 { rl(r, 3) } else { v1_rl(r, 3) }
+}
+
+fn reg_poison_off_v1(r: i64) -> i64 {
+    if r < 16 { rp(r) } else { v1_rp(r) }
+}
+
+fn mem_val_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 0) } else { v1_mem_base() + s * 32 }
+}
+
+fn mem_ehi_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 1) } else { v1_mem_base() + s * 32 + 8 }
+}
+
+fn mem_elo_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 2) } else { v1_mem_base() + s * 32 + 16 }
+}
+
+fn mem_u_off_v1(s: i64) -> i64 {
+    if s < 8 { ml(s, 3) } else { v1_mem_base() + s * 32 + 24 }
+}
+
+fn mem_poison_off_v1(s: i64) -> i64 {
+    if s < 8 { mp(s) } else { v1_mem_poison_base() + s * 8 }
+}
+
+// ---- v2 state layout (qd128 err lane) ---------------------------------------
+// v2 images dispatch to their own translator; a v2 ELF never mixes with v0/v1
+// state, so the v2 blocks reuse the whole state region with a fresh layout.
+// Each register is 6 CONTIGUOUS f64 (val, e0, e1, e2, e3, u = 48 bytes); the
+// contiguity lets the shared lane subroutines take one base offset and stride.
+// The v0 scratch/digit region [960..1536) is preserved verbatim so
+// em_print_uint / em_decompose keep working, and the v1 runtime counters in
+// sc(32..36),(55) are reused (sc(56..61) hold the 6-word fuel-stop snapshot).
+// Disjoint blocks (all >= 2048):
+//   regs:       64 * 48B at 2048 + r*48                 [2048 .. 5120)
+//   reg poison: 64 * i64 at 5120 + r*8                  [5120 .. 5632)
+//   mem:        32 * 48B at 5632 + s*48                 [5632 .. 7168)
+//   mem poison: 32 * i64 at 7168 + s*8                  [7168 .. 7424)
+//   qd scratch: 224 * f64 at 7424 + i*8                 [7424 .. 9216)
+// state top = 9216 (rbx-relative); strings blob at file 9472 (128 + 9216 + 128
+// slack) so it can NEVER overlap the state region (file top 128+9216 = 9344).
+fn v2_reg_base() -> i64 { 2048 }
+fn v2_lanes(r: i64) -> i64 { v2_reg_base() + r * 48 }
+fn v2_l_val() -> i64 { 0 }
+fn v2_l_e0() -> i64 { 8 }
+fn v2_l_e1() -> i64 { 16 }
+fn v2_l_e2() -> i64 { 24 }
+fn v2_l_e3() -> i64 { 32 }
+fn v2_l_u() -> i64 { 40 }
+fn v2_rp2(r: i64) -> i64 { 5120 + r * 8 }
+fn v2_mlanes(s: i64) -> i64 { 5632 + s * 48 }
+fn v2_mp2(s: i64) -> i64 { 7168 + s * 8 }
+fn v2q(i: i64) -> i64 { 7424 + i * 8 }        // qd scratch, 384 slots -> top 10496
+fn v2_state_size() -> i64 { 10496 }
+fn v2_strings_off() -> i64 { 10752 }          // 128 + 10496 + 128 slack (> state top)
+
+fn v2_reg_val_off(r: i64) -> i64 { v2_lanes(r) + v2_l_val() }
+fn v2_reg_e0_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e0() }
+fn v2_reg_e1_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e1() }
+fn v2_reg_e2_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e2() }
+fn v2_reg_e3_off(r: i64) -> i64 { v2_lanes(r) + v2_l_e3() }
+fn v2_reg_u_off(r: i64) -> i64 { v2_lanes(r) + v2_l_u() }
+fn v2_reg_poison_off(r: i64) -> i64 { v2_rp2(r) }
+fn v2_mem_val_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_val() }
+fn v2_mem_e0_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e0() }
+fn v2_mem_e1_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e1() }
+fn v2_mem_e2_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e2() }
+fn v2_mem_e3_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_e3() }
+fn v2_mem_u_off(s: i64) -> i64 { v2_mlanes(s) + v2_l_u() }
+fn v2_mem_poison_off(s: i64) -> i64 { v2_mp2(s) }
+
+// f64 bit-pattern constants (sign 0)
+fn f64bits(exp: i64, mant: i64) -> i64 { exp * 4503599627370496 + mant }
+fn c_half() -> i64 { 4602678819172646912 }   // 0.5
+fn c_one() -> i64 { 4607182418800017408 }     // 1.0
+fn c_two() -> i64 { 4611686018427387904 }     // 2.0
+fn c_split() -> i64 { 4728779608772575232 }   // 134217729.0
+fn c_nan() -> i64 { 9221120237041090560 }     // 0x7FF8000000000000
+fn c_inf() -> i64 { 9218868437227405312 }     // 0x7FF0000000000000
+
+// ---- low level byte emit ----------------------------------------------------
+fn put8(out: &![i8; 131072], p: i64, b: i64) -> i64 with Mut, Panic, Div {
+    (*out)[p as usize] = (b & 255) as i8
+    p + 1
+}
+
+fn put32(out: &![i8; 131072], p: i64, v: i64) -> i64 with Mut, Panic, Div {
+    let w = v & 4294967295
+    var pp = put8(out, p, (w & 255))
+    pp = put8(out, pp, ((w / 256) & 255))
+    pp = put8(out, pp, ((w / 65536) & 255))
+    pp = put8(out, pp, ((w / 16777216) & 255))
+    pp
+}
+
+fn put64(out: &![i8; 131072], p: i64, v: i64) -> i64 with Mut, Panic, Div {
+    var pp = put32(out, p, v)
+    let hi = (v / 4294967296) & 4294967295
+    pp = put32(out, pp, hi)
+    pp
+}
+
+fn patch32(out: &![i8; 131072], at: i64, v: i64) with Mut, Panic, Div {
+    var _pp = put32(out, at, v)
+}
+
+fn w16(out: &![i8; 131072], off: i64, v: i64) with Mut, Panic, Div {
+    var _p = put8(out, off, (v & 255))
+    _p = put8(out, off + 1, ((v / 256) & 255))
+}
+
+fn w32(out: &![i8; 131072], off: i64, v: i64) with Mut, Panic, Div {
+    var _p = put32(out, off, v)
+}
+
+fn w64(out: &![i8; 131072], off: i64, v: i64) with Mut, Panic, Div {
+    var _p = put64(out, off, v)
+}
+
+// ---- SSE encoders (base register = rbx) -------------------------------------
+// F2 0F <opc> <modrm=0xC0|dst<<3|src>  — scalar double reg/reg
+fn sse(out: &![i8; 131072], p: i64, opc: i64, d: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xF2)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, opc)
+    pp = put8(out, pp, 192 + d * 8 + s)
+    pp
+}
+
+// movsd xmm_n, [rbx+disp32]   F2 0F 10 (0x80|n<<3|3) disp32
+fn ld(out: &![i8; 131072], p: i64, n: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xF2)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x10)
+    pp = put8(out, pp, 128 + n * 8 + 3)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+// movsd [rbx+disp32], xmm_n   F2 0F 11 (0x80|n<<3|3) disp32
+fn st(out: &![i8; 131072], p: i64, n: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xF2)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x11)
+    pp = put8(out, pp, 128 + n * 8 + 3)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+// mov rax, imm64 ; movq xmm_n, rax
+fn setx(out: &![i8; 131072], p: i64, n: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, bits)
+    pp = put8(out, pp, 0x66)
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x6E)
+    pp = put8(out, pp, 192 + n * 8)
+    pp
+}
+
+fn pxor(out: &![i8; 131072], p: i64, d: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x66)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0xEF)
+    pp = put8(out, pp, 192 + d * 8 + s)
+    pp
+}
+
+fn ucomi(out: &![i8; 131072], p: i64, d: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x66)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x2E)
+    pp = put8(out, pp, 192 + d * 8 + s)
+    pp
+}
+
+// ---- integer helpers --------------------------------------------------------
+fn mov_rax_mem(out: &![i8; 131072], p: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x8B)
+    pp = put8(out, pp, 0x83)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+fn mov_mem_rax(out: &![i8; 131072], p: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x89)
+    pp = put8(out, pp, 0x83)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+fn shr_rax(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xC1)
+    pp = put8(out, pp, 0xE8)
+    pp = put8(out, pp, imm)
+    pp
+}
+
+fn shl_rax(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xC1)
+    pp = put8(out, pp, 0xE0)
+    pp = put8(out, pp, imm)
+    pp
+}
+
+fn and_rax(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x25)
+    pp = put32(out, pp, imm)
+    pp
+}
+
+fn cmp_rax(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x3D)
+    pp = put32(out, pp, imm)
+    pp
+}
+
+fn test_rax(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x85)
+    pp = put8(out, pp, 0xC0)
+    pp
+}
+
+fn xor_rax(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x31)
+    pp = put8(out, pp, 0xC0)
+    pp
+}
+
+fn or_rax_mem(out: &![i8; 131072], p: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x0B)
+    pp = put8(out, pp, 0x83)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+fn mov_rax_imm64(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, imm)
+    pp
+}
+
+fn mov_rcx_imm64(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xB9)
+    pp = put64(out, pp, imm)
+    pp
+}
+
+fn dec_rax(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0xC8)
+    pp
+}
+
+fn inc_mem64(out: &![i8; 131072], p: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0x83)
+    pp = put32(out, pp, disp)
+    pp
+}
+
+fn cmp_rax_rcx(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x39)
+    pp = put8(out, pp, 0xC8)
+    pp
+}
+
+// jcc rel32 (0F cc). Returns new p; rel32 field is at (p_before + 2).
+fn jcc(out: &![i8; 131072], p: i64, cc: i64, rel: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x0F)
+    pp = put8(out, pp, cc)
+    pp = put32(out, pp, rel)
+    pp
+}
+
+fn jmp32(out: &![i8; 131072], p: i64, rel: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xE9)
+    pp = put32(out, pp, rel)
+    pp
+}
+
+fn call32(out: &![i8; 131072], p: i64, target: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xE8)
+    pp = put32(out, pp, target - (pp + 4))
+    pp
+}
+
+// write(1, addr, len) with all-constant operands
+fn write_str(out: &![i8; 131072], p: i64, addr: i64, len: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xB8)
+    pp = put32(out, pp, 1)        // mov eax,1
+    pp = put8(out, pp, 0xBF)
+    pp = put32(out, pp, 1)        // mov edi,1
+    pp = put8(out, pp, 0xBE)
+    pp = put32(out, pp, addr)     // mov esi, addr
+    pp = put8(out, pp, 0xBA)
+    pp = put32(out, pp, len)      // mov edx, len
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x05)      // syscall
+    pp
+}
+
+// ---- dd64 EFT primitive templates (replay math::dd64 exactly) ---------------
+fn em_two_sum(out: &![i8; 131072], p: i64, da: i64, db: i64, dhi: i64, dlo: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, da)
+    pp = ld(out, pp, 1, db)
+    pp = sse(out, pp, 0x10, 2, 0)   // xmm2 = a
+    pp = sse(out, pp, 0x58, 2, 1)   // xmm2 = s = a+b
+    pp = sse(out, pp, 0x10, 3, 2)   // xmm3 = s
+    pp = sse(out, pp, 0x5C, 3, 0)   // xmm3 = s-a = bb
+    pp = sse(out, pp, 0x10, 4, 2)   // xmm4 = s
+    pp = sse(out, pp, 0x5C, 4, 3)   // xmm4 = s-bb
+    pp = sse(out, pp, 0x10, 5, 0)   // xmm5 = a
+    pp = sse(out, pp, 0x5C, 5, 4)   // xmm5 = a-(s-bb)
+    pp = sse(out, pp, 0x10, 6, 1)   // xmm6 = b
+    pp = sse(out, pp, 0x5C, 6, 3)   // xmm6 = b-bb
+    pp = sse(out, pp, 0x58, 5, 6)   // xmm5 = e
+    pp = st(out, pp, 2, dhi)
+    pp = st(out, pp, 5, dlo)
+    pp
+}
+
+fn em_qsum(out: &![i8; 131072], p: i64, da: i64, db: i64, dhi: i64, dlo: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, da)
+    pp = ld(out, pp, 1, db)
+    pp = sse(out, pp, 0x10, 2, 0)   // s = a+b
+    pp = sse(out, pp, 0x58, 2, 1)
+    pp = sse(out, pp, 0x10, 3, 2)   // s-a
+    pp = sse(out, pp, 0x5C, 3, 0)
+    pp = sse(out, pp, 0x10, 4, 1)   // e = b-(s-a)
+    pp = sse(out, pp, 0x5C, 4, 3)
+    pp = st(out, pp, 2, dhi)
+    pp = st(out, pp, 4, dlo)
+    pp
+}
+
+fn em_split(out: &![i8; 131072], p: i64, da: i64, dhi: i64, dlo: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 1, c_split())
+    pp = ld(out, pp, 0, da)
+    pp = sse(out, pp, 0x10, 2, 1)   // c = splitter
+    pp = sse(out, pp, 0x59, 2, 0)   // c = splitter*a
+    pp = sse(out, pp, 0x10, 3, 2)   // c-a
+    pp = sse(out, pp, 0x5C, 3, 0)
+    pp = sse(out, pp, 0x10, 4, 2)   // h = c-(c-a)
+    pp = sse(out, pp, 0x5C, 4, 3)
+    pp = st(out, pp, 4, dhi)
+    pp = sse(out, pp, 0x10, 5, 0)   // a-h
+    pp = sse(out, pp, 0x5C, 5, 4)
+    pp = st(out, pp, 5, dlo)
+    pp
+}
+
+fn em_two_prod(out: &![i8; 131072], p: i64, da: i64, db: i64, dhi: i64, dlo: i64) -> i64 with Mut, Panic, Div {
+    let ah = sc(42)
+    let al = sc(43)
+    let bh = sc(44)
+    let bl = sc(45)
+    let pp0 = sc(46)
+    var pp = ld(out, p, 0, da)
+    pp = ld(out, pp, 1, db)
+    pp = sse(out, pp, 0x10, 2, 0)
+    pp = sse(out, pp, 0x59, 2, 1)   // p = a*b
+    pp = st(out, pp, 2, pp0)
+    pp = em_split(out, pp, da, ah, al)
+    pp = em_split(out, pp, db, bh, bl)
+    pp = ld(out, pp, 0, ah)
+    pp = ld(out, pp, 1, bh)
+    pp = sse(out, pp, 0x59, 0, 1)   // ah*bh
+    pp = ld(out, pp, 2, pp0)
+    pp = sse(out, pp, 0x5C, 0, 2)   // - p
+    pp = ld(out, pp, 1, ah)
+    pp = ld(out, pp, 2, bl)
+    pp = sse(out, pp, 0x59, 1, 2)   // ah*bl
+    pp = sse(out, pp, 0x58, 0, 1)   // +
+    pp = ld(out, pp, 1, al)
+    pp = ld(out, pp, 2, bh)
+    pp = sse(out, pp, 0x59, 1, 2)   // al*bh
+    pp = sse(out, pp, 0x58, 0, 1)   // +
+    pp = ld(out, pp, 1, al)
+    pp = ld(out, pp, 2, bl)
+    pp = sse(out, pp, 0x59, 1, 2)   // al*bl
+    pp = sse(out, pp, 0x58, 0, 1)   // +
+    pp = st(out, pp, 0, dlo)
+    pp = ld(out, pp, 0, pp0)
+    pp = st(out, pp, 0, dhi)
+    pp
+}
+
+fn em_dd_add(
+    out: &![i8; 131072], p: i64,
+    xh: i64, xl: i64, yh: i64, yl: i64, zh: i64, zl: i64
+) -> i64 with Mut, Panic, Div {
+    let shh = sc(47)
+    let sll = sc(48)
+    let thh = sc(49)
+    let tll = sc(50)
+    let ccc = sc(51)
+    let vhh = sc(52)
+    let vll = sc(53)
+    let www = sc(54)
+    var pp = em_two_sum(out, p, xh, yh, shh, sll)
+    pp = em_two_sum(out, pp, xl, yl, thh, tll)
+    pp = ld(out, pp, 0, sll)
+    pp = ld(out, pp, 1, thh)
+    pp = sse(out, pp, 0x58, 0, 1)   // c = s.lo + t.hi
+    pp = st(out, pp, 0, ccc)
+    pp = em_qsum(out, pp, shh, ccc, vhh, vll)
+    pp = ld(out, pp, 0, tll)
+    pp = ld(out, pp, 1, vll)
+    pp = sse(out, pp, 0x58, 0, 1)   // w = t.lo + v.lo
+    pp = st(out, pp, 0, www)
+    pp = em_qsum(out, pp, vhh, www, zh, zl)
+    pp
+}
+
+fn em_dd_mulf(
+    out: &![i8; 131072], p: i64,
+    xh: i64, xl: i64, y: i64, zh: i64, zl: i64
+) -> i64 with Mut, Panic, Div {
+    let phh = sc(58)
+    let pll = sc(59)
+    let lll = sc(60)
+    var pp = em_two_prod(out, p, xh, y, phh, pll)
+    pp = ld(out, pp, 0, pll)
+    pp = ld(out, pp, 1, xl)
+    pp = ld(out, pp, 2, y)
+    pp = sse(out, pp, 0x59, 1, 2)   // x.lo * y
+    pp = sse(out, pp, 0x58, 0, 1)   // p.lo + x.lo*y
+    pp = st(out, pp, 0, lll)
+    pp = em_qsum(out, pp, phh, lll, zh, zl)
+    pp
+}
+
+// ---- poison / lane helpers --------------------------------------------------
+fn em_set_poison(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, reg_val_off_v1(r))    // val = NaN
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, reg_ehi_off_v1(r))    // ehi = 0
+    pp = st(out, pp, 0, reg_elo_off_v1(r))    // elo = 0
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, reg_u_off_v1(r))      // u = +Inf
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, 1)                    // mov rax,1
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(r)) // poison = 1
+    pp
+}
+
+fn em_set_mem_poison(out: &![i8; 131072], p: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, mem_val_off_v1(s))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, mem_ehi_off_v1(s))
+    pp = st(out, pp, 0, mem_elo_off_v1(s))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, mem_u_off_v1(s))
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, mem_poison_off_v1(s))
+    pp
+}
+
+// Bit-pattern lane validity: appends a "je/jne target" for each failure to a
+// pending patch list. Emits checks that jump to `bad_placeholder` (rel filled
+// by caller through returned patch positions is impractical here) — instead we
+// route every failure through one branch by testing a running flag in rax.
+// Returns new p with rax = 1 when bad else 0, and poisons r when bad.
+fn em_normalize(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    // check exponent field == 0x7FF for val, ehi, elo; and u sign bit
+    var pp = mov_rax_mem(out, p, reg_val_off_v1(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j1 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)       // je bad
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j2 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, reg_elo_off_v1(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j3 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(r))
+    pp = shr_rax(out, pp, 63)
+    pp = test_rax(out, pp)
+    let j4 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)       // jne bad  (u sign set => u<0)
+    // ok path: rax = 0
+    pp = xor_rax(out, pp)
+    let j5 = pp + 1
+    pp = jmp32(out, pp, 0)           // jmp done
+    // bad path
+    let bad_lbl = pp
+    pp = em_set_poison(out, pp, r)
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, 1)           // mov rax,1
+    let done_lbl = pp
+    patch32(out, j1, bad_lbl - (j1 + 4))
+    patch32(out, j2, bad_lbl - (j2 + 4))
+    patch32(out, j3, bad_lbl - (j3 + 4))
+    patch32(out, j4, bad_lbl - (j4 + 4))
+    patch32(out, j5, done_lbl - (j5 + 4))
+    pp
+}
+
+// ---- arithmetic bodies (write RV=sc8,RH=sc9,RL=sc10,RU=sc11) ----------------
+fn em_u_from_two(
+    out: &![i8; 131072], p: i64, ta: i64, tb: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    // sqrt(ta^2 + tb^2) with ta,tb already in slots; result -> sc(11)
+    var pp = ld(out, p, 0, ta)
+    pp = sse(out, pp, 0x59, 0, 0)   // ta^2
+    pp = ld(out, pp, 1, tb)
+    pp = sse(out, pp, 0x59, 1, 1)   // tb^2
+    pp = sse(out, pp, 0x58, 0, 1)   // ta^2 + tb^2
+    pp = call32(out, pp, ns_off)
+    pp = st(out, pp, 0, sc(11))
+    pp
+}
+
+fn em_arith(
+    out: &![i8; 131072], p: i64, op: i64, a: i64, b: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    let av = reg_val_off_v1(a)
+    let ah_ = reg_ehi_off_v1(a)
+    let al_ = reg_elo_off_v1(a)
+    let au = reg_u_off_v1(a)
+    let bv = reg_val_off_v1(b)
+    let bh_ = reg_ehi_off_v1(b)
+    let bl_ = reg_elo_off_v1(b)
+    let bu = reg_u_off_v1(b)
+    var pp = p
+    if op == 2 {
+        // eadd
+        pp = em_two_sum(out, pp, av, bv, sc(12), sc(13))
+        pp = ld(out, pp, 0, sc(12))
+        pp = st(out, pp, 0, sc(8))                     // val
+        pp = em_dd_add(out, pp, ah_, al_, bh_, bl_, sc(14), sc(15))
+        pp = pxor(out, pp, 0, 0)
+        pp = st(out, pp, 0, sc(16))                    // zero
+        pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
+        // u = sqrt(x.u^2 + y.u^2)
+        pp = ld(out, pp, 0, au)
+        pp = st(out, pp, 0, sc(24))
+        pp = ld(out, pp, 0, bu)
+        pp = st(out, pp, 0, sc(25))
+        pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
+        return pp
+    }
+    if op == 3 {
+        // esub: two_sum(x.val, 0 - y.val); err = dd_add(dd_sub(x.err,y.err), s.lo)
+        pp = ld(out, pp, 1, bv)
+        pp = pxor(out, pp, 0, 0)
+        pp = sse(out, pp, 0x5C, 0, 1)                  // 0 - y.val
+        pp = st(out, pp, 0, sc(17))
+        pp = em_two_sum(out, pp, av, sc(17), sc(12), sc(13))
+        pp = ld(out, pp, 0, sc(12))
+        pp = st(out, pp, 0, sc(8))
+        // neg y.err
+        pp = ld(out, pp, 1, bh_)
+        pp = pxor(out, pp, 0, 0)
+        pp = sse(out, pp, 0x5C, 0, 1)
+        pp = st(out, pp, 0, sc(18))
+        pp = ld(out, pp, 1, bl_)
+        pp = pxor(out, pp, 0, 0)
+        pp = sse(out, pp, 0x5C, 0, 1)
+        pp = st(out, pp, 0, sc(19))
+        pp = em_dd_add(out, pp, ah_, al_, sc(18), sc(19), sc(14), sc(15))
+        pp = pxor(out, pp, 0, 0)
+        pp = st(out, pp, 0, sc(16))
+        pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
+        pp = ld(out, pp, 0, au)
+        pp = st(out, pp, 0, sc(24))
+        pp = ld(out, pp, 0, bu)
+        pp = st(out, pp, 0, sc(25))
+        pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
+        return pp
+    }
+    if op == 4 {
+        // emul
+        pp = em_two_prod(out, pp, av, bv, sc(12), sc(13))
+        pp = ld(out, pp, 0, sc(12))
+        pp = st(out, pp, 0, sc(8))                     // val = p.hi
+        pp = em_dd_mulf(out, pp, ah_, al_, bv, sc(20), sc(21))
+        pp = em_dd_mulf(out, pp, bh_, bl_, av, sc(22), sc(23))
+        pp = em_dd_add(out, pp, sc(20), sc(21), sc(22), sc(23), sc(14), sc(15))
+        pp = pxor(out, pp, 0, 0)
+        pp = st(out, pp, 0, sc(16))
+        pp = em_dd_add(out, pp, sc(14), sc(15), sc(13), sc(16), sc(9), sc(10))
+        // t1 = y.val * x.u ; t2 = x.val * y.u
+        pp = ld(out, pp, 0, bv)
+        pp = ld(out, pp, 1, au)
+        pp = sse(out, pp, 0x59, 0, 1)
+        pp = st(out, pp, 0, sc(24))
+        pp = ld(out, pp, 0, av)
+        pp = ld(out, pp, 1, bu)
+        pp = sse(out, pp, 0x59, 0, 1)
+        pp = st(out, pp, 0, sc(25))
+        pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
+        return pp
+    }
+    // op == 5 : ediv  (non-zero divisor path; zero divisor handled by caller)
+    // q = x.val / y.val
+    pp = ld(out, pp, 0, av)
+    pp = ld(out, pp, 1, bv)
+    pp = sse(out, pp, 0x5E, 0, 1)                      // q
+    pp = st(out, pp, 0, sc(8))                         // val = q
+    // p = two_prod(q, y.val)
+    pp = em_two_prod(out, pp, sc(8), bv, sc(12), sc(13))
+    // residual_dd = dd_sub(dd_from_f64(x.val), p) = dd_add({x.val,0}, neg p)
+    pp = ld(out, pp, 1, sc(12))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(18))
+    pp = ld(out, pp, 1, sc(13))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(19))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, sc(16))
+    pp = em_dd_add(out, pp, av, sc(16), sc(18), sc(19), sc(14), sc(15))
+    // res = dd_to_f64(residual) / y.val
+    pp = ld(out, pp, 0, sc(14))
+    pp = ld(out, pp, 1, sc(15))
+    pp = sse(out, pp, 0x58, 0, 1)
+    pp = ld(out, pp, 1, bv)
+    pp = sse(out, pp, 0x5E, 0, 1)
+    pp = st(out, pp, 0, sc(17))                        // res
+    // err = dd_add(dd_sub(dd_mulf(x.err, 1/y), dd_mulf(y.err, q/y)), res)
+    pp = setx(out, pp, 0, c_one())
+    pp = ld(out, pp, 1, bv)
+    pp = sse(out, pp, 0x5E, 0, 1)                      // 1/y
+    pp = st(out, pp, 0, sc(26))
+    pp = ld(out, pp, 0, sc(8))
+    pp = ld(out, pp, 1, bv)
+    pp = sse(out, pp, 0x5E, 0, 1)                      // q/y
+    pp = st(out, pp, 0, sc(27))
+    pp = em_dd_mulf(out, pp, ah_, al_, sc(26), sc(20), sc(21))
+    pp = em_dd_mulf(out, pp, bh_, bl_, sc(27), sc(22), sc(23))
+    // neg the second term then dd_add
+    pp = ld(out, pp, 1, sc(22))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(28))
+    pp = ld(out, pp, 1, sc(23))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(29))
+    pp = em_dd_add(out, pp, sc(20), sc(21), sc(28), sc(29), sc(14), sc(15))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, sc(16))
+    pp = em_dd_add(out, pp, sc(14), sc(15), sc(17), sc(16), sc(9), sc(10))
+    // u = (1/|y.val|) * sqrt(x.u^2 + (q*y.u)^2)
+    pp = ld(out, pp, 0, au)
+    pp = st(out, pp, 0, sc(24))
+    pp = ld(out, pp, 0, sc(8))
+    pp = ld(out, pp, 1, bu)
+    pp = sse(out, pp, 0x59, 0, 1)                      // q*y.u
+    pp = st(out, pp, 0, sc(25))
+    pp = em_u_from_two(out, pp, sc(24), sc(25), ns_off)
+    // scale by 1/|y.val|
+    pp = ld(out, pp, 0, bv)
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jpos = pp + 2
+    pp = jcc(out, pp, 0x87, 0)                         // ja  -> y>0, keep
+    pp = ld(out, pp, 1, bv)
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)                      // 0 - y  (abs for y<0)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    let keep_lbl = pp
+    pp = ld(out, pp, 0, bv)                            // y>0 branch: ay = y
+    let after_lbl = pp
+    patch32(out, jpos, keep_lbl - (jpos + 4))
+    patch32(out, jdone, after_lbl - (jdone + 4))
+    pp = st(out, pp, 0, sc(30))                        // ay
+    pp = setx(out, pp, 0, c_one())
+    pp = ld(out, pp, 1, sc(30))
+    pp = sse(out, pp, 0x5E, 0, 1)                      // 1/ay
+    pp = ld(out, pp, 1, sc(11))
+    pp = sse(out, pp, 0x59, 0, 1)                      // (1/ay)*sqrt(...)
+    pp = st(out, pp, 0, sc(11))
+    pp
+}
+
+// finite-and-write result slots -> reg lanes, else poison. Single POISON/DONE.
+fn em_finish(out: &![i8; 131072], p: i64, dst: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_mem(out, p, sc(8))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j1 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, sc(9))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j2 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, sc(10))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j3 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, sc(11))
+    pp = shr_rax(out, pp, 63)
+    pp = test_rax(out, pp)
+    let j4 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)
+    // ok path: copy result lanes to dst, poison=0
+    pp = ld(out, pp, 0, sc(8))
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
+    pp = ld(out, pp, 0, sc(9))
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
+    pp = ld(out, pp, 0, sc(10))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
+    pp = ld(out, pp, 0, sc(11))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
+    let jok = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    pp = em_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, j1, poison_lbl - (j1 + 4))
+    patch32(out, j2, poison_lbl - (j2 + 4))
+    patch32(out, j3, poison_lbl - (j3 + 4))
+    patch32(out, j4, poison_lbl - (j4 + 4))
+    patch32(out, jok, done_lbl - (jok + 4))
+    pp
+}
+
+// ---- opcode templates -------------------------------------------------------
+fn em_econst(out: &![i8; 131072], p: i64, dst: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, bits)
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
+    pp
+}
+
+fn em_binop(
+    out: &![i8; 131072], p: i64, op: i64, dst: i64, a: i64, b: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_normalize(out, p, a)
+    pp = mov_mem_rax(out, pp, sc(38))          // stash bad_a
+    pp = em_normalize(out, pp, b)
+    pp = or_rax_mem(out, pp, sc(38))           // combine bad
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                  // jne POISON
+    var jz = 0
+    var has_jz = false
+    if op == 5 {
+        pp = ld(out, pp, 0, reg_val_off_v1(b))
+        pp = pxor(out, pp, 1, 1)
+        pp = ucomi(out, pp, 0, 1)
+        jz = pp + 2
+        pp = jcc(out, pp, 0x84, 0)              // je POISON (divisor == 0)
+        has_jz = true
+    }
+    pp = em_arith(out, pp, op, a, b, ns_off)
+    pp = em_finish(out, pp, dst)                // ok -> DONE ; bad -> its own poison
+    let jend = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    pp = em_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    if has_jz {
+        patch32(out, jz, poison_lbl - (jz + 4))
+    }
+    patch32(out, jend, done_lbl - (jend + 4))
+    pp
+}
+
+fn em_esqrt(out: &![i8; 131072], p: i64, dst: i64, a: i64, ns_off: i64) -> i64 with Mut, Panic, Div {
+    let av = reg_val_off_v1(a)
+    let ah_ = reg_ehi_off_v1(a)
+    let al_ = reg_elo_off_v1(a)
+    let au = reg_u_off_v1(a)
+    var pp = em_normalize(out, p, a)
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                  // jne POISON
+    // if x.val <= 0 -> exact zero
+    pp = ld(out, pp, 0, av)
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz = pp + 2
+    pp = jcc(out, pp, 0x86, 0)                  // jbe ZEROPATH
+    // sqrt body
+    pp = ld(out, pp, 0, av)
+    pp = call32(out, pp, ns_off)
+    pp = st(out, pp, 0, sc(8))                  // z = val
+    pp = em_two_prod(out, pp, sc(8), sc(8), sc(12), sc(13))
+    // neg p
+    pp = ld(out, pp, 1, sc(12))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(18))
+    pp = ld(out, pp, 1, sc(13))
+    pp = pxor(out, pp, 0, 0)
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, sc(19))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, sc(16))
+    pp = em_dd_add(out, pp, av, sc(16), sc(18), sc(19), sc(14), sc(15))
+    // res = (r.hi + r.lo) / (2z)
+    pp = ld(out, pp, 0, sc(14))
+    pp = ld(out, pp, 1, sc(15))
+    pp = sse(out, pp, 0x58, 0, 1)
+    pp = ld(out, pp, 2, sc(8))
+    pp = setx(out, pp, 3, c_two())
+    pp = sse(out, pp, 0x59, 2, 3)               // 2z
+    pp = sse(out, pp, 0x5E, 0, 2)               // res
+    pp = st(out, pp, 0, sc(17))
+    // k = 1/(2z)
+    pp = ld(out, pp, 2, sc(8))
+    pp = setx(out, pp, 3, c_two())
+    pp = sse(out, pp, 0x59, 2, 3)               // 2z
+    pp = setx(out, pp, 0, c_one())
+    pp = sse(out, pp, 0x5E, 0, 2)               // 1/(2z)
+    pp = st(out, pp, 0, sc(26))
+    pp = em_dd_mulf(out, pp, ah_, al_, sc(26), sc(22), sc(23))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, sc(16))
+    pp = em_dd_add(out, pp, sc(22), sc(23), sc(17), sc(16), sc(9), sc(10))
+    // u = x.u / (2z)
+    pp = ld(out, pp, 0, au)
+    pp = ld(out, pp, 2, sc(8))
+    pp = setx(out, pp, 3, c_two())
+    pp = sse(out, pp, 0x59, 2, 3)
+    pp = sse(out, pp, 0x5E, 0, 2)
+    pp = st(out, pp, 0, sc(11))
+    pp = em_finish(out, pp, dst)
+    let jend = pp + 1
+    pp = jmp32(out, pp, 0)
+    // ZEROPATH
+    let zero_lbl = pp
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, reg_val_off_v1(dst))
+    pp = st(out, pp, 0, reg_ehi_off_v1(dst))
+    pp = st(out, pp, 0, reg_elo_off_v1(dst))
+    pp = st(out, pp, 0, reg_u_off_v1(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(dst))
+    let jend2 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    pp = em_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    patch32(out, jz, zero_lbl - (jz + 4))
+    patch32(out, jend, done_lbl - (jend + 4))
+    patch32(out, jend2, done_lbl - (jend2 + 4))
+    pp
+}
+
+fn em_estore(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, reg_val_off_v1(reg))
+    pp = st(out, pp, 0, mem_val_off_v1(slot))
+    pp = ld(out, pp, 0, reg_ehi_off_v1(reg))
+    pp = st(out, pp, 0, mem_ehi_off_v1(slot))
+    pp = ld(out, pp, 0, reg_elo_off_v1(reg))
+    pp = st(out, pp, 0, mem_elo_off_v1(slot))
+    pp = ld(out, pp, 0, reg_u_off_v1(reg))
+    pp = st(out, pp, 0, mem_u_off_v1(slot))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(reg))
+    pp = mov_mem_rax(out, pp, mem_poison_off_v1(slot))
+    pp
+}
+
+fn em_eload(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, mem_val_off_v1(slot))
+    pp = st(out, pp, 0, reg_val_off_v1(reg))
+    pp = ld(out, pp, 0, mem_ehi_off_v1(slot))
+    pp = st(out, pp, 0, reg_ehi_off_v1(reg))
+    pp = ld(out, pp, 0, mem_elo_off_v1(slot))
+    pp = st(out, pp, 0, reg_elo_off_v1(reg))
+    pp = ld(out, pp, 0, mem_u_off_v1(slot))
+    pp = st(out, pp, 0, reg_u_off_v1(reg))
+    pp = mov_rax_mem(out, pp, mem_poison_off_v1(slot))
+    pp = mov_mem_rax(out, pp, reg_poison_off_v1(reg))
+    pp
+}
+
+// v2 (qd128) estore: copy all six lane words (val,e0,e1,e2,e3,u) + poison from
+// register `reg` into mem slot `slot`. Mirrors em_estore but on the deep lane.
+fn em_v2_estore(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2_reg_val_off(reg))
+    pp = st(out, pp, 0, v2_mem_val_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e0_off(reg))
+    pp = st(out, pp, 0, v2_mem_e0_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e1_off(reg))
+    pp = st(out, pp, 0, v2_mem_e1_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e2_off(reg))
+    pp = st(out, pp, 0, v2_mem_e2_off(slot))
+    pp = ld(out, pp, 0, v2_reg_e3_off(reg))
+    pp = st(out, pp, 0, v2_mem_e3_off(slot))
+    pp = ld(out, pp, 0, v2_reg_u_off(reg))
+    pp = st(out, pp, 0, v2_mem_u_off(slot))
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(reg))
+    pp = mov_mem_rax(out, pp, v2_mem_poison_off(slot))
+    pp
+}
+
+// v2 (qd128) eload: copy all six lane words (val,e0,e1,e2,e3,u) + poison from
+// mem slot `slot` into register `reg`. Mirrors em_eload but on the deep lane.
+fn em_v2_eload(out: &![i8; 131072], p: i64, reg: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2_mem_val_off(slot))
+    pp = st(out, pp, 0, v2_reg_val_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e0_off(slot))
+    pp = st(out, pp, 0, v2_reg_e0_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e1_off(slot))
+    pp = st(out, pp, 0, v2_reg_e1_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e2_off(slot))
+    pp = st(out, pp, 0, v2_reg_e2_off(reg))
+    pp = ld(out, pp, 0, v2_mem_e3_off(slot))
+    pp = st(out, pp, 0, v2_reg_e3_off(reg))
+    pp = ld(out, pp, 0, v2_mem_u_off(slot))
+    pp = st(out, pp, 0, v2_reg_u_off(reg))
+    pp = mov_rax_mem(out, pp, v2_mem_poison_off(slot))
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(reg))
+    pp
+}
+
+// v2 (qd128) mem-lane poison canonical form — mirrors em_set_mem_poison but
+// writes all four err components + inf u + poison=1 into the 48-byte mem slot.
+fn em_v2_set_mem_poison(out: &![i8; 131072], p: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, v2_mem_val_off(s))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_mem_e0_off(s))
+    pp = st(out, pp, 0, v2_mem_e1_off(s))
+    pp = st(out, pp, 0, v2_mem_e2_off(s))
+    pp = st(out, pp, 0, v2_mem_e3_off(s))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, v2_mem_u_off(s))
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, v2_mem_poison_off(s))
+    pp
+}
+
+fn em_egate(
+    out: &![i8; 131072], p: i64, dst: i64,
+    pu_off: i64, dp_off: i64, s: &Strs, gi: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_normalize(out, p, dst)          // ensure poison lanes/flag set
+    let base = c_base()
+    let saddr = c_base() + c_strings_off()
+    // prefix "...prog=..gate=..reg=e.. val=s"
+    pp = write_str(out, pp, base + s.p0off[gi as usize], s.p0len[gi as usize])
+    // val
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    // " roundoff=s"
+    pp = write_str(out, pp, base + s.ro, s.rolen)
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    // " u=s"
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    // " poisoned="
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(dst))
+    pp = call32(out, pp, pu_off)
+    // "\n"
+    pp = write_str(out, pp, base + s.nl, 1)
+    let _keep = saddr
+    pp
+}
+
+fn em_v1_set_last_written(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_imm64(out, p, r)
+    pp = mov_mem_rax(out, pp, sc(36))
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(r))
+    pp = mov_mem_rax(out, pp, sc(61))
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(r))
+    pp = mov_mem_rax(out, pp, sc(62))
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(r))
+    pp = mov_mem_rax(out, pp, sc(63))
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(r))
+    pp = mov_mem_rax(out, pp, sc(55))
+    pp
+}
+
+fn em_v1_normalize_u_lane(out: &![i8; 131072], p: i64, uoff: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_mem(out, p, uoff)
+    pp = mov_rcx_imm64(out, pp, -9223372036854775808)
+    pp = cmp_rax_rcx(out, pp)
+    let jnz = pp + 2
+    pp = jcc(out, pp, 0x85, 0)
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, uoff)
+    let done = pp
+    patch32(out, jnz, done - (jnz + 4))
+    pp
+}
+
+fn em_v1_emit_receipt(
+    out: &![i8; 131072],
+    p: i64,
+    dst: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV1,
+    force_poison_one: i64,
+    emit_stop_fuel: i64
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_imm64(out, pp, dst)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, reg_val_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro, s.rolen)
+    pp = mov_rax_mem(out, pp, reg_ehi_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, reg_u_off_v1(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_mem(out, pp, reg_poison_off_v1(dst))
+    pp = or_rax_mem(out, pp, sc(35))
+    if force_poison_one == 1 {
+        pp = mov_rax_imm64(out, pp, 1)
+    }
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    if emit_stop_fuel == 1 {
+        pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    }
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
+fn em_v1_emit_fuel_stop_receipt(
+    out: &![i8; 131072],
+    p: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV1
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_mem(out, pp, sc(36))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, sc(61))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro, s.rolen)
+    pp = mov_rax_mem(out, pp, sc(62))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, sc(63))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
+fn em_v1_abs_copy(out: &![i8; 131072], p: i64, src_off: i64, dst_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, src_off)
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jkeep = pp + 2
+    pp = jcc(out, pp, 0x83, 0)
+    pp = pxor(out, pp, 1, 1)
+    pp = sse(out, pp, 0x5C, 1, 0)
+    pp = sse(out, pp, 0x10, 0, 1)
+    let done = pp
+    patch32(out, jkeep, done - (jkeep + 4))
+    pp = st(out, pp, 0, dst_off)
+    pp
+}
+
+// ---- v2 (qd128) lane helpers ------------------------------------------------
+// Poison a v2 register: val = NaN, e0..e3 = 0, u = +Inf, poison = 1. Mirrors
+// evm_set_reg_poison -> write_reg_raw (make_nan, 0,0,+inf) with the two deep
+// components zeroed as write_reg_raw does on the v2 path.
+fn em_v2_set_poison(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, c_nan())
+    pp = st(out, pp, 0, v2_reg_val_off(r))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_e0_off(r))
+    pp = st(out, pp, 0, v2_reg_e1_off(r))
+    pp = st(out, pp, 0, v2_reg_e2_off(r))
+    pp = st(out, pp, 0, v2_reg_e3_off(r))
+    pp = setx(out, pp, 0, c_inf())
+    pp = st(out, pp, 0, v2_reg_u_off(r))
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(r))
+    pp
+}
+
+// Normalise+validate a v2 register (I3 over all four err components). Poisons r
+// and leaves rax = 1 when bad, else rax = 0. The u lane must already be
+// canonicalised (-0.0 -> +0.0) by em_v1_normalize_u_lane before this runs, so
+// the raw sign-bit test is exact. Equivalent to normalize_reg_lane: a poisoned
+// register always carries val = NaN (caught by the val exponent test), and
+// lane_tuple_ok(val,e0,e1,u) plus the e2/e3 finiteness check are all covered by
+// testing exp == 0x7FF on val,e0,e1,e2,e3 and the u sign bit.
+fn em_v2_normalize(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_mem(out, p, v2_reg_val_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j1 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j2 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j3 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j4 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(r))
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = cmp_rax(out, pp, 2047)
+    let j5 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(r))
+    pp = shr_rax(out, pp, 63)
+    pp = test_rax(out, pp)
+    let j6 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)
+    pp = xor_rax(out, pp)
+    let j7 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let bad_lbl = pp
+    pp = em_v2_set_poison(out, pp, r)
+    pp = mov_rax_imm64(out, pp, 1)
+    let done_lbl = pp
+    patch32(out, j1, bad_lbl - (j1 + 4))
+    patch32(out, j2, bad_lbl - (j2 + 4))
+    patch32(out, j3, bad_lbl - (j3 + 4))
+    patch32(out, j4, bad_lbl - (j4 + 4))
+    patch32(out, j5, bad_lbl - (j5 + 4))
+    patch32(out, j6, bad_lbl - (j6 + 4))
+    patch32(out, j7, done_lbl - (j7 + 4))
+    pp
+}
+
+// Snapshot the 6-word v2 lane + poison for the fuel-stop receipt. sc(36)=idx,
+// sc(56..61)=val,e0,e1,e2,e3,u, sc(55)=poison.
+fn em_v2_set_last_written(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = mov_rax_imm64(out, p, r)
+    pp = mov_mem_rax(out, pp, sc(36))
+    pp = mov_rax_mem(out, pp, v2_reg_val_off(r))
+    pp = mov_mem_rax(out, pp, sc(56))
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(r))
+    pp = mov_mem_rax(out, pp, sc(57))
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(r))
+    pp = mov_mem_rax(out, pp, sc(58))
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(r))
+    pp = mov_mem_rax(out, pp, sc(59))
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(r))
+    pp = mov_mem_rax(out, pp, sc(60))
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(r))
+    pp = mov_mem_rax(out, pp, sc(61))
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(r))
+    pp = mov_mem_rax(out, pp, sc(55))
+    pp
+}
+
+// econst on the v2 path: write val = const bits, e0..e3 = 0, u = 0, poison = 0.
+fn em_v2_econst(out: &![i8; 131072], p: i64, dst: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 0, bits)
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    pp
+}
+
+// Emit a receipt v3 line for register dst (gate path). Byte-identical to
+// emit_receipt_v3: val, roundoff0..3, u, poisoned, frail[, stop=fuel].
+fn em_v2_emit_receipt(
+    out: &![i8; 131072],
+    p: i64,
+    dst: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV2,
+    force_poison_one: i64,
+    emit_stop_fuel: i64
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_imm64(out, pp, dst)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, v2_reg_val_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro0, s.ro0len)
+    pp = mov_rax_mem(out, pp, v2_reg_e0_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro1, s.ro1len)
+    pp = mov_rax_mem(out, pp, v2_reg_e1_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro2, s.ro2len)
+    pp = mov_rax_mem(out, pp, v2_reg_e2_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro3, s.ro3len)
+    pp = mov_rax_mem(out, pp, v2_reg_e3_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, v2_reg_u_off(dst))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_mem(out, pp, v2_reg_poison_off(dst))
+    pp = or_rax_mem(out, pp, sc(35))
+    if force_poison_one == 1 {
+        pp = mov_rax_imm64(out, pp, 1)
+    }
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    if emit_stop_fuel == 1 {
+        pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    }
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
+// Fuel-stop receipt v3 from the snapshot slots (forced poisoned=1, stop=fuel).
+fn em_v2_emit_fuel_stop_receipt(
+    out: &![i8; 131072],
+    p: i64,
+    pu_off: i64,
+    dp_off: i64,
+    s: &StrsV2
+) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = write_str(out, p, base + s.pfx, s.pfxlen)
+    pp = mov_rax_mem(out, pp, sc(33))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.reg, s.reglen)
+    pp = mov_rax_mem(out, pp, sc(36))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.val, s.vallen)
+    pp = mov_rax_mem(out, pp, sc(56))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro0, s.ro0len)
+    pp = mov_rax_mem(out, pp, sc(57))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro1, s.ro1len)
+    pp = mov_rax_mem(out, pp, sc(58))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro2, s.ro2len)
+    pp = mov_rax_mem(out, pp, sc(59))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.ro3, s.ro3len)
+    pp = mov_rax_mem(out, pp, sc(60))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.lu, s.lulen)
+    pp = mov_rax_mem(out, pp, sc(61))
+    pp = call32(out, pp, dp_off)
+    pp = write_str(out, pp, base + s.po, s.polen)
+    pp = mov_rax_imm64(out, pp, 1)
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.frail, s.fraillen)
+    pp = mov_rax_mem(out, pp, sc(34))
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.stopfuel, s.stopfuellen)
+    pp = write_str(out, pp, base + s.nl, 1)
+    pp
+}
+
+// ---- v2 qd128 subroutines ---------------------------------------------------
+// Emitted once per ELF; called by the per-op templates. Convention: rbx is the
+// state base; leaf EFTs are register-only (a=xmm0,b=xmm1 -> hi=xmm0,lo=xmm1,
+// scratch xmm2..7); composite subroutines pass qd operands/results through
+// FIXED, DISJOINT v2q slot groups (no recursion => a static slot layout is
+// sound). Slot map (v2q index):
+//   QA 0..3   QB 4..7   QR 8..11        (ABI operands/result)
+//   RN_lo 12  RN_IN 13..17  RN_OUT 18..21  RN_s 22  RN_b 23..26  RN_t 27..30
+//   DA_u 31  DA_v 32  DA_x 33  DA_s 34  DA_uu 35  DA_vv 36
+//   SORT 40..47  SRT_key 48  SRT_akey 49
+//   QADD_u 50  QADD_v 51  QADD_c 52..55
+//   TX 56..59  TY 60..63  TT 64..67  VALTMP 72   (per-op-body holds)
+// RN_b (23..26) and QADD_c (52..55) are contiguous so b[k]/c[k] use a rcx-scaled
+// SIB store. The u-lane scratch stays in sc(<32); counters sc(32..36) and the
+// snapshot sc(55..61) are reserved.
+
+fn andpd(out: &![i8; 131072], p: i64, d: i64, s: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x66)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x54)
+    pp = put8(out, pp, 192 + d * 8 + s)
+    pp
+}
+
+// movsd [rbx + rcx*8 + disp32], xmm_n   (b[k]/c[k] store, k in rcx)
+fn st_sib(out: &![i8; 131072], p: i64, n: i64, disp: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0xF2)
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x11)
+    pp = put8(out, pp, 132 + n * 8)   // modrm mod=10 reg=n rm=100(SIB)
+    pp = put8(out, pp, 0xCB)          // SIB scale=3(x8) index=rcx base=rbx
+    pp = put32(out, pp, disp)
+    pp
+}
+
+fn xor_rcx(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x31)
+    pp = put8(out, pp, 0xC9)
+    pp
+}
+
+fn inc_rcx(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0xC1)
+    pp
+}
+
+fn cmp_rcx_imm32(out: &![i8; 131072], p: i64, imm: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x81)
+    pp = put8(out, pp, 0xF9)
+    pp = put32(out, pp, imm)
+    pp
+}
+
+// call a leaf EFT (two_sum / quick_two_sum): args from slots sa,sb; hi->dhi, lo->dlo.
+fn em_call_binf(
+    out: &![i8; 131072], p: i64, sub_off: i64, sa: i64, sb: i64, dhi: i64, dlo: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, sa)
+    pp = ld(out, pp, 1, sb)
+    pp = call32(out, pp, sub_off)
+    pp = st(out, pp, 0, dhi)
+    pp = st(out, pp, 1, dlo)
+    pp
+}
+
+// two_sum(a=xmm0,b=xmm1) -> hi=xmm0, lo=xmm1  (Knuth, dd64.sio:61)
+fn em_sub_two_sum(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = sse(out, p, 0x10, 2, 0)    // xmm2 = a
+    pp = sse(out, pp, 0x58, 2, 1)       // xmm2 = a+b = s
+    pp = sse(out, pp, 0x10, 3, 2)       // xmm3 = s
+    pp = sse(out, pp, 0x5C, 3, 0)       // xmm3 = s-a = bb
+    pp = sse(out, pp, 0x10, 4, 2)       // xmm4 = s
+    pp = sse(out, pp, 0x5C, 4, 3)       // xmm4 = s-bb
+    pp = sse(out, pp, 0x10, 5, 0)       // xmm5 = a
+    pp = sse(out, pp, 0x5C, 5, 4)       // xmm5 = a-(s-bb)
+    pp = sse(out, pp, 0x10, 4, 1)       // xmm4 = b
+    pp = sse(out, pp, 0x5C, 4, 3)       // xmm4 = b-bb
+    pp = sse(out, pp, 0x58, 5, 4)       // xmm5 = e
+    pp = sse(out, pp, 0x10, 0, 2)       // xmm0 = s
+    pp = sse(out, pp, 0x10, 1, 5)       // xmm1 = e
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// quick_two_sum(a=xmm0,b=xmm1) -> hi=xmm0, lo=xmm1  (Dekker, dd64.sio:70)
+fn em_sub_quick_two_sum(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = sse(out, p, 0x10, 2, 0)    // xmm2 = a
+    pp = sse(out, pp, 0x58, 2, 1)       // xmm2 = a+b = s
+    pp = sse(out, pp, 0x10, 3, 2)       // xmm3 = s
+    pp = sse(out, pp, 0x5C, 3, 0)       // xmm3 = s-a
+    pp = sse(out, pp, 0x10, 4, 1)       // xmm4 = b
+    pp = sse(out, pp, 0x5C, 4, 3)       // xmm4 = b-(s-a) = e
+    pp = sse(out, pp, 0x10, 0, 2)       // xmm0 = s
+    pp = sse(out, pp, 0x10, 1, 4)       // xmm1 = e
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_renorm5(RN_IN[13..17]) -> RN_OUT[18..21]   (qd128.sio:79, Priest Alg.9)
+fn em_sub_renorm5(out: &![i8; 131072], p: i64, qs_off: i64) -> i64 with Mut, Panic, Div {
+    // s4=qts(a3,a4): hi->RN_s, lo->t4 ; then s3,s2,s1 chaining hi through RN_s.
+    var pp = em_call_binf(out, p, qs_off, v2q(16), v2q(17), v2q(22), v2q(30))
+    pp = em_call_binf(out, pp, qs_off, v2q(15), v2q(22), v2q(22), v2q(29))
+    pp = em_call_binf(out, pp, qs_off, v2q(14), v2q(22), v2q(22), v2q(28))
+    pp = em_call_binf(out, pp, qs_off, v2q(13), v2q(22), v2q(22), v2q(27))
+    // b0..b3 = 0
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(23))
+    pp = st(out, pp, 0, v2q(24))
+    pp = st(out, pp, 0, v2q(25))
+    pp = st(out, pp, 0, v2q(26))
+    pp = xor_rcx(out, pp)               // k = 0
+    var ti_arr: [i64; 4] = [27, 28, 29, 30]
+    var ii = 0
+    while ii < 4 {
+        let ti = ti_arr[ii as usize]
+        // r = qts(s, t_i): hi->RN_s, lo->RN_lo
+        pp = em_call_binf(out, pp, qs_off, v2q(22), v2q(ti), v2q(22), v2q(12))
+        pp = ld(out, pp, 1, v2q(12))
+        pp = pxor(out, pp, 2, 2)
+        pp = ucomi(out, pp, 1, 2)       // cmp r.lo, 0
+        let jskip = pp + 2
+        pp = jcc(out, pp, 0x84, 0)      // je skip (r.lo == 0)
+        pp = ld(out, pp, 7, v2q(22))    // xmm7 = s
+        pp = st_sib(out, pp, 7, v2q(23))// b[k] = s
+        pp = ld(out, pp, 0, v2q(12))    // s = r.lo
+        pp = st(out, pp, 0, v2q(22))
+        pp = inc_rcx(out, pp)
+        let skip = pp
+        patch32(out, jskip, skip - (jskip + 4))
+        ii = ii + 1
+    }
+    // if k < 4 { b[k] = s }
+    pp = cmp_rcx_imm32(out, pp, 4)
+    let jge = pp + 2
+    pp = jcc(out, pp, 0x8D, 0)          // jge done
+    pp = ld(out, pp, 7, v2q(22))
+    pp = st_sib(out, pp, 7, v2q(23))
+    let done = pp
+    patch32(out, jge, done - (jge + 4))
+    pp = ld(out, pp, 0, v2q(23))
+    pp = st(out, pp, 0, v2q(18))
+    pp = ld(out, pp, 0, v2q(24))
+    pp = st(out, pp, 0, v2q(19))
+    pp = ld(out, pp, 0, v2q(25))
+    pp = st(out, pp, 0, v2q(20))
+    pp = ld(out, pp, 0, v2q(26))
+    pp = st(out, pp, 0, v2q(21))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_double_accumulate(DA_u,DA_v,DA_x) -> DA_s,DA_uu,DA_vv   (qd128.sio:171)
+fn em_sub_double_accumulate(out: &![i8; 131072], p: i64, ts_off: i64) -> i64 with Mut, Panic, Div {
+    // s0 = two_sum(v,x): hi->DA_s(temp), lo->DA_vv
+    var pp = em_call_binf(out, p, ts_off, v2q(32), v2q(33), v2q(34), v2q(36))
+    // s1 = two_sum(u, s0.hi): hi->DA_s, lo->DA_uu
+    pp = em_call_binf(out, pp, ts_off, v2q(31), v2q(34), v2q(34), v2q(35))
+    // if uu == 0 { uu = s; s = 0 }
+    pp = ld(out, pp, 1, v2q(35))
+    pp = pxor(out, pp, 2, 2)
+    pp = ucomi(out, pp, 1, 2)
+    let js1 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne skip1
+    pp = ld(out, pp, 0, v2q(34))
+    pp = st(out, pp, 0, v2q(35))        // uu = s
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(34))        // s = 0
+    let sk1 = pp
+    patch32(out, js1, sk1 - (js1 + 4))
+    // if vv == 0 { vv = uu; uu = s; s = 0 }
+    pp = ld(out, pp, 1, v2q(36))
+    pp = pxor(out, pp, 2, 2)
+    pp = ucomi(out, pp, 1, 2)
+    let js2 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne skip2
+    pp = ld(out, pp, 0, v2q(35))
+    pp = st(out, pp, 0, v2q(36))        // vv = uu
+    pp = ld(out, pp, 0, v2q(34))
+    pp = st(out, pp, 0, v2q(35))        // uu = s
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(34))        // s = 0
+    let sk2 = pp
+    patch32(out, js2, sk2 - (js2 + 4))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_components_sorted8(QA,QB) -> SORT[40..47]   (qd128.sio:189)
+// Deterministic insertion sort by descending magnitude, fully unrolled.
+fn em_sub_sorted8(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = p
+    var si = 0
+    while si < 8 {
+        pp = ld(out, pp, 0, v2q(si))         // QA/QB packed 0..7
+        pp = st(out, pp, 0, v2q(40 + si))
+        si = si + 1
+    }
+    pp = setx(out, pp, 6, 9223372036854775807)  // sign mask
+    var jmp_done: [i64; 8] = [0; 8]
+    var i = 1
+    while i < 8 {
+        pp = ld(out, pp, 0, v2q(40 + i))     // key
+        pp = st(out, pp, 0, v2q(48))
+        pp = andpd(out, pp, 0, 6)            // |key|
+        pp = st(out, pp, 0, v2q(49))
+        var ndone = 0
+        var j = i
+        while j >= 1 {
+            pp = ld(out, pp, 0, v2q(40 + (j - 1)))
+            pp = andpd(out, pp, 0, 6)        // |SORT[j-1]|
+            pp = ld(out, pp, 1, v2q(49))     // akey
+            pp = ucomi(out, pp, 0, 1)
+            let jb_shift = pp + 2
+            pp = jcc(out, pp, 0x82, 0)       // jb SHIFT (|x[j-1]| < akey)
+            pp = ld(out, pp, 7, v2q(48))     // place key at j
+            pp = st(out, pp, 7, v2q(40 + j))
+            jmp_done[ndone as usize] = pp + 1
+            pp = jmp32(out, pp, 0)
+            ndone = ndone + 1
+            let shift_lbl = pp
+            patch32(out, jb_shift, shift_lbl - (jb_shift + 4))
+            pp = ld(out, pp, 0, v2q(40 + (j - 1)))
+            pp = st(out, pp, 0, v2q(40 + j)) // SORT[j] = SORT[j-1]
+            j = j - 1
+        }
+        pp = ld(out, pp, 7, v2q(48))         // SORT[0] = key
+        pp = st(out, pp, 7, v2q(40))
+        let done_lbl = pp
+        var d = 0
+        while d < ndone {
+            let at = jmp_done[d as usize]
+            patch32(out, at, done_lbl - (at + 4))
+            d = d + 1
+        }
+        i = i + 1
+    }
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_add(QA,QB) -> QR   (qd128.sio:223): sorted merge + Double-Accumulate + renorm4
+fn em_sub_qd_add(
+    out: &![i8; 131072], p: i64, srt_off: i64, da_off: i64, rn_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = call32(out, p, srt_off)
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(50))     // u = 0
+    pp = st(out, pp, 0, v2q(51))     // v = 0
+    pp = st(out, pp, 0, v2q(52))     // c0..c3 = 0
+    pp = st(out, pp, 0, v2q(53))
+    pp = st(out, pp, 0, v2q(54))
+    pp = st(out, pp, 0, v2q(55))
+    pp = xor_rcx(out, pp)            // k = 0
+    var i = 0
+    while i < 8 {
+        pp = cmp_rcx_imm32(out, pp, 4)
+        let jge_skip = pp + 2
+        pp = jcc(out, pp, 0x8D, 0)  // jge skip iteration (k>=4)
+        pp = ld(out, pp, 0, v2q(50))
+        pp = st(out, pp, 0, v2q(31))    // DA_u = u
+        pp = ld(out, pp, 0, v2q(51))
+        pp = st(out, pp, 0, v2q(32))    // DA_v = v
+        pp = ld(out, pp, 0, v2q(40 + i))
+        pp = st(out, pp, 0, v2q(33))    // DA_x = SORT[i]
+        pp = call32(out, pp, da_off)
+        pp = ld(out, pp, 0, v2q(35))
+        pp = st(out, pp, 0, v2q(50))    // u = da.uu
+        pp = ld(out, pp, 0, v2q(36))
+        pp = st(out, pp, 0, v2q(51))    // v = da.vv
+        pp = ld(out, pp, 1, v2q(34))    // da.s
+        pp = pxor(out, pp, 2, 2)
+        pp = ucomi(out, pp, 1, 2)
+        let jskip_store = pp + 2
+        pp = jcc(out, pp, 0x84, 0)      // je (da.s == 0)
+        pp = ld(out, pp, 7, v2q(34))
+        pp = st_sib(out, pp, 7, v2q(52))// c[k] = da.s
+        pp = inc_rcx(out, pp)
+        let skip_store = pp
+        patch32(out, jskip_store, skip_store - (jskip_store + 4))
+        let skip_iter = pp
+        patch32(out, jge_skip, skip_iter - (jge_skip + 4))
+        i = i + 1
+    }
+    // if k < 4 { c[k] = u; k++ }
+    pp = cmp_rcx_imm32(out, pp, 4)
+    let jt1 = pp + 2
+    pp = jcc(out, pp, 0x8D, 0)
+    pp = ld(out, pp, 7, v2q(50))
+    pp = st_sib(out, pp, 7, v2q(52))
+    pp = inc_rcx(out, pp)
+    let t1 = pp
+    patch32(out, jt1, t1 - (jt1 + 4))
+    // if k < 4 { c[k] = v }
+    pp = cmp_rcx_imm32(out, pp, 4)
+    let jt2 = pp + 2
+    pp = jcc(out, pp, 0x8D, 0)
+    pp = ld(out, pp, 7, v2q(51))
+    pp = st_sib(out, pp, 7, v2q(52))
+    let t2 = pp
+    patch32(out, jt2, t2 - (jt2 + 4))
+    // renorm4(c0..c3) = renorm5(c0,c1,c2,c3, 0)
+    pp = ld(out, pp, 0, v2q(52))
+    pp = st(out, pp, 0, v2q(13))
+    pp = ld(out, pp, 0, v2q(53))
+    pp = st(out, pp, 0, v2q(14))
+    pp = ld(out, pp, 0, v2q(54))
+    pp = st(out, pp, 0, v2q(15))
+    pp = ld(out, pp, 0, v2q(55))
+    pp = st(out, pp, 0, v2q(16))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(17))
+    pp = call32(out, pp, rn_off)
+    pp = ld(out, pp, 0, v2q(18))
+    pp = st(out, pp, 0, v2q(8))
+    pp = ld(out, pp, 0, v2q(19))
+    pp = st(out, pp, 0, v2q(9))
+    pp = ld(out, pp, 0, v2q(20))
+    pp = st(out, pp, 0, v2q(10))
+    pp = ld(out, pp, 0, v2q(21))
+    pp = st(out, pp, 0, v2q(11))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// two_prod(a=xmm0,b=xmm1) -> hi=xmm0, lo=xmm1  (Dekker/Veltkamp, dd64.sio:86)
+// Register-only (scratch xmm2..7); clobbers rax (setx of the splitter).
+fn em_sub_two_prod(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = setx(out, p, 7, c_split())     // xmm7 = 134217729.0
+    pp = sse(out, pp, 0x10, 2, 0)           // xmm2 = a
+    pp = sse(out, pp, 0x59, 2, 1)           // xmm2 = a*b = p
+    pp = sse(out, pp, 0x10, 3, 0)           // ca = split*a
+    pp = sse(out, pp, 0x59, 3, 7)
+    pp = sse(out, pp, 0x10, 4, 3)
+    pp = sse(out, pp, 0x5C, 4, 0)           // ca-a
+    pp = sse(out, pp, 0x5C, 3, 4)           // ha = ca-(ca-a)
+    pp = sse(out, pp, 0x10, 4, 0)
+    pp = sse(out, pp, 0x5C, 4, 3)           // la = a-ha
+    pp = sse(out, pp, 0x10, 5, 1)           // cb = split*b
+    pp = sse(out, pp, 0x59, 5, 7)
+    pp = sse(out, pp, 0x10, 6, 5)
+    pp = sse(out, pp, 0x5C, 6, 1)           // cb-b
+    pp = sse(out, pp, 0x5C, 5, 6)           // hb = cb-(cb-b)
+    pp = sse(out, pp, 0x10, 6, 1)
+    pp = sse(out, pp, 0x5C, 6, 5)           // lb = b-hb
+    pp = sse(out, pp, 0x10, 7, 3)           // ha
+    pp = sse(out, pp, 0x59, 7, 5)           // ha*hb
+    pp = sse(out, pp, 0x5C, 7, 2)           // ha*hb - p
+    pp = sse(out, pp, 0x10, 0, 3)
+    pp = sse(out, pp, 0x59, 0, 6)           // ha*lb
+    pp = sse(out, pp, 0x58, 7, 0)           // + ha*lb
+    pp = sse(out, pp, 0x10, 0, 4)
+    pp = sse(out, pp, 0x59, 0, 5)           // la*hb
+    pp = sse(out, pp, 0x58, 7, 0)           // + la*hb
+    pp = sse(out, pp, 0x10, 0, 4)
+    pp = sse(out, pp, 0x59, 0, 6)           // la*lb
+    pp = sse(out, pp, 0x58, 7, 0)           // + la*lb = e
+    pp = sse(out, pp, 0x10, 0, 2)           // hi = p
+    pp = sse(out, pp, 0x10, 1, 7)           // lo = e
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_add_f64(QF_a[73..76], QF_b[77]) -> QR  (qd128.sio:163)
+fn em_sub_qd_add_f64(out: &![i8; 131072], p: i64, ts_off: i64, rn_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, ts_off, v2q(73), v2q(77), v2q(13), v2q(81))
+    pp = em_call_binf(out, pp, ts_off, v2q(74), v2q(81), v2q(14), v2q(82))
+    pp = em_call_binf(out, pp, ts_off, v2q(75), v2q(82), v2q(15), v2q(83))
+    pp = em_call_binf(out, pp, ts_off, v2q(76), v2q(83), v2q(16), v2q(17))
+    pp = call32(out, pp, rn_off)
+    pp = ld(out, pp, 0, v2q(18))
+    pp = st(out, pp, 0, v2q(8))
+    pp = ld(out, pp, 0, v2q(19))
+    pp = st(out, pp, 0, v2q(9))
+    pp = ld(out, pp, 0, v2q(20))
+    pp = st(out, pp, 0, v2q(10))
+    pp = ld(out, pp, 0, v2q(21))
+    pp = st(out, pp, 0, v2q(11))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// dd_add(DDa[170,171], DDb[172,173]) -> DDr[174,175]  (dd64.sio:100)
+fn em_sub_dd_add(out: &![i8; 131072], p: i64, ts_off: i64, qs_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, ts_off, v2q(170), v2q(172), v2q(204), v2q(205))
+    pp = em_call_binf(out, pp, ts_off, v2q(171), v2q(173), v2q(206), v2q(207))
+    pp = ld(out, pp, 0, v2q(205))
+    pp = ld(out, pp, 1, v2q(206))
+    pp = sse(out, pp, 0x58, 0, 1)           // c = s.lo + t.hi
+    pp = st(out, pp, 0, v2q(208))
+    pp = em_call_binf(out, pp, qs_off, v2q(204), v2q(208), v2q(174), v2q(209))
+    pp = ld(out, pp, 0, v2q(207))
+    pp = ld(out, pp, 1, v2q(209))
+    pp = sse(out, pp, 0x58, 0, 1)           // w = t.lo + v.lo
+    pp = st(out, pp, 0, v2q(208))
+    pp = em_call_binf(out, pp, qs_off, v2q(174), v2q(208), v2q(174), v2q(175))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// dd_add_f64(DDa[170,171], scalar[184]) -> DDr[174,175]  (dd64.sio:110)
+fn em_sub_dd_add_f64(out: &![i8; 131072], p: i64, ts_off: i64, qs_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, ts_off, v2q(170), v2q(184), v2q(204), v2q(205))
+    pp = ld(out, pp, 0, v2q(205))
+    pp = ld(out, pp, 1, v2q(171))
+    pp = sse(out, pp, 0x58, 0, 1)           // v = s.lo + x.lo
+    pp = st(out, pp, 0, v2q(208))
+    pp = em_call_binf(out, pp, qs_off, v2q(204), v2q(208), v2q(174), v2q(175))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_three_sum(T3in[84,85,86]) -> T3out[87,88,89]  (qd128.sio:290)
+fn em_sub_three_sum(out: &![i8; 131072], p: i64, ts_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, ts_off, v2q(84), v2q(85), v2q(200), v2q(201))
+    pp = em_call_binf(out, pp, ts_off, v2q(86), v2q(200), v2q(87), v2q(202))
+    pp = em_call_binf(out, pp, ts_off, v2q(201), v2q(202), v2q(88), v2q(89))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// accumulate step: acc = qd_add_f64(acc, scalar). acc at accBase (4 slots).
+fn em_addf64_step(
+    out: &![i8; 131072], p: i64, qaddf_off: i64, acc_base: i64, scalar: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_qcopy(out, p, acc_base, 73)   // acc -> QF_a
+    pp = ld(out, pp, 0, v2q(scalar))
+    pp = st(out, pp, 0, v2q(77))                 // QF_b = scalar
+    pp = call32(out, pp, qaddf_off)
+    pp = em_v2_qcopy(out, pp, 8, acc_base)       // QR -> acc
+    pp
+}
+
+// qd_six_three_sum(S63in[90..95]) -> S63out[96,97,98]  (qd128.sio:297)
+fn em_sub_six_three_sum(
+    out: &![i8; 131072], p: i64, three_off: i64, qaddf_off: i64
+) -> i64 with Mut, Panic, Div {
+    // t0 = three_sum(a0,a1,a2)
+    var pp = ld(out, p, 0, v2q(90))
+    pp = st(out, pp, 0, v2q(84))
+    pp = ld(out, pp, 0, v2q(91))
+    pp = st(out, pp, 0, v2q(85))
+    pp = ld(out, pp, 0, v2q(92))
+    pp = st(out, pp, 0, v2q(86))
+    pp = call32(out, pp, three_off)
+    pp = ld(out, pp, 0, v2q(87))
+    pp = st(out, pp, 0, v2q(210))
+    pp = ld(out, pp, 0, v2q(88))
+    pp = st(out, pp, 0, v2q(211))
+    pp = ld(out, pp, 0, v2q(89))
+    pp = st(out, pp, 0, v2q(212))
+    // t1 = three_sum(b0,b1,b2)
+    pp = ld(out, pp, 0, v2q(93))
+    pp = st(out, pp, 0, v2q(84))
+    pp = ld(out, pp, 0, v2q(94))
+    pp = st(out, pp, 0, v2q(85))
+    pp = ld(out, pp, 0, v2q(95))
+    pp = st(out, pp, 0, v2q(86))
+    pp = call32(out, pp, three_off)
+    pp = ld(out, pp, 0, v2q(87))
+    pp = st(out, pp, 0, v2q(213))
+    pp = ld(out, pp, 0, v2q(88))
+    pp = st(out, pp, 0, v2q(214))
+    pp = ld(out, pp, 0, v2q(89))
+    pp = st(out, pp, 0, v2q(215))
+    // acc = 0; add the six residuals
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(99))
+    pp = st(out, pp, 0, v2q(100))
+    pp = st(out, pp, 0, v2q(101))
+    pp = st(out, pp, 0, v2q(102))
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 210)
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 211)
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 212)
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 213)
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 214)
+    pp = em_addf64_step(out, pp, qaddf_off, 99, 215)
+    pp = ld(out, pp, 0, v2q(99))
+    pp = st(out, pp, 0, v2q(96))
+    pp = ld(out, pp, 0, v2q(100))
+    pp = st(out, pp, 0, v2q(97))
+    pp = ld(out, pp, 0, v2q(101))
+    pp = st(out, pp, 0, v2q(98))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_nine_two_sum(N92in[103..111]) -> N92out[112,113]  (qd128.sio:310)
+fn em_sub_nine_two_sum(
+    out: &![i8; 131072], p: i64, ts_off: i64, ddadd_off: i64, ddaddf_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, ts_off, v2q(103), v2q(104), v2q(170), v2q(171))
+    pp = em_call_binf(out, pp, ts_off, v2q(105), v2q(106), v2q(172), v2q(173))
+    pp = call32(out, pp, ddadd_off)         // d0 = dd_add(t01,t23)
+    pp = ld(out, pp, 0, v2q(174))
+    pp = st(out, pp, 0, v2q(176))
+    pp = ld(out, pp, 0, v2q(175))
+    pp = st(out, pp, 0, v2q(177))
+    pp = em_call_binf(out, pp, ts_off, v2q(107), v2q(108), v2q(170), v2q(171))
+    pp = em_call_binf(out, pp, ts_off, v2q(109), v2q(110), v2q(172), v2q(173))
+    pp = call32(out, pp, ddadd_off)         // d1 = dd_add(t45,t67)
+    pp = ld(out, pp, 0, v2q(174))
+    pp = st(out, pp, 0, v2q(178))
+    pp = ld(out, pp, 0, v2q(175))
+    pp = st(out, pp, 0, v2q(179))
+    // d2 = dd_add(d0,d1)
+    pp = ld(out, pp, 0, v2q(176))
+    pp = st(out, pp, 0, v2q(170))
+    pp = ld(out, pp, 0, v2q(177))
+    pp = st(out, pp, 0, v2q(171))
+    pp = ld(out, pp, 0, v2q(178))
+    pp = st(out, pp, 0, v2q(172))
+    pp = ld(out, pp, 0, v2q(179))
+    pp = st(out, pp, 0, v2q(173))
+    pp = call32(out, pp, ddadd_off)
+    pp = ld(out, pp, 0, v2q(174))
+    pp = st(out, pp, 0, v2q(180))
+    pp = ld(out, pp, 0, v2q(175))
+    pp = st(out, pp, 0, v2q(181))
+    // d3 = dd_add_f64(d2, a8)
+    pp = ld(out, pp, 0, v2q(180))
+    pp = st(out, pp, 0, v2q(170))
+    pp = ld(out, pp, 0, v2q(181))
+    pp = st(out, pp, 0, v2q(171))
+    pp = ld(out, pp, 0, v2q(111))
+    pp = st(out, pp, 0, v2q(184))
+    pp = call32(out, pp, ddaddf_off)
+    pp = ld(out, pp, 0, v2q(174))
+    pp = st(out, pp, 0, v2q(112))
+    pp = ld(out, pp, 0, v2q(175))
+    pp = st(out, pp, 0, v2q(113))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_nine_one_sum(N91in[120..128]) -> N91out[129]  (qd128.sio:320)
+fn em_sub_nine_one_sum(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2q(120))
+    var kk = 1
+    while kk < 9 {
+        pp = ld(out, pp, 1, v2q(120 + kk))
+        pp = sse(out, pp, 0x58, 0, 1)
+        kk = kk + 1
+    }
+    pp = st(out, pp, 0, v2q(129))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_mul(QA,QB) -> QR  (qd128.sio:326): 13-term HLB accumulation box.
+fn em_sub_qd_mul(
+    out: &![i8; 131072], p: i64, tp_off: i64, three_off: i64, six_off: i64,
+    ntwo_off: i64, none_off: i64, qaddf_off: i64
+) -> i64 with Mut, Panic, Div {
+    // products p_ij (i+j<=3) via two_prod
+    var pp = em_call_binf(out, p, tp_off, v2q(0), v2q(4), v2q(130), v2q(131))   // p00
+    pp = em_call_binf(out, pp, tp_off, v2q(0), v2q(5), v2q(132), v2q(133))      // p01
+    pp = em_call_binf(out, pp, tp_off, v2q(1), v2q(4), v2q(134), v2q(135))      // p10
+    pp = em_call_binf(out, pp, tp_off, v2q(0), v2q(6), v2q(136), v2q(137))      // p02
+    pp = em_call_binf(out, pp, tp_off, v2q(1), v2q(5), v2q(138), v2q(139))      // p11
+    pp = em_call_binf(out, pp, tp_off, v2q(2), v2q(4), v2q(140), v2q(141))      // p20
+    pp = em_call_binf(out, pp, tp_off, v2q(0), v2q(7), v2q(142), v2q(143))      // p03
+    pp = em_call_binf(out, pp, tp_off, v2q(1), v2q(6), v2q(144), v2q(145))      // p12
+    pp = em_call_binf(out, pp, tp_off, v2q(2), v2q(5), v2q(146), v2q(147))      // p21
+    pp = em_call_binf(out, pp, tp_off, v2q(3), v2q(4), v2q(148), v2q(149))      // p30
+    // o4 plain products
+    pp = ld(out, pp, 0, v2q(1))
+    pp = ld(out, pp, 1, v2q(7))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(150))            // a1*b3
+    pp = ld(out, pp, 0, v2q(2))
+    pp = ld(out, pp, 1, v2q(6))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(151))            // a2*b2
+    pp = ld(out, pp, 0, v2q(3))
+    pp = ld(out, pp, 1, v2q(5))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(152))            // a3*b1
+    // e1 = three_sum(p01.hi, p10.hi, p00.lo)
+    pp = ld(out, pp, 0, v2q(132))
+    pp = st(out, pp, 0, v2q(84))
+    pp = ld(out, pp, 0, v2q(134))
+    pp = st(out, pp, 0, v2q(85))
+    pp = ld(out, pp, 0, v2q(131))
+    pp = st(out, pp, 0, v2q(86))
+    pp = call32(out, pp, three_off)
+    pp = ld(out, pp, 0, v2q(87))
+    pp = st(out, pp, 0, v2q(153))
+    pp = ld(out, pp, 0, v2q(88))
+    pp = st(out, pp, 0, v2q(154))
+    pp = ld(out, pp, 0, v2q(89))
+    pp = st(out, pp, 0, v2q(155))
+    // e2 = six_three_sum(p02.hi,p11.hi,p20.hi,p01.lo,p10.lo,0)
+    pp = ld(out, pp, 0, v2q(136))
+    pp = st(out, pp, 0, v2q(90))
+    pp = ld(out, pp, 0, v2q(138))
+    pp = st(out, pp, 0, v2q(91))
+    pp = ld(out, pp, 0, v2q(140))
+    pp = st(out, pp, 0, v2q(92))
+    pp = ld(out, pp, 0, v2q(133))
+    pp = st(out, pp, 0, v2q(93))
+    pp = ld(out, pp, 0, v2q(135))
+    pp = st(out, pp, 0, v2q(94))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(95))
+    pp = call32(out, pp, six_off)
+    pp = ld(out, pp, 0, v2q(96))
+    pp = st(out, pp, 0, v2q(156))
+    pp = ld(out, pp, 0, v2q(97))
+    pp = st(out, pp, 0, v2q(157))
+    pp = ld(out, pp, 0, v2q(98))
+    pp = st(out, pp, 0, v2q(158))
+    // e3 = nine_two_sum(p03.hi,p12.hi,p21.hi,p30.hi,p02.lo,p11.lo,p20.lo,0,0)
+    pp = ld(out, pp, 0, v2q(142))
+    pp = st(out, pp, 0, v2q(103))
+    pp = ld(out, pp, 0, v2q(144))
+    pp = st(out, pp, 0, v2q(104))
+    pp = ld(out, pp, 0, v2q(146))
+    pp = st(out, pp, 0, v2q(105))
+    pp = ld(out, pp, 0, v2q(148))
+    pp = st(out, pp, 0, v2q(106))
+    pp = ld(out, pp, 0, v2q(137))
+    pp = st(out, pp, 0, v2q(107))
+    pp = ld(out, pp, 0, v2q(139))
+    pp = st(out, pp, 0, v2q(108))
+    pp = ld(out, pp, 0, v2q(141))
+    pp = st(out, pp, 0, v2q(109))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(110))
+    pp = st(out, pp, 0, v2q(111))
+    pp = call32(out, pp, ntwo_off)
+    pp = ld(out, pp, 0, v2q(112))
+    pp = st(out, pp, 0, v2q(159))
+    pp = ld(out, pp, 0, v2q(113))
+    pp = st(out, pp, 0, v2q(160))
+    // e4 = nine_one_sum(p03.lo,p12.lo,p21.lo,p30.lo,o4_0,o4_1,o4_2,0,0)
+    pp = ld(out, pp, 0, v2q(143))
+    pp = st(out, pp, 0, v2q(120))
+    pp = ld(out, pp, 0, v2q(145))
+    pp = st(out, pp, 0, v2q(121))
+    pp = ld(out, pp, 0, v2q(147))
+    pp = st(out, pp, 0, v2q(122))
+    pp = ld(out, pp, 0, v2q(149))
+    pp = st(out, pp, 0, v2q(123))
+    pp = ld(out, pp, 0, v2q(150))
+    pp = st(out, pp, 0, v2q(124))
+    pp = ld(out, pp, 0, v2q(151))
+    pp = st(out, pp, 0, v2q(125))
+    pp = ld(out, pp, 0, v2q(152))
+    pp = st(out, pp, 0, v2q(126))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(127))
+    pp = st(out, pp, 0, v2q(128))
+    pp = call32(out, pp, none_off)
+    pp = ld(out, pp, 0, v2q(129))
+    pp = st(out, pp, 0, v2q(161))
+    // r = qd_zero(); accumulate p00.hi + e1(3) + e2(3) + e3(2) + e4
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(162))
+    pp = st(out, pp, 0, v2q(163))
+    pp = st(out, pp, 0, v2q(164))
+    pp = st(out, pp, 0, v2q(165))
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 130)   // p00.hi
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 153)   // e1.r0
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 154)
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 155)
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 156)   // e2.r0
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 157)
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 158)
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 159)   // e3.r0
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 160)
+    pp = em_addf64_step(out, pp, qaddf_off, 162, 161)   // e4
+    pp = em_v2_qcopy(out, pp, 162, 8)                   // racc -> QR
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_mul_f64(QMFa[224..227], QMFb[228]) -> QR   (qd128.sio:273)
+fn em_sub_qd_mul_f64(out: &![i8; 131072], p: i64, tp_off: i64, qaddf_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_call_binf(out, p, tp_off, v2q(224), v2q(228), v2q(229), v2q(230))  // p0
+    pp = em_call_binf(out, pp, tp_off, v2q(225), v2q(228), v2q(231), v2q(232))     // p1
+    pp = em_call_binf(out, pp, tp_off, v2q(226), v2q(228), v2q(233), v2q(234))     // p2
+    pp = ld(out, pp, 0, v2q(227))
+    pp = ld(out, pp, 1, v2q(228))
+    pp = sse(out, pp, 0x59, 0, 1)          // p3 = a.x3 * b
+    pp = st(out, pp, 0, v2q(235))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(236))
+    pp = st(out, pp, 0, v2q(237))
+    pp = st(out, pp, 0, v2q(238))
+    pp = st(out, pp, 0, v2q(239))
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 229)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 230)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 231)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 232)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 233)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 234)
+    pp = em_addf64_step(out, pp, qaddf_off, 236, 235)
+    pp = em_v2_qcopy(out, pp, 236, 8)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_sub(QA, QB) -> QR = qd_add(QA, qd_neg(QB))   (qd128.sio:269). Mutates QB.
+fn em_sub_qd_sub(out: &![i8; 131072], p: i64, qadd_off: i64) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_qneg(out, p, 4)
+    pp = call32(out, pp, qadd_off)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_div(QA=a, QB=b) -> QR   (qd128.sio:364): 5-term quotient with full qd
+// remainder updates, then renorm5.
+fn em_sub_qd_div(
+    out: &![i8; 131072], p: i64, qmulf_off: i64, qsub_off: i64, rn_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_qcopy(out, p, 0, 244)     // a -> DVr
+    pp = em_v2_qcopy(out, pp, 4, 240)        // b -> DVb
+    var i = 0
+    while i < 5 {
+        pp = ld(out, pp, 0, v2q(244))
+        pp = ld(out, pp, 1, v2q(240))
+        pp = sse(out, pp, 0x5E, 0, 1)        // q_i = DVr0 / DVb0
+        pp = st(out, pp, 0, v2q(248 + i))
+        if i < 4 {
+            // rmf = qd_mul_f64(DVb, q_i)
+            pp = em_v2_qcopy(out, pp, 240, 224)      // DVb -> QMFa
+            pp = ld(out, pp, 0, v2q(248 + i))
+            pp = st(out, pp, 0, v2q(228))            // QMFb = q_i
+            pp = call32(out, pp, qmulf_off)
+            // r = qd_sub(DVr, rmf)
+            pp = em_v2_qcopy(out, pp, 244, 0)        // DVr -> QA
+            pp = em_v2_qcopy(out, pp, 8, 4)          // rmf(QR) -> QB
+            pp = call32(out, pp, qsub_off)
+            pp = em_v2_qcopy(out, pp, 8, 244)        // QR -> DVr
+        }
+        i = i + 1
+    }
+    // renorm5(q0..q4)
+    pp = ld(out, pp, 0, v2q(248))
+    pp = st(out, pp, 0, v2q(13))
+    pp = ld(out, pp, 0, v2q(249))
+    pp = st(out, pp, 0, v2q(14))
+    pp = ld(out, pp, 0, v2q(250))
+    pp = st(out, pp, 0, v2q(15))
+    pp = ld(out, pp, 0, v2q(251))
+    pp = st(out, pp, 0, v2q(16))
+    pp = ld(out, pp, 0, v2q(252))
+    pp = st(out, pp, 0, v2q(17))
+    pp = call32(out, pp, rn_off)
+    pp = em_v2_qcopy(out, pp, 18, 8)
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// qd_sqrt(QA=a) -> QR   (qd128.sio:396): inverse-root Newton, 3 iterations.
+// SQa 260..263 (a), SQx 264..267 (x), SQtmp 268..271, SQom 272..275,
+// SQprod 276..279, SQcorr 280..283.
+fn em_sub_qd_sqrt(
+    out: &![i8; 131072], p: i64, qmul_off: i64, qsub_off: i64, qmulf_off: i64,
+    qadd_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    // a.x0 == 0 or < 0 -> qd zero
+    var pp = ld(out, p, 0, v2q(0))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz0 = pp + 2
+    pp = jcc(out, pp, 0x84, 0)          // je ZERO
+    pp = ld(out, pp, 0, v2q(0))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz1 = pp + 2
+    pp = jcc(out, pp, 0x82, 0)          // jb ZERO (a.x0 < 0)
+    pp = em_v2_qcopy(out, pp, 0, 260)   // a -> SQa
+    // seed: x = qd_from_f64(1.0 / sqrt(a.x0))
+    pp = ld(out, pp, 0, v2q(0))
+    pp = call32(out, pp, ns_off)        // xmm0 = sqrt(a.x0)
+    pp = setx(out, pp, 1, c_one())
+    pp = sse(out, pp, 0x5E, 1, 0)       // 1.0 / seed
+    pp = st(out, pp, 1, v2q(264))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(265))
+    pp = st(out, pp, 0, v2q(266))
+    pp = st(out, pp, 0, v2q(267))
+    var i = 0
+    while i < 3 {
+        // x2 = qd_mul(x, x)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 264, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 268)
+        // ax2 = qd_mul(a, x2)
+        pp = em_v2_qcopy(out, pp, 260, 0)
+        pp = em_v2_qcopy(out, pp, 268, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 268)
+        // one_minus = qd_sub(qd_from_f64(1.0), ax2)
+        pp = setx(out, pp, 0, c_one())
+        pp = st(out, pp, 0, v2q(0))
+        pp = pxor(out, pp, 0, 0)
+        pp = st(out, pp, 0, v2q(1))
+        pp = st(out, pp, 0, v2q(2))
+        pp = st(out, pp, 0, v2q(3))
+        pp = em_v2_qcopy(out, pp, 268, 4)
+        pp = call32(out, pp, qsub_off)
+        pp = em_v2_qcopy(out, pp, 8, 272)
+        // prod = qd_mul(x, one_minus)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 272, 4)
+        pp = call32(out, pp, qmul_off)
+        pp = em_v2_qcopy(out, pp, 8, 276)
+        // corr = qd_mul_f64(prod, 0.5)
+        pp = em_v2_qcopy(out, pp, 276, 224)
+        pp = setx(out, pp, 0, c_half())
+        pp = st(out, pp, 0, v2q(228))
+        pp = call32(out, pp, qmulf_off)
+        pp = em_v2_qcopy(out, pp, 8, 280)
+        // x = qd_add(x, corr)
+        pp = em_v2_qcopy(out, pp, 264, 0)
+        pp = em_v2_qcopy(out, pp, 280, 4)
+        pp = call32(out, pp, qadd_off)
+        pp = em_v2_qcopy(out, pp, 8, 264)
+        i = i + 1
+    }
+    // result = qd_mul(a, x)
+    pp = em_v2_qcopy(out, pp, 260, 0)
+    pp = em_v2_qcopy(out, pp, 264, 4)
+    pp = call32(out, pp, qmul_off)
+    let jret = pp + 1
+    pp = jmp32(out, pp, 0)
+    let zero_lbl = pp
+    patch32(out, jz0, zero_lbl - (jz0 + 4))
+    patch32(out, jz1, zero_lbl - (jz1 + 4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(8))
+    pp = st(out, pp, 0, v2q(9))
+    pp = st(out, pp, 0, v2q(10))
+    pp = st(out, pp, 0, v2q(11))
+    let ret_lbl = pp
+    patch32(out, jret, ret_lbl - (jret + 4))
+    pp = put8(out, pp, 0xC3)
+    pp
+}
+
+// esqrt on the v2 path. Mirrors evm_step op_esqrt (v2): normalize a; poison if
+// bad; esqrt2 (val<=0 -> exact zero); I3 write.
+fn em_v2_sqrt(
+    out: &![i8; 131072], p: i64, dst: i64, a: i64, qadd_off: i64, qsqrt_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // if a.val <= 0.0 -> exact zero
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jzero = pp + 2
+    pp = jcc(out, pp, 0x86, 0)          // jbe ZEROVAL
+    // z = sqrt(a.val)
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = call32(out, pp, ns_off)
+    pp = st(out, pp, 0, v2q(72))        // VALTMP = z
+    // t = qd_sqrt(true(a))
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)      // tx = true(a)
+    pp = em_v2_qcopy(out, pp, 8, 56)
+    pp = em_v2_qcopy(out, pp, 56, 0)
+    pp = call32(out, pp, qsqrt_off)     // t = qd_sqrt(tx)
+    pp = em_v2_qcopy(out, pp, 8, 64)
+    // err = qd_add(t, qd_neg(qd_from_f64(z)))
+    pp = em_v2_qcopy(out, pp, 64, 0)
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, v2q(4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)
+    // u = a.u / (2.0 * z)
+    pp = ld(out, pp, 0, v2q(72))
+    pp = setx(out, pp, 1, c_two())
+    pp = sse(out, pp, 0x59, 0, 1)       // 2*z  (== 2.0*z, commutative)
+    pp = ld(out, pp, 1, v2_reg_u_off(a))
+    pp = sse(out, pp, 0x5E, 1, 0)       // a.u / (2z)
+    pp = st(out, pp, 1, sc(11))
+    pp = em_v2_finish_result(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    // ZEROVAL: dst = exact zero
+    let zeroval_lbl = pp
+    patch32(out, jzero, zeroval_lbl - (jzero + 4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    let jdone2 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    patch32(out, jdone2, done_lbl - (jdone2 + 4))
+    pp
+}
+
+// Load a qd operand (val + 4 err comps as (val,0,0,0)+(e0..e3)... ) — helper to
+// stage QA = qd_from_f64(reg.val), QB = reg.err for a true() computation.
+fn em_v2_stage_true(out: &![i8; 131072], p: i64, r: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2_reg_val_off(r))
+    pp = st(out, pp, 0, v2q(0))         // QA0 = val
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(1))
+    pp = st(out, pp, 0, v2q(2))
+    pp = st(out, pp, 0, v2q(3))
+    pp = ld(out, pp, 0, v2_reg_e0_off(r))
+    pp = st(out, pp, 0, v2q(4))
+    pp = ld(out, pp, 0, v2_reg_e1_off(r))
+    pp = st(out, pp, 0, v2q(5))
+    pp = ld(out, pp, 0, v2_reg_e2_off(r))
+    pp = st(out, pp, 0, v2q(6))
+    pp = ld(out, pp, 0, v2_reg_e3_off(r))
+    pp = st(out, pp, 0, v2q(7))
+    pp
+}
+
+// Copy a 4-slot qd block (src base slot -> dst base slot).
+fn em_v2_qcopy(out: &![i8; 131072], p: i64, src0: i64, dst0: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2q(src0))
+    pp = st(out, pp, 0, v2q(dst0))
+    pp = ld(out, pp, 0, v2q(src0 + 1))
+    pp = st(out, pp, 0, v2q(dst0 + 1))
+    pp = ld(out, pp, 0, v2q(src0 + 2))
+    pp = st(out, pp, 0, v2q(dst0 + 2))
+    pp = ld(out, pp, 0, v2q(src0 + 3))
+    pp = st(out, pp, 0, v2q(dst0 + 3))
+    pp
+}
+
+// Negate a 4-slot qd block in place (0.0 - xi per word, matching qd_neg).
+fn em_v2_qneg(out: &![i8; 131072], p: i64, base: i64) -> i64 with Mut, Panic, Div {
+    var pp = p
+    var k = 0
+    while k < 4 {
+        pp = pxor(out, pp, 0, 0)
+        pp = ld(out, pp, 1, v2q(base + k))
+        pp = sse(out, pp, 0x5C, 0, 1)
+        pp = st(out, pp, 0, v2q(base + k))
+        k = k + 1
+    }
+    pp
+}
+
+// eadd/esub on the v2 path. Mirrors evm_step (v2): normalize a,b; poison
+// combine; eadd2/esub2 closure contract; I3 write. is_sub selects subtraction
+// (val = a-b; t = qd_add(true(a), qd_neg(true(b)))). err in QR, val in VALTMP.
+fn em_v2_binop_addsub(
+    out: &![i8; 131072], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, ns_off: i64, is_sub: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = mov_mem_rax(out, pp, sc(38))
+    pp = em_v2_normalize(out, pp, b)
+    pp = or_rax_mem(out, pp, sc(38))
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // val = a.val +/- b.val
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = ld(out, pp, 1, v2_reg_val_off(b))
+    let valop = if is_sub == 1 { 0x5C } else { 0x58 }
+    pp = sse(out, pp, valop, 0, 1)
+    pp = st(out, pp, 0, v2q(72))        // VALTMP
+    // tx = qd_add(qd_from_f64(a.val), a.err) -> TX
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 56)    // QR -> TX
+    // ty = qd_add(qd_from_f64(b.val), b.err) -> TY
+    pp = em_v2_stage_true(out, pp, b)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 60)    // QR -> TY
+    // t = qd_add(tx, ty)  [sub: qd_add(tx, qd_neg(ty))] -> TT
+    pp = em_v2_qcopy(out, pp, 56, 0)    // TX -> QA
+    pp = em_v2_qcopy(out, pp, 60, 4)    // TY -> QB
+    if is_sub == 1 {
+        pp = em_v2_qneg(out, pp, 4)     // QB = qd_neg(ty)
+    }
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 64)    // QR -> TT
+    // err = qd_add(t, qd_neg(qd_from_f64(val)))
+    pp = em_v2_qcopy(out, pp, 64, 0)    // TT -> QA
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)       // xmm0 = 0 - val
+    pp = st(out, pp, 0, v2q(4))         // QB0 = -val
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)      // QR = err
+    // u = sqrt(a.u^2 + b.u^2) -> sc(11)
+    pp = em_u_from_two(out, pp, v2_reg_u_off(a), v2_reg_u_off(b), ns_off)
+    // finish: write dst (val, err, u), poison=0, I3 re-check
+    pp = ld(out, pp, 0, v2q(72))
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = ld(out, pp, 0, v2q(8))
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = ld(out, pp, 0, v2q(9))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = ld(out, pp, 0, v2q(10))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = ld(out, pp, 0, v2q(11))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = ld(out, pp, 0, sc(11))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    pp = em_v1_normalize_u_lane(out, pp, v2_reg_u_off(dst))
+    pp = em_v2_normalize(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    pp
+}
+
+// Write the computed result (val=VALTMP, err=QR, u=sc(11)) to dst with the
+// I3 poison re-check. Shared by the mul/div/sqrt op bodies.
+fn em_v2_finish_result(out: &![i8; 131072], p: i64, dst: i64) -> i64 with Mut, Panic, Div {
+    var pp = ld(out, p, 0, v2q(72))
+    pp = st(out, pp, 0, v2_reg_val_off(dst))
+    pp = ld(out, pp, 0, v2q(8))
+    pp = st(out, pp, 0, v2_reg_e0_off(dst))
+    pp = ld(out, pp, 0, v2q(9))
+    pp = st(out, pp, 0, v2_reg_e1_off(dst))
+    pp = ld(out, pp, 0, v2q(10))
+    pp = st(out, pp, 0, v2_reg_e2_off(dst))
+    pp = ld(out, pp, 0, v2q(11))
+    pp = st(out, pp, 0, v2_reg_e3_off(dst))
+    pp = ld(out, pp, 0, sc(11))
+    pp = st(out, pp, 0, v2_reg_u_off(dst))
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, v2_reg_poison_off(dst))
+    pp = em_v1_normalize_u_lane(out, pp, v2_reg_u_off(dst))
+    pp = em_v2_normalize(out, pp, dst)
+    pp
+}
+
+// emul on the v2 path. Mirrors evm_step op_emul (v2): normalize a,b; poison
+// combine; emul2 closure contract; I3 write.
+fn em_v2_binop_mul(
+    out: &![i8; 131072], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, qmul_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = mov_mem_rax(out, pp, sc(38))
+    pp = em_v2_normalize(out, pp, b)
+    pp = or_rax_mem(out, pp, sc(38))
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // val = a.val * b.val
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = ld(out, pp, 1, v2_reg_val_off(b))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(72))
+    // tx, ty
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 56)
+    pp = em_v2_stage_true(out, pp, b)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 60)
+    // t = qd_mul(tx, ty)
+    pp = em_v2_qcopy(out, pp, 56, 0)
+    pp = em_v2_qcopy(out, pp, 60, 4)
+    pp = call32(out, pp, qmul_off)
+    pp = em_v2_qcopy(out, pp, 8, 64)
+    // err = qd_add(t, qd_neg(qd_from_f64(val)))
+    pp = em_v2_qcopy(out, pp, 64, 0)
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, v2q(4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)
+    // u = sqrt((b.val*a.u)^2 + (a.val*b.u)^2)
+    pp = ld(out, pp, 0, v2_reg_val_off(b))
+    pp = ld(out, pp, 1, v2_reg_u_off(a))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(185))
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = ld(out, pp, 1, v2_reg_u_off(b))
+    pp = sse(out, pp, 0x59, 0, 1)
+    pp = st(out, pp, 0, v2q(186))
+    pp = em_u_from_two(out, pp, v2q(185), v2q(186), ns_off)
+    // finish
+    pp = em_v2_finish_result(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    pp
+}
+
+// ediv on the v2 path. Mirrors evm_step op_ediv (v2): normalize a,b; poison
+// combine; divisor-zero poison; ediv2 closure contract; I3 write.
+fn em_v2_binop_div(
+    out: &![i8; 131072], p: i64, dst: i64, a: i64, b: i64, qadd_off: i64, qdiv_off: i64, ns_off: i64
+) -> i64 with Mut, Panic, Div {
+    var pp = em_v2_normalize(out, p, a)
+    pp = mov_mem_rax(out, pp, sc(38))
+    pp = em_v2_normalize(out, pp, b)
+    pp = or_rax_mem(out, pp, sc(38))
+    pp = test_rax(out, pp)
+    let jp = pp + 2
+    pp = jcc(out, pp, 0x85, 0)          // jne POISON
+    // divisor-zero guard: b.val == 0 -> poison
+    pp = ld(out, pp, 0, v2_reg_val_off(b))
+    pp = pxor(out, pp, 1, 1)
+    pp = ucomi(out, pp, 0, 1)
+    let jz = pp + 2
+    pp = jcc(out, pp, 0x84, 0)          // je POISON (divisor == 0)
+    // q = a.val / b.val
+    pp = ld(out, pp, 0, v2_reg_val_off(a))
+    pp = ld(out, pp, 1, v2_reg_val_off(b))
+    pp = sse(out, pp, 0x5E, 0, 1)
+    pp = st(out, pp, 0, v2q(72))
+    // tx, ty
+    pp = em_v2_stage_true(out, pp, a)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 56)
+    pp = em_v2_stage_true(out, pp, b)
+    pp = call32(out, pp, qadd_off)
+    pp = em_v2_qcopy(out, pp, 8, 60)
+    // t = qd_div(tx, ty)
+    pp = em_v2_qcopy(out, pp, 56, 0)
+    pp = em_v2_qcopy(out, pp, 60, 4)
+    pp = call32(out, pp, qdiv_off)
+    pp = em_v2_qcopy(out, pp, 8, 64)
+    // err = qd_add(t, qd_neg(qd_from_f64(q)))
+    pp = em_v2_qcopy(out, pp, 64, 0)
+    pp = pxor(out, pp, 0, 0)
+    pp = ld(out, pp, 1, v2q(72))
+    pp = sse(out, pp, 0x5C, 0, 1)
+    pp = st(out, pp, 0, v2q(4))
+    pp = pxor(out, pp, 0, 0)
+    pp = st(out, pp, 0, v2q(5))
+    pp = st(out, pp, 0, v2q(6))
+    pp = st(out, pp, 0, v2q(7))
+    pp = call32(out, pp, qadd_off)
+    // u = (1/|b.val|) * sqrt(a.u^2 + (q*b.u)^2)
+    pp = ld(out, pp, 0, v2_reg_u_off(a))
+    pp = st(out, pp, 0, v2q(253))
+    pp = ld(out, pp, 0, v2q(72))
+    pp = ld(out, pp, 1, v2_reg_u_off(b))
+    pp = sse(out, pp, 0x59, 0, 1)       // q * b.u
+    pp = st(out, pp, 0, v2q(254))
+    pp = em_u_from_two(out, pp, v2q(253), v2q(254), ns_off)
+    pp = ld(out, pp, 0, v2_reg_val_off(b))
+    pp = setx(out, pp, 1, 9223372036854775807)
+    pp = andpd(out, pp, 0, 1)           // |b.val|
+    pp = setx(out, pp, 1, c_one())
+    pp = sse(out, pp, 0x5E, 1, 0)       // 1.0 / |b.val|
+    pp = ld(out, pp, 0, sc(11))
+    pp = sse(out, pp, 0x59, 0, 1)       // sqrt(inner) * (1/|b.val|)
+    pp = st(out, pp, 0, sc(11))
+    // finish
+    pp = em_v2_finish_result(out, pp, dst)
+    let jdone = pp + 1
+    pp = jmp32(out, pp, 0)
+    let poison_lbl = pp
+    patch32(out, jp, poison_lbl - (jp + 4))
+    patch32(out, jz, poison_lbl - (jz + 4))
+    pp = em_v2_set_poison(out, pp, dst)
+    let done_lbl = pp
+    patch32(out, jdone, done_lbl - (jdone + 4))
+    pp
+}
+
+// ---- shared subroutines -----------------------------------------------------
+// print_uint: decimal of unsigned rax to DIGIT buffer, then write(1,...).
+fn em_print_uint(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = put8(out, p, 0x48)
+    pp = put8(out, pp, 0x89)
+    pp = put8(out, pp, 0xDE)                    // mov rsi, rbx
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x81)
+    pp = put8(out, pp, 0xC6)
+    pp = put32(out, pp, d_digit_end())          // add rsi, DIGIT_END
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xC7)
+    pp = put8(out, pp, 0xC1)
+    pp = put32(out, pp, 10)                      // mov rcx, 10
+    pp = test_rax(out, pp)
+    let jnz = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne loop
+    // zero case
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0xCE)                     // dec rsi
+    pp = put8(out, pp, 0xC6)
+    pp = put8(out, pp, 0x06)
+    pp = put8(out, pp, 48)                        // mov byte [rsi], '0'
+    let jw = pp + 1
+    pp = jmp32(out, pp, 0)                         // jmp write
+    let loop_lbl = pp
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x31)
+    pp = put8(out, pp, 0xD2)                     // xor rdx,rdx
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xF7)
+    pp = put8(out, pp, 0xF1)                     // div rcx
+    pp = put8(out, pp, 0x80)
+    pp = put8(out, pp, 0xC2)
+    pp = put8(out, pp, 48)                        // add dl, '0'
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0xCE)                     // dec rsi
+    pp = put8(out, pp, 0x88)
+    pp = put8(out, pp, 0x16)                     // mov [rsi], dl
+    pp = test_rax(out, pp)
+    let jback = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne loop
+    let write_lbl = pp
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x89)
+    pp = put8(out, pp, 0xDA)                     // mov rdx, rbx
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x81)
+    pp = put8(out, pp, 0xC2)
+    pp = put32(out, pp, d_digit_end())           // add rdx, DIGIT_END
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0x29)
+    pp = put8(out, pp, 0xF2)                     // sub rdx, rsi  (len)
+    pp = put8(out, pp, 0xB8)
+    pp = put32(out, pp, 1)                        // mov eax,1
+    pp = put8(out, pp, 0xBF)
+    pp = put32(out, pp, 1)                        // mov edi,1
+    pp = put8(out, pp, 0x0F)
+    pp = put8(out, pp, 0x05)                     // syscall
+    pp = put8(out, pp, 0xC3)                     // ret
+    patch32(out, jnz, loop_lbl - (jnz + 4))
+    patch32(out, jw, write_lbl - (jw + 4))
+    patch32(out, jback, loop_lbl - (jback + 4))
+    pp
+}
+
+// decompose_print: raw f64 bits in rax -> "<sign>e<exp>m<mant>"
+fn em_decompose(out: &![i8; 131072], p: i64, pu_off: i64, s: &Strs) -> i64 with Mut, Panic, Div {
+    let base = c_base()
+    var pp = mov_mem_rax(out, p, d_raw())        // store raw
+    // sign = raw >> 63
+    pp = mov_rax_mem(out, pp, d_raw())
+    pp = shr_rax(out, pp, 63)
+    pp = mov_mem_rax(out, pp, d_sign())
+    // exp = (raw >> 52) & 0x7FF
+    pp = mov_rax_mem(out, pp, d_raw())
+    pp = shr_rax(out, pp, 52)
+    pp = and_rax(out, pp, 2047)
+    pp = mov_mem_rax(out, pp, d_exp())
+    // mant = (raw << 12) >> 12
+    pp = mov_rax_mem(out, pp, d_raw())
+    pp = shl_rax(out, pp, 12)
+    pp = shr_rax(out, pp, 12)
+    pp = mov_mem_rax(out, pp, d_mant())
+    // if exp == 2047
+    pp = mov_rax_mem(out, pp, d_exp())
+    pp = cmp_rax(out, pp, 2047)
+    let jnotmax = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne not_inf_nan
+    pp = mov_rax_mem(out, pp, d_mant())
+    pp = test_rax(out, pp)
+    let jnan = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne nan
+    // inf: keep sign, mant already 0
+    let jemit1 = pp + 1
+    pp = jmp32(out, pp, 0)                         // jmp emit
+    let nan_lbl = pp
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, d_sign())           // sign = 0
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xB8)
+    pp = put64(out, pp, 1)                         // mov rax,1
+    pp = mov_mem_rax(out, pp, d_mant())           // mant = 1
+    let jemit2 = pp + 1
+    pp = jmp32(out, pp, 0)
+    let notmax_lbl = pp
+    pp = mov_rax_mem(out, pp, d_exp())
+    pp = test_rax(out, pp)
+    let jemit3 = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne emit (normal)
+    // exp == 0
+    pp = mov_rax_mem(out, pp, d_mant())
+    pp = test_rax(out, pp)
+    let jsub = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                    // jne sub  (subnormal keeps sign)
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, d_sign())           // zero: sign = 0
+    let sub_lbl = pp
+    pp = xor_rax(out, pp)
+    pp = mov_mem_rax(out, pp, d_mant())           // mant = 0
+    let emit_lbl = pp
+    // print sign
+    pp = mov_rax_mem(out, pp, d_sign())
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.se, 1)       // "e"
+    pp = mov_rax_mem(out, pp, d_exp())
+    pp = call32(out, pp, pu_off)
+    pp = write_str(out, pp, base + s.sm, 1)       // "m"
+    pp = mov_rax_mem(out, pp, d_mant())
+    pp = call32(out, pp, pu_off)
+    pp = put8(out, pp, 0xC3)                       // ret
+    patch32(out, jnotmax, notmax_lbl - (jnotmax + 4))
+    patch32(out, jnan, nan_lbl - (jnan + 4))
+    patch32(out, jemit1, emit_lbl - (jemit1 + 4))
+    patch32(out, jemit2, emit_lbl - (jemit2 + 4))
+    patch32(out, jemit3, emit_lbl - (jemit3 + 4))
+    patch32(out, jsub, sub_lbl - (jsub + 4))
+    pp
+}
+
+// newton_sqrt: xmm0 = x -> xmm0 = eisa_sqrt_f64(x) (40-iter, matches core)
+fn em_newton(out: &![i8; 131072], p: i64) -> i64 with Mut, Panic, Div {
+    var pp = sse(out, p, 0x10, 7, 0)              // xmm7 = x
+    pp = pxor(out, pp, 1, 1)                       // xmm1 = 0
+    pp = ucomi(out, pp, 7, 1)                      // cmp x,0
+    let jret0 = pp + 2
+    pp = jcc(out, pp, 0x86, 0)                     // jbe ret0
+    pp = setx(out, pp, 5, c_half())               // xmm5 = 0.5
+    pp = setx(out, pp, 4, c_one())                // xmm4 = 1.0
+    pp = ucomi(out, pp, 7, 4)                      // cmp x,1
+    let jle1 = pp + 2
+    pp = jcc(out, pp, 0x86, 0)                     // jbe gle1
+    pp = sse(out, pp, 0x10, 6, 7)                 // g = x
+    pp = sse(out, pp, 0x59, 6, 5)                 // g = x*0.5
+    let jinit = pp + 1
+    pp = jmp32(out, pp, 0)
+    let gle1_lbl = pp
+    pp = sse(out, pp, 0x10, 6, 4)                 // g = 1.0
+    let init_done = pp
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xC7)
+    pp = put8(out, pp, 0xC1)
+    pp = put32(out, pp, 40)                        // mov rcx, 40
+    let loop_lbl = pp
+    pp = sse(out, pp, 0x10, 0, 7)                 // xmm0 = x
+    pp = sse(out, pp, 0x5E, 0, 6)                 // x/g
+    pp = sse(out, pp, 0x58, 0, 6)                 // g + x/g
+    pp = sse(out, pp, 0x59, 0, 5)                 // *0.5
+    pp = sse(out, pp, 0x10, 6, 0)                 // g =
+    pp = put8(out, pp, 0x48)
+    pp = put8(out, pp, 0xFF)
+    pp = put8(out, pp, 0xC9)                     // dec rcx
+    let jloop = pp + 2
+    pp = jcc(out, pp, 0x85, 0)                     // jne loop
+    pp = sse(out, pp, 0x10, 0, 6)                 // xmm0 = g
+    pp = put8(out, pp, 0xC3)                       // ret
+    let ret0_lbl = pp
+    pp = pxor(out, pp, 0, 0)                        // xmm0 = 0
+    pp = put8(out, pp, 0xC3)                       // ret
+    patch32(out, jret0, ret0_lbl - (jret0 + 4))
+    patch32(out, jle1, gle1_lbl - (jle1 + 4))
+    patch32(out, jinit, init_done - (jinit + 4))
+    patch32(out, jloop, loop_lbl - (jloop + 4))
+    pp
+}
+
+// ---- string blob ------------------------------------------------------------
+fn put_lit(out: &![i8; 131072], p: i64, s: string) -> i64 with Mut, Panic, Div {
+    var i = 0
+    var pp = p
+    while true {
+        let ch = str_char_at(s, i)
+        if ch <= 0 { return pp }
+        pp = put8(out, pp, ch)
+        i = i + 1
+    }
+    pp
+}
+
+fn put_dec(out: &![i8; 131072], p: i64, n: i64) -> i64 with Mut, Panic, Div {
+    if n == 0 { return put8(out, p, 48) }
+    var digits: [i64; 24] = [0; 24]
+    var len = 0
+    var v = n
+    while v > 0 {
+        digits[len as usize] = v - (v / 10) * 10
+        v = v / 10
+        len = len + 1
+    }
+    var i = len - 1
+    var pp = p
+    while i >= 0 {
+        pp = put8(out, pp, 48 + digits[i as usize])
+        i = i - 1
+    }
+    pp
+}
+
+fn build_strings(out: &![i8; 131072], img: EisaxImage) -> Strs with Mut, Div, Panic {
+    var s = Strs {
+        p0off: [0; 8], p0len: [0; 8],
+        se: 0, sm: 0, ro: 0, rolen: 0, lu: 0, lulen: 0,
+        po: 0, polen: 0, nl: 0, endpos: 0,
+    }
+    var p = c_strings_off()
+    s.se = p
+    p = put_lit(out, p, "e")
+    s.sm = p
+    p = put_lit(out, p, "m")
+    s.ro = p
+    p = put_lit(out, p, " roundoff=s")
+    s.rolen = p - s.ro
+    s.lu = p
+    p = put_lit(out, p, " u=s")
+    s.lulen = p - s.lu
+    s.po = p
+    p = put_lit(out, p, " poisoned=")
+    s.polen = p - s.po
+    s.nl = p
+    p = put_lit(out, p, "\n")
+
+    let hash = eisax_prog_hash(img)
+    let n = eisax_n_code(img)
+    var gi = 0
+    var i = 0
+    while i < n {
+        if eisax_code_op(img, i) == op_egate() {
+            s.p0off[gi as usize] = p
+            p = put_lit(out, p, "eisa-receipt: v=1 prog=")
+            p = put_dec(out, p, hash)
+            p = put_lit(out, p, " gate=")
+            p = put_dec(out, p, gi + 1)
+            p = put_lit(out, p, " reg=e")
+            p = put_dec(out, p, eisax_code_dst(img, i))
+            p = put_lit(out, p, " val=s")
+            s.p0len[gi as usize] = p - s.p0off[gi as usize]
+            gi = gi + 1
+        }
+        i = i + 1
+    }
+    s.endpos = p
+    s
+}
+
+fn build_strings_v1(out: &![i8; 131072], img: EisaxImage) -> StrsV1 with Mut, Div, Panic {
+    var s = StrsV1 {
+        se: 0, sm: 0, pfx: 0, pfxlen: 0, reg: 0, reglen: 0, val: 0, vallen: 0,
+        ro: 0, rolen: 0, lu: 0, lulen: 0, po: 0, polen: 0,
+        frail: 0, fraillen: 0, stopfuel: 0, stopfuellen: 0, nl: 0, endpos: 0,
+    }
+    var p = v1_strings_off()
+    let hash = eisax_prog_hash(img)
+
+    s.se = p
+    p = put_lit(out, p, "e")
+    s.sm = p
+    p = put_lit(out, p, "m")
+
+    s.pfx = p
+    p = put_lit(out, p, "eisa-receipt: v=2 prog=")
+    p = put_dec(out, p, hash)
+    p = put_lit(out, p, " gate=")
+    s.pfxlen = p - s.pfx
+
+    s.reg = p
+    p = put_lit(out, p, " reg=e")
+    s.reglen = p - s.reg
+
+    s.val = p
+    p = put_lit(out, p, " val=s")
+    s.vallen = p - s.val
+
+    s.ro = p
+    p = put_lit(out, p, " roundoff=s")
+    s.rolen = p - s.ro
+
+    s.lu = p
+    p = put_lit(out, p, " u=s")
+    s.lulen = p - s.lu
+
+    s.po = p
+    p = put_lit(out, p, " poisoned=")
+    s.polen = p - s.po
+
+    s.frail = p
+    p = put_lit(out, p, " frail=")
+    s.fraillen = p - s.frail
+
+    s.stopfuel = p
+    p = put_lit(out, p, " stop=fuel")
+    s.stopfuellen = p - s.stopfuel
+
+    s.nl = p
+    p = put_lit(out, p, "\n")
+    s.endpos = p
+    s
+}
+
+fn build_strings_v2(out: &![i8; 131072], img: EisaxImage) -> StrsV2 with Mut, Div, Panic {
+    var s = StrsV2 {
+        se: 0, sm: 0, pfx: 0, pfxlen: 0, reg: 0, reglen: 0, val: 0, vallen: 0,
+        ro0: 0, ro0len: 0, ro1: 0, ro1len: 0, ro2: 0, ro2len: 0, ro3: 0, ro3len: 0,
+        lu: 0, lulen: 0, po: 0, polen: 0,
+        frail: 0, fraillen: 0, stopfuel: 0, stopfuellen: 0, nl: 0, endpos: 0,
+    }
+    var p = v2_strings_off()
+    let hash = eisax_prog_hash(img)
+
+    s.se = p
+    p = put_lit(out, p, "e")
+    s.sm = p
+    p = put_lit(out, p, "m")
+
+    s.pfx = p
+    p = put_lit(out, p, "eisa-receipt: v=3 prog=")
+    p = put_dec(out, p, hash)
+    p = put_lit(out, p, " gate=")
+    s.pfxlen = p - s.pfx
+
+    s.reg = p
+    p = put_lit(out, p, " reg=e")
+    s.reglen = p - s.reg
+
+    s.val = p
+    p = put_lit(out, p, " val=s")
+    s.vallen = p - s.val
+
+    s.ro0 = p
+    p = put_lit(out, p, " roundoff0=s")
+    s.ro0len = p - s.ro0
+
+    s.ro1 = p
+    p = put_lit(out, p, " roundoff1=s")
+    s.ro1len = p - s.ro1
+
+    s.ro2 = p
+    p = put_lit(out, p, " roundoff2=s")
+    s.ro2len = p - s.ro2
+
+    s.ro3 = p
+    p = put_lit(out, p, " roundoff3=s")
+    s.ro3len = p - s.ro3
+
+    s.lu = p
+    p = put_lit(out, p, " u=s")
+    s.lulen = p - s.lu
+
+    s.po = p
+    p = put_lit(out, p, " poisoned=")
+    s.polen = p - s.po
+
+    s.frail = p
+    p = put_lit(out, p, " frail=")
+    s.fraillen = p - s.frail
+
+    s.stopfuel = p
+    p = put_lit(out, p, " stop=fuel")
+    s.stopfuellen = p - s.stopfuel
+
+    s.nl = p
+    p = put_lit(out, p, "\n")
+    s.endpos = p
+    s
+}
+
+fn const_bits(img: EisaxImage, idx: i64) -> i64 with Mut, Div, Panic {
+    let parts = f64_parts(eisax_const(img, idx))
+    let s = if parts.sign == 1 { -9223372036854775808 } else { 0 }
+    s + f64bits(parts.exp, parts.mant)
+}
+
+// ---- top level --------------------------------------------------------------
+fn bridge_translate_v0(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with Mut, Div, Panic {
+    let rc = eisax_validate(img)
+    if rc != 0 { return BridgeMeta { len: 0, status: 1 } }
+
+    // zero the working region (state + strings + code all fit under 16 KiB)
+    var z = 0
+    while z < 16384 {
+        (*out)[z as usize] = 0 as i8
+        z = z + 1
+    }
+
+    let s = build_strings(out, img)
+    let code_off = s.endpos
+
+    // subroutines first, then main
+    var p = code_off
+    let pu_off = p
+    p = em_print_uint(out, p)
+    let dp_off = p
+    p = em_decompose(out, p, pu_off, &s)
+    let ns_off = p
+    p = em_newton(out, p)
+
+    let main_off = p
+    // prologue: mov rbx, state base vaddr
+    p = put8(out, p, 0x48)
+    p = put8(out, p, 0xBB)
+    p = put64(out, p, c_state_vaddr())
+
+    let n = eisax_n_code(img)
+    var gi = 0
+    var i = 0
+    while i < n {
+        let op = eisax_code_op(img, i)
+        let dst = eisax_code_dst(img, i)
+        let a = eisax_code_a(img, i)
+        let b = eisax_code_b(img, i)
+        if op == op_econst() {
+            p = em_econst(out, p, dst, const_bits(img, a))
+        } else {
+            if op == op_eload() {
+                p = em_eload(out, p, dst, a)
+            } else {
+                if op == op_estore() {
+                    p = em_estore(out, p, dst, a)
+                } else {
+                    if op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv() {
+                        p = em_binop(out, p, op, dst, a, b, ns_off)
+                    } else {
+                        if op == op_esqrt() {
+                            p = em_esqrt(out, p, dst, a, ns_off)
+                        } else {
+                            if op == op_egate() {
+                                p = em_egate(out, p, dst, pu_off, dp_off, &s, gi)
+                                gi = gi + 1
+                            } else {
+                                return BridgeMeta { len: 0, status: 2 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // exit(0)
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    let total = p
+    if total > 131072 { return BridgeMeta { len: 0, status: 3 } }
+
+    let base = c_base()
+    let entry = base + main_off
+
+    // ELF header
+    var _q = put8(out, 0, 0x7f)
+    _q = put8(out, 1, 0x45)
+    _q = put8(out, 2, 0x4c)
+    _q = put8(out, 3, 0x46)
+    _q = put8(out, 4, 2)
+    _q = put8(out, 5, 1)
+    _q = put8(out, 6, 1)
+    w16(out, 16, 2)          // ET_EXEC
+    w16(out, 18, 0x3E)       // x86-64
+    w32(out, 20, 1)
+    w64(out, 24, entry)
+    w64(out, 32, 64)         // e_phoff
+    w16(out, 52, 64)         // e_ehsize
+    w16(out, 54, 56)         // e_phentsize
+    w16(out, 56, 1)          // e_phnum
+
+    // program header (RWX)
+    w32(out, 64, 1)          // PT_LOAD
+    w32(out, 68, 7)          // R+W+X
+    w64(out, 72, 0)          // p_offset
+    w64(out, 80, base)       // p_vaddr
+    w64(out, 88, base)       // p_paddr
+    w64(out, 96, total)      // p_filesz
+    w64(out, 104, total)     // p_memsz
+    w64(out, 112, 0x1000)    // p_align
+
+    BridgeMeta { len: total, status: 0 }
+}
+
+fn bridge_translate_v1_stub(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with Mut, Div, Panic {
+    // NOTE: v1 control flow uses direct emission with rel32 patch lists
+    // (single-pass codegen + fixups), preserving byte-identical v0 path.
+    var z = 0
+    while z < 16384 {
+        (*out)[z as usize] = 0 as i8
+        z = z + 1
+    }
+
+    let s = build_strings_v1(out, img)
+    let code_off = s.endpos
+
+    var p = code_off
+    let pu_off = p
+    p = em_print_uint(out, p)
+    let dp_off = p
+    let dss = Strs {
+        p0off: [0; 8], p0len: [0; 8], se: s.se, sm: s.sm, ro: 0, rolen: 0, lu: 0, lulen: 0, po: 0, polen: 0, nl: s.nl, endpos: s.endpos,
+    }
+    p = em_decompose(out, p, pu_off, &dss)
+    let ns_off = p
+    p = em_newton(out, p)
+
+    let main_off = p
+    p = put8(out, p, 0x48)
+    p = put8(out, p, 0xBB)
+    p = put64(out, p, c_state_vaddr())
+
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(33))
+    p = mov_mem_rax(out, p, sc(34))
+    p = mov_mem_rax(out, p, sc(35))
+    p = mov_rax_imm64(out, p, 0 - 1)
+    p = mov_mem_rax(out, p, sc(36))
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_mem_rax(out, p, sc(62))
+    p = mov_mem_rax(out, p, sc(63))
+    p = mov_mem_rax(out, p, sc(55))
+    p = mov_rax_imm64(out, p, eisax_fuel(img))
+    p = mov_mem_rax(out, p, sc(32))
+
+    let n = eisax_n_code(img)
+    var starts: [i64; 256] = [0; 256]
+    var br_at: [i64; 512] = [0; 512]
+    var br_tgt: [i64; 512] = [0; 512]
+    var br_n = 0
+    var fuel_at: [i64; 512] = [0; 512]
+    var fuel_n = 0
+
+    var i = 0
+    while i < n {
+        starts[i as usize] = p
+        let fuel_check = mov_rax_mem(out, p, sc(32))
+        p = fuel_check
+        p = cmp_rax(out, p, 0)
+        fuel_at[fuel_n as usize] = p + 2
+        p = jcc(out, p, 0x8E, 0)
+        fuel_n = fuel_n + 1
+        p = dec_rax(out, p)
+        p = mov_mem_rax(out, p, sc(32))
+
+        let op = eisax_code_op(img, i)
+        let dst = eisax_code_dst(img, i)
+        let a = eisax_code_a(img, i)
+        let b = eisax_code_b(img, i)
+
+        // operand ranges are enforced by eisax_validate (regs 0..63,
+        // mem 0..31, branch targets 0..n); keep a cheap defensive dst guard.
+        if dst < 0 || dst >= 64 {
+            return BridgeMeta { len: 0, status: 45 }
+        }
+
+        if op == op_econst() {
+            p = em_econst(out, p, dst, const_bits(img, a))
+            p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+            p = em_v1_set_last_written(out, p, dst)
+        } else {
+            if op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv() {
+                p = em_binop(out, p, op, dst, a, b, ns_off)
+                p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                p = em_v1_set_last_written(out, p, dst)
+            } else {
+                if op == op_esqrt() {
+                    p = em_esqrt(out, p, dst, a, ns_off)
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                    p = em_v1_set_last_written(out, p, dst)
+                } else {
+                if op == op_eload() {
+                    p = em_eload(out, p, dst, a)
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                    p = em_v1_set_last_written(out, p, dst)
+                } else {
+                if op == op_estore() {
+                    p = em_estore(out, p, dst, a)
+                    p = em_v1_normalize_u_lane(out, p, mem_u_off_v1(a))
+                    // EVM: storing a poisoned register re-canonicalises it and
+                    // refreshes last_written_reg = dst. Replicate conditionally.
+                    p = mov_rax_mem(out, p, reg_poison_off_v1(dst))
+                    p = test_rax(out, p)
+                    let jskip_lw = p + 2
+                    p = jcc(out, p, 0x84, 0)
+                    p = em_v1_set_last_written(out, p, dst)
+                    let skip_lw = p
+                    patch32(out, jskip_lw, skip_lw - (jskip_lw + 4))
+                } else {
+                if op == op_emov() {
+                    p = ld(out, p, 0, reg_val_off_v1(a))
+                    p = st(out, p, 0, reg_val_off_v1(dst))
+                    p = ld(out, p, 0, reg_ehi_off_v1(a))
+                    p = st(out, p, 0, reg_ehi_off_v1(dst))
+                    p = ld(out, p, 0, reg_elo_off_v1(a))
+                    p = st(out, p, 0, reg_elo_off_v1(dst))
+                    p = ld(out, p, 0, reg_u_off_v1(a))
+                    p = st(out, p, 0, reg_u_off_v1(dst))
+                    p = mov_rax_mem(out, p, reg_poison_off_v1(a))
+                    p = mov_mem_rax(out, p, reg_poison_off_v1(dst))
+                    p = em_v1_normalize_u_lane(out, p, reg_u_off_v1(dst))
+                    p = em_v1_set_last_written(out, p, dst)
+                } else {
+                    if op == op_egate() {
+                        p = em_normalize(out, p, dst)
+                        // EVM: gating a poisoned register re-canonicalises it and
+                        // refreshes last_written_reg = dst. em_normalize leaves
+                        // rax = 1 exactly when the register is poisoned/bad.
+                        p = test_rax(out, p)
+                        let jskip_glw = p + 2
+                        p = jcc(out, p, 0x84, 0)
+                        p = em_v1_set_last_written(out, p, dst)
+                        let skip_glw = p
+                        patch32(out, jskip_glw, skip_glw - (jskip_glw + 4))
+                        p = inc_mem64(out, p, sc(33))
+                        p = em_v1_emit_receipt(out, p, dst, pu_off, dp_off, &s, 0, 0)
+                    } else {
+                        if op == op_ebr() {
+                            br_at[br_n as usize] = p + 1
+                            br_tgt[br_n as usize] = a
+                            br_n = br_n + 1
+                            p = jmp32(out, p, 0)
+                        } else {
+                            if op == op_ebrz() || op == op_ebrn() {
+                                p = em_normalize(out, p, a)
+                                p = mov_rax_mem(out, p, reg_poison_off_v1(a))
+                                p = test_rax(out, p)
+                                let jpoison = p + 2
+                                p = jcc(out, p, 0x85, 0)
+
+                                p = em_v1_abs_copy(out, p, reg_ehi_off_v1(a), sc(40))
+                                p = em_v1_abs_copy(out, p, reg_val_off_v1(a), sc(41))
+                                p = ld(out, p, 0, reg_u_off_v1(a))
+                                p = ld(out, p, 1, sc(40))
+                                p = sse(out, p, 0x5F, 0, 1)
+                                p = st(out, p, 0, sc(42))
+                                p = pxor(out, p, 1, 1)
+                                p = ucomi(out, p, 0, 1)
+                                let jnofrail1 = p + 2
+                                p = jcc(out, p, 0x86, 0)
+                                p = ld(out, p, 2, sc(41))
+                                p = ucomi(out, p, 2, 0)
+                                let jnofrail2 = p + 2
+                                p = jcc(out, p, 0x87, 0)
+                                p = inc_mem64(out, p, sc(34))
+                                let frail_done = p
+                                patch32(out, jnofrail1, frail_done - (jnofrail1 + 4))
+                                patch32(out, jnofrail2, frail_done - (jnofrail2 + 4))
+
+                                p = ld(out, p, 0, reg_val_off_v1(a))
+                                p = pxor(out, p, 1, 1)
+                                p = ucomi(out, p, 0, 1)
+                                let ccode = if op == op_ebrz() { 0x84 } else { 0x82 }
+                                br_at[br_n as usize] = p + 2
+                                br_tgt[br_n as usize] = b
+                                br_n = br_n + 1
+                                p = jcc(out, p, ccode, 0)
+                                let jskip_poison = p + 1
+                                p = jmp32(out, p, 0)
+                                let poison_lbl = p
+                                p = mov_rax_imm64(out, p, 1)
+                                p = mov_mem_rax(out, p, sc(35))
+                                // EVM: normalising a poisoned branch register
+                                // refreshes last_written_reg = a. Replicate.
+                                p = em_v1_set_last_written(out, p, a)
+                                let after_poison = p
+                                patch32(out, jpoison, poison_lbl - (jpoison + 4))
+                                patch32(out, jskip_poison, after_poison - (jskip_poison + 4))
+                            } else {
+                                if op == op_ehalt() {
+                                    br_at[br_n as usize] = p + 1
+                                    br_tgt[br_n as usize] = n
+                                    br_n = br_n + 1
+                                    p = jmp32(out, p, 0)
+                                } else {
+                                    return BridgeMeta { len: 0, status: 42 }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+                }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    let run_end = p
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    let fuel_stop = p
+    p = mov_rax_mem(out, p, sc(36))
+    p = cmp_rax(out, p, 0)
+    let jlw_bad_lo = p + 2
+    p = jcc(out, p, 0x8C, 0)
+    p = cmp_rax(out, p, 63)
+    let jlw_ok = p + 2
+    p = jcc(out, p, 0x8E, 0)
+    let lw_bad = p
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(36))
+    p = mov_rax_mem(out, p, rl(0, 0))
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_rax_mem(out, p, rl(0, 1))
+    p = mov_mem_rax(out, p, sc(62))
+    p = mov_rax_mem(out, p, rl(0, 3))
+    p = mov_mem_rax(out, p, sc(63))
+    p = mov_rax_mem(out, p, rp(0))
+    p = mov_mem_rax(out, p, sc(55))
+    let lw_done = p
+    patch32(out, jlw_bad_lo, lw_bad - (jlw_bad_lo + 4))
+    patch32(out, jlw_ok, lw_done - (jlw_ok + 4))
+    p = em_v1_emit_fuel_stop_receipt(out, p, pu_off, dp_off, &s)
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    i = 0
+    while i < fuel_n {
+        let at = fuel_at[i as usize]
+        patch32(out, at, fuel_stop - (at + 4))
+        i = i + 1
+    }
+    i = 0
+    while i < br_n {
+        let at = br_at[i as usize]
+        let t = br_tgt[i as usize]
+        let to = if t == n { run_end } else { starts[t as usize] }
+        patch32(out, at, to - (at + 4))
+        i = i + 1
+    }
+
+    let total = p
+    if total > 131072 { return BridgeMeta { len: 0, status: 3 } }
+    let base = c_base()
+    let entry = base + main_off
+
+    var _q = put8(out, 0, 0x7f)
+    _q = put8(out, 1, 0x45)
+    _q = put8(out, 2, 0x4c)
+    _q = put8(out, 3, 0x46)
+    _q = put8(out, 4, 2)
+    _q = put8(out, 5, 1)
+    _q = put8(out, 6, 1)
+    w16(out, 16, 2)
+    w16(out, 18, 0x3E)
+    w32(out, 20, 1)
+    w64(out, 24, entry)
+    w64(out, 32, 64)
+    w16(out, 52, 64)
+    w16(out, 54, 56)
+    w16(out, 56, 1)
+    w32(out, 64, 1)
+    w32(out, 68, 7)
+    w64(out, 72, 0)
+    w64(out, 80, base)
+    w64(out, 88, base)
+    w64(out, 96, total)
+    w64(out, 104, total)
+    w64(out, 112, 0x1000)
+
+    BridgeMeta { len: total, status: 0 }
+}
+
+// v2 (qd128) AOT translator. Shares the v1 control-flow/fuel/branch machinery;
+// only the err lane deepens to 4 components and the receipt is v3. Opcodes not
+// yet implemented on the v2 path return a loud status (never emit garbage that
+// would run) per the W4 micro-step discipline.
+fn bridge_translate_v2(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with Mut, Div, Panic {
+    var z = 0
+    while z < 16384 {
+        (*out)[z as usize] = 0 as i8
+        z = z + 1
+    }
+
+    let s = build_strings_v2(out, img)
+    let code_off = s.endpos
+
+    var p = code_off
+    let pu_off = p
+    p = em_print_uint(out, p)
+    let dp_off = p
+    let dss = Strs {
+        p0off: [0; 8], p0len: [0; 8], se: s.se, sm: s.sm, ro: 0, rolen: 0, lu: 0, lulen: 0, po: 0, polen: 0, nl: s.nl, endpos: s.endpos,
+    }
+    p = em_decompose(out, p, pu_off, &dss)
+    let ns_off = p
+    p = em_newton(out, p)
+    let ts_off = p
+    p = em_sub_two_sum(out, p)
+    let qs_off = p
+    p = em_sub_quick_two_sum(out, p)
+    let rn_off = p
+    p = em_sub_renorm5(out, p, qs_off)
+    let da_off = p
+    p = em_sub_double_accumulate(out, p, ts_off)
+    let srt_off = p
+    p = em_sub_sorted8(out, p)
+    let qadd_off = p
+    p = em_sub_qd_add(out, p, srt_off, da_off, rn_off)
+    let tp_off = p
+    p = em_sub_two_prod(out, p)
+    let qaddf_off = p
+    p = em_sub_qd_add_f64(out, p, ts_off, rn_off)
+    let ddadd_off = p
+    p = em_sub_dd_add(out, p, ts_off, qs_off)
+    let ddaddf_off = p
+    p = em_sub_dd_add_f64(out, p, ts_off, qs_off)
+    let three_off = p
+    p = em_sub_three_sum(out, p, ts_off)
+    let six_off = p
+    p = em_sub_six_three_sum(out, p, three_off, qaddf_off)
+    let ntwo_off = p
+    p = em_sub_nine_two_sum(out, p, ts_off, ddadd_off, ddaddf_off)
+    let none_off = p
+    p = em_sub_nine_one_sum(out, p)
+    let qmul_off = p
+    p = em_sub_qd_mul(out, p, tp_off, three_off, six_off, ntwo_off, none_off, qaddf_off)
+    let qmulf_off = p
+    p = em_sub_qd_mul_f64(out, p, tp_off, qaddf_off)
+    let qsub_off = p
+    p = em_sub_qd_sub(out, p, qadd_off)
+    let qdiv_off = p
+    p = em_sub_qd_div(out, p, qmulf_off, qsub_off, rn_off)
+    let qsqrt_off = p
+    p = em_sub_qd_sqrt(out, p, qmul_off, qsub_off, qmulf_off, qadd_off, ns_off)
+
+    let main_off = p
+    p = put8(out, p, 0x48)
+    p = put8(out, p, 0xBB)
+    p = put64(out, p, c_state_vaddr())
+
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(33))
+    p = mov_mem_rax(out, p, sc(34))
+    p = mov_mem_rax(out, p, sc(35))
+    p = mov_rax_imm64(out, p, 0 - 1)
+    p = mov_mem_rax(out, p, sc(36))
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(55))
+    p = mov_mem_rax(out, p, sc(56))
+    p = mov_mem_rax(out, p, sc(57))
+    p = mov_mem_rax(out, p, sc(58))
+    p = mov_mem_rax(out, p, sc(59))
+    p = mov_mem_rax(out, p, sc(60))
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_rax_imm64(out, p, eisax_fuel(img))
+    p = mov_mem_rax(out, p, sc(32))
+
+    let n = eisax_n_code(img)
+    var starts: [i64; 256] = [0; 256]
+    var br_at: [i64; 512] = [0; 512]
+    var br_tgt: [i64; 512] = [0; 512]
+    var br_n = 0
+    var fuel_at: [i64; 512] = [0; 512]
+    var fuel_n = 0
+
+    var i = 0
+    while i < n {
+        starts[i as usize] = p
+        p = mov_rax_mem(out, p, sc(32))
+        p = cmp_rax(out, p, 0)
+        fuel_at[fuel_n as usize] = p + 2
+        p = jcc(out, p, 0x8E, 0)
+        fuel_n = fuel_n + 1
+        p = dec_rax(out, p)
+        p = mov_mem_rax(out, p, sc(32))
+
+        let op = eisax_code_op(img, i)
+        let dst = eisax_code_dst(img, i)
+        let a = eisax_code_a(img, i)
+        let b = eisax_code_b(img, i)
+
+        if dst < 0 || dst >= 64 {
+            return BridgeMeta { len: 0, status: 45 }
+        }
+
+        if op == op_econst() {
+            p = em_v2_econst(out, p, dst, const_bits(img, a))
+            p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
+            p = em_v2_set_last_written(out, p, dst)
+        } else {
+            if op == op_egate() {
+                p = em_v2_normalize(out, p, dst)
+                p = test_rax(out, p)
+                let jskip_glw = p + 2
+                p = jcc(out, p, 0x84, 0)
+                p = em_v2_set_last_written(out, p, dst)
+                let skip_glw = p
+                patch32(out, jskip_glw, skip_glw - (jskip_glw + 4))
+                p = inc_mem64(out, p, sc(33))
+                p = em_v2_emit_receipt(out, p, dst, pu_off, dp_off, &s, 0, 0)
+            } else {
+                if op == op_ebr() {
+                    br_at[br_n as usize] = p + 1
+                    br_tgt[br_n as usize] = a
+                    br_n = br_n + 1
+                    p = jmp32(out, p, 0)
+                } else {
+                    if op == op_ehalt() {
+                        br_at[br_n as usize] = p + 1
+                        br_tgt[br_n as usize] = n
+                        br_n = br_n + 1
+                        p = jmp32(out, p, 0)
+                    } else {
+                        if op == op_eadd() {
+                            p = em_v2_binop_addsub(out, p, dst, a, b, qadd_off, ns_off, 0)
+                            p = em_v2_set_last_written(out, p, dst)
+                        } else {
+                            if op == op_esub() {
+                                p = em_v2_binop_addsub(out, p, dst, a, b, qadd_off, ns_off, 1)
+                                p = em_v2_set_last_written(out, p, dst)
+                            } else {
+                                if op == op_emul() {
+                                    p = em_v2_binop_mul(out, p, dst, a, b, qadd_off, qmul_off, ns_off)
+                                    p = em_v2_set_last_written(out, p, dst)
+                                } else {
+                                    if op == op_ediv() {
+                                        p = em_v2_binop_div(out, p, dst, a, b, qadd_off, qdiv_off, ns_off)
+                                        p = em_v2_set_last_written(out, p, dst)
+                                    } else {
+                                        if op == op_esqrt() {
+                                            p = em_v2_sqrt(out, p, dst, a, qadd_off, qsqrt_off, ns_off)
+                                            p = em_v2_set_last_written(out, p, dst)
+                                        } else {
+                                        if op == op_eload() {
+                                            p = em_v2_eload(out, p, dst, a)
+                                            p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
+                                            p = em_v2_set_last_written(out, p, dst)
+                                        } else {
+                                        if op == op_estore() {
+                                            p = em_v2_estore(out, p, dst, a)
+                                            p = em_v1_normalize_u_lane(out, p, v2_mem_u_off(a))
+                                            // EVM: storing a poisoned register re-canonicalises it
+                                            // and refreshes last_written_reg = dst. Replicate
+                                            // conditionally (poison flag still original here).
+                                            p = mov_rax_mem(out, p, v2_reg_poison_off(dst))
+                                            p = test_rax(out, p)
+                                            let jskip_lw = p + 2
+                                            p = jcc(out, p, 0x84, 0)
+                                            p = em_v2_set_last_written(out, p, dst)
+                                            let skip_lw = p
+                                            patch32(out, jskip_lw, skip_lw - (jskip_lw + 4))
+                                        } else {
+                                        if op == op_emov() {
+                                            // copy all six lane words + poison a -> dst
+                                            // (slot-by-slot copy handles dst==a aliasing).
+                                            p = ld(out, p, 0, v2_reg_val_off(a))
+                                            p = st(out, p, 0, v2_reg_val_off(dst))
+                                            p = ld(out, p, 0, v2_reg_e0_off(a))
+                                            p = st(out, p, 0, v2_reg_e0_off(dst))
+                                            p = ld(out, p, 0, v2_reg_e1_off(a))
+                                            p = st(out, p, 0, v2_reg_e1_off(dst))
+                                            p = ld(out, p, 0, v2_reg_e2_off(a))
+                                            p = st(out, p, 0, v2_reg_e2_off(dst))
+                                            p = ld(out, p, 0, v2_reg_e3_off(a))
+                                            p = st(out, p, 0, v2_reg_e3_off(dst))
+                                            p = ld(out, p, 0, v2_reg_u_off(a))
+                                            p = st(out, p, 0, v2_reg_u_off(dst))
+                                            p = mov_rax_mem(out, p, v2_reg_poison_off(a))
+                                            p = mov_mem_rax(out, p, v2_reg_poison_off(dst))
+                                            p = em_v1_normalize_u_lane(out, p, v2_reg_u_off(dst))
+                                            p = em_v2_set_last_written(out, p, dst)
+                                        } else {
+                                        if op == op_ebrz() || op == op_ebrn() {
+                                            p = em_v2_normalize(out, p, a)
+                                            p = mov_rax_mem(out, p, v2_reg_poison_off(a))
+                                            p = test_rax(out, p)
+                                            let jpoison = p + 2
+                                            p = jcc(out, p, 0x85, 0)
+
+                                            // frail band = max(u, |e0|); count iff
+                                            // band > 0 AND |val| <= band (e0 = deep
+                                            // leading err term, ehi position).
+                                            p = em_v1_abs_copy(out, p, v2_reg_e0_off(a), sc(40))
+                                            p = em_v1_abs_copy(out, p, v2_reg_val_off(a), sc(41))
+                                            p = ld(out, p, 0, v2_reg_u_off(a))
+                                            p = ld(out, p, 1, sc(40))
+                                            p = sse(out, p, 0x5F, 0, 1)
+                                            p = st(out, p, 0, sc(42))
+                                            p = pxor(out, p, 1, 1)
+                                            p = ucomi(out, p, 0, 1)
+                                            let jnofrail1 = p + 2
+                                            p = jcc(out, p, 0x86, 0)
+                                            p = ld(out, p, 2, sc(41))
+                                            p = ucomi(out, p, 2, 0)
+                                            let jnofrail2 = p + 2
+                                            p = jcc(out, p, 0x87, 0)
+                                            p = inc_mem64(out, p, sc(34))
+                                            let frail_done = p
+                                            patch32(out, jnofrail1, frail_done - (jnofrail1 + 4))
+                                            patch32(out, jnofrail2, frail_done - (jnofrail2 + 4))
+
+                                            p = ld(out, p, 0, v2_reg_val_off(a))
+                                            p = pxor(out, p, 1, 1)
+                                            p = ucomi(out, p, 0, 1)
+                                            let ccode = if op == op_ebrz() { 0x84 } else { 0x82 }
+                                            br_at[br_n as usize] = p + 2
+                                            br_tgt[br_n as usize] = b
+                                            br_n = br_n + 1
+                                            p = jcc(out, p, ccode, 0)
+                                            let jskip_poison = p + 1
+                                            p = jmp32(out, p, 0)
+                                            let poison_lbl = p
+                                            p = mov_rax_imm64(out, p, 1)
+                                            p = mov_mem_rax(out, p, sc(35))
+                                            // EVM: normalising a poisoned branch register
+                                            // refreshes last_written_reg = a. Replicate.
+                                            p = em_v2_set_last_written(out, p, a)
+                                            let after_poison = p
+                                            patch32(out, jpoison, poison_lbl - (jpoison + 4))
+                                            patch32(out, jskip_poison, after_poison - (jskip_poison + 4))
+                                        } else {
+                                            // remaining v2 control-flow templates not yet landed
+                                            return BridgeMeta { len: 0, status: 42 }
+                                        }
+                                        }
+                                        }
+                                        }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    let run_end = p
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    let fuel_stop = p
+    p = mov_rax_mem(out, p, sc(36))
+    p = cmp_rax(out, p, 0)
+    let jlw_bad_lo = p + 2
+    p = jcc(out, p, 0x8C, 0)
+    p = cmp_rax(out, p, 63)
+    let jlw_ok = p + 2
+    p = jcc(out, p, 0x8E, 0)
+    let lw_bad = p
+    p = xor_rax(out, p)
+    p = mov_mem_rax(out, p, sc(36))
+    p = mov_rax_mem(out, p, v2_reg_val_off(0))
+    p = mov_mem_rax(out, p, sc(56))
+    p = mov_rax_mem(out, p, v2_reg_e0_off(0))
+    p = mov_mem_rax(out, p, sc(57))
+    p = mov_rax_mem(out, p, v2_reg_e1_off(0))
+    p = mov_mem_rax(out, p, sc(58))
+    p = mov_rax_mem(out, p, v2_reg_e2_off(0))
+    p = mov_mem_rax(out, p, sc(59))
+    p = mov_rax_mem(out, p, v2_reg_e3_off(0))
+    p = mov_mem_rax(out, p, sc(60))
+    p = mov_rax_mem(out, p, v2_reg_u_off(0))
+    p = mov_mem_rax(out, p, sc(61))
+    p = mov_rax_mem(out, p, v2_reg_poison_off(0))
+    p = mov_mem_rax(out, p, sc(55))
+    let lw_done = p
+    patch32(out, jlw_bad_lo, lw_bad - (jlw_bad_lo + 4))
+    patch32(out, jlw_ok, lw_done - (jlw_ok + 4))
+    p = em_v2_emit_fuel_stop_receipt(out, p, pu_off, dp_off, &s)
+    p = put8(out, p, 0xB8)
+    p = put32(out, p, 60)
+    p = put8(out, p, 0x31)
+    p = put8(out, p, 0xFF)
+    p = put8(out, p, 0x0F)
+    p = put8(out, p, 0x05)
+
+    i = 0
+    while i < fuel_n {
+        let at = fuel_at[i as usize]
+        patch32(out, at, fuel_stop - (at + 4))
+        i = i + 1
+    }
+    i = 0
+    while i < br_n {
+        let at = br_at[i as usize]
+        let t = br_tgt[i as usize]
+        let to = if t == n { run_end } else { starts[t as usize] }
+        patch32(out, at, to - (at + 4))
+        i = i + 1
+    }
+
+    let total = p
+    if total > 131072 { return BridgeMeta { len: 0, status: 3 } }
+    let base = c_base()
+    let entry = base + main_off
+
+    var _q = put8(out, 0, 0x7f)
+    _q = put8(out, 1, 0x45)
+    _q = put8(out, 2, 0x4c)
+    _q = put8(out, 3, 0x46)
+    _q = put8(out, 4, 2)
+    _q = put8(out, 5, 1)
+    _q = put8(out, 6, 1)
+    w16(out, 16, 2)
+    w16(out, 18, 0x3E)
+    w32(out, 20, 1)
+    w64(out, 24, entry)
+    w64(out, 32, 64)
+    w16(out, 52, 64)
+    w16(out, 54, 56)
+    w16(out, 56, 1)
+    w32(out, 64, 1)
+    w32(out, 68, 7)
+    w64(out, 72, 0)
+    w64(out, 80, base)
+    w64(out, 88, base)
+    w64(out, 96, total)
+    w64(out, 104, total)
+    w64(out, 112, 0x1000)
+
+    BridgeMeta { len: total, status: 0 }
+}
+
+pub fn bridge_translate(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with Mut, Div, Panic {
+    let rc = eisax_validate(img)
+    if rc != 0 { return BridgeMeta { len: 0, status: 1 } }
+    if img.w[1] == eisax_version_v2() {
+        return bridge_translate_v2(img, out)
+    }
+    if img.w[1] == eisax_version_v1() {
+        return bridge_translate_v1_stub(img, out)
+    }
+    bridge_translate_v0(img, out)
+}
+
+pub fn bridge_write_elf(path: string, out: &[i8; 131072], meta: BridgeMeta) -> bool with IO {
+    if meta.status != 0 { return false }
+    let wr = write_file(path, *out, meta.len)
+    if wr < 0 { return false }
+    syscall6(90, path, 493, 0, 0, 0, 0) >= 0
+}

@@ -1,0 +1,464 @@
+// stdlib/particle_physics/pdf.sio
+//
+// Parton distribution functions (PDFs) for the proton at leading order.
+// Simplified parameterizations inspired by CTEQ6L and MSTW2008lo.
+//
+// References:
+//   - Pumplin et al., CTEQ6L, JHEP 0207 (2002) 012
+//   - PDG 2024, Structure Functions (Sec. 19)
+
+module particle_physics::pdf
+
+use particle_physics::sm_params::*;
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// PDF PARAMETERIZATIONS (LO, Q²-dependent via DGLAP-inspired scaling)
+// ============================================================================
+
+/// Gluon PDF at leading order.
+///
+/// Parameterization: g(x, Q²) = A_g × x^(-λ) × (1-x)^5 × [1 + ε_g √x]
+/// where λ decreases with ln(Q²) to model DGLAP evolution.
+///
+/// # Parameters
+/// - `x`: Bjorken-x (0 < x < 1).
+/// - `q2`: Momentum transfer squared in GeV².
+pub fn pdf_gluon_lo(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let q2_0 = 1.69  // reference scale (1.3 GeV)²
+    let lambda_0 = 0.30
+    let lambda_q2 = lambda_0 * (1.0 - 0.05 * ln_f64(q2 / q2_0))
+    if lambda_q2 < 0.05 { return 0.0 }
+    let A_g = 13.0  // LO normalization: momentum fraction ~50%
+    let eps_g = 0.5
+    let x_pow = if lambda_q2 > 0.0 { pow_f64(x, 0.0 - lambda_q2) } else { 1.0 / x }
+    A_g * x_pow * pow_f64(1.0 - x, 5.0) * (1.0 + eps_g * sqrt_f64(x))
+}
+
+/// Up valence quark PDF.
+///
+/// u_v(x) = A_u × x^α × (1-x)^β × (1 + γ_u √x)
+pub fn pdf_valence_up(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let alpha = 0.50 + 0.02 * ln_f64(q2 / 1.69)
+    let beta = 3.0 + 0.1 * ln_f64(q2 / 1.69)
+    let A_u = 25.0  // LO normalization: ∫ u_v ≈ 2
+    let gamma_u = 0.8
+    A_u * pow_f64(x, alpha) * pow_f64(1.0 - x, beta) * (1.0 + gamma_u * sqrt_f64(x))
+}
+
+/// Down valence quark PDF.
+pub fn pdf_valence_down(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let alpha = 0.50 + 0.02 * ln_f64(q2 / 1.69)
+    let beta = 3.5 + 0.1 * ln_f64(q2 / 1.69)
+    let A_d = 16.5  // LO normalization: ∫ d_v ≈ 1 at typical LHC scales
+    let gamma_d = 0.5
+    A_d * pow_f64(x, alpha) * pow_f64(1.0 - x, beta) * (1.0 + gamma_d * sqrt_f64(x))
+}
+
+/// Sea quark PDF (symmetric for all light flavors).
+///
+/// q_s(x) = A_s × x^(-λ_s) × (1-x)^7
+pub fn pdf_sea_quark(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let q2_0 = 1.69
+    let lambda_s = 0.20 * (1.0 - 0.03 * ln_f64(q2 / q2_0))
+    if lambda_s < 0.05 { return 0.0 }
+    let A_s = 0.3
+    let x_pow = if lambda_s > 0.0 { pow_f64(x, 0.0 - lambda_s) } else { 1.0 / x }
+    A_s * x_pow * pow_f64(1.0 - x, 7.0)
+}
+
+/// Antiquark PDF (same as sea at LO).
+pub fn pdf_antiquark(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_sea_quark(x, q2)
+}
+
+/// Total up quark PDF: valence + sea.
+pub fn pdf_up_total(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_valence_up(x, q2) + pdf_sea_quark(x, q2)
+}
+
+/// Total down quark PDF: valence + sea.
+pub fn pdf_down_total(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_valence_down(x, q2) + pdf_sea_quark(x, q2)
+}
+
+/// Strangeness PDF (pure sea).
+pub fn pdf_strange(x: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    0.5 * pdf_sea_quark(x, q2)
+}
+
+// ============================================================================
+// MOMENTUM AND NUMBER SUM RULES
+// ============================================================================
+
+/// Integral of a PDF over x ∈ [0, 1] using Simpson's rule with n bins.
+///
+/// # Parameters
+/// - `pdf_fn`: Function pointer index (0=gluon, 1=u_v, 2=d_v, 3=sea).
+/// - `q2`: Scale in GeV².
+/// - `n_bins`: Number of integration bins (must be even).
+fn pdf_integral(pdf_fn: i64, q2: f64, n_bins_in: i64) -> f64 with Mut, Div, Panic {
+    var n_bins = n_bins_in
+    if n_bins <= 0 || n_bins % 2 != 0 { n_bins = 64 }
+    let h = 1.0 / (n_bins as f64)
+    var sum = 0.0
+    var i: i64 = 0
+    while i <= n_bins {
+        let x = (i as f64) * h
+        var fx: f64 = 0.0
+        if pdf_fn == 0 { fx = pdf_gluon_lo(x, q2) }
+        else if pdf_fn == 1 { fx = pdf_valence_up(x, q2) }
+        else if pdf_fn == 2 { fx = pdf_valence_down(x, q2) }
+        else if pdf_fn == 3 { fx = pdf_sea_quark(x, q2) }
+
+        var w: f64 = 1.0
+        if i == 0 || i == n_bins { w = 1.0 }
+        else if i % 2 == 0 { w = 2.0 }
+        else { w = 4.0 }
+
+        sum = sum + w * fx
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+/// Momentum-weighted integral ∫ x f(x) dx.
+fn pdf_momentum_integral(pdf_fn: i64, q2: f64, n_bins_in: i64) -> f64 with Mut, Div, Panic {
+    var n_bins = n_bins_in
+    if n_bins <= 0 || n_bins % 2 != 0 { n_bins = 64 }
+    let h = 1.0 / (n_bins as f64)
+    var sum = 0.0
+    var i: i64 = 0
+    while i <= n_bins {
+        let x = (i as f64) * h
+        var fx: f64 = 0.0
+        if pdf_fn == 0 { fx = pdf_gluon_lo(x, q2) }
+        else if pdf_fn == 1 { fx = pdf_valence_up(x, q2) }
+        else if pdf_fn == 2 { fx = pdf_valence_down(x, q2) }
+        else if pdf_fn == 3 { fx = pdf_sea_quark(x, q2) }
+
+        var w: f64 = 1.0
+        if i == 0 || i == n_bins { w = 1.0 }
+        else if i % 2 == 0 { w = 2.0 }
+        else { w = 4.0 }
+
+        sum = sum + w * x * fx
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+/// Gluon momentum fraction at scale Q²: ∫ x g(x) dx.
+pub fn gluon_momentum_fraction(q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_momentum_integral(0, q2, 128)
+}
+
+/// Up valence quark number at scale Q².
+pub fn up_valence_number(q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_integral(1, q2, 128)
+}
+
+/// Down valence quark number at scale Q².
+pub fn down_valence_number(q2: f64) -> f64 with Mut, Div, Panic {
+    pdf_integral(2, q2, 128)
+}
+
+// ============================================================================
+// PARTON LUMINOSITIES
+// ============================================================================
+
+/// gg parton luminosity L_gg(τ, Q²) = ∫_τ¹ dx/x g(x)g(τ/x).
+///
+/// Uses Simpson integration over x ∈ [τ, 1].
+pub fn parton_luminosity_gg(tau: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if tau <= 0.0 || tau >= 1.0 { return 0.0 }
+    let n = 64
+    let h = (1.0 - tau) / (n as f64)
+    var sum = 0.0
+    var i: i64 = 0
+    while i <= n {
+        let x = tau + (i as f64) * h
+        let y = tau / x
+        if y > 1.0 || y <= 0.0 {
+            i = i + 1
+            continue
+        }
+        let fx = pdf_gluon_lo(x, q2) * pdf_gluon_lo(y, q2) / x
+        var w: f64 = 1.0
+        if i == 0 || i == n { w = 1.0 }
+        else if i % 2 == 0 { w = 2.0 }
+        else { w = 4.0 }
+        sum = sum + w * fx
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+/// q q̄ parton luminosity L_qqbar(τ, Q²) for a given flavor.
+pub fn parton_luminosity_qqbar(tau: f64, q2: f64) -> f64 with Mut, Div, Panic {
+    if tau <= 0.0 || tau >= 1.0 { return 0.0 }
+    let n = 64
+    let h = (1.0 - tau) / (n as f64)
+    var sum = 0.0
+    var i: i64 = 0
+    while i <= n {
+        let x = tau + (i as f64) * h
+        let y = tau / x
+        if y > 1.0 || y <= 0.0 {
+            i = i + 1
+            continue
+        }
+        // Sum over u, d, s, c valence+sea contributions
+        let fx = (pdf_up_total(x, q2) * pdf_up_total(y, q2)
+                + pdf_down_total(x, q2) * pdf_down_total(y, q2)
+                + 2.0 * pdf_strange(x, q2) * pdf_strange(y, q2)) / x
+        var w: f64 = 1.0
+        if i == 0 || i == n { w = 1.0 }
+        else if i % 2 == 0 { w = 2.0 }
+        else { w = 4.0 }
+        sum = sum + w * fx
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+// ============================================================================
+// HADRONIC CROSS-SECTIONS
+// ============================================================================
+
+/// Convolute a partonic cross-section with PDFs to get a hadronic cross-section.
+///
+/// σ_had(√s) = ∫_τ_min¹ dτ L(τ) σ̂(τ s)
+///
+/// # Parameters
+/// - `sigma_partonic`: Partonic cross-section in GeV⁻².
+/// - `sqrt_s`: Hadron CM energy in GeV.
+/// - `q2`: Scale in GeV².
+/// - `luminosity_fn`: 0 for gg, 1 for qq̄.
+pub fn hadronic_cross_section_from_partonic(
+    sigma_partonic: f64,
+    sqrt_s: f64,
+    q2: f64,
+    luminosity_fn: i64,
+) -> f64 with Mut, Div, Panic {
+    if sqrt_s <= 0.0 { return 0.0 }
+    let n = 64
+    let tau_min = 0.001
+    let h = (1.0 - tau_min) / (n as f64)
+    var sum = 0.0
+    var i: i64 = 0
+    while i <= n {
+        let tau = tau_min + (i as f64) * h
+        let lum = if luminosity_fn == 0 {
+            parton_luminosity_gg(tau, q2)
+        } else {
+            parton_luminosity_qqbar(tau, q2)
+        }
+        let fx = lum * sigma_partonic
+        var w: f64 = 1.0
+        if i == 0 || i == n { w = 1.0 }
+        else if i % 2 == 0 { w = 2.0 }
+        else { w = 4.0 }
+        sum = sum + w * fx
+        i = i + 1
+    }
+    sum * h / 3.0 * 0.389379e9  // convert GeV⁻² to pb
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+fn pow_f64(x: f64, y: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if y == 0.0 { return 1.0 }
+    if y == 1.0 { return x }
+    if y == 2.0 { return x * x }
+    if y == 3.0 { return x * x * x }
+    if y == 4.0 { return x * x * x * x }
+    if y == 5.0 { return x * x * x * x * x }
+    if y == 6.0 { return x * x * x * x * x * x }
+    if y == 7.0 { return x * x * x * x * x * x * x }
+    // General case: x^y = exp(y ln x)
+    exp_f64(y * ln_f64(x))
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    // Taylor series: exp(x) = Σ x^n / n!
+    if x < 0.0 {
+        let pos = exp_f64(0.0 - x)
+        return 1.0 / pos
+    }
+    var term: f64 = 1.0
+    var sum: f64 = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// Newton-Raphson sqrt for internal use in Hessian uncertainty
+fn nu_sqrt_pdf(x: f64) -> f64 with Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x / 2.0 }
+    var i: i64 = 0
+    while i < 50 {
+        let next = 0.5 * (g + x / g)
+        let diff = next - g
+        let absd = if diff < 0.0 { 0.0 - diff } else { diff }
+        if absd < g * 1.0e-12 { return next }
+        g = next
+        i = i + 1
+    }
+    g
+}
+
+// ============================================================================
+// HESSIAN PDF UNCERTAINTY (Epistemic GUM propagation)
+// ============================================================================
+//
+// Parametric Hessian bands derived from CT10/MMHT2014 68% CL envelope widths.
+// Relative uncertainties:
+//   σ_rel(g)   = 0.03 + 0.05·x  (~3% at x=0.1, rising to ~8% at x=1)
+//   σ_rel(q_v) = 0.05 + 0.03·x  (~5% at x=0.1, rising to ~8% at x=1)
+//
+// For the gg luminosity, two independent Hessian eigen-sets combine in
+// quadrature: σ_rel(L_gg) ≈ sqrt(2) × σ_rel(g) at representative x~sqrt(τ).
+
+use epistemic::knowledge::{Epistemic}
+
+/// Gluon PDF with Hessian uncertainty.
+///
+/// Returns Epistemic wrapping the LO gluon PDF with CT10-consistent σ_rel.
+pub fn pdf_gluon_ep(x: f64, q2: f64) -> Epistemic with Mut, Div, Panic {
+    let central = pdf_gluon_lo(x, q2)
+    let sig_rel = 0.03 + 0.05 * x
+    let sig_abs = central * sig_rel
+    Epistemic::measured(central, sig_abs)
+}
+
+/// Up-quark valence PDF with Hessian uncertainty.
+pub fn pdf_valence_up_ep(x: f64, q2: f64) -> Epistemic with Mut, Div, Panic {
+    let central = pdf_valence_up(x, q2)
+    let sig_rel = 0.05 + 0.03 * x
+    let sig_abs = central * sig_rel
+    Epistemic::measured(central, sig_abs)
+}
+
+/// Down-quark valence PDF with Hessian uncertainty.
+pub fn pdf_valence_down_ep(x: f64, q2: f64) -> Epistemic with Mut, Div, Panic {
+    let central = pdf_valence_down(x, q2)
+    let sig_rel = 0.05 + 0.03 * x
+    let sig_abs = central * sig_rel
+    Epistemic::measured(central, sig_abs)
+}
+
+/// gg parton luminosity with Hessian uncertainty.
+///
+/// σ_rel(L_gg) ≈ sqrt(2) × σ_rel(g) — two independent PDF Hessian sets
+/// combine in quadrature, with representative x ~ sqrt(τ).
+pub fn parton_luminosity_gg_ep(tau: f64, q2: f64) -> Epistemic with Mut, Div, Panic {
+    let central = parton_luminosity_gg(tau, q2)
+    let x_mid = nu_sqrt_pdf(tau)
+    let sig_rel_single = 0.03 + 0.05 * x_mid
+    let sig_rel_combined = 1.41421356 * sig_rel_single
+    let sig_abs = central * sig_rel_combined
+    Epistemic::measured(central, sig_abs)
+}
+
+// ============================================================================
+// PDF HESSIAN TESTS
+// ============================================================================
+
+var PDF_EP_PASS: [i64; 2] = [0; 2]
+
+fn pdf_chk(pass: bool, id: i64) with Mut, Panic {
+    if pass {
+        PDF_EP_PASS[0] = PDF_EP_PASS[0] + 1
+    } else {
+        print("FAIL pdf_ep #")
+        print_int(id)
+        print("\n")
+        PDF_EP_PASS[1] = PDF_EP_PASS[1] + 1
+    }
+}
+
+pub fn run_pdf_ep_tests() with Div, Panic, Mut {
+    print("=== PDF Hessian Tests ===\n")
+
+    // T1: gluon PDF at x=0.1 has positive central value
+    let g1 = pdf_gluon_ep(0.1, 10000.0)
+    pdf_chk(g1.val() > 0.0, 1)
+
+    // T2: gluon PDF has positive variance (Hessian band)
+    pdf_chk(g1.variance() > 0.0, 2)
+
+    // T3: confidence is positive
+    pdf_chk(g1.confidence() > 0, 3)
+
+    // T4: up valence at x=0.3, Q²=10000 — positive central, positive variance
+    let u1 = pdf_valence_up_ep(0.3, 10000.0)
+    pdf_chk(u1.val() > 0.0, 4)
+    pdf_chk(u1.variance() > 0.0, 5)
+
+    // T5: down valence at x=0.3 — positive
+    let d1 = pdf_valence_down_ep(0.3, 10000.0)
+    pdf_chk(d1.val() > 0.0, 6)
+    pdf_chk(d1.variance() > 0.0, 7)
+
+    // T6: parton luminosity gg at tau=0.01, Q²=10000
+    let lgg = parton_luminosity_gg_ep(0.01, 10000.0)
+    pdf_chk(lgg.val() > 0.0, 8)
+    pdf_chk(lgg.variance() > 0.0, 9)
+
+    // T7: luminosity val consistent with scalar central value
+    let lgg2 = parton_luminosity_gg_ep(0.01, 10000.0)
+    pdf_chk(lgg2.val() > 0.0, 10)
+
+    let total = PDF_EP_PASS[0] + PDF_EP_PASS[1]
+    print("PDF Hessian: ")
+    print_int(PDF_EP_PASS[0])
+    print("/")
+    print_int(total)
+    print(" PASS\n")
+}

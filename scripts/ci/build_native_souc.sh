@@ -18,6 +18,16 @@ host_platform() {
     printf '%s:%s\n' "$host_os" "$host_arch"
 }
 
+host_target() {
+    case "$1" in
+        Linux:x86_64|Linux:amd64) printf '%s\n' "x86_64-linux" ;;
+        Linux:arm64|Linux:aarch64) printf '%s\n' "aarch64-linux" ;;
+        Darwin:arm64|Darwin:aarch64) printf '%s\n' "aarch64-macos" ;;
+        Darwin:x86_64|Darwin:amd64) printf '%s\n' "x86_64-macos" ;;
+        *) return 1 ;;
+    esac
+}
+
 portable_size() {
     local path="$1"
     stat -c%s "$path" 2>/dev/null || stat -f%z "$path"
@@ -27,9 +37,18 @@ run_bootstrap_step() {
     local compiler_bin="$1"
     local src_path="$2"
     local out_path="$3"
+    local target="${4:-}"
+
+    if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
+        sounio_ad_hoc_codesign "$compiler_bin"
+    fi
 
     set +e
-    "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
+    if [[ -n "$target" ]]; then
+        "$compiler_bin" "$src_path" "$out_path" --target "$target" >/dev/null 2>&1
+    else
+        "$compiler_bin" "$src_path" "$out_path" >/dev/null 2>&1
+    fi
     local rc=$?
     set -e
 
@@ -47,11 +66,11 @@ bootstrap_direct_lean() {
     stage1_bin="$(mktemp /tmp/sounio-lean-stage1.XXXXXX)"
 
     rm -f "$stage1_bin"
-    if ! run_bootstrap_step "$seed_bin" "$LEAN" "$stage1_bin"; then
+    if ! run_bootstrap_step "$seed_bin" "$LEAN" "$stage1_bin" "$HOST_TARGET"; then
         rm -f "$stage1_bin"
         return 1
     fi
-    if ! run_bootstrap_step "$stage1_bin" "$LEAN" "$OUT"; then
+    if ! run_bootstrap_step "$stage1_bin" "$LEAN" "$OUT" "$HOST_TARGET"; then
         rm -f "$stage1_bin"
         return 1
     fi
@@ -94,11 +113,24 @@ bootstrap_via_boot4_chain() {
 
 LEAN="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 OUT="${1:-/tmp/souc-native}"
+if [[ "$OUT" == -* ]]; then
+    echo "error: output path must not start with '-': $OUT" >&2
+    exit 2
+fi
 FORCE_SOURCE_BOOTSTRAP="${SOUNIO_FORCE_SOURCE_BOOTSTRAP:-0}"
+NATIVE_SEED_OVERRIDE="${SOUNIO_NATIVE_SEED:-}"
+if [[ -n "$NATIVE_SEED_OVERRIDE" ]]; then
+    if [[ ! -x "$NATIVE_SEED_OVERRIDE" ]]; then
+        echo "error: SOUNIO_NATIVE_SEED is not executable: $NATIVE_SEED_OVERRIDE" >&2
+        exit 2
+    fi
+    FORCE_SOURCE_BOOTSTRAP=1
+fi
 LEAN_BYTES="$(portable_size "$LEAN")"
 BOOT4_DIRECT_SRC_CAP=1048576
 
 HOST_PLATFORM="$(host_platform)"
+HOST_TARGET="$(host_target "$HOST_PLATFORM")"
 HOST_PREBUILTS=()
 
 case "$HOST_PLATFORM" in
@@ -124,7 +156,13 @@ case "$HOST_PLATFORM" in
         ;;
 esac
 
-# Strategy 0: Use checked-in self-hosted native compiler (fast path — copy)
+SOURCE_BOOTSTRAP_SEEDS=("${HOST_PREBUILTS[@]}")
+if [[ -n "$NATIVE_SEED_OVERRIDE" ]]; then
+    SOURCE_BOOTSTRAP_SEEDS=("$NATIVE_SEED_OVERRIDE" "${SOURCE_BOOTSTRAP_SEEDS[@]}")
+    echo "Using explicit source-bootstrap seed: $NATIVE_SEED_OVERRIDE"
+fi
+
+# Strategy 0: Use checked-in self-hosted native compiler (fast path -- copy)
 if [ "$FORCE_SOURCE_BOOTSTRAP" != "1" ]; then
     for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
         if [ -x "$NATIVE_PREBUILT" ]; then
@@ -142,12 +180,12 @@ else
     echo "Skipping checked-in native compiler artifact copy (SOUNIO_FORCE_SOURCE_BOOTSTRAP=1)"
 fi
 
-# Strategy 0.5: Staged bootstrap from checked-in binary when source bootstrap is forced.
+# Strategy 0.5: Staged bootstrap from an explicit or checked-in seed.
 # boot4.elf is stale and miscompiles current lean_single.sio; use the checked-in
 # artifact as a correct seed for a staged bootstrap instead.
-for NATIVE_PREBUILT in "${HOST_PREBUILTS[@]}"; do
+for NATIVE_PREBUILT in "${SOURCE_BOOTSTRAP_SEEDS[@]}"; do
     if [ -x "$NATIVE_PREBUILT" ]; then
-        echo "Staged bootstrap from checked-in artifact: $NATIVE_PREBUILT"
+        echo "Staged bootstrap from seed: $NATIVE_PREBUILT"
         if bootstrap_direct_lean "$NATIVE_PREBUILT"; then
             if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
                 sounio_ad_hoc_codesign "$OUT"

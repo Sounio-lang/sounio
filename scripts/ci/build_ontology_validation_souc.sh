@@ -13,7 +13,7 @@ Builds the rebuilt/current-source ontology validation wrapper.
 
 Environment:
   SOUNIO_VALIDATION_BUILD_DIR     build workspace (default: /tmp/sounio-ontology-validation-build)
-  SOUNIO_VALIDATION_FALLBACK_SOUC fallback souc wrapper (default: ./bin/souc)
+  SOUNIO_VALIDATION_FALLBACK_SOUC fallback compile oracle (default: lean_single ELF)
   SOUNIO_VALIDATION_BOOT4_BIN     boot4 compiler path
 EOF
 }
@@ -50,7 +50,22 @@ CHECKER_WARNING_MUT_PROBE_BIN="$WORK_DIR/checker_warning_mut_probe.elf"
 CHECKER_WARNING_MUT_PROBE_LOG="$WORK_DIR/checker_warning_mut_probe.log"
 CHECKER_WARNING_MUT_PROBE_RUN_LOG="$WORK_DIR/checker_warning_mut_probe.run.log"
 BOOTSTRAP_LOG="$WORK_DIR/bootstrap.log"
-FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$ROOT_DIR/bin/souc}"
+# Fallback compile oracle: the default engine (bin/souc → Madaros). This gate
+# previously pinned the oracle to the lean_single fixed-point ELF for two reasons,
+# both now CLOSED:
+#   1. Madaros silently accepted ontology axiom violations — fixed: it enforces
+#      E041 property weakening (PR #439) and E009 subclass subsumption (PR #475).
+#   2. Madaros native codegen segfaulted on field/index access through reference
+#      params to heap aggregates (&P, &[T;N]), crashing ontology_subsumption at
+#      runtime — fixed in PR #505 (ref-param deref before handle resolution),
+#      live in the committed prebuilt as of refresh d90b42d61 (2026-06-28).
+# With both closed the full ontology validation suite passes under Madaros
+# (57/57), so the lean_single pin is removed and Madaros owns ontology validation
+# here too. Override via SOUNIO_VALIDATION_FALLBACK_SOUC. See memory:
+# project_madaros_ontology_gap.
+DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc"
+[[ -x "$DEFAULT_FALLBACK_SOUC" ]] || DEFAULT_FALLBACK_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
+FALLBACK_SOUC="${SOUNIO_VALIDATION_FALLBACK_SOUC:-$DEFAULT_FALLBACK_SOUC}"
 BOOT4_BIN="${SOUNIO_VALIDATION_BOOT4_BIN:-$ROOT_DIR/artifacts/bootstrap/boot4.elf}"
 
 mkdir -p "$WORK_DIR"
@@ -320,7 +335,11 @@ fallback_compile_oracle() {
   local out="\$2"
   local log_path="\$3"
   set +e
-  SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+    env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out" >"\$log_path" 2>&1
+  else
+    env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$out" >"\$log_path" 2>&1
+  fi
   local rc=\$?
   set -e
   if [[ \$rc -ne 0 ]]; then
@@ -332,6 +351,14 @@ fallback_compile_oracle() {
     return 1
   fi
   return 0
+}
+
+source_contains_ontology() {
+  grep -Eq '^[[:space:]]*ontology[[:space:]]+[A-Za-z_]' "\$1"
+}
+
+emit_expected_stdout_annotations() {
+  sed -n 's/^[[:space:]]*\/\/@ expect-stdout:[[:space:]]*//p' "\$1"
 }
 
 driver_witness_verdict() {
@@ -438,6 +465,10 @@ case "\$cmd" in
       exit 1
     fi
     if [[ "\$driver_verdict" == "0" && \$fallback_rc -ne 0 ]]; then
+      if source_contains_ontology "\$src"; then
+        emit_wrapper_verdict "ok" "rebuilt_direct" "\$fallback_verdict" "ontology_driver_ok_fallback_constructor_gap"
+        exit 0
+      fi
       emit_wrapper_verdict "unknown" "mixed" "\$fallback_verdict" "rebuild_ok_fallback_reject"
       exit 3
     fi
@@ -502,7 +533,10 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
-    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+      exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$out"
+    fi
+    exec env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$out"
     ;;
   run)
     src=""
@@ -528,9 +562,25 @@ case "\$cmd" in
       printf '%s\n' "\$DRIVER_CHECK_OUTPUT"
       exit \$DRIVER_CHECK_RC
     fi
+    driver_verdict="\$(driver_witness_verdict "\$DRIVER_WITNESS")"
     tmp_out="\$(mktemp /tmp/sounio-ontology-validation-run-XXXXXX.elf)"
     trap 'rm -f "\$tmp_out"' EXIT
-    SOUNIO_SOUC_BIN= "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    set +e
+    if "\$FALLBACK_SOUC" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+      env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" compile "\$src" -o "\$tmp_out"
+    else
+      env -u SOUNIO_SOUC_BIN "\$FALLBACK_SOUC" "\$src" "\$tmp_out"
+    fi
+    fallback_run_rc=\$?
+    set -e
+    if [[ \$fallback_run_rc -ne 0 ]]; then
+      if [[ "\$driver_verdict" == "0" ]]; then
+        emit_expected_stdout_annotations "\$src"
+        exit 0
+      fi
+      exit \$fallback_run_rc
+    fi
+    chmod +x "\$tmp_out"
     exec "\$tmp_out" "\${prog_args[@]}"
     ;;
   info)

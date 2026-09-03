@@ -1,0 +1,131 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: IMPORTED_ARRAY_BYVALUE_OK
+// Wave14 Agent B — issue #913
+// [f64;N] passed by value to an *imported* function must not arrive zeroed.
+//
+// Characterization (historical):
+//   corrupt: cross-module + [f64;N] by value
+//   fine:    same-module + [f64;N] by value; cross-module + &[f64;N] by ref
+//
+// Accept: imported by-value sum of [1,2,3,_] == 6 (bits of 6.0).
+// Use f64_to_bits (print_f64 can mangle negatives; bit identity is the oracle).
+
+use fixtures::imported_array_byvalue_leaf::{
+    imported_sum3_byvalue,
+    imported_elem0_byvalue,
+    imported_elem1_byvalue,
+    imported_sum3_byref,
+    imported_sum3_wide_byvalue,
+    imported_sum3_wide_byref,
+    imported_ols_slope_byvalue,
+}
+
+fn local_sum3_byvalue(a: [f64; 4]) -> f64 {
+    a[0] + a[1] + a[2]
+}
+
+fn bits_eq(a: f64, b: f64) -> bool {
+    f64_to_bits(a) == f64_to_bits(b)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var x: [f64; 4] = [0.0; 4]
+    x[0] = 1.0
+    x[1] = 2.0
+    x[2] = 3.0
+    x[3] = 4.0
+
+    // Control A — same-module by value (must work regardless of #913).
+    let local_sum = local_sum3_byvalue(x)
+    if !bits_eq(local_sum, 6.0) {
+        print("FAIL local_byvalue bits=")
+        print_int(f64_to_bits(local_sum))
+        println("")
+        return 1
+    }
+
+    // Control B — imported by ref (historically correct).
+    let ref_sum = imported_sum3_byref(&x)
+    if !bits_eq(ref_sum, 6.0) {
+        print("FAIL import_byref bits=")
+        print_int(f64_to_bits(ref_sum))
+        println("")
+        return 2
+    }
+
+    // Defect probe — imported by value (was zeroed → sum 0.0).
+    let imp_sum = imported_sum3_byvalue(x)
+    print("import_byvalue_sum_bits ")
+    print_int(f64_to_bits(imp_sum))
+    println("")
+    if !bits_eq(imp_sum, 6.0) {
+        println("FAIL import_byvalue_sum")
+        return 3
+    }
+
+    let e0 = imported_elem0_byvalue(x)
+    let e1 = imported_elem1_byvalue(x)
+    print("import_byvalue_e0_bits ")
+    print_int(f64_to_bits(e0))
+    println("")
+    print("import_byvalue_e1_bits ")
+    print_int(f64_to_bits(e1))
+    println("")
+    if !bits_eq(e0, 1.0) {
+        println("FAIL import_byvalue_e0")
+        return 4
+    }
+    if !bits_eq(e1, 2.0) {
+        println("FAIL import_byvalue_e1")
+        return 5
+    }
+
+    // Wide form matches the original regression API shape ([f64;100]).
+    var w: [f64; 100] = [0.0; 100]
+    w[0] = 1.0
+    w[1] = 2.0
+    w[2] = 3.0
+
+    let wide_ref = imported_sum3_wide_byref(&w)
+    if !bits_eq(wide_ref, 6.0) {
+        print("FAIL import_wide_byref bits=")
+        print_int(f64_to_bits(wide_ref))
+        println("")
+        return 6
+    }
+
+    let wide_val = imported_sum3_wide_byvalue(w)
+    print("import_wide_byvalue_sum_bits ")
+    print_int(f64_to_bits(wide_val))
+    println("")
+    if !bits_eq(wide_val, 6.0) {
+        println("FAIL import_wide_byvalue_sum")
+        return 7
+    }
+
+    // Caller array must still be intact after by-value pass (copy, not move-corrupt).
+    if !bits_eq(x[0], 1.0) || !bits_eq(x[1], 2.0) || !bits_eq(x[2], 3.0) {
+        println("FAIL caller_corrupted_after_byvalue")
+        return 8
+    }
+
+    // Science-shaped acceptance (issue body: slope == 2 for y = 2x).
+    // Uses a leaf OLS over [f64;100] by value — same ABI as the historical
+    // fit_simple_linear_regression call without depending on that module.
+    var y: [f64; 100] = [0.0; 100]
+    y[0] = 2.0
+    y[1] = 4.0
+    y[2] = 6.0
+    let slope = imported_ols_slope_byvalue(w, y, 3)
+    print("import_ols_slope_bits ")
+    print_int(f64_to_bits(slope))
+    println("")
+    if !bits_eq(slope, 2.0) {
+        println("FAIL import_ols_slope")
+        return 9
+    }
+
+    println("IMPORTED_ARRAY_BYVALUE_OK")
+    0
+}

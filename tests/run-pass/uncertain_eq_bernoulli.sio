@@ -1,0 +1,67 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// L0 acceptance for uncertain-Bool equality (stdlib/epistemic/uncertain_eq.sio):
+// `==` on uncertain values returns the Bernoulli P(|a−b|<ε); branching commits
+// through ep_decide(p, confidence). All expected values independently verified
+// (python math.erf vs compiled SOUNIO, agree to 1e-4).
+//
+// The anti-footgun trio (P3/P4/P5) is the point: a certain literal vs a precise
+// measurement IS equal (P≈1), vs a moderate one is smoothly partial (0.197), vs
+// a wide one is honestly near-zero (0.0004) — no Hellinger δ-catastrophe, and
+// the both-certain corner is exactly boolean.
+
+use epistemic::knowledge::{Epistemic}
+use epistemic::uncertain_eq::{ep_eq_prob, ep_decide, EqField, ep_eq_field}
+
+fn approx(x: f64, y: f64) -> bool {
+    let d = if x > y { x - y } else { y - x }
+    d < 0.0001
+}
+
+fn main() with Mut, Div, Panic {
+    var ok = true
+    let c10 = Epistemic::measured(10.0, 0.0)      // certain 10 (literal)
+    let c13 = Epistemic::measured(13.0, 0.0)      // certain 13
+    let m_tight = Epistemic::measured(10.0, 0.01) // precise measurement
+    let m_mid = Epistemic::measured(10.0, 2.0)    // moderate uncertainty
+    let m_wide = Epistemic::measured(10.0, 1000.0)// wide uncertainty
+    let m5 = Epistemic::measured(10.0, 5.0)
+    let b6 = Epistemic::measured(13.0, 6.0)
+
+    // both-certain corner = exact boolean
+    if approx(ep_eq_prob(&c10, &c10, 0.5), 1.0) { print("P1 certain==certain same -> 1: PASS") }
+    else { print("P1: FAIL"); ok = false }
+    if approx(ep_eq_prob(&c10, &c13, 0.5), 0.0) { print("P2 certain==certain diff -> 0: PASS") }
+    else { print("P2: FAIL"); ok = false }
+
+    // the anti-footgun trio (the Hellinger catastrophe is gone)
+    if approx(ep_eq_prob(&c10, &m_mid, 0.5), 0.1974127) { print("P3 literal vs 10±2 -> 0.197 (smooth): PASS") }
+    else { print("P3: FAIL"); ok = false }
+    if approx(ep_eq_prob(&c10, &m_tight, 0.5), 1.0) { print("P4 literal vs 10±0.01 -> 1 (equal!): PASS") }
+    else { print("P4: FAIL"); ok = false }
+    if approx(ep_eq_prob(&c10, &m_wide, 0.5), 0.0003989) { print("P5 literal vs 10±1000 -> ~0: PASS") }
+    else { print("P5: FAIL"); ok = false }
+
+    // monotone in the declared resolution ε
+    let p7a = ep_eq_prob(&m_mid, &m5, 0.5)
+    let p7b = ep_eq_prob(&m_mid, &m5, 2.0)
+    let p7c = ep_eq_prob(&m_mid, &m5, 5.0)
+    if approx(p7a, 0.0739754) { print("P7a eps=0.5 -> 0.0740: PASS") } else { print("P7a: FAIL"); ok = false }
+    if approx(p7b, 0.2896534) { print("P7b eps=2 -> 0.2897: PASS") } else { print("P7b: FAIL"); ok = false }
+    if approx(p7c, 0.6468396) { print("P7c eps=5 -> 0.6468: PASS") } else { print("P7c: FAIL"); ok = false }
+    if p7a < p7b && p7b < p7c { print("P7 monotone in eps: PASS") } else { print("P7 monotone: FAIL"); ok = false }
+
+    // the commitment primitive: threshold named at the decision site
+    if ep_decide(0.99, 0.95) { print("decide(0.99 at 0.95) -> true: PASS") } else { print("decide-true: FAIL"); ok = false }
+    if ep_decide(0.5, 0.95) { print("decide-false: FAIL"); ok = false } else { print("decide(0.5 at 0.95) -> false: PASS") }
+
+    // EqField diagnostic windows, computed once
+    let ef = ep_eq_field(&m_mid, &b6, 0.5)
+    if approx(ef.p_equal, 0.0563211) { print("EqField p_equal=0.0563: PASS") } else { print("EqField p: FAIL"); ok = false }
+    if approx(ef.hellinger, 0.5174665) { print("EqField hellinger=0.5175: PASS") } else { print("EqField H: FAIL"); ok = false }
+    if approx(ef.w2, 5.0) { print("EqField w2=5: PASS") } else { print("EqField w2: FAIL"); ok = false }
+    if approx(ef.z, 0.4743416) { print("EqField z=0.4743: PASS") } else { print("EqField z: FAIL"); ok = false }
+
+    if ok { print("ALL PASS") } else { print("SOME FAIL") }
+}

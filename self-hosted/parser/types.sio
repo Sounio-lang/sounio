@@ -5,22 +5,90 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::exprs::{parse_expr_entry}
+
+fn type_path_structural_count(list: &StringList, remaining: i64) -> i64 with Mut {
+    if remaining <= 0 || (*list).head_len <= 0 || (*list).head_len > 128 {
+        return -1
+    }
+    match (*list).tail {
+        None => 1
+        Some(next) => {
+            let tail_count = type_path_structural_count(&(*next), remaining - 1)
+            if tail_count <= 0 { -1 } else { 1 + tail_count }
+        }
+    }
+}
+
+fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: Span) -> Parser with Mut, IO {
+    if (*path).seg_count != 1 || (*path).segments.head_len != 4 { return mut_p }
+    let buf = (*path).segments.head_buf
+    if buf[0] != 102 as i8 { return mut_p }
+    let is_f128 = buf[1] == 49 as i8 && buf[2] == 50 as i8 && buf[3] == 56 as i8
+    let is_f256 = buf[1] == 50 as i8 && buf[2] == 53 as i8 && buf[3] == 54 as i8
+    if !is_f128 && !is_f256 { return mut_p }
+    var p = mut_p
+    p.had_error = true
+    p.error_count = p.error_count + 1
+    print("error[E218]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A\n")
+    print("   = note: parser marks this source invalid before checker, IR, SOIR, ABI, or native lowering\n")
+    p
+}
 
 impl Parser {
     // ============================================================
     // Type expression entry point
     // ============================================================
 
-    fn parse_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let k = self.peek()
 
-        if k == TokenKind::Amp {
+        if k == TokenKind::Star {
+            let start = self.current_span()
+            var p = self.advance()  // skip *
+            var is_mut = false
+            if parser_peek(p) == TokenKind::Mut {
+                is_mut = true
+                p = p.advance()
+            } else if parser_peek(p) == TokenKind::Const {
+                p = p.advance()
+            }
+
+            let pair = p.parse_type()
+            p = pair.0
+            let inner_ty = pair.1
+            let span = p.span_from(start)
+            var raw_ty = TypeExpr {
+                kind: TypeExprKind::TypeRawPtr,
+                span: span,
+                path: empty_path(),
+                type_args: None,
+                inner: Some(Box::new(inner_ty)),
+                array_size: None,
+                effects: None,
+                knowledge_info: None,
+                refinement_info: None,
+            }
+            if is_mut {
+                raw_ty.array_size = Some(Box::new(mk_expr(ExprKind::ExprIntLit, span)))
+            }
+            (p, raw_ty)
+        } else if k == TokenKind::Amp {
             self.parse_ref_type()
         } else if k == TokenKind::AmpBang {
             self.parse_ref_mut_type()
         } else if k == TokenKind::LBracket {
             self.parse_array_type()
+        } else if k == TokenKind::LBrace {
+            self.parse_refinement_type()
         } else if k == TokenKind::LParen {
             self.parse_tuple_or_fn_type()
         } else if k == TokenKind::Bang {
@@ -65,10 +133,28 @@ impl Parser {
                 knowledge_info: None,
                 refinement_info: None,
             })
+        } else if k == TokenKind::Question {
+            self.parse_option_shorthand_type()
         } else if k == TokenKind::Fn {
             self.parse_fn_type()
         } else if k == TokenKind::Knowledge {
             self.parse_knowledge_type()
+        } else if k == TokenKind::Forgettable {
+            self.parse_forgettable_type()
+        } else if k == TokenKind::ExactlyPrivate {
+            self.parse_exactly_private_type()
+        } else if k == TokenKind::Editable {
+            self.parse_editable_type()
+        } else if k == TokenKind::CapabilityGated {
+            self.parse_capability_gated_type()
+        } else if k == TokenKind::Composable {
+            self.parse_composable_type()
+        } else if k == TokenKind::Audited {
+            self.parse_audited_type()
+        } else if k == TokenKind::Revivable {
+            self.parse_revivable_type()
+        } else if k == TokenKind::Interpretable {
+            self.parse_interpretable_type()
         } else if k == TokenKind::Model {
             self.parse_generic_wrapper_type(TypeExprKind::TypeModel)
         } else if k == TokenKind::Policy {
@@ -144,7 +230,38 @@ impl Parser {
     // Named type: Foo, Foo::Bar, Option<Box<T>>
     // ============================================================
 
-    fn parse_named_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_option_shorthand_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip ?
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        let span = p.span_from(start)
+        var opt_name = Name { buf: [0; 128], len: 6 }
+        opt_name.buf[0] = 79 as i8
+        opt_name.buf[1] = 112 as i8
+        opt_name.buf[2] = 116 as i8
+        opt_name.buf[3] = 105 as i8
+        opt_name.buf[4] = 111 as i8
+        opt_name.buf[5] = 110 as i8
+        let path = AstPath {
+            segments: StringList { head_buf: opt_name.buf, head_len: opt_name.len, tail: None },
+            seg_count: 1,
+        }
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeNamed,
+            span: span,
+            path: path,
+            type_args: Some(Box::new(TypeExprList { head: inner_ty, tail: None })),
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    fn parse_named_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         let pair = self.parse_type_path()
         let p1 = pair.0
@@ -191,7 +308,8 @@ impl Parser {
             let p2 = pair2.0
             let p2_end: i64 = if p2.pos < p2.token_count { PT_END[p2.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p2_end }
-            (pair2.0, TypeExpr {
+            let p3 = parser_reject_reserved_wide_float_path(pair2.0, &path, span)
+            (p3, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
@@ -206,7 +324,8 @@ impl Parser {
             // Inline span_from to avoid SIZE_HINT method-call issues on p1
             let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
-            (p1, TypeExpr {
+            let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
+            (p2, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
@@ -224,7 +343,52 @@ impl Parser {
     // Type path: Foo or Foo::Bar::Baz
     // ============================================================
 
-    fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div {
+    fn parse_type_path_segments_into(
+        self,
+        out: &! StringList,
+    ) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let name = self.current_name()
+        (*out).head_len = name.len
+        var byte_i: i64 = 0
+        while byte_i < 128 {
+            (*out).head_buf[byte_i as usize] = name.buf[byte_i as usize]
+            byte_i = byte_i + 1
+        }
+        (*out).tail = None
+
+        var p = self.advance()
+        if parser_peek(p) == TokenKind::ColonColon {
+            let next_k = parser_peek_ahead(p, 1)
+            if next_k == TokenKind::Ident || tk_is_keyword(next_k) {
+                p = p.advance()
+                var next = Box::new(StringList {
+                    head_buf: [0; 128],
+                    head_len: 0,
+                    tail: None,
+                })
+                p = p.parse_type_path_segments_into(&!(*next))
+                (*out).tail = Some(next)
+            }
+        }
+        p
+    }
+
+    fn parse_type_path_into(self, out: &! AstPath) -> Parser with Mut, IO, Panic, Div, Alloc {
+        (*out).seg_count = 0
+        (*out).segments.head_len = 0
+        (*out).segments.tail = None
+        var p = self.parse_type_path_segments_into(&!(*out).segments)
+        let segment_count = type_path_structural_count(&(*out).segments, 64)
+        if segment_count <= 0 {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+        } else {
+            (*out).seg_count = segment_count
+        }
+        p
+    }
+
+    fn parse_type_path(self) -> (Parser, AstPath) with Mut, IO, Panic, Div, Alloc {
         let name = self.current_name()
         var p = self.advance()
         var rev_segs = StringList { head_buf: name.buf, head_len: name.len, tail: None }
@@ -346,7 +510,7 @@ impl Parser {
     // Generic arguments: <T, U, V>
     // ============================================================
 
-    fn parse_type_args(self) -> (Parser, TypeExprList) with Mut, IO, Panic, Div {
+    fn parse_type_args(self) -> (Parser, TypeExprList) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip <
         let pair = p.parse_type()
         p = pair.0
@@ -369,17 +533,31 @@ impl Parser {
     // Reference type: &T
     // ============================================================
 
-    fn parse_ref_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_ref_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip &
+        // E041: Rust `&mut T` — Sounio uses `&!T` for exclusive references. Detect
+        // the `mut` keyword after `&` and emit a coded, helpful diagnostic; recover
+        // by consuming `mut` and parsing the inner type as a shared `&T`.
+        if parser_peek(p) == TokenKind::Mut {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            if p.error_count <= 20 {
+                print("error[E041]: Sounio uses `&!T` for exclusive references, not `&mut T`\n")
+                print("  help: change `&mut T` to `&!T`\n")
+            }
+            p = p.advance()  // skip `mut`
+        }
         let pair = p.parse_type()
-        let span = pair.0.span_from(start)
-        (pair.0, TypeExpr {
+        p = pair.0
+        let inner_ty = pair.1
+        let span = p.span_from(start)
+        (p, TypeExpr {
             kind: TypeExprKind::TypeReference,
             span: span,
             path: empty_path(),
             type_args: None,
-            inner: Some(Box::new(pair.1)),
+            inner: Some(Box::new(inner_ty)),
             array_size: None,
             effects: None,
             knowledge_info: None,
@@ -391,17 +569,19 @@ impl Parser {
     // Exclusive reference type: &!T
     // ============================================================
 
-    fn parse_ref_mut_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_ref_mut_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip &!
         let pair = p.parse_type()
-        let span = pair.0.span_from(start)
-        (pair.0, TypeExpr {
+        p = pair.0
+        let inner_ty = pair.1
+        let span = p.span_from(start)
+        (p, TypeExpr {
             kind: TypeExprKind::TypeRefMut,
             span: span,
             path: empty_path(),
             type_args: None,
-            inner: Some(Box::new(pair.1)),
+            inner: Some(Box::new(inner_ty)),
             array_size: None,
             effects: None,
             knowledge_info: None,
@@ -410,10 +590,150 @@ impl Parser {
     }
 
     // ============================================================
+    // Refinement type: { v: T | v >= literal }
+    // ============================================================
+
+    fn parse_refinement_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        var var_name = empty_name()
+        if parser_peek(p) == TokenKind::Ident {
+            var_name = p.current_name()
+            p = p.advance()
+        }
+        p = p.expect(TokenKind::Colon)
+        let base_pair = p.parse_type()
+        p = base_pair.0
+        let base_ty = base_pair.1
+        p = p.expect(TokenKind::Pipe)
+
+        if parser_peek(p) == TokenKind::Ident {
+            p = p.advance()
+        }
+
+        var pred_op: i64 = 5
+        let op = parser_peek(p)
+        if op == TokenKind::Gt {
+            pred_op = 1
+            p = p.advance()
+        } else if op == TokenKind::GtEq {
+            pred_op = 2
+            p = p.advance()
+        } else if op == TokenKind::Lt {
+            pred_op = 3
+            p = p.advance()
+        } else if op == TokenKind::LtEq {
+            pred_op = 4
+            p = p.advance()
+        } else if op == TokenKind::EqEq || op == TokenKind::Eq {
+            pred_op = 5
+            p = p.advance()
+        } else if op == TokenKind::BangEq {
+            pred_op = 6
+            p = p.advance()
+        }
+
+        var pred_int_val: i64 = 0
+        var pred_float_val: f64 = 0.0
+        var pred_is_float = false
+        if parser_peek(p) == TokenKind::FloatLit {
+            pred_float_val = p.current().float_value
+            pred_is_float = true
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::IntLit {
+            pred_int_val = p.current().int_value
+            pred_float_val = p.current().int_value as f64
+            pred_is_float = false
+            p = p.advance()
+        }
+
+        var compound_op: i64 = 0
+        var pred2_op: i64 = 0
+        var pred2_int_val: i64 = 0
+        var pred2_float_val: f64 = 0.0
+        var pred2_is_float = false
+
+        if parser_peek(p) == TokenKind::AmpAmp || parser_peek(p) == TokenKind::PipePipe {
+            if parser_peek(p) == TokenKind::AmpAmp {
+                compound_op = 7
+            } else {
+                compound_op = 8
+            }
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                p = p.advance()
+            }
+            let op2 = parser_peek(p)
+            if op2 == TokenKind::Gt {
+                pred2_op = 1
+                p = p.advance()
+            } else if op2 == TokenKind::GtEq {
+                pred2_op = 2
+                p = p.advance()
+            } else if op2 == TokenKind::Lt {
+                pred2_op = 3
+                p = p.advance()
+            } else if op2 == TokenKind::LtEq {
+                pred2_op = 4
+                p = p.advance()
+            } else if op2 == TokenKind::EqEq || op2 == TokenKind::Eq {
+                pred2_op = 5
+                p = p.advance()
+            } else if op2 == TokenKind::BangEq {
+                pred2_op = 6
+                p = p.advance()
+            }
+            if parser_peek(p) == TokenKind::FloatLit {
+                pred2_float_val = p.current().float_value
+                pred2_is_float = true
+                p = p.advance()
+            } else if parser_peek(p) == TokenKind::IntLit {
+                pred2_int_val = p.current().int_value
+                pred2_float_val = p.current().int_value as f64
+                pred2_is_float = false
+                p = p.advance()
+            }
+        }
+
+        // Consume any additional predicate syntax beyond the first binary
+        // connective so parsing reaches the checker boundary cleanly.
+        while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+            p = p.advance()
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        let info = RefinementInfo {
+            var_name: var_name,
+            base_type: Some(Box::new(base_ty)),
+            pred_op: pred_op,
+            pred_int_val: pred_int_val,
+            pred_float_val: pred_float_val,
+            pred_is_float: pred_is_float,
+            compound_op: compound_op,
+            pred2_op: pred2_op,
+            pred2_int_val: pred2_int_val,
+            pred2_float_val: pred2_float_val,
+            pred2_is_float: pred2_is_float,
+        }
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeRefinement,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: Some(Box::new(info)),
+        })
+    }
+
+    // ============================================================
     // Array or slice element type: [T; N] or [T]
     // ============================================================
 
-    fn parse_array_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_array_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip [
         let pair = p.parse_type()
@@ -422,9 +742,8 @@ impl Parser {
         var size_expr: Option<Box<Expr>> = None
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
-            let pair2 = p.parse_expr()
-            p = pair2.0
-            size_expr = Some(Box::new(pair2.1))
+            p = parse_expr_entry(p)
+            size_expr = Some(parser_take_expr_box())
         }
         p = p.expect(TokenKind::RBracket)
         let span = p.span_from(start)
@@ -445,7 +764,7 @@ impl Parser {
     // Tuple type: (T, U) or unit type: ()
     // ============================================================
 
-    fn parse_tuple_or_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_tuple_or_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip (
 
@@ -508,7 +827,7 @@ impl Parser {
     // Function type: fn(T, U) -> V with E1, E2
     // ============================================================
 
-    fn parse_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div {
+    fn parse_fn_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip fn
         p = p.expect(TokenKind::LParen)
@@ -572,38 +891,92 @@ impl Parser {
     // Effect list: with IO, Mut, Alloc
     // ============================================================
 
-    fn parse_effect_list(self) -> (Parser, EffectList) with Mut, IO, Panic, Div {
+    fn parse_effect_list(self) -> (Parser, EffectList) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'with'
         let first_name = p.current_name()
-        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len }
+        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len, payload: 0 - 1 }
         var first = copy_name_to_effect(first_name, first_eff)
         p = p.advance()  // skip effect name
+        let fpay = p.parse_effect_payload()
+        p = fpay.0
+        first.payload = fpay.1
 
         var rev_list = EffectList { head: first, tail: None }
 
         while parser_peek(p) == TokenKind::Comma {
+            let next_k = parser_peek_ahead(p, 1)
+            let next2_k = parser_peek_ahead(p, 2)
+            if next_k == TokenKind::Ident && next2_k == TokenKind::Colon {
+                break
+            }
             p = p.advance()  // skip ,
             let eff_name = p.current_name()
-            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len }
+            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len, payload: 0 - 1 }
             var e = copy_name_to_effect(eff_name, eff)
-            rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
             p = p.advance()  // skip effect name
+            let npay = p.parse_effect_payload()
+            p = npay.0
+            e.payload = npay.1
+            rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
         }
 
         (p, reverse_effect_list(rev_list))
+    }
+
+    // Returns the parser and the payload of a parameterised effect, or -1 when the
+    // effect carries none. Balanced-paren skipping is kept for payload shapes this
+    // does not yet model; what is new is that a single integer literal is now
+    // RETAINED. It used to be counted and thrown away, which made Epistemic(950)
+    // and Epistemic(400) the same effect.
+    fn parse_effect_payload(self) -> (Parser, i64) with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        var value: i64 = 0 - 1
+        if parser_peek(p) != TokenKind::LParen {
+            return (p, value)
+        }
+        if parser_peek_ahead(p, 1) == TokenKind::IntLit && parser_peek_ahead(p, 2) == TokenKind::RParen {
+            p = p.advance()
+            let tok = p.current()
+            value = tok.int_value
+            p = p.advance()
+            p = p.advance()
+            return (p, value)
+        }
+
+        var depth: i64 = 0
+        while !parser_at_eof(p) {
+            let k = parser_peek(p)
+            if k == TokenKind::LParen {
+                depth = depth + 1
+                p = p.advance()
+            } else if k == TokenKind::RParen {
+                depth = depth - 1
+                p = p.advance()
+                if depth == 0 {
+                    return (p, value)
+                }
+            } else {
+                p = p.advance()
+            }
+        }
+
+        (p, value)
     }
 
     // ============================================================
     // Optional type annotation: ': Type'
     // ============================================================
 
-    fn parse_optional_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div {
+    fn parse_optional_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div, Alloc {
         if self.peek() == TokenKind::Colon {
             var p = self.advance()  // skip :
             let pair = p.parse_type()
-            (pair.0, Some(Box::new(pair.1)))
+            let p2: Parser = pair.0
+            let ty: TypeExpr = pair.1
+            (p2, Some(Box::new(ty)))
         } else {
-            (self, None)
+            let none: Option<Box<TypeExpr>> = None
+            (self, none)
         }
     }
 
@@ -611,21 +984,114 @@ impl Parser {
     // Optional return type: '-> Type'
     // ============================================================
 
-    fn parse_optional_return_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div {
+    fn parse_optional_return_type(self) -> (Parser, Option<Box<TypeExpr>>) with Mut, IO, Panic, Div, Alloc {
         if self.peek() == TokenKind::Arrow {
             var p = self.advance()  // skip ->
             let pair = p.parse_type()
-            let port_p = pair.0
-            let port_ty = pair.1
+            let port_p: Parser = pair.0
+            let port_ty: TypeExpr = pair.1
             (port_p, Some(Box::new(port_ty)))
         } else {
-            (self, None)
+            let none: Option<Box<TypeExpr>> = None
+            (self, none)
         }
     }
 
     // ============================================================
     // Knowledge type: Knowledge<T> or Knowledge[T, ε < 0.05, Valid(...), Derived]
     // ============================================================
+
+    fn parse_knowledge_constraint(self) -> (Parser, KnowledgeConstraint) with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        var constraint = KnowledgeConstraint {
+            field: empty_name(),
+            kind: KnowledgeConstraintKind::KnowledgeConstraintEq,
+            target_name: empty_name(),
+            unit_name: empty_name(),
+            int_value: 0,
+            float_value: 0.0,
+            value_kind: KnowledgeConstraintValueKind::KnowledgeConstraintValueNone,
+        }
+
+        if parser_peek(p) == TokenKind::Ident {
+            constraint.field = p.current_name()
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::Ident && name_eq(p.current_name(), make_name("subclass_of")) {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintSubclassOf
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                constraint.target_name = p.current_name()
+                constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueName
+                p = p.advance()
+            }
+            return (p, constraint)
+        }
+
+        let op = parser_peek(p)
+        if op == TokenKind::GtEq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintGe
+            p = p.advance()
+        } else if op == TokenKind::Gt {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintGt
+            p = p.advance()
+        } else if op == TokenKind::LtEq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintLe
+            p = p.advance()
+        } else if op == TokenKind::Lt {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintLt
+            p = p.advance()
+        } else if op == TokenKind::EqEq || op == TokenKind::Eq {
+            constraint.kind = KnowledgeConstraintKind::KnowledgeConstraintEq
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::IntLit {
+            constraint.int_value = p.current().int_value
+            constraint.float_value = p.current().int_value as f64
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueInt
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::FloatLit {
+            constraint.float_value = p.current().float_value
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueFloat
+            p = p.advance()
+        } else if parser_peek(p) == TokenKind::Ident {
+            constraint.target_name = p.current_name()
+            constraint.value_kind = KnowledgeConstraintValueKind::KnowledgeConstraintValueName
+            p = p.advance()
+        }
+
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Ident {
+                constraint.unit_name = p.current_name()
+                p = p.advance()
+            }
+            p = p.expect(TokenKind::Gt)
+        }
+
+        (p, constraint)
+    }
+
+    fn parse_knowledge_constraint_list(self) -> (Parser, Option<Box<KnowledgeConstraintList> >) with Mut, IO, Panic, Div, Alloc {
+        var p = self.expect(TokenKind::LBrace)
+        var out: Option<Box<KnowledgeConstraintList> > = None
+
+        while parser_peek(p) != TokenKind::RBrace && !parser_at_eof(p) {
+            let parsed = p.parse_knowledge_constraint()
+            p = parsed.0
+            out = Some(Box::new(KnowledgeConstraintList { head: parsed.1, tail: out }))
+            if parser_peek(p) == TokenKind::Comma {
+                p = p.advance()
+            } else if parser_peek(p) == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        (p, out)
+    }
 
     fn parse_knowledge_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
@@ -650,88 +1116,134 @@ impl Parser {
         var epsilon_opt: Option<Box<EpsilonBound>> = None
         var validity_opt: Option<Box<ValidityCondition>> = None
         var provenance_opt: Option<Box<AstProvenanceKind>> = None
+        var proof_constraints_opt: Option<Box<KnowledgeConstraintList> > = None
 
-        if use_bracket {
-            while parser_peek(p) == TokenKind::Comma {
-                p = p.advance()  // skip ,
+        if parser_peek(p) == TokenKind::Where {
+            p = p.advance()
+            let constraint_pair = p.parse_knowledge_constraint_list()
+            p = constraint_pair.0
+            proof_constraints_opt = constraint_pair.1
+        }
 
-                let ck = parser_peek(p)
+        while parser_peek(p) == TokenKind::Comma {
+            p = p.advance()  // skip ,
 
-                // Check for epsilon bound: identifier followed by comparison op
-                if ck == TokenKind::Ident {
-                    // Assume epsilon identifier: parse op + value
-                    p = p.advance()  // skip epsilon identifier
-                    var cmp_op = CompareOp::CmpLt
-                    if parser_peek(p) == TokenKind::Lt {
-                        cmp_op = CompareOp::CmpLt
-                        p = p.advance()
-                    } else if parser_peek(p) == TokenKind::LtEq {
-                        cmp_op = CompareOp::CmpLe
-                        p = p.advance()
-                    } else if parser_peek(p) == TokenKind::Gt {
-                        cmp_op = CompareOp::CmpGt
-                        p = p.advance()
-                    } else if parser_peek(p) == TokenKind::GtEq {
-                        cmp_op = CompareOp::CmpGe
-                        p = p.advance()
-                    } else if parser_peek(p) == TokenKind::EqEq {
-                        cmp_op = CompareOp::CmpEq
-                        p = p.advance()
-                    }
-                    // Parse float value
-                    let eps_tok = p.current()
-                    let eps_val = eps_tok.float_value
-                    p = p.advance()  // skip float literal
-                    epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
-                } else if ck == TokenKind::Valid {
-                    p = p.advance()  // skip 'Valid'
-                    let vkind = AstValidityKind::ValidDuration
-                    var vexpr: Option<Box<Expr>> = None
-                    if parser_peek(p) == TokenKind::LParen {
-                        p = p.advance()  // skip (
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
-                        p = p.expect(TokenKind::RParen)
-                    }
-                    validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
-                } else if ck == TokenKind::ValidUntil {
-                    p = p.advance()  // skip 'ValidUntil'
-                    let vkind = AstValidityKind::ValidUntilTime
-                    var vexpr: Option<Box<Expr>> = None
-                    if parser_peek(p) == TokenKind::LParen {
-                        p = p.advance()
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
-                        p = p.expect(TokenKind::RParen)
-                    }
-                    validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
-                } else if ck == TokenKind::ValidWhile {
-                    p = p.advance()  // skip 'ValidWhile'
-                    let vkind = AstValidityKind::ValidWhileCond
-                    var vexpr: Option<Box<Expr>> = None
-                    if parser_peek(p) == TokenKind::LParen {
-                        p = p.advance()
-                        let epair = p.parse_expr()
-                        p = epair.0
-                        vexpr = Some(Box::new(epair.1))
-                        p = p.expect(TokenKind::RParen)
-                    }
-                    validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
-                } else if ck == TokenKind::Derived {
+            let ck = parser_peek(p)
+
+            // Check for epsilon bound: identifier followed by comparison op
+            if ck == TokenKind::Ident {
+                // Assume epsilon identifier: parse op + value
+                p = p.advance()  // skip epsilon identifier
+                var cmp_op = CompareOp::CmpLt
+                if parser_peek(p) == TokenKind::Lt {
+                    cmp_op = CompareOp::CmpLt
                     p = p.advance()
-                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvDerived))
-                } else if ck == TokenKind::Computed {
+                } else if parser_peek(p) == TokenKind::LtEq {
+                    cmp_op = CompareOp::CmpLe
                     p = p.advance()
-                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvComputed))
-                } else if ck == TokenKind::Measured {
+                } else if parser_peek(p) == TokenKind::Gt {
+                    cmp_op = CompareOp::CmpGt
                     p = p.advance()
-                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvMeasured))
-                } else {
-                    // Unknown component — skip
+                } else if parser_peek(p) == TokenKind::GtEq {
+                    cmp_op = CompareOp::CmpGe
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::EqEq || parser_peek(p) == TokenKind::Eq {
+                    cmp_op = CompareOp::CmpEq
                     p = p.advance()
                 }
+                var eps_val = 0.0
+                if parser_peek(p) == TokenKind::FloatLit {
+                    eps_val = p.current().float_value
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::IntLit {
+                    eps_val = p.current().int_value as f64
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::Ident {
+                    p = p.advance()
+                }
+                epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
+            } else if ck == TokenKind::Error {
+                p = p.advance()
+                while parser_peek(p) == TokenKind::Error {
+                    p = p.advance()
+                }
+                var cmp_op2 = CompareOp::CmpEq
+                if parser_peek(p) == TokenKind::Lt {
+                    cmp_op2 = CompareOp::CmpLt
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::LtEq {
+                    cmp_op2 = CompareOp::CmpLe
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::Gt {
+                    cmp_op2 = CompareOp::CmpGt
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::GtEq {
+                    cmp_op2 = CompareOp::CmpGe
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::EqEq || parser_peek(p) == TokenKind::Eq {
+                    cmp_op2 = CompareOp::CmpEq
+                    p = p.advance()
+                }
+                var eps_val2 = 0.0
+                if parser_peek(p) == TokenKind::FloatLit {
+                    eps_val2 = p.current().float_value
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::IntLit {
+                    eps_val2 = p.current().int_value as f64
+                    p = p.advance()
+                } else if parser_peek(p) == TokenKind::Ident {
+                    p = p.advance()
+                } else {
+                    while parser_peek(p) == TokenKind::Error {
+                        p = p.advance()
+                    }
+                }
+                epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op2, value: eps_val2 }))
+            } else if ck == TokenKind::Valid {
+                p = p.advance()  // skip 'Valid'
+                let vkind = AstValidityKind::ValidDuration
+                var vexpr: Option<Box<Expr>> = None
+                if parser_peek(p) == TokenKind::LParen {
+                    p = p.advance()  // skip (
+                    p = parse_expr_entry(p)
+                    vexpr = Some(parser_take_expr_box())
+                    p = p.expect(TokenKind::RParen)
+                }
+                validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
+            } else if ck == TokenKind::ValidUntil {
+                p = p.advance()  // skip 'ValidUntil'
+                let vkind = AstValidityKind::ValidUntilTime
+                var vexpr: Option<Box<Expr>> = None
+                if parser_peek(p) == TokenKind::LParen {
+                    p = p.advance()
+                    p = parse_expr_entry(p)
+                    vexpr = Some(parser_take_expr_box())
+                    p = p.expect(TokenKind::RParen)
+                }
+                validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
+            } else if ck == TokenKind::ValidWhile {
+                p = p.advance()  // skip 'ValidWhile'
+                let vkind = AstValidityKind::ValidWhileCond
+                var vexpr: Option<Box<Expr>> = None
+                if parser_peek(p) == TokenKind::LParen {
+                    p = p.advance()
+                    p = parse_expr_entry(p)
+                    vexpr = Some(parser_take_expr_box())
+                    p = p.expect(TokenKind::RParen)
+                }
+                validity_opt = Some(Box::new(ValidityCondition { kind: vkind, expr: vexpr }))
+            } else if ck == TokenKind::Derived {
+                p = p.advance()
+                provenance_opt = Some(Box::new(AstProvenanceKind::AstProvDerived))
+            } else if ck == TokenKind::Computed {
+                p = p.advance()
+                provenance_opt = Some(Box::new(AstProvenanceKind::AstProvComputed))
+            } else if ck == TokenKind::Measured {
+                p = p.advance()
+                provenance_opt = Some(Box::new(AstProvenanceKind::AstProvMeasured))
+            } else {
+                // Unknown component — skip
+                p = p.advance()
             }
         }
 
@@ -748,6 +1260,7 @@ impl Parser {
             epsilon: epsilon_opt,
             validity: validity_opt,
             provenance: provenance_opt,
+            proof_constraints: proof_constraints_opt,
         }
         (p, TypeExpr {
             kind: TypeExprKind::TypeKnowledge,
@@ -758,6 +1271,212 @@ impl Parser {
             array_size: None,
             effects: None,
             knowledge_info: Some(Box::new(info)),
+            refinement_info: None,
+        })
+    }
+
+    // Forgettable<T> — ZD-annihilable type.
+    // Syntax: Forgettable<T> or Forgettable<T, "e3e10"> (with optional ZD locus name)
+    // Inner type stored in `inner` field; functions that use Forgettable<T>
+    // must declare the `ZD` effect so the compiler can verify exact erasure.
+    fn parse_forgettable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()   // skip 'Forgettable'
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeForgettable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // ExactlyPrivate<T> — exact-privacy wrapper: contribution to a trained model
+    // is algebraically zero in the ZD kernel (G3/G4). Stronger than DP.
+    // Requires `with ZD`.
+    fn parse_exactly_private_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        // Optional second parameter: the ZD locus this privacy claim is made at.
+        // ExactlyPrivate<T, e3e10> names the zero-divisor element whose kernel the
+        // contribution is claimed to be algebraically inside. It is a compile-time
+        // locus, not a runtime value; the *mut spine interrogates well-formedness.
+        var locus_args: Option<Box<TypeExprList> > = None
+        if parser_peek(p) == TokenKind::Comma {
+            p = p.advance()
+            let pair2 = p.parse_type()
+            p = pair2.0
+            locus_args = Some(Box::new(TypeExprList { head: pair2.1, tail: None }))
+        }
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeExactlyPrivate,
+            span: span,
+            path: empty_path(),
+            type_args: locus_args,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Editable<T> — locality-bounded model editing wrapper (G5).
+    // Edits via ZD are confined to the 4D kernel of the ZD operator.
+    fn parse_editable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeEditable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // CapabilityGated<T> — capability containment (G7): value lives in a ZD-gated
+    // subspace; can be exactly annihilated without touching orthogonal capabilities.
+    fn parse_capability_gated_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeCapabilityGated,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Composable<T> — ZD-orthogonal model merge (G8). Two Composable values
+    // combine along ZD-orthogonal complements without mutual perturbation.
+    fn parse_composable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeComposable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Audited<T> — witness-bearing surgery (G9). Every surgical operation
+    // emits a machine-checkable Lean derivation.
+    fn parse_audited_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeAudited,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Revivable<T> — time-bounded reversible surgery (G10). Surgical ops
+    // can be inverted within a Temporal window, irrevocable afterward.
+    fn parse_revivable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeRevivable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
+    }
+
+    // Interpretable<T> — AMI canonical-basis marker. T's internal
+    // representation admits a unique decomposition onto the 168 ZD classes.
+    fn parse_interpretable_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+        p = p.expect(TokenKind::Lt)
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+        p = p.expect(TokenKind::Gt)
+        let span = p.span_from(start)
+        (p, TypeExpr {
+            kind: TypeExprKind::TypeInterpretable,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: Some(Box::new(inner_ty)),
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
             refinement_info: None,
         })
     }
@@ -791,10 +1510,10 @@ impl Parser {
                 if component_tok == TokenKind::Valid {
                     p = p.advance()
                     p = p.expect(TokenKind::LParen)
-                    let expr_pair = p.parse_expr()
-                    p = expr_pair.0
+                    p = parse_expr_entry(p)
+                    let expr_box = parser_take_expr_box()
                     p = p.expect(TokenKind::RParen)
-                    validity_opt = Some(Box::new(ValidityCondition { kind: AstValidityKind::ValidDuration, expr: Some(Box::new(expr_pair.1)) }))
+                    validity_opt = Some(Box::new(ValidityCondition { kind: AstValidityKind::ValidDuration, expr: Some(expr_box) }))
                 } else if component_tok == TokenKind::Derived {
                     p = p.advance()
                     provenance_opt = Some(Box::new(AstProvenanceKind::AstProvDerived))
@@ -819,6 +1538,7 @@ impl Parser {
             epsilon: epsilon_opt,
             validity: validity_opt,
             provenance: provenance_opt,
+            proof_constraints: None,
         }
         (p, TypeExpr {
             kind: wrapper_kind,

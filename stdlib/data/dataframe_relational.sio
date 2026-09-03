@@ -1,0 +1,473 @@
+//! Relational DataFrame verbs: group-by aggregation and inner join.
+//!
+//! Built entirely on the public `data::dataframe` accessors (df_new/df_get/df_add_row/
+//! df_nrows/df_ncols), so they compose with the rest of the DataFrame surface and the
+//! CSV-file hub. Keys are matched by exact f64 equality (intended for integer-encoded
+//! categories, e.g. ids 1.0, 2.0, 3.0).
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols}
+
+// Find `key` among seen[0..n); returns its index or -1.
+fn find_key(seen: &[f64; 1024], n: i64, key: f64) -> i64 {
+    var i: i64 = 0
+    while i < n {
+        if seen[i as usize] == key { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Collect the distinct values of `col` into `out`, returning how many there are.
+fn distinct_keys(df: &DataFrame, col: i64, out: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        let k = df_get(df, r, col)
+        if find_key(out, n, k) < 0 && n < 1024 {
+            out[n as usize] = k
+            n = n + 1
+        }
+        r = r + 1
+    }
+    n
+}
+
+/// Group by `key_col` and sum `val_col`. Returns a 2-column DataFrame [key, sum(val)],
+/// one row per distinct key (in first-seen order).
+pub fn df_groupby_sum(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var s: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col) }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = s
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and average `val_col`. Returns [key, mean(val)].
+pub fn df_groupby_mean(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var s: f64 = 0.0
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col); cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key
+        row[1] = if cnt > 0.0 { s / cnt } else { 0.0 }
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and count rows per key. Returns [key, count].
+pub fn df_groupby_count(df: &DataFrame, key_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = cnt
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Inner join `left` and `right` on left[left_key] == right[right_key]. Each matching pair emits a
+/// row of all left columns followed by all right columns except the right key. The result therefore
+/// has left.ncols + right.ncols - 1 columns (capped at 64).
+pub fn df_join_inner(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_new(lc + rc - 1)
+    var lr: i64 = 0
+    while lr < df_nrows(left) {
+        let lk = df_get(left, lr, left_key)
+        var rr: i64 = 0
+        while rr < df_nrows(right) {
+            if df_get(right, rr, right_key) == lk {
+                var row: [f64; 64] = [0.0; 64]
+                var col: i64 = 0
+                var c: i64 = 0
+                while c < lc && col < 64 { row[col as usize] = df_get(left, lr, c); col = col + 1; c = c + 1 }
+                c = 0
+                while c < rc && col < 64 {
+                    if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                    c = c + 1
+                }
+                df_add_row(&!out, &row)
+            }
+            rr = rr + 1
+        }
+        lr = lr + 1
+    }
+    out
+}
+
+// True if `key` appears in column `col` of `df`.
+fn df_col_contains(df: &DataFrame, col: i64, key: f64) -> bool with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        if df_get(df, r, col) == key { return true }
+        r = r + 1
+    }
+    false
+}
+
+/// Left (outer) join: every left row appears at least once. Matching right rows contribute their
+/// columns (all right columns except the right key); a left row with no match gets 0.0 in those
+/// columns. Result layout is identical to df_join_inner: left.ncols + right.ncols - 1 columns.
+/// (0.0 is the "missing" fill — the DataFrame has no separate null.)
+pub fn df_join_left(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_new(lc + rc - 1)
+    var lr: i64 = 0
+    while lr < df_nrows(left) {
+        let lk = df_get(left, lr, left_key)
+        var matched: i64 = 0
+        var rr: i64 = 0
+        while rr < df_nrows(right) {
+            if df_get(right, rr, right_key) == lk {
+                matched = 1
+                var row: [f64; 64] = [0.0; 64]
+                var col: i64 = 0
+                var c: i64 = 0
+                while c < lc && col < 64 { row[col as usize] = df_get(left, lr, c); col = col + 1; c = c + 1 }
+                c = 0
+                while c < rc && col < 64 {
+                    if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                    c = c + 1
+                }
+                df_add_row(&!out, &row)
+            }
+            rr = rr + 1
+        }
+        if matched == 0 {
+            // left columns preserved; the (rc - 1) right columns stay 0.0
+            var row: [f64; 64] = [0.0; 64]
+            var c: i64 = 0
+            while c < lc && c < 64 { row[c as usize] = df_get(left, lr, c); c = c + 1 }
+            df_add_row(&!out, &row)
+        }
+        lr = lr + 1
+    }
+    out
+}
+
+/// Full outer join: the left join, plus one row for every right key absent from the left. Those
+/// right-only rows carry the right key in the left-key column, 0.0 in the other left columns, and
+/// the right row's values in the right columns. Same layout as df_join_inner/df_join_left.
+pub fn df_join_outer(left: &DataFrame, right: &DataFrame, left_key: i64, right_key: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let lc = df_ncols(left)
+    let rc = df_ncols(right)
+    var out = df_join_left(left, right, left_key, right_key)
+    var rr: i64 = 0
+    while rr < df_nrows(right) {
+        let rk = df_get(right, rr, right_key)
+        if !df_col_contains(left, left_key, rk) {
+            var row: [f64; 64] = [0.0; 64]
+            row[left_key as usize] = rk            // carry the key into the left-key column
+            var col: i64 = lc
+            var c: i64 = 0
+            while c < rc && col < 64 {
+                if c != right_key { row[col as usize] = df_get(right, rr, c); col = col + 1 }
+                c = c + 1
+            }
+            df_add_row(&!out, &row)
+        }
+        rr = rr + 1
+    }
+    out
+}
+
+// Local Newton sqrt (keeps the data module self-contained).
+fn gb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = if x > 1.0 { x } else { 1.0 }
+    var i: i64 = 0
+    while i < 50 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+/// Group by `key_col` and take the minimum of `val_col`. Returns [key, min(val)].
+pub fn df_groupby_min(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v < m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the maximum of `val_col`. Returns [key, max(val)].
+pub fn df_groupby_max(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var m: f64 = 0.0
+        var seen: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key {
+                let v = df_get(df, r, val_col)
+                if seen == 0 || v > m { m = v }
+                seen = 1
+            }
+            r = r + 1
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = m
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the sample standard deviation of `val_col` (dividing by n-1, matching
+/// df_col_std; a group of fewer than 2 rows yields 0). Returns [key, std(val)].
+pub fn df_groupby_std(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        // pass 1: mean
+        var s: f64 = 0.0
+        var cnt: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key { s = s + df_get(df, r, val_col); cnt = cnt + 1.0 }
+            r = r + 1
+        }
+        var sd: f64 = 0.0
+        if cnt >= 2.0 {
+            let mean = s / cnt
+            var ss: f64 = 0.0
+            r = 0
+            while r < df_nrows(df) {
+                if df_get(df, r, key_col) == key {
+                    let d = df_get(df, r, val_col) - mean
+                    ss = ss + d * d
+                }
+                r = r + 1
+            }
+            sd = gb_sqrt(ss / (cnt - 1.0))
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = sd
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+// Sort a scratch array a[0..n) ascending in place (insertion sort; n <= 1024).
+fn gb_sort_vals(a: &![f64; 1024], n: i64) {
+    var i: i64 = 1
+    while i < n && i < 1024 {
+        let cur = a[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 && a[j as usize] > cur {
+            a[(j + 1) as usize] = a[j as usize]
+            j = j - 1
+        }
+        a[(j + 1) as usize] = cur
+        i = i + 1
+    }
+}
+
+/// Group by `key_col` and take the median of `val_col`. Returns [key, median(val)]. For an even
+/// group size the median is the average of the two central values; an empty group yields 0.
+pub fn df_groupby_median(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                buf[cnt as usize] = df_get(df, r, val_col)
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        gb_sort_vals(&!buf, cnt)
+        var med: f64 = 0.0
+        if cnt > 0 {
+            if cnt % 2 == 1 {
+                med = buf[(cnt / 2) as usize]
+            } else {
+                med = 0.5 * (buf[(cnt / 2 - 1) as usize] + buf[(cnt / 2) as usize])
+            }
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = med
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+// p-th percentile (0..100) of a sorted array a[0..n) by linear interpolation (numpy/pandas default).
+fn gb_percentile(a: &[f64; 1024], n: i64, p: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    if n == 1 { return a[0] }
+    let rank = (p / 100.0) * ((n - 1) as f64)
+    var lo: i64 = rank as i64
+    if lo < 0 { lo = 0 }
+    if lo >= n - 1 { return a[(n - 1) as usize] }
+    let frac = rank - (lo as f64)
+    a[lo as usize] + frac * (a[(lo + 1) as usize] - a[lo as usize])
+}
+
+/// Group by `key_col` and take the p-th percentile (0..100) of `val_col`, using linear interpolation
+/// between order statistics (the numpy/pandas default). Returns [key, percentile]. p=50 equals the
+/// median; an empty group yields 0.
+pub fn df_groupby_percentile(df: &DataFrame, key_col: i64, val_col: i64, p: f64) -> DataFrame
+    with Mut, Div, Panic
+{
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(2)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                buf[cnt as usize] = df_get(df, r, val_col)
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        gb_sort_vals(&!buf, cnt)
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key
+        row[1] = gb_percentile(&buf, cnt, p)
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}
+
+/// Group by `key_col` and take the 90th percentile of `val_col` (convenience over
+/// df_groupby_percentile).
+pub fn df_groupby_p90(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    df_groupby_percentile(df, key_col, val_col, 90.0)
+}
+
+/// Group by `key_col` and compute several aggregates of `val_col` in one pass. Returns an 8-column
+/// DataFrame with, per distinct key:
+///   [0]=key  [1]=count  [2]=sum  [3]=mean  [4]=min  [5]=max  [6]=sample std (n-1)  [7]=median
+/// (std is 0 for a group of fewer than 2 rows.) Equivalent to the individual df_groupby_* verbs but
+/// grouped once.
+pub fn df_groupby_agg(df: &DataFrame, key_col: i64, val_col: i64) -> DataFrame with Mut, Div, Panic {
+    var keys: [f64; 1024] = [0.0; 1024]
+    let nk = distinct_keys(df, key_col, &!keys)
+    var out = df_new(8)
+    var g: i64 = 0
+    while g < nk {
+        let key = keys[g as usize]
+        var buf: [f64; 1024] = [0.0; 1024]
+        var cnt: i64 = 0
+        var sum: f64 = 0.0
+        var mn: f64 = 0.0
+        var mx: f64 = 0.0
+        var r: i64 = 0
+        while r < df_nrows(df) {
+            if df_get(df, r, key_col) == key && cnt < 1024 {
+                let v = df_get(df, r, val_col)
+                if cnt == 0 { mn = v; mx = v } else { if v < mn { mn = v } if v > mx { mx = v } }
+                sum = sum + v
+                buf[cnt as usize] = v
+                cnt = cnt + 1
+            }
+            r = r + 1
+        }
+        let cf = cnt as f64
+        let mean = if cnt > 0 { sum / cf } else { 0.0 }
+        // sample std
+        var std: f64 = 0.0
+        if cnt >= 2 {
+            var ss: f64 = 0.0
+            var k: i64 = 0
+            while k < cnt { let d = buf[k as usize] - mean; ss = ss + d * d; k = k + 1 }
+            std = gb_sqrt(ss / (cf - 1.0))
+        }
+        // median (sorts buf in place)
+        gb_sort_vals(&!buf, cnt)
+        var med: f64 = 0.0
+        if cnt > 0 {
+            if cnt % 2 == 1 { med = buf[(cnt / 2) as usize] }
+            else { med = 0.5 * (buf[(cnt / 2 - 1) as usize] + buf[(cnt / 2) as usize]) }
+        }
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = key; row[1] = cf; row[2] = sum; row[3] = mean
+        row[4] = mn;  row[5] = mx; row[6] = std; row[7] = med
+        df_add_row(&!out, &row)
+        g = g + 1
+    }
+    out
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, useSpring } from 'framer-motion';
 
 export function CustomCursor() {
@@ -8,8 +8,14 @@ export function CustomCursor() {
   const cursorY = useSpring(0, { stiffness: 600, damping: 30, mass: 0.5 });
 
   useEffect(() => {
-    // Hide on mobile / touch devices
-    if (typeof window !== 'undefined' && window.matchMedia("(hover: none)").matches) {
+    // Hide on mobile / touch devices or screens smaller than 1024px to prevent stuck cursors on tap
+    if (typeof window !== 'undefined' && (window.matchMedia("(hover: none)").matches || window.innerWidth < 1024)) {
+      return;
+    }
+
+    // Respect OS “reduce motion” — keep native cursor semantics
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (reduceMotion.matches) {
       return;
     }
 

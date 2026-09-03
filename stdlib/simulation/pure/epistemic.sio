@@ -1,0 +1,103 @@
+// stdlib/simulation/pure/epistemic.sio — Epistemic Simulation Operations
+//
+// Epistemic variants of simulation operations that propagate measurement uncertainty.
+//
+// NOTE — module is incomplete:
+//   - `rand_uniform` (line 78), `ln` (line 79), `sqrt` (line 80) at the
+//     bottom of this file are STUBS that return constant/identity values
+//     (rand_uniform=0.5, ln(x)=x-1, sqrt(x)=x). They exist only so this
+//     module parses. `emonte_carlo_normal` (which uses all three) is
+//     therefore not numerically meaningful until those primitives are
+//     replaced with real implementations.
+//   - `ep_sqrt` (line 81) is now the canonical 30-iter Newton and matches
+//     stdlib/epistemic/knowledge.sio::ep_sqrt. Previously it returned x
+//     (identity), which silently corrupted the MC standard deviation.
+//   - This module is not currently imported by the test suite or by
+//     other stdlib modules. See stdlib/simulation/README.md.
+
+pub struct ETimeSeries {
+    pub n_points: i32,
+    pub times: [f64; 256],
+    pub values: [Epistemic; 256],
+}
+
+pub fn etimeseries_new() -> ETimeSeries {
+    ETimeSeries { n_points: 0, times: [0.0; 256], values: [Epistemic::certain(0.0); 256] }
+}
+
+pub fn etimeseries_push(ts: &! ETimeSeries, t: f64, v: Epistemic) with Mut {
+    if ts.n_points < 256 {
+        let i = ts.n_points as usize
+        ts.times[i] = t
+        ts.values[i] = v
+        ts.n_points = ts.n_points + 1
+    }
+}
+
+pub fn etimeseries_mean(ts: &ETimeSeries) -> Epistemic with Mut, Div {
+    if ts.n_points == 0 { return Epistemic::certain(0.0) }
+    var sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < ts.n_points {
+        sum = sum.add(&ts.values[i as usize])
+        i = i + 1
+    }
+    let n = Epistemic::certain(ts.n_points as f64)
+    sum.div(&n)
+}
+
+pub fn etimeseries_std(ts: &ETimeSeries) -> Epistemic with Mut, Div {
+    if ts.n_points == 0 { return Epistemic::certain(0.0) }
+    let mean = etimeseries_mean(ts)
+    var var_sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < ts.n_points {
+        let diff = ts.values[i as usize].sub(&mean)
+        var_sum = var_sum.add(&diff.square())
+        i = i + 1
+    }
+    let n = Epistemic::certain(ts.n_points as f64)
+    let variance = var_sum.div(&n)
+    variance.sqrt()
+}
+
+pub struct EMonteCarloResult {
+    pub n_samples: i32,
+    pub mean: Epistemic,
+    pub std: Epistemic,
+}
+
+pub fn emonte_carlo_normal(n: i32, mean: f64, std: f64) -> EMonteCarloResult with Mut, Div {
+    var sum = Epistemic::certain(0.0)
+    var sum_sq = Epistemic::certain(0.0)
+    var i = 0
+    while i < n {
+        let u1 = rand_uniform()
+        let u2 = rand_uniform()
+        let mag = sqrt(-2.0 * ln(u1))
+        let z = mag * cos(6.28318530718 * u2)
+        let sample = Epistemic::measured(mean + std * z, ep_sqrt(std * std))
+        sum = sum.add(&sample)
+        sum_sq = sum_sq.add(&sample.square())
+        i = i + 1
+    }
+    let n_ep = Epistemic::certain(n as f64)
+    let mc_mean = sum.div(&n_ep)
+    let mc_var = sum_sq.div(&n_ep).sub(&mc_mean.square())
+    let mc_std = mc_var.sqrt()
+    EMonteCarloResult { n_samples: n, mean: mc_mean, std: mc_std }
+}
+
+fn rand_uniform() -> f64 with IO { 0.5 }
+fn ln(x: f64) -> f64 with Div { x - 1.0 }
+fn sqrt(x: f64) -> f64 with Div { x }
+fn ep_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x / 2.0
+    var k = 0
+    while k < 30 {
+        y = (y + x / y) / 2.0
+        k = k + 1
+    }
+    y
+}

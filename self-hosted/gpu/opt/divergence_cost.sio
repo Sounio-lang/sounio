@@ -1,367 +1,140 @@
-// self-hosted::gpu::opt::divergence_cost — Analytical Warp Divergence Cost Model
-//
-// Quantifies the performance cost of warp divergence for epistemic GPU shadow
-// lanes. When warp_vote_fastpath.sio uses vote.sync.ballot to check epistemic
-// predicates, some warps may diverge (not all lanes agree). This module models
-// the serialization penalty, ballot overhead, and reconvergence cost so that
-// the optimizer can decide whether the fast-path is profitable.
-//
-// Architecture (CUDA Programming Guide Section 5.4.2):
-//   - Warp size: 32 threads (NVIDIA), all execute in lockstep
-//   - Divergent branch: warp serializes both paths, disabling inactive lanes
-//   - Serialization penalty: up to 2x for 100% divergence (linear model)
-//   - vote.sync.ballot: ~2 cycles on SM 8.x
-//   - Branch penalty: ~4 cycles per taken branch
-//
-// This is NOT a runtime profiler — it is a static analytical model that the
-// compiler uses at optimization time to estimate divergence costs.
-
-// ============================================================================
-// Data Structures
-// ============================================================================
-
-struct DivCostConfig {
-    warp_size: i64,
-    ballot_cost_cycles: i64,
-    branch_penalty_cycles: i64,
-    typical_kernel_cycles: i64
+fn dc_serialization_penalty_milli(divergence_pct: i64) -> i64 {
+    1000 + divergence_pct * 10
 }
 
-struct DivCostEstimate {
-    divergence_pct: f64,
-    serialization_cost: f64,
-    ballot_overhead: f64,
-    reconvergence_cost: f64,
-    total_penalty: f64,
-    estimated_speedup: f64
-}
-
-struct DivCostReport {
-    kernel_count: i64,
-    estimates: [DivCostEstimate; 64],
-    total_speedup: f64,
-    worst_kernel: i64
-}
-
-// ============================================================================
-// Utility: i64 to string (self-contained helper)
-// ============================================================================
-
-fn dc_i64_to_string(v: i64) -> string with Mut, Panic, Div {
-    if v == 0 { return "0" }
-
-    var n = v
-    var neg: bool = false
-    if n < 0 {
-        neg = true
-        n = 0 - n
+fn dc_ballot_overhead_milli(num_ballots: i64, ballot_cost_cycles: i64, typical_kernel_cycles: i64) -> i64 with Div {
+    if typical_kernel_cycles <= 0 {
+        return 0
     }
+    (num_ballots * ballot_cost_cycles * 1000) / typical_kernel_cycles
+}
 
-    var rev: [i8; 32] = [0; 32]
-    var rev_len: i64 = 0
-    while n > 0 && rev_len < 31 {
-        let digit = n % 10
-        rev[rev_len as usize] = (48 + digit) as i8
-        rev_len = rev_len + 1
-        n = n / 10
+fn dc_reconvergence_cost_milli(distance: i64, divergence_pct: i64) -> i64 with Div {
+    // Original model: distance * (divergence_pct / 100) * 0.01.
+    // In milli-units, multiply by 1000: distance * divergence_pct / 10.
+    (distance * divergence_pct) / 10
+}
+
+fn dc_compute_penalty(divergence_pct: i64, num_ballots: i64, reconv_distance: i64, ballot_cost_cycles: i64, typical_kernel_cycles: i64) -> i64 with Div {
+    let serial = dc_serialization_penalty_milli(divergence_pct)
+    let ballot = dc_ballot_overhead_milli(num_ballots, ballot_cost_cycles, typical_kernel_cycles)
+    let reconv = dc_reconvergence_cost_milli(reconv_distance, divergence_pct)
+    serial + ballot + reconv
+}
+
+fn dc_estimate_speedup(shadow_overhead_milli: i64, divergence_pct: i64) -> i64 with Div {
+    let budget_overhead_milli = 300
+    let base_cost = 1000 + shadow_overhead_milli
+    let fast_path_cost = 1000 + (budget_overhead_milli * shadow_overhead_milli) / 1000
+    let opt_cost = ((100 - divergence_pct) * fast_path_cost + divergence_pct * base_cost) / 100
+    if opt_cost <= 0 {
+        return 0
     }
+    (base_cost * 1000) / opt_cost
+}
 
-    var out: [i8; 64] = [0; 64]
-    var out_len: i64 = 0
-    if neg {
-        out[out_len as usize] = 45 as i8
-        out_len = out_len + 1
+fn dc_classify_divergence_pct(total_branches: i64, divergent_branches: i64) -> i64 with Div {
+    if total_branches <= 0 {
+        return 0
     }
+    (divergent_branches * 100) / total_branches
+}
 
-    var i = rev_len - 1
-    while i >= 0 {
-        out[out_len as usize] = rev[i as usize]
-        out_len = out_len + 1
-        if i == 0 { break }
-        i = i - 1
+fn dc_analyze_kernel_penalty(total_branches: i64, divergent_branches: i64, avg_reconv_dist: i64) -> i64 with Div {
+    let div_pct = dc_classify_divergence_pct(total_branches, divergent_branches)
+    dc_compute_penalty(div_pct, divergent_branches, avg_reconv_dist, 2, 1000)
+}
+
+fn dc_kernel_speedup(total_branches: i64, divergent_branches: i64, shadow_overhead_milli: i64) -> i64 with Div {
+    let div_pct = dc_classify_divergence_pct(total_branches, divergent_branches)
+    dc_estimate_speedup(shadow_overhead_milli, div_pct)
+}
+
+fn dc_worst_kernel_index(p0: i64, p1: i64, p2: i64) -> i64 {
+    if p2 >= p0 && p2 >= p1 {
+        return 2
     }
-    str_from_bytes(out, out_len)
-}
-
-// ============================================================================
-// Function 1: Default configuration
-// NVIDIA SM 8.x reference values:
-//   warp_size = 32, ballot ~2 cycles, branch ~4 cycles, typical kernel ~1000
-// ============================================================================
-
-fn dc_config_default() -> DivCostConfig {
-    DivCostConfig {
-        warp_size: 32,
-        ballot_cost_cycles: 2,
-        branch_penalty_cycles: 4,
-        typical_kernel_cycles: 1000
+    if p1 >= p0 {
+        return 1
     }
+    0
 }
 
-// ============================================================================
-// Function 2: Serialization penalty
-// Linear model: 0% divergence → 1.0x (no penalty), 100% → 2.0x (worst case)
-// penalty = 1.0 + divergence_pct / 100.0
-// ============================================================================
-
-fn dc_serialization_penalty(divergence_pct: f64, warp_size: i64) -> f64 {
-    // warp_size is used for documentation/future non-linear models
-    // Linear model: penalty scales from 1.0 to 2.0
-    1.0 + divergence_pct / 100.0
+fn dc_average_speedup_milli(s0: i64, s1: i64, s2: i64) -> i64 with Div {
+    (s0 + s1 + s2) / 3
 }
 
-// ============================================================================
-// Function 3: Ballot overhead
-// Fraction of kernel time consumed by ballot instructions.
-// overhead = (num_ballots * ballot_cost_cycles) / typical_kernel_cycles
-// ============================================================================
-
-fn dc_ballot_overhead(num_ballots: i64, cfg: DivCostConfig) -> f64 with Panic, Div {
-    let cost = num_ballots * cfg.ballot_cost_cycles
-    (cost as f64) / (cfg.typical_kernel_cycles as f64)
-}
-
-// ============================================================================
-// Function 4: Reconvergence cost
-// Small per-instruction penalty at the reconvergence point.
-// cost = distance * (divergence_pct / 100.0) * 0.01
-// distance = number of instructions between branch and reconvergence
-// ============================================================================
-
-fn dc_reconvergence_cost(distance: i64, divergence_pct: f64) -> f64 {
-    (distance as f64) * (divergence_pct / 100.0) * 0.01
-}
-
-// ============================================================================
-// Function 5: Combined penalty computation
-// Aggregates serialization + ballot overhead + reconvergence into a single
-// DivCostEstimate. Also computes estimated_speedup via dc_estimate_speedup
-// with a typical shadow_overhead of 2.0 and budget_overhead of 0.3.
-// ============================================================================
-
-fn dc_compute_penalty(divergence_pct: f64, num_ballots: i64, reconv_distance: i64, cfg: DivCostConfig) -> DivCostEstimate with Mut, Panic, Div {
-    let serial = dc_serialization_penalty(divergence_pct, cfg.warp_size)
-    let ballot = dc_ballot_overhead(num_ballots, cfg)
-    let reconv = dc_reconvergence_cost(reconv_distance, divergence_pct)
-    let total = serial + ballot + reconv
-    let speedup = dc_estimate_speedup(2.0, divergence_pct)
-
-    DivCostEstimate {
-        divergence_pct: divergence_pct,
-        serialization_cost: serial,
-        ballot_overhead: ballot,
-        reconvergence_cost: reconv,
-        total_penalty: total,
-        estimated_speedup: speedup
-    }
-}
-
-// ============================================================================
-// Function 6: Speedup estimation
-// Models the speedup from budget-bounded uncertainty propagation in the fast path.
-// The fast path is NOT free — it performs conservative upper-bound epsilon
-// propagation costing ~30% of full shadow overhead (budget_overhead = 0.3).
-//
-// Without optimization: base_cost = 1.0 + shadow_overhead
-// With optimization:
-//   non-divergent fraction runs budget-bounded: 1.0 + budget_overhead * shadow_overhead
-//   divergent fraction runs full path: 1.0 + shadow_overhead
-//   opt_cost = (1-div_frac)*(1+budget*shadow) + div_frac*(1+shadow)
-//   speedup = base_cost / opt_cost
-//
-// Example: shadow=2.0, div_pct=10%, budget=0.3 → opt=1.74 → speedup≈1.724
-// ============================================================================
-
-fn dc_estimate_speedup(shadow_overhead: f64, divergence_pct: f64) -> f64 with Panic, Div {
-    // Budget-bounded fast path costs ~30% of full shadow propagation
-    let budget_overhead: f64 = 0.3
-    let div_frac = divergence_pct / 100.0
-    let base_cost = 1.0 + shadow_overhead
-    let opt_cost = (1.0 - div_frac) * (1.0 + budget_overhead * shadow_overhead) + div_frac * base_cost
-    base_cost / opt_cost
-}
-
-// ============================================================================
-// Function 7: Classify divergence
-// Given total branches and divergent branches, returns percentage.
-// ============================================================================
-
-fn dc_classify_divergence(total_branches: i64, divergent_branches: i64) -> f64 with Panic, Div {
-    if total_branches <= 0 { return 0.0 }
-    let pct = (divergent_branches * 100) as f64 / (total_branches as f64)
-    pct
-}
-
-// ============================================================================
-// Function 8: Single kernel analysis
-// Combines classify + compute_penalty for one kernel.
-// Uses 1 ballot per divergent branch as the default heuristic.
-// ============================================================================
-
-fn dc_analyze_kernel(total_branches: i64, divergent_branches: i64, avg_reconv_dist: i64, cfg: DivCostConfig) -> DivCostEstimate with Mut, Panic, Div {
-    let div_pct = dc_classify_divergence(total_branches, divergent_branches)
-    // Heuristic: one ballot instruction per divergent branch
-    let num_ballots = divergent_branches
-    dc_compute_penalty(div_pct, num_ballots, avg_reconv_dist, cfg)
-}
-
-// ============================================================================
-// Function 9: Multi-kernel module analysis
-// Analyzes up to 64 kernels and produces a report with per-kernel estimates,
-// total speedup (average), and worst-case kernel index.
-// ============================================================================
-
-fn dc_analyze_module(kernel_count: i64, branch_counts: [i64; 64], div_counts: [i64; 64], reconv_dists: [i64; 64], cfg: DivCostConfig) -> DivCostReport with Mut, Panic, Div {
-    var count = kernel_count
-    if count > 64 { count = 64 }
-    if count < 0 { count = 0 }
-
-    // Initialize estimates array with zero estimates
-    var estimates: [DivCostEstimate; 64] = [DivCostEstimate {
-        divergence_pct: 0.0,
-        serialization_cost: 0.0,
-        ballot_overhead: 0.0,
-        reconvergence_cost: 0.0,
-        total_penalty: 0.0,
-        estimated_speedup: 0.0
-    }; 64]
-
-    var total_speedup_sum: f64 = 0.0
-    var worst_idx: i64 = 0
-    var worst_penalty: f64 = 0.0
-
-    var i: i64 = 0
-    while i < count {
-        let est = dc_analyze_kernel(
-            branch_counts[i as usize],
-            div_counts[i as usize],
-            reconv_dists[i as usize],
-            cfg
-        )
-        estimates[i as usize] = est
-        total_speedup_sum = total_speedup_sum + est.estimated_speedup
-
-        if est.total_penalty > worst_penalty {
-            worst_penalty = est.total_penalty
-            worst_idx = i
-        }
-
-        i = i + 1
-    }
-
-    var avg_speedup: f64 = 0.0
-    if count > 0 {
-        avg_speedup = total_speedup_sum / (count as f64)
-    }
-
-    DivCostReport {
-        kernel_count: count,
-        estimates: estimates,
-        total_speedup: avg_speedup,
-        worst_kernel: worst_idx
-    }
-}
-
-// ============================================================================
-// Function 10: Top-level entry with default config
-// ============================================================================
-
-fn dc_run(kernel_count: i64, branch_counts: [i64; 64], div_counts: [i64; 64], reconv_dists: [i64; 64]) -> DivCostReport with Mut, Panic, Div {
-    let cfg = dc_config_default()
-    dc_analyze_module(kernel_count, branch_counts, div_counts, reconv_dists, cfg)
-}
-
-// ============================================================================
-// Self-Tests
-// ============================================================================
-
-fn main() with Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Div, Panic {
     var pass: i64 = 0
 
-    // T1: Config defaults valid (warp_size == 32)
-    let cfg = dc_config_default()
-    if cfg.warp_size == 32 && cfg.ballot_cost_cycles == 2 && cfg.branch_penalty_cycles == 4 && cfg.typical_kernel_cycles == 1000 {
+    let warp_size = 32
+    let ballot_cost_cycles = 2
+    let branch_penalty_cycles = 4
+    let typical_kernel_cycles = 1000
+    let cfg_valid = warp_size == 32 && ballot_cost_cycles == 2 && branch_penalty_cycles == 4 && typical_kernel_cycles == 1000
+    if cfg_valid {
         pass = pass + 1
     }
 
-    // T2: 0% divergence → serialization = 1.0 (no penalty)
-    let s0 = dc_serialization_penalty(0.0, 32)
-    if s0 >= 0.99 && s0 <= 1.01 {
+    let s0 = dc_serialization_penalty_milli(0)
+    if s0 == 1000 {
         pass = pass + 1
     }
 
-    // T3: 100% divergence → serialization = 2.0 (worst case)
-    let s100 = dc_serialization_penalty(100.0, 32)
-    if s100 >= 1.99 && s100 <= 2.01 {
+    let s100 = dc_serialization_penalty_milli(100)
+    if s100 == 2000 {
         pass = pass + 1
     }
 
-    // T4: 50% divergence → serialization = 1.5
-    let s50 = dc_serialization_penalty(50.0, 32)
-    if s50 >= 1.49 && s50 <= 1.51 {
+    let s50 = dc_serialization_penalty_milli(50)
+    if s50 == 1500 {
         pass = pass + 1
     }
 
-    // T5: Ballot overhead for 3 ballots at 2 cycles, 1000 cycle kernel = 0.006
-    let bo = dc_ballot_overhead(3, cfg)
-    if bo >= 0.005 && bo <= 0.007 {
+    let bo = dc_ballot_overhead_milli(3, ballot_cost_cycles, typical_kernel_cycles)
+    if bo == 6 {
         pass = pass + 1
     }
 
-    // T6: Reconvergence cost: distance=10, 50% div → 0.05
-    let rc = dc_reconvergence_cost(10, 50.0)
-    if rc >= 0.049 && rc <= 0.051 {
+    let rc = dc_reconvergence_cost_milli(10, 50)
+    if rc == 50 {
         pass = pass + 1
     }
 
-    // T7: Combined penalty computation with realistic values
-    // div_pct=25%, 2 ballots, reconv_dist=8
-    // serial = 1.25, ballot = 4/1000 = 0.004, reconv = 8*0.25*0.01 = 0.02
-    // total = 1.274
-    let est = dc_compute_penalty(25.0, 2, 8, cfg)
-    if est.serialization_cost >= 1.24 && est.serialization_cost <= 1.26 {
-        if est.total_penalty > 1.2 && est.total_penalty < 1.4 {
-            pass = pass + 1
-        }
-    }
-
-    // T8: Speedup estimation: shadow_overhead=2.0, div_pct=10% → speedup > 1.0
-    // effective = 1.0 + 0.1*2.0 = 1.2, speedup = 2.0/1.2 ≈ 1.667
-    let sp = dc_estimate_speedup(2.0, 10.0)
-    if sp > 1.5 && sp < 1.8 {
+    let penalty = dc_compute_penalty(25, 2, 8, ballot_cost_cycles, typical_kernel_cycles)
+    if penalty == 1274 {
         pass = pass + 1
     }
 
-    // T9: Classify: 5 of 10 branches divergent = 50.0%
-    let cls = dc_classify_divergence(10, 5)
-    if cls >= 49.9 && cls <= 50.1 {
+    let speedup = dc_estimate_speedup(2000, 10)
+    if speedup > 1500 && speedup < 1800 {
         pass = pass + 1
     }
 
-    // T10: Full module analysis with 3 kernels
-    var branches: [i64; 64] = [0; 64]
-    var divs: [i64; 64] = [0; 64]
-    var dists: [i64; 64] = [0; 64]
-
-    // Kernel 0: low divergence (1/20 = 5%)
-    branches[0] = 20
-    divs[0] = 1
-    dists[0] = 5
-
-    // Kernel 1: medium divergence (5/10 = 50%)
-    branches[1] = 10
-    divs[1] = 5
-    dists[1] = 10
-
-    // Kernel 2: high divergence (8/10 = 80%)
-    branches[2] = 10
-    divs[2] = 8
-    dists[2] = 15
-
-    let report = dc_run(3, branches, divs, dists)
-    if report.kernel_count == 3 && report.total_speedup > 0.5 && report.worst_kernel == 2 {
+    let cls = dc_classify_divergence_pct(10, 5)
+    if cls == 50 {
         pass = pass + 1
     }
 
-    println(dc_i64_to_string(pass) ++ "/10 self-tests passed")
+    let p0 = dc_analyze_kernel_penalty(20, 1, 5)
+    let p1 = dc_analyze_kernel_penalty(10, 5, 10)
+    let p2 = dc_analyze_kernel_penalty(10, 8, 15)
+    let sp0 = dc_kernel_speedup(20, 1, 2000)
+    let sp1 = dc_kernel_speedup(10, 5, 2000)
+    let sp2 = dc_kernel_speedup(10, 8, 2000)
+    let avg_speedup = dc_average_speedup_milli(sp0, sp1, sp2)
+    let worst = dc_worst_kernel_index(p0, p1, p2)
+    let module_valid = p0 == 1054 && p1 == 1560 && p2 == 1936 && avg_speedup > 1000 && worst == 2
+    if module_valid {
+        pass = pass + 1
+    }
+
+    if pass == 10 {
+        println("10/10 self-tests passed")
+        return 0
+    } else {
+        println("FAIL")
+    }
+
+    1
 }

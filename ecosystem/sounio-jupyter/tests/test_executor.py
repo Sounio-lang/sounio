@@ -65,9 +65,64 @@ def test_code_wrapping_preserves_type_defs():
     executor.cleanup()
 
 
+def test_session_persistence():
+    """Test that declarations accumulate across run_cell calls."""
+    executor = CellExecutor()
+
+    # First cell: a declaration
+    out1, err1, rc1 = executor.run_cell("fn add(x: i64, y: i64) -> i64 { x + y }")
+    assert rc1 == 0, f"Declaration should compile: {err1}"
+    assert len(executor._declarations) == 1
+
+    # Second cell: another declaration
+    out2, err2, rc2 = executor.run_cell("fn sub(x: i64, y: i64) -> i64 { x - y }")
+    assert rc2 == 0, f"Second declaration should compile: {err2}"
+    assert len(executor._declarations) == 2
+
+    # Session source should contain both
+    src = executor.get_session_source()
+    assert "fn add" in src
+    assert "fn sub" in src
+
+    executor.cleanup()
+
+
+def test_expression_uses_session():
+    """Test that expressions can reference previously declared functions."""
+    executor = CellExecutor()
+
+    # Declare a function
+    out1, err1, rc1 = executor.run_cell("fn double(x: i64) -> i64 { x * 2 }")
+    assert rc1 == 0, f"Declaration failed: {err1}"
+
+    # Evaluate an expression using the function
+    out2, err2, rc2 = executor.run_cell("double(21)")
+    assert rc2 == 0, f"Expression failed: {err2}"
+    assert out2.strip() == "42", f"Expected 42, got {out2!r}"
+
+    executor.cleanup()
+
+
+def test_reset_session():
+    """Test that reset_session clears accumulated declarations."""
+    executor = CellExecutor()
+
+    executor.run_cell("fn id(x: i64) -> i64 { x }")
+    assert len(executor._declarations) == 1
+
+    executor.reset_session()
+    assert len(executor._declarations) == 0
+    assert executor.get_session_source() == ""
+
+    executor.cleanup()
+
+
 if __name__ == "__main__":
     test_executor_initialization()
     test_code_wrapping_expressions()
     test_code_wrapping_preserves_functions()
     test_code_wrapping_preserves_type_defs()
+    test_session_persistence()
+    test_expression_uses_session()
+    test_reset_session()
     print("All executor tests passed!")

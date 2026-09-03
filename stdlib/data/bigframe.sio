@@ -1,0 +1,213 @@
+// stdlib/data/bigframe.sio
+// Heap-backed columnar f64 DataFrame — breaks the 64x1024 cap of data::dataframe.
+//
+// Storage: one heap f64 buffer per column, grown on demand (2x) via heap_realloc.
+// Column pointers are kept inside the struct as i64 (cast to/from *mut f64).
+// Backed by heap_alloc / heap_realloc / heap_free (from stdlib/mem/box.sio) and
+// the read_f64 / write_f64 builtins — the same idiom as collections/heap_vec.sio's
+// HeapF64Vec. NATIVE ONLY, and heap needs the lean_single engine.
+//
+// The POINT is scale: a BigFrame can hold >> 1024 rows (millions), unlike the
+// fixed [f64; 65536] DataFrame which is hard-capped at 1024 rows x 64 cols.
+//
+// IMPORTANT (see heap_vec.sio): the FIRST allocation of every column MUST be
+// heap_alloc — heap_realloc uses mremap and reads a header 8 bytes before the
+// pointer, so it must never be called on a null/initial pointer.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn bf_max_cols() -> i64 { 64 }
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+//
+// col_ptrs[c] holds the heap address of column c's f64 buffer, stored as i64.
+// All columns share the same n_rows (logical length) and cap_rows (capacity).
+pub struct BigFrame {
+    col_ptrs: [i64; 64],
+    n_cols: i64,
+    n_rows: i64,
+    cap_rows: i64,
+}
+
+// ============================================================================
+// CONSTRUCTION
+// ============================================================================
+
+// Create an empty BigFrame with n_cols columns, each preallocated to hold
+// capacity_rows rows. capacity_rows is clamped to >= 1 so the first buffer is a
+// real heap_alloc (never a null that heap_realloc could later mremap).
+pub fn bf_new(n_cols: i64, capacity_rows: i64) -> BigFrame with Alloc {
+    var nc = n_cols
+    if nc < 0 { nc = 0 }
+    if nc > 64 { nc = 64 }
+    var cap = capacity_rows
+    if cap < 1 { cap = 1 }
+
+    var ptrs: [i64; 64] = [0; 64]
+    let bytes = cap * 8
+    var c: i64 = 0
+    while c < nc {
+        let p = heap_alloc(bytes) as *mut f64
+        ptrs[c] = p as i64
+        c = c + 1
+    }
+    BigFrame {
+        col_ptrs: ptrs,
+        n_cols: nc,
+        n_rows: 0,
+        cap_rows: cap,
+    }
+}
+
+// ============================================================================
+// INTERNAL: grow every column buffer to at least `need` rows.
+// ============================================================================
+fn bf_reserve(bf: &!BigFrame, need: i64) with Alloc, Mut {
+    if need <= bf.cap_rows { return }
+    var new_cap = bf.cap_rows
+    if new_cap < 1 { new_cap = 1 }
+    while new_cap < need {
+        new_cap = new_cap * 2
+    }
+    let new_bytes = new_cap * 8
+    var c: i64 = 0
+    while c < bf.n_cols {
+        let old = bf.col_ptrs[c] as *mut i8
+        let np = heap_realloc(old, new_bytes) as *mut f64
+        bf.col_ptrs[c] = np as i64
+        c = c + 1
+    }
+    bf.cap_rows = new_cap
+}
+
+// ============================================================================
+// MUTATION
+// ============================================================================
+
+// Append one row. `row` supplies up to 64 column values; only the first n_cols
+// (capped to bf.n_cols) are stored. Grows every column buffer if needed.
+pub fn bf_push_row(bf: &!BigFrame, row: &[f64; 64], n_cols: i64) with Alloc, Mut {
+    bf_reserve(bf, bf.n_rows + 1)
+    let r = bf.n_rows
+    var nc = n_cols
+    if nc > bf.n_cols { nc = bf.n_cols }
+    var c: i64 = 0
+    while c < nc {
+        let p = bf.col_ptrs[c] as *mut f64
+        write_f64(p, r, row[c])
+        c = c + 1
+    }
+    // zero-fill any remaining columns not provided by the row
+    while c < bf.n_cols {
+        let p = bf.col_ptrs[c] as *mut f64
+        write_f64(p, r, 0.0)
+        c = c + 1
+    }
+    bf.n_rows = bf.n_rows + 1
+}
+
+// Set a single cell.
+pub fn bf_set(bf: &!BigFrame, r: i64, c: i64, v: f64) with Mut {
+    if r < 0 { return }
+    if c < 0 { return }
+    if r >= bf.n_rows { return }
+    if c >= bf.n_cols { return }
+    let p = bf.col_ptrs[c] as *mut f64
+    write_f64(p, r, v)
+}
+
+// ============================================================================
+// ACCESS
+// ============================================================================
+
+// Get a single cell.
+pub fn bf_get(bf: &BigFrame, r: i64, c: i64) -> f64 {
+    if r < 0 { return 0.0 }
+    if c < 0 { return 0.0 }
+    if r >= bf.n_rows { return 0.0 }
+    if c >= bf.n_cols { return 0.0 }
+    let p = bf.col_ptrs[c] as *mut f64
+    read_f64(p, r)
+}
+
+pub fn bf_nrows(bf: &BigFrame) -> i64 {
+    bf.n_rows
+}
+
+pub fn bf_ncols(bf: &BigFrame) -> i64 {
+    bf.n_cols
+}
+
+pub fn bf_cap_rows(bf: &BigFrame) -> i64 {
+    bf.cap_rows
+}
+
+// ============================================================================
+// AGGREGATION
+// ============================================================================
+
+pub fn bf_col_ptr(bf: &BigFrame, c: i64) -> i64 { bf.col_ptrs[c] }
+
+pub fn bf_col_sum(bf: &BigFrame, c: i64) -> f64 {
+    if c < 0 { return 0.0 }
+    if c >= bf.n_cols { return 0.0 }
+    let p = bf.col_ptrs[c] as *mut f64
+    let n = bf.n_rows
+    // 8 independent accumulators break the serial add dependency chain so the CPU pipelines the
+    // adds (instruction-level parallelism) -- ~1.4x over a single accumulator. True SIMD would close
+    // the rest of the gap to a vectorized kernel; that is a compiler auto-vectorization item (C3).
+    var a0: f64 = 0.0
+    var a1: f64 = 0.0
+    var a2: f64 = 0.0
+    var a3: f64 = 0.0
+    var a4: f64 = 0.0
+    var a5: f64 = 0.0
+    var a6: f64 = 0.0
+    var a7: f64 = 0.0
+    let n8 = n - (n % 8)
+    var i: i64 = 0
+    while i < n8 {
+        a0 = a0 + read_f64(p, i)
+        a1 = a1 + read_f64(p, i + 1)
+        a2 = a2 + read_f64(p, i + 2)
+        a3 = a3 + read_f64(p, i + 3)
+        a4 = a4 + read_f64(p, i + 4)
+        a5 = a5 + read_f64(p, i + 5)
+        a6 = a6 + read_f64(p, i + 6)
+        a7 = a7 + read_f64(p, i + 7)
+        i = i + 8
+    }
+    while i < n {
+        a0 = a0 + read_f64(p, i)
+        i = i + 1
+    }
+    ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7))
+}
+
+pub fn bf_col_mean(bf: &BigFrame, c: i64) -> f64 {
+    if bf.n_rows <= 0 { return 0.0 }
+    let s = bf_col_sum(bf, c)
+    s / (bf.n_rows as f64)
+}
+
+// ============================================================================
+// TEARDOWN
+// ============================================================================
+
+pub fn bf_free(bf: &!BigFrame) with Alloc, Mut {
+    var c: i64 = 0
+    while c < bf.n_cols {
+        let p = bf.col_ptrs[c]
+        if p != 0 {
+            heap_free(p as *mut i8)
+            bf.col_ptrs[c] = 0
+        }
+        c = c + 1
+    }
+    bf.n_rows = 0
+    bf.cap_rows = 0
+}

@@ -1,0 +1,122 @@
+// tests/run-pass/multi_drug_aggregate_test.sio
+//
+// End-to-end gate for darwin_pbpk::aggregate_confidence.
+//
+// Inputs (per the dissertation's three-drug study):
+//   rapamycin     c = 0.612
+//   haloperidol   c = 0.587
+//   DES sirolimus c = 0.503
+//
+// Expected (computed by hand, verified by stdout-diff against
+// tests/golden/multi_drug_conf/aggregator_outputs.txt):
+//   worst_case    = 0.503
+//   rss           = 1 - sqrt(0.388² + 0.413² + 0.497²)
+//                 = 1 - sqrt(0.150544 + 0.170569 + 0.247009)
+//                 = 1 - sqrt(0.568122)  ≈ 1 - 0.753738  ≈ 0.246262
+//   cov_weighted (ρ = I) = rss  (bit-identical via the same sqrt path)
+
+use darwin_pbpk::aggregate_confidence::*
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    var d: f64 = a - b
+    if d < 0.0 { d = 0.0 - d }
+    d < tol
+}
+
+fn build_three_drug_input() -> MultiDrugInput with Mut, Div, Panic {
+    var inp = multi_drug_input_zero()
+    inp.n_drugs = 3
+    inp.confidence[0] = 0.612    // rapamycin
+    inp.confidence[1] = 0.587    // haloperidol
+    inp.confidence[2] = 0.503    // DES sirolimus
+    inp.rho = rho_identity()
+    inp
+}
+
+fn fail(tag: string) with IO, Mut, Panic, Div {
+    print("FAIL multi_drug_aggregate: ")
+    println(tag)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let inp = build_three_drug_input()
+
+    // ---- Rule 1: worst_case ----
+    let wc = aggregate_worst_case(inp)
+    if !approx_eq(wc, 0.503, 1e-12) {
+        fail("worst_case_value")
+        return
+    }
+
+    // ---- Rule 2: rss ----
+    let rss = aggregate_rss(inp)
+    if !approx_eq(rss, 0.246262, 1e-4) {
+        fail("rss_value")
+        return
+    }
+
+    // ---- Rule 3: cov_weighted with rho = I ----
+    let cw = aggregate_cov_weighted(inp)
+    if !approx_eq(cw, rss, 1e-12) {
+        fail("cov_weighted_eq_rss_when_rho_identity")
+        return
+    }
+
+    // ---- --min-conf gate behaviour ----
+    // At min_conf = 0.5: worst_case ADMITS (0.503 >= 0.5), rss REFUSES.
+    let v_wc_strict = aggregate_evaluate(inp, 0, 0.5)
+    if !v_wc_strict.admitted {
+        fail("worst_case_strict_should_admit")
+        return
+    }
+    let v_rss_strict = aggregate_evaluate(inp, 1, 0.5)
+    if v_rss_strict.admitted {
+        fail("rss_strict_should_refuse")
+        return
+    }
+
+    // At min_conf = 0.2: all rules ADMIT.
+    let v_wc_loose = aggregate_evaluate(inp, 0, 0.2)
+    if !v_wc_loose.admitted {
+        fail("worst_case_loose_should_admit")
+        return
+    }
+    let v_rss_loose = aggregate_evaluate(inp, 1, 0.2)
+    if !v_rss_loose.admitted {
+        fail("rss_loose_should_admit")
+        return
+    }
+    let v_cw_loose = aggregate_evaluate(inp, 2, 0.2)
+    if !v_cw_loose.admitted {
+        fail("cov_weighted_loose_should_admit")
+        return
+    }
+
+    // ---- Weakest-drug identification ----
+    if v_wc_strict.weakest != 2 {
+        fail("weakest_idx_should_be_2")
+        return
+    }
+    if !approx_eq(v_wc_strict.weakest_c, 0.503, 1e-12) {
+        fail("weakest_c_should_be_0.503")
+        return
+    }
+
+    // ---- Empty-input edge case (n_drugs=0 → aggregate=1.0, ADMIT) ----
+    let empty = multi_drug_input_zero()
+    if !approx_eq(aggregate_worst_case(empty), 1.0, 1e-12) {
+        fail("empty_worst_case_should_be_1")
+        return
+    }
+    if !approx_eq(aggregate_rss(empty), 1.0, 1e-12) {
+        fail("empty_rss_should_be_1")
+        return
+    }
+
+    // ---- Deterministic stdout snapshot — keeps the gate's golden honest ----
+    aggregate_print_verdict(v_wc_strict)
+    aggregate_print_verdict(v_rss_strict)
+    aggregate_print_verdict(v_cw_loose)
+
+    println("PASS multi_drug_aggregate")
+}

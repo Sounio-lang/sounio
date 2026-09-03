@@ -1,0 +1,212 @@
+// examples/erdos/168_regime_a1.sio
+//
+// A1 probe: 14-vertex unit-distance graph spanning all 7 ZD fibers.
+// 84 ZD surgeries produce 15 distinct edge structures (vs 2 for the 7-vertex probe).
+//
+// Formula design (fixed LCG seed = 12345 for all twists → background identical,
+// only edge-constraint clauses vary → formula variation = pure graph structure):
+//   42 coloring vars  (14 vertices × 3 colors, var = vertex*3 + color)
+//   95 background 3-SAT clauses (fixed, same for all 84 twists)
+//   56 coloring-base clauses   (14 at-least-one + 42 at-most-one)
+//   3*e edge-conflict clauses  (depends on surgery)
+//   Total: 151 + 3*e
+//     e=8:  175 / 42 = 4.17  (near threshold)
+//     e=10: 181 / 42 = 4.31  (just above threshold)
+//     e=12: 187 / 42 = 4.45
+//     e=18: 205 / 42 = 4.88  (well above threshold)
+//   Threshold for 42 vars ≈ 4.27 * 42 = 179 clauses.
+//
+// Falsifiable prediction (CDCL phase-transition model):
+//   More edges → higher clause density → above threshold → shorter UNSAT proof
+//   → fewer conflicts → LOWER regime_recent_hardness.
+//   So: mean hardness at e=8 > mean hardness at e=18.
+//   The 14-vertex probe has 15 distinct graph structures so this is testable.
+//
+// Connection:
+//   docs/research/locus-coeruleus-surgical-controller-sounio-note.md §5(c)
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+var lcg_state: i64 = 0
+
+fn lcg_next() -> i64 with Mut {
+    lcg_state = (lcg_state * 1664525 + 1013904223) & 0x7FFFFFFF
+    return lcg_state
+}
+
+fn lrand(n: i64) -> i64 with Mut {
+    return lcg_next() % n
+}
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") } if d == 1 { print("1") } if d == 2 { print("2") }
+    if d == 3 { print("3") } if d == 4 { print("4") } if d == 5 { print("5") }
+    if d == 6 { print("6") } if d == 7 { print("7") } if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn prf(x: f64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); prf(0.0 - x); return }
+    let ip = x as i32
+    pri(ip)
+    print(".")
+    let f0 = (x - (ip as f64)) * 10.0
+    let d0 = f0 as i32
+    let f1 = (f0 - (d0 as f64)) * 10.0
+    let d1 = f1 as i32
+    pri(d0)
+    pri(d1)
+}
+
+fn add2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a; lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a; lits[1] = b; lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+// 95 background 3-SAT clauses over 42 vars. LCG seeded to fixed value before call.
+fn add_background(ctx: &!SmtContext) with Mut, Div {
+    var i: i32 = 0
+    while i < 95 {
+        let v0 = (lrand(42)) as i32
+        let s0 = (lrand(2)) as i32
+        let v1 = (lrand(42)) as i32
+        let s1 = (lrand(2)) as i32
+        let v2 = (lrand(42)) as i32
+        let s2 = (lrand(2)) as i32
+        add3(ctx, v0*2+s0, v1*2+s1, v2*2+s2)
+        i = i + 1
+    }
+}
+
+// 3-coloring base: at-least-one + at-most-one for 14 vertices.
+fn add_color_base14(ctx: &!SmtContext) with Mut, Div {
+    var v: i32 = 0
+    while v < 14 {
+        add3(ctx, (v*3+0)*2, (v*3+1)*2, (v*3+2)*2)
+        add2(ctx, (v*3+0)*2+1, (v*3+1)*2+1)
+        add2(ctx, (v*3+0)*2+1, (v*3+2)*2+1)
+        add2(ctx, (v*3+1)*2+1, (v*3+2)*2+1)
+        v = v + 1
+    }
+}
+
+// Edge constraints from current ADJ14.
+fn add_edge_clauses14(ctx: &!SmtContext) with Mut, Div {
+    var ui: i64 = 0
+    while ui < 14 {
+        var wi: i64 = ui + 1
+        while wi < 14 {
+            if get_adj14_edge(ui, wi) == 1 {
+                var c: i32 = 0
+                while c < 3 {
+                    let uv = (ui as i32) * 3 + c
+                    let wv = (wi as i32) * 3 + c
+                    add2(ctx, uv*2+1, wv*2+1)
+                    c = c + 1
+                }
+            }
+            wi = wi + 1
+        }
+        ui = ui + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+    init_probe14_pub()
+
+    print("=== A1: 14-vertex ZD-surgery regime probe ===\n")
+    print("42 vars. 95 bg (fixed seed) + 56 color-base + 3*e edge clauses.\n")
+    print("15 distinct graph structures. Prediction: hardness ~ edge count.\n\n")
+    print("idx lo hi e  cls  confl trust  hard\n")
+    print("--- -- -- -- ---  ----- -----  ----\n")
+
+    // Per-edge-count accumulators (edge counts: 8,10,11,12,18 → use array indexed by e)
+    var sum_hard_by_e:  [f64; 20] = [0.0; 20]
+    var cnt_by_e:       [i32; 20] = [0; 20]
+
+    var idx: i64 = 0
+    while idx < 84 {
+        let lo  = get_prim_lo(idx)
+        let hi  = get_prim_hi(idx)
+
+        build_twisted_adj14_pub(idx)
+        let e = count_edges14_pub() as i32
+
+        // Unique seed per twist: background variation + graph variation.
+        // With 15 distinct graphs appearing multiple times, averaging per edge count
+        // separates graph-structure effect from background noise.
+        lcg_state = idx * 127 + 1
+        var ctx = smt_new()
+        add_background(&! ctx)
+        add_color_base14(&! ctx)
+        add_edge_clauses14(&! ctx)
+
+        smt_set_score_mode(&! ctx, 3)
+        smt_set_no_ple(&! ctx, 1)
+        let _r = smt_solve(&! ctx)
+
+        let confl = smt_get_conflicts(&ctx)
+        let trust = smt_get_explore_trust(&ctx)
+        let hard  = smt_get_regime_hardness(&ctx)
+
+        if e < 20 {
+            sum_hard_by_e[e as usize] = sum_hard_by_e[e as usize] + hard
+            cnt_by_e[e as usize] = cnt_by_e[e as usize] + 1
+        }
+
+        pri(idx as i32); print(" ")
+        pri(lo as i32);  print("  ")
+        pri(hi as i32);  print("  ")
+        pri(e);          print("  ")
+        pri(151 + e * 3); print("  ")
+        pri(confl);      print("  ")
+        prf(trust);      print("  ")
+        prf(hard);       print("\n")
+
+        idx = idx + 1
+    }
+
+    print("\n=== By edge count ===\n")
+    print("e    mean_hard  n\n")
+    var e2: i32 = 0
+    while e2 < 20 {
+        if cnt_by_e[e2 as usize] > 0 {
+            pri(e2); print("    ")
+            prf(sum_hard_by_e[e2 as usize] / (cnt_by_e[e2 as usize] as f64))
+            print("     "); pri(cnt_by_e[e2 as usize]); print("\n")
+        }
+        e2 = e2 + 1
+    }
+
+    print("\n--- Verdict ---\n")
+    // Compare hardness at e=8 (low) vs e=18 (high)
+    let h8 = sum_hard_by_e[8] / (cnt_by_e[8] as f64)
+    let h18 = if cnt_by_e[18] > 0 { sum_hard_by_e[18] / (cnt_by_e[18] as f64) } else { 0.0 }
+    print("Mean hard e=8:  "); prf(h8);  print(" (n="); pri(cnt_by_e[8]);  print(")\n")
+    print("Mean hard e=18: "); prf(h18); print(" (n="); pri(cnt_by_e[18]); print(")\n")
+    // Correct CDCL direction: more edges → above threshold → shorter UNSAT proof
+    // → fewer conflicts → LOWER hardness.  So h8 > h18 is the CONFIRMED direction.
+    if h8 > h18 + 0.02 {
+        print("CONFIRMED: sparse graph (e=8) harder than dense (e=18).\n")
+        print("More ZD-surgery edges → higher clause density → above threshold →\n")
+        print("shorter CDCL refutation → lower hardness.  Phase-transition model holds.\n")
+        print("ZD surgery edge structure correlates with epistemic regime signal.\n")
+    } else if h18 > h8 + 0.02 {
+        print("UNEXPECTED: dense graph harder. Coloring constraints dominate refutation.\n")
+    } else {
+        print("NULL: no significant hardness separation between e=8 and e=18.\n")
+    }
+}

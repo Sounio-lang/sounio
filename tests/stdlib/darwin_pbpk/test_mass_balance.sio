@@ -1,0 +1,110 @@
+//@ run-pass
+//@ expect-stdout: MASS_BALANCE_OK
+// Systemic mass-conservation test for the 14-compartment PBPK model.
+// Validates that total drug mass is conserved within solver tolerance,
+// is non-negative, approximately monotone, and decays over a 168 h horizon.
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Note: rapamycin parameters (e.g. ep14_rapamycin_params) have rb_ratio != 1,
+    // which causes the circulation ODE terms to create/destroy mass.  For a
+    // genuine mass-conservation test we use default_pbpk_params() where
+    // rb_ratio = 1.0 so compartmental exchange is mass-neutral.
+    let prm = default_pbpk_params()
+    let dose_mg = 5.0
+
+    let checkpoints: [f64; 16] = [0.0, 0.25, 1.0, 4.0, 8.0, 24.0, 72.0, 168.0,
+                                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let n_points = 8
+
+    let c0 = dose_mg / prm.v_blood
+    var st = pbpk_state_zero()
+    st.blood = c0
+
+    var masses: [f64; 16] = [0.0; 16]
+    var t = 0.0
+    let cfg = tight_ode_config()
+    var dt = cfg.dt_init
+    var nsteps: i64 = 0
+    var nreject: i64 = 0
+    var point_i: i32 = 0
+
+    while point_i < n_points {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt > target { target - t } else { dt }
+            let result = tsit5_step_pbpk(st, t, dt_use, prm)
+            let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                st = result.state_new
+                t = t + dt_use
+                nsteps = nsteps + 1
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+
+            if dt < cfg.dt_min { dt = cfg.dt_min }
+            if dt > cfg.dt_max { dt = cfg.dt_max }
+
+            if nreject > 10000 {
+                return 99
+            }
+        }
+
+        if t + cfg.dt_min < target {
+            return 98
+        }
+
+        // pbpk_state_total_mass is private; compute manually
+        let total_mass = st.blood * prm.v_blood + st.liver * prm.v_liver + st.kidney * prm.v_kidney
+                       + st.brain * prm.v_brain + st.heart * prm.v_heart + st.lung * prm.v_lung
+                       + st.muscle * prm.v_muscle + st.adipose * prm.v_adipose + st.gut * prm.v_gut
+                       + st.skin * prm.v_skin + st.bone * prm.v_bone + st.spleen * prm.v_spleen
+                       + st.pancreas * prm.v_pancreas + st.other * prm.v_other
+
+        masses[idx] = total_mass
+        point_i = point_i + 1
+    }
+
+    // Check 1: mass at t=0 ≈ dose (within 1% relative)
+    let mass0 = masses[0]
+    let abs_err_0 = if mass0 > dose_mg { mass0 - dose_mg } else { dose_mg - mass0 }
+    let rel_err_0 = abs_err_0 / dose_mg
+    if rel_err_0 > 0.01 { return 1 }
+
+    var check_i: i32 = 0
+    while check_i < n_points {
+        let cidx = check_i as usize
+        let m = masses[cidx]
+
+        // Check 2: mass is always non-negative
+        if m < 0.0 { return 2 }
+
+        // Check 3: mass never exceeds dose * 1.01
+        if m > dose_mg * 1.01 { return 3 }
+
+        // Check 4: mass is approximately monotonically non-increasing
+        if check_i > 0 {
+            let prev = masses[(check_i - 1) as usize]
+            if m > prev + dose_mg * 0.01 { return 4 }
+        }
+
+        check_i = check_i + 1
+    }
+
+    // Check 5: mass at 168 h is < dose * 0.5 (most drug eliminated)
+    let mass_final = masses[7]
+    if mass_final >= dose_mg * 0.5 { return 5 }
+
+    // Check 6: mass at 168 h is > 0.0
+    if mass_final <= 0.0 { return 6 }
+
+    println("MASS_BALANCE_OK")
+    0
+}

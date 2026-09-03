@@ -1,0 +1,124 @@
+---
+title: "Medidas Inciertas con Knowledge<T>"
+description: "Reemplaza los números crudos con tipos epistémicos que rastrean la incertidumbre de las medidas"
+series: "drug-dosing"
+order: 3
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-02-pk-model"]
+topic_id: "website.tutorials.es.drug-dosing-03-knowledge"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.es.drug-dosing-03-knowledge"
+---
+
+En la lección anterior, construimos un modelo de PK con valores exactos `f64`. Ahora lo actualizaremos para rastrear la incertidumbre utilizando el tipo `Knowledge<T>` de Sounio.
+
+## De `f64` a `Knowledge&lt;f64&gt;`
+
+Cada medición clínica tiene incertidumbre. Una creatinina sérica de 1.2 mg/dL realmente significa "alrededor de 1.2, con una desviación estándar de aproximadamente 0.06". En Sounio:
+
+```sio
+// Antes: número crudo, incertidumbre desconocida
+let scr: f64 = 1.2
+
+// Después: valor + incertidumbre estándar
+let scr: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+El constructor `measure()` crea un `Knowledge<f64>` con:
+- **valor**: la estimación más probable (1.2)
+- **incertidumbre**: la incertidumbre estándar (0.06, que representa ±5% CV)
+
+## Construyendo un Modelo PK Epistémico
+
+Vamos a redefinir nuestros parámetros de PK para llevar la incertidumbre:
+
+```sio
+struct EpistemicPK {
+    clearance: Knowledge<f64>,    // L/h ± incertidumbre
+    volume: Knowledge<f64>,       // L ± incertidumbre
+    dose: f64,                    // mg (conocido exactamente — controlamos la dosis)
+    tau: f64,                     // horas (conocido exactamente — establecemos el horario)
+}
+```
+
+Notar que `dose` y `tau` permanecen en el simple `f64` — estas son **decisiones** que tomamos, no medidas. Solo cantidades medidas llevan incertidumbre.
+
+## Creando Parámetros Específicos del Paciente
+
+Un escenario clínico real para la dosificación de vancomicina:
+
+```sio
+fn create_patient_pk() -> EpistemicPK {
+    EpistemicPK {
+        // Clearance: estimada a partir de Cockcroft-Gault
+        // Media poblacional 4.5 L/h, pero 30% de variabilidad interindividual
+        clearance: measure(4.5, uncertainty: 1.35),
+
+        // Volume: estimada a partir del peso corporal
+        // 50 L ± 10% (error de estimación basado en peso)
+        volume: measure(50.0, uncertainty: 5.0),
+
+        dose: 1000.0,   // 1g de vancomicina (exacto)
+        tau: 12.0,       // q12h (exacto)
+    }
+}
+```
+
+La incertidumbre de clearance de 1.35 L/h (30% CV) refleja la variabilidad clínica real. La clearance de vancomicina depende de la función renal, la edad, el peso y la genética, todos los cuales no los conocemos con precisión para un paciente específico.
+
+## Aritmética con Valores de Knowledge
+
+Cuando se realizan operaciones aritméticas con valores `Knowledge<T>`, Sounio propaga automáticamente la incertidumbre utilizando la propagación de errores de primer orden (el método delta):
+
+```sio
+// La división propaga la incertidumbre de ambos operandos
+fn half_life_epistemic(pk: EpistemicPK) -> Knowledge<f64> {
+    0.693 * pk.volume / pk.clearance
+}
+
+// El resultado tiene una incertidumbre combinada:
+// σ(t½) = t½ × √((σ_V/V)² + (σ_CL/CL)²)
+```
+
+No tienes que escribir la fórmula de propagación. El tipo `Knowledge<T>` se encarga de ello. El compilador verifica que todas las operaciones son seguras frente a la incertidumbre.
+
+## Extrayendo Información
+
+Puedes consultar un valor `Knowledge<f64>` para sus componentes:
+
+```sio
+fn main() with IO {
+    let pk = create_patient_pk()
+    let t_half = half_life_epistemic(pk)
+
+    // Acceder a la mejor estimación
+    let value = t_half.value        // ~7.7 horas
+
+    // Acceder a la incertidumbre estándar
+    let uncert = t_half.uncertainty // ~2.7 horas
+
+    // Incertidumbre relativa (coeficiente de variación)
+    let cv = uncert / value         // ~35%
+
+    print("Vida media: ")
+    print(value)
+    print(" ± ")
+    print(uncert)
+    print(" horas (CV: ")
+    print(cv)
+    print(")\n")
+}
+```
+
+Un 35% CV en la vida media significa que nuestras predicciones de dosis son significativamente inciertas. Esta es información clínica **crítica** que la aritmética pura `f64` ocultaría.
+
+## Resumen Clave
+
+- `Knowledge<f64>` envuelve un valor con su incertidumbre estándar
+- Usa `measure(value, uncertainty: sigma)` para crear valores epistémicos
+- Las operaciones aritméticas propagan automáticamente la incertidumbre
+- Las decisiones (dosis, horario) permanecen como `f64` puro — solo las medidas llevan incertidumbre
+- El compilador garantiza que nunca mezcles accidentalmente valores seguros e inciertos

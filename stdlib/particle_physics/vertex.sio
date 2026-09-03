@@ -1,0 +1,335 @@
+// stdlib/particle_physics/vertex.sio — Feynman rules for SM vertices
+//
+// Tree-level vertex factors for QED, QCD, weak, and Yukawa interactions.
+// All couplings are extracted from sm_params.sio with epistemic uncertainty.
+//
+// References:
+//   - Peskin & Schroeder, Ch. 4-5, 15-20
+//   - PDG 2024, Standard Model
+
+module particle_physics::vertex
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new}
+use particle_physics::spinor::{DiracMatrix, dirac_matrix_zero, dirac_matrix_identity,
+                               dirac_matrix_scale, dirac_matrix_add, dirac_matrix_mul,
+                               gamma_matrix, gamma_5, slash, projector_left, projector_right}
+use particle_physics::gauge::{su3_casimir_cf, su3_casimir_ca, su3_dynkin_tf}
+use particle_physics::sm_params::{coupling_e, coupling_gs, coupling_g, sin2_theta_w}
+use epistemic::knowledge::{Epistemic}
+use complex::lib::{Complex, complex_new, complex_zero, complex_one, complex_i,
+                   complex_scale, complex_mul}
+
+// #1622 / E175: builtin sqrt needs no private extern (see lorentz.sio).
+
+// ============================================================================
+// QED VERTEX
+// ============================================================================
+
+/// QED vertex factor: −i e γ^μ.
+///
+/// # Returns
+/// DiracMatrix vertex factor (complex matrix).
+pub fn qed_vertex(mu: i64) -> DiracMatrix with Mut, Div, Panic {
+    let e = coupling_e().val()
+    let g = gamma_matrix(mu)
+    dirac_matrix_scale(g, complex_new(0.0 - e, 0.0))
+}
+
+/// QED vertex magnitude squared (spin-averaged):
+///   (1/4) Σ_spins |M|² = e² · L_μν · L^μν
+/// where L_μν is the lepton tensor.
+/// For unpolarized scattering: L_μν = 2(p_μ p'_ν + p_ν p'_μ − η_μν p·p').
+pub fn qed_vertex_factor_sq() -> f64 with Mut, Div, Panic {
+    let e = coupling_e().val()
+    e * e
+}
+
+/// GUM-exact QED vertex |e|² with full uncertainty propagation.
+/// GUM: Var(e²) = 4 e² Var(e).
+pub fn qed_vertex_factor_sq_ep() -> Epistemic with Mut, Div, Panic {
+    coupling_e().square()
+}
+
+// ============================================================================
+// QCD VERTICES
+// ============================================================================
+
+/// Quark-gluon vertex factor: −i g_s γ^μ (λ^a/2).
+///
+/// # Parameters
+/// - `mu`: Lorentz index.
+/// - `a`: Gluon color index (1…8).
+///
+/// # Returns
+/// DiracMatrix vertex factor.  The color matrix λ^a/2 is handled externally
+/// (this function returns the spinor part only).
+pub fn qcd_quark_gluon_vertex(mu: i64) -> DiracMatrix with Mut, Div, Panic {
+    let gs = coupling_gs().val()
+    let g = gamma_matrix(mu)
+    dirac_matrix_scale(g, complex_new(0.0 - gs, 0.0))
+}
+
+/// QCD quark-gluon vertex magnitude squared, averaged over initial colors
+/// and summed over final colors:
+///   (1/4)(1/N_c) Σ |M|² = g_s² · C_F · (spinor trace)
+/// where C_F = 4/3 for N_c = 3.
+pub fn qcd_vertex_factor_sq() -> f64 with Mut, Div, Panic {
+    let gs = coupling_gs().val()
+    let cf = su3_casimir_cf()
+    gs * gs * cf
+}
+
+/// GUM-exact QCD vertex |g_s|² · C_F with uncertainty from α_s.
+/// GUM: Var(g_s²) = 4 g_s² Var(g_s); C_F is exact.
+pub fn qcd_vertex_factor_sq_ep() -> Epistemic with Mut, Div, Panic {
+    let cf = Epistemic::certain(su3_casimir_cf())
+    coupling_gs().square().mul(&cf)
+}
+
+/// Triple-gluon vertex factor (momentum-space):
+///   V^{abc}_{μνρ}(p,q,r) = g_s f^{abc} [(p−q)_ρ η_μν + (q−r)_μ η_νρ + (r−p)_ν η_ρμ].
+/// This is a rank-3 tensor; for practical calculations we provide the
+/// scalar factor g_s f^{abc} and the kinematic structure is built in
+/// the amplitude module.
+pub fn qcd_triple_gluon_factor(a: i64, b: i64, c: i64) -> f64 with Mut, Div, Panic {
+    let gs = coupling_gs().val()
+    let f = su3_structure_constant(a, b, c)
+    gs * f
+}
+
+/// GUM-exact triple-gluon scalar: g_s · f^{abc} with α_s uncertainty.
+pub fn qcd_triple_gluon_factor_ep(a: i64, b: i64, c: i64) -> Epistemic with Mut, Div, Panic {
+    let f_exact = Epistemic::certain(su3_structure_constant(a, b, c))
+    coupling_gs().mul(&f_exact)
+}
+
+// Local helper for SU(3) f_abc (re-declared to avoid import cycle)
+fn su3_structure_constant(a: i64, b: i64, c: i64) -> f64 {
+    if (a == 1 && b == 2 && c == 3) || (a == 2 && b == 3 && c == 1) || (a == 3 && b == 1 && c == 2) {
+        return 1.0
+    }
+    if (a == 3 && b == 2 && c == 1) || (a == 2 && b == 1 && c == 3) || (a == 1 && b == 3 && c == 2) {
+        return -1.0
+    }
+    if is_perm_abc(a, b, c, 1, 4, 7) || is_perm_abc(a, b, c, 2, 4, 6) || is_perm_abc(a, b, c, 3, 4, 5) {
+        return 0.5
+    }
+    if is_perm_abc(a, b, c, 7, 4, 1) || is_perm_abc(a, b, c, 6, 4, 2) || is_perm_abc(a, b, c, 5, 4, 3) {
+        return -0.5
+    }
+    if is_perm_abc(a, b, c, 1, 5, 6) || is_perm_abc(a, b, c, 3, 6, 7) {
+        return -0.5
+    }
+    if is_perm_abc(a, b, c, 6, 5, 1) || is_perm_abc(a, b, c, 7, 6, 3) {
+        return 0.5
+    }
+    if is_perm_abc(a, b, c, 4, 5, 8) || is_perm_abc(a, b, c, 6, 7, 8) {
+        return 0.8660254037844386
+    }
+    if is_perm_abc(a, b, c, 8, 5, 4) || is_perm_abc(a, b, c, 8, 7, 6) {
+        return -0.8660254037844386
+    }
+    0.0
+}
+
+fn is_perm_abc(a: i64, b: i64, c: i64, x: i64, y: i64, z: i64) -> bool {
+    (a == x && b == y && c == z) ||
+    (a == y && b == z && c == x) ||
+    (a == z && b == x && c == y)
+}
+
+// ============================================================================
+// WEAK VERTICES
+// ============================================================================
+
+/// Weak charged-current vertex factor (V−A):
+///   −i (g / √2) γ^μ (1 − γ^5)/2.
+///
+/// # Parameters
+/// - `mu`: Lorentz index.
+///
+/// # Returns
+/// DiracMatrix vertex factor.
+pub fn weak_charged_current_vertex(mu: i64) -> DiracMatrix with Mut, Div, Panic {
+    let g = coupling_g().val()
+    let gmu = gamma_matrix(mu)
+    let pl = projector_left()
+    let prod = dirac_matrix_mul(gmu, pl)
+    let prefactor = g / sqrt(2.0)
+    dirac_matrix_scale(prod, complex_new(0.0 - prefactor, 0.0))
+}
+
+/// Weak neutral-current vertex factor:
+///   −i (g / cosθ_W) γ^μ (g_V − g_A γ^5).
+///
+/// # Parameters
+/// - `mu`: Lorentz index.
+/// - `g_v`: Vector coupling constant.
+/// - `g_a`: Axial coupling constant.
+///
+/// # Returns
+/// DiracMatrix vertex factor.
+pub fn weak_neutral_current_vertex(mu: i64, g_v: f64, g_a: f64) -> DiracMatrix with Mut, Div, Panic {
+    let g = coupling_g().val()
+    let s2w = sin2_theta_w().val()
+    let cw = sqrt(1.0 - s2w)
+    let gz = g / cw
+    let gmu = gamma_matrix(mu)
+    // g_V - g_A γ^5 = g_V I - g_A γ^5
+    // Note: γ^5 = P_R - P_L in some conventions, but here γ^5 = diag(-1,-1,1,1)
+    // (g_V - g_A γ^5) = g_V I - g_A γ^5
+    let id = dirac_matrix_identity()
+    let g5 = gamma_5()
+    let ga_term = dirac_matrix_scale(g5, complex_new(g_a, 0.0))
+    let gv_term = dirac_matrix_scale(id, complex_new(g_v, 0.0))
+    let coupling_mat = dirac_matrix_sub(gv_term, ga_term)
+    let prod = dirac_matrix_mul(gmu, coupling_mat)
+    dirac_matrix_scale(prod, complex_new(0.0 - gz, 0.0))
+}
+
+/// Neutral-current couplings for fermion f:
+///   g_V = T_3^f − 2 Q_f sin²θ_W
+///   g_A = T_3^f
+/// where T_3^f is weak isospin (+1/2 for up-type, −1/2 for down-type)
+/// and Q_f is electric charge.
+///
+/// # Parameters
+/// - `t3`: Weak isospin T_3.
+/// - `charge`: Electric charge Q in units of e.
+///
+/// # Returns
+/// (g_V, g_A) as a tuple — returned as two separate values.
+///
+/// Prefer `neutral_current_gv` + `neutral_current_ga` under Madaros multimodule:
+/// imported `(f64, f64)` unpack leaves elements not float-typed (ga*ga → 0).
+/// Scalar imported f64 multiplies correctly. See
+/// `docs/audit/MADAROS_IMPORTED_F64_MUL_2026-07-26.md`.
+pub fn neutral_current_couplings(t3: f64, charge: f64) -> (f64, f64) with Mut, Div, Panic {
+    (neutral_current_gv(t3, charge), neutral_current_ga(t3))
+}
+
+/// Scalar g_V = t3 − 2Q sin²θ_W (Madaros-safe: single f64 return).
+pub fn neutral_current_gv(t3: f64, charge: f64) -> f64 with Mut, Div, Panic {
+    let s2w = sin2_theta_w().val()
+    t3 - 2.0 * charge * s2w
+}
+
+/// Scalar g_A = t3 (exact integer quantum number; Madaros-safe).
+pub fn neutral_current_ga(t3: f64) -> f64 with Mut, Div, Panic {
+    t3
+}
+
+/// GUM-exact neutral-current vector coupling g_V with sin²θ_W uncertainty.
+///   GUM: g_V = t3 − 2Q sin²θ_W  →  Var(g_V) = (2Q)² Var(sin²θ_W).
+/// g_A = t3 is exact (integer quantum number).
+pub fn neutral_current_gv_ep(t3: f64, charge: f64) -> Epistemic with Mut, Div, Panic {
+    let s2w = sin2_theta_w()
+    // g_V = t3 + (-2Q) * sin²θ_W
+    s2w.scale(-2.0 * charge).shift(t3)
+}
+
+/// GUM-exact NC couplings: (gv_ep, ga_exact).
+/// ga_exact is a pure number (weak isospin), carries no PDG uncertainty.
+pub fn neutral_current_couplings_ep(t3: f64, charge: f64) -> (Epistemic, f64) with Mut, Div, Panic {
+    (neutral_current_gv_ep(t3, charge), t3)
+}
+
+// Pre-computed neutral current couplings for common fermions
+// Tuple forms kept for API compatibility; prefer scalar gv/ga under Madaros.
+
+/// Electron neutral current couplings: T_3 = −1/2, Q = −1.
+pub fn nc_coupling_electron() -> (f64, f64) with Mut, Div, Panic {
+    neutral_current_couplings(0.0 - 0.5, 0.0 - 1.0)
+}
+
+/// Muon neutral current couplings: same as electron.
+pub fn nc_coupling_muon() -> (f64, f64) with Mut, Div, Panic {
+    neutral_current_couplings(0.0 - 0.5, 0.0 - 1.0)
+}
+
+/// Up-quark neutral current couplings: T_3 = +1/2, Q = +2/3.
+pub fn nc_coupling_up() -> (f64, f64) with Mut, Div, Panic {
+    neutral_current_couplings(0.5, 0.6666666666666666)
+}
+
+/// Down-quark neutral current couplings: T_3 = −1/2, Q = −1/3.
+pub fn nc_coupling_down() -> (f64, f64) with Mut, Div, Panic {
+    neutral_current_couplings(0.0 - 0.5, 0.0 - 0.3333333333333333)
+}
+
+/// Neutrino neutral current couplings: T_3 = +1/2, Q = 0.
+pub fn nc_coupling_neutrino() -> (f64, f64) with Mut, Div, Panic {
+    neutral_current_couplings(0.5, 0.0)
+}
+
+/// Electron g_V (scalar import; Madaros-safe mul).
+pub fn nc_gv_electron() -> f64 with Mut, Div, Panic {
+    neutral_current_gv(0.0 - 0.5, 0.0 - 1.0)
+}
+
+/// Electron g_A = −1/2 (scalar).
+pub fn nc_ga_electron() -> f64 with Mut, Div, Panic {
+    neutral_current_ga(0.0 - 0.5)
+}
+
+/// Muon g_V (same as electron).
+pub fn nc_gv_muon() -> f64 with Mut, Div, Panic {
+    neutral_current_gv(0.0 - 0.5, 0.0 - 1.0)
+}
+
+/// Muon g_A = −1/2.
+pub fn nc_ga_muon() -> f64 with Mut, Div, Panic {
+    neutral_current_ga(0.0 - 0.5)
+}
+
+/// Up-quark g_V.
+pub fn nc_gv_up() -> f64 with Mut, Div, Panic {
+    neutral_current_gv(0.5, 0.6666666666666666)
+}
+
+/// Up-quark g_A = +1/2.
+pub fn nc_ga_up() -> f64 with Mut, Div, Panic {
+    neutral_current_ga(0.5)
+}
+
+/// Down-quark g_V.
+pub fn nc_gv_down() -> f64 with Mut, Div, Panic {
+    neutral_current_gv(0.0 - 0.5, 0.0 - 0.3333333333333333)
+}
+
+/// Down-quark g_A = −1/2.
+pub fn nc_ga_down() -> f64 with Mut, Div, Panic {
+    neutral_current_ga(0.0 - 0.5)
+}
+
+/// Neutrino g_V.
+pub fn nc_gv_neutrino() -> f64 with Mut, Div, Panic {
+    neutral_current_gv(0.5, 0.0)
+}
+
+/// Neutrino g_A = +1/2.
+pub fn nc_ga_neutrino() -> f64 with Mut, Div, Panic {
+    neutral_current_ga(0.5)
+}
+
+// ============================================================================
+// YUKAWA VERTEX
+// ============================================================================
+
+/// Yukawa vertex factor: −i m_f / v.
+///
+/// # Parameters
+/// - `m_f`: Fermion mass.
+/// - `v`: Higgs VEV (≈ 246 GeV).
+///
+/// # Returns
+/// Scalar (complex) vertex factor.
+pub fn yukawa_vertex(m_f: f64, v: f64) -> Complex with Div, Panic {
+    if v == 0.0 { return complex_zero() }
+    complex_new(0.0 - m_f / v, 0.0)
+}
+
+/// Standard Model Higgs VEV: v = 1 / √(√2 G_F) ≈ 246.22 GeV.
+pub fn higgs_vev() -> f64 {
+    246.22
+}

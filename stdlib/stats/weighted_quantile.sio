@@ -1,0 +1,118 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/weighted_quantile.sio — weighted quantiles & median
+//
+// Quantiles for weighted data — the value below which a target fraction of the
+// total weight lies:
+//
+//   weighted_quantile(x, w, n, p) -> f64
+//   weighted_median(x, w, n)      -> f64      (p = 0.5)
+//
+// The p-quantile is the smallest value v with Σ_{xᵢ ≤ v} wᵢ ≥ p·Σwᵢ (the
+// lower / left-continuous definition). With equal weights this reduces to an
+// ordinary quantile.
+//
+// Pure Sounio: a sort-free O(n²) cumulative-weight scan (no paired-array sort).
+// No external dependency, no nested data-array calls.
+//
+// References:
+//   standard weighted-quantile definitions (e.g. Hmisc wtd.quantile).
+
+module stats::weighted_quantile
+
+/// Weighted p-quantile (lower definition).
+///
+/// Parâmetros: x — values; w — non-negative weights; n — size; p — in [0,1].
+/// Retorno: the weighted p-quantile.
+pub fn weighted_quantile(x: &[f64; 256], w: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var total = 0.0
+    var i = 0
+    while i < n { total = total + w[i as usize]; i = i + 1 }
+    if total <= 0.0 { return 0.0 }
+    let target = p * total
+    // smallest x_i whose cumulative weight (of all x_j <= x_i) reaches target
+    var best = 0.0
+    var have = false
+    var a = 0
+    while a < n {
+        let xi = x[a as usize]
+        var cw = 0.0
+        var b = 0
+        while b < n { if x[b as usize] <= xi { cw = cw + w[b as usize] } b = b + 1 }
+        if cw >= target - 1.0e-12 {
+            if have == false || xi < best { best = xi; have = true }
+        }
+        a = a + 1
+    }
+    if have == false { return x[0] }
+    return best
+}
+
+/// Weighted median (p = 0.5).
+pub fn weighted_median(x: &[f64; 256], w: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    return weighted_quantile(x, w, n, 0.5)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// equal weights {1,2,3} -> median = 2 (cum/total: 1/3,2/3,1; first ≥0.5 is x=2).
+fn test_equal() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    w[0]=1.0; w[1]=1.0; w[2]=1.0
+    return check(1, approx(weighted_median(&x, &w, 3), 2.0, 1.0e-9))
+}
+
+// heavy weight pulls the median: {1,2,3,4} w={1,1,1,5}. total 8, target 4.
+// cum at x=4 is 8 ≥ 4, and no smaller value reaches 4 -> weighted median = 4.
+fn test_heavy() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    w[0]=1.0; w[1]=1.0; w[2]=1.0; w[3]=5.0
+    return check(10, approx(weighted_median(&x, &w, 4), 4.0, 1.0e-9))
+}
+
+// quantile p=0.25 of {1,2,3,4} equal weights -> smallest v with cum/4 ≥ 0.25 = x=1.
+fn test_quartile() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    w[0]=1.0; w[1]=1.0; w[2]=1.0; w[3]=1.0
+    var ok = true
+    ok = check(20, approx(weighted_quantile(&x, &w, 4, 0.25), 1.0, 1.0e-9)) && ok
+    ok = check(21, approx(weighted_quantile(&x, &w, 4, 0.75), 3.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_equal() && ok
+    ok = test_heavy() && ok
+    ok = test_quartile() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,5 +1,5 @@
 //@ run-pass
-//@ ignore
+
 // tests/stdlib/nn/test_epistemic_backward_e2e.sio
 //
 // End-to-end: train an epistemic dense layer to approximate y = 0.6*x1 + 0.4*x2.
@@ -17,6 +17,7 @@ use nn::epistemic_layer::{
 use nn::epistemic_backward::{
     EpistemicLayerGrad,
     epistemic_dense_backward, epistemic_dense_update,
+    epistemic_layer_grad_zero,
     mse_loss, mse_gradient,
 }
 
@@ -39,14 +40,15 @@ fn test_learn_linear() with IO, Mut, Div, Panic {
 
     // Initialize: small weights near zero with 10% uncertainty
     var weights = emat4_zeros()
-    emat4_set(&weights, 0, 0, 0.1, 0.01, 0.9)
-    emat4_set(&weights, 0, 1, 0.1, 0.01, 0.9)
+    emat4_set(&!weights, 0, 0, 0.1, 0.01, 0.9)
+    emat4_set(&!weights, 0, 1, 0.1, 0.01, 0.9)
     let bias = evec4_zeros()
 
     var layer = epistemic_dense_4x4(weights, bias, ACT_IDENTITY())
 
     // Record initial state
-    let out0 = epistemic_dense_forward(&layer, &input)
+    var out0 = evec4_zeros()
+    epistemic_dense_forward(&!out0, &layer, &input)
     let loss0 = mse_loss(&out0, &target)
     let w00_unc0 = emat4_get_unc(&layer.weights, 0, 0)
 
@@ -55,17 +57,25 @@ fn test_learn_linear() with IO, Mut, Div, Panic {
     println("Initial MSE:")
     println(loss0)
 
-    // Train for 20 steps
+    var grad: EpistemicLayerGrad
+    grad.weight_grad = emat4_zeros()
+    grad.bias_grad = evec4_zeros()
+    grad.input_delta = evec4_zeros()
+
     var step = 0
     while step < 20 {
-        let out = epistemic_dense_forward(&layer, &input)
-        let upstream = mse_gradient(&out, &target)
-        let grad = epistemic_dense_backward(&layer, &input, &out, &out, &upstream)
-        epistemic_dense_update(&layer, &grad, 0.1)
+        var out = evec4_zeros()
+        epistemic_dense_forward(&!out, &layer, &input)
+        var upstream = evec4_zeros()
+        mse_gradient(&!upstream, &out, &target)
+        epistemic_layer_grad_zero(&!grad)
+        epistemic_dense_backward(&!grad, &layer, &input, &out, &out, &upstream)
+        epistemic_dense_update(&!layer, &grad, 0.1)
         step = step + 1
     }
 
-    let out_final = epistemic_dense_forward(&layer, &input)
+    var out_final = evec4_zeros()
+    epistemic_dense_forward(&!out_final, &layer, &input)
     let loss_final = mse_loss(&out_final, &target)
     let w00_final = emat4_get_val(&layer.weights, 0, 0)
     let w00_unc_final = emat4_get_unc(&layer.weights, 0, 0)
@@ -97,8 +107,8 @@ fn test_relu_layer_backward() with IO, Mut, Div, Panic {
 
     // ReLU layer: verify that gradient is zeroed for negative pre-activations
     var weights = emat4_zeros()
-    emat4_set(&weights, 0, 0, 1.0, 0.05, 0.95)
-    emat4_set(&weights, 1, 0, 0.0 - 1.0, 0.05, 0.95)   // negative weight causes negative output
+    emat4_set(&!weights, 0, 0, 1.0, 0.05, 0.95)
+    emat4_set(&!weights, 1, 0, 0.0 - 1.0, 0.05, 0.95)   // negative weight causes negative output
     let bias = evec4_zeros()
     var layer = epistemic_dense_4x4(weights, bias, ACT_RELU())
 
@@ -116,9 +126,15 @@ fn test_relu_layer_backward() with IO, Mut, Div, Panic {
         0.0, 0.0, 1.0,
         0.0, 0.0, 1.0,
     )
-    let fwd_out = epistemic_dense_forward(&layer, &input)
-    let upstream = mse_gradient(&fwd_out, &target)
-    let grad = epistemic_dense_backward(&layer, &input, &pre_act, &fwd_out, &upstream)
+    var fwd_out = evec4_zeros()
+    epistemic_dense_forward(&!fwd_out, &layer, &input)
+    var upstream = evec4_zeros()
+    mse_gradient(&!upstream, &fwd_out, &target)
+    var grad: EpistemicLayerGrad
+    grad.weight_grad = emat4_zeros()
+    grad.bias_grad = evec4_zeros()
+    grad.input_delta = evec4_zeros()
+    epistemic_dense_backward(&!grad, &layer, &input, &pre_act, &fwd_out, &upstream)
 
     // Weight gradient for negative neuron should be zero (ReLU gates it)
     let wg_10 = emat4_get_val(&grad.weight_grad, 1, 0)

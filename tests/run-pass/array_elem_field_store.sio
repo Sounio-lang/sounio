@@ -1,0 +1,70 @@
+//@ run-pass
+// Regression test: arr[i].field = value  — store into a field of a struct that
+// is an element of an array-of-structs.
+//
+// Previously NO statement detector matched `name[idx].field = expr` (array
+// index at root, then a field chain): it tokenized as `ident [ .. ] . ident =`
+// and fell through to expression-statement handling, silently dropping the
+// store or segfaulting. The `name.field[i] = v` (leaf-index) path was a
+// different, already-handled case.
+//
+// Fix in lean_single.sio: stmt_is_array_elem_field_store +
+// compile_array_elem_field_store_x86. Array-of-struct slots hold pointers to
+// heap-materialized copies, so each slot must first be populated with a whole
+// struct (arr[i] = S{..}) before per-field mutation.
+//
+// Covers: local array root, &![T;N] ref-param root, and a nested field chain
+// (arr[i].inner.v). Global arrays-of-structs are a separate, pre-existing
+// limitation (the global subscript read path supports only esz==8/esz==1, not
+// inline structs), so they are out of scope here.
+
+struct Point { x: i64, y: i64 }
+struct Nested { p: Point, tag: i64 }
+
+fn bump_first(a: &![Point; 3]) with Mut, Panic {
+    a[0 as usize].x = 111
+    a[0 as usize].y = 222
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    // ---- local array of structs ----
+    var a: [Point; 3] = [Point { x: 0, y: 0 }; 3]
+    a[0 as usize] = Point { x: 1, y: 2 }
+    a[1 as usize] = Point { x: 3, y: 4 }
+    a[2 as usize] = Point { x: 5, y: 6 }
+    // per-field mutation (the feature under test)
+    a[1 as usize].x = 30
+    a[1 as usize].y = 40
+    if a[0 as usize].x != 1 || a[0 as usize].y != 2 {
+        println("array_elem_field_store: FAIL (untouched element)")
+        return 1
+    }
+    if a[1 as usize].x != 30 || a[1 as usize].y != 40 {
+        println("array_elem_field_store: FAIL (local field store)")
+        return 1
+    }
+    if a[2 as usize].x != 5 || a[2 as usize].y != 6 {
+        println("array_elem_field_store: FAIL (neighbor clobbered)")
+        return 1
+    }
+
+    // ---- &![T; N] ref-param root ----
+    bump_first(&! a)
+    if a[0 as usize].x != 111 || a[0 as usize].y != 222 {
+        println("array_elem_field_store: FAIL (ref-param field store)")
+        return 1
+    }
+
+    // ---- nested field chain: arr[i].inner.field ----
+    var ns: [Nested; 2] = [Nested { p: Point { x: 0, y: 0 }, tag: 0 }; 2]
+    ns[0 as usize] = Nested { p: Point { x: 9, y: 9 }, tag: 100 }
+    ns[0 as usize].p.x = 91
+    ns[0 as usize].tag = 101
+    if ns[0 as usize].p.x != 91 || ns[0 as usize].p.y != 9 || ns[0 as usize].tag != 101 {
+        println("array_elem_field_store: FAIL (nested field chain)")
+        return 1
+    }
+
+    println("array_elem_field_store: PASS")
+    return 0
+}

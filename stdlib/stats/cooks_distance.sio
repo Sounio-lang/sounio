@@ -1,0 +1,144 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/cooks_distance.sio — Cook's distance for simple linear regression
+//
+// The influence of each observation on the fitted line — how much the whole fit
+// would move if that point were deleted:
+//
+//   cooks_distance(x, y, n, out_d) -> CooksResult
+//
+// After the OLS fit (residual eᵢ, leverage hᵢ, residual variance s² = SSE/(n−2)),
+//   Dᵢ = eᵢ²·hᵢ / (p·s²·(1−hᵢ)²),   p = 2.
+// A point with Dᵢ > 4/n is conventionally flagged as influential.
+//
+// Pure Sounio: OLS fit, then a pass filling the Cook's-distance vector. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Cook (1977) Technometrics 19:15.
+
+module stats::cooks_distance
+
+pub struct CooksResult {
+    pub max_d: f64,        // largest Cook's distance
+    pub n_influential: i64,// count with Dᵢ > 4/n
+    pub slope: f64,
+    pub intercept: f64,
+}
+
+/// Cook's distance for simple linear regression; fills out_d[0..n).
+///
+/// Parâmetros: x, y — data; n — size (>=3, <=256); out_d — receives Cook's Dᵢ.
+/// Retorno: CooksResult (max_d, n_influential, slope, intercept).
+/// Referências: Cook (1977).
+pub fn cooks_distance(x: &[f64; 256], y: &[f64; 256], n: i32, out_d: &![f64; 256]) -> CooksResult with Mut, Div, Panic {
+    if n < 3 { return CooksResult { max_d: 0.0, n_influential: 0, slope: 0.0, intercept: 0.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * (y[j as usize] - my)
+        j = j + 1
+    }
+    var slope = 0.0
+    if sxx > 1.0e-300 { slope = sxy / sxx }
+    let intercept = my - slope * mx
+    // residual variance
+    var sse = 0.0
+    var k = 0
+    while k < n {
+        let e = y[k as usize] - (intercept + slope * x[k as usize])
+        sse = sse + e * e
+        k = k + 1
+    }
+    let s2 = sse / (nf - 2.0)
+    let thresh = 4.0 / nf
+    var maxd = 0.0
+    var ninf = 0
+    var t = 0
+    while t < n {
+        let e = y[t as usize] - (intercept + slope * x[t as usize])
+        let dx = x[t as usize] - mx
+        var h = 1.0 / nf
+        if sxx > 1.0e-300 { h = 1.0 / nf + dx * dx / sxx }
+        var d = 0.0
+        let om = 1.0 - h
+        if s2 > 1.0e-300 && om > 1.0e-12 {
+            d = e * e * h / (2.0 * s2 * om * om)
+        }
+        out_d[t as usize] = d
+        if d > maxd { maxd = d }
+        if d > thresh { ninf = ninf + 1 }
+        t = t + 1
+    }
+    return CooksResult { max_d: maxd, n_influential: ninf as i64, slope: slope, intercept: intercept }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3,4,5}, y={1,2,3,4,10}. fit slope 2, intercept -2; e={1,0,-1,-2,2};
+// s²=10/3; h={0.6,0.3,0.2,0.3,0.6}. D5=4·0.6/(2·(10/3)·0.16)=2.25; D1=0.5625.
+fn test_cooks() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var d: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0; y[3]=4.0; y[4]=10.0
+    let r = cooks_distance(&x, &y, 5, &!d)
+    var ok = true
+    ok = check(1, approx(r.slope, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.intercept, 0.0 - 2.0, 1.0e-9)) && ok
+    ok = check(3, approx(d[4], 2.25, 1.0e-4)) && ok
+    ok = check(4, approx(d[0], 0.5625, 1.0e-4)) && ok
+    ok = check(5, approx(r.max_d, 2.25, 1.0e-4)) && ok
+    return ok
+}
+
+// perfect fit -> all Cook's distances 0.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var d: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 5 { x[i as usize] = i as f64; y[i as usize] = 2.0 * (i as f64) + 1.0; i = i + 1 }
+    let r = cooks_distance(&x, &y, 5, &!d)
+    return check(10, approx(r.max_d, 0.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_cooks() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

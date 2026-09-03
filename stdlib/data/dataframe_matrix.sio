@@ -1,0 +1,86 @@
+//! Pairwise correlation and covariance matrices over all columns of a DataFrame (pandas corr / cov).
+//!
+//! Each verb returns an ncols x ncols DataFrame whose cell (i, j) is the statistic between column i
+//! and column j. The correlation diagonal is 1 (for non-constant columns); the covariance diagonal is
+//! each column's sample variance. Read-only apart from building the result. Self-contained: uses only
+//! the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_set_col_name, df_col_mean}
+
+fn col_mean(df: &DataFrame, c: i64) -> f64 with Mut, Div, Panic { df_col_mean(df, c) }
+
+// Sample covariance (n-1) between columns a and b.
+fn cov2(df: &DataFrame, a: i64, b: i64, ma: f64, mb: f64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    if n < 2 { return 0.0 }
+    var s = 0.0
+    var r: i64 = 0
+    while r < n { s = s + (df_get(df, r, a) - ma) * (df_get(df, r, b) - mb); r = r + 1 }
+    s / ((n - 1) as f64)
+}
+
+fn m_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+fn name_cols(out: &!DataFrame, nc: i64) with Mut, Panic {
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, c); c = c + 1 }
+}
+
+/// The ncols x ncols sample covariance matrix (n-1 denominator). Cell (i, j) = cov(col_i, col_j);
+/// the diagonal is each column's variance.
+pub fn df_cov_matrix(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var mean: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 { mean[c as usize] = col_mean(df, c); c = c + 1 }
+    var out = df_new(nc)
+    name_cols(&!out, nc)
+    var i: i64 = 0
+    while i < nc && i < 64 {
+        var row: [f64; 64] = [0.0; 64]
+        var j: i64 = 0
+        while j < nc && j < 64 {
+            row[j as usize] = cov2(df, i, j, mean[i as usize], mean[j as usize])
+            j = j + 1
+        }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}
+
+/// The ncols x ncols Pearson correlation matrix. Cell (i, j) = corr(col_i, col_j) in [-1, 1]; a
+/// constant column yields 0 off-diagonal (and 0 on its own diagonal).
+pub fn df_corr_matrix(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var mean: [f64; 64] = [0.0; 64]
+    var sd: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 {
+        let m = col_mean(df, c)
+        mean[c as usize] = m
+        sd[c as usize] = m_sqrt(cov2(df, c, c, m, m))
+        c = c + 1
+    }
+    var out = df_new(nc)
+    name_cols(&!out, nc)
+    var i: i64 = 0
+    while i < nc && i < 64 {
+        var row: [f64; 64] = [0.0; 64]
+        var j: i64 = 0
+        while j < nc && j < 64 {
+            let denom = sd[i as usize] * sd[j as usize]
+            if denom != 0.0 { row[j as usize] = cov2(df, i, j, mean[i as usize], mean[j as usize]) / denom } else { row[j as usize] = 0.0 }
+            j = j + 1
+        }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}

@@ -2,23 +2,18 @@
 """
 registry_serve.py — Local development registry for the Sounio Package Manager.
 
-Simulates registry.sounio.org/api/v1 endpoints on localhost:8080.
-Use this to develop/test `souc pkg install` and `souc pkg publish`
-without network access to the production registry.
+Simulates a read-only future registry catalog on localhost:8080.
+Public publishing and registry attestation are outside R0-R2.
 
 Usage:
     python3 scripts/dev/registry_serve.py [--port 8080] [--db data/registry.json]
 
 Endpoints:
-    GET  /api/v1/search?q=<query>&min_score=<0-100>&regulatory=<bool>
+    GET  /api/v1/search?q=<query>
     GET  /api/v1/packages/<name>/<version|latest>
-    GET  /api/v1/packages/<name>/epistemic-report
-    POST /api/v1/packages         — publish
+    GET  /api/v1/packages/<name>/boundary-report
+    POST /api/v1/packages         - disabled until registry attestation exists
     GET  /health
-
-Epistemic scoring enforced:
-    - Minimum epistemic-score for publish: 60%
-    - Regulatory tier requires >= 90% + human review flag
 """
 
 import argparse
@@ -38,99 +33,95 @@ SEED_PACKAGES = [
         "name":              "epistemic-core",
         "version":           "0.1.0",
         "description":       "Core epistemic types: Knowledge<T>, GUM propagation, confidence gates",
-        "epistemic_score_pct": 97,
-        "gum_compliant":     True,
-        "regulatory_ready":  True,
-        "provenance_level":  "strong",
-        "tier":              3,
+        "ring":              "scientific-package",
+        "evidence_status":   "passes-gate",
+        "context_of_use":    "epistemic measurement primitives for research software",
+        "visibility":        "public",
+        "review_state":      "draft",
         "sha256":            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-        "source":            "registry+https://registry.sounio.org",
-        "published_at":      "2026-04-20T00:00:00Z",
-        "downloads":         0,
+        "source":            "preview+local://epistemic-core/0.1.0",
     },
     {
         "name":              "epistemic-stats",
         "version":           "0.1.0",
         "description":       "Bayesian inference, hypothesis testing, credibility intervals",
-        "epistemic_score_pct": 88,
-        "gum_compliant":     True,
-        "regulatory_ready":  False,
-        "provenance_level":  "strong",
-        "tier":              2,
+        "ring":              "scientific-package-candidate",
+        "evidence_status":   "implemented",
+        "context_of_use":    "statistical research software pending package inventory",
+        "visibility":        "protected",
+        "review_state":      "draft",
         "sha256":            "beef0011beef0011beef0011beef0011beef0011beef0011beef0011beef0011",
-        "source":            "registry+https://registry.sounio.org",
-        "published_at":      "2026-04-20T00:00:00Z",
-        "downloads":         0,
+        "source":            "preview+local://epistemic-stats/0.1.0",
     },
     {
         "name":              "darwin-pbpk",
         "version":           "0.4.2",
         "description":       "Physiologically-based pharmacokinetic models with epistemic uncertainty",
-        "epistemic_score_pct": 94,
-        "gum_compliant":     True,
-        "regulatory_ready":  True,
-        "provenance_level":  "strong",
-        "tier":              3,
+        "ring":              "research",
+        "evidence_status":   "implemented",
+        "context_of_use":    "PBPK model research pending model-specific qualification",
+        "visibility":        "protected",
+        "review_state":      "draft",
         "sha256":            "dead0000dead0000dead0000dead0000dead0000dead0000dead0000dead0000",
-        "source":            "registry+https://registry.sounio.org",
-        "published_at":      "2026-04-20T00:00:00Z",
-        "downloads":         0,
+        "source":            "preview+local://darwin-pbpk/0.4.2",
     },
     {
         "name":              "snn-fractal",
         "version":           "0.2.1",
         "description":       "Spiking neural networks with fractal dynamics",
-        "epistemic_score_pct": 79,
-        "gum_compliant":     False,
-        "regulatory_ready":  False,
-        "provenance_level":  "medium",
-        "tier":              1,
+        "ring":              "research",
+        "evidence_status":   "implemented",
+        "context_of_use":    "spiking-neural-network research",
+        "visibility":        "protected",
+        "review_state":      "draft",
         "sha256":            "cafe0000cafe0000cafe0000cafe0000cafe0000cafe0000cafe0000cafe0000",
-        "source":            "registry+https://registry.sounio.org",
-        "published_at":      "2026-04-20T00:00:00Z",
-        "downloads":         0,
+        "source":            "preview+local://snn-fractal/0.2.1",
     },
 ]
 
-# Working copy — mutable (accepts publishes during the session)
+# Working copy for optional read-only catalog extensions.
 _db: list[dict] = list(SEED_PACKAGES)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tier_name(t: int) -> str:
-    return {0: "experimental", 1: "community", 2: "curated", 3: "regulatory"}.get(t, "unknown")
-
-
-def _epistemic_report(pkg: dict) -> dict:
+def _public_package(pkg: dict) -> dict:
     return {
-        "name":                pkg["name"],
-        "version":             pkg["version"],
-        "epistemic_score_pct": pkg["epistemic_score_pct"],
-        "tier":                _tier_name(pkg["tier"]),
-        "gum_compliant":       pkg["gum_compliant"],
-        "regulatory_ready":    pkg["regulatory_ready"],
-        "provenance_level":    pkg["provenance_level"],
-        "sha256":              pkg["sha256"],
-        "source":              pkg["source"],
-        "published_at":        pkg["published_at"],
-        "confidence_gate_default": "0.90" if pkg["epistemic_score_pct"] >= 90 else "0.80",
+        "name": pkg.get("name", ""),
+        "version": pkg.get("version", ""),
+        "description": pkg.get("description", ""),
+        "ring": pkg.get("ring", "unclassified"),
+        "evidence_status": pkg.get("evidence_status", "unknown"),
+        "context_of_use": pkg.get("context_of_use", "undeclared"),
+        "visibility": pkg.get("visibility", "protected"),
+        "review_state": pkg.get("review_state", "unreviewed"),
+        "sha256": pkg.get("sha256", ""),
+        "source": pkg.get("source", ""),
     }
 
 
-def _search(query: str, min_score: int, regulatory_only: bool) -> list[dict]:
+def _boundary_report(pkg: dict) -> dict:
+    result = _public_package(pkg)
+    result["schema"] = "sounio.registry-boundary-report.preview.v1"
+    result["boundary_receipt_sha256"] = pkg.get("boundary_receipt_sha256", "")
+    result["limitations"] = [
+        "preview_catalog_only",
+        "does_not_assert_scientific_truth",
+        "does_not_assert_clinical_or_regulatory_authority",
+        "does_not_assert_publication",
+    ]
+    return result
+
+
+def _search(query: str) -> list[dict]:
     q = query.lower()
     results = []
     for p in _db:
         if q and q not in p["name"].lower() and q not in p["description"].lower():
             continue
-        if p["epistemic_score_pct"] < min_score:
-            continue
-        if regulatory_only and not p["regulatory_ready"]:
-            continue
-        results.append(p)
-    results.sort(key=lambda x: x["epistemic_score_pct"], reverse=True)
+        results.append(_public_package(p))
+    results.sort(key=lambda x: (x["name"], x["version"]))
     return results
 
 
@@ -174,17 +165,16 @@ class RegistryHandler(BaseHTTPRequestHandler):
 
         # -- Search ---------------------------------------------------------
         if path == "/api/v1/search":
-            q            = qs.get("q", [""])[0]
-            min_score    = int(qs.get("min_score", ["0"])[0])
-            regulatory   = qs.get("regulatory", ["false"])[0].lower() == "true"
-            results      = _search(q, min_score, regulatory)
+            q = qs.get("q", [""])[0]
+            results = _search(q)
             self._send_json(200, {
                 "total":    len(results),
                 "packages": results,
+                "limitations": ["legacy_score_and_regulatory_filters_are_ignored"],
             })
             return
 
-        # -- Package metadata or epistemic report ---------------------------
+        # -- Package metadata or boundary report ----------------------------
         parts = path.split("/")
         # /api/v1/packages/<name>/<version_or_report>
         if len(parts) >= 5 and parts[1] == "api" and parts[2] == "v1" and parts[3] == "packages":
@@ -192,18 +182,22 @@ class RegistryHandler(BaseHTTPRequestHandler):
             sub  = parts[5] if len(parts) > 5 else "latest"
 
             if sub == "epistemic-report":
+                self._send_error(410, "epistemic-report was removed; use boundary-report")
+                return
+
+            if sub == "boundary-report":
                 pkg = _get_package(name, "latest")
                 if not pkg:
                     self._send_error(404, f"Package '{name}' not found")
                     return
-                self._send_json(200, _epistemic_report(pkg))
+                self._send_json(200, _boundary_report(pkg))
                 return
 
             pkg = _get_package(name, sub)
             if not pkg:
                 self._send_error(404, f"Package '{name}@{sub}' not found")
                 return
-            self._send_json(200, pkg)
+            self._send_json(200, _public_package(pkg))
             return
 
         self._send_error(404, f"Unknown path: {path}")
@@ -216,63 +210,10 @@ class RegistryHandler(BaseHTTPRequestHandler):
             self._send_error(404, f"Unknown path: {path}")
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
-
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError as e:
-            self._send_error(400, f"Invalid JSON: {e}")
-            return
-
-        name    = data.get("name", "")
-        version = data.get("version", "0.0.0")
-        score   = int(data.get("epistemic_score_pct", 0))
-        gum     = bool(data.get("gum_compliant", False))
-        reg     = bool(data.get("regulatory_ready", False))
-
-        if not name:
-            self._send_error(400, "name is required")
-            return
-        if score < 60:
-            self._send_error(422, f"epistemic_score_pct {score} below minimum (60)")
-            return
-
-        tier = 0
-        if score >= 90 and reg:   tier = 3
-        elif score >= 85 and gum: tier = 2
-        elif score >= 70:         tier = 1
-
-        entry = {
-            "name":                name,
-            "version":             version,
-            "description":         data.get("description", ""),
-            "epistemic_score_pct": score,
-            "gum_compliant":       gum,
-            "regulatory_ready":    reg,
-            "provenance_level":    data.get("provenance_level", "medium"),
-            "tier":                tier,
-            "sha256":              data.get("sha256", "0" * 64),
-            "source":              "registry+http://localhost:8080",
-            "published_at":        time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "downloads":           0,
-            "review_required":     (tier == 3),
-        }
-        _db.append(entry)
-
-        status = "published"
-        msg    = f"Package '{name}@{version}' accepted (tier={_tier_name(tier)})"
-        if tier == 3:
-            status = "pending_review"
-            msg    = f"Package '{name}@{version}' queued for human review (regulatory tier)"
-
-        print(f"[registry] PUBLISH {name}@{version} score={score}% tier={_tier_name(tier)}")
-        self._send_json(201, {
-            "status":          status,
-            "message":         msg,
-            "tier":            _tier_name(tier),
-            "review_required": tier == 3,
-        })
+        self._send_error(
+            501,
+            "publishing is disabled until a separately specified registry attestation gate exists",
+        )
 
     def do_OPTIONS(self):
         self.send_response(204)

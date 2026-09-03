@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BOARD_JSON="${PLAN_BIG_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_status_board.v1.json}"
@@ -60,7 +60,7 @@ fi
 
 mkdir -p "$(dirname "$BOARD_JSON")" "$(dirname "$BOARD_MD")" "$(dirname "$OUT_JSON")"
 
-bash "$ROOT_DIR/scripts/plan_big_status_board.sh" --run-gates
+bash "$ROOT_DIR/scripts/overnight/plan_big_status_board.sh" --run-gates
 
 missing=0
 for path in "$BOARD_JSON"; do

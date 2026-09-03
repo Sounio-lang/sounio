@@ -1,0 +1,184 @@
+// stdlib/darwin_pbpk/tmdd/fkbp12_mtorc1.sio — FKBP12 / mTORC1 TMDD layer
+//
+// Target-mediated drug disposition for rapamycin binding FKBP12 in liver,
+// heart, and gut compartments (the dissertation's three rapamycin TMDD organs,
+// matching website/src/lib/pbpk28_core.mjs and tests/run-pass/
+// dissertation_pbpk28_parity_ref_rapamycin.sio).
+//
+// Per-organ ODE block (Mager 2004):
+//
+//   dC_t / dt   = -k_on · C_t · R_free + k_off · DR
+//   dR_free / dt =  k_syn - k_deg · R_free - k_on · C_t · R_free + k_off · DR
+//   dDR / dt    =  k_on · C_t · R_free - (k_off + k_int) · DR
+//
+// All concentrations in nmol/L (the drug-side C_t is exposed in mg/L on the
+// PBPK28 state vector — the helper `mg_per_l_to_nmol_per_l` converts using the
+// drug's molecular weight).
+//
+// Stepping strategy: Newton-linearize the bilinear k_on·C_t·R_free product at
+// (C_t_old, R_free_old) and apply one implicit Crank-Nicolson half-step on the
+// resulting 3×3 system. A-stable, 2nd-order, one 3×3 invert per organ per step
+// — matches the parity-ref `tmdd_step_organ` math byte-for-byte at IEEE-754
+// double precision.
+//
+// Extracted from tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio
+// (Stage G-ε-11, gap-report claim `tmdd_rapamycin_path`).
+
+// ─── Drug constants ─────────────────────────────────────────────────────────
+// Sirolimus, free acid, Mw = 914.17 Da (PubChem CID 5284616).
+pub fn fkbp12_mw_rapamycin_da() -> f64 { return 914.17 }
+
+// ─── Literature parameters per dissertation §4.5 ────────────────────────────
+// Same numbers as the parity reference (which in turn match
+// pbpk28_core.mjs).
+//   Liver (organ index 1), Heart (4 — coronary_smc proxy), Gut (8).
+//   K_d = k_off / k_on = 0.10 nmol/L for the rapamycin-FKBP12 affinity
+//   (Banaszynski 2005 SPR fits, refined Sehgal 1998 EC50). The same K_d is
+//   reused across all three organs; only R_total varies.
+
+pub fn fkbp12_kdeg() -> f64 { return 0.05 }    // 1/h, receptor turnover
+pub fn fkbp12_kon()  -> f64 { return 0.10 }    // L/(nmol·h), binding rate
+pub fn fkbp12_kd()   -> f64 { return 0.10 }    // nmol/L
+pub fn fkbp12_kint() -> f64 { return 0.010 }   // 1/h, drug-receptor internalisation
+pub fn fkbp12_koff() -> f64 { return fkbp12_kon() * fkbp12_kd() }
+
+// Total FKBP12 receptor at baseline (nmol/L of tissue volume).
+//   Liver  i=1 → 50.0 nmol/L (FKBP12 abundance per Banaszynski 2005)
+//   Heart  i=4 → 25.0 nmol/L (coronary SMC proxy; conservative half-of-liver)
+//   Gut    i=8 → 30.0 nmol/L (enterocyte FKBP12 — Lampen 1998)
+pub fn fkbp12_rtotal0_at(i: i64) -> f64 {
+    if i == 1 { return 50.0 }
+    if i == 4 { return 25.0 }
+    if i == 8 { return 30.0 }
+    return 0.0
+}
+
+// At equilibrium, k_syn = k_deg · R_total_0.
+pub fn fkbp12_ksyn_at(i: i64) -> f64 {
+    return fkbp12_kdeg() * fkbp12_rtotal0_at(i)
+}
+
+// Whether an organ index participates in the rapamycin TMDD layer.
+pub fn fkbp12_is_tmdd_organ(i: i64) -> bool {
+    if i == 1 { return true }
+    if i == 4 { return true }
+    if i == 8 { return true }
+    return false
+}
+
+// ─── State record ───────────────────────────────────────────────────────────
+// Per-organ TMDD state. Drug concentration `ct_mass` carried in mg/L (the
+// PBPK28 native unit on the interstitial side); receptor and complex in
+// nmol/L. Conversions handled inside tmdd_step.
+pub struct TmddState {
+    ct_mass: f64,
+    rfree:   f64,
+    dr:      f64,
+}
+
+// Per-organ TMDD parameter pack. Holds everything tmdd_step needs in one
+// struct so callers can swap rapamycin/FKBP12 ↔ semaglutide/GLP-1R without
+// changing the stepping math.
+pub struct TmddOrganParams {
+    k_on:  f64,    // L/(nmol·h)
+    k_off: f64,    // 1/h
+    k_int: f64,    // 1/h, DR internalisation
+    k_deg: f64,    // 1/h, R-turnover
+    k_syn: f64,    // nmol/(L·h), de-novo R synthesis
+    mw_da: f64,    // Da, drug molecular weight (mg/L ↔ nmol/L bridge)
+}
+
+// Populate `TmddOrganParams` for rapamycin at the named organ index.
+pub fn fkbp12_params_at(i: i64) -> TmddOrganParams {
+    TmddOrganParams {
+        k_on:  fkbp12_kon(),
+        k_off: fkbp12_koff(),
+        k_int: fkbp12_kint(),
+        k_deg: fkbp12_kdeg(),
+        k_syn: fkbp12_ksyn_at(i),
+        mw_da: fkbp12_mw_rapamycin_da(),
+    }
+}
+
+// ─── Step kernel ────────────────────────────────────────────────────────────
+// Newton-linearized implicit-CN half-step on the 3-state (C_t, R_free, DR).
+// Pure function: takes current state + parameters + Δt, returns new state.
+// Identical math to parity-ref tmdd_step_organ (lines 364-438 of
+// dissertation_pbpk28_parity_ref_rapamycin.sio) — no Pbpk28 dependency.
+pub fn tmdd_step(s: TmddState, p: TmddOrganParams, dt: f64) -> TmddState with Mut, Div {
+    let h = 0.5 * dt
+    let mass_to_nm = 1.0e6 / p.mw_da
+    let nm_to_mass = p.mw_da * 1.0e-6
+    let ct_old_mass = s.ct_mass
+    let ct_old_nm = if ct_old_mass < 0.0 { 0.0 } else { ct_old_mass * mass_to_nm }
+    let rf_old = s.rfree
+    let dr_old = s.dr
+
+    let kon_rf  = p.k_on * rf_old
+    let kon_ct  = p.k_on * ct_old_nm
+    let bil_old = p.k_on * ct_old_nm * rf_old
+
+    // M (3×3) Jacobian Newton-linearized at (ct_old_nm, rf_old):
+    let m00 = 0.0 - kon_rf
+    let m01 = 0.0 - kon_ct
+    let m02 = p.k_off
+    let m10 = 0.0 - kon_rf
+    let m11 = (0.0 - p.k_deg) - kon_ct
+    let m12 = p.k_off
+    let m20 = kon_rf
+    let m21 = kon_ct
+    let m22 = 0.0 - (p.k_off + p.k_int)
+
+    // Constant terms from the Newton expansion:
+    //   k_on·C_t·R_free ≈ k_on·(C_t_old·R_free + R_free_old·C_t - C_t_old·R_free_old)
+    let f0 = bil_old
+    let f1 = p.k_syn + bil_old
+    let f2 = 0.0 - bil_old
+
+    // RHS = (I + h·M)·x_old + dt·f
+    let rhs0 = (1.0 + h*m00) * ct_old_nm + (h*m01) * rf_old      + (h*m02) * dr_old + dt * f0
+    let rhs1 = (h*m10)       * ct_old_nm + (1.0 + h*m11) * rf_old + (h*m12) * dr_old + dt * f1
+    let rhs2 = (h*m20)       * ct_old_nm + (h*m21) * rf_old      + (1.0 + h*m22) * dr_old + dt * f2
+
+    // A = I - h·M
+    let a00 = 1.0 - h*m00
+    let a01 = 0.0 - h*m01
+    let a02 = 0.0 - h*m02
+    let a10 = 0.0 - h*m10
+    let a11 = 1.0 - h*m11
+    let a12 = 0.0 - h*m12
+    let a20 = 0.0 - h*m20
+    let a21 = 0.0 - h*m21
+    let a22 = 1.0 - h*m22
+
+    // 3×3 invert via cofactor expansion.
+    let c00 = a11*a22 - a12*a21
+    let c01 = a12*a20 - a10*a22
+    let c02 = a10*a21 - a11*a20
+    let det = a00*c00 + a01*c01 + a02*c02
+
+    let c10 = a02*a21 - a01*a22
+    let c11 = a00*a22 - a02*a20
+    let c12 = a01*a20 - a00*a21
+    let c20 = a01*a12 - a02*a11
+    let c21 = a02*a10 - a00*a12
+    let c22 = a00*a11 - a01*a10
+
+    let ct_new_nm = (c00*rhs0 + c10*rhs1 + c20*rhs2) / det
+    let rf_new    = (c01*rhs0 + c11*rhs1 + c21*rhs2) / det
+    let dr_new    = (c02*rhs0 + c12*rhs1 + c22*rhs2) / det
+
+    let ct_new_clamped = if ct_new_nm < 0.0 { 0.0 } else { ct_new_nm }
+    TmddState {
+        ct_mass: ct_new_clamped * nm_to_mass,
+        rfree:   if rf_new < 0.0 { 0.0 } else { rf_new },
+        dr:      if dr_new < 0.0 { 0.0 } else { dr_new },
+    }
+}
+
+// Convenience: receptor occupancy DR / (R_free + DR), guarded against 0/0.
+pub fn tmdd_occupancy(s: TmddState) -> f64 with Div {
+    let total = s.rfree + s.dr
+    if total < 1.0e-12 { return 0.0 }
+    return s.dr / total
+}

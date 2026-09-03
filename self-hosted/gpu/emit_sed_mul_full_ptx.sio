@@ -1,0 +1,103 @@
+// Sounio emitter for a SELF-CONTAINED tensor-core SEDENION multiply (Convention X).
+// sounio_sed_mul_full(a_ptr[16 f32], b_ptr[16*16 f32], out_ptr[256 f32]): thread 0 builds
+// L(a)[k][j]=σ(k⊕j,j,4)·a[k⊕j] in shared (f16). L(a) is 16×16 = EXACTLY one wmma m16n16k16 tile
+// (no padding). bar.sync; the warp runs the tile → D = L(a)·B = the sedenion products (X).
+// Validated on the DGX Spark GB10 including the canonical zero divisor (e3+e10)(e6−e15)=0.
+
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    var digits = ""
+    var x = n
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var c = "0"
+        if d == 1 { c = "1" }
+        if d == 2 { c = "2" }
+        if d == 3 { c = "3" }
+        if d == 4 { c = "4" }
+        if d == 5 { c = "5" }
+        if d == 6 { c = "6" }
+        if d == 7 { c = "7" }
+        if d == 8 { c = "8" }
+        if d == 9 { c = "9" }
+        digits = str_concat(c, digits)
+        x = x / 10
+    }
+    digits
+}
+fn cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+fn frag(prefix: string, start: i64, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, prefix), i64_to_string(start + i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    print(".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    print(".visible .entry sounio_sed_mul_full(\n")
+    print("    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_b,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    print("    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<12>;\n    .reg .b64 %rd<7>;\n")
+    print("    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sB[512];\n")
+    print("    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_b];\n    ld.param.u64 %rd3, [p_out];\n")
+    print("    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    print("    mov.u32 %r18, sL;\n    mov.u32 %r19, sB;\n")
+    print("    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    // build L(a) 16x16, bits=4 — full tile, no padding
+    var k: i64 = 0
+    while k < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let i = k ^ j
+            print("    ld.global.f32 %f1, [%rd4+") print(i64_to_string(i * 4)) print("];\n")
+            if cd_sigma(i, j, 4) < 0 { print("    neg.f32 %f1, %f1;\n") }
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n")
+            print("    st.shared.u16 [%r18+") print(i64_to_string((k * 16 + j) * 2)) print("], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    // stage B col-major 16x16
+    var c: i64 = 0
+    while c < 16 {
+        var r: i64 = 0
+        while r < 16 {
+            print("    ld.global.f32 %f1, [%rd5+") print(i64_to_string((c * 16 + r) * 4)) print("];\n")
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n")
+            print("    st.shared.u16 [%r19+") print(i64_to_string((c * 16 + r) * 2)) print("], %rs1;\n")
+            r = r + 1
+        }
+        c = c + 1
+    }
+    print("$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n")
+    let aF = frag("%r", 2, 8)
+    let bF = frag("%r", 10, 8)
+    let dF = frag("%f", 2, 8)
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ") print(aF) print(", [%r18], %r1;\n")
+    print("    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ") print(bF) print(", [%r19], %r1;\n")
+    print("    mov.f32 %f0, 0f00000000;\n")
+    print("    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ") print(dF) print(", ") print(aF) print(", ") print(bF)
+    print(", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    print("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ") print(dF) print(", %r1;\n")
+    print("    ret;\n}\n")
+}

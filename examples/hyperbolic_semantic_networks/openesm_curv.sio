@@ -1,0 +1,172 @@
+//! PREREGISTERED multi-subject test: does affect-network curvature predict depression BEYOND density?
+//! Concatenated after a generated openesm_<dataset>_data.sio. Each "unit" = one subject with their
+//! affect-network edge list, a depression outcome, and density (mean|r|) — all from the fixture.
+//! Per subject: mean Forman-Ricci + mean exact-OT Ollivier-Ricci (log-Sinkhorn over hop-distances).
+//! Across subjects: partial Spearman(curvature, depression | density) + permutation null → confidence.
+//! Node count K is read from the fixture (<=24); arrays sized 24x24.
+
+fn oe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn oe_sqrt(x: f64) -> f64 with Mut, Div, Panic { if x<=0.0 {return 0.0} var y=x; var i:i64=0; while i<30 {y=0.5*(y+x/y); i=i+1}; y }
+fn oe_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x<=0.0 {return -1.0e9}
+    let ln2=0.6931471805599453; var v=x; var k:i64=0
+    while v>2.0 {v=v/2.0; k=k+1}
+    while v<1.0 {v=v*2.0; k=k-1}
+    let y=(v-1.0)/(v+1.0); let yy=y*y; var r=0.0; var p=y; var i:i64=1
+    while i<=29 {r=r+p/(i as f64); p=p*yy; i=i+2}
+    2.0*r+(k as f64)*ln2
+}
+fn oe_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -700.0 {return 0.0}
+    let ln2=0.6931471805599453; var v=x; if v>700.0 {v=700.0}
+    let k=(v/ln2) as i64; let r=v-(k as f64)*ln2
+    var res=1.0; var term=1.0; var i:i64=1
+    while i<=15 {term=term*r/(i as f64); res=res+term; i=i+1}
+    if k>=0 {var j:i64=0; while j<k {res=res*2.0; j=j+1}} else {var j:i64=0; while j<(0-k) {res=res/2.0; j=j+1}}
+    res
+}
+
+// W1 via log-domain Sinkhorn over n-point marginals a,b with cost C (n*n). eps reg.
+fn sinkhorn_w1(a: &[f64; 24], b: &[f64; 24], C: &[f64; 576], n: i64, eps: f64, iters: i64) -> f64 with Mut, Div, Panic {
+    var la:[f64;24]=[0.0;24]; var lb:[f64;24]=[0.0;24]; var f:[f64;24]=[0.0;24]; var g:[f64;24]=[0.0;24]
+    var i:i64=0; while i<n {la[i]=oe_ln(a[i]); lb[i]=oe_ln(b[i]); i=i+1}
+    var it:i64=0
+    while it<iters {
+        i=0
+        while i<n {
+            var m=-1.0e30; var j:i64=0
+            while j<n {let z=(0.0-C[i*n+j])/eps+g[j]; if z>m {m=z}; j=j+1}
+            var s=0.0; j=0
+            while j<n {s=s+oe_exp(((0.0-C[i*n+j])/eps+g[j])-m); j=j+1}
+            f[i]=la[i]-(m+oe_ln(s)); i=i+1
+        }
+        var j:i64=0
+        while j<n {
+            var m=-1.0e30; var ii:i64=0
+            while ii<n {let z=(0.0-C[ii*n+j])/eps+f[ii]; if z>m {m=z}; ii=ii+1}
+            var s=0.0; ii=0
+            while ii<n {s=s+oe_exp(((0.0-C[ii*n+j])/eps+f[ii])-m); ii=ii+1}
+            g[j]=lb[j]-(m+oe_ln(s)); j=j+1
+        }
+        it=it+1
+    }
+    var w1=0.0; i=0
+    while i<n {var j:i64=0; while j<n {let t=oe_exp(f[i]+(0.0-C[i*n+j])/eps+g[j]); w1=w1+t*C[i*n+j]; j=j+1}; i=i+1}
+    w1
+}
+
+// ---- cross-unit stats ----
+fn rank_into(x: &[f64; 1024], n: i64, r: &![f64; 1024]) with Mut, Div, Panic {
+    var i:i64=0
+    while i<n {var less=0.0; var eq=0.0; var j:i64=0
+        while j<n {if x[j]<x[i] {less=less+1.0} else {if x[j]==x[i] {eq=eq+1.0}}; j=j+1}
+        r[i]=less+(eq+1.0)/2.0; i=i+1}
+}
+fn pear(a: &[f64; 1024], b: &[f64; 1024], n: i64) -> f64 with Mut, Div, Panic {
+    var sa=0.0; var sb=0.0; var saa=0.0; var sbb=0.0; var sab=0.0; var i:i64=0
+    while i<n {sa=sa+a[i]; sb=sb+b[i]; saa=saa+a[i]*a[i]; sbb=sbb+b[i]*b[i]; sab=sab+a[i]*b[i]; i=i+1}
+    let nf=n as f64; let cov=nf*sab-sa*sb
+    let da=oe_sqrt(nf*saa-sa*sa); let db=oe_sqrt(nf*sbb-sb*sb)
+    if da<=0.0||db<=0.0 {return 0.0}
+    cov/(da*db)
+}
+fn spear(x: &[f64;1024], y: &[f64;1024], n: i64, rx: &![f64;1024], ry: &![f64;1024]) -> f64 with Mut, Div, Panic {
+    rank_into(x,n,rx); rank_into(y,n,ry); pear(rx,ry,n)
+}
+fn partial3(rxy: f64, rxz: f64, ryz: f64) -> f64 with Mut, Div, Panic {
+    let den=oe_sqrt((1.0-rxz*rxz)*(1.0-ryz*ryz)); if den<=0.0 {return 0.0}
+    (rxy-rxz*ryz)/den
+}
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let K = fx_n_nodes()
+    let U = fx_n_units()
+    var us:[i64;1024]=[0;1024]; var un:[i64;1024]=[0;1024]
+    var ei:[i64;65536]=[0;65536]; var ej:[i64;65536]=[0;65536]; var ew:[f64;65536]=[0.0;65536]
+    var dep:[f64;1024]=[0.0;1024]; var dens:[f64;1024]=[0.0;1024]
+    load_u_start(&!us); load_u_nedge(&!un); load_ei(&!ei); load_ej(&!ej); load_ew(&!ew)
+    load_depression(&!dep); load_density(&!dens)
+
+    var forman:[f64;1024]=[0.0;1024]; var orc:[f64;1024]=[0.0;1024]
+    var u:i64=0
+    while u<U {
+        let s0=us[u]; let ne=un[u]
+        var A:[f64;576]=[0.0;576]
+        var e:i64=0
+        while e<ne {let a=ei[s0+e]; let b=ej[s0+e]; let w=ew[s0+e]; A[a*K+b]=w; A[b*K+a]=w; e=e+1}
+        var deg:[f64;24]=[0.0;24]
+        var i:i64=0
+        while i<K {var d=0.0; var j:i64=0; while j<K {d=d+A[i*K+j]; j=j+1}; deg[i]=d; i=i+1}
+        // Floyd-Warshall hop distance
+        var D:[f64;576]=[0.0;576]
+        i=0
+        while i<K {var j:i64=0
+            while j<K {if i==j {D[i*K+j]=0.0} else {if A[i*K+j]>0.0 {D[i*K+j]=1.0} else {D[i*K+j]=1.0e6}}; j=j+1}
+            i=i+1}
+        var kk:i64=0
+        while kk<K {i=0
+            while i<K {var j:i64=0; while j<K {let alt=D[i*K+kk]+D[kk*K+j]; if alt<D[i*K+j] {D[i*K+j]=alt}; j=j+1}; i=i+1}
+            kk=kk+1}
+        var osum=0.0; var fsum=0.0
+        e=0
+        while e<ne {
+            let a=ei[s0+e]; let b=ej[s0+e]; let we=ew[s0+e]
+            var mu:[f64;24]=[0.0;24]; var mv:[f64;24]=[0.0;24]
+            var y:i64=0
+            while y<K {mu[y]=if deg[a]>0.0 {A[a*K+y]/deg[a]} else {0.0}; mv[y]=if deg[b]>0.0 {A[b*K+y]/deg[b]} else {0.0}; y=y+1}
+            let w1=sinkhorn_w1(&mu,&mv,&D,K,0.05,150)
+            osum=osum+(1.0-w1/D[a*K+b])
+            var acc=0.0; var x:i64=0
+            while x<K {if x!=b && A[a*K+x]>0.0 {acc=acc+oe_sqrt(we/A[a*K+x])}; x=x+1}
+            x=0
+            while x<K {if x!=a && A[b*K+x]>0.0 {acc=acc+oe_sqrt(we/A[b*K+x])}; x=x+1}
+            fsum=fsum+(2.0-acc)
+            e=e+1
+        }
+        forman[u]=if ne>0 {fsum/(ne as f64)} else {0.0}
+        orc[u]=if ne>0 {osum/(ne as f64)} else {0.0}
+        u=u+1
+    }
+
+    var rx:[f64;1024]=[0.0;1024]; var ry:[f64;1024]=[0.0;1024]
+    let r_F_dep = spear(&forman,&dep,U,&!rx,&!ry)
+    let r_O_dep = spear(&orc,&dep,U,&!rx,&!ry)
+    let r_den_dep = spear(&dens,&dep,U,&!rx,&!ry)        // premise
+    let r_F_den = spear(&forman,&dens,U,&!rx,&!ry)
+    let r_O_den = spear(&orc,&dens,U,&!rx,&!ry)
+    let pF = partial3(r_F_dep, r_F_den, r_den_dep)
+    let pO = partial3(r_O_dep, r_O_den, r_den_dep)
+
+    println("=== preregistered curvature -> depression (controlling density) ===")
+    print_kv("n_units", U as f64)
+    print_kv("premise_corr_density_depression", r_den_dep)
+    print_kv("raw_spearman_Forman_dep", r_F_dep)
+    print_kv("raw_spearman_ORC_dep", r_O_dep)
+    print_kv("PARTIAL_Forman_dep_given_density", pF)
+    print_kv("PARTIAL_ORC_dep_given_density", pO)
+
+    // permutation null on PARTIAL Forman: shuffle depression, recompute partial
+    var seed:i64=20260527; let B:i64=1000; var ge:i64=0; var ge_one:i64=0
+    var depp:[f64;1024]=[0.0;1024]
+    var bi:i64=0
+    while bi<B {
+        var t:i64=0; while t<U {depp[t]=dep[t]; t=t+1}
+        var k:i64=U-1
+        while k>0 {seed=(seed*1103515245+12345)&2147483647; let jj=seed%(k+1); let tmp=depp[k]; depp[k]=depp[jj]; depp[jj]=tmp; k=k-1}
+        let rfd=spear(&forman,&depp,U,&!rx,&!ry)
+        let rdd=spear(&dens,&depp,U,&!rx,&!ry)
+        let pp=partial3(rfd, r_F_den, rdd)
+        if oe_abs(pp)>=oe_abs(pF) {ge=ge+1}
+        if pp<=pF {ge_one=ge_one+1}      // one-sided (H1: negative), pF<0
+        bi=bi+1
+    }
+    let pval=((ge+1) as f64)/((B+1) as f64)
+    let pval_one=((ge_one+1) as f64)/((B+1) as f64)
+    print_kv("perm_p_partial_Forman", pval)
+    print_kv("perm_p_one_sided_Forman_negative", pval_one)
+    print_kv("epistemic_confidence_0_1000", (1.0-pval)*1000.0)
+    print_kv("gate_pass_conf_ge_800", if (1.0-pval)*1000.0>=800.0 {1.0} else {0.0})
+    println("OPENESM_CURV_DONE")
+    0
+}

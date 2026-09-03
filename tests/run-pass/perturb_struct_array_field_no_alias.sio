@@ -1,0 +1,79 @@
+//@ run-pass
+//@ expect-stdout: PERTURB_NO_ALIAS_OK
+// Regression gate for #1497, in the shape the defect was actually observed in.
+//
+// tests/run-pass/aggregate_nested_field_deep_copy.sio (#1479/#1487) pins the
+// deep copy by MUTATING a copy and READING BACK through the source. That form
+// is not how #1497 presented, and a 1-level repro written that way did not
+// reproduce it.
+//
+// The observable form is a CENTRAL DIFFERENCE: perturb the same base twice, by
+// +h and by -h, then compare the two RESULTS. When the by-value struct copy
+// shares its array field with the source, both calls mutate one backing array
+// (+h, then +h-h), the two returned structs alias it, and the two readouts come
+// back byte-identical. The derivative is then EXACTLY 0.0 -- not noisy, not
+// approximate -- and every downstream aggregate invariant still holds, which is
+// why stdlib/darwin_pbpk/epistemic_pbpk28.sio reported 9/9 PASSED while four of
+// its seven sensitivity components were destroyed.
+//
+// This mirrors ep28_perturb / ep28_run: a scalar field (correct even under the
+// #1480 flat copy) alongside an array element (the broken one), so a failure
+// here localises the defect instead of merely reporting it.
+
+struct P { kp: [f64; 8], cl: f64 }
+
+fn perturb(prm: P, idx: i64, delta: f64) -> P with Mut, Div, Panic, Alloc {
+    var p = prm
+    if idx == 0 { p.cl = p.cl + delta }
+    if idx == 3 { p.kp[3] = p.kp[3] + delta }
+    return p
+}
+
+fn readout(prm: P) -> f64 with Mut, Div, Panic, Alloc {
+    prm.kp[3] * 2.0 + prm.cl
+}
+
+fn central_diff(base: P, idx: i64, h: f64) -> f64 with Mut, Div, Panic, Alloc {
+    let pp = perturb(base, idx, h)
+    let pn = perturb(base, idx, 0.0 - h)
+    (readout(pp) - readout(pn)) / (2.0 * h)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    var base = P { kp: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], cl: 10.0 }
+    let h = 0.25
+
+    // 1. SCALAR field. Correct even under the flat copy of #1480; present so a
+    //    failure of case 2 is read as "aggregate field", not "perturbation".
+    let d_cl = central_diff(base, 0, h)
+    assert(d_cl > 0.999)
+    assert(d_cl < 1.001)
+
+    // 2. ARRAY ELEMENT inside the by-value struct copy. Exactly 0.0 when the
+    //    field aliases; 2.0 when it is genuinely copied.
+    let d_kp = central_diff(base, 3, h)
+    assert(d_kp > 1.999)
+    assert(d_kp < 2.001)
+
+    // 3. the two perturbed structs must be DISTINCT objects, not one aliased one
+    let pp = perturb(base, 3, h)
+    let pn = perturb(base, 3, 0.0 - h)
+    assert(pp.kp[3] > pn.kp[3])
+    assert(pp.kp[3] > 4.24)
+    assert(pp.kp[3] < 4.26)
+    assert(pn.kp[3] > 3.74)
+    assert(pn.kp[3] < 3.76)
+
+    // 4. neither call may have written through to the caller's base
+    assert(base.kp[3] > 3.99)
+    assert(base.kp[3] < 4.01)
+    assert(base.cl > 9.99)
+    assert(base.cl < 10.01)
+
+    // 5. an untouched element of the same array must survive the copy
+    assert(pp.kp[7] > 7.99)
+    assert(pp.kp[7] < 8.01)
+
+    println("PERTURB_NO_ALIAS_OK")
+    return 0
+}

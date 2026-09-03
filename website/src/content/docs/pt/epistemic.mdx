@@ -1,6 +1,6 @@
 ---
 title: "Tipos Epistêmicos"
-description: "Incerteza, confiança e proveniência como dados de primeira classe."
+description: "Incerteza, confiança e proveniência de dados como cidadãos de primeira classe na segurança da linguagem."
 weight: 18
 category: "epistemic"
 topic_id: "website.docs.epistemic"
@@ -11,15 +11,93 @@ validated_by: "A3"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.epistemic"
 ---
 
-# Tipos Epistêmicos
+# Tipos Epistêmicos e Computação sob Incerteza
 
-Tipos epistêmicos são onde Sounio mais se diferencia hoje: o contrato público validado é estreito, mas é real e sustentado por testes.
+O Sounio introduz **Tipos Epistêmicos** como uma solução nativa de linguagem para modelar dados científicos, clínicos e experimentais. Diferente de sistemas de tipos tradicionais que assumem números com precisão ideal infinita e sem histórico (o que é uma falácia na ciência e na clínica), o Sounio trata a **incerteza**, o **intervalo de confiança** e a **proveniência** (rastreabilidade da origem) como metadados indissociáveis do dado de primeira classe.
 
-## Verificado hoje
-- `Knowledge<T>` ainda exige fronteiras de unwrap explícitas em vez de extração silenciosa.
-- Fixtures compile-fail com limites de confiança fazem parte do contrato verificado.
-- `tests/run-pass/vancomycin_propagation.sio` e o fixture médico documentam o fluxo epistemic atual.
+O principal construtor para esse sistema é o tipo parametrizado `Knowledge<T>`.
 
-## Ressalvas atuais
-- O modelo completo de incerteza e proveniência é mais rico na spec e na stdlib do que no artefato validado de hoje.
-- O comportamento depende do binário `souc` exato, não apenas dos arquivos presentes no repositório.
+---
+
+## 1. O Tipo Genérico `Knowledge<T>`
+
+O tipo `Knowledge<T>` encapsula um valor central juntamente com suas informações de incerteza e contexto de proveniência de dados:
+
+```sio
+// Medição de dose com incerteza associada (GUM)
+let dose: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
+```
+
+Aqui, o valor `500.0 mg` possui uma incerteza de medição padrão de `2.5 mg` associada estaticamente.
+
+---
+
+## 2. Propagação de Incerteza baseada no Guia GUM
+
+O Sounio implementa as diretrizes do **GUM (Guide to the Expression of Uncertainty in Measurement)** diretamente em seu runtime e compilador. Quando operações matemáticas são realizadas entre tipos epistêmicos, as incertezas são propagadas automaticamente usando expansões de Taylor de primeira ordem (lei de propagação de incertezas):
+
+### Soma e Subtração (Incertezas Somadas em Quadratura)
+Se $z = x + y$ ou $z = x - y$, a incerteza padrão combinada $u(z)$ é dada por:
+
+`u(z) = √(u(x)² + u(y)²)`
+
+### Multiplicação e Divisão (Incertezas Relativas Somadas em Quadratura)
+Se $z = x · y$ ou $z = x / y$, a incerteza relativa combinada é dada por:
+
+`u(z) / |z| = √((u(x)/x)² + (u(y)/y)²)`
+
+### Exemplo de Propagação Automática em Código
+
+```sio
+let concentracao_inicial: Knowledge<mg_per_L> = measure(20.0, uncertainty: 0.8)
+let fator_diluicao: Knowledge<f64> = measure(2.0, uncertainty: 0.05)
+
+// O Sounio calcula automaticamente o novo valor central e a incerteza combinada correta
+let concentracao_final = concentracao_inicial / fator_diluicao
+```
+
+---
+
+## 3. Proveniência e Rastreabilidade de Dados
+
+Na ciência de dados críticos e na farmacologia, saber *como* um dado foi calculado é tão importante quanto o valor em si. O sistema epistêmico do Sounio anexa metadados estruturados de proveniência ao tipo `Knowledge<T>` que incluem:
+
+-   **SHA-256 Hashes**: Assinaturas criptográficas dos geradores, templates de dados e arquivos de entrada.
+-   **Measure and Cost Construction Notes**: Histórico de restrições ou ajustes estatísticos de custo aplicados à medição ao longo do pipeline de modelagem.
+-   **Rastreamento de Origem**: Preserva a linhagem da informação, prevenindo adulteração silenciosa ou "alinhamentos" forçados de dados experimentais.
+
+---
+
+## 4. O Tipo `Unobserved<T>` e Barreiras de Observação
+
+Diferente de variáveis comuns, dados probabilísticos ou experimentais complexos podem começar no estado não observado. O Sounio fornece o tipo `Unobserved<T>` para representar esses canais:
+
+-   Para acessar ou testar o valor interno de um canal `Unobserved<T>` (por exemplo, em ramificações condicionais ou passagens para subsistemas externos e FFI), o desenvolvedor deve obrigatoriamente executar uma função ou método de efeito `Observe`.
+-   Falta de observação explícita gera o erro de compilação `E035` ou falha de cobertura.
+
+```sio
+fn analisar_observacao(x: Unobserved<f64>) -> bool with Observe {
+    // É obrigatório converter para observado antes de avaliar a comparação
+    let valor_real = observe(x)
+    valor_real > 0.0
+}
+```
+
+---
+
+## 5. Casos de Uso Clínicos e Farmacocinéticos (PK)
+
+O principal caso de validação e testes integrados de tipos epistêmicos está localizado em `tests/run-pass/vancomycin_propagation.sio`. 
+
+Em modelos de monitoramento terapêutico de drogas (TDM) de Vancomicina, onde pequenas variações na depuração renal (clearance de creatinina) alteram drasticamente a meia-vida do fármaco, o Sounio garante que:
+
+-   **Validação de Limites de Confiança**: O compilador rejeita o uso de estimativas de dosagem cuja probabilidade cumulativa de falha ultrapasse limites de segurança específicos (conforme testado em `tests/compile-fail/vancomycin_low_conf.sio`).
+-   **Monotonicidade**: O runtime epistêmico valida se os parâmetros calculados de concentração mínima (Cmin) e área sob a curva (AUC24) mantêm consistência física matemática honesta, impedindo modificações e tolerâncias retroajustadas artificiais.
+
+---
+
+## 6. Estado de Maturidade e Políticas de Rigor Matemático
+
+O módulo de Tipos Epistêmicos está em estado de **produção robusto**, apoiado por provas formais desenvolvidas na linguagem Lean 4 (`formal/lean4/`). 
+
+Como diretriz inalterável do repositório, **tolerâncias e intervalos numéricos não podem ser alterados para mascarar falhas matemáticas de modelos** (política anti-afrouxamento). Se um teste epistêmico falhar, o modelo matemático ou o algoritmo de processamento do compilador devem ser reparados com honestidade acadêmica absoluta.

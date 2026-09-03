@@ -107,21 +107,40 @@ fn law_beta_posterior_formula(k: i32, n: i32) -> bool {
 // GUM PROPAGATION LAWS
 // ============================================================================
 
-// GUM combined uncertainty for y = f(x1, x2) with sensitivities c1, c2.
+// GUM uncertainty for y = f(x1, x2) with sensitivities c1, c2, under correlation rho.
 //
-// REQUIRES INDEPENDENCE. This is JCGM 100:2008 equation (10), which holds only
-// when x1 and x2 are uncorrelated. The general law is equation (13):
+// Merge note (#1758 x integration/sounio-dev-ready-base, 2026-09-03): both
+// branches independently fixed the same defect here -- this function used to
+// be `sqrt(c1^2 u1^2 + c2^2 u2^2)`, JCGM 100:2008 eq. (10), silently assuming
+// independence in a file named `invariants`, with "Law 6" built on top of it.
+// The general law is eq. (13):
 //
-//     u_c(y)^2 = c1^2 u1^2 + c2^2 u2^2 + 2 c1 c2 u(x1,x2)
+//     u_c^2 = c1^2 u1^2 + c2^2 u2^2 + 2 c1 c2 rho u1 u2
 //
-// Dropping the covariance term is not a simplification: with rho > 0 it makes
-// u_c SMALLER than the truth, and SEMANTICS.md Invariant 2 says in as many words
-// that uncertainty bounds which can shrink under transformation are lies.
-//
-// The assumption is now in the name. Callers that cannot discharge it must use
-// gum_combined_uncertainty_correlated below.
+// #1758's fix renamed the rho=0 function to gum_combined_uncertainty_independent
+// but kept the bare gum_combined_uncertainty alias pointed at it -- an unlabeled
+// caller still silently got the independence-assuming answer. This branch's fix
+// factors the one true formula (gum_combined_uncertainty_rho) and points the
+// bare alias at rho=1, the conservative worst case, matching the same
+// "default inverts to conservative" choice this PR already makes in
+// stdlib/epistemic/graded_effects.sio's graded_compose. Kept: no test on
+// either branch called the bare name, so nothing regresses.
+fn gum_combined_uncertainty_rho(u1: f64, u2: f64, c1: f64, c2: f64, rho: f64) -> f64 {
+    let s = c1*c1*u1*u1 + c2*c2*u2*u2 + 2.0*c1*c2*rho*u1*u2
+    if s <= 0.0 { return 0.0 }
+    return sqrt(s)
+}
+
+// Independência PROVADA (rho = 0). Nome explícito para que a alegação seja grepável.
 fn gum_combined_uncertainty_independent(u1: f64, u2: f64, c1: f64, c2: f64) -> f64 {
-    return sqrt(c1*c1*u1*u1 + c2*c2*u2*u2)
+    return gum_combined_uncertainty_rho(u1, u2, c1, c2, 0.0)
+}
+
+// Sem rho declarado, o padrão é o PIOR CASO (rho = 1) — o limite de Cauchy–Schwarz, que é a
+// mesma lei no extremo, e não uma invenção defensiva. A "Law 6" (u_c >= maior contribuição
+// individual) continua valendo, porque o limite conservador só cresce.
+fn gum_combined_uncertainty(u1: f64, u2: f64, c1: f64, c2: f64) -> f64 {
+    return gum_combined_uncertainty_rho(u1, u2, c1, c2, 1.0)
 }
 
 // The general JCGM 100:2008 eq. (13) form, with the correlation coefficient
@@ -139,12 +158,6 @@ fn gum_combined_uncertainty_correlated(u1: f64, u2: f64, c1: f64, c2: f64, rho: 
     let total = var_indep + cov_term
     if total <= 0.0 { return 0.0 }
     return sqrt(total)
-}
-
-// Kept so existing callers keep compiling. It is the independent law, and the
-// name no longer hides that.
-fn gum_combined_uncertainty(u1: f64, u2: f64, c1: f64, c2: f64) -> f64 {
-    return gum_combined_uncertainty_independent(u1, u2, c1, c2)
 }
 
 // Law 6: Combined uncertainty >= max individual contribution

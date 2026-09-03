@@ -66,12 +66,12 @@ let EG_HASH_PRIME: i64 = 16381
 // Section 2: Data Structures
 // ============================================================================
 
-struct EgNode {
-    op: i64,
-    children: [i64; 4],
-    child_count: i64,
-    value: i64,
-    eclass_id: i64,
+pub struct EgNode {
+    pub op: i64,
+    pub children: [i64; 4],
+    pub child_count: i64,
+    pub value: i64,
+    pub eclass_id: i64,
 }
 
 struct EgClass {
@@ -88,7 +88,7 @@ struct EgUnionFind {
     size: i64,
 }
 
-struct EgRule {
+pub struct EgRule {
     lhs_op: i64,
     lhs_children: [i64; 4],
     rhs_op: i64,
@@ -134,7 +134,7 @@ struct EgContext {
     stats: EgStats,
 }
 
-struct EgMatch {
+pub struct EgMatch {
     matched_class: i64,
     matched_node: i64,
     bindings: [i64; 4],
@@ -337,7 +337,7 @@ fn eg_graph_make_set(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
 // Section 5: Hashing
 // ============================================================================
 
-fn eg_hash_node(op: i64, children: [i64; 4], child_count: i64) -> i64 with Mut, Div, Panic {
+pub(crate) fn eg_hash_node(op: i64, children: [i64; 4], child_count: i64) -> i64 with Mut, Div, Panic {
     var h: i64 = op * 2654435761
     var i: i64 = 0
     while i < child_count {
@@ -877,13 +877,13 @@ fn eg_best_cost_for_class(graph: &! EgGraph, extractor: &EgExtractor, class_id: 
 // Section 13: Built-In Algebraic Rules
 // ============================================================================
 
-fn eg_rule_add_commute() -> EgRule {
+pub(crate) fn eg_rule_add_commute() -> EgRule {
     let lhs_ch: [i64; 4] = [EG_PAT_VAR_A, EG_PAT_VAR_B, EG_INVALID, EG_INVALID]
     let rhs_ch: [i64; 4] = [EG_PAT_VAR_B, EG_PAT_VAR_A, EG_INVALID, EG_INVALID]
     eg_make_rule(EG_OP_ADD, lhs_ch, 2, EG_OP_ADD, rhs_ch, 2, 101, false)
 }
 
-fn eg_rule_mul_commute() -> EgRule {
+pub(crate) fn eg_rule_mul_commute() -> EgRule {
     let lhs_ch: [i64; 4] = [EG_PAT_VAR_A, EG_PAT_VAR_B, EG_INVALID, EG_INVALID]
     let rhs_ch: [i64; 4] = [EG_PAT_VAR_B, EG_PAT_VAR_A, EG_INVALID, EG_INVALID]
     eg_make_rule(EG_OP_MUL, lhs_ch, 2, EG_OP_MUL, rhs_ch, 2, 102, false)
@@ -1186,7 +1186,7 @@ fn eg_count_live_classes(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
     count
 }
 
-fn eg_op_name_hash(op: i64) -> i64 {
+pub(crate) fn eg_op_name_hash(op: i64) -> i64 {
     if op == EG_OP_CONST { return 100 }
     if op == EG_OP_VAR { return 200 }
     if op == EG_OP_ADD { return 300 }
@@ -1302,7 +1302,7 @@ fn eg_ctx_node_child(ctx: &EgContext, node_idx: i64, child_idx: i64) -> i64 with
 // References:
 //   Willsey et al. "egg: Fast and Extensible Equality Saturation" (2021)
 
-struct EgSmallContext {
+pub struct EgSmallContext {
     nodes:      [EgNode; 64],
     node_count: i64,
     parent:     [i64; 128],
@@ -1320,6 +1320,23 @@ struct EgSmallContext {
     reassoc_strategy: i64,
     // Cayley-Dickson tower level for Fano predicate (3=octonion, 4=sedenion)
     cd_bits: i64,
+    // Representation-exactness axis (orthogonal to the value-algebra axis above).
+    // false (default): the carrier is inexact (IEEE-754 f64/f32), so reassociation
+    //   of FADD/FSUB/FMUL is FORBIDDEN — it changes the bits and breaks bit-identity /
+    //   cross-stage determinism. IEEE-754 addition and multiplication are commutative
+    //   but NOT associative, independent of the value algebra.
+    // true: the producing context has explicitly opted in to inexact reassociation
+    //   (the GUM-guided precision-preserving pass, which deliberately trades bits for a
+    //   lower-uncertainty evaluation order). Only that path may set this.
+    allow_inexact_reassoc: bool,
+    // A-layer-2 (Lyapunov/chaos axis). true: this context optimizes a function that
+    // integrates a vector field tagged `chaotic` (largest Lyapunov exponent λ > 0,
+    // per the chaos-sensitivity manifest). A reassociation-induced rounding difference
+    // then grows ~ e^{λt} over the integration horizon, so ALL float reassociation is
+    // refused REGARDLESS of allow_inexact_reassoc — the chaos gate dominates the
+    // precision-preserving opt-in. Set from the IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
+    // strategy, which a `with Chaotic` effect produces.
+    chaotic: bool,
     // Phase 5: observation barriers.
     // E-classes in this array are "observed" — the optimizer must not merge
     // them with other classes. They are fixed points in the equivalence space.
@@ -1328,13 +1345,15 @@ struct EgSmallContext {
     observe_barrier_count: i64,
 }
 
-fn eg_small_init() -> EgSmallContext {
+pub fn eg_small_init() -> EgSmallContext {
     EgSmallContext {
         nodes:      [eg_node_new(); 64],
         node_count: 0,
         algebra_kind: 0,  // default: Real (associative)
         reassoc_strategy: 0,  // default: free reassociation
         cd_bits: 0,
+        allow_inexact_reassoc: false,  // default: inexact (f64) reassociation FORBIDDEN
+        chaotic: false,                // default: not a chaotic integration path
         observe_barriers: [0 - 1; 16],
         observe_barrier_count: 0,
         parent:     [EG_INVALID; 128],
@@ -1354,6 +1373,15 @@ fn eg_small_init_algebra(strategy: i64, cd_bits_in: i64) -> EgSmallContext {
         algebra_kind: 3,
         reassoc_strategy: strategy,
         cd_bits: cd_bits_in,
+        chaotic: false,                // default: not a chaotic integration path
+        // Deliberate opt-in: this constructor exists ONLY for explicit algebra-gated
+        // reassociation contexts (Cayley-Dickson octonion/sedenion), whose callers have
+        // declared intent to reassociate within the value-algebra limits encoded by
+        // `strategy` (free / blocked / fano_selective). It is the value-algebra axis that
+        // then decides WHICH triples may merge. The exactness axis is therefore opted in
+        // here, so the Fano predicate (168-theorem) remains the deciding gate — preserving
+        // the algebra tests' semantics. The default-safe path is eg_small_init() (false).
+        allow_inexact_reassoc: true,
         observe_barriers: [0 - 1; 16],
         observe_barrier_count: 0,
         parent:     [EG_INVALID; 128],
@@ -1379,7 +1407,7 @@ fn eg_small_is_observed(ctx: &! EgSmallContext, eclass: i64) -> bool with Mut, D
 }
 
 // Mark an e-class as observed (creates a barrier the optimizer cannot merge past).
-fn eg_small_mark_observed(ctx: &! EgSmallContext, eclass: i64) with Mut {
+pub fn eg_small_mark_observed(ctx: &! EgSmallContext, eclass: i64) with Mut {
     if ctx.observe_barrier_count < 16 {
         ctx.observe_barriers[ctx.observe_barrier_count] = eclass
         ctx.observe_barrier_count = ctx.observe_barrier_count + 1
@@ -1397,7 +1425,7 @@ fn eg_small_make_set(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
 }
 
 // Path-compressing find on the small union-find.
-fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div, Panic {
+pub(crate) fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div, Panic {
     if x < 0 || x >= 128 { return x }
     var root = x
     while ctx.parent[root as usize] != root {
@@ -1414,7 +1442,7 @@ fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div, Panic {
 
 // Rank-based union.  Returns true if a real merge happened (classes were distinct).
 // Phase 5: observation barriers block merges. Observed e-classes are fixed points.
-fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+pub(crate) fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
     let ra = eg_small_find(ctx, a)
     let rb = eg_small_find(ctx, b)
     if ra == rb { return false }
@@ -1461,7 +1489,7 @@ fn eg_small_add_node(ctx: &! EgSmallContext, node: EgNode) -> i64 with Mut, Div,
     id
 }
 
-fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div, Panic {
+pub(crate) fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          EG_OP_CONST,
         children:    [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
@@ -1480,7 +1508,7 @@ fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div, 
 // Used for GUM uncertainty propagation: u(z) = sqrt(u(x)^2 + u(y)^2)
 // Initial guess: y = 2^k where 4^(k-1) < x <= 4^k, so y/sqrt(x) in [1,2)
 // guaranteeing convergence in 7 iterations to floor(sqrt(x)).
-fn eg_isqrt(x: i64) -> i64 {
+pub(crate) fn eg_isqrt(x: i64) -> i64 {
     if x <= 0 { return 0 }
     if x == 1 { return 1 }
     var y: i64 = 2
@@ -1525,13 +1553,13 @@ fn eg_isqrt(x: i64) -> i64 {
 }
 
 // Quantize f64 uncertainty to i64 scale (multiply by 1e9 for nanoscale resolution)
-fn eg_quantize_unc(u_f64: f64) -> i64 {
+pub fn eg_quantize_unc(u_f64: f64) -> i64 {
     let scaled = u_f64 * 1000000000.0
     if scaled < 0.0 { return 0 }
     scaled as i64
 }
 
-fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div, Panic {
+pub fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          EG_OP_VAR,
         children:    [var_id, EG_INVALID, EG_INVALID, EG_INVALID],
@@ -1542,7 +1570,7 @@ fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div, P
     eg_small_add_node(ctx, node)
 }
 
-fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div, Panic {
+pub fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          op,
         children:    [lhs, rhs, EG_INVALID, EG_INVALID],
@@ -1554,7 +1582,7 @@ fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i6
 }
 
 // Add VAR node with uncertainty annotation (for epistemic pass)
-fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) -> i64 with Mut, Div, Panic {
+pub fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) -> i64 with Mut, Div, Panic {
     let node_idx = eg_small_add_var(ctx, var_id)
     if node_idx >= 0 && node_idx < 64 {
         ctx.unc_lo[node_idx as usize] = unc
@@ -1565,7 +1593,7 @@ fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) -> i
 // Add binary op node with propagated uncertainty for epistemic pass
 // GUM §5.1.2: u(z)^2 = u(x)^2 + u(y)^2 for additive ops; conservative for mul/div.
 // lhs_class/rhs_class are node indices (same as e-class IDs for leaf nodes) into unc_lo.
-fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
+pub fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
     let lhs_unc = if lhs_class >= 0 && lhs_class < 64 { ctx.unc_lo[lhs_class as usize] } else { 0 }
     let rhs_unc = if rhs_class >= 0 && rhs_class < 64 { ctx.unc_lo[rhs_class as usize] } else { 0 }
     // Clamp to avoid i64 overflow in the square (safe up to ~3.03e9 per operand)
@@ -1590,7 +1618,7 @@ fn eg_small_cost_by_op(op: i64) -> i64 {
 // Apply algebraic saturation rules on the small graph.
 // Rules: add(x,0)→x, add(0,x)→x, mul(x,1)→x, mul(1,x)→x, sub(x,x)→0.
 // Returns total merge count; 0 indicates already saturated.
-fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+pub fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
     var total_merges: i64 = 0
     var iter: i64 = 0
     while iter < 8 {
@@ -1681,7 +1709,7 @@ fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
 
 // Cost-based extraction: return the cheapest EgNode in the equivalence class
 // of class_id (using path-compression-aware find).
-fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
+pub fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
     let canonical  = eg_small_find(ctx, class_id)
     var best       = eg_node_new()
     var best_cost: i64 = 999999
@@ -1705,7 +1733,7 @@ fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, D
 
 // Uncertainty-guided extraction (Sprint 225 epistemic pass)
 // Extracts the equivalent node with minimum uncertainty (GUM cost model)
-fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
+pub fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
     let canonical  = eg_small_find(ctx, class_id)
     var best       = eg_node_new()
     var best_unc: i64 = 999999999
@@ -1782,16 +1810,35 @@ fn eg_small_basis_index(ctx: &! EgSmallContext, eclass: i64) -> i64 with Mut, Di
 }
 
 // Float associativity saturation (imperative scan, mirrors eg_apply_distributivity)
-// Applies: fadd(fadd(a,b),c) ↔ fadd(a,fadd(b,c)) — always (addition is associative)
-//          fmul(fmul(a,b),c) ↔ fmul(a,fmul(b,c)) — gated by reassoc_strategy
+// Applies: fadd(fadd(a,b),c) ↔ fadd(a,fadd(b,c))
+//          fmul(fmul(a,b),c) ↔ fmul(a,fmul(b,c))
 // 8 iterations max; terminates when no new merges
 //
-// STRATEGY:
-//   0 = free: all reassociations allowed (R, C, H, or unconstrained)
-//   1 = blocked: addition always OK, multiplication NEVER reassociated
-//   2 = fano_selective: addition always OK, multiplication checked per-triple
-//       via ir_can_reassociate_triple() — the 168 theorem as a compiler predicate
-fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+// TWO ORTHOGONAL GATES — reassociation fires iff BOTH hold:
+//
+// 1. EXACTNESS (ctx.allow_inexact_reassoc): IEEE-754 f64/f32 add and mul are
+//    commutative but NOT associative — reassociation changes the bits and breaks
+//    bit-identity / cross-stage determinism. This is true regardless of the value
+//    algebra (it is a property of the floating-point REPRESENTATION, not of ℝ or
+//    the Cayley-Dickson tower). So ALL float reassociation here — FADD/FSUB AND
+//    FMUL — is FORBIDDEN unless the producing context has explicitly opted in.
+//    Only the GUM-guided precision-preserving pass opts in (it deliberately trades
+//    bits for a lower-uncertainty evaluation order). Default contexts never do.
+//
+// 2. VALUE-ALGEBRA (reassoc_strategy): even when inexact reassociation is permitted,
+//    FMUL must additionally respect the carrier's non-associativity:
+//      0 = free: multiplication reassociation allowed (R, C, H)
+//      1 = blocked: multiplication NEVER reassociated (sedenion+)
+//      2 = fano_selective: multiplication checked per-triple via
+//          ir_can_reassociate_triple() — the 168 theorem as a compiler predicate
+//    FADD/FSUB is associative in every Cayley-Dickson algebra, so it is bound by
+//    gate 1 alone.
+pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    // A-layer-2: on a chaotic integration path, refuse ALL float reassociation. A
+    // reassociation-induced rounding difference grows ~ e^{λt} (λ > 0) over the
+    // horizon, so no tolerance can contain it — the chaos gate dominates even the
+    // GUM-guided precision-preserving opt-in (allow_inexact_reassoc).
+    if ctx.chaotic { return 0 }
     var total_merges: i64 = 0
     var iter: i64 = 0
     while iter < 8 {
@@ -1800,9 +1847,9 @@ fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
         while i < ctx.node_count {
             let node = ctx.nodes[i as usize]
 
-            // FADD/FSUB reassociation: ALWAYS allowed (addition is associative
-            // in all Cayley-Dickson algebras, including octonions and sedenions)
-            if (node.op == EG_OP_FADD || node.op == EG_OP_FSUB) && node.child_count >= 2 {
+            // FADD/FSUB reassociation: associative in every Cayley-Dickson algebra,
+            // but NOT in IEEE-754 — gated by the exactness opt-in (gate 1).
+            if ctx.allow_inexact_reassoc && (node.op == EG_OP_FADD || node.op == EG_OP_FSUB) && node.child_count >= 2 {
                 let lhs_class = node.children[0]
                 let rhs_class = node.children[1]
 
@@ -1832,9 +1879,10 @@ fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
                 let mul_lhs = node.children[0]
                 let mul_rhs = node.children[1]
 
-                // Strategy 0 (free) or strategy 2 (fano_selective): attempt reassociation
-                // Strategy 1 (blocked): skip entirely
-                if ctx.reassoc_strategy != 1 {
+                // Gate 1 (exactness): inexact reassociation must be opted in.
+                // Gate 2 (value-algebra): strategy 0 (free) or 2 (fano_selective) attempt
+                //   reassociation; strategy 1 (blocked) skips entirely.
+                if ctx.allow_inexact_reassoc && ctx.reassoc_strategy != 1 {
                     var j: i64 = 0
                     while j < ctx.node_count {
                         let inner = ctx.nodes[j as usize]
@@ -2005,7 +2053,7 @@ fn test_eg_uf_find_self_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
     let fb = eg_find(uf, b)
     fa == 0 && fb == 1
 }
-fn test_eg_uf_find_self() -> bool with Mut, Div, Panic {
+pub(crate) fn test_eg_uf_find_self() -> bool with Mut, Div, Panic {
     var uf = eg_union_find_new()
     return test_eg_uf_find_self_inner(&! uf)
 }
@@ -2017,7 +2065,7 @@ fn test_eg_uf_union_basic_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic
     let same = eg_same_set(uf, a, b)
     same
 }
-fn test_eg_uf_union_basic() -> bool with Mut, Div, Panic {
+pub(crate) fn test_eg_uf_union_basic() -> bool with Mut, Div, Panic {
     var uf = eg_union_find_new()
     return test_eg_uf_union_basic_inner(&! uf)
 }
@@ -3316,12 +3364,67 @@ fn test_eg_fano_allows_fano_triple() -> bool with Mut, Div, Panic {
 }
 
 // ============================================================================
+// Section 29a: Epistemic reassociation gate — value-algebra x exactness x chaos
+//
+// Duplicated from self-hosted/compiler/main.sio's T143b/c/d
+// (compiler_main_test_eg_small_satf_*, main.sio:8951-8974) so this gate is
+// verified from egraph.sio's own independent self-test entrypoint
+// (test_eg_main / egraph_self_test_main, run standalone via
+// `souc run self-hosted/ir/egraph.sio`) rather than only from inside
+// main.sio's much larger self-test suite. Measured 2026-07-27: that larger
+// suite has a pre-existing crash reached partway through a full run (main.sio
+// documents this at its own T143b/c/d call site: "a pre-existing crash
+// downstream of T1201 on this WIP branch" forces those three to be run
+// first) -- so a test living only inside it is only as reliable as the
+// binary's ability to reach that point without segfaulting first. These
+// three duplicates carry no such dependency: they exercise only
+// EgSmallContext and eg_small_saturate_float, both defined in this file.
+
+// Build the FADD chain (a+b)+c over `ctx` and return the float-saturation
+// merge count. Distinct var ids 1,2,3 keep the leaves apart.
+fn eg_satf_fadd_chain_merges(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    let a  = eg_small_add_var(ctx, 1)
+    let b  = eg_small_add_var(ctx, 2)
+    let c  = eg_small_add_var(ctx, 3)
+    let ab = eg_small_add_binop(ctx, EG_OP_FADD, a, b)     // a+b
+    let _o = eg_small_add_binop(ctx, EG_OP_FADD, ab, c)    // (a+b)+c
+    eg_small_saturate_float(ctx)
+}
+
+// T83 (Feature A-1): a default EgSmallContext is INEXACT, so float associativity
+// is FORBIDDEN -- eg_small_saturate_float must perform zero reassociation merges
+// on the f64 chain (a+b)+c.
+fn test_eg_small_satf_blocks_inexact_default() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// T84 (Feature A-1): when the producing context explicitly opts in to inexact
+// reassociation (the GUM-guided precision-preserving pass), float associativity
+// fires again -- at least one merge on the same chain.
+fn test_eg_small_satf_allows_optin() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    return eg_satf_fadd_chain_merges(&! ctx) > 0
+}
+
+// T85 (Feature A-layer-2): even with the inexact-reassoc opt-in enabled, a
+// CHAOTIC context refuses all float reassociation -- the chaos gate
+// (e^{lambda t} amplification) dominates the precision-preserving opt-in.
+fn test_eg_small_satf_chaotic_blocks() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    ctx.chaotic = true
+    return eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// ============================================================================
 // Section 29: Test Runner
 // ============================================================================
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 82
+    let total: i64 = 85
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -3407,6 +3510,9 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_guided_e2e() { passed = passed + 1; print("  T80 OK guided_e2e\n") } else { print("  FAIL: T80 guided_e2e\n") }
     if test_eg_fano_blocks_non_fano()    { passed = passed + 1; print("  T81 OK fano_blocks_non_fano\n")    } else { print("  FAIL: T81 fano_blocks_non_fano\n")    }
     if test_eg_fano_allows_fano_triple() { passed = passed + 1; print("  T82 OK fano_allows_fano_triple\n") } else { print("  FAIL: T82 fano_allows_fano_triple\n") }
+    if test_eg_small_satf_blocks_inexact_default() { passed = passed + 1; print("  T83 OK satf_blocks_inexact_default\n") } else { print("  FAIL: T83 satf_blocks_inexact_default\n") }
+    if test_eg_small_satf_allows_optin() { passed = passed + 1; print("  T84 OK satf_allows_optin\n") } else { print("  FAIL: T84 satf_allows_optin\n") }
+    if test_eg_small_satf_chaotic_blocks() { passed = passed + 1; print("  T85 OK satf_chaotic_blocks\n") } else { print("  FAIL: T85 satf_chaotic_blocks\n") }
 
     print("\nE-Graph: ")
     print_int(passed)
@@ -3418,5 +3524,3 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
 }
 
 fn egraph_self_test_main() -> i32 with IO, Mut, Panic, Div { test_eg_main() }
-
-fn main() -> i32 with IO, Mut, Panic, Div { egraph_self_test_main() }

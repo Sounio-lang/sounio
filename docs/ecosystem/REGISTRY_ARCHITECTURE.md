@@ -12,12 +12,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.regi
 **Nome proposto:** `registry.sounio.org`
 **Versão:** 1.0 (MVP)
 **Data:** 2026-04-20
+Status: design reference only; not launched as a public registry.
 
 ## 1. Visão Geral
 
-O registry é o coração do ecossistema. Ele não é apenas um repositório de pacotes — é um **repositório de conhecimento epistêmico curado**.
+Este documento descreve uma arquitetura-alvo para um registry público futuro.
+Ele não documenta um serviço hospedado em produção, e não deve ser citado como
+evidência de publicação, login, busca hospedada ou suporte de registry pública.
 
-Cada pacote carrega não apenas código, mas **metadados de confiança científica**.
+O registry proposto seria um catálogo de artefatos, declarações de ring e
+receipts verificáveis. Ele não atribuiria confiança científica a um pacote e
+não converteria metadados, popularidade ou scores em autoridade de claim.
 
 ---
 
@@ -27,18 +32,18 @@ Cada pacote carrega não apenas código, mas **metadados de confiança científi
 
 ```mermaid
 graph TD
-    CLI[souc CLI] --> API[REST API]
-    WebUI[registry.sounio.org] --> API
+    CLI[souc CLI futuro] --> API[REST API]
+    WebUI[registry futuro] --> API
     API --> Storage[S3/MinIO]
     API --> DB[PostgreSQL]
-    API --> Index[Epistemic Index]
+    API --> Index[Boundary Receipt Index]
     CI[CI/CD Gate] --> API
-    Index --> Search[Semantic Search]
+    Index --> Search[Package Search]
     
-    subgraph "Epistemic Layer"
+    subgraph "Boundary Layer"
         Index
-        Scoring[Epistemic Scoring Engine]
-        Ledger[Provenance Ledger]
+        Verify[Receipt Verification]
+        Provenance[Typed Evidence References]
     end
 ```
 
@@ -47,7 +52,7 @@ graph TD
 - **Backend:** Rust (Axum) ou Sounio self-hosted (quando maduro)
 - **Banco:** PostgreSQL com extensão JSONB
 - **Armazenamento:** S3 compatível (MinIO para self-host)
-- **Busca:** Meilisearch ou Typesense (para busca semântica + epistemic filters)
+- **Busca:** Meilisearch ou Typesense para nome, versão e descrição
 - **Autenticação:** GitHub OAuth + tokens de API
 
 ---
@@ -61,9 +66,11 @@ table packages {
   id uuid [pk]
   name string
   version semver
-  epistemic_score float
-  provenance_level enum(weak, medium, strong, regulatory)
-  gum_compliant boolean
+  ring enum(pl-core, scientific-package, research, candidate, unresolved)
+  evidence_status string
+  context_of_use text
+  visibility enum(public, protected, embargoed)
+  boundary_receipt_sha256 sha256
   description text
   repository url
   uploaded_at timestamp
@@ -73,48 +80,42 @@ table packages {
 }
 ```
 
-### Índice Epistêmico
+### Índice de Fronteira
 
-Cada pacote recebe um **Epistemic Score** calculado a partir de:
-
-- Cobertura de uso de `Knowledge<T>` (peso 35%)
-- Propagação correta de incerteza em testes (peso 25%)
-- Nível de provenance e ledger usage (peso 15%)
-- Cobertura de testes E2E (peso 10%)
-- Qualidade da documentação e exemplos (peso 10%)
-- Revisão humana (peso 5%)
-
-**Fórmula inicial:**
-`score = 0.35*knowledge_usage + 0.25*uncertainty_tests + 0.15*provenance + 0.10*test_coverage + 0.10*docs + 0.05*human_review`
+O índice separa identidade de artefato, provenance, ring declarado, contexto de
+uso, claim contract e assurance. Um receipt `identity-only` pode demonstrar
+que uma versão atravessou a política R0-R2; ele não demonstra correção do
+método, validade dos dados ou verdade científica.
 
 ---
 
 ## 4. API Endpoints (MVP)
 
-- `GET /api/v1/search?q=pbpk&min_score=0.8`
-- `POST /api/v1/packages` (publish)
+- `GET /api/v1/search?q=pbpk` (futuro)
+- `POST /api/v1/packages` (futuro; requer especificação separada de attestation)
 - `GET /api/v1/packages/{name}/{version}`
-- `GET /api/v1/packages/{name}/epistemic-report`
+- `GET /api/v1/packages/{name}/boundary-report`
 - `GET /api/v1/stats` (dashboards de adoção)
 
 ---
 
 ## 5. Fluxo de Publicação
 
-1. Desenvolvedor roda `souc pkg build`
-2. `souc pkg publish` envia para registry
+1. Desenvolvedor roda um comando futuro de build de pacote
+2. Um comando futuro de publish envia para registry
 3. CI executa:
    - Validação de `sounio.toml`
    - Testes de regressão
-   - Cálculo automático de `epistemic-score`
-4. Revisão humana opcional para pacotes `regulatory`
-5. Pacote publicado com badge de score
+   - Gate de fronteira no contexto de uso declarado
+   - Verificação de hashes de fonte, policy, compilador e artefato
+4. Claim contracts e revisões aplicáveis são verificados por gates nomeados
+5. O registry preserva o receipt e suas limitações sem ampliar a claim
 
 ---
 
 ## 6. Features Futuras (Fase 2+)
 
-- **"Epistemic Dependability Badge"** — selo visual no site
+- **Boundary receipt badge** com verdict, modo, engine e limitações
 - **Mirror de pacotes** para uso offline em ambientes regulados
 - **Provenance Graph Explorer** — visualizar cadeia de confiança entre pacotes
 - **AI Review Assistant** — sugestões automáticas de melhoria epistêmica
@@ -124,9 +125,9 @@ Cada pacote recebe um **Epistemic Score** calculado a partir de:
 
 ## 7. Considerações de Governança
 
-- Pacotes com `epistemic-score < 0.6` são marcados como "experimental"
-- Pacotes com `regulatory` requerem revisão por mantenedores core
-- Transparência total: todos os scores e relatórios são públicos
+- Rings candidatos ou irresolvidos permanecem `UNKNOWN`
+- Nenhum campo de pacote concede autoridade regulatória ou clínica
+- Receipts públicos preservam hashes e limitações sem caminhos absolutos
 - Modelo de curadoria comunitária + mantenedores oficiais
 
 ---
@@ -144,15 +145,17 @@ Cada pacote recebe um **Epistemic Score** calculado a partir de:
 - **A4:** Roadmap detalhado com esforço (`docs/ecosystem/ECOSYSTEM_ROADMAP_2026.md`)
 - **Curated Packages:** Lista inicial + critérios (`docs/ecosystem/CURATED_PACKAGES.md`)
 - **Registry Architecture:** Design técnico completo (`docs/ecosystem/REGISTRY_ARCHITECTURE.md`)
+- **Registry Attestation R2.6:** policy local executável, determinística e
+  identity-only (`docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md`)
 
-**Pendente (próxima etapa real de implementação):**
-- **A3:** Implementar os comandos `souc pkg` no compilador (`self-hosted/compiler/pkg/` + modificações em `main.sio`)
+**Pendente:**
+- especificar identidade de issuer/namespace, assinatura remota e replay independente
+- integrar publicação somente depois desses gates e de revisão própria
 
 ---
 
-**Recomendação forte:** O próximo passo concreto deve ser a implementação do parser de `sounio.toml` e o comando `souc pkg init`.
-
-Quer que eu comece a implementar o código real do Package Manager agora (A3), ou prefere revisar/expandir algum dos documentos criados?
-
-Todos os 6 TODOs originais + os 5 sub-itens foram endereçados.
-O caminho para tornar o Sounio **muito mais competitivo** está claramente mapeado.
+O registry local em `scripts/dev/registry_serve.py` é deliberadamente
+read-only para publicação. R2.6 especifica somente uma avaliação local de
+policy com `publication-status = "disabled"`; não cria registry público,
+trusted publishing, assinatura remota, `ClinicalAuthority` ou
+`ClinicalRelease`.

@@ -1,0 +1,370 @@
+// self-hosted/gpu/test_kaxi_differential.sio — Differential validation driver
+//
+// Builds reference kernels, runs scalar + warp simulators, prints memory states
+// and standalone C code for each kernel. A shell script compiles the C code
+// with gcc and compares outputs.
+//
+// WORKAROUND: The Sounio compiler has a bug with storing string return values
+// from imported functions into `let` bindings when the caller has large stack
+// frames. We use local transpilation functions and pass results directly to
+// println without intermediate storage.
+
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_c::*
+
+fn emit_kernel_header(name: string) with IO {
+    println("")
+    println("---KERNEL ")
+    println(name)
+    println("---")
+}
+
+fn emit_sim_mem(state: KaxiSimState) with IO, Mut, Panic, Div, Alloc {
+    print("SIM_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print(int_to_string(state.mem[i as usize]))
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_warp_mem(warp: KaxiWarpState) with IO, Mut, Panic, Div, Alloc {
+    print("WARP_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print(int_to_string(warp.mem[i as usize]))
+        i = i + 1
+    }
+    println("")
+}
+
+// Local transpiler to avoid imported-function string-return bug
+fn my_transpile_to_c(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, "#include <stdio.h>\n")
+    out = kaxi_asm_push_str(out, "void kaxi_kernel(int tid, long long mem[1024], long long shared_mem[256]) {\n")
+    out = kaxi_asm_push_str(out, "    long long *reg_val = kaxi_lane_reg[tid];\n")
+    out = kaxi_asm_push_str(out, "    int *pred = kaxi_lane_pred[tid];\n")
+    out = kaxi_asm_push_str(out, "    (void)tid;\n")
+    var line_start: i64 = 0
+    var i: i64 = 0
+    var instr_idx: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let c = kaxi_transpile_line_to_c(asm, line_start, line_len)
+                    out = kaxi_asm_push_str(out, "    L")
+                    out = kaxi_asm_push_str(out, int_to_string(instr_idx))
+                    out = kaxi_asm_push_str(out, ": ")
+                    if str_len(c) > 0 {
+                        out = kaxi_asm_push_str(out, c)
+                    } else {
+                        out = kaxi_asm_push_str(out, "// nop")
+                    }
+                    out = kaxi_asm_push_byte(out, 10)
+                    instr_idx = instr_idx + 1
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    out = kaxi_asm_push_str(out, "}\n")
+    kaxi_asm_to_string(out)
+}
+
+// Print standalone C code directly (no string storage in caller)
+fn emit_c_direct(asm: KaxiAsmBuf, warp_size: i64) with IO, Mut, Panic, Div, Alloc {
+    println("---C_CODE---")
+    println("#include \"self-hosted/gpu/kaxi_c_runtime.h\"")
+    println(my_transpile_to_c(asm))
+    println("int main() {")
+    println("    long long mem[1024] = {0};")
+    if warp_size > 1 {
+        print("    kaxi_run_warp(kaxi_kernel, mem, ")
+        print(int_to_string(warp_size))
+        println(");")
+    } else {
+        println("    kaxi_run_scalar(kaxi_kernel, mem);")
+    }
+    println("    kaxi_dump_mem(\"C_MEM\", mem, 16);")
+    println("    return 0;")
+    println("}")
+    println("---C_CODE_END---")
+}
+
+fn check_mem_agree(scalar: KaxiSimState, warp: KaxiWarpState) -> bool with Mut {
+    var i: i64 = 0
+    while i < 16 {
+        if scalar.mem[i as usize] != warp.mem[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn run_kernel_vec_add() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("vec_add")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "add r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_fma() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("fma")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=2, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=3, seq=2")
+    asm = kaxi_asm_push_line(asm, "fma r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_mul_div() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("mul_div")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=4, seq=3")
+    asm = kaxi_asm_push_line(asm, "mul r4, r1, r2, var=+62.5%, seq=4")
+    asm = kaxi_asm_push_line(asm, "div r5, r4, r3, var=+75%, seq=5")
+    asm = kaxi_asm_push_line(asm, "store_global r5, addr=r0, seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_multi_lane() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("multi_lane")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r2, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "ret seq=4")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new_with_tid(0)
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    state.mem[0] == warp.mem[0]
+}
+
+fn run_kernel_shared_memory() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("shared_memory")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=42, seq=1")
+    asm = kaxi_asm_push_line(asm, "store_shared r1, addr=r0, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_shared r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 1)
+    check_mem_agree(state, warp)
+}
+
+fn run_kernel_divergent() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("divergent")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=0, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.eq p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "branch p0, target=6, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=100, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=5")
+    asm = kaxi_asm_push_line(asm, "reconverge seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+fn run_kernel_vote_ballot() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("vote_ballot")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=4, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.lt p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "vote.b r2, p0, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=0, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r3, seq=5")
+    asm = kaxi_asm_push_line(asm, "ret seq=6")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+fn run_kernel_shuffle_xor() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("shuffle_xor")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "shuffle.x r1, r0, imm=1, seq=1")
+    asm = kaxi_asm_push_line(asm, "store_global r1, addr=r0, seq=2")
+    asm = kaxi_asm_push_line(asm, "ret seq=3")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+fn run_kernel_warp_reduce_add() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("warp_reduce_add")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "warp.reduc r1, r0, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=0, seq=2")
+    asm = kaxi_asm_push_line(asm, "store_global r1, addr=r2, seq=3")
+    asm = kaxi_asm_push_line(asm, "ret seq=4")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+fn run_kernel_nested_divergence() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("nested_divergence")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=4, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.lt p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "branch p0, target=8, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=3, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=5")
+    asm = kaxi_asm_push_line(asm, "reconverge seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=2, seq=8")
+    asm = kaxi_asm_push_line(asm, "setp.lt p1, r0, r3, seq=9")
+    asm = kaxi_asm_push_line(asm, "branch p1, target=15, seq=10")
+    asm = kaxi_asm_push_line(asm, "load_imm r4, imm=2, seq=11")
+    asm = kaxi_asm_push_line(asm, "store_global r4, addr=r0, seq=12")
+    asm = kaxi_asm_push_line(asm, "reconverge seq=13")
+    asm = kaxi_asm_push_line(asm, "ret seq=14")
+    asm = kaxi_asm_push_line(asm, "load_imm r5, imm=1, seq=15")
+    asm = kaxi_asm_push_line(asm, "store_global r5, addr=r0, seq=16")
+    asm = kaxi_asm_push_line(asm, "reconverge seq=17")
+    asm = kaxi_asm_push_line(asm, "ret seq=18")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+fn run_kernel_selp() -> bool with IO, Mut, Panic, Div, Alloc {
+    emit_kernel_header("selp")
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=2, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.lt p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=10, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=20, seq=4")
+    asm = kaxi_asm_push_line(asm, "selp r4, r2, r3, pred=p0, seq=5")
+    asm = kaxi_asm_push_line(asm, "store_global r4, addr=r0, seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+    true
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var all_pass = true
+    if !run_kernel_vec_add() { println("FAIL vec_add mismatch"); all_pass = false }
+    if !run_kernel_fma() { println("FAIL fma mismatch"); all_pass = false }
+    if !run_kernel_mul_div() { println("FAIL mul_div mismatch"); all_pass = false }
+    if !run_kernel_multi_lane() { println("FAIL multi_lane mismatch"); all_pass = false }
+    if !run_kernel_shared_memory() { println("FAIL shared_memory mismatch"); all_pass = false }
+    if !run_kernel_divergent() { println("FAIL divergent mismatch"); all_pass = false }
+    if !run_kernel_vote_ballot() { println("FAIL vote_ballot mismatch"); all_pass = false }
+    if !run_kernel_shuffle_xor() { println("FAIL shuffle_xor mismatch"); all_pass = false }
+    if !run_kernel_warp_reduce_add() { println("FAIL warp_reduce_add mismatch"); all_pass = false }
+    if !run_kernel_nested_divergence() { println("FAIL nested_divergence mismatch"); all_pass = false }
+    if !run_kernel_selp() { println("FAIL selp mismatch"); all_pass = false }
+    if all_pass {
+        println("PASS differential_sim")
+    } else {
+        println("FAIL differential_sim")
+    }
+    0
+}

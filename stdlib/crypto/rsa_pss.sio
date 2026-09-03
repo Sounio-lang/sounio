@@ -1,0 +1,290 @@
+// stdlib/crypto/rsa_pss.sio
+//
+// RSASSA-PSS-VERIFY (RFC 8017 SS8.1.2 / EMSA-PSS-VERIFY SS9.1.2), used
+// exclusively for TLS 1.3's rsa_pss_rsae_sha256/384 CertificateVerify
+// signature schemes (RFC 8446 SS4.2.3): MGF1 is always instantiated with
+// the SAME hash as the signature's own hash, and the salt length sLen
+// always equals the hash's own output length hLen. RSASSA-PKCS1-v1_5
+// (stdlib/crypto/pkcs1.sio) is explicitly FORBIDDEN for CertificateVerify
+// under TLS 1.3, even for RSA certificates -- this file exists because
+// pkcs1.sio's existing verify cannot be reused for that purpose.
+//
+// Public-key verification only -- this project never signs with an RSA
+// private key, so no constant-time requirement applies to anything except
+// the final digest comparison (step 11 below), which follows this
+// codebase's established AEAD-tag-comparison discipline (accumulate a
+// bitwise OR of every byte difference, compare once at the end).
+//
+// WRITE-SIDE RAWBUF DISCIPLINE: `rawbuf_set(buf, i, v)` on this compiler
+// writes one correct byte at position i but also CLOBBERS the next 7
+// bytes (i+1..i+7) to zero (documented in stdlib/crypto/pkcs1.sio,
+// independently confirmed -- see docs/audit/
+// TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md Finding 20). Every
+// buffer this file fills is written in STRICTLY ASCENDING index order
+// (position 0 first, then 1, 2, ...), which self-heals the clobber: each
+// write's forward zeroing only ever lands on a position this same loop is
+// about to (re)write on a later iteration, or on trailing headroom past
+// the meaningful data (every buffer below is allocated with +8 bytes of
+// slack for exactly this reason). Never write a buffer in descending or
+// non-sequential order without re-deriving this reasoning first.
+
+use bignum::bigint::*
+use net::socket::*
+use hash::sha256::*
+use hash::sha384::*
+
+pub const RSA_PSS_HASH_SHA256: i32 = 0
+pub const RSA_PSS_HASH_SHA384: i32 = 1
+
+fn hash_len(hash_algo: i32) -> i64 {
+    if hash_algo == RSA_PSS_HASH_SHA256 {
+        32
+    } else {
+        48   // RSA_PSS_HASH_SHA384
+    }
+}
+
+// Hashes `input[0..input_len)` with the hash algorithm selected by
+// `hash_algo`, returning the digest as a RawBuf whose first
+// hash_len(hash_algo) bytes are meaningful (plus 8 bytes of trailing
+// headroom for the write-clobber, see module-level comment above).
+fn digest_to_rawbuf(input: &RawBuf, input_len: i64, hash_algo: i32) -> RawBuf with IO {
+    if hash_algo == RSA_PSS_HASH_SHA256 {
+        let h = sha256(input, input_len)
+        let out = rawbuf_new(32 + 8)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, (h[i as usize] as i64) & 255)
+            i = i + 1
+        }
+        out
+    } else {
+        let h = sha384(input, input_len)
+        let out = rawbuf_new(48 + 8)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, (h[i as usize] as i64) & 255)
+            i = i + 1
+        }
+        out
+    }
+}
+
+// RFC 8017 SS B.2.1 MGF1. `seed` must have at least `seed_len` valid bytes.
+// Returns a RawBuf whose first `mask_len` bytes are meaningful (plus
+// headroom). The counter loop below writes every output byte at a
+// strictly increasing index across every iteration (0, 1, 2, ...,
+// mask_len-1), which is exactly the ascending-write discipline required
+// to self-heal the rawbuf_set clobber (see module-level comment).
+fn mgf1(seed: &RawBuf, seed_len: i64, mask_len: i64, hash_algo: i32) -> RawBuf with IO {
+    let h_len = hash_len(hash_algo)
+    let out = rawbuf_new(mask_len + h_len + 8)
+    var counter: i64 = 0
+    var produced: i64 = 0
+    while produced < mask_len {
+        let block_len = seed_len + 4
+        let block = rawbuf_new(block_len + 8)
+        var i: i64 = 0
+        while i < seed_len {
+            rawbuf_set(&block, i, rawbuf_get(seed, i))
+            i = i + 1
+        }
+        // C: a 4-byte big-endian encoding of the counter (RFC 8017 SS
+        // B.2.1). This project's counters never approach 2^32, but all 4
+        // bytes are always written, per the spec.
+        rawbuf_set(&block, seed_len, (counter >> 24) & 255)
+        rawbuf_set(&block, seed_len + 1, (counter >> 16) & 255)
+        rawbuf_set(&block, seed_len + 2, (counter >> 8) & 255)
+        rawbuf_set(&block, seed_len + 3, counter & 255)
+
+        let block_digest = digest_to_rawbuf(&block, block_len, hash_algo)
+        var j: i64 = 0
+        while j < h_len && produced + j < mask_len {
+            rawbuf_set(&out, produced + j, rawbuf_get(&block_digest, j))
+            j = j + 1
+        }
+        produced = produced + h_len
+        counter = counter + 1
+    }
+    out
+}
+
+// Big-endian byte extraction of a BigInt into a RawBuf of exactly
+// `out_len` bytes, written in ascending output-index order (position 0,
+// the most significant byte, first). Returns false if the value is too
+// wide to fit in out_len bytes. Deliberately a fresh implementation, not
+// shared with pkcs1.sio's file-private `bigint_to_bytes_be` (not
+// importable -- pkcs1.sio's own helper is not `pub`), per this task's
+// brief.
+fn bigint_to_bytes_be_ascending(v: &BigInt, out: &RawBuf, out_len: i64) -> bool with IO {
+    let total_bytes = (v.len as i64) * 2
+    if total_bytes > out_len {
+        return false   // value too wide for the requested output width
+    }
+    var p: i64 = 0
+    while p < out_len {
+        let idx = out_len - 1 - p   // byte position counted from the LSB (0)
+        let limb_i = idx / 2
+        var byte_val: i64 = 0
+        if limb_i < (v.len as i64) {
+            let limb = v.limbs[limb_i as usize]
+            if idx % 2 == 0 {
+                byte_val = (limb as i64) & 255           // low byte of the limb
+            } else {
+                byte_val = ((limb as i64) >> 8) & 255    // high byte of the limb
+            }
+        }
+        rawbuf_set(out, p, byte_val)
+        p = p + 1
+    }
+    true
+}
+
+// RSASSA-PSS-VERIFY (RFC 8017 SS8.1.2), specialized to sLen == hLen (the
+// universal TLS 1.3 rsa_pss_rsae_* convention, RFC 8446 SS4.2.3).
+pub fn rsa_pss_verify(
+    modulus: &BigInt,
+    exponent: &BigInt,
+    modulus_byte_len: i64,
+    message: &RawBuf,
+    message_len: i64,
+    signature: &BigInt,
+    hash_algo: i32,
+) -> bool with IO {
+    // RSAVP1 (RFC 8017 SS5.2.2): m = signature^exponent mod modulus. A
+    // valid signature representative must be strictly less than modulus.
+    if bigint_cmp(signature, modulus) >= 0 {
+        return false
+    }
+    let m = bigint_modpow(signature, exponent, modulus)
+
+    let h_len = hash_len(hash_algo)
+    let em_len = modulus_byte_len
+
+    // RFC 8017 SS9.1.2 EMSA-PSS-VERIFY step 1: if emLen < hLen + sLen + 2
+    // (here sLen == hLen), output "inconsistent". This also guarantees
+    // db_len and zero_count below never go negative later.
+    if em_len < h_len + h_len + 2 {
+        return false
+    }
+
+    // Step 2: m -> EM, a big-endian byte string of length emLen.
+    let em_buf = rawbuf_new(em_len + 8)
+    let converted = bigint_to_bytes_be_ascending(&m, &em_buf, em_len)
+    if converted == false {
+        return false
+    }
+
+    // Step 3 / RFC step 4: emBits = 8*emLen - 1 (RSA-PSS treats EM as an
+    // emBits-bit string, not a full-byte one), so 8*emLen - emBits = 1 --
+    // exactly the single leftmost bit of EM's first octet, which must
+    // already be zero (this is a REQUIRED CHECK on maskedDB as read from
+    // EM, distinct from step 7's unconditional masking of DB below).
+    if (rawbuf_get(&em_buf, 0) & 0x80) != 0 {
+        return false
+    }
+
+    // Step 4 / RFC step 2: EM must end in the trailer byte 0xBC.
+    if (rawbuf_get(&em_buf, em_len - 1) & 255) != 0xBC {
+        return false
+    }
+
+    // Step 5 / RFC step 3: split EM (minus the trailing 0xBC byte) into
+    // maskedDB (the first db_len = emLen - hLen - 1 bytes) and H (the
+    // next hLen bytes).
+    let db_len = em_len - h_len - 1
+    let masked_db = rawbuf_new(db_len + 8)
+    var mi: i64 = 0
+    while mi < db_len {
+        rawbuf_set(&masked_db, mi, rawbuf_get(&em_buf, mi))
+        mi = mi + 1
+    }
+    let h_recovered = rawbuf_new(h_len + 8)
+    var hi: i64 = 0
+    while hi < h_len {
+        rawbuf_set(&h_recovered, hi, rawbuf_get(&em_buf, db_len + hi))
+        hi = hi + 1
+    }
+
+    // Step 6 / RFC step 5: dbMask = MGF1(H, db_len).
+    let db_mask = mgf1(&h_recovered, h_len, db_len, hash_algo)
+
+    // Step 7 / RFC steps 6-7: DB = maskedDB XOR dbMask, then force the
+    // leftmost bit of DB's first octet to zero unconditionally (matching
+    // step 3's masking -- dbMask's own top bit is not itself checked, it
+    // is simply overwritten).
+    let db = rawbuf_new(db_len + 8)
+    var di: i64 = 0
+    while di < db_len {
+        let mval = rawbuf_get(&masked_db, di) & 255
+        let kval = rawbuf_get(&db_mask, di) & 255
+        rawbuf_set(&db, di, mval ^ kval)
+        di = di + 1
+    }
+    let db0 = rawbuf_get(&db, 0) & 255
+    rawbuf_set(&db, 0, db0 & 0x7f)
+
+    // Step 8: DB must be zero_count = emLen - hLen - hLen - 2 zero bytes,
+    // then a single 0x01 byte, then the hLen-byte salt.
+    let zero_count = db_len - h_len - 1
+    if zero_count < 0 {
+        return false
+    }
+    var zi: i64 = 0
+    while zi < zero_count {
+        if (rawbuf_get(&db, zi) & 255) != 0 {
+            return false
+        }
+        zi = zi + 1
+    }
+    if (rawbuf_get(&db, zero_count) & 255) != 0x01 {
+        return false
+    }
+
+    // salt = the trailing hLen bytes of DB.
+    let salt = rawbuf_new(h_len + 8)
+    var si: i64 = 0
+    while si < h_len {
+        rawbuf_set(&salt, si, rawbuf_get(&db, zero_count + 1 + si))
+        si = si + 1
+    }
+
+    // Step 9: mHash = Hash(message).
+    let m_hash = digest_to_rawbuf(message, message_len, hash_algo)
+
+    // Step 10: M' = 8 zero bytes || mHash || salt.
+    let mprime_len = 8 + h_len + h_len
+    let mprime = rawbuf_new(mprime_len + 8)
+    var zpad: i64 = 0
+    while zpad < 8 {
+        rawbuf_set(&mprime, zpad, 0)
+        zpad = zpad + 1
+    }
+    var mhi: i64 = 0
+    while mhi < h_len {
+        rawbuf_set(&mprime, 8 + mhi, rawbuf_get(&m_hash, mhi))
+        mhi = mhi + 1
+    }
+    var sali: i64 = 0
+    while sali < h_len {
+        rawbuf_set(&mprime, 8 + h_len + sali, rawbuf_get(&salt, sali))
+        sali = sali + 1
+    }
+
+    // Step 11: H' = Hash(M'); compare H' to H (h_recovered) byte-for-byte,
+    // constant-time -- accumulate a bitwise OR of every byte difference
+    // and compare once at the end, matching this codebase's established
+    // AEAD tag-comparison discipline (never a short-circuiting per-byte
+    // comparison).
+    let hprime = digest_to_rawbuf(&mprime, mprime_len, hash_algo)
+    var diff: i64 = 0
+    var ci: i64 = 0
+    while ci < h_len {
+        let a = rawbuf_get(&hprime, ci) & 255
+        let b = rawbuf_get(&h_recovered, ci) & 255
+        diff = diff | (a ^ b)
+        ci = ci + 1
+    }
+
+    diff == 0
+}

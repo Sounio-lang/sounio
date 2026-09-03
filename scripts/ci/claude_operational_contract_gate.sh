@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_PATH="${SOUNIO_CLAUDE_CONTRACT_OUT:-$ROOT_DIR/artifacts/omega/claude_operational_contract_status.v1.json}"
@@ -38,13 +38,19 @@ run_check() {
 
 CHECKS=()
 
-check_json="$(run_check prompt_execution_contract bash scripts/check_prompt_execution_contract.sh)"
+check_json="$(run_check prompt_execution_contract bash scripts/ci/check_prompt_execution_contract.sh || true)"
 CHECKS+=("$check_json")
 
-check_json="$(run_check plan_consistency bash scripts/check_claude_plan_consistency.sh)"
+check_json="$(run_check plan_consistency bash scripts/ci/check_claude_plan_consistency.sh || true)"
 CHECKS+=("$check_json")
 
-check_json="$(run_check check_sio_window bash scripts/check_check_sio_integration_window.sh)"
+check_json="$(run_check check_sio_window bash scripts/ci/check_check_sio_integration_window.sh || true)"
+CHECKS+=("$check_json")
+
+check_json="$(run_check parallel_blocker_contract bash scripts/ci/check_parallel_blocker_contract.sh || true)"
+CHECKS+=("$check_json")
+
+check_json="$(run_check madaros_blocker_contract bash scripts/ci/madaros_blocker_contract_gate.sh || true)"
 CHECKS+=("$check_json")
 
 checks_joined=""

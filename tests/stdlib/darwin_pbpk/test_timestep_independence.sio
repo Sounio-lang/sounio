@@ -1,0 +1,165 @@
+//@ run-pass
+//@ expect-stdout: TIMESTEP_INDEPENDENCE_OK
+// Timestep-independence test for the adaptive Tsit5 PBPK solver.
+// Runs the same 24 h simulation with three tolerance settings (tight,
+// default, loose) and checks that blood/brain concentrations, AUC, and
+// Cmax agree within prescribed relative bounds.
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+struct SimResult {
+    blood_24: f64,
+    brain_24: f64,
+    auc: f64,
+    cmax: f64,
+    success: bool,
+}
+
+fn sim_result_empty() -> SimResult {
+    SimResult {
+        blood_24: 0.0,
+        brain_24: 0.0,
+        auc: 0.0,
+        cmax: 0.0,
+        success: false,
+    }
+}
+
+fn run_simulation(
+    prm: PBPKParams14,
+    dose_mg: f64,
+    t_end: f64,
+    cfg: ODEConfig14
+) -> SimResult with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = PBPKState14 {
+        blood: c0,
+        liver: 0.0,
+        kidney: 0.0,
+        brain: 0.0,
+        heart: 0.0,
+        lung: 0.0,
+        muscle: 0.0,
+        adipose: 0.0,
+        gut: 0.0,
+        skin: 0.0,
+        bone: 0.0,
+        spleen: 0.0,
+        pancreas: 0.0,
+        other: 0.0,
+    }
+
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps: i64 = 0
+    var nreject: i64 = 0
+    var cmax = c0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end && nsteps < cfg.max_steps {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+
+        let result = tsit5_step_pbpk(st, t, dt_use, prm)
+        let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+        if err_norm <= 1.0 {
+            let c_now = result.state_new.blood
+            auc = auc + (c_prev + c_now) * 0.5 * dt_use
+            if c_now > cmax {
+                cmax = c_now
+            }
+            c_prev = c_now
+            t = t + dt_use
+            st = result.state_new
+            nsteps = nsteps + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        } else {
+            nreject = nreject + 1
+            dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+        }
+
+        dt = max_f64(cfg.dt_min, min_f64(cfg.dt_max, dt))
+
+        if nreject > 10000 {
+            return sim_result_empty()
+        }
+    }
+
+    let ok = t >= t_end - cfg.dt_min
+    SimResult {
+        blood_24: st.blood,
+        brain_24: st.brain,
+        auc: auc,
+        cmax: cmax,
+        success: ok,
+    }
+}
+
+fn loose_ode_config() -> ODEConfig14 {
+    return ODEConfig14 {
+        rtol: 0.1,
+        atol: 0.001,
+        dt_init: 0.01,
+        dt_min: 0.0000001,
+        dt_max: 1.0,
+        max_steps: 100000,
+        safety: 0.9,
+        max_growth: 5.0,
+        min_shrink: 0.1,
+    }
+}
+
+fn rel_diff(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let num = a - b
+    let abs_num = if num < 0.0 { 0.0 - num } else { num }
+    if a > 1.0e-12 {
+        return abs_num / a
+    }
+    return abs_num
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = default_pbpk_params()
+    let dose_mg = 5.0
+    let t_end = 24.0
+
+    let cfg_tight = tight_ode_config()
+    let cfg_default = default_ode_config()
+    let cfg_loose = loose_ode_config()
+
+    let r_tight = run_simulation(prm, dose_mg, t_end, cfg_tight)
+    let r_default = run_simulation(prm, dose_mg, t_end, cfg_default)
+    let r_loose = run_simulation(prm, dose_mg, t_end, cfg_loose)
+
+    if r_tight.success == false { return 1 }
+    if r_default.success == false { return 2 }
+    if r_loose.success == false { return 3 }
+
+    // Blood at 24 h
+    let rd_blood_td = rel_diff(r_tight.blood_24, r_default.blood_24)
+    let rd_blood_tl = rel_diff(r_tight.blood_24, r_loose.blood_24)
+    if rd_blood_td > 0.05 { return 4 }
+    if rd_blood_tl > 0.10 { return 5 }
+
+    // Brain at 24 h
+    let rd_brain_td = rel_diff(r_tight.brain_24, r_default.brain_24)
+    let rd_brain_tl = rel_diff(r_tight.brain_24, r_loose.brain_24)
+    if rd_brain_td > 0.05 { return 6 }
+    if rd_brain_tl > 0.10 { return 7 }
+
+    // AUC(0-24h)
+    let rd_auc_td = rel_diff(r_tight.auc, r_default.auc)
+    let rd_auc_tl = rel_diff(r_tight.auc, r_loose.auc)
+    if rd_auc_td > 0.05 { return 8 }
+    if rd_auc_tl > 0.10 { return 9 }
+
+    // Cmax
+    let rd_cmax_td = rel_diff(r_tight.cmax, r_default.cmax)
+    let rd_cmax_tl = rel_diff(r_tight.cmax, r_loose.cmax)
+    if rd_cmax_td > 0.05 { return 10 }
+    if rd_cmax_tl > 0.10 { return 11 }
+
+    println("TIMESTEP_INDEPENDENCE_OK")
+    0
+}

@@ -1,0 +1,98 @@
+//@ run-pass
+//@ expect-stdout-contains: PD_BERGMAN_SMOKE_PASS
+
+// Smoke test for stdlib/darwin_pbpk/pd/bergman_glucose_insulin.sio (Stage G-ε-14).
+//
+// Drives the linearised Bergman PD step under three pancreas-occupancy
+// regimes:
+//
+//   1. occ = 0.0   — no drug, baseline (ΔG = ΔI = 0 forever).
+//   2. occ = 0.5   — moderate GLP-1R occupancy: ΔI rises, ΔG drops.
+//   3. occ = 0.9   — strong occupancy: ΔI rises more, ΔG drops further.
+//
+// Confirms the qualitative dissertation message: semaglutide drives
+// pancreatic GLP-1R occupancy → insulin secretion rises → plasma glucose
+// falls.
+
+use darwin_pbpk::pd::bergman_glucose_insulin::*
+
+fn fmt_4(x: f64) -> i64 { return (x * 10000.0) as i64 }
+
+fn run_bergman(occ: f64, n_steps: i64) -> BergmanState with Mut, Div, IO {
+    let p = bergman_default_params()
+    var s = bergman_state_init()
+    let dt = 1.0    // 1 h per step
+    var k = 0
+    while k < n_steps {
+        s = pd_step_glucose_insulin(s, occ, p, dt)
+        k = k + 1
+    }
+    print("occ*1e4="); print(fmt_4(occ))
+    print(" dG*1e4="); print(fmt_4(s.dg))
+    print(" dI*1e4="); println(fmt_4(s.di))
+    return s
+}
+
+fn main() with Mut, Div, IO {
+    println("Bergman PD smoke — 24 h per scenario")
+
+    // Scenario 1: no drug — both deviations stay at 0.
+    print("scenario=baseline   ")
+    let s1 = run_bergman(0.0, 24)
+    let s1_ok = (s1.dg > -0.01) && (s1.dg < 0.01) && (s1.di > -0.01) && (s1.di < 0.01)
+    if !s1_ok {
+        println("FAIL: scenario 1 deviations not pinned to 0")
+        return
+    }
+
+    // Scenario 2: moderate occupancy occ=0.5.
+    // Equilibrium: k_I·ΔI = k_base·α·occ → ΔI = ΔI_b·α·occ = 10·1·0.5 = 5 mU/L
+    // λ_G·ΔG = -S_I·G_b·ΔI → ΔG = -(S_I·G_b·ΔI)/λ_G
+    //                       = -(0.02·100·5)/(1.5+0.02·10)
+    //                       = -10/1.7 ≈ -5.88 mg/dL
+    // Insulin half-life ~3.3 min so 24 h is fully at equilibrium.
+    print("scenario=moderate   ")
+    let s2 = run_bergman(0.5, 24)
+    let s2_di_ok = (s2.di > 4.5) && (s2.di < 5.5)
+    let s2_dg_ok = (s2.dg < -5.0) && (s2.dg > -7.0)
+    if !s2_di_ok {
+        println("FAIL: scenario 2 ΔI not near 5.0 mU/L")
+        return
+    }
+    if !s2_dg_ok {
+        println("FAIL: scenario 2 ΔG not in [-7, -5] mg/dL")
+        return
+    }
+
+    // Scenario 3: strong occupancy occ=0.9.
+    // Equilibrium ΔI = 9.0 mU/L, ΔG ≈ -0.02·100·9/1.7 ≈ -10.6 mg/dL.
+    print("scenario=strong     ")
+    let s3 = run_bergman(0.9, 24)
+    let s3_di_ok = (s3.di > 8.5) && (s3.di < 9.5)
+    let s3_dg_ok = (s3.dg < -9.5) && (s3.dg > -12.0)
+    if !s3_di_ok {
+        println("FAIL: scenario 3 ΔI not near 9.0 mU/L")
+        return
+    }
+    if !s3_dg_ok {
+        println("FAIL: scenario 3 ΔG not in [-12, -9.5] mg/dL")
+        return
+    }
+
+    // Absolute plasma values should always be positive and physiologically sane.
+    let p = bergman_default_params()
+    let g = bergman_plasma_glucose(s3, p)
+    let i = bergman_plasma_insulin(s3, p)
+    let g_ok = (g > 80.0) && (g < 110.0)
+    let i_ok = (i > 15.0) && (i < 25.0)
+    if !g_ok {
+        println("FAIL: plasma glucose outside [80, 110]")
+        return
+    }
+    if !i_ok {
+        println("FAIL: plasma insulin outside [15, 25]")
+        return
+    }
+
+    println("PD_BERGMAN_SMOKE_PASS")
+}

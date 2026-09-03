@@ -1,0 +1,610 @@
+// MLI S2a — ir_to_mli: the IR->MLI side door (design §3.2.2, amendment D1),
+// straight-line scalar subset only.
+//
+// Scope (S2a, approved 2026-08-16): i64 / f64 / bool straight-line bodies —
+// loads, copies, int/float arithmetic, int bit ops, conversions, return.
+// Everything else FAILS CLOSED with a named code and the offending
+// instruction index:
+//
+//   - IrWide*            -> MLI_T_WIDE_EXCLUDED   (i128/u128 excluded from
+//                           R0 MLI — design §4.1 rule 2 / preflight D2(a))
+//   - IrHyperMul*/Assoc  -> MLI_T_R1_CD           (CD ops are R1, S6+)
+//   - IrLiftKnowledge    -> MLI_T_R1_EPISTEMIC    (Knowledge is R1, S5+ via
+//                           emir_to_mli; never "translate" to scalar fadd)
+//   - IrCall             -> MLI_T_CALL_UNSUPPORTED (calls are a later rung)
+//   - OpShl/OpShr        -> MLI_T_SHIFT_UNPINNED  (shift width/mask
+//                           semantics not pinned for MLI yet)
+//   - OpAnd/OpOr (bool)  -> MLI_T_BOOL_LOGIC_UNPINNED (no MLI bool-logic op;
+//                           feeds lower short-circuit logic via branches)
+//
+// S2b: labels/jumps/branches TRANSLATE (block splitting, explicit
+// fallthrough jmps, br over Bool vregs) and compares TRANSLATE to icmp/fcmp
+// producing Bool. See the entry-point banner for the two-pass structure.
+//   - conflicting-kind register reuse -> MLI_T_KIND_CONFLICT (vreg
+//                           splitting deferred; fail closed, never guess)
+//   - anything else      -> MLI_T_UNSUPPORTED_OP  (generic fail-closed)
+//
+// READ DISCIPLINE (measured, 2026-08-16, this lane): under Madaros native-v2,
+// enum values passed as function arguments collapse to discriminant 0, and
+// enum equality miscompiles differently in main-file vs imported-module
+// contexts (the witness-matrix enum-discriminant residual). This module
+// therefore NEVER touches IrInstr structs or enum values. It reads the raw
+// i64 arena columns (IR_A_OP, IR_A_BIN_OP, IR_A_DST, ...) — proven correct
+// in both contexts — and dispatches on i64 ordinals.
+//
+// Opcode ordinals are NOT hardcoded from the enum declaration: they are
+// CALIBRATED at runtime against this binary's own IR constructors
+// (s2a_calibrate pushes one instruction per relevant opcode into a scratch
+// region and records the raw ordinal). If the IrOpcode enum is ever
+// reordered, calibration keeps the mapping true automatically. BinaryOp
+// ordinals cannot be calibrated the same way (every constructor takes the
+// enum as an argument, which is exactly the collapsing shape), so they
+// follow declaration order in parser/ast.sio; the gate writes and reads the
+// same constants, and real compiler-lowered IR uses declaration-order
+// discriminants by construction.
+//
+// f64 constants: IrLoadFloat becomes `mov vreg, imm f64` — representation
+// preserved; materialisation strategy (pool / rip-relative / movabs) is S3's
+// decision under pin O5. S2 does not help.
+
+module mli::ir_to_mli
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+
+// Translator status codes.
+pub let MLI_T_OK: i64 = 0
+pub let MLI_T_UNSUPPORTED_OP: i64 = 1
+pub let MLI_T_WIDE_EXCLUDED: i64 = 2
+pub let MLI_T_R1_CD: i64 = 3
+pub let MLI_T_R1_EPISTEMIC: i64 = 4
+// 5 was MLI_T_CONTROL_S2B (retired in S2b: labels/jumps/branches translate).
+pub let MLI_T_LABEL_UNDEF: i64 = 5
+pub let MLI_T_CALL_UNSUPPORTED: i64 = 6
+pub let MLI_T_KIND_CONFLICT: i64 = 7
+pub let MLI_T_FLOAT_MARK_CONFLICT: i64 = 8
+pub let MLI_T_REG_RANGE: i64 = 9
+pub let MLI_T_REG_UNDEF: i64 = 10
+pub let MLI_T_RET_KIND: i64 = 11
+pub let MLI_T_MISSING_RETURN: i64 = 12
+// 13 (AFTER_RETURN) retired in S2b: block structure subsumes it; unreachable
+// blocks translate and verify vacuously.
+pub let MLI_T_BUILDER_OVERFLOW: i64 = 14
+pub let MLI_T_SHIFT_UNPINNED: i64 = 15
+pub let MLI_T_BOOL_LOGIC_UNPINNED: i64 = 16
+// 17 was MLI_T_COMPARE_S2B (retired in S2b: compares translate to icmp/fcmp).
+pub let MLI_T_REGION: i64 = 18
+pub let MLI_T_OPERAND: i64 = 19
+pub let MLI_T_NOT_CALIBRATED: i64 = 20
+
+// S2b translation caps (fail-closed, never silent).
+pub let S2B_MAX_IR_INSTRS: i64 = 512
+pub let S2B_MAX_LABELS: i64 = 64
+
+// BinaryOp ordinals (declaration order, parser/ast.sio — see header).
+pub let S2A_B_ADD: i64 = 0
+pub let S2A_B_SUB: i64 = 1
+pub let S2A_B_MUL: i64 = 2
+pub let S2A_B_DIV: i64 = 3
+pub let S2A_B_REM: i64 = 4
+pub let S2A_B_EQ: i64 = 5
+pub let S2A_B_NE: i64 = 6
+pub let S2A_B_LT: i64 = 7
+pub let S2A_B_LE: i64 = 8
+pub let S2A_B_GT: i64 = 9
+pub let S2A_B_GE: i64 = 10
+pub let S2A_B_AND: i64 = 11
+pub let S2A_B_OR: i64 = 12
+pub let S2A_B_BITAND: i64 = 13
+pub let S2A_B_BITOR: i64 = 14
+pub let S2A_B_BITXOR: i64 = 15
+pub let S2A_B_SHL: i64 = 16
+pub let S2A_B_SHR: i64 = 17
+
+// Calibrated IrOpcode ordinals (scalar globals; 0-1 = not calibrated).
+var S2A_OP_LOAD_IMM: i64 = -1
+var S2A_OP_LOAD_FLOAT: i64 = -1
+var S2A_OP_I2F: i64 = -1
+var S2A_OP_F2I: i64 = -1
+var S2A_OP_LOAD_BOOL: i64 = -1
+var S2A_OP_COPY: i64 = -1
+var S2A_OP_BINOP: i64 = -1
+var S2A_OP_RETURN: i64 = -1
+var S2A_OP_NOP: i64 = -1
+var S2A_OP_LABEL: i64 = -1
+var S2A_OP_JUMP: i64 = -1
+var S2A_OP_BR_TRUE: i64 = -1
+var S2A_OP_BR_FALSE: i64 = -1
+var S2A_OP_CALL: i64 = -1
+var S2A_OP_WIDE_LO: i64 = -1
+var S2A_OP_WIDE_HI: i64 = -1
+var S2A_OP_HYPER_O: i64 = -1
+var S2A_OP_HYPER_S: i64 = -1
+var S2A_OP_LIFT_KNOWLEDGE: i64 = -1
+var S2A_CALIBRATED: bool = false
+
+// Push one instruction into the scratch region and return its raw op column.
+fn cal_op(r: &!IrInstrRegion, inst: IrInstr) -> i64 with Mut, Panic, Div {
+    if ir_region_push(r, inst) != IR_ARENA_OK { return 0 - 1 }
+    let idx = ir_region_len(r) - 1
+    IR_A_OP[(ir_region_slot_r(*r, idx)) as usize]
+}
+
+// Calibrate the opcode ordinal table against this binary's constructors.
+// Requires ir_instr_arena_init() to have run. Returns false (and leaves the
+// module uncalibrated) on any allocation/push failure or ordinal collision
+// in the accepted set — the translator then refuses everything.
+pub fn s2a_calibrate() -> bool with Mut, Panic, Div {
+    if S2A_CALIBRATED { return true }
+    var r = ir_region_invalid()
+    if ir_instr_arena_alloc(24, &!r) != IR_ARENA_OK { return false }
+
+    S2A_OP_LOAD_IMM = cal_op(&!r, ir_load_imm(0, 0))
+    S2A_OP_LOAD_FLOAT = cal_op(&!r, ir_load_float(0, 0.0))
+    S2A_OP_I2F = cal_op(&!r, ir_int_to_float(0, 0))
+    S2A_OP_F2I = cal_op(&!r, ir_float_to_int(0, 0))
+    S2A_OP_LOAD_BOOL = cal_op(&!r, ir_load_bool(0, false))
+    S2A_OP_COPY = cal_op(&!r, ir_copy(0, 0))
+    S2A_OP_BINOP = cal_op(&!r, ir_binop(0, 0, BinaryOp::OpAdd, 0))
+    S2A_OP_RETURN = cal_op(&!r, ir_return(0))
+    S2A_OP_NOP = cal_op(&!r, ir_nop())
+    S2A_OP_LABEL = cal_op(&!r, ir_label(0))
+    S2A_OP_JUMP = cal_op(&!r, ir_jump(0))
+    S2A_OP_BR_TRUE = cal_op(&!r, ir_branch_true(0, 0))
+    S2A_OP_BR_FALSE = cal_op(&!r, ir_branch_false(0, 0))
+    S2A_OP_WIDE_LO = cal_op(&!r, ir_wide_add(0, 0, 0, 2))
+    S2A_OP_WIDE_HI = cal_op(&!r, ir_wide_div_full(0, 0, 0, 2))
+    S2A_OP_HYPER_O = cal_op(&!r, ir_hyper_mul_o(0, 0, 0))
+    // ir_hyper_mul_s / ir_measure are private in ir::ir — those opcodes fall
+    // through to the generic MLI_T_UNSUPPORTED_OP refusal, which is still
+    // fail-closed; S2A_OP_HYPER_S stays -1 and can never match a real op.
+    S2A_OP_LIFT_KNOWLEDGE = cal_op(&!r, ir_lift_knowledge(0, 0, 0))
+
+    // Accepted-set ordinals must be present and pairwise distinct — a
+    // collision means the read path is lying and NOTHING may translate.
+    if S2A_OP_LOAD_IMM < 0 || S2A_OP_LOAD_FLOAT < 0 || S2A_OP_I2F < 0 { return false }
+    if S2A_OP_F2I < 0 || S2A_OP_LOAD_BOOL < 0 || S2A_OP_COPY < 0 { return false }
+    if S2A_OP_BINOP < 0 || S2A_OP_RETURN < 0 || S2A_OP_NOP < 0 { return false }
+    if S2A_OP_LOAD_IMM == S2A_OP_LOAD_FLOAT { return false }
+    if S2A_OP_BINOP == S2A_OP_COPY { return false }
+    if S2A_OP_RETURN == S2A_OP_NOP { return false }
+    if S2A_OP_I2F == S2A_OP_F2I { return false }
+
+    S2A_CALIBRATED = true
+    true
+}
+
+// Gate/fixture support: hand-built IR cannot carry a real BinaryOp value —
+// enum arguments collapse to discriminant 0 under native-v2 (measured), so
+// ir_binop(..., BinaryOp::OpX, ...) always stores 0. Fixtures push the
+// skeleton and then poke the true ordinal into the raw column with this.
+// Real compiler-lowered IR does not need it.
+pub fn s2a_poke_bin_op(region: IrInstrRegion, idx: i64, bin_ordinal: i64) with Mut, Panic, Div {
+    IR_A_BIN_OP[(ir_region_slot_r(region, idx)) as usize] = bin_ordinal
+}
+
+pub struct MliLowerStatus {
+    pub ok: bool,
+    pub code: i64,
+    pub at_index: i64,
+}
+
+fn t_ok() -> MliLowerStatus {
+    MliLowerStatus { ok: true, code: MLI_T_OK, at_index: 0 - 1 }
+}
+
+fn t_err(code: i64, at: i64) -> MliLowerStatus {
+    MliLowerStatus { ok: false, code: code, at_index: at }
+}
+
+// Register -> (kind tag, vreg) map. Scalar SoA columns only (see
+// docs/audit/MADAROS_NESTED_AGGREGATE_ELEMENT_STORE_DISPATCH_2026-08-16.md).
+pub struct S2aRegMap {
+    pub kind_tag: [i64; 128],
+    pub vreg: [i64; 128],
+}
+
+fn s2a_map_empty() -> S2aRegMap {
+    S2aRegMap {
+        kind_tag: [0; 128],
+        vreg: [0 - 1; 128],
+    }
+}
+
+fn s2a_kind_of(tag: i64) -> MliKind {
+    if tag == MLI_KIND_FLOAT { return mli_kind_float(64) }
+    if tag == MLI_KIND_BOOL { return mli_kind_bool() }
+    mli_kind_int(64, 1)
+}
+
+// Define (or re-define with the same kind) register `reg`. Returns the vreg
+// id, or a NEGATED translator code.
+fn s2a_def(m: &!S2aRegMap, out: &!MliFunction, reg: i64, tag: i64) -> i64 with Mut, Panic {
+    if reg < 0 || reg >= 128 { return 0 - MLI_T_REG_RANGE }
+    if m.kind_tag[reg] != 0 {
+        if m.kind_tag[reg] != tag { return 0 - MLI_T_KIND_CONFLICT }
+        return m.vreg[reg]
+    }
+    let v = mli_new_vreg(out, s2a_kind_of(tag))
+    if v < 0 { return 0 - MLI_T_BUILDER_OVERFLOW }
+    m.kind_tag[reg] = tag
+    m.vreg[reg] = v
+    v
+}
+
+fn s2a_use_tag(m: &S2aRegMap, reg: i64) -> i64 with Panic {
+    if reg < 0 || reg >= 128 { return 0 }
+    m.kind_tag[reg]
+}
+
+fn s2a_use(m: &S2aRegMap, reg: i64) -> MliOperand with Panic {
+    if reg < 0 || reg >= 128 { return mli_opd_none() }
+    if m.kind_tag[reg] == 0 { return mli_opd_none() }
+    mli_opd_vreg(m.vreg[reg], s2a_kind_of(m.kind_tag[reg]))
+}
+
+// Map a BinaryOp ordinal + kind tag to an MLI opcode; negative = refusal
+// code (negated). Compares are handled by the caller (icmp/fcmp + cc).
+fn s2a_arith_opcode(bin: i64, tag: i64) -> i64 {
+    if bin == S2A_B_SHL || bin == S2A_B_SHR { return 0 - MLI_T_SHIFT_UNPINNED }
+    if bin == S2A_B_AND || bin == S2A_B_OR { return 0 - MLI_T_BOOL_LOGIC_UNPINNED }
+    if tag == MLI_KIND_FLOAT {
+        if bin == S2A_B_ADD { return MLI_OP_FADD }
+        if bin == S2A_B_SUB { return MLI_OP_FSUB }
+        if bin == S2A_B_MUL { return MLI_OP_FMUL }
+        if bin == S2A_B_DIV { return MLI_OP_FDIV }
+        // No frem in MLI R0; concat/range are never scalar arithmetic.
+        return 0 - MLI_T_UNSUPPORTED_OP
+    }
+    if tag == MLI_KIND_INT {
+        if bin == S2A_B_ADD { return MLI_OP_ADD }
+        if bin == S2A_B_SUB { return MLI_OP_SUB }
+        if bin == S2A_B_MUL { return MLI_OP_MUL }
+        if bin == S2A_B_DIV { return MLI_OP_DIV }
+        if bin == S2A_B_REM { return MLI_OP_REM }
+        if bin == S2A_B_BITAND { return MLI_OP_AND }
+        if bin == S2A_B_BITOR { return MLI_OP_OR }
+        if bin == S2A_B_BITXOR { return MLI_OP_XOR }
+        return 0 - MLI_T_UNSUPPORTED_OP
+    }
+    0 - MLI_T_OPERAND
+}
+
+// Map a compare BinaryOp ordinal to an MLI condition code; MLI_CC_NONE if
+// the ordinal is not a compare.
+fn s2b_cc_of(bin: i64) -> i64 {
+    if bin == S2A_B_EQ { return MLI_CC_EQ }
+    if bin == S2A_B_NE { return MLI_CC_NE }
+    if bin == S2A_B_LT { return MLI_CC_LT }
+    if bin == S2A_B_LE { return MLI_CC_LE }
+    if bin == S2A_B_GT { return MLI_CC_GT }
+    if bin == S2A_B_GE { return MLI_CC_GE }
+    MLI_CC_NONE
+}
+
+// Block layout computed by pass 1 (S2b). Scalar SoA columns only.
+//   is_start[i]    1 if IR instruction i starts a new MLI block
+//   block_of[i]    MLI block id containing IR instruction i
+//   label_block[l] MLI block id for label l, 0-1 if the label never appears
+pub struct S2bLayout {
+    pub is_start: [i64; 512],
+    pub block_of: [i64; 512],
+    pub label_block: [i64; 64],
+}
+
+fn s2b_layout_empty() -> S2bLayout {
+    S2bLayout {
+        is_start: [0; 512],
+        block_of: [0; 512],
+        label_block: [0 - 1; 64],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point. `out` MUST be a fresh mli_func_empty() from the caller (the
+// translator mutates only through the builder API; it does not reset `out`,
+// because whole-struct stores through &! are in the miscompile family).
+// Requires s2a_calibrate() (run lazily here; arena must be initialised).
+//
+// S2b: full CFG translation. Pass 1 lays out blocks — block boundaries at
+// function entry, at every IrLabel, and after every jump/branch/return.
+// Pass 2 translates: IrJump becomes a jmp terminator, IrBranchTrue/False
+// become br terminators whose fallthrough edge targets the textually next
+// block, a block that falls into a label gets an explicit jmp (copy
+// insertion stays in the feed; NO phi, design §4.4), and compares translate
+// to icmp/fcmp producing Bool vregs which br consumes (D2: Bool, not
+// Flags). Unreachable blocks translate and verify vacuously.
+// ---------------------------------------------------------------------------
+
+pub fn ir_to_mli_scalar(src: &IrFunction, out: &!MliFunction) -> MliLowerStatus with Mut, Panic, Div {
+    if !s2a_calibrate() { return t_err(MLI_T_NOT_CALIBRATED, 0 - 1) }
+
+    let handle = src.region
+    if !ir_region_is_valid(&handle) { return t_err(MLI_T_REGION, 0 - 1) }
+    if src.reg_count > 128 { return t_err(MLI_T_REG_RANGE, 0 - 1) }
+    if src.param_count < 0 || src.param_count > MLI_MAX_ARGS { return t_err(MLI_T_REG_RANGE, 0 - 1) }
+    if src.instr_count > S2B_MAX_IR_INSTRS { return t_err(MLI_T_BUILDER_OVERFLOW, 0 - 1) }
+
+    // Return kind: IrFunction exposes returns_float only. Bool/void/struct
+    // returns are outside this surface and surface as MLI_T_RET_KIND.
+    let ret_tag = if src.returns_float == 1 { MLI_KIND_FLOAT } else { MLI_KIND_INT }
+    out.name = "ir_to_mli_scalar"
+    out.ret = s2a_kind_of(ret_tag)
+
+    var map = s2a_map_empty()
+
+    // Parameters: arg i is vreg i (MLI invariant); kind from float_reg_bits.
+    var pi: i64 = 0
+    while pi < src.param_count {
+        let preg = src.param_regs[pi]
+        if preg < 0 || preg >= 128 { return t_err(MLI_T_REG_RANGE, 0 - 1) }
+        let ptag = if ir_float_bits_get(src, preg) { MLI_KIND_FLOAT } else { MLI_KIND_INT }
+        let av = mli_add_arg(out, s2a_kind_of(ptag))
+        if av < 0 { return t_err(MLI_T_BUILDER_OVERFLOW, 0 - 1) }
+        map.kind_tag[preg] = ptag
+        map.vreg[preg] = av
+        pi = pi + 1
+    }
+
+    let n = src.instr_count
+
+    // -----------------------------------------------------------------
+    // Pass 1: block layout.
+    // -----------------------------------------------------------------
+    var layout = s2b_layout_empty()
+    if n > 0 { layout.is_start[0] = 1 }
+
+    var i: i64 = 0
+    while i < n {
+        let slot = ir_region_slot_r(src.region, i)
+        let op = IR_A_OP[slot as usize]
+        if op == S2A_OP_LABEL {
+            layout.is_start[i] = 1
+        }
+        if op == S2A_OP_JUMP || op == S2A_OP_BR_TRUE || op == S2A_OP_BR_FALSE || op == S2A_OP_RETURN {
+            if i + 1 < n { layout.is_start[i + 1] = 1 }
+        }
+        i = i + 1
+    }
+
+    var bcount: i64 = 0
+    var cur_assign: i64 = 0 - 1
+    i = 0
+    while i < n {
+        if layout.is_start[i] == 1 {
+            cur_assign = bcount
+            bcount = bcount + 1
+        }
+        layout.block_of[i] = cur_assign
+        i = i + 1
+    }
+    if bcount > MLI_MAX_BLOCKS { return t_err(MLI_T_BUILDER_OVERFLOW, 0 - 1) }
+    if bcount == 0 { return t_err(MLI_T_MISSING_RETURN, 0) }
+
+    // Label -> block map.
+    i = 0
+    while i < n {
+        let slot = ir_region_slot_r(src.region, i)
+        let op = IR_A_OP[slot as usize]
+        if op == S2A_OP_LABEL {
+            let lid = IR_A_LABEL_ID[slot as usize]
+            if lid < 0 || lid >= S2B_MAX_LABELS { return t_err(MLI_T_LABEL_UNDEF, i) }
+            layout.label_block[lid] = layout.block_of[i]
+        }
+        i = i + 1
+    }
+
+    // Create all MLI blocks up front (ids follow textual order; entry = 0).
+    var bi: i64 = 0
+    while bi < bcount {
+        if mli_new_block(out) < 0 { return t_err(MLI_T_BUILDER_OVERFLOW, 0 - 1) }
+        bi = bi + 1
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 2: translate.
+    // -----------------------------------------------------------------
+    var cur: i64 = 0
+    i = 0
+    while i < n {
+        let slot = ir_region_slot_r(src.region, i)
+        let op = IR_A_OP[slot as usize]
+        let r_dst = IR_A_DST[slot as usize]
+        let r_src1 = IR_A_SRC1[slot as usize]
+        let r_src2 = IR_A_SRC2[slot as usize]
+        let r_imm_i = IR_A_IMM_I64[slot as usize]
+        let r_imm_f = IR_A_IMM_F64[slot as usize]
+        let r_bin = IR_A_BIN_OP[slot as usize]
+        let r_label = IR_A_LABEL_ID[slot as usize]
+
+        // Boundary transition: an open predecessor falls through into the
+        // block starting here — make the edge explicit with a jmp.
+        let b_here = layout.block_of[i]
+        if b_here != cur {
+            if out.blk_has_term[cur] == 0 {
+                if !mli_set_term(out, cur, mli_term_jmp(b_here)) {
+                    return t_err(MLI_T_BUILDER_OVERFLOW, i)
+                }
+            }
+            cur = b_here
+        }
+
+        if op == S2A_OP_NOP || op == S2A_OP_LABEL {
+            i = i + 1
+            continue
+        }
+
+        // Fail-closed funnel — named classes first.
+        if op >= S2A_OP_WIDE_LO && op <= S2A_OP_WIDE_HI && S2A_OP_WIDE_LO >= 0 {
+            return t_err(MLI_T_WIDE_EXCLUDED, i)
+        }
+        if op == S2A_OP_HYPER_O || op == S2A_OP_HYPER_S { return t_err(MLI_T_R1_CD, i) }
+        if op == S2A_OP_LIFT_KNOWLEDGE { return t_err(MLI_T_R1_EPISTEMIC, i) }
+        if op == S2A_OP_CALL && S2A_OP_CALL >= 0 { return t_err(MLI_T_CALL_UNSUPPORTED, i) }
+
+        if op == S2A_OP_JUMP {
+            if r_label < 0 || r_label >= S2B_MAX_LABELS { return t_err(MLI_T_LABEL_UNDEF, i) }
+            let lb = layout.label_block[r_label]
+            if lb < 0 { return t_err(MLI_T_LABEL_UNDEF, i) }
+            if !mli_set_term(out, cur, mli_term_jmp(lb)) { return t_err(MLI_T_BUILDER_OVERFLOW, i) }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_BR_TRUE || op == S2A_OP_BR_FALSE {
+            if r_label < 0 || r_label >= S2B_MAX_LABELS { return t_err(MLI_T_LABEL_UNDEF, i) }
+            let lb = layout.label_block[r_label]
+            if lb < 0 { return t_err(MLI_T_LABEL_UNDEF, i) }
+            // D2: branch condition is a Bool vreg — never Flags, never int.
+            if s2a_use_tag(&map, r_src1) != MLI_KIND_BOOL { return t_err(MLI_T_OPERAND, i) }
+            if i + 1 >= n { return t_err(MLI_T_MISSING_RETURN, i) }
+            let fb = layout.block_of[i + 1]
+            let cond = s2a_use(&map, r_src1)
+            var term = mli_term_br(cond, lb, fb)
+            if op == S2A_OP_BR_FALSE {
+                term = mli_term_br(cond, fb, lb)
+            }
+            if !mli_set_term(out, cur, term) { return t_err(MLI_T_BUILDER_OVERFLOW, i) }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_LOAD_IMM {
+            let v = s2a_def(&!map, out, r_dst, MLI_KIND_INT)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, mli_kind_int(64, 1))
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, dst, mli_opd_imm_int(r_imm_i, mli_kind_int(64, 1)))) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_LOAD_FLOAT {
+            let v = s2a_def(&!map, out, r_dst, MLI_KIND_FLOAT)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, mli_kind_float(64))
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, dst, mli_opd_imm_f64(r_imm_f))) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_LOAD_BOOL {
+            let v = s2a_def(&!map, out, r_dst, MLI_KIND_BOOL)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, mli_kind_bool())
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, dst, mli_opd_imm_int(r_imm_i, mli_kind_bool()))) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_COPY {
+            let stag = s2a_use_tag(&map, r_src1)
+            if stag == 0 { return t_err(MLI_T_REG_UNDEF, i) }
+            let v = s2a_def(&!map, out, r_dst, stag)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, s2a_kind_of(stag))
+            let s = s2a_use(&map, r_src1)
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, dst, s)) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_I2F {
+            if s2a_use_tag(&map, r_src1) != MLI_KIND_INT { return t_err(MLI_T_OPERAND, i) }
+            let v = s2a_def(&!map, out, r_dst, MLI_KIND_FLOAT)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, mli_kind_float(64))
+            let s = s2a_use(&map, r_src1)
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_I2F, dst, s)) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_F2I {
+            if s2a_use_tag(&map, r_src1) != MLI_KIND_FLOAT { return t_err(MLI_T_OPERAND, i) }
+            let v = s2a_def(&!map, out, r_dst, MLI_KIND_INT)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, mli_kind_int(64, 1))
+            let s = s2a_use(&map, r_src1)
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_F2I, dst, s)) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_BINOP {
+            let ltag = s2a_use_tag(&map, r_src1)
+            let rtag = s2a_use_tag(&map, r_src2)
+            if ltag == 0 || rtag == 0 { return t_err(MLI_T_REG_UNDEF, i) }
+            if ltag != rtag { return t_err(MLI_T_OPERAND, i) }
+
+            let cc = s2b_cc_of(r_bin)
+            if cc != MLI_CC_NONE {
+                // Compare: produces a Bool vreg (icmp/fcmp by operand kind).
+                if ltag != MLI_KIND_INT && ltag != MLI_KIND_FLOAT { return t_err(MLI_T_OPERAND, i) }
+                let v = s2a_def(&!map, out, r_dst, MLI_KIND_BOOL)
+                if v < 0 { return t_err(0 - v, i) }
+                let dst = mli_opd_vreg(v, mli_kind_bool())
+                let a = s2a_use(&map, r_src1)
+                let b = s2a_use(&map, r_src2)
+                var cmp = mli_inst_icmp(cc, dst, a, b)
+                if ltag == MLI_KIND_FLOAT {
+                    cmp = mli_inst_fcmp(cc, dst, a, b)
+                }
+                if !mli_emit(out, cur, cmp) { return t_err(MLI_T_BUILDER_OVERFLOW, i) }
+                i = i + 1
+                continue
+            }
+
+            let mop = s2a_arith_opcode(r_bin, ltag)
+            if mop < 0 { return t_err(0 - mop, i) }
+
+            let v = s2a_def(&!map, out, r_dst, ltag)
+            if v < 0 { return t_err(0 - v, i) }
+            let dst = mli_opd_vreg(v, s2a_kind_of(ltag))
+            let a = s2a_use(&map, r_src1)
+            let b = s2a_use(&map, r_src2)
+            if !mli_emit(out, cur, mli_inst3(mop, dst, a, b)) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        if op == S2A_OP_RETURN {
+            let stag = s2a_use_tag(&map, r_src1)
+            if stag == 0 { return t_err(MLI_T_REG_UNDEF, i) }
+            if stag != ret_tag { return t_err(MLI_T_RET_KIND, i) }
+            let s = s2a_use(&map, r_src1)
+            if !mli_set_term(out, cur, mli_term_ret(s)) {
+                return t_err(MLI_T_BUILDER_OVERFLOW, i)
+            }
+            i = i + 1
+            continue
+        }
+
+        // Anything not handled above is refused with its index.
+        return t_err(MLI_T_UNSUPPORTED_OP, i)
+    }
+
+    // Every block needs a terminator; an open final block means the function
+    // fell off the end — refuse, never invent a return.
+    var bcheck: i64 = 0
+    while bcheck < bcount {
+        if out.blk_has_term[bcheck] == 0 { return t_err(MLI_T_MISSING_RETURN, n) }
+        bcheck = bcheck + 1
+    }
+    if out.overflowed { return t_err(MLI_T_BUILDER_OVERFLOW, n) }
+    t_ok()
+}

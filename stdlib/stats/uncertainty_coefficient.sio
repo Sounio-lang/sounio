@@ -1,0 +1,174 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/uncertainty_coefficient.sio — Theil's U (entropy association)
+//
+// An information-theoretic measure of nominal association: the fraction of one
+// variable's entropy explained by the other:
+//
+//   uncertainty_coefficient(table, nr, nc) -> UResult      (row-major nr × nc)
+//
+//   H(R) = −Σ pᵣ₊ ln pᵣ₊,   I(R;C) = ΣΣ p_rc ln( p_rc /(pᵣ₊ p₊c) ),
+//   U(R|C) = I/H(R),   U(C|R) = I/H(C),   symmetric U = 2I/(H(R)+H(C)).
+// U = 0 under independence, 1 when C perfectly determines R.
+//
+// Pure Sounio: marginals then the entropy / mutual-information sums; inline ln.
+// No external dependency, no nested data-array calls.
+//
+// References:
+//   Theil (1970) Am. J. Sociol. 76:103.
+
+module stats::uncertainty_coefficient
+
+fn uc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+pub struct UResult {
+    pub u_rc: f64,    // U(R|C): fraction of H(R) explained by C
+    pub u_cr: f64,    // U(C|R)
+    pub u_sym: f64,   // symmetric U
+    pub mutual_info: f64,
+}
+
+/// Theil's uncertainty coefficient for a nominal contingency table.
+///
+/// Parâmetros: table — row-major nr×nc counts; nr — rows (2..16); nc — cols (2..16).
+/// Retorno: UResult (u_rc, u_cr, u_sym, mutual_info).
+/// Referências: Theil (1970).
+pub fn uncertainty_coefficient(table: &[f64; 256], nr: i32, nc: i32) -> UResult with Mut, Div, Panic {
+    if nr < 2 || nr > 16 || nc < 2 || nc > 16 {
+        return UResult { u_rc: 0.0, u_cr: 0.0, u_sym: 0.0, mutual_info: 0.0 }
+    }
+    var total = 0.0
+    var rowm: [f64; 16] = [0.0; 16]
+    var colm: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < nr {
+        var j = 0
+        while j < nc {
+            let v = table[(i * nc + j) as usize]
+            total = total + v
+            rowm[i as usize] = rowm[i as usize] + v
+            colm[j as usize] = colm[j as usize] + v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if total <= 0.0 { return UResult { u_rc: 0.0, u_cr: 0.0, u_sym: 0.0, mutual_info: 0.0 } }
+    // entropies of the marginals
+    var hr = 0.0
+    var a = 0
+    while a < nr {
+        let p = rowm[a as usize] / total
+        if p > 0.0 { hr = hr - p * uc_ln(p) }
+        a = a + 1
+    }
+    var hc = 0.0
+    var b = 0
+    while b < nc {
+        let p = colm[b as usize] / total
+        if p > 0.0 { hc = hc - p * uc_ln(p) }
+        b = b + 1
+    }
+    // mutual information
+    var mi = 0.0
+    var r = 0
+    while r < nr {
+        var c = 0
+        while c < nc {
+            let v = table[(r * nc + c) as usize]
+            if v > 0.0 {
+                let p = v / total
+                let pr = rowm[r as usize] / total
+                let pcl = colm[c as usize] / total
+                mi = mi + p * uc_ln(p / (pr * pcl))
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var urc = 0.0
+    if hr > 1.0e-300 { urc = mi / hr }
+    var ucr = 0.0
+    if hc > 1.0e-300 { ucr = mi / hc }
+    var usym = 0.0
+    if hr + hc > 1.0e-300 { usym = 2.0 * mi / (hr + hc) }
+    return UResult { u_rc: urc, u_cr: ucr, u_sym: usym, mutual_info: mi }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// [[40,10],[5,45]]: H(R)=ln2=0.693147; I=0.275396; U(R|C)=0.275396/0.693147=0.397313.
+fn test_u() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=40.0; t[1]=10.0
+    t[2]=5.0;  t[3]=45.0
+    let r = uncertainty_coefficient(&t, 2, 2)
+    var ok = true
+    ok = check(1, approx(r.mutual_info, 0.275396, 1.0e-4)) && ok
+    ok = check(2, approx(r.u_rc, 0.397313, 1.0e-4)) && ok
+    return ok
+}
+
+// independence (rank-1 table) -> I ≈ 0, U ≈ 0.
+fn test_independent() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=10.0; t[1]=20.0
+    t[2]=20.0; t[3]=40.0
+    let r = uncertainty_coefficient(&t, 2, 2)
+    return check(10, approx(r.u_rc, 0.0, 1.0e-6))
+}
+
+// perfect association (diagonal) -> U = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=50.0; t[1]=0.0
+    t[2]=0.0;  t[3]=50.0
+    let r = uncertainty_coefficient(&t, 2, 2)
+    var ok = true
+    ok = check(20, approx(r.u_rc, 1.0, 1.0e-6)) && ok
+    ok = check(21, approx(r.u_sym, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_u() && ok
+    ok = test_independent() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

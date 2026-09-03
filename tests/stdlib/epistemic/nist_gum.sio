@@ -1,3 +1,5 @@
+//@ run-pass
+//@ expect-stdout: NIST_GUM_OK
 // tests/stdlib/epistemic/nist_gum.sio
 // NIST GUM (JCGM 100:2008) Validation Tests for Sounio gum.sio
 //
@@ -7,10 +9,9 @@
 // - NIST Uncertainty Machine — https://physics.nist.gov/cuu/Uncertainty/
 
 use epistemic::gum::{
-    GUMUncertainty, GUMResult,
-    type_a_uncertainty, type_b_uncertainty, type_b_uniform, type_b_triangular,
-    coverage_factor_95, k_normal_95,
-    gum_simple, gum_type_a,
+    coverage_factor_95,
+    gum_add, gum_combine2, gum_div, gum_mul, gum_simple, gum_std_u, gum_dof, gum_type_a,
+    gum_type_b, gum_type_b_uniform, gum_type_b_triangular, gum_u95,
 }
 
 fn abs_gum(x: f64) -> f64 {
@@ -35,17 +36,18 @@ fn assert_close(computed: f64, expected: f64, tol: f64) with Panic {
     }
 }
 
-pub fn main() with Mut, Div, Panic {
+pub fn main() with IO, Mut, Div, Panic {
     // -------------------------------------------------------------------------
     // 1. Type B uncertainty: u = 0.1 mm, 2*u = 0.2 mm
     // -------------------------------------------------------------------------
-    let u1 = type_b_uncertainty(0.1)
-    let U_k2 = 2.0 * u1.std_uncertainty
+    let u1 = gum_type_b(0.1)
+    let r1_b = gum_combine2(0.0, u1, gum_type_b(0.0))
+    let U_k2 = 2.0 * gum_std_u(r1_b)
     assert_close(U_k2, 0.2, 1e-9)
 
     // GUM result with k=1.96 (infinite DoF)
     let r1 = gum_simple(20.0, 0.1)
-    assert_close(r1.expanded_uncertainty_95, 1.96 * 0.1, 1e-9)
+    assert_close(gum_u95(r1), 1.96 * 0.1, 1e-9)
 
     // -------------------------------------------------------------------------
     // 2. Coverage factor k(p=0.95, ν=∞) = 1.96
@@ -54,17 +56,18 @@ pub fn main() with Mut, Div, Panic {
     assert_close(k_inf, 1.96, 1e-6)
 
     // -------------------------------------------------------------------------
-    // 3. Coverage factor k(p=0.95, ν=10) ≈ 2.201
+    // 3. Coverage factor k(p=0.95, ν=10) ≈ 2.228
     // -------------------------------------------------------------------------
     let k10 = coverage_factor_95(10.0)
-    assert_close(k10, 2.201, 1e-3)
+    assert_close(k10, 2.228, 1e-3)
 
     // -------------------------------------------------------------------------
     // 4. Type A: s=0.5, n=10 → u = s/sqrt(n) ≈ 0.15811, ν=9
     // -------------------------------------------------------------------------
-    let ua = type_a_uncertainty(0.5, 10)
-    assert_close(ua.std_uncertainty, 0.5 / sqrt_gum(10.0), 1e-9)
-    assert_close(ua.degrees_of_freedom, 9.0, 1e-9)
+    let ua = gum_type_a(0.5, 10)
+    let ua_r = gum_combine2(0.0, ua, gum_type_b(0.0))
+    assert_close(gum_std_u(ua_r), 0.5 / sqrt_gum(10.0), 1e-9)
+    assert_close(gum_dof(ua_r), 9.0, 1e-9)
 
     // -------------------------------------------------------------------------
     // 5. Welch-Satterthwaite DoF combination
@@ -72,16 +75,20 @@ pub fn main() with Mut, Div, Panic {
     //    uc = sqrt(0.01 + 0.0025) = sqrt(0.0125) ≈ 0.11180
     //    ν_eff = uc^4 / (u1^4/ν1) = (0.0125^2) / (0.0001/10) ≈ 156.25
     // -------------------------------------------------------------------------
-    let u1_ws = type_a_uncertainty(0.316227766, 11)   // s=0.316..., n=11 → u≈0.1, ν=10
-    let u2_ws = type_b_uncertainty(0.05)
-    let comb_ws = u1_ws.combine(&u2_ws)
-    let uc_ws = sqrt_gum(u1_ws.std_uncertainty * u1_ws.std_uncertainty + u2_ws.std_uncertainty * u2_ws.std_uncertainty)
+    let u1_ws = gum_type_a(0.316227766, 11)   // s=0.316..., n=11 -> u≈0.1, ν=10
+    let u2_ws = gum_type_b(0.05)
+    let comb_ws = gum_combine2(0.0, u1_ws, u2_ws)
+    let u1_ws_r = gum_combine2(0.0, u1_ws, gum_type_b(0.0))
+    let u2_ws_r = gum_combine2(0.0, u2_ws, gum_type_b(0.0))
+    let u1_ws_std = gum_std_u(u1_ws_r)
+    let u2_ws_std = gum_std_u(u2_ws_r)
+    let uc_ws = sqrt_gum(u1_ws_std * u1_ws_std + u2_ws_std * u2_ws_std)
     // ν_eff = uc^4 / (u1^4/ν1)  (u2 has infinite ν so its term vanishes)
     let uc4 = uc_ws * uc_ws * uc_ws * uc_ws
-    let u1u = u1_ws.std_uncertainty
+    let u1u = u1_ws_std
     let u14 = u1u * u1u * u1u * u1u
-    let nu_eff_ws = uc4 / (u14 / u1_ws.degrees_of_freedom)
-    assert_close(comb_ws.degrees_of_freedom, nu_eff_ws, 1.0)   // tolerance 1 DoF
+    let nu_eff_ws = uc4 / (u14 / gum_dof(u1_ws_r))
+    assert_close(gum_dof(comb_ws), nu_eff_ws, 1.0)   // tolerance 1 DoF
 
     // -------------------------------------------------------------------------
     // 6. R = V/I (electrical resistance GUM §H.2 style)
@@ -93,10 +100,10 @@ pub fn main() with Mut, Div, Panic {
     // -------------------------------------------------------------------------
     let v_res = gum_simple(100.0, 0.2)
     let i_stddev = 0.01 * sqrt_gum(10.0)
-    let i_res = gum_type_a(10.0, i_stddev, 10)
-    let r_res = v_res.div(&i_res)
+    let i_res = gum_combine2(10.0, gum_type_a(i_stddev, 10), gum_type_b(0.0))
+    let r_res = gum_div(v_res, i_res)
     let expected_ur = sqrt_gum(0.02 * 0.02 + 0.01 * 0.01)
-    assert_close(r_res.std_uncertainty, expected_ur, 1e-6)
+    assert_close(gum_std_u(r_res), expected_ur, 1e-6)
 
     // -------------------------------------------------------------------------
     // 7. Addition propagation: x1 + x2
@@ -105,8 +112,8 @@ pub fn main() with Mut, Div, Panic {
     // -------------------------------------------------------------------------
     let x1 = gum_simple(10.0, 0.1)
     let x2 = gum_simple(20.0, 0.2)
-    let sum = x1.add(&x2)
-    assert_close(sum.std_uncertainty, sqrt_gum(0.05), 1e-9)
+    let sum = gum_add(x1, x2)
+    assert_close(gum_std_u(sum), sqrt_gum(0.05), 1e-9)
 
     // -------------------------------------------------------------------------
     // 8. Multiplication propagation: x1 * x2
@@ -114,21 +121,22 @@ pub fn main() with Mut, Div, Panic {
     //          = sqrt((20*0.1)^2 + (10*0.2)^2)
     //          = sqrt(4 + 4) = sqrt(8) ≈ 2.82842
     // -------------------------------------------------------------------------
-    let mul = x1.mul(&x2)
-    assert_close(mul.std_uncertainty, sqrt_gum(8.0), 1e-9)
+    let mul = gum_mul(x1, x2)
+    assert_close(gum_std_u(mul), sqrt_gum(8.0), 1e-9)
 
     // -------------------------------------------------------------------------
     // 9. Type B uniform: a = 0.15 mm → u = a/sqrt(3) ≈ 0.08660
     // -------------------------------------------------------------------------
-    let u_uni = type_b_uniform(0.15)
-    assert_close(u_uni.std_uncertainty, 0.15 / sqrt_gum(3.0), 1e-9)
+    let u_uni = gum_combine2(0.0, gum_type_b_uniform(0.15), gum_type_b(0.0))
+    assert_close(gum_std_u(u_uni), 0.15 / sqrt_gum(3.0), 1e-9)
 
     // -------------------------------------------------------------------------
     // 10. Type B triangular: a = 0.15 mm → u = a/sqrt(6) ≈ 0.06123
     // -------------------------------------------------------------------------
-    let u_tri = type_b_triangular(0.15)
-    assert_close(u_tri.std_uncertainty, 0.15 / sqrt_gum(6.0), 1e-9)
+    let u_tri = gum_combine2(0.0, gum_type_b_triangular(0.15), gum_type_b(0.0))
+    assert_close(gum_std_u(u_tri), 0.15 / sqrt_gum(6.0), 1e-9)
 
     var count: i64 = 0
     while count < 10 { count = count + 1 }
+    println("NIST_GUM_OK")
 }

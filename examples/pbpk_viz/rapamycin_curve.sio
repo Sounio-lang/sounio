@@ -1,0 +1,59 @@
+// examples/pbpk_viz/rapamycin_curve.sio
+// Publication figure: rapamycin (sirolimus) oral concentration-time curve with a
+// 95% GUM uncertainty band, from the literature-referenced Epistemic parameters
+// in stdlib/pbpk. High-resolution, native (no matplotlib / Python / FFI).
+//   souc run examples/pbpk_viz/rapamycin_curve.sio -> rapamycin_curve.png
+
+use image::pure::types::{Image, image_new}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_band, plot_line_w, plot_axes, plot_text_sc}
+use image::pure::png::{png_write}
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_params::{rap_ka, rap_vd, rap_ke}
+
+fn pk_oral(dose_ug: f64, ka: f64, vdf: f64, ke: f64, t: f64) -> f64 with Mut, Div, Panic {
+    var d = ka - ke; if d < 0.0 { d = 0.0 - d }
+    if d < 0.000000001 { return 0.0 }
+    (dose_ug * ka) / (vdf * (ka - ke)) * (exp(0.0 - ke * t) - exp(0.0 - ka * t))
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let ka_e = rap_ka(); let ka = ka_e.val(); let ka_sd = ka_e.std()
+    let vd_e = rap_vd(); let vd = vd_e.val(); let vd_sd = vd_e.std()
+    let ke_e = rap_ke(); let ke = ke_e.val(); let ke_sd = ke_e.std()
+    let dose = 6000.0
+    let n = 320
+    var ts: [f64; 512] = [0.0; 512]
+    var cc: [f64; 512] = [0.0; 512]
+    var lo: [f64; 512] = [0.0; 512]
+    var hi: [f64; 512] = [0.0; 512]
+    let tmax = 72.0
+    var ymax = 0.0
+    var i = 0
+    while i < n {
+        let t = tmax * ((i as f64) / ((n - 1) as f64))
+        let c = pk_oral(dose, ka, vd, ke, t)
+        let g_ka = (pk_oral(dose, ka + ka_sd, vd, ke, t) - pk_oral(dose, ka - ka_sd, vd, ke, t)) / 2.0
+        let g_vd = (pk_oral(dose, ka, vd + vd_sd, ke, t) - pk_oral(dose, ka, vd - vd_sd, ke, t)) / 2.0
+        let g_ke = (pk_oral(dose, ka, vd, ke + ke_sd, t) - pk_oral(dose, ka, vd, ke - ke_sd, t)) / 2.0
+        let sig = sqrt(g_ka * g_ka + g_vd * g_vd + g_ke * g_ke)
+        var l = c - 1.96 * sig; if l < 0.0 { l = 0.0 }
+        ts[i as usize] = t; cc[i as usize] = c; lo[i as usize] = l; hi[i as usize] = c + 1.96 * sig
+        if c + 1.96 * sig > ymax { ymax = c + 1.96 * sig }
+        i = i + 1
+    }
+    ymax = ymax * 1.06
+
+    let w = 1200; let h = 760
+    var img = image_new(w as i32, h as i32)
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, 0.0, tmax, 0.0, ymax)
+    plot_grid(&!img, &a, 6, 6, 0xECECEC)
+    plot_band(&!img, &a, &ts, &lo, &hi, n, 0xCBDDF2)     // 95% GUM band
+    plot_line_w(&!img, &a, &ts, &cc, n, 0x1F5FA8, 2.4)   // mean curve
+    plot_axes(&!img, &a, 6, 6, 0x555555, 3)
+    let _t1 = plot_text_sc(&!img, "Rapamycin 6 mg oral: concentration-time", 150, 40, 0x111111, 4)
+    let _t2 = plot_text_sc(&!img, "time (h)", 560, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "C (ng/mL)", 150, 78, 0x333333, 3)
+    let ok = png_write("rapamycin_curve.png", &img)
+    print("wrote="); print(ok); print("\n")
+}

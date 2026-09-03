@@ -95,15 +95,20 @@ pub fn edual_to_gum_result(d: EpistemicDual, dof: f64) -> GUMResult with Div, Pa
     }
 }
 
-/// Compose two independent GUM propagation steps through an AD computation.
-/// u_combined = sqrt(u1^2 + u2^2) when inputs are independent (GUM §5.1.2).
+/// Compose two GUM propagation steps through an AD computation, under a declared correlation.
 ///
-/// Each dual carries: output_unc_i = |dot_i| * unc_i
-/// Combined: u_c = sqrt(sum of (|dot_i| * unc_i)^2)
-pub fn edual_combine_gum(d1: EpistemicDual, d2: EpistemicDual) -> GUMUncertainty with Div, Panic {
+/// 🚨 A versão anterior desta função aplicava quadratura INCONDICIONALMENTE, e a própria
+/// documentação dela dizia "when inputs are independent (GUM §5.1.2)" — enunciava a
+/// pré-condição e não a exigia. Nenhum chamador jamais provou independência.
+///
+/// A fórmula completa do GUM §5.2 é u_c = sqrt(u1² + u2² + 2·ρ·u1·u2). Quadratura é ela com
+/// ρ = 0; a soma aditiva é ela com ρ = 1 (Cauchy–Schwarz). São o mesmo teorema em dois pontos,
+/// e assumir ρ = 0 em silêncio é publicar um limite mais apertado que a verdade.
+pub fn edual_combine_gum_rho(d1: EpistemicDual, d2: EpistemicDual, rho: f64) -> GUMUncertainty with Div, Panic {
     let u1 = bridge_abs(d1.dot) * d1.unc
     let u2 = bridge_abs(d2.dot) * d2.unc
-    let combined = bridge_sqrt(u1 * u1 + u2 * u2)
+    let sum_sq = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
+    let combined = bridge_sqrt(sum_sq)
     // Effective sensitivity: magnitude of combined gradient direction
     let sens = bridge_sqrt(d1.dot * d1.dot + d2.dot * d2.dot)
     GUMUncertainty {
@@ -111,4 +116,19 @@ pub fn edual_combine_gum(d1: EpistemicDual, d2: EpistemicDual) -> GUMUncertainty
         degrees_of_freedom: 1.0e9,
         sensitivity: sens,
     }
+}
+
+/// Composição sob INDEPENDÊNCIA PROVADA (ρ = 0). Só use quando houver testemunha — em geral,
+/// `cat_d_separated` sobre o grafo causal do problema. Existe separada, e com nome explícito,
+/// para que a alegação seja grepável:
+///   grep -rn "edual_combine_gum_independent" --include=*.sio
+pub fn edual_combine_gum_independent(d1: EpistemicDual, d2: EpistemicDual) -> GUMUncertainty with Div, Panic {
+    edual_combine_gum_rho(d1, d2, 0.0)
+}
+
+/// Compatibilidade de assinatura, semântica INVERTIDA de propósito: sem ρ declarado, o padrão é
+/// o PIOR CASO (ρ = 1), não a quadratura. Todo número que afrouxa ao adotar esta versão é um
+/// lugar onde o sistema vinha mentindo para baixo.
+pub fn edual_combine_gum(d1: EpistemicDual, d2: EpistemicDual) -> GUMUncertainty with Div, Panic {
+    edual_combine_gum_rho(d1, d2, 1.0)
 }

@@ -1,0 +1,130 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/weighted_stats.sio — weighted mean & variance
+//
+// The mean and variance when observations carry weights (survey weights,
+// meta-analytic precisions, frequency counts):
+//
+//   weighted_stats(x, w, n) -> WeightedResult
+//
+//   x̄_w = Σwᵢxᵢ / Σwᵢ,
+//   population variance  σ²_w = Σwᵢ(xᵢ−x̄_w)² / Σwᵢ,
+//   reliability-weight unbiased variance  s²_w = Σwᵢ(xᵢ−x̄_w)² / (V₁ − V₂/V₁),
+// with V₁ = Σwᵢ, V₂ = Σwᵢ².
+//
+// Pure Sounio: two passes (weighted mean, then the weighted sum of squares);
+// inline sqrt. No external dependency, no nested data-array calls.
+//
+// References:
+//   Kish, "Survey Sampling" (1965); GNU Scientific Library weighted statistics.
+
+module stats::weighted_stats
+
+fn ws_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct WeightedResult {
+    pub mean: f64,        // weighted mean
+    pub var_pop: f64,     // population weighted variance (÷ Σw)
+    pub var_unbiased: f64,// reliability-weight unbiased variance
+    pub sd: f64,          // √var_unbiased
+    pub sum_w: f64,       // Σw
+}
+
+/// Weighted mean and variance.
+///
+/// Parâmetros: x — values; w — non-negative weights; n — size (>=2, <=256).
+/// Retorno: WeightedResult (mean, var_pop, var_unbiased, sd, sum_w).
+/// Referências: Kish (1965).
+pub fn weighted_stats(x: &[f64; 256], w: &[f64; 256], n: i32) -> WeightedResult with Mut, Div, Panic {
+    if n < 2 { return WeightedResult { mean: 0.0, var_pop: 0.0, var_unbiased: 0.0, sd: 0.0, sum_w: 0.0 } }
+    var v1 = 0.0
+    var v2 = 0.0
+    var swx = 0.0
+    var i = 0
+    while i < n {
+        let wi = w[i as usize]
+        v1 = v1 + wi
+        v2 = v2 + wi * wi
+        swx = swx + wi * x[i as usize]
+        i = i + 1
+    }
+    if v1 <= 0.0 { return WeightedResult { mean: 0.0, var_pop: 0.0, var_unbiased: 0.0, sd: 0.0, sum_w: 0.0 } }
+    let mean = swx / v1
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + w[j as usize] * d * d; j = j + 1 }
+    let var_pop = ss / v1
+    var var_ub = 0.0
+    let den = v1 - v2 / v1
+    if den > 1.0e-300 { var_ub = ss / den }
+    let sd = ws_sqrt(var_ub)
+    return WeightedResult { mean: mean, var_pop: var_pop, var_unbiased: var_ub, sd: sd, sum_w: v1 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3}, w={1,2,3}: x̄_w=14/6=2.333333.
+// SS=1·(1.333)²+2·(0.333)²+3·(0.667)²=1.777778+0.222222+1.333333=3.333333.
+// var_pop=3.333333/6=0.555556. V1-V2/V1=6-14/6=3.666667; var_ub=3.333333/3.666667=0.909091.
+fn test_weighted() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    w[0]=1.0; w[1]=2.0; w[2]=3.0
+    let r = weighted_stats(&x, &w, 3)
+    var ok = true
+    ok = check(1, approx(r.mean, 2.333333, 1.0e-5)) && ok
+    ok = check(2, approx(r.var_pop, 0.555556, 1.0e-5)) && ok
+    ok = check(3, approx(r.var_unbiased, 0.909091, 1.0e-5)) && ok
+    ok = check(4, approx(r.sum_w, 6.0, 1.0e-9)) && ok
+    return ok
+}
+
+// equal weights -> weighted mean = arithmetic mean.
+fn test_equal_weights() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var w: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=6.0; x[3]=8.0
+    w[0]=1.0; w[1]=1.0; w[2]=1.0; w[3]=1.0
+    let r = weighted_stats(&x, &w, 4)
+    return check(10, approx(r.mean, 5.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_weighted() && ok
+    ok = test_equal_weights() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

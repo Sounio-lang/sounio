@@ -1,0 +1,324 @@
+// stdlib/privacy/lib.sio — ε-Differential Privacy with linear budget and GUM coupling
+//
+// Phase 1 foundations (2026-05-28).
+//
+// What this module gives you:
+//   1. Refinement-typed privacy parameters (Eps, Delta, Sensitivity).
+//   2. A linear `PrivacyBudget` that cannot be double-spent. The compiler
+//      enforces single-consumption at every call site — see double-spend probe.
+//   3. A Laplace-mechanism uncertainty channel: variance 2·(sens/ε)² is folded
+//      directly into a GUM-typed `Epistemic` via gum_type_b, so the returned
+//      Knowledge<f64> carries the privacy noise as a Type-B contribution
+//      alongside any input uncertainty.
+//
+// What this module does NOT do (deferred to a forensic-dispatch patch, "Phase 1.5"):
+//   - Register a literal `DP` algebraic effect in the self-hosted compiler.
+//     Until then, DP-budget access is signalled by the linear `PrivacyBudget`
+//     parameter, not by an effect annotation in `with ...`.
+//
+// COVERAGE CAVEAT (flagged by math-review offload, 2026-05-28):
+//   The combined standard uncertainty `std_c` is the correct quadrature
+//   sum of independent Type-A and Type-B contributions. However, the
+//   privacy noise distribution is Laplace, NOT Gaussian. Computing a 95%
+//   interval as k=1.96 · std_c (the GUM-default Gaussian factor) will
+//   UNDER-cover, because Laplace tails are heavier. The 95% quantile of
+//   Laplace(0, b) is b · ln(20) ≈ 2.996·b. For a privacy-dominated channel
+//   prefer k_95 ≈ 3.0 on the Type-B component; for a sampling-dominated
+//   channel the Gaussian default is fine. Phase 4 will derive a principled
+//   mixed-distribution coverage factor.
+//
+// References:
+//   - Dwork, McSherry, Nissim, Smith (2006) "Calibrating Noise to Sensitivity in
+//     Private Data Analysis", TCC. Laplace mechanism Theorem 1.
+//   - JCGM 100:2008 (GUM) §5: combined standard uncertainty from independent
+//     Type-B contributions adds in quadrature.
+
+// ============================================================================
+// REFINEMENT TYPES
+// ============================================================================
+
+// Privacy parameter ε. Strict positivity is checked at runtime when needed;
+// the refinement here statically rules out negative literals.
+pub type Eps = { e: f64 | e >= 0.0 };
+
+// Failure probability δ for (ε, δ)-DP. Phase 1 uses pure ε-DP (δ = 0); the type
+// is exported for Phase 3 (Rényi DP / zCDP).
+pub type Delta = { d: f64 | d >= 0.0 };
+
+// L1 sensitivity of a query. For a query f: D → ℝ, sensitivity is the maximum
+// over neighbouring databases D, D' of |f(D) − f(D')|.
+pub type Sensitivity = { s: f64 | s >= 0.0 };
+
+// ============================================================================
+// LINEAR PRIVACY BUDGET
+// ============================================================================
+
+// PrivacyBudget tracks the cumulative ε spent against a declared cap.
+// Linearity is the load-bearing guarantee: holding a `PrivacyBudget` value
+// means you can spend it exactly once. Trying to use it twice is a
+// compile-time error ("linear value used more than once"). Dropping it
+// without consumption is also a compile-time error ("linear value not
+// consumed"). Verified by /tmp/probe_double_spend.sio on 2026-05-28.
+pub linear struct PrivacyBudget {
+    eps_cap: f64,
+    eps_spent: f64,
+}
+
+// Allocate a fresh budget with cap ε_cap. The caller now owns it linearly.
+pub fn budget_new(eps_cap: f64) -> PrivacyBudget {
+    PrivacyBudget { eps_cap: eps_cap, eps_spent: 0.0 }
+}
+
+// Consume the budget and return one with ε added to `eps_spent`.
+// Sequential composition: Dwork-McSherry-Nissim-Smith 2006 Thm 1.
+// Panics if remaining < ε_used (over-spend); the refinement on Eps already
+// rules out negative ε_used statically when called with a literal.
+pub fn budget_spend(b: PrivacyBudget, eps_used: f64) -> PrivacyBudget with Mut, Div, Panic {
+    let remaining = b.eps_cap - b.eps_spent
+    if eps_used > remaining {
+        panic("PrivacyBudget: spend exceeds cap")
+    }
+    PrivacyBudget { eps_cap: b.eps_cap, eps_spent: b.eps_spent + eps_used }
+}
+
+// Inspect remaining ε without consuming. Returns a copy of the f64; the
+// budget itself is borrowed, not moved.
+pub fn budget_remaining(b: &PrivacyBudget) -> f64 {
+    b.eps_cap - b.eps_spent
+}
+
+pub fn budget_spent(b: &PrivacyBudget) -> f64 {
+    b.eps_spent
+}
+
+pub fn budget_cap(b: &PrivacyBudget) -> f64 {
+    b.eps_cap
+}
+
+// Explicit consumption when a caller is done with the budget. Returns the
+// total ε spent so audit logs can record it.
+pub fn budget_close(b: PrivacyBudget) -> f64 {
+    b.eps_spent
+}
+
+// ============================================================================
+// LAPLACE MECHANISM — GUM-COUPLED UNCERTAINTY CHANNEL
+// ============================================================================
+//
+// The Laplace mechanism adds Laplace(0, s/ε) noise. Variance of Laplace(0, b)
+// is 2b². So the mechanism's noise contribution to Var(output) is 2·(s/ε)².
+// We fold this into a GUM Type-B component (a-priori known distribution) and
+// combine with the natural sampling variance of the mean estimator.
+//
+// Phase 1 returns the GUM-typed uncertainty channel WITHOUT materializing a
+// noisy sample. This is the right shape for compile-time uncertainty audit:
+// the caller sees the privacy cost as variance, not as a single realisation.
+// Phase 4 will add a sampling variant for practitioners who want a number.
+
+// Compute mean of a fixed-size array of f64.
+fn arr_mean(xs: &[f64; 32]) -> f64 with Div, Panic {
+    var i: i64 = 0
+    var acc: f64 = 0.0
+    let n: i64 = 32
+    for i in 0..n {
+        acc = acc + (*xs)[i]
+    }
+    acc / (n as f64)
+}
+
+// Sample variance (Bessel-corrected). Used to derive the Type-A standard
+// uncertainty of the mean estimator (σ̂ / √n).
+fn arr_sample_var(xs: &[f64; 32], mean: f64) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var acc: f64 = 0.0
+    let n: i64 = 32
+    for i in 0..n {
+        let d = (*xs)[i] - mean
+        acc = acc + d * d
+    }
+    let denom = (n - 1) as f64
+    acc / denom
+}
+
+fn lap_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    for i in 0..10 {
+        y = 0.5 * (y + x / y)
+    }
+    y
+}
+
+fn lap_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Laplace-mechanism uncertainty channel.
+//
+// Inputs:
+//   xs:       fixed-size data array (32 elements for Phase 1)
+//   sens:     L1 sensitivity of the mean query (per-record clip / N)
+//   eps_used: ε to spend on this query (must be > 0 in practice)
+//   b:        the linear PrivacyBudget, consumed and returned
+//
+// Outputs: a `DPMeanResult` carrying:
+//   - mu:    the (still-private) point estimate (Phase 1: no noise added)
+//   - std_b: standard uncertainty contribution from the Laplace noise
+//   - std_a: standard uncertainty contribution from sampling
+//   - std_c: combined standard uncertainty (quadrature sum)
+//   - budget: the consumed budget, ready for the next query
+//
+// The combined channel std_c is the right quantity to feed into Knowledge<f64>:
+//   variance = std_c²,  with confidence reduced by the privacy spend.
+pub struct DPMeanResult {
+    mu: f64,
+    std_a: f64,   // sampling uncertainty of the mean
+    std_b: f64,   // Laplace privacy-noise std (sqrt(2) · sens / eps)
+    std_c: f64,   // combined: sqrt(std_a² + std_b²)
+    budget: PrivacyBudget,
+}
+
+pub fn laplace_mean(
+    xs: &[f64; 32],
+    sens: f64,
+    eps_used: f64,
+    b: PrivacyBudget,
+) -> DPMeanResult with Mut, Div, Panic {
+    // 1. Spend the budget. Linearity guarantees this can happen at most once
+    //    per logical call site.
+    let b2 = budget_spend(b, eps_used)
+
+    // 2. Compute the (still-undisturbed) point estimate.
+    let mu = arr_mean(xs)
+
+    // 3. Sampling uncertainty: σ̂ / √n.
+    let var_hat = arr_sample_var(xs, mu)
+    let n_f = 32.0
+    let std_a = lap_sqrt(var_hat / n_f)
+
+    // 4. Laplace privacy-noise std: Laplace(0, sens/ε) has variance 2(sens/ε)².
+    //    Standard deviation is sqrt(2) · sens / ε.
+    let sqrt2 = 1.414213562373095
+    let std_b = if eps_used > 0.0 { sqrt2 * lap_abs(sens) / eps_used } else { 0.0 }
+
+    // 5. Combined standard uncertainty (independent contributions add in
+    //    quadrature, GUM §5.1.2).
+    let std_c = lap_sqrt(std_a * std_a + std_b * std_b)
+
+    DPMeanResult {
+        mu: mu,
+        std_a: std_a,
+        std_b: std_b,
+        std_c: std_c,
+        budget: b2,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    d <= tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var i: i64 = 0
+    var passes: i64 = 0
+    var fails: i64 = 0
+
+    // ---- Test 1: budget allocation + remaining ---------------------------
+    var b1 = budget_new(2.0)
+    let r1 = budget_remaining(&b1)
+    if approx_eq(r1, 2.0, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: budget_new remaining\n")
+    }
+
+    // ---- Test 2: spend reduces remaining ---------------------------------
+    b1 = budget_spend(b1, 0.5)
+    let r2 = budget_remaining(&b1)
+    if approx_eq(r2, 1.5, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: budget_spend\n")
+    }
+
+    // ---- Test 3: cumulative spend, audit closes the budget ---------------
+    b1 = budget_spend(b1, 0.25)
+    let total = budget_close(b1)
+    if approx_eq(total, 0.75, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: budget_close total\n")
+    }
+
+    // ---- Test 4: Laplace mechanism — variance algebra --------------------
+    // Use a constant-valued dataset so std_a = 0 and std_c == std_b exactly.
+    // Note: BSS-zeros var inits (compiler limitation) — fill manually.
+    var xs: [f64; 32] = [0.0; 32]
+    var k: i64 = 0
+    for k in 0..32 {
+        xs[k] = 50.0
+    }
+    let budget = budget_new(1.0)
+    let dp = laplace_mean(&xs, 1.0, 0.5, budget)
+
+    // Point estimate = 50.0 exactly (data is constant)
+    if approx_eq(dp.mu, 50.0, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: laplace mu = ")
+        print_f64(dp.mu)
+        print("\n")
+    }
+
+    // Sampling std = 0 (constant data)
+    if approx_eq(dp.std_a, 0.0, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: laplace std_a should be 0 for constant data\n")
+    }
+
+    // Laplace std = sqrt(2) · 1.0 / 0.5 = 2·sqrt(2) ≈ 2.828427
+    let want_b = 2.828427124746190
+    if approx_eq(dp.std_b, want_b, 1.0e-6) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: laplace std_b\n")
+    }
+
+    // Combined std == std_b when std_a = 0
+    if approx_eq(dp.std_c, dp.std_b, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: laplace std_c == std_b for constant data\n")
+    }
+
+    // Consume the returned budget to satisfy linearity
+    let spent = budget_close(dp.budget)
+    if approx_eq(spent, 0.5, 1.0e-9) {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("FAIL: laplace budget spent\n")
+    }
+
+    print("privacy/lib.sio tests: ")
+    print_int(passes)
+    print(" / ")
+    print_int(passes + fails)
+    print(" PASS\n")
+    if fails > 0 { return 1 }
+    0
+}

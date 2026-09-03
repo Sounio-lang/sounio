@@ -1,0 +1,1911 @@
+module eisa::backend
+
+use eisa::format::*
+use str::lib::*
+
+// Status convention:
+//   0    => success
+//   >0   => source line number for syntax/semantic error
+//   -1   => register limit exceeded (16)
+//   -2   => instruction limit exceeded (32)
+//   -3   => constant pool limit exceeded (16)
+//   -4   => memory slot limit exceeded (8)
+//   -10  => malformed while condition (expects: while <ident> != 0.0 {)
+//   -11  => malformed if condition (expects: if <ident> < 0.0 {)
+//   -12  => undefined identifier in condition
+//   -13  => set on undefined identifier
+//   -14  => nesting depth exceeded (max 8)
+//   -15  => malformed fuel directive
+//   -16  => fuel below minimum (must be >= 1)
+//   -17  => fuel above maximum (must be <= 16777216)
+//   -18  => source reached Str cap (256 bytes) before structural close
+pub struct BackendResult {
+    pub build: EisaxBuild,
+    pub status: i64,
+}
+
+struct SymLookup {
+    pub found: bool,
+    pub reg: i64,
+}
+
+struct SlotLookup {
+    pub ok: bool,
+    pub slot: i64,
+    pub next_count: i64,
+}
+
+struct AddVarResult {
+    pub ok: bool,
+    pub next_count: i64,
+}
+
+struct RegAlloc {
+    pub ok: bool,
+    pub reg: i64,
+    pub next_reg: i64,
+}
+
+fn fail_line(line_no: i64) -> BackendResult {
+    BackendResult { build: eisax_build_new(), status: line_no }
+}
+
+fn fail_class(code: i64) -> BackendResult {
+    BackendResult { build: eisax_build_new(), status: code }
+}
+
+fn ok_result(b: EisaxBuild) -> BackendResult {
+    BackendResult { build: b, status: 0 }
+}
+
+fn is_space(ch: i8) -> bool {
+    ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8
+}
+
+fn is_digit(ch: i8) -> bool {
+    ch >= 48 as i8 && ch <= 57 as i8
+}
+
+fn is_alpha(ch: i8) -> bool {
+    (ch >= 65 as i8 && ch <= 90 as i8) || (ch >= 97 as i8 && ch <= 122 as i8)
+}
+
+fn is_ident_char(ch: i8) -> bool {
+    is_alpha(ch) || is_digit(ch) || ch == 95 as i8
+}
+
+fn str_lit(s: string) -> Str with Mut, Div, Panic {
+    str_from_literal(s)
+}
+
+fn str_copy(s: &Str) -> Str with Mut, Div, Panic {
+    str_sub(s, 0, s.len)
+}
+
+fn str_eq_lit(s: &Str, lit: string) -> bool with Mut, Div, Panic {
+    let t = str_lit(lit)
+    if s.len != t.len { return false }
+    var i = 0
+    while i < s.len {
+        if s.data[i as usize] != t.data[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn token_is_sqrt(tok: &Str) -> bool with Mut, Div, Panic {
+    str_eq_lit(tok, "sqrt")
+}
+
+fn strip_comment(line: &Str) -> Str with Mut, Div, Panic {
+    var i = 0
+    while i + 1 < line.len {
+        if line.data[i as usize] == 47 as i8 && line.data[(i + 1) as usize] == 47 as i8 {
+            return str_sub(line, 0, i)
+        }
+        i = i + 1
+    }
+    str_copy(line)
+}
+
+fn sym_eq(
+    sym_data: &[i8; 1024],
+    sym_lens: &[i32; 16],
+    idx: i64,
+    name: &Str
+) -> bool with Mut, Panic {
+    if sym_lens[idx as usize] != name.len { return false }
+    var i = 0
+    while i < name.len {
+        let off = idx * 64 + i
+        if sym_data[off as usize] != name.data[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn sym_store(
+    sym_data: &![i8; 1024],
+    sym_lens: &![i32; 16],
+    idx: i64,
+    name: &Str
+) with Mut, Panic {
+    sym_lens[idx as usize] = name.len
+    var i = 0
+    while i < name.len {
+        let off = idx * 64 + i
+        sym_data[off as usize] = name.data[i as usize]
+        i = i + 1
+    }
+}
+
+fn find_var(
+    sym_data: &[i8; 1024],
+    sym_lens: &[i32; 16],
+    sym_regs: &[i64; 16],
+    sym_count: i64,
+    name: &Str
+) -> SymLookup with Mut, Panic {
+    var i = 0
+    while i < sym_count {
+        if sym_eq(sym_data, sym_lens, i, name) {
+            return SymLookup { found: true, reg: sym_regs[i as usize] }
+        }
+        i = i + 1
+    }
+    SymLookup { found: false, reg: 0 }
+}
+
+fn inc_i64(x: i64) -> i64 {
+    x + (1 as i64)
+}
+
+fn dec_i64(x: i64) -> i64 {
+    x - (1 as i64)
+}
+
+fn next_reg_dec(cur: i64) -> RegAlloc {
+    RegAlloc { ok: true, reg: 0, next_reg: dec_i64(cur) }
+}
+
+fn next_reg_inc(cur: i64) -> RegAlloc {
+    RegAlloc { ok: true, reg: 0, next_reg: inc_i64(cur) }
+}
+
+fn next_count_inc(cur: i64) -> AddVarResult {
+    AddVarResult { ok: true, next_count: inc_i64(cur) }
+}
+
+fn add_var(
+    sym_data: &![i8; 1024],
+    sym_lens: &![i32; 16],
+    sym_regs: &![i64; 16],
+    sym_count: i64,
+    name: &Str,
+    reg: i64
+) -> AddVarResult with Mut, Panic {
+    let cur = sym_count
+    if cur >= 16 {
+        return AddVarResult { ok: false, next_count: cur }
+    }
+    sym_store(sym_data, sym_lens, cur, name)
+    sym_regs[cur as usize] = reg
+    AddVarResult { ok: true, next_count: inc_i64(cur) }
+}
+
+fn slot_eq(
+    slot_data: &[i8; 256],
+    slot_lens: &[i32; 8],
+    idx: i64,
+    name: &Str
+) -> bool with Mut, Panic {
+    if slot_lens[idx as usize] != name.len { return false }
+    var i = 0
+    while i < name.len {
+        let off = idx * 32 + i
+        if slot_data[off as usize] != name.data[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn slot_store(
+    slot_data: &![i8; 256],
+    slot_lens: &![i32; 8],
+    idx: i64,
+    name: &Str
+) with Mut, Panic {
+    slot_lens[idx as usize] = name.len
+    var i = 0
+    while i < name.len {
+        let off = idx * 32 + i
+        slot_data[off as usize] = name.data[i as usize]
+        i = i + 1
+    }
+}
+
+fn slot_find_or_add(
+    slot_data: &![i8; 256],
+    slot_lens: &![i32; 8],
+    slot_count: i64,
+    name: &Str
+) -> SlotLookup with Mut, Panic {
+    var i = 0
+    while i < slot_count {
+        if slot_eq(slot_data, slot_lens, i, name) {
+            return SlotLookup { ok: true, slot: i, next_count: slot_count }
+        }
+        i = i + 1
+    }
+    if slot_count >= 8 {
+        return SlotLookup { ok: false, slot: 0, next_count: slot_count }
+    }
+    slot_store(slot_data, slot_lens, slot_count, name)
+    SlotLookup { ok: true, slot: slot_count, next_count: slot_count + 1 }
+}
+
+fn alloc_reg_value(cur: i64) -> RegAlloc {
+    if cur >= 16 {
+        return RegAlloc { ok: false, reg: 0, next_reg: cur }
+    }
+    RegAlloc { ok: true, reg: cur, next_reg: inc_i64(cur) }
+}
+
+fn alloc_reg(next_reg: &!i64) -> i64 with Mut {
+    let a = alloc_reg_value(*next_reg)
+    if !a.ok { return 0 - 1 }
+    *next_reg = a.next_reg
+    a.reg
+}
+
+fn add_instr(b: &!EisaxBuild, op: i64, dst: i64, a: i64, bb: i64) -> bool with Mut, Panic {
+    if b.n_code >= 32 { return false }
+    b.ops[b.n_code as usize] = op
+    b.dsts[b.n_code as usize] = dst
+    b.as_[b.n_code as usize] = a
+    b.bs_[b.n_code as usize] = bb
+    b.n_code = b.n_code + 1
+    true
+}
+
+fn const_find_or_add(b: &!EisaxBuild, v: f64) -> i64 with Mut, Div, Panic {
+    let vp = f64_parts(v)
+    var i = 0
+    while i < b.n_const {
+        let p = f64_parts(b.consts[i as usize])
+        if p.sign == vp.sign && p.exp == vp.exp && p.mant == vp.mant {
+            return i
+        }
+        i = i + 1
+    }
+    if b.n_const >= 16 { return 0 - 1 }
+    b.consts[b.n_const as usize] = v
+    b.n_const = b.n_const + 1
+    b.n_const - 1
+}
+
+fn parse_ident_token(tok: &Str) -> bool with Mut, Panic {
+    if tok.len <= 0 { return false }
+    if !is_alpha(tok.data[0]) { return false }
+    var i = 1
+    while i < tok.len {
+        if !is_ident_char(tok.data[i as usize]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn parse_slot_token(tok: &Str, out: &!Str) -> bool with Mut, Div, Panic {
+    let t = str_trim(tok)
+    if t.len < 3 { return false }
+    if t.data[0] != 91 as i8 { return false }
+    if t.data[(t.len - 1) as usize] != 93 as i8 { return false }
+    let inner = str_sub(&t, 1, t.len - 1)
+    let mid = str_trim(&inner)
+    if !parse_ident_token(&mid) { return false }
+    *out = mid
+    true
+}
+
+fn valid_f64_literal(tok: &Str) -> bool with Mut, Panic {
+    if tok.len <= 0 { return false }
+    var i = 0
+    var digits0 = 0
+    while i < tok.len && is_digit(tok.data[i as usize]) {
+        digits0 = digits0 + 1
+        i = i + 1
+    }
+    var has_dot = false
+    var digits1 = 0
+    if i < tok.len && tok.data[i as usize] == 46 as i8 {
+        has_dot = true
+        i = i + 1
+        while i < tok.len && is_digit(tok.data[i as usize]) {
+            digits1 = digits1 + 1
+            i = i + 1
+        }
+    }
+    if digits0 <= 0 && digits1 <= 0 { return false }
+    if has_dot && digits1 <= 0 { return false }
+    if i < tok.len && (tok.data[i as usize] == 101 as i8 || tok.data[i as usize] == 69 as i8) {
+        i = i + 1
+        if i < tok.len && (tok.data[i as usize] == 45 as i8 || tok.data[i as usize] == 43 as i8) {
+            i = i + 1
+        }
+        var expd = 0
+        while i < tok.len && is_digit(tok.data[i as usize]) {
+            expd = expd + 1
+            i = i + 1
+        }
+        if expd <= 0 { return false }
+    }
+    i == tok.len
+}
+
+fn tk_num() -> i64 { 1 }
+fn tk_ident() -> i64 { 2 }
+fn tk_plus() -> i64 { 3 }
+fn tk_minus() -> i64 { 4 }
+fn tk_mul() -> i64 { 5 }
+fn tk_div() -> i64 { 6 }
+fn tk_lpar() -> i64 { 7 }
+fn tk_rpar() -> i64 { 8 }
+fn tk_sqrt() -> i64 { 9 }
+
+fn is_op(k: i64) -> bool {
+    k == tk_plus() || k == tk_minus() || k == tk_mul() || k == tk_div()
+}
+
+fn precedence(k: i64) -> i64 {
+    if k == tk_mul() || k == tk_div() { 2 } else { 1 }
+}
+
+fn tokenize_expr(
+    expr: &Str,
+    kinds: &![i64; 64],
+    starts: &![i64; 64],
+    lens: &![i64; 64]
+) -> i64 with Mut, Div, Panic {
+    var n = 0
+    var i = 0
+    while i < expr.len {
+        while i < expr.len && is_space(expr.data[i as usize]) {
+            i = i + 1
+        }
+        if i >= expr.len { break }
+        if n >= 64 { return 0 - 1 }
+
+        let ch = expr.data[i as usize]
+        if is_digit(ch) || ch == 46 as i8 {
+            let start = i
+            var j = i
+            while j < expr.len && is_digit(expr.data[j as usize]) {
+                j = j + 1
+            }
+            if j < expr.len && expr.data[j as usize] == 46 as i8 {
+                j = j + 1
+                while j < expr.len && is_digit(expr.data[j as usize]) {
+                    j = j + 1
+                }
+            }
+            if j < expr.len && (expr.data[j as usize] == 101 as i8 || expr.data[j as usize] == 69 as i8) {
+                j = j + 1
+                if j < expr.len && (expr.data[j as usize] == 45 as i8 || expr.data[j as usize] == 43 as i8) {
+                    j = j + 1
+                }
+                while j < expr.len && is_digit(expr.data[j as usize]) {
+                    j = j + 1
+                }
+            }
+            let tok = str_sub(expr, start, j)
+            if !valid_f64_literal(&tok) { return 0 - 1 }
+            kinds[n as usize] = tk_num()
+            starts[n as usize] = start
+            lens[n as usize] = j - start
+            n = n + 1
+            i = j
+            continue
+        }
+
+        if is_alpha(ch) {
+            let start = i
+            var j = i + 1
+            while j < expr.len && is_ident_char(expr.data[j as usize]) {
+                j = j + 1
+            }
+            let tok = str_sub(expr, start, j)
+            if token_is_sqrt(&tok) {
+                kinds[n as usize] = tk_sqrt()
+            } else {
+                kinds[n as usize] = tk_ident()
+            }
+            starts[n as usize] = start
+            lens[n as usize] = j - start
+            n = n + 1
+            i = j
+            continue
+        }
+
+        if ch == 43 as i8 {
+            kinds[n as usize] = tk_plus()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        if ch == 45 as i8 {
+            kinds[n as usize] = tk_minus()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        if ch == 42 as i8 {
+            kinds[n as usize] = tk_mul()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        if ch == 47 as i8 {
+            kinds[n as usize] = tk_div()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        if ch == 40 as i8 {
+            kinds[n as usize] = tk_lpar()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        if ch == 41 as i8 {
+            kinds[n as usize] = tk_rpar()
+            starts[n as usize] = i
+            lens[n as usize] = 1
+            n = n + 1
+            i = i + 1
+            continue
+        }
+        return 0 - 1
+    }
+    n
+}
+
+fn expr_to_rpn(
+    n_tok: i64,
+    kinds: &[i64; 64],
+    starts: &[i64; 64],
+    lens: &[i64; 64],
+    out_k: &![i64; 64],
+    out_s: &![i64; 64],
+    out_l: &![i64; 64]
+) -> i64 with Mut, Panic {
+    var op_k: [i64; 64] = [0; 64]
+    var op_s: [i64; 64] = [0; 64]
+    var op_l: [i64; 64] = [0; 64]
+    var op_n = 0
+    var out_n = 0
+    var i = 0
+    var expect_operand = true
+
+    while i < n_tok {
+        let k = kinds[i as usize]
+        if k == tk_num() || k == tk_ident() {
+            if !expect_operand { return 0 - 1 }
+            out_k[out_n as usize] = k
+            out_s[out_n as usize] = starts[i as usize]
+            out_l[out_n as usize] = lens[i as usize]
+            out_n = out_n + 1
+            expect_operand = false
+            i = i + 1
+            continue
+        }
+
+        if k == tk_sqrt() {
+            if !expect_operand { return 0 - 1 }
+            op_k[op_n as usize] = k
+            op_s[op_n as usize] = starts[i as usize]
+            op_l[op_n as usize] = lens[i as usize]
+            op_n = op_n + 1
+            expect_operand = true
+            i = i + 1
+            continue
+        }
+
+        if k == tk_lpar() {
+            if !expect_operand { return 0 - 1 }
+            op_k[op_n as usize] = k
+            op_s[op_n as usize] = starts[i as usize]
+            op_l[op_n as usize] = lens[i as usize]
+            op_n = op_n + 1
+            expect_operand = true
+            i = i + 1
+            continue
+        }
+
+        if k == tk_rpar() {
+            if expect_operand { return 0 - 1 }
+            var hit = false
+            while op_n > 0 {
+                let top = op_k[(op_n - 1) as usize]
+                if top == tk_lpar() {
+                    hit = true
+                    op_n = op_n - 1
+                    break
+                }
+                out_k[out_n as usize] = top
+                out_s[out_n as usize] = op_s[(op_n - 1) as usize]
+                out_l[out_n as usize] = op_l[(op_n - 1) as usize]
+                out_n = out_n + 1
+                op_n = op_n - 1
+            }
+            if !hit { return 0 - 1 }
+            if op_n > 0 && op_k[(op_n - 1) as usize] == tk_sqrt() {
+                out_k[out_n as usize] = tk_sqrt()
+                out_s[out_n as usize] = op_s[(op_n - 1) as usize]
+                out_l[out_n as usize] = op_l[(op_n - 1) as usize]
+                out_n = out_n + 1
+                op_n = op_n - 1
+            }
+            expect_operand = false
+            i = i + 1
+            continue
+        }
+
+        if is_op(k) {
+            if expect_operand { return 0 - 1 }
+            while op_n > 0 {
+                let top = op_k[(op_n - 1) as usize]
+                if is_op(top) && precedence(top) >= precedence(k) {
+                    out_k[out_n as usize] = top
+                    out_s[out_n as usize] = op_s[(op_n - 1) as usize]
+                    out_l[out_n as usize] = op_l[(op_n - 1) as usize]
+                    out_n = out_n + 1
+                    op_n = op_n - 1
+                } else {
+                    break
+                }
+            }
+            op_k[op_n as usize] = k
+            op_s[op_n as usize] = starts[i as usize]
+            op_l[op_n as usize] = lens[i as usize]
+            op_n = op_n + 1
+            expect_operand = true
+            i = i + 1
+            continue
+        }
+
+        return 0 - 1
+    }
+
+    if expect_operand { return 0 - 1 }
+    while op_n > 0 {
+        let top = op_k[(op_n - 1) as usize]
+        if top == tk_lpar() || top == tk_rpar() { return 0 - 1 }
+        out_k[out_n as usize] = top
+        out_s[out_n as usize] = op_s[(op_n - 1) as usize]
+        out_l[out_n as usize] = op_l[(op_n - 1) as usize]
+        out_n = out_n + 1
+        op_n = op_n - 1
+    }
+    out_n
+}
+
+fn ensure_zero_reg(
+    b: &!EisaxBuild,
+    next_reg: &!i64,
+    zero_reg: &!i64
+) -> i64 with Mut, Div, Panic {
+    if *zero_reg >= 0 { return 0 }
+    let cidx = const_find_or_add(b, 0.0)
+    if cidx < 0 { return 0 - 3 }
+    let zr = alloc_reg(next_reg)
+    if zr < 0 { return 0 - 1 }
+    if !add_instr(b, op_econst(), zr, cidx, 0) {
+        return 0 - 2
+    }
+    *zero_reg = zr
+    0
+}
+
+fn compile_expr(
+    expr: &Str,
+    dst_reg: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 1024],
+    sym_lens: &[i32; 16],
+    sym_regs: &[i64; 16],
+    sym_count: i64,
+    next_reg: &!i64,
+    zero_reg: &!i64
+) -> i64 with Mut, Div, Panic {
+    var tk_k: [i64; 64] = [0; 64]
+    var tk_s: [i64; 64] = [0; 64]
+    var tk_l: [i64; 64] = [0; 64]
+    let n_tok = tokenize_expr(expr, &!tk_k, &!tk_s, &!tk_l)
+    if n_tok <= 0 { return 1 }
+
+    var out_k: [i64; 64] = [0; 64]
+    var out_s: [i64; 64] = [0; 64]
+    var out_l: [i64; 64] = [0; 64]
+    let n_out = expr_to_rpn(n_tok, &tk_k, &tk_s, &tk_l, &!out_k, &!out_s, &!out_l)
+    if n_out <= 0 { return 1 }
+
+    if n_out == 1 {
+        let k0 = out_k[0]
+        let tok0 = str_sub(expr, out_s[0], out_s[0] + out_l[0])
+        if k0 == tk_num() {
+            let c = str_to_f64(&tok0)
+            if !is_finite_f64(c) { return 1 }
+            let cidx = const_find_or_add(b, c)
+            if cidx < 0 { return 0 - 3 }
+            if !add_instr(b, op_econst(), dst_reg, cidx, 0) { return 0 - 2 }
+            return 0
+        }
+        if k0 == tk_ident() {
+            let v = find_var(sym_data, sym_lens, sym_regs, sym_count, &tok0)
+            if !v.found { return 1 }
+            let zr_rc = ensure_zero_reg(b, next_reg, zero_reg)
+            if zr_rc != 0 { return zr_rc }
+            if !add_instr(b, op_eadd(), dst_reg, v.reg, *zero_reg) { return 0 - 2 }
+            return 0
+        }
+        return 1
+    }
+
+    var stack: [i64; 64] = [0; 64]
+    var stack_tmp: [i64; 64] = [0; 64]
+    var free_regs: [i64; 16] = [0; 16]
+    var free_n = 0
+    var sp = 0
+    var i = 0
+    while i < n_out {
+        let k = out_k[i as usize]
+        let tok = str_sub(expr, out_s[i as usize], out_s[i as usize] + out_l[i as usize])
+
+        if k == tk_num() {
+            let c = str_to_f64(&tok)
+            if !is_finite_f64(c) { return 1 }
+            let cidx = const_find_or_add(b, c)
+            if cidx < 0 { return 0 - 3 }
+            let r = if free_n > 0 {
+                free_n = free_n - 1
+                free_regs[free_n as usize]
+            } else {
+                alloc_reg(next_reg)
+            }
+            if r < 0 { return 0 - 1 }
+            if !add_instr(b, op_econst(), r, cidx, 0) { return 0 - 2 }
+            stack[sp as usize] = r
+            stack_tmp[sp as usize] = 1
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if k == tk_ident() {
+            let v = find_var(sym_data, sym_lens, sym_regs, sym_count, &tok)
+            if !v.found { return 1 }
+            stack[sp as usize] = v.reg
+            stack_tmp[sp as usize] = 0
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if k == tk_sqrt() {
+            if sp < 1 { return 1 }
+            let a = stack[(sp - 1) as usize]
+            let ta = stack_tmp[(sp - 1) as usize]
+            sp = sp - 1
+            let d = if i == n_out - 1 {
+                dst_reg
+            } else {
+                if ta == 1 {
+                    a
+                } else {
+                    if free_n > 0 {
+                        free_n = free_n - 1
+                        free_regs[free_n as usize]
+                    } else {
+                        alloc_reg(next_reg)
+                    }
+                }
+            }
+            if d < 0 { return 0 - 1 }
+            if !add_instr(b, op_esqrt(), d, a, 0) { return 0 - 2 }
+            if ta == 1 && a != d && free_n < 16 {
+                free_regs[free_n as usize] = a
+                free_n = free_n + 1
+            }
+            stack[sp as usize] = d
+            stack_tmp[sp as usize] = if i == n_out - 1 { 0 } else { 1 }
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if is_op(k) {
+            if sp < 2 { return 1 }
+            let rb = stack[(sp - 1) as usize]
+            let ra = stack[(sp - 2) as usize]
+            let tb = stack_tmp[(sp - 1) as usize]
+            let ta = stack_tmp[(sp - 2) as usize]
+            sp = sp - 2
+            let d = if i == n_out - 1 {
+                dst_reg
+            } else {
+                if ta == 1 {
+                    ra
+                } else {
+                    if tb == 1 {
+                        rb
+                    } else {
+                        if free_n > 0 {
+                            free_n = free_n - 1
+                            free_regs[free_n as usize]
+                        } else {
+                            alloc_reg(next_reg)
+                        }
+                    }
+                }
+            }
+            if d < 0 { return 0 - 1 }
+            let op = if k == tk_plus() {
+                op_eadd()
+            } else {
+                if k == tk_minus() {
+                    op_esub()
+                } else {
+                    if k == tk_mul() { op_emul() } else { op_ediv() }
+                }
+            }
+            if !add_instr(b, op, d, ra, rb) { return 0 - 2 }
+            if ta == 1 && ra != d && free_n < 16 {
+                free_regs[free_n as usize] = ra
+                free_n = free_n + 1
+            }
+            if tb == 1 && rb != d && free_n < 16 {
+                free_regs[free_n as usize] = rb
+                free_n = free_n + 1
+            }
+            stack[sp as usize] = d
+            stack_tmp[sp as usize] = if i == n_out - 1 { 0 } else { 1 }
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+        return 1
+    }
+
+    if sp != 1 { return 1 }
+    if stack[0] != dst_reg {
+        let zr_rc = ensure_zero_reg(b, next_reg, zero_reg)
+        if zr_rc != 0 { return zr_rc }
+        if !add_instr(b, op_eadd(), dst_reg, stack[0], *zero_reg) { return 0 - 2 }
+    }
+    0
+}
+
+fn parse_header(line: &Str, fn_name: &!Str) -> bool with Mut, Div, Panic {
+    let t = str_trim(line)
+    if t.len < 1 { return false }
+    let kw_ep = str_lit("epistemic")
+    let kw_fn = str_lit("fn")
+    if !str_starts_with(&t, &kw_ep) { return false }
+    let rem0 = str_sub(&t, 9, t.len)
+    let rem1 = str_trim(&rem0)
+    if !str_starts_with(&rem1, &kw_fn) { return false }
+    let rem2 = str_sub(&rem1, 2, rem1.len)
+    let rem = str_trim(&rem2)
+    let tok_lp = str_lit("(")
+    let tok_rp = str_lit(")")
+    let tok_lb = str_lit("{")
+    let p_lp = str_index_of(&rem, &tok_lp)
+    if p_lp <= 0 { return false }
+    let p_rp = str_index_of(&rem, &tok_rp)
+    if p_rp < 0 { return false }
+    let p_lb = str_index_of(&rem, &tok_lb)
+    if p_lb < 0 { return false }
+    if p_rp > p_lb { return false }
+    let name0 = str_sub(&rem, 0, p_lp)
+    let name = str_trim(&name0)
+    if !parse_ident_token(&name) { return false }
+    let inside0 = str_sub(&rem, p_lp + 1, p_rp)
+    let inside = str_trim(&inside0)
+    if inside.len != 0 { return false }
+    let tail0 = str_sub(&rem, p_rp + 1, rem.len)
+    let tail = str_trim(&tail0)
+    if !str_eq_lit(&tail, "{") { return false }
+    *fn_name = name
+    true
+}
+
+fn parse_let_line(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &![i8; 1024],
+    sym_lens: &![i32; 16],
+    sym_regs: &![i64; 16],
+    sym_count: &!i64,
+    next_reg: &!i64,
+    zero_reg: &!i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 3, line.len)
+    let rem = str_trim(&rem0)
+    let tok_eq = str_lit("=")
+    let p_eq = str_index_of(&rem, &tok_eq)
+    if p_eq <= 0 { return line_no }
+    let lhs0 = str_sub(&rem, 0, p_eq)
+    let rhs0 = str_sub(&rem, p_eq + 1, rem.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    if rhs.len <= 0 { return line_no }
+    if !parse_ident_token(&lhs) { return line_no }
+    let old = find_var(sym_data, sym_lens, sym_regs, *sym_count, &lhs)
+    if old.found { return line_no }
+
+    let dst = alloc_reg(next_reg)
+    if dst < 0 { return 0 - 1 }
+    let ares = add_var(sym_data, sym_lens, sym_regs, *sym_count, &lhs, dst)
+    if !ares.ok {
+        return 0 - 1
+    }
+    *sym_count = ares.next_count
+
+    let rc = compile_expr(&rhs, dst, b, sym_data, sym_lens, sym_regs, *sym_count, next_reg, zero_reg)
+    if rc != 0 { return rc }
+    0
+}
+
+fn parse_gate_line(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 1024],
+    sym_lens: &[i32; 16],
+    sym_regs: &[i64; 16],
+    sym_count: i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 4, line.len)
+    let rem = str_trim(&rem0)
+    if !parse_ident_token(&rem) { return line_no }
+    let v = find_var(sym_data, sym_lens, sym_regs, sym_count, &rem)
+    if !v.found { return line_no }
+    if !add_instr(b, op_egate(), v.reg, 0, 0) { return 0 - 2 }
+    0
+}
+
+fn parse_store_line(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 1024],
+    sym_lens: &[i32; 16],
+    sym_regs: &[i64; 16],
+    sym_count: i64,
+    slot_data: &![i8; 256],
+    slot_lens: &![i32; 8],
+    slot_count: &!i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 5, line.len)
+    let rem = str_trim(&rem0)
+    let tok_arrow = str_lit("<-")
+    let p_arrow = str_index_of(&rem, &tok_arrow)
+    if p_arrow <= 0 { return line_no }
+    let lhs0 = str_sub(&rem, 0, p_arrow)
+    let rhs0 = str_sub(&rem, p_arrow + 2, rem.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    var slot_name = str_new()
+    if !parse_slot_token(&lhs, &!slot_name) { return line_no }
+    if !parse_ident_token(&rhs) { return line_no }
+    let v = find_var(sym_data, sym_lens, sym_regs, sym_count, &rhs)
+    if !v.found { return line_no }
+    let sres = slot_find_or_add(slot_data, slot_lens, *slot_count, &slot_name)
+    if !sres.ok { return 0 - 4 }
+    *slot_count = sres.next_count
+    if !add_instr(b, op_estore(), v.reg, sres.slot, 0) { return 0 - 2 }
+    0
+}
+
+fn eisa_compile_v0_legacy(src: Str) -> BackendResult with Mut, Div, Panic {
+    var b = eisax_build_new()
+    b.prov_source = 0
+    b.prov_flags = 0
+
+    var sym_data: [i8; 1024] = [0; 1024]
+    var sym_lens: [i32; 16] = [0; 16]
+    var sym_regs: [i64; 16] = [0; 16]
+    var sym_count: i64 = 0
+
+    var slot_data: [i8; 256] = [0; 256]
+    var slot_lens: [i32; 8] = [0; 8]
+    var slot_count: i64 = 0
+
+    var next_reg: i64 = 0
+    var zero_reg: i64 = 0 - 1
+
+    var header_seen = false
+    var closed = false
+    var line_no = 1
+    var pos = 0
+    var fn_name = str_new()
+
+    while pos <= src.len {
+        var next = pos
+        while next < src.len && src.data[next as usize] != 10 as i8 {
+            next = next + 1
+        }
+
+        var line = str_sub(&src, pos, next)
+        line = strip_comment(&line)
+        line = str_trim(&line)
+
+        if line.len > 0 {
+            if !header_seen {
+                if !parse_header(&line, &!fn_name) {
+                    return fail_line(line_no as i64)
+                }
+                header_seen = true
+            } else {
+                if closed { return fail_line(line_no as i64) }
+                if str_eq_lit(&line, "}") {
+                    closed = true
+                } else {
+                    let kw_let = str_lit("let")
+                    let kw_gate = str_lit("gate")
+                    let kw_store = str_lit("store")
+                    if str_starts_with(&line, &kw_let) {
+                        let rc = parse_let_line(
+                            &line,
+                            line_no as i64,
+                            &!b,
+                            &!sym_data,
+                            &!sym_lens,
+                            &!sym_regs,
+                            &!sym_count,
+                            &!next_reg,
+                            &!zero_reg
+                        )
+                        if rc != 0 {
+                            if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                        }
+                    } else {
+                        if str_starts_with(&line, &kw_gate) {
+                            let rc = parse_gate_line(&line, line_no as i64, &!b, &sym_data, &sym_lens, &sym_regs, sym_count)
+                            if rc != 0 {
+                                if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                            }
+                        } else {
+                            if str_starts_with(&line, &kw_store) {
+                                let rc = parse_store_line(
+                                    &line,
+                                    line_no as i64,
+                                    &!b,
+                                    &sym_data,
+                                    &sym_lens,
+                                    &sym_regs,
+                                    sym_count,
+                                    &!slot_data,
+                                    &!slot_lens,
+                                    &!slot_count
+                                )
+                                if rc != 0 {
+                                    if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                                }
+                            } else {
+                                return fail_line(line_no as i64)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if next == src.len {
+            pos = src.len + 1
+        } else {
+            pos = next + 1
+        }
+        line_no = line_no + 1
+    }
+
+    if !header_seen { return fail_line(1) }
+    if !closed {
+        // Str is fixed-width (256 bytes). Builders that exceed this cap truncate
+        // silently in stdlib/str::str_cat; report a distinct honest rejection.
+        if src.len >= 256 { return fail_class(0 - 18) }
+        return fail_line(line_no - 1)
+    }
+    ok_result(b)
+}
+
+fn reg_cap_v1() -> i64 { 64 }
+fn code_cap_v1() -> i64 { 256 }
+fn const_cap_v1() -> i64 { 64 }
+fn mem_cap_v1() -> i64 { 32 }
+fn v1_depth_cap() -> i64 { 8 }
+fn v1_fuel_max() -> i64 { 16777216 }
+
+fn is_kw_line(line: &Str, kw: string) -> bool with Mut, Div, Panic {
+    let t = str_trim(line)
+    let k = str_lit(kw)
+    if t.len == k.len {
+        return str_eq_lit(&t, kw)
+    }
+    if t.len < k.len + 1 { return false }
+    if !str_starts_with(&t, &k) { return false }
+    is_space(t.data[k.len as usize])
+}
+
+fn add_instr_v1(b: &!EisaxBuild, op: i64, dst: i64, a: i64, bb: i64) -> bool with Mut, Panic {
+    if b.n_code >= code_cap_v1() { return false }
+    b.ops[b.n_code as usize] = op
+    b.dsts[b.n_code as usize] = dst
+    b.as_[b.n_code as usize] = a
+    b.bs_[b.n_code as usize] = bb
+    b.n_code = b.n_code + 1
+    true
+}
+
+fn const_find_or_add_v1(b: &!EisaxBuild, v: f64) -> i64 with Mut, Div, Panic {
+    let vp = f64_parts(v)
+    var i = 0
+    while i < b.n_const {
+        let p = f64_parts(b.consts[i as usize])
+        if p.sign == vp.sign && p.exp == vp.exp && p.mant == vp.mant {
+            return i
+        }
+        i = i + 1
+    }
+    if b.n_const >= const_cap_v1() { return 0 - 1 }
+    b.consts[b.n_const as usize] = v
+    b.n_const = b.n_const + 1
+    b.n_const - 1
+}
+
+fn sym_eq_v1(
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    idx: i64,
+    name: &Str
+) -> bool with Mut, Panic {
+    if sym_lens[idx as usize] != name.len { return false }
+    var i = 0
+    while i < name.len {
+        let off = idx * 64 + i
+        if sym_data[off as usize] != name.data[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn sym_store_v1(
+    sym_data: &![i8; 4096],
+    sym_lens: &![i32; 64],
+    idx: i64,
+    name: &Str
+) with Mut, Panic {
+    sym_lens[idx as usize] = name.len
+    var i = 0
+    while i < name.len {
+        let off = idx * 64 + i
+        sym_data[off as usize] = name.data[i as usize]
+        i = i + 1
+    }
+}
+
+fn find_var_v1(
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64,
+    name: &Str
+) -> SymLookup with Mut, Panic {
+    var i = sym_count - 1
+    while i >= 0 {
+        if sym_eq_v1(sym_data, sym_lens, i, name) {
+            return SymLookup { found: true, reg: sym_regs[i as usize] }
+        }
+        i = i - 1
+    }
+    SymLookup { found: false, reg: 0 }
+}
+
+fn has_var_in_scope_v1(
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_depths: &[i64; 64],
+    sym_count: i64,
+    scope_depth: i64,
+    name: &Str
+) -> bool with Mut, Panic {
+    var i = sym_count - 1
+    while i >= 0 {
+        if sym_depths[i as usize] == scope_depth && sym_eq_v1(sym_data, sym_lens, i, name) {
+            return true
+        }
+        i = i - 1
+    }
+    false
+}
+
+fn slot_eq_v1(
+    slot_data: &[i8; 1024],
+    slot_lens: &[i32; 32],
+    idx: i64,
+    name: &Str
+) -> bool with Mut, Panic {
+    if slot_lens[idx as usize] != name.len { return false }
+    var i = 0
+    while i < name.len {
+        let off = idx * 32 + i
+        if slot_data[off as usize] != name.data[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn slot_store_v1(
+    slot_data: &![i8; 1024],
+    slot_lens: &![i32; 32],
+    idx: i64,
+    name: &Str
+) with Mut, Panic {
+    slot_lens[idx as usize] = name.len
+    var i = 0
+    while i < name.len {
+        let off = idx * 32 + i
+        slot_data[off as usize] = name.data[i as usize]
+        i = i + 1
+    }
+}
+
+fn slot_find_or_add_v1(
+    slot_data: &![i8; 1024],
+    slot_lens: &![i32; 32],
+    slot_count: i64,
+    name: &Str
+) -> SlotLookup with Mut, Panic {
+    var i = 0
+    while i < slot_count {
+        if slot_eq_v1(slot_data, slot_lens, i, name) {
+            return SlotLookup { ok: true, slot: i, next_count: slot_count }
+        }
+        i = i + 1
+    }
+    if slot_count >= mem_cap_v1() {
+        return SlotLookup { ok: false, slot: 0, next_count: slot_count }
+    }
+    slot_store_v1(slot_data, slot_lens, slot_count, name)
+    SlotLookup { ok: true, slot: slot_count, next_count: slot_count + 1 }
+}
+
+fn alloc_reg_v1(
+    next_reg: &!i64,
+    free_regs: &![i64; 64],
+    free_n: &![i64; 1]
+) -> i64 with Mut, Panic {
+    let nfree = free_n[0]
+    if nfree > 0 {
+        let upd = next_reg_dec(nfree)
+        free_n[0] = upd.next_reg
+        return free_regs[upd.next_reg as usize]
+    }
+    let nr: i64 = *next_reg
+    if nr >= reg_cap_v1() {
+        return 0 - 1
+    }
+    *next_reg = inc_i64(nr)
+    nr
+}
+
+fn release_reg_v1(
+    reg: i64,
+    free_regs: &![i64; 64],
+    free_n: &![i64; 1]
+) with Mut, Panic {
+    if reg < 0 { return }
+    let nfree = free_n[0]
+    if nfree >= reg_cap_v1() { return }
+    free_regs[nfree as usize] = reg
+    let upd = next_reg_inc(nfree)
+    free_n[0] = upd.next_reg
+}
+
+fn parse_while_cond_reg(
+    line: &Str,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 5, line.len)
+    let rem = str_trim(&rem0)
+    let tok_lb = str_lit("{")
+    let p_lb = str_index_of(&rem, &tok_lb)
+    if p_lb < 0 { return 0 - 10 }
+    let cond0 = str_sub(&rem, 0, p_lb)
+    let tail0 = str_sub(&rem, p_lb + 1, rem.len)
+    let cond = str_trim(&cond0)
+    let tail = str_trim(&tail0)
+    if tail.len != 0 { return 0 - 10 }
+    let tok_ne = str_lit("!=")
+    let p_ne = str_index_of(&cond, &tok_ne)
+    if p_ne <= 0 { return 0 - 10 }
+    let lhs0 = str_sub(&cond, 0, p_ne)
+    let rhs0 = str_sub(&cond, p_ne + 2, cond.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    if !parse_ident_token(&lhs) { return 0 - 10 }
+    if !str_eq_lit(&rhs, "0.0") { return 0 - 10 }
+    let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &lhs)
+    if !v.found { return 0 - 12 }
+    v.reg
+}
+
+fn parse_if_cond_reg(
+    line: &Str,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 2, line.len)
+    let rem = str_trim(&rem0)
+    let tok_lb = str_lit("{")
+    let p_lb = str_index_of(&rem, &tok_lb)
+    if p_lb < 0 { return 0 - 11 }
+    let cond0 = str_sub(&rem, 0, p_lb)
+    let tail0 = str_sub(&rem, p_lb + 1, rem.len)
+    let cond = str_trim(&cond0)
+    let tail = str_trim(&tail0)
+    if tail.len != 0 { return 0 - 11 }
+    let tok_lt = str_lit("<")
+    let p_lt = str_index_of(&cond, &tok_lt)
+    if p_lt <= 0 { return 0 - 11 }
+    let lhs0 = str_sub(&cond, 0, p_lt)
+    let rhs0 = str_sub(&cond, p_lt + 1, cond.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    if !parse_ident_token(&lhs) { return 0 - 11 }
+    if !str_eq_lit(&rhs, "0.0") { return 0 - 11 }
+    let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &lhs)
+    if !v.found { return 0 - 12 }
+    v.reg
+}
+
+fn parse_fuel_directive(line: &Str) -> i64 with Mut, Div, Panic {
+    if !is_kw_line(line, "fuel") { return 0 - 15 }
+    let rem0 = str_sub(line, 4, line.len)
+    let rem = str_trim(&rem0)
+    if rem.len <= 0 { return 0 - 15 }
+    var i = 0
+    while i < rem.len {
+        if !is_digit(rem.data[i as usize]) { return 0 - 15 }
+        i = i + 1
+    }
+    let n = str_to_i64(&rem)
+    if n < 1 { return 0 - 16 }
+    if n > v1_fuel_max() { return 0 - 17 }
+    n
+}
+
+fn v1_default_fuel(n_code: i64) -> i64 {
+    let f = 64 + n_code * 64
+    if f > v1_fuel_max() { v1_fuel_max() } else { f }
+}
+
+fn compile_expr_v1(
+    expr: &Str,
+    dst_reg: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64,
+    next_reg: &!i64,
+    free_regs: &![i64; 64],
+    free_n: &![i64; 1]
+) -> i64 with Mut, Div, Panic {
+    var tk_k: [i64; 64] = [0; 64]
+    var tk_s: [i64; 64] = [0; 64]
+    var tk_l: [i64; 64] = [0; 64]
+    let n_tok = tokenize_expr(expr, &!tk_k, &!tk_s, &!tk_l)
+    if n_tok <= 0 { return 1 }
+
+    var out_k: [i64; 64] = [0; 64]
+    var out_s: [i64; 64] = [0; 64]
+    var out_l: [i64; 64] = [0; 64]
+    let n_out = expr_to_rpn(n_tok, &tk_k, &tk_s, &tk_l, &!out_k, &!out_s, &!out_l)
+    if n_out <= 0 { return 1 }
+
+    if n_out == 1 {
+        let k0 = out_k[0]
+        let tok0 = str_sub(expr, out_s[0], out_s[0] + out_l[0])
+        if k0 == tk_num() {
+            let c = str_to_f64(&tok0)
+            if !is_finite_f64(c) { return 1 }
+            let cidx = const_find_or_add_v1(b, c)
+            if cidx < 0 { return 0 - 3 }
+            if !add_instr_v1(b, op_econst(), dst_reg, cidx, 0) { return 0 - 2 }
+            return 0
+        }
+        if k0 == tk_ident() {
+            let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &tok0)
+            if !v.found { return 1 }
+            if !add_instr_v1(b, op_emov(), dst_reg, v.reg, 0) { return 0 - 2 }
+            return 0
+        }
+        return 1
+    }
+
+    var stack: [i64; 64] = [0; 64]
+    var stack_tmp: [i64; 64] = [0; 64]
+    var local_free: [i64; 64] = [0; 64]
+    var local_free_n = 0
+    var sp = 0
+    var i = 0
+    while i < n_out {
+        let k = out_k[i as usize]
+        let tok = str_sub(expr, out_s[i as usize], out_s[i as usize] + out_l[i as usize])
+
+        if k == tk_num() {
+            let c = str_to_f64(&tok)
+            if !is_finite_f64(c) { return 1 }
+            let cidx = const_find_or_add_v1(b, c)
+            if cidx < 0 { return 0 - 3 }
+            let r = if local_free_n > 0 {
+                local_free_n = local_free_n - 1
+                local_free[local_free_n as usize]
+            } else {
+                alloc_reg_v1(next_reg, free_regs, free_n)
+            }
+            if r < 0 { return 0 - 1 }
+            if !add_instr_v1(b, op_econst(), r, cidx, 0) { return 0 - 2 }
+            stack[sp as usize] = r
+            stack_tmp[sp as usize] = 1
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if k == tk_ident() {
+            let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &tok)
+            if !v.found { return 1 }
+            stack[sp as usize] = v.reg
+            stack_tmp[sp as usize] = 0
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if k == tk_sqrt() {
+            if sp < 1 { return 1 }
+            let a = stack[(sp - 1) as usize]
+            let ta = stack_tmp[(sp - 1) as usize]
+            sp = sp - 1
+            let d = if i == n_out - 1 {
+                dst_reg
+            } else {
+                if ta == 1 {
+                    a
+                } else {
+                    if local_free_n > 0 {
+                        local_free_n = local_free_n - 1
+                        local_free[local_free_n as usize]
+                    } else {
+                        alloc_reg_v1(next_reg, free_regs, free_n)
+                    }
+                }
+            }
+            if d < 0 { return 0 - 1 }
+            if !add_instr_v1(b, op_esqrt(), d, a, 0) { return 0 - 2 }
+            if ta == 1 && a != d && local_free_n < reg_cap_v1() {
+                local_free[local_free_n as usize] = a
+                local_free_n = local_free_n + 1
+            }
+            stack[sp as usize] = d
+            stack_tmp[sp as usize] = if i == n_out - 1 { 0 } else { 1 }
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+
+        if is_op(k) {
+            if sp < 2 { return 1 }
+            let rb = stack[(sp - 1) as usize]
+            let ra = stack[(sp - 2) as usize]
+            let tb = stack_tmp[(sp - 1) as usize]
+            let ta = stack_tmp[(sp - 2) as usize]
+            sp = sp - 2
+            let d = if i == n_out - 1 {
+                dst_reg
+            } else {
+                if ta == 1 {
+                    ra
+                } else {
+                    if tb == 1 {
+                        rb
+                    } else {
+                        if local_free_n > 0 {
+                            local_free_n = local_free_n - 1
+                            local_free[local_free_n as usize]
+                        } else {
+                            alloc_reg_v1(next_reg, free_regs, free_n)
+                        }
+                    }
+                }
+            }
+            if d < 0 { return 0 - 1 }
+            let op = if k == tk_plus() {
+                op_eadd()
+            } else {
+                if k == tk_minus() {
+                    op_esub()
+                } else {
+                    if k == tk_mul() { op_emul() } else { op_ediv() }
+                }
+            }
+            if !add_instr_v1(b, op, d, ra, rb) { return 0 - 2 }
+            if ta == 1 && ra != d && local_free_n < reg_cap_v1() {
+                local_free[local_free_n as usize] = ra
+                local_free_n = local_free_n + 1
+            }
+            if tb == 1 && rb != d && local_free_n < reg_cap_v1() {
+                local_free[local_free_n as usize] = rb
+                local_free_n = local_free_n + 1
+            }
+            stack[sp as usize] = d
+            stack_tmp[sp as usize] = if i == n_out - 1 { 0 } else { 1 }
+            sp = sp + 1
+            i = i + 1
+            continue
+        }
+        return 1
+    }
+
+    if sp != 1 { return 1 }
+    if stack[0] != dst_reg {
+        if !add_instr_v1(b, op_emov(), dst_reg, stack[0], 0) { return 0 - 2 }
+        if stack_tmp[0] == 1 {
+            local_free[local_free_n as usize] = stack[0]
+            local_free_n = local_free_n + 1
+        }
+    }
+
+    i = 0
+    while i < local_free_n {
+        release_reg_v1(local_free[i as usize], free_regs, free_n)
+        i = i + 1
+    }
+    0
+}
+
+fn parse_let_line_v1(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &![i8; 4096],
+    sym_lens: &![i32; 64],
+    sym_regs: &![i64; 64],
+    sym_depths: &![i64; 64],
+    sym_count: &![i64; 1],
+    scope_depth: i64,
+    next_reg: &!i64,
+    free_regs: &![i64; 64],
+    free_n: &![i64; 1]
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 3, line.len)
+    let rem = str_trim(&rem0)
+    let tok_eq = str_lit("=")
+    let p_eq = str_index_of(&rem, &tok_eq)
+    if p_eq <= 0 { return line_no }
+    let lhs0 = str_sub(&rem, 0, p_eq)
+    let rhs0 = str_sub(&rem, p_eq + 1, rem.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    if rhs.len <= 0 { return line_no }
+    if !parse_ident_token(&lhs) { return line_no }
+    if has_var_in_scope_v1(sym_data, sym_lens, sym_depths, sym_count[0], scope_depth, &lhs) {
+        return line_no
+    }
+    if sym_count[0] >= reg_cap_v1() { return 0 - 1 }
+    let dst = alloc_reg_v1(next_reg, free_regs, free_n)
+    if dst < 0 { return 0 - 1 }
+
+    let sc = sym_count[0]
+    sym_store_v1(sym_data, sym_lens, sc, &lhs)
+    sym_regs[sc as usize] = dst
+    sym_depths[sc as usize] = scope_depth
+    let upd = next_count_inc(sc)
+    sym_count[0] = upd.next_count
+
+    let rc = compile_expr_v1(&rhs, dst, b, sym_data, sym_lens, sym_regs, sym_count[0], next_reg, free_regs, free_n)
+    if rc != 0 { return rc }
+    0
+}
+
+fn parse_set_line_v1(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64,
+    next_reg: &!i64,
+    free_regs: &![i64; 64],
+    free_n: &![i64; 1]
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 3, line.len)
+    let rem = str_trim(&rem0)
+    let tok_eq = str_lit("=")
+    let p_eq = str_index_of(&rem, &tok_eq)
+    if p_eq <= 0 { return line_no }
+    let lhs0 = str_sub(&rem, 0, p_eq)
+    let rhs0 = str_sub(&rem, p_eq + 1, rem.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    if rhs.len <= 0 { return line_no }
+    if !parse_ident_token(&lhs) { return line_no }
+    let dst = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &lhs)
+    if !dst.found { return 0 - 13 }
+
+    let tmp = alloc_reg_v1(next_reg, free_regs, free_n)
+    if tmp < 0 { return 0 - 1 }
+    let rc = compile_expr_v1(&rhs, tmp, b, sym_data, sym_lens, sym_regs, sym_count, next_reg, free_regs, free_n)
+    if rc != 0 {
+        release_reg_v1(tmp, free_regs, free_n)
+        return rc
+    }
+    if !add_instr_v1(b, op_emov(), dst.reg, tmp, 0) {
+        release_reg_v1(tmp, free_regs, free_n)
+        return 0 - 2
+    }
+    release_reg_v1(tmp, free_regs, free_n)
+    0
+}
+
+fn parse_gate_line_v1(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 4, line.len)
+    let rem = str_trim(&rem0)
+    if !parse_ident_token(&rem) { return line_no }
+    let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &rem)
+    if !v.found { return line_no }
+    if !add_instr_v1(b, op_egate(), v.reg, 0, 0) { return 0 - 2 }
+    0
+}
+
+fn parse_store_line_v1(
+    line: &Str,
+    line_no: i64,
+    b: &!EisaxBuild,
+    sym_data: &[i8; 4096],
+    sym_lens: &[i32; 64],
+    sym_regs: &[i64; 64],
+    sym_count: i64,
+    slot_data: &![i8; 1024],
+    slot_lens: &![i32; 32],
+    slot_count: &!i64
+) -> i64 with Mut, Div, Panic {
+    let rem0 = str_sub(line, 5, line.len)
+    let rem = str_trim(&rem0)
+    let tok_arrow = str_lit("<-")
+    let p_arrow = str_index_of(&rem, &tok_arrow)
+    if p_arrow <= 0 { return line_no }
+    let lhs0 = str_sub(&rem, 0, p_arrow)
+    let rhs0 = str_sub(&rem, p_arrow + 2, rem.len)
+    let lhs = str_trim(&lhs0)
+    let rhs = str_trim(&rhs0)
+    var slot_name = str_new()
+    if !parse_slot_token(&lhs, &!slot_name) { return line_no }
+    if !parse_ident_token(&rhs) { return line_no }
+    let v = find_var_v1(sym_data, sym_lens, sym_regs, sym_count, &rhs)
+    if !v.found { return line_no }
+    let sres = slot_find_or_add_v1(slot_data, slot_lens, *slot_count, &slot_name)
+    if !sres.ok { return 0 - 4 }
+    *slot_count = sres.next_count
+    if !add_instr_v1(b, op_estore(), v.reg, sres.slot, 0) { return 0 - 2 }
+    0
+}
+
+fn source_has_v1_construct(src: &Str) -> bool with Mut, Div, Panic {
+    var pos = 0
+    while pos <= src.len {
+        var next = pos
+        while next < src.len && src.data[next as usize] != 10 as i8 {
+            next = next + 1
+        }
+        var line = str_sub(src, pos, next)
+        line = strip_comment(&line)
+        line = str_trim(&line)
+        if line.len > 0 {
+            if is_kw_line(&line, "while") || is_kw_line(&line, "if") {
+                return true
+            }
+        }
+        if next == src.len {
+            pos = src.len + 1
+        } else {
+            pos = next + 1
+        }
+    }
+    false
+}
+
+fn eisa_compile_v1_inner(src: Str, force_v1: bool) -> BackendResult with Mut, Div, Panic {
+    var b = eisax_build_new()
+    b.prov_source = 0
+    b.prov_flags = 0
+
+    var sym_data: [i8; 4096] = [0; 4096]
+    var sym_lens: [i32; 64] = [0; 64]
+    var sym_regs: [i64; 64] = [0; 64]
+    var sym_depths: [i64; 64] = [0; 64]
+    var sym_count: i64 = 0
+
+    var slot_data: [i8; 1024] = [0; 1024]
+    var slot_lens: [i32; 32] = [0; 32]
+    var slot_count: i64 = 0
+
+    var next_reg: i64 = 0
+    var free_regs: [i64; 64] = [0; 64]
+    var free_n: [i64; 1] = [0; 1]
+
+    // Control stack for structured lowering:
+    // while: emit [ebrz cond, EXIT] before body, then closing emits [ebr TEST].
+    // if: emit [ebrn cond, BODY], [ebr END], BODY... then patch END at close.
+    var ctrl_kind: [i64; 16] = [0; 16]
+    var ctrl_line: [i64; 16] = [0; 16]
+    var ctrl_patch: [i64; 16] = [0; 16]
+    var ctrl_loop_test: [i64; 16] = [0; 16]
+    var ctrl_scope_base: [i64; 16] = [0; 16]
+    var ctrl_n: i64 = 0
+
+    var header_seen = false
+    var closed = false
+    var line_no = 1
+    var pos = 0
+    var fn_name = str_new()
+    var fuel_override: i64 = 0
+    var fuel_seen = false
+    var body_opened = false
+    var root_scope_base: i64 = 0
+
+    while pos <= src.len {
+        var next = pos
+        while next < src.len && src.data[next as usize] != 10 as i8 {
+            next = next + 1
+        }
+
+        var line = str_sub(&src, pos, next)
+        line = strip_comment(&line)
+        line = str_trim(&line)
+
+        if line.len > 0 {
+            if !header_seen {
+                if !parse_header(&line, &!fn_name) {
+                    return fail_line(line_no as i64)
+                }
+                header_seen = true
+                body_opened = true
+                root_scope_base = sym_count
+            } else {
+                if closed { return fail_line(line_no as i64) }
+
+                if str_eq_lit(&line, "}") {
+                    if ctrl_n > 0 {
+                        let top = ctrl_n - 1
+                        while sym_count > ctrl_scope_base[top as usize] {
+                            sym_count = sym_count - 1
+                            release_reg_v1(sym_regs[sym_count as usize], &!free_regs, &!free_n)
+                        }
+
+                        if ctrl_kind[top as usize] == 1 {
+                            if !add_instr_v1(&!b, op_ebr(), 0, ctrl_loop_test[top as usize], 0) {
+                                return fail_class(0 - 2)
+                            }
+                            b.bs_[ctrl_patch[top as usize] as usize] = b.n_code
+                        } else {
+                            b.as_[ctrl_patch[top as usize] as usize] = b.n_code
+                        }
+                        ctrl_n = ctrl_n - 1
+                    } else {
+                        while sym_count > root_scope_base {
+                            sym_count = sym_count - 1
+                            release_reg_v1(sym_regs[sym_count as usize], &!free_regs, &!free_n)
+                        }
+                        closed = true
+                    }
+                } else {
+                    if body_opened && !fuel_seen && is_kw_line(&line, "fuel") {
+                        let fv = parse_fuel_directive(&line)
+                        if fv == 0 - 15 || fv == 0 - 16 || fv == 0 - 17 {
+                            return fail_class(fv)
+                        }
+                        fuel_override = fv
+                        fuel_seen = true
+                    } else {
+                        let kw_let = str_lit("let")
+                        let kw_set = str_lit("set")
+                        let kw_gate = str_lit("gate")
+                        let kw_store = str_lit("store")
+                        let kw_while = str_lit("while")
+                        let kw_if = str_lit("if")
+
+                        if str_starts_with(&line, &kw_while) {
+                            if ctrl_n >= v1_depth_cap() {
+                                return fail_class(0 - 14)
+                            }
+                            let reg = parse_while_cond_reg(&line, &sym_data, &sym_lens, &sym_regs, sym_count)
+                            if reg == 0 - 10 || reg == 0 - 12 {
+                                return fail_class(reg)
+                            }
+                            let test_pc = b.n_code
+                            if !add_instr_v1(&!b, op_ebrz(), 0, reg, 0) {
+                                return fail_class(0 - 2)
+                            }
+                            ctrl_kind[ctrl_n as usize] = 1
+                            ctrl_line[ctrl_n as usize] = line_no
+                            ctrl_patch[ctrl_n as usize] = b.n_code - 1
+                            ctrl_loop_test[ctrl_n as usize] = test_pc
+                            ctrl_scope_base[ctrl_n as usize] = sym_count
+                            ctrl_n = ctrl_n + 1
+                        } else {
+                            if str_starts_with(&line, &kw_if) {
+                                if ctrl_n >= v1_depth_cap() {
+                                    return fail_class(0 - 14)
+                                }
+                                let reg = parse_if_cond_reg(&line, &sym_data, &sym_lens, &sym_regs, sym_count)
+                                if reg == 0 - 11 || reg == 0 - 12 {
+                                    return fail_class(reg)
+                                }
+                                if !add_instr_v1(&!b, op_ebrn(), 0, reg, b.n_code + 2) {
+                                    return fail_class(0 - 2)
+                                }
+                                if !add_instr_v1(&!b, op_ebr(), 0, 0, 0) {
+                                    return fail_class(0 - 2)
+                                }
+                                ctrl_kind[ctrl_n as usize] = 2
+                                ctrl_line[ctrl_n as usize] = line_no
+                                ctrl_patch[ctrl_n as usize] = b.n_code - 1
+                                ctrl_loop_test[ctrl_n as usize] = 0
+                                ctrl_scope_base[ctrl_n as usize] = sym_count
+                                ctrl_n = ctrl_n + 1
+                            } else {
+                                if str_starts_with(&line, &kw_let) {
+                                    var sym_count_box: [i64; 1] = [0; 1]
+                                    sym_count_box[0] = sym_count
+                                    let rc = parse_let_line_v1(
+                                        &line,
+                                        line_no as i64,
+                                        &!b,
+                                        &!sym_data,
+                                        &!sym_lens,
+                                        &!sym_regs,
+                                        &!sym_depths,
+                                        &!sym_count_box,
+                                        ctrl_n,
+                                        &!next_reg,
+                                        &!free_regs,
+                                        &!free_n
+                                    )
+                                    if rc != 0 {
+                                        if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                                    } else {
+                                        sym_count = sym_count_box[0]
+                                    }
+                                } else {
+                                    if str_starts_with(&line, &kw_set) {
+                                        let rc = parse_set_line_v1(
+                                            &line,
+                                            line_no as i64,
+                                            &!b,
+                                            &sym_data,
+                                            &sym_lens,
+                                            &sym_regs,
+                                            sym_count,
+                                            &!next_reg,
+                                            &!free_regs,
+                                            &!free_n
+                                        )
+                                        if rc != 0 {
+                                            if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                                        }
+                                    } else {
+                                        if str_starts_with(&line, &kw_gate) {
+                                            let rc = parse_gate_line_v1(&line, line_no as i64, &!b, &sym_data, &sym_lens, &sym_regs, sym_count)
+                                            if rc != 0 {
+                                                if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                                            }
+                                        } else {
+                                            if str_starts_with(&line, &kw_store) {
+                                                let rc = parse_store_line_v1(
+                                                    &line,
+                                                    line_no as i64,
+                                                    &!b,
+                                                    &sym_data,
+                                                    &sym_lens,
+                                                    &sym_regs,
+                                                    sym_count,
+                                                    &!slot_data,
+                                                    &!slot_lens,
+                                                    &!slot_count
+                                                )
+                                                if rc != 0 {
+                                                    if rc > 0 { return fail_line(rc) } else { return fail_class(rc) }
+                                                }
+                                            } else {
+                                                return fail_line(line_no as i64)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if next == src.len {
+            pos = src.len + 1
+        } else {
+            pos = next + 1
+        }
+        line_no = line_no + 1
+    }
+
+    if !header_seen { return fail_line(1) }
+    if !closed { return fail_line(line_no - 1) }
+    if ctrl_n != 0 { return fail_line(line_no - 1) }
+
+    b = eisax_build_set_version(b, eisax_version_v1())
+    let fuel = if fuel_seen { fuel_override } else { v1_default_fuel(b.n_code) }
+    b = eisax_build_set_fuel(b, fuel)
+    if !force_v1 && !source_has_v1_construct(&src) {
+        return eisa_compile_v0_legacy(src)
+    }
+    ok_result(b)
+}
+
+pub fn eisa_compile_v1(src: Str) -> BackendResult with Mut, Div, Panic {
+    eisa_compile_v1_inner(src, true)
+}
+
+pub fn eisa_compile(src: Str) -> BackendResult with Mut, Div, Panic {
+    if source_has_v1_construct(&src) {
+        eisa_compile_v1_inner(src, false)
+    } else {
+        eisa_compile_v0_legacy(src)
+    }
+}

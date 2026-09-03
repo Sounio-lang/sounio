@@ -1,0 +1,129 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/gwet_ac1.sio — Gwet's AC1 agreement coefficient
+//
+// A chance-corrected agreement coefficient for two raters that is resistant to
+// the "kappa paradox" (high observed agreement but a low or negative kappa when
+// one category dominates):
+//
+//   gwet_ac1(table, k) -> AC1Result       (k×k rater1×rater2 counts)
+//
+//   Pₐ = Σ diagonal / N,   πc = (rowc + colc)/(2N),
+//   Pₑ = 1/(k−1) · Σ πc(1−πc),   AC1 = (Pₐ − Pₑ)/(1 − Pₑ).
+// Gwet's chance term uses πc(1−πc) rather than kappa's πc², so a lopsided
+// category prevalence does not inflate the correction.
+//
+// Pure Sounio: one pass over the table for the diagonal and marginals. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Gwet (2008) Br. J. Math. Stat. Psychol. 61:29.
+
+module stats::gwet_ac1
+
+pub struct AC1Result {
+    pub ac1: f64,   // Gwet's AC1
+    pub pa: f64,    // observed agreement
+    pub pe: f64,    // AC1 chance agreement
+}
+
+/// Gwet's AC1 for a k×k two-rater agreement table.
+///
+/// Parâmetros: table — row-major k×k counts (rater1 = row, rater2 = col);
+///             k — number of categories (2..16).
+/// Retorno: AC1Result (ac1, pa, pe).
+/// Referências: Gwet (2008).
+pub fn gwet_ac1(table: &[f64; 256], k: i32) -> AC1Result with Mut, Div, Panic {
+    if k < 2 || k > 16 { return AC1Result { ac1: 0.0, pa: 0.0, pe: 0.0 } }
+    var total = 0.0
+    var diag = 0.0
+    var i = 0
+    while i < k {
+        var j = 0
+        while j < k {
+            let v = table[(i * k + j) as usize]
+            total = total + v
+            if i == j { diag = diag + v }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if total <= 0.0 { return AC1Result { ac1: 0.0, pa: 0.0, pe: 0.0 } }
+    let pa = diag / total
+    // category proportions πc = (row_c + col_c)/(2N)
+    var pe_sum = 0.0
+    var c = 0
+    while c < k {
+        var rowc = 0.0
+        var colc = 0.0
+        var t = 0
+        while t < k {
+            rowc = rowc + table[(c * k + t) as usize]
+            colc = colc + table[(t * k + c) as usize]
+            t = t + 1
+        }
+        let pic = (rowc + colc) / (2.0 * total)
+        pe_sum = pe_sum + pic * (1.0 - pic)
+        c = c + 1
+    }
+    let pe = pe_sum / ((k - 1) as f64)
+    var ac1 = 0.0
+    let den = 1.0 - pe
+    if den > 1.0e-300 || den < 0.0 - 1.0e-300 { ac1 = (pa - pe) / den }
+    return AC1Result { ac1: ac1, pa: pa, pe: pe }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// paradox case [[8,1],[1,0]], N=10. Pa=0.8; π_yes=0.9, π_no=0.1;
+// Pe=0.9·0.1+0.1·0.9=0.18; AC1=(0.8-0.18)/0.82=0.756098.
+// (Cohen's kappa on the same table is negative — AC1 resists the paradox.)
+fn test_paradox() -> bool with IO, Mut, Div, Panic {
+    var tb: [f64; 256] = [0.0; 256]
+    tb[0]=8.0; tb[1]=1.0
+    tb[2]=1.0; tb[3]=0.0
+    let r = gwet_ac1(&tb, 2)
+    var ok = true
+    ok = check(1, approx(r.pa, 0.8, 1.0e-9)) && ok
+    ok = check(2, approx(r.pe, 0.18, 1.0e-9)) && ok
+    ok = check(3, approx(r.ac1, 0.756098, 1.0e-5)) && ok
+    return ok
+}
+
+// perfect agreement -> AC1 = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var tb: [f64; 256] = [0.0; 256]
+    tb[0]=5.0; tb[1]=0.0
+    tb[2]=0.0; tb[3]=5.0
+    let r = gwet_ac1(&tb, 2)
+    return check(10, approx(r.ac1, 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_paradox() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

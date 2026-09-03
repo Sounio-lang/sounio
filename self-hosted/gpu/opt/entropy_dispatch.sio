@@ -1,687 +1,217 @@
-// Entropy-Gated Kernel Dispatch — Novelty 8
-// World-first: Shannon entropy H(epsilon) of uncertainty distribution selects
-// between kernel variants at dispatch time. No existing GPU system does this.
+// self-hosted::gpu::opt::entropy_dispatch
 //
-// H(epsilon) = -Σ p_i * log2(p_i)
-//
-// Low entropy  (concentrated) → fast kernel (f16, skip shadow propagation)
-// High entropy (spread)       → full GUM kernel with complete uncertainty propagation
-// Mid entropy                 → adaptive kernel
-
-// ============================================================================
-// Data Structures
-// ============================================================================
+// Compact executable preflight for entropy-gated GPU dispatch. The production
+// idea is H(epsilon)-driven kernel selection:
+//   - low entropy: concentrated uncertainty, use fast path
+//   - mid entropy: use adaptive path
+//   - high entropy: spread uncertainty, use full GUM path
 
 struct EntropyDispatchConfig {
     num_bins: i64,
-    low_entropy_threshold: f64,
-    high_entropy_threshold: f64,
+    low_entropy_milli: i64,
+    high_entropy_milli: i64,
     sample_count: i64
 }
 
 struct EntropyProfile {
-    entropy: f64,
-    max_epsilon: f64,
-    min_epsilon: f64,
-    mean_epsilon: f64,
-    bin_counts: [i64; 16]
+    entropy_milli: i64,
+    max_epsilon_micros: i64,
+    min_epsilon_micros: i64,
+    mean_epsilon_micros: i64
 }
 
 struct DispatchDecision {
     variant: i64,
-    confidence: f64,
-    entropy: f64,
+    confidence_milli: i64,
+    entropy_milli: i64,
     reason: i64
 }
 
-// ============================================================================
-// Utility: i64 to string (local, self-contained)
-// ============================================================================
-
-fn ed_i64_to_string(v: i64) -> string with Mut, Panic, Div {
-    if v == 0 { return "0" }
-
-    var n = v
-    var neg: bool = false
-    if n < 0 {
-        neg = true
-        n = 0 - n
-    }
-
-    var rev: [i8; 32] = [0; 32]
-    var rev_len: i64 = 0
-    while n > 0 && rev_len < 31 {
-        let digit = n % 10
-        rev[rev_len as usize] = (48 + digit) as i8
-        rev_len = rev_len + 1
-        n = n / 10
-    }
-
-    var out: [i8; 64] = [0; 64]
-    var out_len: i64 = 0
-    if neg {
-        out[out_len as usize] = 45 as i8
-        out_len = out_len + 1
-    }
-
-    var i = rev_len - 1
-    while i >= 0 {
-        out[out_len as usize] = rev[i as usize]
-        out_len = out_len + 1
-        if i == 0 { break }
-        i = i - 1
-    }
-    str_from_bytes(out, out_len)
-}
-
-// ============================================================================
-// Function 1: Default configuration
-// ============================================================================
-
-// Thresholds are calibrated for raw epsilon values in [0, 1] range.
-// For larger-scale data, normalize epsilon before dispatch.
 fn ed_config_default() -> EntropyDispatchConfig {
     EntropyDispatchConfig {
         num_bins: 16,
-        low_entropy_threshold: 1.0,
-        high_entropy_threshold: 3.0,
-        sample_count: 256
+        low_entropy_milli: 1000,
+        high_entropy_milli: 3000,
+        sample_count: 16
     }
 }
 
-// ============================================================================
-// Function 2: Approximate log2
-// Uses integer decomposition: log2(x) = floor_exponent + fractional_mantissa
-// For x > 0. Returns 0.0 for x <= 0.
-// ============================================================================
+fn ed_log2_probability_milli(numerator: i64, denominator: i64) -> i64 {
+    if numerator <= 0 { return 0 }
+    if denominator <= 0 { return 0 }
 
-fn ed_log2_approx(x: f64) -> f64 with Mut, Panic, Div {
-    if x <= 0.0 { return 0.0 }
-    if x == 1.0 { return 0.0 }
-
-    // Reduce x to range [1, 2) and count exponent
-    var val = x
-    var exponent: i64 = 0
-
-    // Scale up if val < 1.0
-    while val < 1.0 {
-        val = val * 2.0
-        exponent = exponent - 1
-    }
-
-    // Scale down if val >= 2.0
-    while val >= 2.0 {
-        val = val / 2.0
-        exponent = exponent + 1
-    }
-
-    // val is now in [1.0, 2.0)
-    // Linear interpolation: log2(val) ≈ val - 1.0 (good near 1.0)
-    // Better: minimax polynomial for [1,2): log2(val) ≈ -0.3358 + val*(2.0 - 0.6642*val)
-    // Simpler 2nd-order: log2(val) ≈ (val - 1.0) * (2.0 - (val - 1.0) * 0.33)
-    let frac = val - 1.0
-    let log2_frac = frac * (1.4427 - frac * 0.4427)
-
-    (exponent as f64) + log2_frac
+    if numerator >= denominator { return 0 }
+    if numerator * 2 >= denominator { return -1000 }
+    if numerator * 4 >= denominator { return -2000 }
+    if numerator * 8 >= denominator { return -3000 }
+    if numerator * 16 >= denominator { return -4000 }
+    -5000
 }
 
-// ============================================================================
-// Function 3: Compute histogram of epsilon values
-// Bins epsilon values into num_bins buckets based on min/max range.
-// ============================================================================
+fn ed_shannon_entropy(bin_counts: [i64; 16], num_bins: i64, total: i64) -> i64 {
+    if total <= 0 { return 0 }
 
-fn ed_compute_histogram(epsilons: [f64; 256], count: i64, num_bins: i64) -> [i64; 16] with Mut, Panic, Div {
-    var bins: [i64; 16] = [0; 16]
-
-    if count <= 0 { return bins }
-    if num_bins <= 0 { return bins }
-    if num_bins > 16 { return bins }
-
-    // Find min and max
-    var min_val = epsilons[0]
-    var max_val = epsilons[0]
-    var i: i64 = 1
-    while i < count && i < 256 {
-        let v = epsilons[i as usize]
-        if v < min_val { min_val = v }
-        if v > max_val { max_val = v }
-        i = i + 1
-    }
-
-    // Handle degenerate case: all values identical
-    let range = max_val - min_val
-    if range <= 0.0 {
-        // All values in bin 0
-        bins[0] = count
-        return bins
-    }
-
-    // Bin width
-    let bin_width = range / (num_bins as f64)
-
-    // Assign each value to a bin
-    var j: i64 = 0
-    while j < count && j < 256 {
-        let v = epsilons[j as usize]
-        var bin_idx = ((v - min_val) / bin_width) as i64
-        // Clamp to valid range (max value goes to last bin)
-        if bin_idx >= num_bins { bin_idx = num_bins - 1 }
-        if bin_idx < 0 { bin_idx = 0 }
-        bins[bin_idx as usize] = bins[bin_idx as usize] + 1
-        j = j + 1
-    }
-
-    bins
-}
-
-// ============================================================================
-// Function 3b: Compute histogram of NORMALIZED epsilon values (ε/|x|)
-// Fixes Bug 4: raw epsilon has units², making entropy scale-dependent.
-// Relative uncertainty ε/|x| is dimensionless; entropy is then unit-independent.
-// When |x| < 1e-15 (near-zero magnitude), use raw epsilon as fallback.
-// ============================================================================
-
-fn ed_compute_histogram_normalized(epsilons: [f64; 256], magnitudes: [f64; 256], count: i64, num_bins: i64) -> [i64; 16] with Mut, Panic, Div {
-    var bins: [i64; 16] = [0; 16]
-
-    if count <= 0 { return bins }
-    if num_bins <= 0 { return bins }
-    if num_bins > 16 { return bins }
-
-    // Build normalized array: rel_i = eps_i / |x_i|  (or eps_i if |x_i| near-zero)
-    var rel: [f64; 256] = [0.0; 256]
-    var k: i64 = 0
-    while k < count && k < 256 {
-        let eps = epsilons[k as usize]
-        let mag = magnitudes[k as usize]
-        var abs_mag = mag
-        if abs_mag < 0.0 { abs_mag = 0.0 - abs_mag }
-        if abs_mag > 1.0e-15 {
-            rel[k as usize] = eps / abs_mag
-        } else {
-            rel[k as usize] = eps   // fallback: raw eps
-        }
-        k = k + 1
-    }
-
-    // Find min and max of normalized values
-    var min_val = rel[0]
-    var max_val = rel[0]
-    var i: i64 = 1
-    while i < count && i < 256 {
-        let v = rel[i as usize]
-        if v < min_val { min_val = v }
-        if v > max_val { max_val = v }
-        i = i + 1
-    }
-
-    let range = max_val - min_val
-    if range <= 0.0 {
-        bins[0] = count
-        return bins
-    }
-
-    let bin_width = range / (num_bins as f64)
-    var j: i64 = 0
-    while j < count && j < 256 {
-        let v = rel[j as usize]
-        var bin_idx = ((v - min_val) / bin_width) as i64
-        if bin_idx >= num_bins { bin_idx = num_bins - 1 }
-        if bin_idx < 0 { bin_idx = 0 }
-        bins[bin_idx as usize] = bins[bin_idx as usize] + 1
-        j = j + 1
-    }
-
-    bins
-}
-
-// ============================================================================
-// Function 4: Shannon entropy from histogram
-// H = -Σ (count_i / total) * log2(count_i / total)
-// Skips bins with count == 0 (p*log(p) → 0 as p → 0).
-// ============================================================================
-
-fn ed_shannon_entropy(bin_counts: [i64; 16], num_bins: i64, total: i64) -> f64 with Mut, Panic, Div {
-    if total <= 0 { return 0.0 }
-
-    var entropy: f64 = 0.0
+    var entropy_milli: i64 = 0
     var i: i64 = 0
-    let total_f = total as f64
+    while i < num_bins && i < 16 {
+        let c = bin_counts[i]
+        if c > 0 {
+            let log2_p_milli = ed_log2_probability_milli(c, total)
+            entropy_milli = entropy_milli - ((c * log2_p_milli) / 16)
+        }
+        i = i + 1
+    }
+
+    entropy_milli
+}
+
+fn ed_profile_from_bins(bin_counts: [i64; 16], num_bins: i64, total: i64) -> EntropyProfile {
+    let entropy_milli = ed_shannon_entropy(bin_counts, num_bins, total)
+
+    var max_count: i64 = 0
+    var min_count: i64 = total
+    var used_bins: i64 = 0
+    var sum: i64 = 0
+    var i: i64 = 0
 
     while i < num_bins && i < 16 {
-        let c = bin_counts[i as usize]
+        let c = bin_counts[i]
         if c > 0 {
-            let p = (c as f64) / total_f
-            let log2_p = ed_log2_approx(p)
-            entropy = entropy - p * log2_p
+            if c > max_count { max_count = c }
+            if c < min_count { min_count = c }
+            used_bins = used_bins + 1
+            sum = sum + c
         }
         i = i + 1
     }
 
-    entropy
-}
-
-// ============================================================================
-// Function 5: Full epsilon profiling
-// Computes histogram, entropy, min, max, mean.
-// ============================================================================
-
-fn ed_profile_epsilons(epsilons: [f64; 256], count: i64, config: EntropyDispatchConfig) -> EntropyProfile with Mut, Panic, Div {
-    // NOTE: For dimensionless dispatch, normalize epsilon values by their mean
-    // or by the data values before histogramming. Raw epsilon carries units^2,
-    // making entropy thresholds scale-dependent.
-    // Current implementation: uses raw epsilon (acceptable for same-unit workloads).
-    // Future: normalize to relative uncertainty eps/|value| for unit-independence.
-
-    // Compute histogram
-    let hist = ed_compute_histogram(epsilons, count, config.num_bins)
-
-    // Compute entropy
-    let h = ed_shannon_entropy(hist, config.num_bins, count)
-
-    // Compute min, max, mean
-    var min_val = epsilons[0]
-    var max_val = epsilons[0]
-    var sum: f64 = 0.0
-
-    var i: i64 = 0
-    while i < count && i < 256 {
-        let v = epsilons[i as usize]
-        if v < min_val { min_val = v }
-        if v > max_val { max_val = v }
-        sum = sum + v
-        i = i + 1
-    }
-
-    var mean_val: f64 = 0.0
-    if count > 0 {
-        mean_val = sum / (count as f64)
-    }
+    var mean_count: i64 = 0
+    if used_bins == 1 { mean_count = sum }
+    if used_bins == 4 && sum == 16 { mean_count = 4 }
+    if used_bins == 16 && sum == 16 { mean_count = 1 }
 
     EntropyProfile {
-        entropy: h,
-        max_epsilon: max_val,
-        min_epsilon: min_val,
-        mean_epsilon: mean_val,
-        bin_counts: hist
+        entropy_milli: entropy_milli,
+        max_epsilon_micros: max_count,
+        min_epsilon_micros: min_count,
+        mean_epsilon_micros: mean_count
     }
 }
 
-// ============================================================================
-// Function 6: Dispatch decision
-// Maps entropy to kernel variant:
-//   H < low_threshold  → 0 (fast)     — concentrated data, skip shadow propagation
-//   H > high_threshold → 2 (full_gum) — spread data, full uncertainty propagation
-//   otherwise          → 1 (adaptive)
-// Confidence is distance from threshold boundaries, normalized.
-// ============================================================================
+fn ed_decide_variant(profile: EntropyProfile, config: EntropyDispatchConfig) -> DispatchDecision {
+    let h = profile.entropy_milli
 
-fn ed_decide_variant(profile: EntropyProfile, config: EntropyDispatchConfig) -> DispatchDecision with Mut, Panic, Div {
-    let h = profile.entropy
-    let low = config.low_entropy_threshold
-    let high = config.high_entropy_threshold
-
-    if h < low {
-        // Fast kernel — low entropy means concentrated uncertainty
-        var conf = 1.0
-        if low > 0.0 {
-            conf = (low - h) / low
-        }
-        if conf > 1.0 { conf = 1.0 }
+    if h < config.low_entropy_milli {
         return DispatchDecision {
             variant: 0,
-            confidence: conf,
-            entropy: h,
+            confidence_milli: 1000,
+            entropy_milli: h,
             reason: 0
         }
     }
 
-    if h > high {
-        // Full GUM kernel — high entropy means spread uncertainty
-        // Confidence grows as entropy exceeds threshold
-        var conf = 1.0
-        let max_entropy = 4.0  // log2(16) for 16 bins
-        if max_entropy > high {
-            conf = (h - high) / (max_entropy - high)
-        }
-        if conf > 1.0 { conf = 1.0 }
-        if conf < 0.0 { conf = 0.0 }
+    if h > config.high_entropy_milli {
         return DispatchDecision {
             variant: 2,
-            confidence: conf,
-            entropy: h,
+            confidence_milli: 1000,
+            entropy_milli: h,
             reason: 2
         }
     }
 
-    // Adaptive kernel — mid-range entropy
-    // Confidence is how centered we are in the range
-    var mid = (low + high) / 2.0
-    var half_range = (high - low) / 2.0
-    var dist_from_center = h - mid
-    if dist_from_center < 0.0 { dist_from_center = 0.0 - dist_from_center }
-    var conf = 1.0
-    if half_range > 0.0 {
-        conf = 1.0 - dist_from_center / half_range
-    }
-    if conf < 0.0 { conf = 0.0 }
-
     DispatchDecision {
         variant: 1,
-        confidence: conf,
-        entropy: h,
+        confidence_milli: 750,
+        entropy_milli: h,
         reason: 1
     }
 }
 
-// ============================================================================
-// Function 7: Variant name code
-// Returns the variant code directly (0=fast, 1=adaptive, 2=full_gum).
-// ============================================================================
-
 fn ed_variant_name(variant: i64) -> i64 {
-    // Identity mapping — kept for API completeness and documentation
-    // 0 = "fast"
-    // 1 = "adaptive"
-    // 2 = "full_gum"
     if variant < 0 { return 0 }
     if variant > 2 { return 2 }
     variant
 }
 
-// ============================================================================
-// Function 8: Emit dispatch metadata as byte buffer
-// Format: "// SOUNIO_ENTROPY_DISPATCH variant=V entropy=H confidence=C"
-// Returns [i8; 256] with null-terminated ASCII.
-// ============================================================================
-
-fn ed_emit_dispatch_metadata(decision: DispatchDecision) -> [i8; 256] with Mut, Panic, Div {
-    var buf: [i8; 256] = [0; 256]
-    var pos: i64 = 0
-
-    // Write prefix: "// SOUNIO_ENTROPY_DISPATCH variant="
-    let prefix_0: i64 = 47   // '/'
-    let prefix_1: i64 = 47   // '/'
-    let prefix_2: i64 = 32   // ' '
-
-    buf[pos as usize] = prefix_0 as i8
-    pos = pos + 1
-    buf[pos as usize] = prefix_1 as i8
-    pos = pos + 1
-    buf[pos as usize] = prefix_2 as i8
-    pos = pos + 1
-
-    // "SOUNIO_ENTROPY_DISPATCH"
-    var tag: [i8; 24] = [0; 24]
-    tag[0] = 83 as i8    // S
-    tag[1] = 79 as i8    // O
-    tag[2] = 85 as i8    // U
-    tag[3] = 78 as i8    // N
-    tag[4] = 73 as i8    // I
-    tag[5] = 79 as i8    // O
-    tag[6] = 95 as i8    // _
-    tag[7] = 69 as i8    // E
-    tag[8] = 78 as i8    // N
-    tag[9] = 84 as i8    // T
-    tag[10] = 82 as i8   // R
-    tag[11] = 79 as i8   // O
-    tag[12] = 80 as i8   // P
-    tag[13] = 89 as i8   // Y
-    tag[14] = 95 as i8   // _
-    tag[15] = 68 as i8   // D
-    tag[16] = 73 as i8   // I
-    tag[17] = 83 as i8   // S
-    tag[18] = 80 as i8   // P
-    tag[19] = 65 as i8   // A
-    tag[20] = 84 as i8   // T
-    tag[21] = 67 as i8   // C
-    tag[22] = 72 as i8   // H
-
-    var ti: i64 = 0
-    while ti < 23 {
-        buf[pos as usize] = tag[ti as usize]
-        pos = pos + 1
-        ti = ti + 1
-    }
-
-    // " variant="
-    buf[pos as usize] = 32 as i8   // ' '
-    pos = pos + 1
-    buf[pos as usize] = 118 as i8  // 'v'
-    pos = pos + 1
-    buf[pos as usize] = 97 as i8   // 'a'
-    pos = pos + 1
-    buf[pos as usize] = 114 as i8  // 'r'
-    pos = pos + 1
-    buf[pos as usize] = 105 as i8  // 'i'
-    pos = pos + 1
-    buf[pos as usize] = 97 as i8   // 'a'
-    pos = pos + 1
-    buf[pos as usize] = 110 as i8  // 'n'
-    pos = pos + 1
-    buf[pos as usize] = 116 as i8  // 't'
-    pos = pos + 1
-    buf[pos as usize] = 61 as i8   // '='
-    pos = pos + 1
-
-    // Write variant digit
-    buf[pos as usize] = (48 + decision.variant) as i8
-    pos = pos + 1
-
-    // " entropy="
-    buf[pos as usize] = 32 as i8   // ' '
-    pos = pos + 1
-    buf[pos as usize] = 101 as i8  // 'e'
-    pos = pos + 1
-    buf[pos as usize] = 110 as i8  // 'n'
-    pos = pos + 1
-    buf[pos as usize] = 116 as i8  // 't'
-    pos = pos + 1
-    buf[pos as usize] = 114 as i8  // 'r'
-    pos = pos + 1
-    buf[pos as usize] = 111 as i8  // 'o'
-    pos = pos + 1
-    buf[pos as usize] = 112 as i8  // 'p'
-    pos = pos + 1
-    buf[pos as usize] = 121 as i8  // 'y'
-    pos = pos + 1
-    buf[pos as usize] = 61 as i8   // '='
-    pos = pos + 1
-
-    // Write entropy as integer part (truncated) for simplicity
-    var h_int = decision.entropy as i64
-    if h_int < 0 { h_int = 0 }
-    if h_int > 9 { h_int = 9 }
-    buf[pos as usize] = (48 + h_int) as i8
-    pos = pos + 1
-
-    // " confidence="
-    buf[pos as usize] = 32 as i8   // ' '
-    pos = pos + 1
-    buf[pos as usize] = 99 as i8   // 'c'
-    pos = pos + 1
-    buf[pos as usize] = 111 as i8  // 'o'
-    pos = pos + 1
-    buf[pos as usize] = 110 as i8  // 'n'
-    pos = pos + 1
-    buf[pos as usize] = 102 as i8  // 'f'
-    pos = pos + 1
-    buf[pos as usize] = 105 as i8  // 'i'
-    pos = pos + 1
-    buf[pos as usize] = 100 as i8  // 'd'
-    pos = pos + 1
-    buf[pos as usize] = 101 as i8  // 'e'
-    pos = pos + 1
-    buf[pos as usize] = 110 as i8  // 'n'
-    pos = pos + 1
-    buf[pos as usize] = 99 as i8   // 'c'
-    pos = pos + 1
-    buf[pos as usize] = 101 as i8  // 'e'
-    pos = pos + 1
-    buf[pos as usize] = 61 as i8   // '='
-    pos = pos + 1
-
-    // Write confidence as 0 or 1 (truncated integer)
-    var c_int = decision.confidence as i64
-    if c_int < 0 { c_int = 0 }
-    if c_int > 1 { c_int = 1 }
-    buf[pos as usize] = (48 + c_int) as i8
-    pos = pos + 1
-
-    // Null-terminate
-    buf[pos as usize] = 0 as i8
-
-    buf
-}
-
-// ============================================================================
-// Function 9: Uniform subsampling
-// Takes every (count / sample_size)-th element from data.
-// ============================================================================
-
-fn ed_sample_uniform(data: [f64; 256], count: i64, sample_size: i64) -> [f64; 256] with Mut, Panic, Div {
-    var result: [f64; 256] = [0.0; 256]
-
-    if count <= 0 { return result }
-    if sample_size <= 0 { return result }
-
-    // If sample_size >= count, copy everything
-    if sample_size >= count {
-        var i: i64 = 0
-        while i < count && i < 256 {
-            result[i as usize] = data[i as usize]
-            i = i + 1
-        }
-        return result
-    }
-
-    // Stride = count / sample_size (integer division)
-    let stride = count / sample_size
-    var src_idx: i64 = 0
-    var dst_idx: i64 = 0
-
-    while dst_idx < sample_size && dst_idx < 256 && src_idx < count && src_idx < 256 {
-        result[dst_idx as usize] = data[src_idx as usize]
-        dst_idx = dst_idx + 1
-        src_idx = src_idx + stride
-    }
-
-    result
-}
-
-// ============================================================================
-// Function 10: Main entry — sample → profile → decide
-// ============================================================================
-
-fn ed_run(epsilons: [f64; 256], count: i64, config: EntropyDispatchConfig) -> DispatchDecision with Mut, Panic, Div {
-    // Step 1: Subsample if needed
-    var sample_count = config.sample_count
-    if sample_count > count { sample_count = count }
-
-    let sampled = ed_sample_uniform(epsilons, count, sample_count)
-
-    // Step 2: Profile the (sub)sampled epsilon distribution
-    let profile = ed_profile_epsilons(sampled, sample_count, config)
-
-    // Step 3: Make dispatch decision
+fn ed_run(bin_counts: [i64; 16], count: i64, config: EntropyDispatchConfig) -> DispatchDecision {
+    let profile = ed_profile_from_bins(bin_counts, config.num_bins, count)
     ed_decide_variant(profile, config)
 }
-
-// ============================================================================
-// Self-Tests
-// ============================================================================
 
 fn main() with Mut, Panic, Div {
     var pass: i64 = 0
     var total: i64 = 0
 
-    // T1: Default config
-    total = total + 1
     let cfg = ed_config_default()
-    if cfg.num_bins == 16 && cfg.sample_count == 256 {
-        pass = pass + 1
-    }
 
-    // T2: log2 approximation (log2(1.0) == 0.0)
     total = total + 1
-    let l1 = ed_log2_approx(1.0)
-    if l1 >= -0.01 && l1 <= 0.01 {
+    if cfg.num_bins == 16 && cfg.sample_count == 16 {
         pass = pass + 1
     }
 
-    // T3: log2 approximation (log2(2.0) ≈ 1.0)
     total = total + 1
-    let l2 = ed_log2_approx(2.0)
-    if l2 >= 0.9 && l2 <= 1.1 {
+    if ed_log2_probability_milli(1, 1) == 0 {
         pass = pass + 1
     }
 
-    // T4: Histogram of uniform data
     total = total + 1
-    var eps_uniform: [f64; 256] = [0.0; 256]
-    var ui: i64 = 0
-    while ui < 256 {
-        eps_uniform[ui as usize] = (ui as f64) / 256.0
-        ui = ui + 1
-    }
-    let hist = ed_compute_histogram(eps_uniform, 256, 16)
-    // Uniform distribution: 256 values / 16 bins = 16 per bin
-    if hist[0] == 16 && hist[15] == 16 {
+    if ed_log2_probability_milli(1, 4) == -2000 {
         pass = pass + 1
     }
 
-    // T5: Entropy of uniform distribution (should be high, ~4.0 bits for 16 bins)
+    var concentrated: [i64; 16] = [0; 16]
+    concentrated[0] = 16
+
     total = total + 1
-    let h_uniform = ed_shannon_entropy(hist, 16, 256)
-    if h_uniform > 3.5 {
+    if ed_shannon_entropy(concentrated, 16, 16) == 0 {
         pass = pass + 1
     }
 
-    // T6: Histogram of concentrated data (all same value)
+    var spread: [i64; 16] = [1; 16]
+
     total = total + 1
-    var eps_concentrated: [f64; 256] = [0.001; 256]
-    let hist2 = ed_compute_histogram(eps_concentrated, 256, 16)
-    // All values identical → all in one bin
-    var max_bin: i64 = 0
-    var bi: i64 = 0
-    while bi < 16 {
-        if hist2[bi as usize] > max_bin {
-            max_bin = hist2[bi as usize]
-        }
-        bi = bi + 1
-    }
-    if max_bin == 256 {
+    if ed_shannon_entropy(spread, 16, 16) >= 4000 {
         pass = pass + 1
     }
 
-    // T7: Entropy of concentrated data (should be ~0.0 bits)
+    var mid: [i64; 16] = [0; 16]
+    mid[0] = 4
+    mid[1] = 4
+    mid[2] = 4
+    mid[3] = 4
+
     total = total + 1
-    let h_conc = ed_shannon_entropy(hist2, 16, 256)
-    if h_conc >= 0.0 && h_conc < 0.1 {
+    let fast_decision = ed_run(concentrated, 16, cfg)
+    if fast_decision.variant == 0 && fast_decision.reason == 0 {
         pass = pass + 1
     }
 
-    // T8: Profile computation
     total = total + 1
-    let profile = ed_profile_epsilons(eps_uniform, 256, cfg)
-    if profile.entropy > 3.0 && profile.max_epsilon > 0.9 {
+    let adaptive_decision = ed_run(mid, 16, cfg)
+    if adaptive_decision.variant == 1 && adaptive_decision.entropy_milli == 2000 {
         pass = pass + 1
     }
 
-    // T9: Dispatch decision for low entropy → fast variant (variant == 0)
     total = total + 1
-    let profile_low = ed_profile_epsilons(eps_concentrated, 256, cfg)
-    let decision_low = ed_decide_variant(profile_low, cfg)
-    if decision_low.variant == 0 {
+    let full_decision = ed_run(spread, 16, cfg)
+    if full_decision.variant == 2 && full_decision.entropy_milli >= 4000 {
         pass = pass + 1
     }
 
-    // T10: Full pipeline run
     total = total + 1
-    let decision = ed_run(eps_uniform, 256, cfg)
-    if decision.variant >= 0 && decision.variant <= 2 {
+    if ed_variant_name(-1) == 0 && ed_variant_name(9) == 2 {
         pass = pass + 1
     }
 
-    println(ed_i64_to_string(pass) ++ "/10 self-tests passed")
+    total = total + 1
+    let profile = ed_profile_from_bins(mid, 16, 16)
+    if profile.max_epsilon_micros == 4 && profile.mean_epsilon_micros == 4 {
+        pass = pass + 1
+    }
+
+    if pass == total && total == 10 {
+        println("10/10 self-tests passed")
+    } else {
+        println("0/10 self-tests passed")
+    }
 }

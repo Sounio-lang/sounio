@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
+import { publicContract } from '../../data/artifactStatus';
+import { claimEscape } from '../../lib/measurementClaim';
 
 interface PlaygroundEditorProps {
   initialCode?: string;
@@ -323,7 +325,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
 
   const handleRun = useCallback(async () => {
     if (!wasmApi) {
-      setOutput('WASM runtime is not ready. Build assets with: ../scripts/build_playground_wasm.sh');
+      setOutput('WASM runtime is not ready. Build assets with: bash scripts/build/build_playground_wasm.sh (repo root)');
       return;
     }
 
@@ -373,7 +375,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
   }, []);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    (e: KeyboardEvent) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         handleRun();
@@ -447,7 +449,12 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
       </div>
 
       <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] text-white/60 text-xs font-mono border-t border-white/10">
-        <span>Sounio v1.0.0-beta.5</span>
+        <span>Sounio v{claimEscape({
+          id: 'checked-artifact-version',
+          class: 'version',
+          reason: 'Compiler launcher version string from the public contract. Identity, not a green-count.',
+          text: publicContract.versions.checkedArtifact,
+        })}</span>
         <span>{wasmApi?.version ? wasmApi.version() : 'WASM'}</span>
       </div>
     </div>

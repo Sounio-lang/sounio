@@ -1,0 +1,134 @@
+// artifacts/zd-ssm/model.sio
+//
+// ZD-SSM — the deployable artifact of the Butterfly Thesis.
+//
+// Architecture: a Mamba-family State-Space Model (SSM) whose
+// final output projection is replaced by a sedenion-structured
+// ZdGated layer.  The ZdGated layer operates on 16-dim sedenion
+// chunks of the SSM hidden state and applies surgical operations
+// (ExactlyPrivate / Editable / CapabilityGated / Composable /
+// Audited / Revivable / Interpretable) directly in the algebraic
+// kernel.
+//
+// This file is the TYPE-LEVEL SPECIFICATION.  Real weights live
+// outside Sounio (a 130M Mamba checkpoint).  Sounio's role is:
+//   (a) define the surgical head's type signature,
+//   (b) export a stable FFI for the Python inference loop,
+//   (c) back every op emitted by audit.sio with a type derivation
+//       that Paper F's regulatory theorems pick up.
+//
+// The Sounio type system therefore plays the role of a
+// "cryptographic interface contract" for the surgical operations
+// at model boundary.
+
+// ────────────────────────────────────────────────────────────────────
+// SSM block: state dimension d_state, model dimension d_model.
+//
+// For a 130M Mamba: d_model = 768, d_state = 16, 24 layers.
+// The ZdGated head reshapes d_model into 48 sedenion chunks of
+// dim 16 (= 768 / 16).  Surgical operations act per-chunk.
+// ────────────────────────────────────────────────────────────────────
+
+struct ZdSsmConfig {
+    d_model: i32,   // 768 for Mamba-130M
+    d_state: i32,   // 16 (sedenion dim)
+    n_layers: i32,  // 24
+    n_chunks: i32,  // d_model / d_state = 48
+    vocab_size: i32, // 50_257 (GPT-2 tokenizer)
+}
+
+fn zd_ssm_130m_config() -> ZdSsmConfig with Mut {
+    ZdSsmConfig {
+        d_model: 768,
+        d_state: 16,
+        n_layers: 24,
+        n_chunks: 48,
+        vocab_size: 50257,
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ZdGated head — the only surgically-typed layer of the model.
+//
+// Input:  SSM hidden state h ∈ R^d_model, reshaped to [n_chunks][16].
+// Output: logits over vocab, after per-chunk ZD-decomposition and
+//         optional surgical gate application.
+// ────────────────────────────────────────────────────────────────────
+
+struct ZdGatedHead {
+    // Per-chunk surgical gate state.  When a chunk is
+    // ExactlyPrivate<Alice>, its kernel projection is zeroed before
+    // it contributes to the logits.
+    active_gates: [i32; 48],  // 0 = no gate, 1..168 = gate class
+    n_active: i32,
+}
+
+fn zd_gated_head_new() -> ZdGatedHead with Mut {
+    ZdGatedHead { active_gates: [0; 48], n_active: 0 }
+}
+
+// Apply the active surgical gates to a chunked hidden state.
+// Each gate zeros the kernel projection in its chunk.
+// Returns the post-surgical state.
+fn zd_gated_apply(
+    head: &ZdGatedHead,
+    h: &[f64; 768],
+) -> [f64; 768] with Mut, Panic, ZD {
+    var out: [f64; 768] = [0.0; 768]
+    var i = 0
+    while i < 768 { out[i] = (*h)[i]; i = i + 1 }
+    var k = 0
+    while k < 48 {
+        let gate = (*head).active_gates[k]
+        if gate != 0 {
+            // Kernel basis u1=(1/√2)(e3-e10), u2=(1/√2)(e7+e14)
+            // placed into chunk k (offset = k*16).
+            let off = k * 16
+            let u1_6 = 0.707107
+            let u1_15 = 0.0 - 0.707107
+            let u2_7 = 0.707107
+            let u2_14 = 0.707107
+            let c1 = u1_6 * out[off + 6] + u1_15 * out[off + 15]
+            let c2 = u2_7 * out[off + 7] + u2_14 * out[off + 14]
+            out[off + 6]  = out[off + 6]  - c1 * u1_6
+            out[off + 15] = out[off + 15] - c1 * u1_15
+            out[off + 7]  = out[off + 7]  - c2 * u2_7
+            out[off + 14] = out[off + 14] - c2 * u2_14
+        }
+        k = k + 1
+    }
+    out
+}
+
+// Arm a gate on a given chunk (1-based class index in [1..168]).
+fn zd_gated_arm(head: &!ZdGatedHead, chunk: i32, class: i32) with Mut, Panic, Div {
+    if chunk < 0 { return }
+    if chunk >= 48 { return }
+    (*head).active_gates[chunk] = class
+    (*head).n_active = (*head).n_active + 1
+}
+
+// Disarm a gate on a given chunk.
+fn zd_gated_disarm(head: &!ZdGatedHead, chunk: i32) with Mut, Panic, Div {
+    if chunk < 0 { return }
+    if chunk >= 48 { return }
+    if (*head).active_gates[chunk] != 0 {
+        (*head).n_active = (*head).n_active - 1
+    }
+    (*head).active_gates[chunk] = 0
+}
+
+// ────────────────────────────────────────────────────────────────────
+// FFI surface (declarations only; actual weights loaded from disk)
+// ────────────────────────────────────────────────────────────────────
+
+// extern "C" zd_ssm_forward(
+//   cfg: *const ZdSsmConfig,
+//   tokens: *const u32,
+//   n_tok: usize,
+//   h_out: *mut f64,  // [d_model]
+// );
+//
+// The Python driver in artifacts/zd-ssm/inference.py (not tracked
+// here) packs a Mamba-130M checkpoint and calls this FFI per step.
+// Sounio's contribution is the surgical head and the proof witnesses.

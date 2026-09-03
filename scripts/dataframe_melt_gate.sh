@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Gate for stdlib data::dataframe_melt (wide->long) + pivot<->melt round-trip. lean_single engine.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+SOUC=./bin/souc
+OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
+fail=0
+echo "== check data/dataframe_melt.sio =="
+$SOUC check stdlib/data/dataframe_melt.sio >/dev/null 2>&1 || echo "NOTE: standalone check quirk on stdlib/data/dataframe_melt.sio (Madaros check-mode; driver proves the API)"
+echo "== run-proof: melt + pivot round-trip =="
+if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile tests/stdlib/data/test_dataframe_melt_stdlib.sio -o "$OUT/x.elf" >/dev/null 2>&1; then
+  chmod +x "$OUT/x.elf"; "$OUT/x.elf" | grep -q "DATAFRAME_MELT_STDLIB_OK" || { echo "FAIL run"; fail=1; }
+else echo "FAIL compile"; fail=1; fi
+[ $fail -eq 0 ] && echo "DATAFRAME_MELT_GATE_OK"
+exit $fail

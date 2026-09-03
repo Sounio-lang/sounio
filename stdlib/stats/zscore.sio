@@ -1,0 +1,142 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/zscore.sio — standardisation (z-scores) & percentile rank
+//
+// Centres and scales data to zero mean and unit sd, and locates a value in the
+// sample — the basic feature-scaling and positioning primitives:
+//
+//   zscore(x, n, out_z) -> ZResult                 zᵢ = (xᵢ − x̄)/s
+//   percentile_rank(x, n, value) -> f64            (#< + ½·#=)/n · 100
+//
+// The z-scores use the sample sd (÷(n−1)); the percentile rank uses the mid-rank
+// convention so ties are split evenly.
+//
+// Pure Sounio: one pass for the mean, one for the sd, one to fill out_z; inline
+// sqrt. No external dependency, no nested data-array calls.
+//
+// References:
+//   Kreyszig, "Advanced Engineering Mathematics"; standard definitions.
+
+module stats::zscore
+
+fn zs_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct ZResult {
+    pub mean: f64,
+    pub sd: f64,
+}
+
+/// Standardise x to z-scores; fills out_z[0..n).
+///
+/// Parâmetros: x — data; n — size (>=2, <=256); out_z — receives the z-scores.
+/// Retorno: ZResult (mean, sd).
+pub fn zscore(x: &[f64; 256], n: i32, out_z: &![f64; 256]) -> ZResult with Mut, Div, Panic {
+    if n < 2 { return ZResult { mean: 0.0, sd: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let sd = zs_sqrt(ss / (nf - 1.0))
+    var k = 0
+    while k < n {
+        var z = 0.0
+        if sd > 1.0e-300 { z = (x[k as usize] - mean) / sd }
+        out_z[k as usize] = z
+        k = k + 1
+    }
+    return ZResult { mean: mean, sd: sd }
+}
+
+/// Percentile rank of a value within the sample (mid-rank convention, 0..100).
+pub fn percentile_rank(x: &[f64; 256], n: i32, value: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var below = 0
+    var equal = 0
+    var i = 0
+    while i < n {
+        let v = x[i as usize]
+        if v < value { below = below + 1 } else { if v == value { equal = equal + 1 } }
+        i = i + 1
+    }
+    return ((below as f64) + 0.5 * (equal as f64)) / (n as f64) * 100.0
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {2,4,4,4,5,5,7,9}: mean 5, sample sd 2.138090.
+// z_0=(2-5)/2.138090=-1.403191; z_7=(9-5)/2.138090=1.870922.
+fn test_zscore() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var z: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=4.0; x[3]=4.0; x[4]=5.0; x[5]=5.0; x[6]=7.0; x[7]=9.0
+    let r = zscore(&x, 8, &!z)
+    var ok = true
+    ok = check(1, approx(r.mean, 5.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.sd, 2.138090, 1.0e-5)) && ok
+    ok = check(3, approx(z[0], 0.0 - 1.403191, 1.0e-4)) && ok
+    ok = check(4, approx(z[7], 1.870922, 1.0e-4)) && ok
+    return ok
+}
+
+// standardized data has mean 0 (sum of z ≈ 0).
+fn test_mean_zero() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var z: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=20.0; x[2]=30.0; x[3]=40.0; x[4]=50.0
+    let r = zscore(&x, 5, &!z)
+    var s = 0.0
+    var i = 0
+    while i < 5 { s = s + z[i as usize]; i = i + 1 }
+    return check(10, approx(s, 0.0, 1.0e-9))
+}
+
+// percentile rank: value 5 in {2,4,4,4,5,5,7,9}: below=4, equal=2 -> (4+1)/8·100=62.5.
+fn test_prank() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=4.0; x[3]=4.0; x[4]=5.0; x[5]=5.0; x[6]=7.0; x[7]=9.0
+    return check(20, approx(percentile_rank(&x, 8, 5.0), 62.5, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_zscore() && ok
+    ok = test_mean_zero() && ok
+    ok = test_prank() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

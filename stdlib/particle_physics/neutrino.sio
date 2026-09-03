@@ -1,0 +1,328 @@
+// stdlib/particle_physics/neutrino.sio
+//
+// Neutrino flavor oscillations in vacuum and matter.
+// Uses the PMNS matrix from StandardModel and PDG 2024 oscillation parameters.
+//
+// References:
+//   - PDG 2024, Neutrino Mixing
+//   - Fukugita & Yanagida, "Physics of Neutrinos", Ch. 3
+
+module particle_physics::neutrino
+
+use particle_physics::standard_model::{StandardModel, pmns_get}
+use epistemic::knowledge::{Epistemic}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// PMNS MATRIX ACCESSORS
+// ============================================================================
+
+/// PMNS matrix element magnitude |U_ij| where i,j ∈ {0,1,2}.
+/// i = flavor (0=e, 1=μ, 2=τ), j = mass eigenstate (0=1, 1=2, 2=3).
+pub fn pmns_u(sm: StandardModel, i: i64, j: i64) -> f64 {
+    pmns_get(sm, i, j)
+}
+
+/// Squared PMNS element |U_ij|².
+pub fn pmns_u_sq(sm: StandardModel, i: i64, j: i64) -> f64 {
+    let u = pmns_get(sm, i, j)
+    u * u
+}
+
+// ============================================================================
+// TWO-FLAVOR OSCILLATION
+// ============================================================================
+
+/// Vacuum oscillation probability for two flavors.
+///
+/// P(ν_a → ν_b) = sin²(2θ) · sin²(1.267 · Δm² · L / E)
+///
+/// # Parameters
+/// - `sin2_2theta`: sin²(2θ) mixing parameter.
+/// - `dm2`: Mass-squared difference in eV².
+/// - `L`: Baseline in km.
+/// - `E`: Neutrino energy in GeV.
+///
+/// # Returns
+/// Oscillation probability (0 to 1).
+pub fn oscillation_probability_2flavor(sin2_2theta: f64, dm2: f64, L: f64, E: f64) -> f64 with Mut, Div, Panic {
+    if E <= 0.0 { return 0.0 }
+    let arg = 1.267 * dm2 * L / E
+    let sin_arg = sin_f64(arg)
+    sin2_2theta * sin_arg * sin_arg
+}
+
+/// Survival probability P(ν_a → ν_a) for two flavors.
+pub fn survival_probability_2flavor(sin2_2theta: f64, dm2: f64, L: f64, E: f64) -> f64 with Mut, Div, Panic {
+    1.0 - oscillation_probability_2flavor(sin2_2theta, dm2, L, E)
+}
+
+// ============================================================================
+// THREE-FLAVOR VACUUM OSCILLATIONS (SIMPLIFIED)
+// ============================================================================
+
+/// Electron neutrino survival probability P(ν_e → ν_e) in vacuum.
+/// Approximate formula neglecting CP phase and subleading terms:
+///   P_ee ≈ 1 - sin²(2θ₁₃) sin²(Δm²₃₁ L / 4E)
+///          - cos⁴θ₁₃ sin²(2θ₁₂) sin²(Δm²₂₁ L / 4E)
+///
+/// # Parameters
+/// - `L`: Baseline in km.
+/// - `E`: Neutrino energy in GeV.
+/// - `theta12`: θ₁₂ mixing angle in radians.
+/// - `theta13`: θ₁₃ mixing angle in radians.
+/// - `dm2_21`: Δm²₂₁ in eV².
+/// - `dm2_31`: Δm²₃₁ in eV².
+pub fn oscillation_probability_ee(sin2_2theta12: f64, sin2_2theta13: f64, cos_theta13: f64, dm2_21: f64, dm2_31: f64, L: f64, E: f64) -> f64 with Mut, Div, Panic {
+    if E <= 0.0 { return 1.0 }
+    let arg31 = 1.267 * dm2_31 * L / E
+    let arg21 = 1.267 * dm2_21 * L / E
+    let sin31 = sin_f64(arg31)
+    let sin21 = sin_f64(arg21)
+    let c13_4 = cos_theta13 * cos_theta13 * cos_theta13 * cos_theta13
+    1.0 - sin2_2theta13 * sin31 * sin31 - c13_4 * sin2_2theta12 * sin21 * sin21
+}
+
+/// Muon-to-electron appearance probability P(ν_μ → ν_e).
+/// Leading term for long-baseline experiments (T2K, NOvA):
+///   P_μe ≈ sin²(θ₂₃) sin²(2θ₁₃) sin²(Δm²₃₁ L / 4E)
+pub fn oscillation_probability_mue(sin2_theta23: f64, sin2_2theta13: f64, dm2_31: f64, L: f64, E: f64) -> f64 with Mut, Div, Panic {
+    if E <= 0.0 { return 0.0 }
+    let arg = 1.267 * dm2_31 * L / E
+    let sin_arg = sin_f64(arg)
+    sin2_theta23 * sin2_2theta13 * sin_arg * sin_arg
+}
+
+/// Muon-to-tau disappearance probability P(ν_μ → ν_τ).
+/// Approximate formula for atmospheric neutrinos:
+///   P_μτ ≈ cos⁴(θ₁₃) sin²(2θ₂₃) sin²(Δm²₃₁ L / 4E)
+pub fn oscillation_probability_mutau(sin2_theta23: f64, sin2_2theta23: f64, cos_theta13: f64, dm2_31: f64, L: f64, E: f64) -> f64 with Mut, Div, Panic {
+    if E <= 0.0 { return 0.0 }
+    let arg = 1.267 * dm2_31 * L / E
+    let sin_arg = sin_f64(arg)
+    let c13_4 = cos_theta13 * cos_theta13 * cos_theta13 * cos_theta13
+    c13_4 * sin2_2theta23 * sin_arg * sin_arg
+}
+
+// ============================================================================
+// MATTER EFFECTS (MSW)
+// ============================================================================
+
+/// Solar matter effect: effective mixing angle in matter.
+///
+/// For solar neutrinos, the MSW resonance modifies the vacuum
+/// mixing angle θ₁₂ → θ₁₂^M where:
+///   tan(2θ₁₂^M) = sin(2θ₁₂) / (cos(2θ₁₂) - 2√2 G_F N_e E / Δm²₂₁)
+///
+/// # Parameters
+/// - `ne`: Electron number density in mol/cm³ (solar core ≈ 100).
+/// - `e_mev`: Neutrino energy in MeV.
+/// - `theta12_rad`: θ₁₂ in radians.
+/// - `dm2_21_ev2`: Δm²₂₁ in eV².
+///
+/// # Returns
+/// Effective sin²(2θ₁₂) in matter.
+pub fn solar_matter_effect(ne: f64, e_mev: f64, theta12_rad: f64, dm2_21_ev2: f64) -> f64 with Mut, Div, Panic {
+    if dm2_21_ev2 == 0.0 { return sin_f64(2.0 * theta12_rad) * sin_f64(2.0 * theta12_rad) }
+    let s2 = sin_f64(2.0 * theta12_rad)
+    let c2 = cos_f64(2.0 * theta12_rad)
+    // Matter potential A = 2√2 G_F N_e E / Δm²₂₁
+    // G_F ≈ 1.166e-5 GeV⁻², N_e in cm⁻³, E in MeV
+    // Convert: 2√2 G_F ≈ 7.63e-14 eV² cm³ / MeV
+    let conversion = 7.63e-14
+    let a = conversion * ne * e_mev / dm2_21_ev2
+    let tan2_eff = s2 / (c2 - a)
+    let sin2_eff = 2.0 * tan2_eff / (1.0 + tan2_eff * tan2_eff)
+    if sin2_eff < 0.0 { 0.0 - sin2_eff } else { sin2_eff }
+}
+
+/// Adiabatic survival probability for solar neutrinos with matter.
+/// P_ee^M = ½ (1 + cos(2θ₁₂^M) cos(2θ₁₂))
+pub fn solar_survival_matter(sin2_2theta12_matter: f64, sin2_2theta12_vacuum: f64) -> f64 with Mut, Div, Panic {
+    // cos(2θ) = √(1 - sin²(2θ))
+    let c2m = sqrt_f64(1.0 - sin2_2theta12_matter)
+    let c2v = sqrt_f64(1.0 - sin2_2theta12_vacuum)
+    0.5 * (1.0 + c2m * c2v)
+}
+
+// ============================================================================
+// OSCILLATION AVERAGES
+// ============================================================================
+
+/// Vacuum-averaged survival probability for 2-flavor case.
+/// After many oscillations, sin²(Δm² L / 4E) → ½.
+pub fn survival_probability_2flavor_avg(sin2_2theta: f64) -> f64 {
+    1.0 - 0.5 * sin2_2theta
+}
+
+/// Vacuum-averaged electron survival probability (3-flavor).
+pub fn survival_probability_ee_avg(sin2_2theta12: f64, sin2_2theta13: f64, cos_theta13: f64) -> f64 {
+    let c13_4 = cos_theta13 * cos_theta13 * cos_theta13 * cos_theta13
+    1.0 - 0.5 * sin2_2theta13 - 0.5 * c13_4 * sin2_2theta12
+}
+
+// ============================================================================
+// PDG 2024 OSCILLATION PARAMETERS WITH EPISTEMIC UNCERTAINTY
+// ============================================================================
+// PDG 2024 NuFIT-5.3 best-fit values with 1σ uncertainties.
+// These are the PMNS parameters independently of any specific model.
+
+/// sin²θ₁₂ with PDG 2024 uncertainty.
+/// PDG: sin²θ₁₂ = 0.307 ± 0.013.
+pub fn sin2_theta12_ep() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(0.307, 0.013)
+}
+
+/// sin²θ₁₃ with PDG 2024 uncertainty.
+/// PDG: sin²θ₁₃ = 0.0218 ± 0.0007.
+pub fn sin2_theta13_ep() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(0.0218, 0.0007)
+}
+
+/// sin²θ₂₃ with PDG 2024 uncertainty.
+/// PDG: sin²θ₂₃ = 0.546 ± 0.021.
+pub fn sin2_theta23_ep() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(0.546, 0.021)
+}
+
+/// Δm²₂₁ (solar mass splitting) with PDG 2024 uncertainty.
+/// PDG: Δm²₂₁ = (7.42 ± 0.21) × 10⁻⁵ eV².
+pub fn dm2_21_ep() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(7.42e-5, 0.21e-5)
+}
+
+/// |Δm²₃₁| (atmospheric mass splitting) with PDG 2024 uncertainty.
+/// PDG: |Δm²₃₁| = (2.515 ± 0.028) × 10⁻³ eV².
+pub fn dm2_31_ep() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(2.515e-3, 0.028e-3)
+}
+
+// ============================================================================
+// GUM-EXACT OSCILLATION PROBABILITIES
+// ============================================================================
+
+/// GUM-exact 2-flavor oscillation probability P(ν_a → ν_b).
+///
+/// P = sin²(2θ) · sin²(1.267 · Δm² · L / E)
+///
+/// Epistemic inputs: sin²(2θ) ±σ_θ, Δm² ±σ_Δm².
+/// GUM chain:
+///   Var(P) ≈ sin⁴(arg) · Var(sin²2θ)
+///           + [sin²(2θ) · sin(2arg) · 1.267 L/E]² · Var(Δm²)
+///
+/// # Arguments
+/// - `sin2_2theta_ep`: sin²(2θ) as Epistemic.
+/// - `dm2_ep`: Δm² as Epistemic (eV²).
+/// - `L_km`: Baseline in km.
+/// - `E_gev`: Neutrino energy in GeV.
+pub fn oscillation_probability_ep(sin2_2theta_ep: Epistemic, dm2_ep: Epistemic, L_km: f64, E_gev: f64) -> Epistemic with Mut, Div, Panic {
+    if E_gev <= 0.0 { return Epistemic::certain(0.0) }
+    let arg = 1.267 * dm2_ep.val() * L_km / E_gev
+    let sin_arg = sin_f64(arg)
+    let cos_arg = cos_f64(arg)
+    let sin2_arg = sin_arg * sin_arg
+
+    // Central value
+    let p_val = sin2_2theta_ep.val() * sin2_arg
+
+    // GUM: ∂P/∂(sin²2θ) = sin²(arg) → Var_θ = sin⁴(arg) · Var(sin²2θ)
+    let dp_dth = sin2_arg
+    let var_from_theta = dp_dth * dp_dth * sin2_2theta_ep.variance()
+
+    // GUM: ∂P/∂(Δm²) = sin²(2θ) · 2 sin(arg) cos(arg) · 1.267 L/E
+    let dp_ddm2 = sin2_2theta_ep.val() * 2.0 * sin_arg * cos_arg * 1.267 * L_km / E_gev
+    let var_from_dm2 = dp_ddm2 * dp_ddm2 * dm2_ep.variance()
+
+    // Confidence: min of two inputs, with combination decay
+    let conf_th = sin2_2theta_ep.confidence()
+    let conf_dm = dm2_ep.confidence()
+    let conf = if conf_th < conf_dm { conf_th * 98 / 100 } else { conf_dm * 98 / 100 }
+
+    Epistemic::new(p_val, var_from_theta + var_from_dm2, conf)
+}
+
+/// GUM-exact reactor θ₁₃ measurement context:
+///   P(ν̄_e → ν̄_e) ≈ 1 - sin²(2θ₁₃) · sin²(1.267 Δm²₃₁ L/E)
+/// Uses PDG 2024 values for sin²(2θ₁₃) and Δm²₃₁.
+///
+/// Represents a Daya Bay/RENO/Double Chooz-class measurement with full uncertainty.
+pub fn reactor_survival_ep(L_km: f64, E_gev: f64) -> Epistemic with Mut, Div, Panic {
+    // sin²(2θ₁₃) = 4 sin²θ₁₃ (1 - sin²θ₁₃)
+    let s13 = sin2_theta13_ep()
+    // At sin²θ₁₃ = 0.0218: sin²(2θ₁₃) ≈ 4 × 0.0218 × (1 - 0.0218) ≈ 0.08527
+    // GUM: d(sin²2θ)/d(sin²θ) = 4(1 - 2 sin²θ)
+    let deriv = 4.0 * (1.0 - 2.0 * s13.val())
+    let s13_val = 4.0 * s13.val() * (1.0 - s13.val())
+    let s13_var = deriv * deriv * s13.variance()
+    let sin2_2theta13_ep = Epistemic::new(s13_val, s13_var, s13.confidence())
+
+    let dm31 = dm2_31_ep()
+    let osc = oscillation_probability_ep(sin2_2theta13_ep, dm31, L_km, E_gev)
+    // Survival = 1 - P_osc, variance unchanged (d(1-P)/dP = -1 → Var unchanged)
+    Epistemic::new(1.0 - osc.val(), osc.variance(), osc.confidence())
+}
+
+/// GUM-exact solar θ₁₂ measurement:
+///   P(ν̄_e → ν̄_e)_avg = 1 - ½ sin²(2θ₁₂)  (averaged over many oscillations)
+/// Uses PDG 2024 sin²θ₁₂ with full uncertainty.
+pub fn solar_survival_avg_ep() -> Epistemic with Mut, Div, Panic {
+    // sin²(2θ₁₂) = 4 sin²θ₁₂ (1 - sin²θ₁₂)
+    let s12 = sin2_theta12_ep()
+    let deriv = 4.0 * (1.0 - 2.0 * s12.val())
+    let s22_val = 4.0 * s12.val() * (1.0 - s12.val())
+    let s22_var = deriv * deriv * s12.variance()
+    // P_avg = 1 - ½ s22  →  Var(P_avg) = ¼ Var(s22)
+    let p_val = 1.0 - 0.5 * s22_val
+    let p_var = 0.25 * s22_var
+    Epistemic::new(p_val, p_var, s12.confidence())
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sin_f64(x: f64) -> f64 with Mut {
+    // Taylor series: sin(x) = x - x³/3! + x⁵/5! - x⁷/7! + ...
+    // Normalize to [-π, π]
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x3 = y * x2
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    let x9 = x7 * x2
+    y - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+fn cos_f64(x: f64) -> f64 with Mut {
+    // Taylor series: cos(x) = 1 - x²/2! + x⁴/4! - x⁶/6! + ...
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    let x8 = x6 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}

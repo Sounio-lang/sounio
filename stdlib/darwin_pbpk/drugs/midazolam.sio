@@ -1,0 +1,99 @@
+// midazolam.sio — Midazolam systemic PBPK14 parameters + CYP3A DDI wiring.
+//
+// Fifth canonical drug; the suite's CYP3A drug–drug-interaction (DDI) probe.
+// Midazolam is the textbook CYP3A victim: oral bioavailability is gated by gut +
+// hepatic first-pass, and a strong CYP3A inhibitor (ketoconazole) raises oral AUC
+// ~15× (Olkkola 1994). The mechanism lives in ddi/cyp3a_competitive.sio: a single
+// hepatic intrinsic clearance CLint_h yields BOTH first-pass survival FH and the
+// systemic well-stirred clearance CL_h, so inhibition is consistent (no
+// double-count). This module exposes midazolam's substrate parameters and builds
+// PBPKParams14 / AbsorptionParams with the (optionally inhibited / PGx-adjusted)
+// CL_h and oral F derived from that mechanism.
+//
+// Systemic distribution Kp are nominal midazolam-plausible values (Vss ~1.4 L/kg,
+// moderate lipophilicity); the validated DDI quantities are F, CL_h and AUCR,
+// which are distribution-independent (see validation/midazolam_ddi.sio). Units:
+// L, L/h, mg/L. Renal clearance of unchanged drug is negligible (<1%).
+//
+// Sources: Heizmann 1984 (oral F~0.4), Thummel 1996 (gut+hepatic first-pass),
+// Gorski 1998 / Olkkola 1994,1996 (ketoconazole DDI ~15×), Yang 2007 (Qgut),
+// Smith 1981 (fu ~0.03).
+
+use darwin_pbpk::absorption::{AbsorptionParams}
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+use darwin_pbpk::ddi::cyp3a_competitive::{Cyp3aSubstrate, Cyp3aInhibitor, cyp3a_clh, cyp3a_f_oral, cyp3a_factor_of}
+use darwin_pbpk::pgx::cyp3a45_midazolam::{mdz_cyp3a_adjusted_clint}
+
+// Midazolam CYP3A substrate parameters (drive FG/FH/CL_h in cyp3a_competitive).
+pub fn midazolam_cyp3a_substrate() -> Cyp3aSubstrate {
+    Cyp3aSubstrate { qh: 90.0, qg: 18.0, fu: 0.03, fu_gut: 1.0, fa: 0.95, clint_h: 1090.0, clint_g: 14.7 }
+}
+
+// Ketoconazole perpetrator: static steady-state unbound conc (mg/L); I/Ki = 8.
+pub fn ketoconazole_inhibitor() -> Cyp3aInhibitor {
+    Cyp3aInhibitor { ki: 0.008, i_unbound: 0.064 }
+}
+
+// PBPK14 systemic distribution template with a supplied (mechanism-derived)
+// effective plasma clearance cl_h_eff. The stdlib pbpk_ode applies cl_hepatic on
+// UNBOUND drug (cl_hepatic·fu·c_plasma), so we store the intrinsic-on-unbound
+// value CL_h/fu to realise cl_h_eff as the plasma clearance. (The fixed-step
+// parity ref applies CL_h on plasma directly — same effective clearance,
+// identical trajectory; the conventions agree on the observable plasma curve.)
+fn midazolam_params_with_clh(cl_h_eff: f64) -> PBPKParams14 with Div {
+    let fu: f64 = 0.03
+    PBPKParams14 {
+        // Volumes (L) — 70 kg reference
+        v_blood: 5.2, v_liver: 1.69, v_kidney: 0.31, v_brain: 1.37,
+        v_heart: 0.31, v_lung: 1.17, v_muscle: 29.0, v_adipose: 18.2,
+        v_gut: 1.65, v_skin: 7.8, v_bone: 10.5, v_spleen: 0.19,
+        v_pancreas: 0.14, v_other: 4.5,
+        // Blood flows (L/h)
+        q_liver: 90.0, q_kidney: 72.0, q_brain: 44.0, q_heart: 14.4,
+        q_lung: 0.0, q_muscle: 73.8, q_adipose: 18.0, q_gut: 57.6,
+        q_skin: 18.0, q_bone: 21.6, q_spleen: 10.8, q_pancreas: 4.5,
+        q_other: 18.0,
+        // Partition coefficients (midazolam, nominal)
+        kp_liver: 2.0, kp_kidney: 1.5, kp_brain: 1.5, kp_heart: 1.2,
+        kp_lung: 1.5, kp_muscle: 1.0, kp_adipose: 2.0, kp_gut: 1.5,
+        kp_skin: 1.2, kp_bone: 0.6, kp_spleen: 1.2, kp_pancreas: 1.2,
+        kp_other: 1.0,
+        // Clearance — intrinsic-on-unbound = CL_h/fu (stdlib multiplies by fu);
+        // renal negligible (<1%)
+        cl_hepatic: cl_h_eff / fu, cl_renal: 0.0,
+        // Blood binding
+        fu_plasma: fu, rb_ratio: 1.0
+    }
+}
+
+// Baseline (no inhibitor) PBPK14 parameters.
+pub fn midazolam_pbpk_params() -> PBPKParams14 with Mut, Div {
+    return midazolam_params_with_clh(cyp3a_clh(midazolam_cyp3a_substrate(), 1.0))
+}
+
+// PBPK14 parameters under a CYP3A inhibition factor in (0,1] (1.0 = no inhibition).
+pub fn midazolam_pbpk_params_ddi(factor: f64) -> PBPKParams14 with Mut, Div {
+    return midazolam_params_with_clh(cyp3a_clh(midazolam_cyp3a_substrate(), factor))
+}
+
+// PBPK14 parameters under a ketoconazole co-administration (static steady state).
+pub fn midazolam_pbpk_params_keto() -> PBPKParams14 with Mut, Div {
+    return midazolam_pbpk_params_ddi(cyp3a_factor_of(ketoconazole_inhibitor()))
+}
+
+// PGx-adjusted PBPK14 parameters: CYP3A5 expresser + CYP3A4*22 scale CLint_h.
+pub fn midazolam_pbpk_params_pgx(cyp3a5_geno: i32, cyp3a4_22: i32) -> PBPKParams14 with Mut, Div, Panic {
+    var sub = midazolam_cyp3a_substrate()
+    sub.clint_h = mdz_cyp3a_adjusted_clint(sub.clint_h, cyp3a5_geno, cyp3a4_22)
+    return midazolam_params_with_clh(cyp3a_clh(sub, 1.0))
+}
+
+// Absorption: rapid oral (ka 3/h, Tmax ~0.9 h), negligible lag. f_bio = Fa·FG·FH.
+pub fn midazolam_absorption_params() -> AbsorptionParams with Div {
+    AbsorptionParams { ka: 3.0, f_bio: cyp3a_f_oral(midazolam_cyp3a_substrate(), 1.0), tlag: 0.0 }
+}
+
+// Absorption under a CYP3A inhibition factor (gut+hepatic first-pass recover).
+pub fn midazolam_absorption_params_ddi(factor: f64) -> AbsorptionParams with Div {
+    AbsorptionParams { ka: 3.0, f_bio: cyp3a_f_oral(midazolam_cyp3a_substrate(), factor), tlag: 0.0 }
+}

@@ -1,14 +1,14 @@
 # epistemic-core
 
-**Epistemic-score: 0.97 | GUM-compliant | Regulatory-ready**
+**First-order uncertainty propagation for uncorrelated inputs**
 
-Core epistemic types for Sounio: `Knowledge<T>`, GUM uncertainty propagation, confidence gates, and provenance tracking.
+Core epistemic types for Sounio: `KCoreKnowledge`, first-order uncertainty propagation, confidence gates, and source metadata.
 
 ## Overview
 
-`epistemic-core` implements the fundamental epistemic layer of the Sounio language ecosystem. It provides first-class uncertainty quantification following the **Guide to the Expression of Uncertainty in Measurement** (JCGM 100:2008 / GUM).
+`epistemic-core` implements measurement values with standard uncertainty, explicit confidence, and lightweight source metadata. Its arithmetic helpers implement the first-order law of propagation of uncertainty for uncorrelated inputs described by **JCGM 100:2008**.
 
-Unlike type libraries that treat uncertainty as an annotation, `epistemic-core` makes uncertainty **propagate automatically** through all arithmetic operations.
+The package propagates uncertainty through its supported arithmetic helper functions. Correlated-input and Monte Carlo propagation are not implemented in this release.
 
 ## Install
 
@@ -26,13 +26,13 @@ let dose   = measure(500.0, 25.0, "HPLC_2025")     // 500 ± 25 mg
 let volume = measure(10.0,  0.2,  "pipette_A")      // 10  ± 0.2 mL
 
 // GUM division: relative uncertainties combine in quadrature
-let conc = knowledge_div(&dose, &volume)             // 50 ± 1.27 mg/mL
+let conc = knowledge_div(&dose, &volume)             // 50 ± 2.69 mg/mL
 
 // Epistemic safety gate
 confidence_gate(&conc, 0.90)                         // panics if conf < 0.90
 
 println_knowledge(&conc)
-// → 50.0000 +/- 1.2748 [conf=1.00]
+// -> 50.0000 +/- 2.6926 [conf=1.00]
 ```
 
 ## API
@@ -50,8 +50,8 @@ println_knowledge(&conc)
 |----------|-------------|
 | `knowledge_add(a, b)` | u = √(u_a² + u_b²) |
 | `knowledge_sub(a, b)` | u = √(u_a² + u_b²) |
-| `knowledge_mul(a, b)` | u/\|v\| = √(rel_a² + rel_b²) |
-| `knowledge_div(a, b)` | u/\|v\| = √(rel_a² + rel_b²) |
+| `knowledge_mul(a, b)` | u(ab) = √((b·u_a)² + (a·u_b)²) |
+| `knowledge_div(a, b)` | u(a/b) = √((u_a/b)² + (a·u_b/b²)²), b != 0 |
 | `knowledge_scale(k, f)` | u_out = f * u_in |
 
 ### Multi-input Propagation
@@ -82,17 +82,17 @@ knowledge_rel_uncertainty(&k)   // u / |v|
 knowledge_expanded(&k, 2.0)     // expanded uncertainty U = k·u
 ```
 
-## GUM Compliance
+## GUM Scope
 
-This package implements **JCGM 100:2008** first-order uncertainty propagation:
+This package implements the **JCGM 100:2008** first-order propagation formula for uncorrelated inputs:
 
 - Additive: u_c(y) = √(Σ(∂f/∂xᵢ · u(xᵢ))²)
-- Confidence propagation: min of input confidences (conservative)
-- Provenance tracking: automatically derives source chain
+- Confidence propagation: minimum of input confidence values (a package policy, not a GUM rule)
+- Correlations, effective degrees of freedom, coverage intervals, and conformity assessment are outside the current scope
 
 ## Provenance
 
-All derived `Knowledge` values carry a `Source` that encodes the provenance chain. Provenance levels: `sensor` (0) → `model` (1) → `literature` (2) → `prior` (3) → `derived` (4).
+`Knowledge` values carry lightweight source metadata. Full label storage, chain relations, and W3C PROV-DM export are not implemented in this release.
 
 ## Roadmap
 

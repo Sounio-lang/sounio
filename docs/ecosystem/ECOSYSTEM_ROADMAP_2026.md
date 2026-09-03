@@ -15,13 +15,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ecosystem.ecos
 
 ## Visão Estratégica
 
-Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta padrão para computação científica confiável e regulatória**, especialmente em farmacologia, neurociência e ciências regulatórias.
+Transformar o Sounio em uma plataforma de computação científica na qual
+fronteiras de software, contexto de uso e evidência permaneçam explícitos, sem
+converter maturidade de implementação em autoridade científica ou regulatória.
 
 **Métrica de sucesso em 12 meses:**
 - 25 pacotes no registry público
 - `pip install sounio` com > 500 downloads/mês
 - Pelo menos 3 publicações científicas usando Sounio + Python
-- `epistemic-score` médio dos pacotes > 0.75
+- receipts de fronteira verificáveis para todos os releases claim-bearing
 
 ---
 
@@ -62,7 +64,7 @@ Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta pa
    - Backend (Rust ou Sounio self-hosted)
    - API de publish/search
    - Web UI simples
-   - Epistemic scoring automático
+   - Indexação de rings, contexts of use e receipts verificáveis
    - Estimativa: 6-7 semanas
 
 2. **sounio-py v0.2**
@@ -86,9 +88,9 @@ Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta pa
 ### **T3 2026 (Out-Dez): Ecossistema e Qualidade**
 
 1. **Ferramentas de Qualidade**
-   - `souc pkg audit --epistemic`
-   - Coverage de testes epistêmicos
-   - Verificação automática de provenance
+   - `souc pkg audit` com métricas nomeadas e não autoritativas
+   - Cobertura de testes identificada como cobertura, não validação
+   - Verificação de provenance separada de assurance
 
 2. **sounio-py v0.3**
    - Epistemic Neural Networks
@@ -104,11 +106,11 @@ Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta pa
 
 ---
 
-### **T4 2026 / T1 2027: Consolidação Regulatória**
+### **T4 2026 / T1 2027: Evidência e Qualificação Específica**
 
-- Ferramentas específicas para submissão regulatória (FDA, EMA, ANVISA)
+- Pesquisa de ferramentas para contextos regulatórios específicos
 - Integração com PyMC, Stan e NONMEM
-- Certificação de qualidade para uso em ensaios clínicos
+- Gates de qualificação definidos por finalidade antes de qualquer claim clínica
 - Suporte a computação em nuvem epistêmica
 
 ---
@@ -144,10 +146,17 @@ Transformar o Sounio de uma linguagem acadêmica promissora em **a ferramenta pa
 
 **Próximos Passos Imediatos (Próximas 2 Semanas):**
 
-1. Implementar parser de `sounio.toml` no compilador
-2. Criar `sounio-py` com binding mínimo de `Knowledge`
-3. Publicar os 3 documentos criados (SOUNIO_TOML_SPEC, sounio-py README, este roadmap)
-4. Definir lista final de pacotes curados
+1. Fechar o inventário ring-by-ring do `stdlib`
+2. Manter a integração R2.5 de `package-boundary-receipt` nos releases opt-in
+3. Criar `sounio-py` com binding mínimo de `Knowledge`
+4. Manter o gate R2.6 de registry attestation local com publicação desabilitada
+5. Manter inventário, materialização, autorização, execução local, aprovação
+   Git/rehearsal, execução Git R3, assessment de gaps de produção e o
+   processador não-autorizante da futura seleção de mapeamento; a execução
+   canônica está provada apenas em fixtures, a issue #1122 ainda não recebeu a
+   escolha humana dos cinco targets, e a origem oficial exige política
+   `canonical-production`, destinos reais e decisão humana explícita antes de
+   qualquer remoção
 
 ---
 

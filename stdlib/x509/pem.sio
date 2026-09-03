@@ -1,0 +1,134 @@
+// stdlib/x509/pem.sio
+//
+// PEM block decoder (RFC 7468 "textual encoding"). Decodes one
+// "-----BEGIN CERTIFICATE-----" ... "-----END CERTIFICATE-----" block at a
+// time out of an arbitrary buffer, returning the block's decoded DER bytes
+// plus a search offset the caller can feed back in to walk every block in a
+// multi-certificate PEM bundle (a CA trust-store bundle is exactly that).
+//
+// base64_decode (stdlib/encoding/base64.sio) only accepts a fixed 256-byte
+// input array per call and requires its input length to be a multiple of 4.
+// A PEM certificate body is normally far longer than 256 base64 characters
+// (wrapped at 64 chars/line by convention), so this module strips newlines
+// out of the body into a scratch buffer first, then feeds base64_decode
+// 256-byte chunks of that scratch buffer, appending each chunk's decoded
+// output into the result buffer.
+
+use net::socket::*
+use encoding::base64::*
+
+pub const PEM_ERR_NO_BEGIN_MARKER: i64 = 0 - 1
+pub const PEM_ERR_NO_END_MARKER: i64 = 0 - 2
+pub const PEM_ERR_BASE64_DECODE: i64 = 0 - 3
+
+fn pem_is_base64_char(b: i64) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 43 || b == 47 || b == 61
+    // A-Z            a-z              0-9              '+'      '/'      '='
+}
+
+// Scans buf[from..buf_len) for the literal marker byte sequence; returns the
+// absolute offset of the first byte AFTER the marker, or -1 if not found
+// before buf_len. Compares byte-by-byte via rawbuf_get (no substring builtin
+// exists in this stdlib for RawBuf).
+fn pem_find_marker(buf: &RawBuf, buf_len: i64, from: i64, marker: &[u8; 32], marker_len: i64) -> i64 with IO {
+    var i: i64 = from
+    while i + marker_len <= buf_len {
+        var matched: bool = true
+        var j: i64 = 0
+        while j < marker_len {
+            if rawbuf_get(buf, i + j) != (marker[j as usize] as i64) {
+                matched = false
+                j = marker_len // break
+            } else {
+                j = j + 1
+            }
+        }
+        if matched {
+            return i + marker_len
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Decodes the next "-----BEGIN CERTIFICATE-----" ... "-----END
+// CERTIFICATE-----" block found at or after `start` in `buf`.
+//
+// Returns (der_bytes, der_len, next_search_offset, error_code):
+//   - error_code == 0 on success (including the "no more blocks" case).
+//   - When no BEGIN marker exists at or after `start`, this is NOT an
+//     error: returns (rawbuf_new(1), 0, -1, 0). next_search_offset == -1
+//     signals "no more blocks" to a caller looping over a multi-cert bundle.
+//   - PEM_ERR_NO_END_MARKER / PEM_ERR_BASE64_DECODE are real errors; the
+//     returned RawBuf is a throwaway empty one in both cases.
+pub fn pem_decode_next(buf: &RawBuf, buf_len: i64, start: i64) -> (RawBuf, i64, i64, i64) with IO, Mut, Div, Panic {
+    let begin_marker: [u8; 32] = [
+        45,45,45,45,45,66,69,71,73,78,32,67,69,82,84,73,70,73,67,65,84,69,45,45,45,45,45,
+        0,0,0,0,0
+    ] // "-----BEGIN CERTIFICATE-----" followed by zero padding to fill the array
+    let begin_marker_len: i64 = 27
+    let end_marker: [u8; 32] = [
+        45,45,45,45,45,69,78,68,32,67,69,82,84,73,70,73,67,65,84,69,45,45,45,45,45,
+        0,0,0,0,0,0,0
+    ] // "-----END CERTIFICATE-----" followed by zero padding
+    let end_marker_len: i64 = 25
+
+    let body_start = pem_find_marker(buf, buf_len, start, &begin_marker, begin_marker_len)
+    if body_start == (0 - 1) {
+        return (rawbuf_new(1), 0, 0 - 1, 0)  // no more blocks -- not an error
+    }
+    let body_end_marker_pos = pem_find_marker(buf, buf_len, body_start, &end_marker, end_marker_len)
+    if body_end_marker_pos == (0 - 1) {
+        return (rawbuf_new(1), 0, 0, PEM_ERR_NO_END_MARKER)
+    }
+    let body_end = body_end_marker_pos - end_marker_len  // position of '-' that starts the END marker
+
+    // Pass 1: strip non-base64-alphabet bytes (newlines, carriage returns)
+    // from body_start..body_end into a scratch RawBuf, tracking its length.
+    let scratch = rawbuf_new(body_end - body_start + 8)
+    var scratch_len: i64 = 0
+    var p: i64 = body_start
+    while p < body_end {
+        let b = rawbuf_get(buf, p)
+        if pem_is_base64_char(b) {
+            rawbuf_set(&scratch, scratch_len, b)
+            scratch_len = scratch_len + 1
+        }
+        p = p + 1
+    }
+
+    // Pass 2: decode scratch in 256-byte chunks (base64_decode's own fixed-
+    // array ceiling), each chunk's length a multiple of 4 by construction
+    // (see this module's header note: the stripped base64 body's total
+    // length is always a multiple of 4, and 256 is itself a multiple of 4,
+    // so every chunk -- including a possibly-shorter final one -- is also
+    // a multiple of 4).
+    let out = rawbuf_new((scratch_len / 4) * 3 + 8)
+    var out_len: i64 = 0
+    var chunk_start: i64 = 0
+    while chunk_start < scratch_len {
+        var chunk_len: i64 = scratch_len - chunk_start
+        if chunk_len > 256 { chunk_len = 256 }
+
+        var chunk_in: [u8; 256] = [0; 256]
+        var k: i64 = 0
+        while k < chunk_len {
+            chunk_in[k as usize] = rawbuf_get(&scratch, chunk_start + k) as u8
+            k = k + 1
+        }
+        var chunk_out: [u8; 256] = [0; 256]
+        let decoded = base64_decode(&chunk_in, chunk_len as i32, &!chunk_out)
+        if decoded < 0 {
+            return (rawbuf_new(1), 0, 0, PEM_ERR_BASE64_DECODE)
+        }
+        var m: i64 = 0
+        while m < (decoded as i64) {
+            rawbuf_set(&out, out_len + m, chunk_out[m as usize] as i64)
+            m = m + 1
+        }
+        out_len = out_len + (decoded as i64)
+        chunk_start = chunk_start + chunk_len
+    }
+
+    (out, out_len, body_end_marker_pos, 0)
+}

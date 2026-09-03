@@ -1,0 +1,203 @@
+// stdlib/pbpk/rapamycin_sprint23_gate.sio — Sprint 23 release gate
+// 56 assertions across 10 sections (A–J).
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+module main
+
+use pbpk::rapamycin_clinical::{conf_from_rel, conf_clinical_min}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std,
+    ob_ke_var_inh, ob_ke_var_ind
+}
+use pbpk::rapamycin_assay::{
+    as_cv_hplc, as_cv_cmia, as_cv_poor,
+    as_v_assay, as_trough_mg_l, as_v_pred_conc, as_conf_total, as_conf_pred,
+    as_hplc_std_n3_unchanged, as_cmia_std_n3_unchanged, as_poor_std_n3_degrades,
+    as_poor_n3_assay_exceeds_pk,
+    as_hplc_std_ss_degrades, as_cmia_std_ss_degrades, as_hplc_std_ss_is_820,
+    as_hplc_slow_ss_preserved, as_cmia_slow_ss_degrades,
+    as_hplc_inh_onset_preserved, as_cmia_inh_onset_degrades,
+    as_hplc_inh_ss_preserved, as_cmia_inh_ss_degrades,
+    as_hplc_ind_degrades, as_all_assays_fail_inducer
+}
+
+var SPR23_PASS: [i64; 2] = [0, 0]
+
+fn s23_chk(ok: bool) with Mut {
+    if ok { SPR23_PASS[0] = SPR23_PASS[0] + 1 }
+    else  { SPR23_PASS[1] = SPR23_PASS[1] + 1 }
+}
+
+fn run_sprint23_gate() with IO, Mut, Div, Panic {
+
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let ke_v = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+
+    // ── Section A: Assay variance structure (8 assertions) ────────────────────
+
+    // CV ordering
+    s23_chk(as_cv_hplc() < as_cv_cmia())                                    //  1 HPLC < CMIA
+    s23_chk(as_cv_cmia() < as_cv_poor())                                     //  2 CMIA < poor
+    s23_chk(as_cv_poor() > as_cv_hplc() + as_cv_cmia())                     //  3 poor > hplc+cmia (0.25>0.17)
+
+    // V_assay ordering at same C
+    let c_ref = 0.008
+    let va_h = as_v_assay(as_cv_hplc(), c_ref)
+    let va_c = as_v_assay(as_cv_cmia(), c_ref)
+    let va_p = as_v_assay(as_cv_poor(), c_ref)
+    s23_chk(va_h < va_c)                                                     //  4 V_hplc < V_cmia
+    s23_chk(va_c < va_p)                                                     //  5 V_cmia < V_poor
+
+    // V_assay quadratic in C: V(2C) = 4 × V(C)
+    let va_2c = as_v_assay(as_cv_hplc(), 0.016)
+    s23_chk(va_2c > va_h * 3.9 && va_2c < va_h * 4.1)                      //  6 V_assay ∝ C²
+
+    // V_total > V_pred_conc (assay always adds noise)
+    let vp_std_n3 = as_v_pred_conc(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    let vt_hplc_n3 = vp_std_n3 + as_v_assay(as_cv_hplc(), as_trough_mg_l(5.0, 3, 0.01118, 0.141))
+    s23_chk(vt_hplc_n3 > vp_std_n3)                                         //  7 V_total > V_pred
+
+    // Conf ordering (all assays): hplc ≥ cmia ≥ poor
+    let ct_h3 = as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, as_cv_hplc())
+    let ct_c3 = as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, as_cv_cmia())
+    let ct_p3 = as_conf_total(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, as_cv_poor())
+    s23_chk(ct_h3 >= ct_c3 && ct_c3 >= ct_p3)                               //  8 hplc≥cmia≥poor at onset
+
+    // ── Section B: Standard onset (N=3) — PK-limited (8 assertions) ──────────
+
+    s23_chk(as_hplc_std_n3_unchanged())                                      //  9 HPLC: conf unchanged (820)
+    s23_chk(as_cmia_std_n3_unchanged())                                      // 10 CMIA: conf unchanged (820)
+    s23_chk(as_poor_std_n3_degrades())                                       // 11 poor: conf 820→700
+    let cp_std_n3 = as_conf_pred(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    s23_chk(ct_p3 < cp_std_n3)                                               // 12 poor causes conf drop
+    s23_chk(as_poor_n3_assay_exceeds_pk())                                   // 13 V_assay_poor > V_pred at onset
+    s23_chk(ct_h3 == cp_std_n3)                                              // 14 HPLC: same as PK-only
+    s23_chk(ct_c3 == cp_std_n3)                                              // 15 CMIA: same as PK-only at onset
+    s23_chk(ct_p3 < ct_c3)                                                   // 16 poor < CMIA
+
+    // ── Section C: Standard SS (N=14) — no assay preserves conf=900 (6) ──────
+
+    let cp_std_ss = as_conf_pred(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    s23_chk(cp_std_ss == 900)                                                // 17 PK-only SS: conf=900
+    s23_chk(as_hplc_std_ss_is_820())                                         // 18 HPLC: 900→820 (PK at boundary)
+    s23_chk(as_cmia_std_ss_degrades())                                       // 19 CMIA: 900→820
+    let ct_p_ss = as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, as_cv_poor())
+    s23_chk(ct_p_ss == 700)                                                  // 20 poor: 900→700
+    s23_chk(as_hplc_std_ss_degrades())                                       // 21 HPLC causes drop (PK right at edge)
+    let ct_cv30_ss = as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, 0.30)
+    s23_chk(ct_cv30_ss == 700)                                               // 22 CV=30%: fully UNCERTAIN at SS
+
+    // ── Section D: Slow genotype SS — HPLC preserves 900 (6 assertions) ──────
+
+    let cp_slow_ss = as_conf_pred(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    s23_chk(cp_slow_ss == 900)                                               // 23 slow PK-only SS: conf=900
+    s23_chk(as_hplc_slow_ss_preserved())                                     // 24 HPLC: 900 preserved (more headroom)
+    s23_chk(as_cmia_slow_ss_degrades())                                      // 25 CMIA: 900→820 for slow SS
+    let ct_p_slow_ss = as_conf_total(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_poor())
+    s23_chk(ct_p_slow_ss == 700)                                             // 26 poor: 900→700 slow SS
+    // Slow onset (N=2): HPLC/CMIA invisible (PK-limited)
+    let cp_slow_n2 = as_conf_pred(5.0, 2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    let ct_h_slow_n2 = as_conf_total(5.0, 2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_hplc())
+    let ct_c_slow_n2 = as_conf_total(5.0, 2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_cmia())
+    s23_chk(ct_h_slow_n2 == cp_slow_n2)                                      // 27 HPLC invisible at slow onset
+    s23_chk(ct_c_slow_n2 == cp_slow_n2)                                      // 28 CMIA invisible at slow onset
+
+    // ── Section E: Inhibitor — HPLC critical (6 assertions) ──────────────────
+
+    let cp_inh_n5 = as_conf_pred(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    s23_chk(cp_inh_n5 == 900)                                                // 29 inh onset PK: conf=900
+    s23_chk(as_hplc_inh_onset_preserved())                                   // 30 HPLC: 900 preserved at inh onset
+    s23_chk(as_cmia_inh_onset_degrades())                                    // 31 CMIA: 900→820 at inh onset
+    let cp_inh_ss = as_conf_pred(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    s23_chk(cp_inh_ss == 900)                                                // 32 inh SS PK: conf=900
+    s23_chk(as_hplc_inh_ss_preserved())                                      // 33 HPLC: 900 preserved at inh SS
+    s23_chk(as_cmia_inh_ss_degrades())                                       // 34 CMIA: 900→820 at inh SS
+
+    // ── Section F: Inducer — even HPLC inadequate (6 assertions) ─────────────
+
+    let cp_ind_n26 = as_conf_pred(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    s23_chk(cp_ind_n26 == 820)                                               // 35 inducer PK-only: conf=820 (rel≈24.8%)
+    s23_chk(as_hplc_ind_degrades())                                          // 36 HPLC: 820→700 (tips past 25%)
+    s23_chk(as_all_assays_fail_inducer())                                    // 37 all assays: 700 for inducer
+    let ct_h_ind = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v, as_cv_hplc())
+    let ct_c_ind = as_conf_total(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v, as_cv_cmia())
+    s23_chk(ct_h_ind == ct_c_ind)                                            // 38 HPLC==CMIA for inducer (both 700)
+    s23_chk(ct_h_ind < cp_ind_n26)                                           // 39 HPLC causes conf drop (inducer)
+    // Inducer requires exactly N=26: at N=20 rel>25% → still UNCERTAIN
+    let cp_ind_n20 = as_conf_pred(20.0, 20, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    s23_chk(cp_ind_n20 == 700)                                               // 40 inducer N=20: still 700 (N_min=26 is binding)
+
+    // ── Section G: Slow-halved at N=13 and V_assay/V_pred ratios (4) ─────────
+
+    let cp_sh_n13 = as_conf_pred(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    s23_chk(cp_sh_n13 == 900)                                                // 41 slow-halved N=13: conf=900
+    let ct_h_sh = as_conf_total(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_hplc())
+    let ct_c_sh = as_conf_total(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_cmia())
+    let ct_p_sh = as_conf_total(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_poor())
+    s23_chk(ct_h_sh == 900)                                                  // 42 HPLC: 900 preserved
+    s23_chk(ct_c_sh == 820)                                                  // 43 CMIA: 900→820
+    s23_chk(ct_p_sh == 700)                                                  // 44 poor: 700
+
+    // ── Section H: V_assay vs V_pred_conc magnitude (4 assertions) ────────────
+
+    // Standard SS: HPLC < PK (ratio≈0.30), CMIA > PK (ratio≈1.70)
+    let vp_ss = as_v_pred_conc(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    let c_ss  = as_trough_mg_l(5.0, 14, 0.01118, 0.141)
+    let va_h_ss = as_v_assay(as_cv_hplc(), c_ss)
+    let va_c_ss = as_v_assay(as_cv_cmia(), c_ss)
+    let va_p_ss = as_v_assay(as_cv_poor(), c_ss)
+    s23_chk(va_h_ss < vp_ss)                                                 // 45 HPLC: V_assay < V_pred at std SS
+    s23_chk(va_c_ss > vp_ss)                                                 // 46 CMIA: V_assay > V_pred at std SS
+    s23_chk(va_p_ss > vp_ss)                                                 // 47 poor: V_assay >> V_pred at std SS
+    // Standard onset: poor assay > PK uncertainty (ratio≈1.60)
+    let va_p_n3 = as_v_assay(as_cv_poor(), as_trough_mg_l(5.0, 3, 0.01118, 0.141))
+    s23_chk(va_p_n3 > vp_std_n3)                                             // 48 poor: V_assay > V_pred at onset
+
+    // ── Section I: Constant consistency (4 assertions) ────────────────────────
+
+    s23_chk(as_cv_hplc() < 0.06)                                             // 49 HPLC CV < 6% (≈5%)
+    s23_chk(as_cv_cmia() > 0.10 && as_cv_cmia() < 0.15)                     // 50 CMIA CV ∈ (10%,15%)
+    s23_chk(as_cv_poor() > as_cv_cmia())                                     // 51 poor > CMIA
+    s23_chk(as_cv_hplc() < as_cv_cmia())                                     // 52 HPLC < CMIA
+
+    // ── Section J: Clinical synthesis (4 assertions) ──────────────────────────
+
+    // HPLC is minimum adequate for inhibitor (preserves 900; CMIA doesn't)
+    let ct_h_inh_ss = as_conf_total(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, as_cv_hplc())
+    let ct_c_inh_ss = as_conf_total(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, as_cv_cmia())
+    s23_chk(ct_h_inh_ss > ct_c_inh_ss)                                       // 53 inh SS: HPLC > CMIA
+
+    // Slow genotype: HPLC uniquely preserves conf=900 at SS (CMIA cannot)
+    let ct_h_slow = as_conf_total(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_hplc())
+    let ct_c_slow = as_conf_total(5.0, 14, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v, as_cv_cmia())
+    s23_chk(ct_h_slow == 900 && ct_c_slow == 820)                            // 54 slow SS: HPLC=900, CMIA=820
+
+    // Standard SS: all assays degrade below 900 (PK at boundary)
+    let ct_h_std_ss = as_conf_total(5.0, 14, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v, as_cv_hplc())
+    s23_chk(ct_h_std_ss < 900 && ct_h_std_ss >= conf_clinical_min())         // 55 std SS: no assay preserves 900
+
+    // Epistemic hierarchy: poor < cmia ≤ hplc across all scenarios
+    let ct_h_inh_n5 = as_conf_total(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, as_cv_hplc())
+    let ct_c_inh_n5 = as_conf_total(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, as_cv_cmia())
+    let ct_p_inh_n5 = as_conf_total(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v, as_cv_poor())
+    s23_chk(ct_h_inh_n5 >= ct_c_inh_n5 && ct_c_inh_n5 >= ct_p_inh_n5)      // 56 conf ordering holds for inh onset
+
+    let pass = SPR23_PASS[0]
+    let fail = SPR23_PASS[1]
+    if fail == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL — ")
+        print_int(fail)
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    run_sprint23_gate()
+}

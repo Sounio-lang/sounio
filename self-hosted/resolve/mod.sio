@@ -10,8 +10,11 @@ module resolve::mod
 
 use parser::ast::*
 use lexer::span::*
+use resolve::resolve::*
+use resolve::symbol::*
+use resolve::imports::*
 
-struct ResolveResult {
+pub struct ResolveResult {
     symbols: SymbolTable,
     error_count: i64,
     had_error: bool,
@@ -95,7 +98,7 @@ fn builtin_name_13(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, i: i8
     n
 }
 
-fn resolve_program(prog: Program) -> ResolveResult with Mut, Panic, Div, Alloc, IO {
+pub(crate) fn resolve_program(prog: Program) -> ResolveResult with Mut, Panic, Div, Alloc, IO {
     var r = resolver_new()
 
     // Inject builtin function names so single-file programs can call print etc.
@@ -117,7 +120,7 @@ fn resolve_program(prog: Program) -> ResolveResult with Mut, Panic, Div, Alloc, 
 // Multi-module resolution: build an export registry then resolve each module with validated imports.
 
 pub struct ResolveBatchResult {
-    results: [ResolveResult; 64],
+    results: [ResolveResult; 256],
     count: i64,
     error_count: i64,
     had_error: bool,
@@ -127,25 +130,28 @@ fn empty_resolve_result() -> ResolveResult with Mut, Panic, Div {
     ResolveResult { symbols: symbol_table_new(), error_count: 0, had_error: false }
 }
 
-pub fn resolve_modules(programs: [Program; 64], count: i64) -> ResolveBatchResult with Mut, Panic, Div, Alloc, IO {
+pub fn resolve_modules(programs: [Program; 256], count: i64) -> ResolveBatchResult with Mut, Panic, Div, Alloc, IO {
     var reg = module_registry_new()
 
     // Pass 0: collect pub exports for each module
     var i: i64 = 0
-    while i < count && i < 64 {
+    while i < count && i < 256 {
         let prog = programs[i as usize]
         let pair = collect_module_exports(prog.items)
         reg = module_registry_put(reg, prog.module_path, pair.0, pair.1)
         i = i + 1
     }
+    // #1689: ASK whether anything was dropped. Silence here is what turned a
+    // capacity limit into 80 spurious E137 in main.sio.
+    let _ovf = module_registry_report_overflow(reg)
 
     // Resolve each module using the shared export registry
-    var results: [ResolveResult; 64] = [empty_resolve_result(); 64]
+    var results: [ResolveResult; 256] = [empty_resolve_result(); 256]
     var total_err: i64 = 0
     var had: bool = false
 
     var j: i64 = 0
-    while j < count && j < 64 {
+    while j < count && j < 256 {
         var r = resolver_with_modules(reg)
         r = r.collect_items(programs[j as usize].items)
         r = r.resolve_items(programs[j as usize].items)

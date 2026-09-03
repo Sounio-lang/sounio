@@ -133,6 +133,18 @@ struct GPModel {
     ok: bool
 }
 
+// Global fitted model — GPModel return from gp_fit() is zeroed by codegen
+var GPM: GPModel = GPModel {
+    hyper: GPHyperparams { length_scale: 1.0, signal_var: 1.0, noise_var: 0.01, kernel_type: 0 },
+    L: [0.0; 4096],
+    alpha: [0.0; 64],
+    n: 0,
+    ok: false
+}
+var GP_LS: f64 = 1.0
+var GP_SIG: f64 = 1.0
+var GP_NOISE: f64 = 0.01
+
 struct GPPrediction {
     means: [f64; 256],
     variances: [f64; 256],
@@ -146,6 +158,10 @@ struct GPPrediction {
 fn kernel_rbf(x1: f64, x2: f64, length_scale: f64, signal_var: f64) -> f64 with Mut, Div, Panic {
     let d = x1 - x2
     signal_var * gp_exp(0.0 - 0.5 * d * d / (length_scale * length_scale))
+}
+
+fn kernel_eval_g(x1: f64, x2: f64) -> f64 with Mut, Div, Panic {
+    return kernel_rbf(x1, x2, GP_LS, GP_SIG)
 }
 
 fn kernel_eval(x1: f64, x2: f64, hyper: GPHyperparams) -> f64 with Mut, Div, Panic {
@@ -165,7 +181,7 @@ fn gp_build_kernel_matrix(data: GPData, params: GPHyperparams) -> [f64; 4096] wi
         var j: i64 = 0
         while j < n {
             let idx = i * n + j
-            let kval = kernel_eval(data.x[i as usize], data.x[j as usize], params)
+            let kval = kernel_eval(GPD.x[i as usize], GPD.x[j as usize], params)
             if i == j {
                 K[idx as usize] = kval + params.noise_var
             } else {
@@ -258,44 +274,136 @@ fn gp_cholesky_solve(L: [f64; 4096], b: [f64; 64], n: i64) -> [f64; 64] with Mut
     return gp_solve_upper(L, z, n)
 }
 
-fn gp_fit(data: GPData, params: GPHyperparams) -> GPModel with Mut, Div, Panic {
-    let n = data.n
-    let K = gp_build_kernel_matrix(data, params)
-    let L = gp_cholesky(K, n)
-    var y_buf: [f64; 64] = [0.0; 64]
+fn gp_fit_into(out: &!GPModel, params: GPHyperparams) with Mut, Div, Panic {
+    let n = GPD.n
+    out.hyper = params
+    out.n = n
+    out.ok = false
+    var zi: i64 = 0
+    while zi < 4096 {
+        out.L[zi as usize] = 0.0
+        zi = zi + 1
+    }
+    zi = 0
+    while zi < 64 {
+        out.alpha[zi as usize] = 0.0
+        zi = zi + 1
+    }
+
+    // Build K and Cholesky inlined
+    var K: [f64; 4096] = [0.0; 4096]
     var i: i64 = 0
     while i < n {
-        y_buf[i as usize] = data.y[i as usize]
+        var j: i64 = 0
+        while j < n {
+            let idx = i * n + j
+            let kval = kernel_eval(GPD.x[i as usize], GPD.x[j as usize], params)
+            if i == j {
+                K[idx as usize] = kval + params.noise_var
+            } else {
+                K[idx as usize] = kval
+            }
+            j = j + 1
+        }
         i = i + 1
     }
-    let alpha = gp_cholesky_solve(L, y_buf, n)
-    return GPModel {
-        hyper: params,
-        L: L,
-        alpha: alpha,
-        n: n,
-        ok: true
+
+    var j: i64 = 0
+    while j < n {
+        var sum_diag = 0.0
+        var k: i64 = 0
+        while k < j {
+            let ljk = out.L[(j * n + k) as usize]
+            sum_diag = sum_diag + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = K[(j * n + j) as usize] - sum_diag
+        if diag_val <= 1.0e-15 {
+            out.L[(j * n + j) as usize] = 1.0e-8
+        } else {
+            out.L[(j * n + j) as usize] = gp_sqrt(diag_val)
+        }
+        var ii: i64 = j + 1
+        while ii < n {
+            var sum_off = 0.0
+            k = 0
+            while k < j {
+                sum_off = sum_off + out.L[(ii * n + k) as usize] * out.L[(j * n + k) as usize]
+                k = k + 1
+            }
+            out.L[(ii * n + j) as usize] = (K[(ii * n + j) as usize] - sum_off) / out.L[(j * n + j) as usize]
+            ii = ii + 1
+        }
+        j = j + 1
     }
+
+    var y_buf: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n {
+        y_buf[i as usize] = GPD.y[i as usize]
+        i = i + 1
+    }
+
+    // Cholesky solve inlined
+    var z: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var k: i64 = 0
+        while k < i {
+            sum = sum + out.L[(i * n + k) as usize] * z[k as usize]
+            k = k + 1
+        }
+        z[i as usize] = (y_buf[i as usize] - sum) / out.L[(i * n + i) as usize]
+        i = i + 1
+    }
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var k: i64 = i + 1
+        while k < n {
+            sum = sum + out.L[(k * n + i) as usize] * out.alpha[k as usize]
+            k = k + 1
+        }
+        out.alpha[i as usize] = (z[i as usize] - sum) / out.L[(i * n + i) as usize]
+        i = i - 1
+    }
+
+    out.ok = true
 }
 
-fn gp_predict(model: GPModel, data: GPData, x_star: f64) -> [f64; 2] with Mut, Div, Panic {
-    let n = model.n
-    var result: [f64; 2] = [0.0; 2]
+var GPD: GPData = GPData { x: [0.0; 64], y: [0.0; 64], n: 0 }
+var GPV: [f64; 2] = [0.0; 2]
+
+fn gp_predict_into(out: &![f64; 2], x_star: f64) with Mut, Div, Panic {
+    let n = GPM.n
     var k_star: [f64; 64] = [0.0; 64]
     var i: i64 = 0
     while i < n {
-        k_star[i as usize] = kernel_eval(x_star, data.x[i as usize], model.hyper)
+        k_star[i as usize] = kernel_eval_g(x_star, GPD.x[i as usize])
         i = i + 1
     }
     var mean_val = 0.0
     i = 0
     while i < n {
-        mean_val = mean_val + k_star[i as usize] * model.alpha[i as usize]
+        mean_val = mean_val + k_star[i as usize] * GPM.alpha[i as usize]
         i = i + 1
     }
-    result[0] = mean_val
-    let v = gp_solve_lower(model.L, k_star, n)
-    let k_ss = kernel_eval(x_star, x_star, model.hyper)
+    out[0] = mean_val
+
+    var v: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var k: i64 = 0
+        while k < i {
+            sum = sum + GPM.L[(i * n + k) as usize] * v[k as usize]
+            k = k + 1
+        }
+        v[i as usize] = (k_star[i as usize] - sum) / GPM.L[(i * n + i) as usize]
+        i = i + 1
+    }
+    let k_ss = kernel_eval_g(x_star, x_star)
     var vtv = 0.0
     i = 0
     while i < n {
@@ -304,23 +412,22 @@ fn gp_predict(model: GPModel, data: GPData, x_star: f64) -> [f64; 2] with Mut, D
     }
     var var_val = k_ss - vtv
     if var_val < 0.0 { var_val = 0.0 }
-    result[1] = var_val
-    return result
+    out[1] = var_val
 }
 
-fn gp_log_marginal_likelihood(model: GPModel, data: GPData) -> f64 with Mut, Div, Panic {
-    let n = model.n
+fn gp_log_marginal_likelihood() -> f64 with Mut, Div, Panic {
+    let n = GPM.n
     var data_fit = 0.0
     var i: i64 = 0
     while i < n {
-        data_fit = data_fit + data.y[i as usize] * model.alpha[i as usize]
+        data_fit = data_fit + GPD.y[i as usize] * GPM.alpha[i as usize]
         i = i + 1
     }
     data_fit = 0.0 - 0.5 * data_fit
     var complexity = 0.0
     i = 0
     while i < n {
-        complexity = complexity + gp_ln(model.L[(i * n + i) as usize])
+        complexity = complexity + gp_ln(GPM.L[(i * n + i) as usize])
         i = i + 1
     }
     complexity = 0.0 - complexity
@@ -350,12 +457,12 @@ fn lcg_to_f64(seed: i64) -> f64 with Mut, Div, Panic {
 // =============================================================================
 
 // T1: GP fit succeeds (Cholesky produces positive diagonal)
-fn test_gp_fit(model: GPModel) -> bool with Mut, Div, Panic {
-    if !model.ok { return false }
-    let n = model.n
+fn test_gp_fit() -> bool with Mut, Div, Panic {
+    if !GPM.ok { return false }
+    let n = GPM.n
     var i: i64 = 0
     while i < n {
-        let diag = model.L[(i * n + i) as usize]
+        let diag = GPM.L[(i * n + i) as usize]
         if diag <= 0.0 { return false }
         if diag != diag { return false }
         i = i + 1
@@ -363,38 +470,91 @@ fn test_gp_fit(model: GPModel) -> bool with Mut, Div, Panic {
     return true
 }
 
-// T2: Predictions at training points are close to observations
-fn test_interpolation(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
-    let n = data.n
+var KBUF: [f64; 64] = [0.0; 64]
+var VBUF: [f64; 64] = [0.0; 64]
+
+fn gp_posterior_var_at(x_star: f64) -> f64 with Mut, Div, Panic {
+    let n = GPM.n
+    var i: i64 = 0
+    while i < n {
+        KBUF[i as usize] = kernel_eval_g(x_star, GPD.x[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var k: i64 = 0
+        while k < i {
+            sum = sum + GPM.L[(i * n + k) as usize] * VBUF[k as usize]
+            k = k + 1
+        }
+        VBUF[i as usize] = (KBUF[i as usize] - sum) / GPM.L[(i * n + i) as usize]
+        i = i + 1
+    }
+    let k_ss = kernel_eval_g(x_star, x_star)
+    var vtv = 0.0
+    i = 0
+    while i < n {
+        vtv = vtv + VBUF[i as usize] * VBUF[i as usize]
+        i = i + 1
+    }
+    var var_val = k_ss - vtv
+    if var_val < 0.0 { var_val = 0.0 }
+    return var_val
+}
+
+fn test_interpolation() -> bool with Mut, Div, Panic {
+    let n = GPD.n
     var max_err = 0.0
     var i: i64 = 0
     while i < n {
-        let pv = gp_predict(model, data, data.x[i as usize])
-        let err = abs_f64(pv[0] - data.y[i as usize])
+        let x_star = GPD.x[i as usize]
+        var j: i64 = 0
+        while j < n {
+            KBUF[j as usize] = kernel_eval_g(x_star, GPD.x[j as usize])
+            j = j + 1
+        }
+        var mean_val = 0.0
+        j = 0
+        while j < n {
+            mean_val = mean_val + KBUF[j as usize] * GPM.alpha[j as usize]
+            j = j + 1
+        }
+        let err = abs_f64(mean_val - GPD.y[i as usize])
         if err > max_err { max_err = err }
         i = i + 1
     }
     return max_err < 0.2
 }
 
-// T3: Variance small at training points, large far away
-fn test_variance_behavior(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
-    let pv_near = gp_predict(model, data, data.x[0])
-    let var_near = pv_near[1]
-    let pv_far = gp_predict(model, data, 100.0)
-    let var_far = pv_far[1]
+fn test_variance_behavior() -> bool with Mut, Div, Panic {
+    let var_near = gp_posterior_var_at(GPD.x[0])
+    let var_far = gp_posterior_var_at(100.0)
     if var_near > 0.5 { return false }
-    if var_far < var_near { return false }
-    return true
+    return var_far >= var_near
 }
 
-// T4: Log marginal likelihood is finite and computable
-fn test_lml(model: GPModel, data: GPData) -> bool with Mut, Div, Panic {
-    let lml = gp_log_marginal_likelihood(model, data)
-    if lml != lml { return false }      // not NaN
-    if lml > 1.0e20 { return false }    // not +inf
-    if lml < -1.0e20 { return false }   // not -inf / failure sentinel
-    return true
+fn test_lml() -> bool with Mut, Div, Panic {
+    let n = GPM.n
+    var data_fit = 0.0
+    var i: i64 = 0
+    while i < n {
+        data_fit = data_fit + GPD.y[i as usize] * GPM.alpha[i as usize]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_ln(GPM.L[(i * n + i) as usize])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_ln(2.0 * gp_pi())
+    let lml = data_fit + complexity + norm_const
+    if lml != lml { return false }
+    if lml > 100.0 { return false }
+    return lml < 0.0
 }
 
 // =============================================================================
@@ -417,11 +577,15 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     while i < 20 {
         let xi = (i as f64) * 6.0 / 19.0
         data.x[i as usize] = xi
+        GPD.x[i as usize] = xi
         seed = lcg_next(seed)
         let noise = lcg_to_f64(seed) * 0.1
-        data.y[i as usize] = gp_sin(xi) + noise
+        let yi = gp_sin(xi) + noise
+        data.y[i as usize] = yi
+        GPD.y[i as usize] = yi
         i = i + 1
     }
+    GPD.n = 20
 
     let params = GPHyperparams {
         length_scale: 1.0,
@@ -430,13 +594,17 @@ fn main() -> i64 with IO, Mut, Div, Panic {
         kernel_type: 0
     }
 
-    let model = gp_fit(data, params)
+    GP_LS = params.length_scale
+    GP_SIG = params.signal_var
+    GP_NOISE = params.noise_var
+
+    gp_fit_into(&!GPM, params)
 
     var passed: i64 = 0
     var failed: i64 = 0
 
     print("T1: GP fit succeeds (Cholesky valid).... ")
-    if test_gp_fit(model) {
+    if test_gp_fit() {
         println("PASS")
         passed = passed + 1
     } else {
@@ -445,7 +613,7 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     }
 
     print("T2: Interpolation at training points.... ")
-    if test_interpolation(model, data) {
+    if test_interpolation() {
         println("PASS")
         passed = passed + 1
     } else {
@@ -454,7 +622,7 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     }
 
     print("T3: Variance small near, large far...... ")
-    if test_variance_behavior(model, data) {
+    if test_variance_behavior() {
         println("PASS")
         passed = passed + 1
     } else {
@@ -463,7 +631,7 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     }
 
     print("T4: Log marginal likelihood finite/neg.. ")
-    if test_lml(model, data) {
+    if test_lml() {
         println("PASS")
         passed = passed + 1
     } else {

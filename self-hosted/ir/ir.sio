@@ -8,9 +8,33 @@ use check::types::{TypeEntry, empty_type_entry}
 // These caps gate what the self-hosted pipeline can lower and execute.
 // Keep them aligned with the fixed backing storage in IrModule/IrFunction so
 // the lowering path can use the capacity that is already physically allocated.
-pub let IR_MAX_FUNCS: i64 = 1024
+//
+// IR_MAX_INSTRS history:
+//   1024 → 2048 (earlier) → 4096 (2026-07-20, unsplit oct_mul) → 3072 (2026-08-05)
+//   → 4096 (2026-08-06, lex_source_to_globals) → 16384 (#1649, arena).
+// Full exclusive-ref 8-component oct_mul lowers to ~2180 IR ops; under 2048 the
+// body filled the array, IrReturn was dropped, and core_ir codegen fell through
+// into main (ENTER/BEFORE_MUL re-entry storm). #1274 lo/hi split stayed green
+// because each half is ~1100 ops.
+//
+// 16384 is affordable only because storage is now a variable-size arena region:
+// the old inline [IrInstr; 4096] made this a per-IrModule reservation, so a 4x
+// bump was a 4x bss bump. A region costs what the function actually uses.
+// tests/run-pass/knowledge_octonion_structure.sio is 136 lines and needs 14389.
+//
+// RAISING THIS IS NOT A ONE-LINE CHANGE. Several analysis passes populate a
+// FIXED per-instruction context and silently TRUNCATE at their own cap, which
+// turns a partial analysis into a wrong one -- a use past the cap is unseen, so
+// its definition looks dead. Every such pass must refuse the function instead of
+// analysing a prefix of it. Pinned by
+// scripts/ci/irfunction_instr_capacity_coherence_gate.sh.
+// IR_MAX_FUNCS stays at main's 8192, NOT the 2048 this lane forked from. #1672
+// measured the requirement: main.sio declares 10705 functions of which 5997 are
+// reachable, and self-compilation needs the reachable set to fit. BSS is
+// byte-identical at 2048/4096/8192 because the IrModule is allocated at runtime.
+pub let IR_MAX_FUNCS: i64 = 16384
 pub let IR_MAX_STRINGS: i64 = 4096
-pub let IR_MAX_INSTRS: i64 = 128
+pub let IR_MAX_INSTRS: i64 = 16384
 pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
 pub let IR_INVALID_LABEL: i64 = -1
@@ -56,6 +80,7 @@ let SOUNIO_ABI_VERSION: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
 let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
+pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
 
 pub enum IrOpcode {
     IrLoadImm,
@@ -76,6 +101,7 @@ pub enum IrOpcode {
     IrFieldSet,
     IrIndexGet,
     IrIndexSet,
+    IrArrayLen,   // dst = LOGICAL element COUNT of aggregate handle in src1 (object-header flags slot)
     IrAlloc,
     IrLabel,
     IrNop,
@@ -621,6 +647,30 @@ pub enum IrOpcode {
     //   Formal guarantee: QDeformClassical.lean  `q_deform_recovers_classical`
     //   Lowering at q=1: 1 VMULPD.  At q≠1: VMULPD + VSUBPD + scale + VFMADD231PD; ~4 EVEX
     IrQDeform,          // Door Ξ: a·_q b, q in imm_flags, unifies all prior Doors
+
+    // SysV aggregate return (>16B) ABI.
+    // IrCallSret injects the hidden destination pointer/handle in rdi and shifts
+    // explicit integer args to rsi/rdx/rcx/r8/r9. IrReturnSret returns that handle.
+    IrCallSret,
+    IrReturnSret,
+    IrWideAdd,
+    IrWideSub,
+    IrWideMul,
+    IrWideShrLimb,
+    IrWideDiv,
+    IrWideMod,
+    IrWideCmp,
+    IrWideReject,
+    IrWideShr,
+    IrWideDivFull,
+    IrWideModFull,
+    // Global variable (BSS) load/store — absolute addressing at BSS_BASE + offset
+    //   imm_i64 = BSS byte offset (from BSS_BASE)
+    //   name    = global variable name (for debugging)
+    IrLoadGlobal,
+    IrStoreGlobal,
+    // Store through a raw pointer: [src1] = src2  (used for `*p = val` on a true reference).
+    IrStorePtr,
 }
 
 pub struct IrRegList {
@@ -641,7 +691,8 @@ pub struct IrInstr {
     pub imm_flags: i64,    // Bit 0: z (zeroing-mask, sets EVEX P3[7]). Future: SAE, broadcast.
     pub bin_op: BinaryOp,
     pub un_op: UnaryOp,
-    pub name: Name,
+    // Interned: index into IR_NAME_POOL, 0 = unnamed. See ir_intern_name.
+    pub name_id: i64,
     pub call_args: Option<Box<IrRegList>>,
     pub arg_count: i64,
 }
@@ -661,6 +712,7 @@ let IR_STRATEGY_PRECISION_PRESERVING: i64 = 2 // Knowledge<T> — no float reass
 let IR_STRATEGY_INSTRUMENTED: i64 = 3       // Contest<T>/Robust<T> — dual-path: fast + instrumented
 let IR_STRATEGY_GPU_KERNEL: i64 = 4         // with GPU — GPU kernel extraction
 let IR_STRATEGY_PROBABILISTIC: i64 = 5      // with Prob — trace-compatible for MCMC/VI
+let IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC: i64 = 6 // with Chaotic — A-layer-2: e-graph refuses ALL float reassociation (e^{λt} amplification)
 let IR_STRATEGY_EXTERN: i64 = 6             // extern "C" fn — no body, C ABI stub (Sprint 108)
 let IR_STRATEGY_EXPORTED: i64 = 7           // export "C" fn — C ABI visibility (Sprint 109)
 
@@ -676,20 +728,1157 @@ pub fn ir_strategy_name(s: i64) -> string {
     else { "unknown" }
 }
 
+// ==========================================================================
+// IR instruction arena (#1649)
+// ==========================================================================
+// Lives here rather than in its own module because IrFunction must hold a
+// region handle and the arena must hold IrInstr, and Sounio has no import
+// cycles anywhere in this tree -- an arena module importing ir::ir while
+// ir::ir imports it back would be the first, and untested.
+//
+// Variable-size region allocator for IR instructions, with generation-checked
+// handles and region sealing.
+//
+// WHY THIS EXISTS (#1649)
+// ----------------------
+// IrFunction currently embeds `instrs: [IrInstr; 4096]` inline, and IrModule
+// embeds `functions: [IrFunction; 2048]`, so a module reserves ~2 GB whether it
+// uses it or not, and no function may exceed 4096 IR instructions. Measured, a
+// 136-line test needs 14389. The limit cannot be raised: a 4x bump takes RSS for
+// a small compile from 753 MB to ~2-3 GB.
+//
+// Fixed-size regions would reproduce exactly that arithmetic, so regions here are
+// VARIABLE size, sized to a function's actual instruction count.
+//
+// WHAT MAKES VARIABLE REGIONS DANGEROUS, AND WHAT THIS MODULE DOES ABOUT IT
+// ------------------------------------------------------------------------
+// Two hazards, both of which would otherwise produce SILENT cross-function
+// miscompiles -- the exact defect class #1586/#1645/#1647 closed:
+//
+//   1. GROWTH. A function that outgrows its region must be reallocated and
+//      copied, which moves its base. Any copy of that handle still holding the
+//      old base would then read or write another function's instructions.
+//      Handled by: every handle carries a GENERATION, bumped on reallocation.
+//      A stale handle is detected on use rather than silently followed.
+//
+//   2. ALIASING. IrFunction is passed by value 163 times, returned 110 times and
+//      explicitly copied 53 times across 34 files, and the optimizer depends on
+//      those copies being deep:
+//
+//          var result = func                  // today: full deep copy
+//          IR_INSTR_ARENA[(ir_region_base_write(&result.region) + (i)) as usize] = ir_copy(...)    // does not touch func
+//          return (false, func)               // rollback returns the original
+//
+//      With a shared region a value copy aliases, so the write corrupts `func`
+//      and the rollback returns corrupted data. Sounio has no copy constructor,
+//      so the clone must be written by hand at each boundary -- and a missed one
+//      compiles cleanly. Handled by: SEALING. A region is sealed when its
+//      function is published (stored into a module, returned across a pass).
+//      Writing through a sealed handle is refused, loudly.
+//
+// Neither check is advisory. A violation prints, sets the durable hard-error flag
+// so the compile cannot exit 0 (the #1645 channel), and routes the write to a
+// quarantine region so nothing else is corrupted in the meantime.
+//
+// This module is standalone: it owns no IrFunction and nothing imports it yet.
+// Converting IrFunction.instrs to a region handle is a separate change (~4282
+// access sites, all of them caught by the type checker once the field is gone).
+
+
+
+// ---------------------------------------------------------------------------
+// Capacity tiers
+// ---------------------------------------------------------------------------
+// Declarations must stay literals (Sounio array sizes are not expressions);
+// every bound CHECK calls the accessor, the same contract as
+// nc_flat_reloc_capacity() in self-hosted/native/frame.sio. Sized for this
+// module's own witnesses; the conversion change sizes it from measurement.
+
+// STRUCT-OF-ARRAYS storage (#1649, #1655).
+//
+// This cannot be `[IrInstr; N]`. Under the bootstrap seed -- which builds this
+// compiler -- storing a STRUCT into a GLOBAL array is a silent no-op: lean_single
+// represents a global aggregate array as pointer-per-slot, so the store writes the
+// address of a temporary and the load returns that pointer as the first field.
+// Measured, isolated, and kept as a reproduction in
+// tests/known_failures/lean_single_global_aggregate_store.sio.
+//
+// Global arrays of SCALARS are fine, so every field gets its own. Measured under
+// the seed: i64 OK, f64 OK, i8 OK, enum BROKEN, Option<Box<_>> segfaults --
+// so enums are held as i64 (the `as i64` / `as IrOpcode` round-trip is exact),
+// the Name goes to a byte pool, and call args go to a flat i64 pool.
+//
+// It is also much cheaper than the array it replaces: ~112 MB of scalars for a
+// million instructions, against 2 GB of reserved [IrInstr; 4096] per module.
+pub var IR_A_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_DST: [i64; 1048576] = [0; 1048576]
+pub var IR_A_SRC1: [i64; 1048576] = [0; 1048576]
+pub var IR_A_SRC2: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_I64: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_F64: [f64; 1048576] = [0.0; 1048576]
+pub var IR_A_LABEL_ID: [i64; 1048576] = [0; 1048576]
+pub var IR_A_FN_ID: [i64; 1048576] = [0; 1048576]
+pub var IR_A_FIELD_IDX: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_FLAGS: [i64; 1048576] = [0; 1048576]
+pub var IR_A_BIN_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_UN_OP: [i64; 1048576] = [0; 1048576]
+// #1695: the INTERNED id, carried rather than recomputed. ir_arena_load did
+// `out.name_id = ir_intern_name(ir_arena_name(at))` -- interning on a READ path
+// reached at ~431 sites. ir_intern_name caps at IR_NAME_POOL_MAX and RETURNS 0 on
+// overflow, and 0 means "unnamed", so once the pool filled every load produced a
+// nameless instruction.
+pub var IR_A_NAME_ID: [i64; 1048576] = [0; 1048576]
+pub var IR_A_ARG_COUNT: [i64; 1048576] = [0; 1048576]
+pub var IR_A_NAME_OFF: [i64; 1048576] = [0; 1048576]
+pub var IR_A_NAME_LEN: [i64; 1048576] = [0; 1048576]
+pub var IR_A_ARG_BASE: [i64; 1048576] = [0; 1048576]
+
+// Byte pool for instruction names, and a flat pool for call-argument registers.
+pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
+// RENAMED from IR_NAME_POOL_LEN. main declares `var IR_NAME_POOL_LEN:
+// [i64; 65536]` for interned per-id lengths; this lane declared a SCALAR of
+// the same name as the arena byte cursor. Two globals, one name, different
+// types: ir_intern_name's `IR_NAME_POOL_LEN[(id-1)] = n.len` wrote through
+// THIS cursor, so ir_arena_put_name then stored name bytes at a corrupted
+// offset -- and IR_ARG_POOL sits just past IR_NAME_POOL, so call arguments
+// were what got overwritten. Bisected to this on Slurm (20 jobs): every
+// cross-module call of arity >= 5 miscompiled; replacing the intern calls
+// with literal 0 fixed it, hoisting them out of the struct literal did not.
+pub var IR_A_NAME_BYTES_USED: i64 = 0
+pub fn ir_name_pool_capacity() -> i64 { 4194304 }
+
+pub var IR_ARG_POOL: [i64; 262144] = [0; 262144]
+pub var IR_ARG_POOL_LEN: i64 = 0
+pub fn ir_arg_pool_capacity() -> i64 { 262144 }
+
+// Copy one arena slot to another, field by field. Replaces what used to be a
+// single aggregate array-element copy -- which the seed silently drops.
+pub fn ir_arena_copy_slot(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_OP[dst as usize] = IR_A_OP[src as usize]
+    IR_A_DST[dst as usize] = IR_A_DST[src as usize]
+    IR_A_SRC1[dst as usize] = IR_A_SRC1[src as usize]
+    IR_A_SRC2[dst as usize] = IR_A_SRC2[src as usize]
+    IR_A_IMM_I64[dst as usize] = IR_A_IMM_I64[src as usize]
+    IR_A_IMM_F64[dst as usize] = IR_A_IMM_F64[src as usize]
+    IR_A_LABEL_ID[dst as usize] = IR_A_LABEL_ID[src as usize]
+    IR_A_FN_ID[dst as usize] = IR_A_FN_ID[src as usize]
+    IR_A_FIELD_IDX[dst as usize] = IR_A_FIELD_IDX[src as usize]
+    IR_A_IMM_FLAGS[dst as usize] = IR_A_IMM_FLAGS[src as usize]
+    IR_A_BIN_OP[dst as usize] = IR_A_BIN_OP[src as usize]
+    IR_A_UN_OP[dst as usize] = IR_A_UN_OP[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+    IR_A_NAME_OFF[dst as usize] = IR_A_NAME_OFF[src as usize]
+    IR_A_NAME_LEN[dst as usize] = IR_A_NAME_LEN[src as usize]
+    IR_A_NAME_ID[dst as usize] = IR_A_NAME_ID[src as usize]
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+}
+
+// Args move/clear, used by the peephole that shuffles instructions between slots.
+pub fn ir_arena_move_args(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+    IR_A_ARG_COUNT[src as usize] = 0
+}
+
+pub fn ir_arena_clear_args(at: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_COUNT[at as usize] = 0
+    IR_A_ARG_BASE[at as usize] = 0
+}
+
+pub fn ir_reg_list_len(l: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = l
+    while true {
+        match cur {
+            Some(node) => { n = n + 1  cur = (*node).tail }
+            _ => { break }
+        }
+    }
+    n
+}
+
+// Copy just the argument binding. The pool is append-only within a compile, so
+// two slots may share a range: nothing rewrites it under them.
+pub fn ir_arena_copy_args(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+}
+
+// Exchange two slots whole. A swap written as two stores cannot carry arguments
+// correctly -- the first store overwrites the very slot the second must take its
+// arguments from -- so the exchange has to be a single primitive.
+pub fn ir_arena_swap_slots(a: i64, b: i64) with Mut, Panic, Div {
+    if a == b { return }
+    if a < 0 || a >= ir_instr_arena_capacity() { return }
+    if b < 0 || b >= ir_instr_arena_capacity() { return }
+    let t_op = IR_A_OP[a as usize]                IR_A_OP[a as usize] = IR_A_OP[b as usize]                IR_A_OP[b as usize] = t_op
+    let t_dst = IR_A_DST[a as usize]              IR_A_DST[a as usize] = IR_A_DST[b as usize]              IR_A_DST[b as usize] = t_dst
+    let t_s1 = IR_A_SRC1[a as usize]              IR_A_SRC1[a as usize] = IR_A_SRC1[b as usize]            IR_A_SRC1[b as usize] = t_s1
+    let t_s2 = IR_A_SRC2[a as usize]              IR_A_SRC2[a as usize] = IR_A_SRC2[b as usize]            IR_A_SRC2[b as usize] = t_s2
+    let t_ii = IR_A_IMM_I64[a as usize]           IR_A_IMM_I64[a as usize] = IR_A_IMM_I64[b as usize]      IR_A_IMM_I64[b as usize] = t_ii
+    let t_if = IR_A_IMM_F64[a as usize]           IR_A_IMM_F64[a as usize] = IR_A_IMM_F64[b as usize]      IR_A_IMM_F64[b as usize] = t_if
+    let t_lb = IR_A_LABEL_ID[a as usize]          IR_A_LABEL_ID[a as usize] = IR_A_LABEL_ID[b as usize]    IR_A_LABEL_ID[b as usize] = t_lb
+    let t_fn = IR_A_FN_ID[a as usize]             IR_A_FN_ID[a as usize] = IR_A_FN_ID[b as usize]          IR_A_FN_ID[b as usize] = t_fn
+    let t_fi = IR_A_FIELD_IDX[a as usize]         IR_A_FIELD_IDX[a as usize] = IR_A_FIELD_IDX[b as usize]  IR_A_FIELD_IDX[b as usize] = t_fi
+    let t_fl = IR_A_IMM_FLAGS[a as usize]         IR_A_IMM_FLAGS[a as usize] = IR_A_IMM_FLAGS[b as usize]  IR_A_IMM_FLAGS[b as usize] = t_fl
+    let t_bo = IR_A_BIN_OP[a as usize]            IR_A_BIN_OP[a as usize] = IR_A_BIN_OP[b as usize]        IR_A_BIN_OP[b as usize] = t_bo
+    let t_uo = IR_A_UN_OP[a as usize]             IR_A_UN_OP[a as usize] = IR_A_UN_OP[b as usize]          IR_A_UN_OP[b as usize] = t_uo
+    let t_no = IR_A_NAME_OFF[a as usize]          IR_A_NAME_OFF[a as usize] = IR_A_NAME_OFF[b as usize]    IR_A_NAME_OFF[b as usize] = t_no
+    let t_nl = IR_A_NAME_LEN[a as usize]          IR_A_NAME_LEN[a as usize] = IR_A_NAME_LEN[b as usize]    IR_A_NAME_LEN[b as usize] = t_nl
+    let t_ni = IR_A_NAME_ID[a as usize]           IR_A_NAME_ID[a as usize] = IR_A_NAME_ID[b as usize]     IR_A_NAME_ID[b as usize] = t_ni
+    let t_ab = IR_A_ARG_BASE[a as usize]          IR_A_ARG_BASE[a as usize] = IR_A_ARG_BASE[b as usize]    IR_A_ARG_BASE[b as usize] = t_ab
+    let t_ac = IR_A_ARG_COUNT[a as usize]         IR_A_ARG_COUNT[a as usize] = IR_A_ARG_COUNT[b as usize]  IR_A_ARG_COUNT[b as usize] = t_ac
+}
+
+// Everything except the name and the call arguments.
+fn ir_arena_store_scalars(at: i64, instr: IrInstr) with Mut, Panic, Div {
+    IR_A_NAME_ID[at as usize] = instr.name_id
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    IR_A_OP[at as usize] = instr.op as i64
+    IR_A_DST[at as usize] = instr.dst
+    IR_A_SRC1[at as usize] = instr.src1
+    IR_A_SRC2[at as usize] = instr.src2
+    IR_A_IMM_I64[at as usize] = instr.imm_i64
+    IR_A_IMM_F64[at as usize] = instr.imm_f64
+    IR_A_LABEL_ID[at as usize] = instr.label_id
+    IR_A_FN_ID[at as usize] = instr.fn_id
+    IR_A_FIELD_IDX[at as usize] = instr.field_idx
+    IR_A_IMM_FLAGS[at as usize] = instr.imm_flags
+    IR_A_BIN_OP[at as usize] = instr.bin_op as i64
+    IR_A_UN_OP[at as usize] = instr.un_op as i64
+}
+
+// Whole-instruction store. Flattens the Name into the byte pool and the call-arg
+// list into the register pool; both are append-only within a compile.
+pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    ir_arena_store_scalars(at, instr)
+    // main interned IrInstr.name -> name_id; the arena stores bytes.
+    ir_arena_put_name(at, ir_name_at(instr.name_id))
+    ir_arena_store_args(at, instr.call_args, instr.arg_count)
+}
+
+// Store an instruction whose argument list did not survive ir_arena_load, taking
+// the arguments from the slot it was loaded FROM. This is the honest form for
+// the shuffles that move an instruction between slots.
+pub fn ir_arena_store_from(at: i64, instr: IrInstr, args_from: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    ir_arena_store_scalars(at, instr)
+    // main interned IrInstr.name -> name_id; the arena stores bytes.
+    ir_arena_put_name(at, ir_name_at(instr.name_id))
+    ir_arena_copy_args(at, args_from)
+}
+
+// ir_arena_load deliberately does NOT rebuild the argument list -- doing so needs
+// Alloc, and forcing Alloc onto ~431 call sites is what desynchronised the
+// checker into six figures of nonsense diagnostics. So a stored instruction may
+// legitimately arrive with arg_count > 0 and no list, and the old code walked
+// that empty list and wrote IR_INVALID_REG once per argument. That is the whole
+// rc=12: every call WITH arguments lost them, so codegen reported the function
+// unsupported. A call with no arguments was unaffected, which is why
+// single-function programs compiled and anything calling a helper did not.
+fn ir_arena_store_args(at: i64, args: Option<Box<IrRegList>>, count: i64) with Mut, Panic, Div {
+    if count <= 0 {
+        IR_A_ARG_COUNT[at as usize] = 0
+        IR_A_ARG_BASE[at as usize] = 0
+        return
+    }
+    if ir_reg_list_len(args) > 0 {
+        IR_A_ARG_COUNT[at as usize] = count
+        ir_arena_put_args(at, args, count)
+        return
+    }
+    // No list and a positive count. Sound ONLY when the destination already
+    // holds exactly these arguments -- a read-modify-write on the same slot.
+    // Anything else would hand the call another instruction's registers, so
+    // fail loud rather than preserve: a silently wrong call is the failure this
+    // arena exists to make impossible. Use ir_arena_store_from for real moves.
+    if IR_A_ARG_COUNT[at as usize] == count && IR_A_ARG_BASE[at as usize] > 0 { return }
+    ir_arena_latch(IR_ARENA_VIOLATION_INVALID, ir_region_invalid())
+    IR_A_ARG_COUNT[at as usize] = 0
+}
+
+pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    var len = nm.len
+    if len < 0 { len = 0 }
+    if len > 128 { len = 128 }
+    // Re-storing an instruction used to re-append its name, so pool consumption
+    // tracked STORES rather than instructions and a dozen cleanup peels
+    // multiplied it. If this slot already holds exactly this name, keep the
+    // binding: that turns the common read-modify-write into free.
+    if IR_A_NAME_LEN[at as usize] == len {
+        let prev = IR_A_NAME_OFF[at as usize]
+        var same = true
+        var k: i64 = 0
+        while k < len {
+            if IR_NAME_POOL[(prev + k) as usize] != nm.buf[k as usize] {
+                same = false
+                k = len
+            }
+            k = k + 1
+        }
+        if same { return }
+    }
+    if IR_A_NAME_BYTES_USED + len > ir_name_pool_capacity() {
+        // Was: drop the name and carry on. Names are load-bearing -- cleanup
+        // matches on ir_name_eq and codegen resolves callees by name -- so a
+        // dropped name is a silently different program. Same defect as the rc=12
+        // argument loss, with the alarm removed. Poison the compile instead; the
+        // driver refuses to emit on a latched violation.
+        IR_A_NAME_LEN[at as usize] = 0
+        ir_arena_latch(IR_ARENA_VIOLATION_NAME_POOL, ir_region_invalid())
+        return
+    }
+    let off = IR_A_NAME_BYTES_USED
+    var i: i64 = 0
+    while i < len {
+        IR_NAME_POOL[(off + i) as usize] = nm.buf[i as usize]
+        i = i + 1
+    }
+    IR_A_NAME_BYTES_USED = off + len
+    IR_A_NAME_OFF[at as usize] = off
+    IR_A_NAME_LEN[at as usize] = len
+}
+
+pub fn ir_arena_name(at: i64) -> Name with Mut, Panic, Div {
+    var nm = ir_empty_name()
+    if at < 0 || at >= ir_instr_arena_capacity() { return nm }
+    let off = IR_A_NAME_OFF[at as usize]
+    let len = IR_A_NAME_LEN[at as usize]
+    if len <= 0 { return nm }
+    var i: i64 = 0
+    while i < len {
+        nm.buf[i as usize] = IR_NAME_POOL[(off + i) as usize]
+        i = i + 1
+    }
+    nm.len = len
+    nm
+}
+
+pub fn ir_arena_put_args(at: i64, args: Option<Box<IrRegList>>, count: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    if count <= 0 { IR_A_ARG_BASE[at as usize] = 0  return }
+    if IR_ARG_POOL_LEN + count > ir_arg_pool_capacity() {
+        // Was: drop the arguments and carry on -- which is exactly the rc=12
+        // failure this arena already paid for once, except silent. A call that
+        // loses its arguments is a different program, not a slower one.
+        IR_A_ARG_COUNT[at as usize] = 0
+        ir_arena_latch(IR_ARENA_VIOLATION_ARG_POOL, ir_region_invalid())
+        return
+    }
+    let base = IR_ARG_POOL_LEN
+    var cur = args
+    var k: i64 = 0
+    while k < count {
+        match cur {
+            Some(node) => {
+                IR_ARG_POOL[(base + k) as usize] = (*node).head
+                cur = (*node).tail
+            }
+            _ => { IR_ARG_POOL[(base + k) as usize] = IR_INVALID_REG }
+        }
+        k = k + 1
+    }
+    IR_ARG_POOL_LEN = base + count
+    IR_A_ARG_BASE[at as usize] = base
+}
+
+// The k-th call argument register, straight out of the flat pool. This is what
+// the arena-resident call sites use instead of walking a Box'd list.
+pub fn ir_arena_arg_at(at: i64, k: i64) -> i64 with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return IR_INVALID_REG }
+    if k < 0 || k >= IR_A_ARG_COUNT[at as usize] { return IR_INVALID_REG }
+    IR_ARG_POOL[(IR_A_ARG_BASE[at as usize] + k) as usize]
+}
+
+// Whole-instruction load. The arg list is rebuilt only when there are arguments,
+// so the common no-arg instruction costs no allocation.
+// NO Alloc effect, deliberately. This is called at ~431 sites; requiring Alloc
+// forced the effect onto every caller and cascaded (the first such error
+// desynchronised the checker into 334k nonsense diagnostics). The call-argument
+// list is therefore NOT rebuilt here -- every arena-resident argument access goes
+// through ir_arena_arg_at and the flat pool instead.
+pub fn ir_arena_load(at: i64) -> IrInstr with Mut, Panic, Div {
+    var out = ir_nop()
+    if at < 0 || at >= ir_instr_arena_capacity() { return out }
+    out.op = IR_A_OP[at as usize] as IrOpcode
+    out.dst = IR_A_DST[at as usize]
+    out.src1 = IR_A_SRC1[at as usize]
+    out.src2 = IR_A_SRC2[at as usize]
+    out.imm_i64 = IR_A_IMM_I64[at as usize]
+    out.imm_f64 = IR_A_IMM_F64[at as usize]
+    out.label_id = IR_A_LABEL_ID[at as usize]
+    out.fn_id = IR_A_FN_ID[at as usize]
+    out.field_idx = IR_A_FIELD_IDX[at as usize]
+    out.imm_flags = IR_A_IMM_FLAGS[at as usize]
+    out.bin_op = IR_A_BIN_OP[at as usize] as BinaryOp
+    out.un_op = IR_A_UN_OP[at as usize] as UnaryOp
+    out.arg_count = IR_A_ARG_COUNT[at as usize]
+    // Carried, NOT re-derived: interning on this read path broke arity >= 5.
+    out.name_id = IR_A_NAME_ID[at as usize]
+    out
+}
+pub fn ir_instr_arena_capacity() -> i64 { 1048576 }
+
+pub var IR_REGION_BASE: [i64; 16640] = [0; 16640]
+pub var IR_REGION_CAP: [i64; 16640] = [0; 16640]
+pub var IR_REGION_LEN: [i64; 16640] = [0; 16640]
+pub var IR_REGION_GEN: [i64; 16640] = [0; 16640]
+pub var IR_REGION_STATE: [i64; 16640] = [0; 16640]
+// MUST EXCEED IR_MAX_FUNCS; both were 8192. Slot 0 is the quarantine and
+// module_frontend_loaded_ir_slot_limit reserves one transient slot, leaving 8190
+// regions for 8191 permitted functions -- so the top of the range got no region,
+// lowering returned ir_region_invalid() and the contract check refused.
+// Bisected: 8189 live slots compile, 8190 and 8191 do not.
+pub fn ir_region_table_capacity() -> i64 { 16640 }
+
+// ============================================================================
+// IrCapacities: ONE object for all coupled capacity constants.
+// ============================================================================
+//
+// SEMANTIC DECLARATION (before code, per FOUNDER_INTENT):
+//
+// A capacity ceiling that silently drops is a lie. The Sounio compiler exists
+// to make such lies impossible. Every capacity in this object is coupled to at
+// least one other by a hard invariant; violating the coupling produces either
+// a silent miscompile (truncated liveness deleting live code) or a silent drop
+// (function symbols and offsets vanishing past the literal, exit 0, no error).
+// Both are exactly what this language was built to prevent.
+//
+// INVARIANTS enforced by ir_capacities_validate:
+//   1. region_slots > max_functions
+//      The region table MUST have more slots than the maximum function count.
+//      Slot 0 is quarantine; module_frontend_loaded_ir_slot_limit reserves one
+//      transient slot. If region_slots <= max_functions, the top functions get
+//      no region, lowering returns ir_region_invalid(), and the contract check
+//      refuses. Bisected 2026-08: 8189 live slots compile, 8190 and 8191 do not.
+//
+//   2. dce_liveness_slots > 0
+//      NOT `dce_liveness_slots >= max_instructions`. Production keeps
+//      dce_liveness_slots=8192 and max_instructions=IR_MAX_INSTRS=16384.
+//      Main chose that on purpose in 042c29be53: dce_run_impl REFUSES any
+//      function above DCE_MAX_INSTRS rather than raising the ceiling. A
+//      truncated liveness analysis is a WRONG analysis, not a weaker one.
+//      Converting that refuse into a panic on every compile would contradict
+//      the measured choice. The IR_MAX_INSTRS / DCE_MAX_INSTRS coupling is a
+//      POLICY invariant pinned by
+//      scripts/ci/irfunction_instr_capacity_coherence_gate.sh (the pass must
+//      refuse, not truncate). The runtime object only requires DCE to have
+//      nonzero capacity. Refusal is detectable via DCE_REFUSAL_COUNT.
+//
+//   3. backend_offset_slots >= max_functions
+//      The backend fn_offsets arrays are indexed by the IrModule.functions slot.
+//      If they are smaller than max_functions, functions past the offset array
+//      get no symbol and no offset — dropped silently.
+//
+// The object does NOT yet move arrays to dynamic allocation. That is the next
+// turn and changes IrModule entirely. This turn: the object, the invariants,
+// and the constructor that refuses to construct a violating configuration.
+
+pub struct IrCapacities {
+    max_functions: i64,
+    region_slots: i64,
+    max_instructions: i64,
+    dce_liveness_slots: i64,
+    backend_offset_slots: i64,
+}
+
+// The current production configuration. All values match the existing
+// constants; the object makes the coupling explicit and checkable.
+pub fn ir_capacities_default() -> IrCapacities {
+    IrCapacities {
+        max_functions: IR_MAX_FUNCS,
+        region_slots: 16640,
+        max_instructions: IR_MAX_INSTRS,
+        dce_liveness_slots: 8192,
+        backend_offset_slots: IR_MAX_FUNCS,
+    }
+}
+
+// Validate the invariant coupling. Panics on violation — a capacity object
+// that can be constructed in a violating state is no object at all.
+pub fn ir_capacities_validate(cap: &IrCapacities) with Panic {
+    // Invariant 1: region_slots > max_functions
+    if (*cap).region_slots <= (*cap).max_functions {
+        panic("IrCapacities: region_slots must exceed max_functions")
+    }
+    // Invariant 2: dce_liveness_slots > 0.
+    // The production config has dce_liveness_slots=8192 < max_instructions=16384.
+    // That is SAFE and DELIBERATE: dce_run_impl (dce.sio:818-821, since 042c29be53)
+    // REFUSES functions above DCE_MAX_INSTRS and returns empty stats — main chose
+    // "refuse the function" over "raise the ceiling". A truncated liveness analysis
+    // is a wrong analysis, not a weaker one. The refusal is now DETECTABLE via
+    // DCE_REFUSAL_COUNT (dce.sio), so the driver can observe that DCE declined.
+    // The coupling "IR_MAX_INSTRS cannot rise without DCE_MAX_INSTRS" is a POLICY
+    // invariant enforced by irfunction_instr_capacity_coherence_gate.sh, not a
+    // runtime panic here. The runtime invariant is simply: DCE must have nonzero
+    // capacity.
+    if (*cap).dce_liveness_slots <= 0 {
+        panic("IrCapacities: dce_liveness_slots must be > 0 (DCE must have capacity to function)")
+    }
+    // Invariant 3: backend_offset_slots >= max_functions
+    if (*cap).backend_offset_slots < (*cap).max_functions {
+        panic("IrCapacities: backend_offset_slots must be >= max_functions")
+    }
+}
+
+// Self-test: the default configuration must pass validation and match the
+// live constants. Wired into test_ir.sio's runner.
+pub fn ir_capacities_self_test() -> bool with Panic {
+    let cap = ir_capacities_default()
+    // If this panics, the default configuration is broken and the test fails loudly.
+    ir_capacities_validate(&cap)
+    if cap.max_functions != IR_MAX_FUNCS { return false }
+    if cap.region_slots != 16640 { return false }
+    if cap.max_instructions != IR_MAX_INSTRS { return false }
+    if cap.dce_liveness_slots != 8192 { return false }
+    if cap.backend_offset_slots != IR_MAX_FUNCS { return false }
+    true
+}
+
+pub var IR_ARENA_TOP: i64 = 0
+pub var IR_REGION_COUNT: i64 = 0
+
+// Every out-of-contract write lands here instead of in someone else's region.
+// Allocated by init as region slot 0 so a zeroed handle cannot address real data.
+pub var IR_QUARANTINE_BASE: i64 = 0
+pub fn ir_quarantine_slots() -> i64 { 256 }
+
+// Set when any handle contract is violated. Read by the compile driver, which
+// must refuse to emit -- same role as IR_LOWER_HARD_ERROR for the lowering walls.
+pub var IR_ARENA_VIOLATION: i64 = 0
+
+pub let IR_REGION_FREE: i64 = 0
+pub let IR_REGION_LIVE: i64 = 1
+pub let IR_REGION_SEALED: i64 = 2
+
+pub let IR_ARENA_OK: i64 = 0
+pub let IR_ARENA_ERR_CAPACITY: i64 = -1        // arena is full
+pub let IR_ARENA_ERR_REGIONS: i64 = -2         // region table is full
+pub let IR_ARENA_ERR_STALE: i64 = -3           // generation mismatch (post-realloc)
+pub let IR_ARENA_ERR_INVALID: i64 = -4         // slot out of range / freed
+pub let IR_ARENA_ERR_SEALED: i64 = -5          // write through a published handle
+pub let IR_ARENA_ERR_RANGE: i64 = -6           // index outside the region
+pub let IR_ARENA_ERR_NEGATIVE: i64 = -7        // negative size asked for
+
+// A handle. Carrying the generation is what makes a post-reallocation stale copy
+// detectable instead of silently pointing at whatever now occupies the old base.
+pub struct IrInstrRegion {
+    pub slot: i64,
+    pub generation: i64,
+}
+
+pub fn ir_region_invalid() -> IrInstrRegion {
+    IrInstrRegion { slot: -1, generation: -1 }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+pub fn ir_instr_arena_init() -> i64 with Mut, Panic, Div {
+    // WS-D: the capacity object's invariants are checked here, where every
+    // compile path arms the arena. A violating configuration panics loudly
+    // instead of arming a ceiling that will silently drop past it.
+    let ir_cap_check = ir_capacities_default()
+    ir_capacities_validate(&ir_cap_check)
+    var i: i64 = 0
+    while i < ir_region_table_capacity() {
+        IR_REGION_BASE[i as usize] = 0
+        IR_REGION_CAP[i as usize] = 0
+        IR_REGION_LEN[i as usize] = 0
+        IR_REGION_STATE[i as usize] = IR_REGION_FREE
+        // Generations deliberately NOT reset: a handle held across an init must
+        // not start matching again. They only ever increase.
+        i = i + 1
+    }
+    IR_ARENA_TOP = 0
+    IR_REGION_COUNT = 0
+    IR_ARENA_VIOLATION = 0
+    // Slot 0 is the quarantine, so a zero-initialised handle addresses scratch.
+    IR_QUARANTINE_BASE = 0
+    IR_REGION_BASE[0] = 0
+    IR_REGION_CAP[0] = ir_quarantine_slots()
+    IR_REGION_LEN[0] = 0
+    IR_REGION_GEN[0] = IR_REGION_GEN[0] + 1
+    IR_REGION_STATE[0] = IR_REGION_LIVE
+    IR_ARENA_TOP = ir_quarantine_slots()
+    IR_REGION_COUNT = 1
+    IR_ARENA_OK
+}
+
+pub fn ir_instr_arena_violation() -> bool { IR_ARENA_VIOLATION != 0 }
+
+pub fn ir_instr_arena_used() -> i64 { IR_ARENA_TOP }
+
+pub fn ir_instr_arena_region_count() -> i64 { IR_REGION_COUNT }
+
+// ---------------------------------------------------------------------------
+// Allocation
+// ---------------------------------------------------------------------------
+
+pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
+    if cap < 0 { return IR_ARENA_ERR_NEGATIVE }
+    // Self-arming. The driver calls ir_instr_arena_init() per compile, but the
+    // compiler has several entry paths and one of them reaches lowering without
+    // passing through that barrier -- relying on the driver alone left the
+    // quarantine region unreserved. Init is idempotent-by-count here.
+    if IR_REGION_COUNT == 0 { ir_instr_arena_init() }
+    if IR_REGION_COUNT >= ir_region_table_capacity() { return IR_ARENA_ERR_REGIONS }
+    if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let slot = IR_REGION_COUNT
+    IR_REGION_BASE[slot as usize] = IR_ARENA_TOP
+    IR_REGION_CAP[slot as usize] = cap
+    IR_REGION_LEN[slot as usize] = 0
+    IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
+    IR_REGION_STATE[slot as usize] = IR_REGION_LIVE
+    IR_ARENA_TOP = IR_ARENA_TOP + cap
+    IR_REGION_COUNT = slot + 1
+    (*out).slot = slot
+    (*out).generation = IR_REGION_GEN[slot as usize]
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Handle validation
+// ---------------------------------------------------------------------------
+
+pub fn ir_region_status(r: &IrInstrRegion) -> i64 with Panic, Div { ir_region_status_v(*r) }
+
+pub fn ir_region_status_v(r: IrInstrRegion) -> i64 with Panic, Div {
+    let s = r.slot
+    if s < 0 || s >= IR_REGION_COUNT { return IR_ARENA_ERR_INVALID }
+    if IR_REGION_STATE[s as usize] == IR_REGION_FREE { return IR_ARENA_ERR_INVALID }
+    if IR_REGION_GEN[s as usize] != r.generation { return IR_ARENA_ERR_STALE }
+    IR_ARENA_OK
+}
+
+pub fn ir_region_is_valid(r: &IrInstrRegion) -> bool with Panic, Div {
+    ir_region_status(r) == IR_ARENA_OK
+}
+
+pub fn ir_region_is_sealed(r: &IrInstrRegion) -> bool with Panic, Div {
+    let s = (*r).slot
+    if s < 0 || s >= IR_REGION_COUNT { return false }
+    IR_REGION_STATE[s as usize] == IR_REGION_SEALED
+}
+
+pub fn ir_region_len(r: &IrInstrRegion) -> i64 with Panic, Div {
+    if ir_region_status(r) != IR_ARENA_OK { return 0 }
+    IR_REGION_LEN[(*r).slot as usize]
+}
+
+pub fn ir_region_cap(r: &IrInstrRegion) -> i64 with Panic, Div {
+    if ir_region_status(r) != IR_ARENA_OK { return 0 }
+    IR_REGION_CAP[(*r).slot as usize]
+}
+
+// ---------------------------------------------------------------------------
+// Raw base accessors -- the hot path for the eventual textual rewrite of
+// `IR_INSTR_ARENA[(ir_region_base_read(&f.region) + (i)) as usize]` into `IR_INSTR_ARENA[(ir_region_base_read(&f.region) + i) as usize]`.
+//
+// Two of them on purpose. A single accessor could not tell a read from a write,
+// and sealing only means anything if writes are the ones refused. The rewrite
+// picks by the shape of the site: assignments, nested field assignments and `&!`
+// take the _write form, everything else takes _read.
+//
+// Both are total: on violation they report once, raise IR_ARENA_VIOLATION so the
+// compile cannot succeed, and return the quarantine base so the access is
+// memory-safe rather than landing in another function's instructions.
+// ---------------------------------------------------------------------------
+
+// Latch only -- deliberately NO IO effect. These accessors are inserted at ~4282
+// call sites by the IrFunction.instrs conversion; giving them IO would force the
+// effect onto every containing function and cascade across the whole backend.
+// The violation is reported by ir_arena_report_violation(), called from the
+// compile driver's barrier where IO already exists.
+pub var IR_ARENA_VIOLATION_KIND: i64 = 0
+pub var IR_ARENA_VIOLATION_SLOT: i64 = -1
+pub var IR_ARENA_VIOLATION_GEN: i64 = -1
+
+pub let IR_ARENA_VIOLATION_STALE: i64 = 1
+pub let IR_ARENA_VIOLATION_INVALID: i64 = 2
+pub let IR_ARENA_VIOLATION_SEALED: i64 = 3
+// Exhaustion, not a handle-contract breach: the side pools ran out. Distinct
+// kinds because the remedy is different -- these say "raise the pool" or "stop
+// re-appending", never "you aliased a region".
+pub let IR_ARENA_VIOLATION_NAME_POOL: i64 = 4
+pub let IR_ARENA_VIOLATION_ARG_POOL: i64 = 5
+// #1669: a float fact the backend cannot represent. Today every consumer caps at
+// 2048 vregs and SILENTLY drops the typing above it, which is the same silent
+// miscompile-in-waiting; this makes it a refusal.
+pub let IR_ARENA_VIOLATION_FLOAT_SET: i64 = 6
+
+fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
+    if IR_ARENA_VIOLATION == 0 {
+        IR_ARENA_VIOLATION_KIND = kind
+        IR_ARENA_VIOLATION_SLOT = r.slot
+        IR_ARENA_VIOLATION_GEN = r.generation
+    }
+    IR_ARENA_VIOLATION = 1
+}
+
+// Prints the FIRST violation. Returns true when there was one, so the driver can
+// refuse to emit -- an arena contract breach means some function's instructions
+// were written through a stale or published handle, which is a miscompile.
+pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
+    if IR_ARENA_VIOLATION == 0 { return false }
+    print("error: IR instruction arena contract violated (")
+    if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_STALE {
+        print("stale handle -- a region was reallocated and this copy was not updated")
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_SEALED {
+        print("write through a sealed handle -- a value copy was made without cloning the region")
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_NAME_POOL {
+        print("name pool exhausted -- an instruction name was dropped, which changes call resolution")
+        print(") fill ")
+        print_int(IR_A_NAME_BYTES_USED)
+        print(" of ")
+        print_int(ir_name_pool_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_FLOAT_SET {
+        print("a vreg above the float-typing capacity was marked as f64 -- the backend cannot represent it")
+        print(") capacity ")
+        print_int(ir_float_bits_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_ARG_POOL {
+        print("call-argument pool exhausted -- a call lost its arguments")
+        print(") fill ")
+        print_int(IR_ARG_POOL_LEN)
+        print(" of ")
+        print_int(ir_arg_pool_capacity())
+        print("\n")
+        return true
+    } else {
+        print("invalid handle")
+    }
+    print(") on region slot ")
+    print_int(IR_ARENA_VIOLATION_SLOT)
+    print(" generation ")
+    print_int(IR_ARENA_VIOLATION_GEN)
+    print("\n")
+    true
+}
+
+// Slot accessors -- what every converted instruction access actually calls.
+//
+// The WRITE form takes a mutable handle and the index so it can ENSURE the
+// region exists and is large enough: that is what finally lets a function grow
+// past the old 4096 wall. The READ form cannot allocate and must not -- reading
+// past a function's instructions is a bug, not a request for space.
+//
+// Both are total. On a contract violation they latch (ir_arena_latch) and return
+// a quarantine slot, so the access stays memory-safe and the compile is
+// guaranteed to fail rather than emit code built on corrupted IR.
+pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 { return IR_QUARANTINE_BASE }
+    let st = ir_region_status_v(r)
+    if st != IR_ARENA_OK {
+        var kind = IR_ARENA_VIOLATION_INVALID
+        if st == IR_ARENA_ERR_STALE { kind = IR_ARENA_VIOLATION_STALE }
+        ir_arena_latch(kind, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let slot = r.slot
+    // Reading past the region is a caller bug, not a request for space. It must
+    // never be allowed to compute an address outside the arena -- an accessor
+    // that can segfault would defeat the entire point of this design.
+    if idx >= IR_REGION_CAP[slot as usize] {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let at = IR_REGION_BASE[slot as usize] + idx
+    if at < 0 || at >= ir_instr_arena_capacity() {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    at
+}
+
+// Takes an IMMUTABLE handle on purpose. Growth only moves IR_REGION_BASE[slot],
+// and the handle stores the SLOT, not the base -- so every copy of a handle sees
+// the new base through the same indirection and growth cannot make a copy stale.
+// That is also what keeps this callable from the ~1425 write sites: `&!` through
+// a chain like `module.functions[0].region` does not typecheck.
+//
+// A region is NOT allocated here. Writing into a function that was never given
+// one is a bug in the caller, and it is latched as a violation rather than
+// papered over -- the whole point of this design is that nothing about it is
+// silent.
+pub fn ir_region_slot_w(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 { return IR_QUARANTINE_BASE }
+    let st = ir_region_status_v(r)
+    if st != IR_ARENA_OK {
+        var kind = IR_ARENA_VIOLATION_INVALID
+        if st == IR_ARENA_ERR_STALE { kind = IR_ARENA_VIOLATION_STALE }
+        ir_arena_latch(kind, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let slot = r.slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED {
+        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    if idx >= IR_REGION_CAP[slot as usize] {
+        if ir_region_grow_slot(slot, idx + 1) != IR_ARENA_OK {
+            ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+            return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+        }
+    }
+    if idx >= IR_REGION_LEN[slot as usize] {
+        IR_REGION_LEN[slot as usize] = idx + 1
+    }
+    let at = IR_REGION_BASE[slot as usize] + idx
+    if at < 0 || at >= ir_instr_arena_capacity() {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    at
+}
+
+// Grow by SLOT, so no handle has to be updated and none can go stale.
+fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= IR_REGION_COUNT { return IR_ARENA_ERR_INVALID }
+    if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
+    var grown = IR_REGION_CAP[slot as usize] * 2
+    if grown < want { grown = want }
+    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let old_base = IR_REGION_BASE[slot as usize]
+    let len = IR_REGION_LEN[slot as usize]
+    let new_base = IR_ARENA_TOP
+    var i: i64 = 0
+    while i < len {
+        ir_arena_copy_slot(new_base + i, old_base + i)
+        i = i + 1
+    }
+    IR_ARENA_TOP = new_base + grown
+    IR_REGION_BASE[slot as usize] = new_base
+    IR_REGION_CAP[slot as usize] = grown
+    IR_ARENA_OK
+}
+
+// Give a function its own region. Called where a function slot is created for
+// real; ir_empty_function() cannot do it because array-repeat initialisers
+// evaluate once and copy, which would hand every slot the SAME region.
+pub fn ir_function_alloc_region(f: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var r = ir_region_invalid()
+    let rc = ir_instr_arena_alloc(16, &! r)
+    if rc != IR_ARENA_OK { return rc }
+    (*f).region = r
+    IR_ARENA_OK
+}
+
+pub fn ir_region_base_read(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st == IR_ARENA_ERR_STALE {
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, *r)
+        return IR_QUARANTINE_BASE
+    }
+    if st != IR_ARENA_OK {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, *r)
+        return IR_QUARANTINE_BASE
+    }
+    IR_REGION_BASE[(*r).slot as usize]
+}
+
+pub fn ir_region_base_write(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st == IR_ARENA_ERR_STALE {
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, *r)
+        return IR_QUARANTINE_BASE
+    }
+    if st != IR_ARENA_OK {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, *r)
+        return IR_QUARANTINE_BASE
+    }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED {
+        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, *r)
+        return IR_QUARANTINE_BASE
+    }
+    IR_REGION_BASE[(*r).slot as usize]
+}
+
+// ---------------------------------------------------------------------------
+// Checked element access (used by the witnesses and by anything not on the
+// rewritten hot path)
+// ---------------------------------------------------------------------------
+
+pub fn ir_region_get(r: &IrInstrRegion, idx: i64, out: &! IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    (*out) = ir_arena_load(IR_REGION_BASE[(*r).slot as usize] + idx)
+    IR_ARENA_OK
+}
+
+pub fn ir_region_set(r: &IrInstrRegion, idx: i64, instr: IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    ir_arena_store(IR_REGION_BASE[(*r).slot as usize] + idx, instr)
+    IR_ARENA_OK
+}
+
+pub fn ir_region_push(r: &! IrInstrRegion, instr: IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(&(*r))
+    if st != IR_ARENA_OK { return st }
+    let slot = (*r).slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    let len = IR_REGION_LEN[slot as usize]
+    if len >= IR_REGION_CAP[slot as usize] {
+        let rc = ir_region_reserve(r, len + 1)
+        if rc != IR_ARENA_OK { return rc }
+    }
+    let s2 = (*r).slot
+    let l2 = IR_REGION_LEN[s2 as usize]
+    ir_arena_store(IR_REGION_BASE[s2 as usize] + l2, instr)
+    IR_REGION_LEN[s2 as usize] = l2 + 1
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Growth
+// ---------------------------------------------------------------------------
+// Reallocation MOVES the region, so it bumps the generation: the handle passed
+// in is updated, and every OTHER copy of that handle becomes detectably stale
+// rather than silently pointing at the old bytes. That is the whole reason the
+// generation exists.
+
+pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic, Div {
+    if want < 0 { return IR_ARENA_ERR_NEGATIVE }
+    let st = ir_region_status(&(*r))
+    if st != IR_ARENA_OK { return st }
+    let slot = (*r).slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
+    var grown = IR_REGION_CAP[slot as usize] * 2
+    if grown < want { grown = want }
+    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let old_base = IR_REGION_BASE[slot as usize]
+    let len = IR_REGION_LEN[slot as usize]
+    let new_base = IR_ARENA_TOP
+    var i: i64 = 0
+    while i < len {
+        ir_arena_copy_slot(new_base + i, old_base + i)
+        i = i + 1
+    }
+    IR_ARENA_TOP = new_base + grown
+    IR_REGION_BASE[slot as usize] = new_base
+    IR_REGION_CAP[slot as usize] = grown
+    IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
+    (*r).generation = IR_REGION_GEN[slot as usize]
+    IR_ARENA_OK
+}
+
+pub fn ir_region_set_len(r: &IrInstrRegion, len: i64) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if len < 0 || len > IR_REGION_CAP[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    IR_REGION_LEN[(*r).slot as usize] = len
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Sealing and cloning
+// ---------------------------------------------------------------------------
+// Seal on publication: once a function's instructions have been stored into a
+// module or handed across a pass boundary, any further write through a handle to
+// them is a missed clone. Cloning is the supported way to get a writable copy,
+// and it is what the by-value boundaries must call.
+
+pub fn ir_region_seal(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    IR_REGION_STATE[(*r).slot as usize] = IR_REGION_SEALED
+    IR_ARENA_OK
+}
+
+// Publish the module: every function's region refuses further writes from here.
+//
+// This is the only mechanism that can answer "is the aliasing class closed?".
+// A static scan can only find the sites its own matching rule knows how to see,
+// and this branch has already been bitten twice by that: Sweep 1 matched writes
+// that were syntactically local and missed two `&!`-one-frame-down sites, and a
+// third shape -- a copy parked in a struct field and mutated later -- would evade
+// both scans. Sealing does not care what the write LOOKS like. It catches the
+// write.
+//
+// Returns the number of regions sealed. Regions that are not live (an empty
+// function never given one) are skipped rather than treated as an error.
+pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var sealed: i64 = 0
+    var i: i64 = 0
+    while i < (*module).fn_count && i < IR_MAX_FUNCS {
+        // Hoist the handle before taking its address. Do not "simplify" this
+        // back to `ir_region_seal(&(*module).functions[i as usize].region)`:
+        // that is what the first version did, and it sealed ZERO of seven
+        // regions in a real compile while reporting nothing.
+        //
+        // WHY it failed is NOT established. The obvious explanation -- that
+        // `&<indexed expression>` is the bad shape, as in #1651's
+        // `&IR_INSTR_ARENA[...]` -- does not survive testing:
+        // tests/native-v2/ir_module_seal_witness.sio seals 3 of 3 with EITHER
+        // form. The difference the witness cannot reach is that the compiler's
+        // module is a Box, and `Box::new(ir_empty_module())` SIGSEGVs in a
+        // witness (a 4.2 MB value through Box), so the failing shape has no
+        // isolated reproduction yet. The hoist is a measured fix, 0 -> 7, with
+        // an unproven mechanism. Treat it as load-bearing until someone can
+        // reproduce and explain it.
+        //
+        // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
+        // all this needs -- nothing has to be written back to the module.
+        var r = (*module).functions[i as usize].region
+        if ir_region_seal(&r) == IR_ARENA_OK {
+            sealed = sealed + 1
+        }
+        i = i + 1
+    }
+    sealed
+}
+
+pub fn ir_region_clone(src: &IrInstrRegion, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(src)
+    if st != IR_ARENA_OK { return st }
+    let slot = (*src).slot
+    let len = IR_REGION_LEN[slot as usize]
+    // Sized to the actual length, not the source capacity: sizing clones by
+    // worst case is what makes fixed-size regions cost as much as the inline
+    // array this replaces.
+    let rc = ir_instr_arena_alloc(len, out)
+    if rc != IR_ARENA_OK { return rc }
+    let src_base = IR_REGION_BASE[slot as usize]
+    let dst_base = IR_REGION_BASE[(*out).slot as usize]
+    var i: i64 = 0
+    while i < len {
+        ir_arena_copy_slot(dst_base + i, src_base + i)
+        i = i + 1
+    }
+    IR_REGION_LEN[(*out).slot as usize] = len
+    IR_ARENA_OK
+}
+
+// #1649 Sweep 1. An IrFunction value copy USED to be a deep copy, because the
+// instructions were inline. With a region handle it is an ALIAS, and the
+// optimizer depends on the old semantics:
+//
+//     var result = func                    // was: full deep copy
+//     ...write through result...           // must NOT touch func
+//     if !changed { return func }          // early-outs return the pristine original
+//
+// Under a shared region those writes land in func's storage while result's
+// scalar fields (instr_count above all) stay separate, so the caller gets
+// shifted instructions with an unchanged count. Nothing about that is visible
+// to the type checker -- the copy site reads identically in both worlds.
+//
+// Fails CLOSED. If the region cannot be cloned the result carries an invalid
+// handle, so the first write is routed to quarantine and latches a violation,
+// rather than silently degrading into the alias this exists to prevent.
+pub fn ir_function_clone(src: &IrFunction) -> IrFunction with Mut, Panic, Div {
+    var out = *src
+    var r = ir_region_invalid()
+    if ir_region_clone(&(*src).region, &! r) != IR_ARENA_OK {
+        out.region = ir_region_invalid()
+        return out
+    }
+    out.region = r
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Mark / release
+// ---------------------------------------------------------------------------
+// Pass-scoped reclamation: a pass records the mark on entry and releases back to
+// it once the surviving result has been copied out. Regions allocated after the
+// mark are invalidated -- their generation is bumped, so any handle to them that
+// escaped the pass is caught by ir_region_status rather than silently reading
+// whatever is allocated there next.
+
+pub struct IrArenaMark {
+    pub top: i64,
+    pub region_count: i64,
+}
+
+pub fn ir_arena_mark() -> IrArenaMark {
+    IrArenaMark { top: IR_ARENA_TOP, region_count: IR_REGION_COUNT }
+}
+
+pub fn ir_arena_release(m: &IrArenaMark) -> i64 with Mut, Panic, Div {
+    if (*m).region_count < 0 || (*m).region_count > IR_REGION_COUNT { return IR_ARENA_ERR_RANGE }
+    if (*m).top < 0 || (*m).top > IR_ARENA_TOP { return IR_ARENA_ERR_RANGE }
+    var i = (*m).region_count
+    while i < IR_REGION_COUNT {
+        IR_REGION_STATE[i as usize] = IR_REGION_FREE
+        IR_REGION_LEN[i as usize] = 0
+        IR_REGION_CAP[i as usize] = 0
+        IR_REGION_GEN[i as usize] = IR_REGION_GEN[i as usize] + 1
+        i = i + 1
+    }
+    IR_ARENA_TOP = (*m).top
+    IR_REGION_COUNT = (*m).region_count
+    IR_ARENA_OK
+}
+
+
 pub struct IrFunction {
     pub name: Name,
-    pub instrs: [IrInstr; 128],
+    // #1649: the instruction storage moved to a variable-size arena region.
+    // This used to be [IrInstr; 4096] inline, which made every IrFunction ~1 MB
+    // and every IrModule ~2 GB regardless of use, and capped a function at 4096
+    // IR instructions -- a 136-line test needs 14389.
+    pub region: IrInstrRegion,
     pub instr_count: i64,
     pub reg_count: i64,
     pub label_count: i64,
     pub param_count: i64,
     pub param_regs: [i64; 64],
     pub compile_strategy: i64,
+    pub returns_float: i64,        // 1 = declared return type is f64; used by native core value tracking
+    pub return_struct_name: Name,  // Named return type, used by native field layout recovery
+    // #1475: element count of a WORD-SCALAR fixed-array return type ([i64;4], [f64;8], ...),
+    // else -1. Lets `var a = make_arr()` (no annotation) learn the length that
+    // `var a: [i64;4] = make_arr()` gets from the annotation, so a later `var c = a`
+    // takes the value-copy path instead of aliasing. Encoded as ONE field so the
+    // unsafe combination "length known, element not word-scalar" is unrepresentable.
+    pub return_fixed_array_len: i64,
     pub prof_counter_id: i64,
     pub hyper_algebra_kind: i64,  // -1 = absent/unknown, otherwise ALG_REAL..ALG_CLIFFORD
+    pub is_sret: i64,             // 1 = SysV sret: rdi is hidden dest; explicit params shift to rsi+
+    pub sret_dest_reg: i64,       // when is_sret==1: vreg receiving the hidden rdi destination
+    pub bss_size: i64,            // for BSS-global vars: byte size of the global (8 for scalars)
+    // 1 = first param is &T / &!T (method self-by-ref). Call sites must pass an
+    // address; bare-value receivers need auto-OpRef (Root 2 method fix).
+    pub first_param_is_ref: i64,
+    // #1669: which vregs live in an xmm. This used to be smuggled through the
+    // instruction stream as IrNop + IR_FLOAT_REG_MARKER_FLAG -- a fact with
+    // FUNCTION lifetime stored in a slot with PASS lifetime. compact_nops deleted
+    // it and every f64 returned from a call came back as i64 MAX.
+    //
+    // 64 words x 32 bits = 2048 vregs, which is not arbitrary: every consumer
+    // already caps float typing there (NC_MAX_VREGS, MIR_MAX_FLOAT_SLOTS, and
+    // codegen's `ty: [i64; 2048]`), so this is exactly information-preserving.
+    // 32 bits per word, not 64, so every mask stays a positive i64.
+    //
+    // A BIT, not a tag, and that is not a limitation on f128/f256: wide floats
+    // are software-emulated over consecutive INTEGER limbs (the 11 IrWide*
+    // opcodes carry limb_count) and never set the marker. The question here is
+    // strictly "xmm or general-purpose register" -- movsd or mov. A future
+    // HARDWARE float of another width would need more than a bit; widening this
+    // lane is then two helpers and four consumers, not a re-plumb.
+    pub float_reg_bits: [i64; 64],
 }
 
-struct IrAlgebraInfo {
+pub struct IrAlgebraInfo {
     name: Name,
     add_commutative: bool,
     add_associative: bool,
@@ -701,12 +1890,12 @@ struct IrAlgebraInfo {
     is_valid: bool,
 }
 
-struct IrAlgebraTable {
+pub struct IrAlgebraTable {
     entries: [IrAlgebraInfo; 32],
     count: i64,
 }
 
-fn ir_empty_algebra_info() -> IrAlgebraInfo {
+pub fn ir_empty_algebra_info() -> IrAlgebraInfo {
     IrAlgebraInfo {
         name: Name { buf: [0; 128], len: 0 },
         add_commutative: true,
@@ -720,7 +1909,7 @@ fn ir_empty_algebra_info() -> IrAlgebraInfo {
     }
 }
 
-fn ir_empty_algebra_table() -> IrAlgebraTable {
+pub fn ir_empty_algebra_table() -> IrAlgebraTable {
     IrAlgebraTable {
         entries: [ir_empty_algebra_info(); 32],
         count: 0,
@@ -731,21 +1920,27 @@ fn ir_empty_algebra_table() -> IrAlgebraTable {
 // Algebraic law enforcement:
 //   tag=0 (Real):       add+mul both commutative and associative
 //   tag=1 (Complex):    add+mul both commutative and associative
+//                       mul_alternative = true (associativity implies alternativity)
 //   tag=2 (Quaternion): mul non-commutative (Hamilton 1843), mul associative
+//                       mul_alternative = true (associativity implies alternativity)
 //   tag=3 (Octonion):   mul non-commutative, mul non-associative (Cayley 1845)
 //                       mul_alternative = true (weaker than associative: x(xy)=(xx)y)
 //   tag=4 (Sedenion):   mul non-commutative, mul non-associative, mul non-alternative
 //                       (admits zero divisors; not a normed division algebra)
-fn ir_algebra_info_for_tag(tag: i64) -> IrAlgebraInfo {
+pub fn ir_algebra_info_for_tag(tag: i64) -> IrAlgebraInfo with Mut {
     var info = ir_empty_algebra_info()
     info.algebra_tag = tag
     info.is_valid = true
-    if tag == 2 {
-        // Quaternion: non-commutative, associative
+    if tag == 0 || tag == 1 {
+        // Real/Complex: commutative, associative, alternative
+        info.mul_alternative = true
+        info.reassoc_strategy = 0
+    } else if tag == 2 {
+        // Quaternion: non-commutative, associative, alternative
         info.mul_commutative = false
         info.mul_associative = true
-        info.mul_alternative = false
-        info.reassoc_strategy = 1
+        info.mul_alternative = true
+        info.reassoc_strategy = 0
     } else if tag == 3 {
         // Octonion: non-commutative, non-associative, alternative
         info.mul_commutative = false
@@ -762,7 +1957,7 @@ fn ir_algebra_info_for_tag(tag: i64) -> IrAlgebraInfo {
     info
 }
 
-struct IrOntologyClassInfo {
+pub struct IrOntologyClassInfo {
     name: Name,
     ontology_name: Name,
     class_index: i64,
@@ -770,18 +1965,30 @@ struct IrOntologyClassInfo {
     is_valid: bool,
 }
 
-struct IrOntologyPropertyInfo {
+pub struct IrOntologyPropertyInfo {
     name: Name,
     property_index: i64,
     domain_class_idx: i64,
     range_class_idx: i64,
 }
 
-struct IrOntologyTable {
+// Audit-only link from a checked source signature to its lowered function.
+// The optimizer may report this identity, but it must never treat it as
+// authority for a transformation.
+pub struct IrOntologyParameterLink {
+    function_name: Name,
+    parameter_index: i64,
+    class_name: Name,
+    is_valid: bool,
+}
+
+pub struct IrOntologyTable {
     entries: [IrOntologyClassInfo; 64],
     count: i64,
     properties: [IrOntologyPropertyInfo; 32],
     property_count: i64,
+    parameter_links: [IrOntologyParameterLink; 128],
+    parameter_link_count: i64,
 }
 
 fn ir_empty_ontology_class_info() -> IrOntologyClassInfo {
@@ -803,13 +2010,174 @@ fn ir_empty_ontology_property_info() -> IrOntologyPropertyInfo {
     }
 }
 
-fn ir_empty_ontology_table() -> IrOntologyTable {
+fn ir_empty_ontology_parameter_link() -> IrOntologyParameterLink {
+    IrOntologyParameterLink {
+        function_name: ir_empty_name(),
+        parameter_index: -1,
+        class_name: ir_empty_name(),
+        is_valid: false,
+    }
+}
+
+pub fn ir_empty_ontology_table() -> IrOntologyTable {
     IrOntologyTable {
         entries: [ir_empty_ontology_class_info(); 64],
         count: 0,
         properties: [ir_empty_ontology_property_info(); 32],
         property_count: 0,
+        parameter_links: [ir_empty_ontology_parameter_link(); 128],
+        parameter_link_count: 0,
     }
+}
+
+pub fn ir_ontology_table_record_parameter_link(
+    table: &! IrOntologyTable,
+    function_name: Name,
+    parameter_index: i64,
+    class_name: Name,
+) -> bool with Mut, Panic, Div {
+    if (*table).parameter_link_count >= 128 {
+        return false
+    }
+    let index = (*table).parameter_link_count
+    (*table).parameter_links[index as usize] = IrOntologyParameterLink {
+        function_name: function_name,
+        parameter_index: parameter_index,
+        class_name: class_name,
+        is_valid: true,
+    }
+    (*table).parameter_link_count = index + 1
+    true
+}
+
+pub fn ir_ontology_parameter_link_count_for_function(
+    table: &IrOntologyTable,
+    function_name: Name,
+) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < (*table).parameter_link_count && i < 128 {
+        let link = (*table).parameter_links[i as usize]
+        if link.is_valid && ir_name_eq(link.function_name, function_name) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+pub fn ir_ontology_parameter_last_class_hash_for_function(
+    table: &IrOntologyTable,
+    function_name: Name,
+) -> i64 with Mut, Panic, Div {
+    var class_hash: i64 = 0
+    var i: i64 = 0
+    while i < (*table).parameter_link_count && i < 128 {
+        let link = (*table).parameter_links[i as usize]
+        if link.is_valid && ir_name_eq(link.function_name, function_name) {
+            class_hash = bss_name_hash(link.class_name)
+        }
+        i = i + 1
+    }
+    class_hash
+}
+
+// Bounded, audit-only accessors used by source-to-IR provenance traces. These
+// expose checked signature identity after type erasure; they grant no optimizer
+// or code-generation authority.
+pub fn ir_ontology_parameter_link_total(table: &IrOntologyTable) -> i64 {
+    let total = (*table).parameter_link_count
+    if total < 0 {
+        0
+    } else if total > 128 {
+        128
+    } else {
+        total
+    }
+}
+
+pub fn ir_ontology_parameter_link_count_is_bounded(table: &IrOntologyTable) -> bool {
+    (*table).parameter_link_count >= 0 && (*table).parameter_link_count <= 128
+}
+
+pub fn ir_ontology_parameter_link_is_valid_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> bool with Panic, Div {
+    let total = ir_ontology_parameter_link_total(table)
+    if index < 0 || index >= total {
+        false
+    } else {
+        (*table).parameter_links[index as usize].is_valid
+    }
+}
+
+pub fn ir_ontology_parameter_link_function_name_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> Name with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        ir_empty_name()
+    } else {
+        (*table).parameter_links[index as usize].function_name
+    }
+}
+
+pub fn ir_ontology_parameter_link_parameter_index_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> i64 with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        -1
+    } else {
+        (*table).parameter_links[index as usize].parameter_index
+    }
+}
+
+pub fn ir_ontology_parameter_link_class_name_at(
+    table: &IrOntologyTable,
+    index: i64,
+) -> Name with Panic, Div {
+    if !ir_ontology_parameter_link_is_valid_at(table, index) {
+        ir_empty_name()
+    } else {
+        (*table).parameter_links[index as usize].class_name
+    }
+}
+
+pub fn ir_merge_ontology_parameter_links(
+    dst: IrOntologyTable,
+    src: IrOntologyTable,
+) -> IrOntologyTable with Mut, Panic, Div {
+    // This helper composes only audit links. The destination's semantic class
+    // and property tables remain authoritative and are intentionally retained.
+    var merged = dst
+    var si: i64 = 0
+    while si < src.parameter_link_count && si < 128 && merged.parameter_link_count < 128 {
+        let candidate = src.parameter_links[si as usize]
+        if candidate.is_valid {
+            var exists = false
+            var di: i64 = 0
+            while di < merged.parameter_link_count {
+                let current = merged.parameter_links[di as usize]
+                if current.is_valid &&
+                   current.parameter_index == candidate.parameter_index &&
+                   ir_name_eq(current.function_name, candidate.function_name) &&
+                   ir_name_eq(current.class_name, candidate.class_name) {
+                    exists = true
+                    di = merged.parameter_link_count
+                } else {
+                    di = di + 1
+                }
+            }
+            if !exists {
+                merged.parameter_links[merged.parameter_link_count as usize] = candidate
+                merged.parameter_link_count = merged.parameter_link_count + 1
+            }
+        }
+        si = si + 1
+    }
+    merged
 }
 
 // Extended with grade tracking — first IR to carry grade as first-class attribute.
@@ -817,16 +2185,20 @@ fn ir_empty_ontology_table() -> IrOntologyTable {
 // grade_known: true = grade_mask is exact; false = conservative (all bits set, no info).
 // cl_p, cl_q: Clifford signature (positive and negative basis vectors).
 // When grade_known && grade_mask == 0, the e-graph prunes this node (dead-grade elimination).
-struct IrHyperExprInfo {
+pub struct IrHyperExprInfo {
     span_start: i64,
     span_end: i64,
     algebra_tag: i64,
     op_kind: i64,
     knowledge_wrapped: bool,
-    grade_mask: i64,   // bitfield: bit k set = grade-k blades present
-    grade_known: bool, // true = grade_mask is exact (enable dead-grade pruning)
-    cl_p: i64,         // Clifford signature p (γᵢ² = +1 for i < p)
-    cl_q: i64,         // Clifford signature q (γⱼ² = -1 for p ≤ j < p+q)
+    grade_mask: i64,
+    grade_known: bool,
+    cl_p: i64,
+    cl_q: i64,
+    reassoc_strategy: i64,
+    forbidden_law_mask: i64,
+    law_profile_source: i64,
+    law_profile_fingerprint: i64,
 }
 
 fn ir_empty_hyper_expr_info() -> IrHyperExprInfo {
@@ -836,21 +2208,25 @@ fn ir_empty_hyper_expr_info() -> IrHyperExprInfo {
         algebra_tag: -1,
         op_kind: 0,
         knowledge_wrapped: false,
-        grade_mask: -1,    // conservative: all grades possible
+        grade_mask: -1,
         grade_known: false,
         cl_p: 0,
         cl_q: 0,
+        reassoc_strategy: 0,
+        forbidden_law_mask: 0,
+        law_profile_source: 0,
+        law_profile_fingerprint: 0,
     }
 }
 
 // Sprint 44: profiling counter metadata — one per instrumented function
-struct IrProfCounterInfo {
+pub struct IrProfCounterInfo {
     fn_id: i64,
     fn_name: Name,
     counter_id: i64,
 }
 
-struct IrPolicyRequirementInfo {
+pub struct IrPolicyRequirementInfo {
     metric_id: i64,
     metric_name: Name,
     op: CompareOp,
@@ -860,7 +2236,7 @@ struct IrPolicyRequirementInfo {
     name_threshold: Name,
 }
 
-fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
+pub fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
     IrPolicyRequirementInfo {
         metric_id: -1,
         metric_name: ir_empty_name(),
@@ -872,7 +2248,7 @@ fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
     }
 }
 
-struct IrModelFamilyInfo {
+pub struct IrModelFamilyInfo {
     id: i64,
     name: Name,
     model_names: [Name; 16],
@@ -892,7 +2268,7 @@ fn ir_empty_model_family_info() -> IrModelFamilyInfo {
     }
 }
 
-struct IrPolicyInfo {
+pub struct IrPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -918,7 +2294,7 @@ fn ir_empty_policy_info() -> IrPolicyInfo {
     }
 }
 
-struct IrDecisionPolicyInfo {
+pub struct IrDecisionPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -936,7 +2312,7 @@ fn ir_empty_decision_policy_info() -> IrDecisionPolicyInfo {
     }
 }
 
-struct IrDeferralPolicyInfo {
+pub struct IrDeferralPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -956,7 +2332,7 @@ fn ir_empty_deferral_policy_info() -> IrDeferralPolicyInfo {
     }
 }
 
-struct IrAcquisitionPolicyInfo {
+pub struct IrAcquisitionPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -978,7 +2354,7 @@ fn ir_empty_acquisition_policy_info() -> IrAcquisitionPolicyInfo {
     }
 }
 
-struct IrRecoursePolicyInfo {
+pub struct IrRecoursePolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1000,7 +2376,7 @@ fn ir_empty_recourse_policy_info() -> IrRecoursePolicyInfo {
     }
 }
 
-struct IrValidationPolicyInfo {
+pub struct IrValidationPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1014,7 +2390,7 @@ fn ir_empty_validation_policy_info() -> IrValidationPolicyInfo {
     }
 }
 
-struct IrMechanisticReportInfo {
+pub struct IrMechanisticReportInfo {
     id: i64,
     latent_state_divergence: f64,
     causal_decomposition_divergence: f64,
@@ -1024,7 +2400,7 @@ struct IrMechanisticReportInfo {
     aggregate_divergence: f64,
 }
 
-fn ir_empty_mechanistic_report_info() -> IrMechanisticReportInfo {
+pub fn ir_empty_mechanistic_report_info() -> IrMechanisticReportInfo {
     IrMechanisticReportInfo {
         id: -1,
         latent_state_divergence: 0.0,
@@ -1036,14 +2412,14 @@ fn ir_empty_mechanistic_report_info() -> IrMechanisticReportInfo {
     }
 }
 
-struct IrPosteriorWeightsInfo {
+pub struct IrPosteriorWeightsInfo {
     id: i64,
     model_names: [Name; 16],
     weights: [f64; 16],
     count: i64,
 }
 
-fn ir_empty_posterior_weights_info() -> IrPosteriorWeightsInfo {
+pub fn ir_empty_posterior_weights_info() -> IrPosteriorWeightsInfo {
     IrPosteriorWeightsInfo {
         id: -1,
         model_names: [ir_empty_name(); 16],
@@ -1052,7 +2428,7 @@ fn ir_empty_posterior_weights_info() -> IrPosteriorWeightsInfo {
     }
 }
 
-struct IrCounterexampleInfo {
+pub struct IrCounterexampleInfo {
     id: i64,
     model_name: Name,
     subgroup_name: Name,
@@ -1062,7 +2438,7 @@ struct IrCounterexampleInfo {
     summary: Name,
 }
 
-fn ir_empty_counterexample_info() -> IrCounterexampleInfo {
+pub fn ir_empty_counterexample_info() -> IrCounterexampleInfo {
     IrCounterexampleInfo {
         id: -1,
         model_name: ir_empty_name(),
@@ -1074,7 +2450,7 @@ fn ir_empty_counterexample_info() -> IrCounterexampleInfo {
     }
 }
 
-struct IrAuditInfo {
+pub struct IrAuditInfo {
     id: i64,
     name: Name,
     span_start: i64,
@@ -1106,7 +2482,7 @@ fn ir_empty_audit_info() -> IrAuditInfo {
     }
 }
 
-struct IrContestWitnessInfo {
+pub struct IrContestWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1124,7 +2500,7 @@ fn ir_empty_contest_witness_info() -> IrContestWitnessInfo {
     }
 }
 
-struct IrContestInfo {
+pub struct IrContestInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1160,7 +2536,7 @@ fn ir_empty_contest_info() -> IrContestInfo {
     }
 }
 
-struct IrRobustProofInfo {
+pub struct IrRobustProofInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1188,7 +2564,7 @@ fn ir_empty_robust_proof_info() -> IrRobustProofInfo {
     }
 }
 
-struct IrValidatedManifestInfo {
+pub struct IrValidatedManifestInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1210,7 +2586,7 @@ fn ir_empty_validated_manifest_info() -> IrValidatedManifestInfo {
     }
 }
 
-struct IrDecisionCertificateInfo {
+pub struct IrDecisionCertificateInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1236,7 +2612,7 @@ fn ir_empty_decision_certificate_info() -> IrDecisionCertificateInfo {
     }
 }
 
-struct IrDeferredCertificateInfo {
+pub struct IrDeferredCertificateInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1268,7 +2644,7 @@ fn ir_empty_deferred_certificate_info() -> IrDeferredCertificateInfo {
     }
 }
 
-struct IrDeferredReasonWitnessInfo {
+pub struct IrDeferredReasonWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1284,7 +2660,7 @@ fn ir_empty_deferred_reason_witness_info() -> IrDeferredReasonWitnessInfo {
     }
 }
 
-struct IrAcquisitionPlanInfo {
+pub struct IrAcquisitionPlanInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1316,7 +2692,7 @@ fn ir_empty_acquisition_plan_info() -> IrAcquisitionPlanInfo {
     }
 }
 
-struct IrAcquisitionReasonWitnessInfo {
+pub struct IrAcquisitionReasonWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1332,7 +2708,7 @@ fn ir_empty_acquisition_reason_witness_info() -> IrAcquisitionReasonWitnessInfo 
     }
 }
 
-struct IrRecoursePlanInfo {
+pub struct IrRecoursePlanInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1364,7 +2740,7 @@ fn ir_empty_recourse_plan_info() -> IrRecoursePlanInfo {
     }
 }
 
-struct IrRecourseReasonWitnessInfo {
+pub struct IrRecourseReasonWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1380,7 +2756,7 @@ fn ir_empty_recourse_reason_witness_info() -> IrRecourseReasonWitnessInfo {
     }
 }
 
-struct IrAlternativePolicyInfo {
+pub struct IrAlternativePolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1404,7 +2780,7 @@ fn ir_empty_alternative_policy_info() -> IrAlternativePolicyInfo {
     }
 }
 
-struct IrAlternativeFrontierInfo {
+pub struct IrAlternativeFrontierInfo {
     id: i64,
     name: Name,
     target_kind: i64, // 0=Deferred<T>, 1=RecoursePlan<T>
@@ -1434,7 +2810,7 @@ fn ir_empty_alternative_frontier_info() -> IrAlternativeFrontierInfo {
     }
 }
 
-struct IrAlternativeCandidateInfo {
+pub struct IrAlternativeCandidateInfo {
     id: i64,
     frontier_id: i64,
     name: Name,
@@ -1474,7 +2850,7 @@ fn ir_empty_alternative_candidate_info() -> IrAlternativeCandidateInfo {
     }
 }
 
-struct IrAlternativeSetInfo {
+pub struct IrAlternativeSetInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1500,7 +2876,7 @@ fn ir_empty_alternative_set_info() -> IrAlternativeSetInfo {
     }
 }
 
-struct IrAlternativeReasonWitnessInfo {
+pub struct IrAlternativeReasonWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1518,7 +2894,7 @@ fn ir_empty_alternative_reason_witness_info() -> IrAlternativeReasonWitnessInfo 
     }
 }
 
-struct IrTransitionPolicyInfo {
+pub struct IrTransitionPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1542,7 +2918,7 @@ fn ir_empty_transition_policy_info() -> IrTransitionPolicyInfo {
     }
 }
 
-struct IrTransitionStepInfo {
+pub struct IrTransitionStepInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1566,7 +2942,7 @@ fn ir_empty_transition_step_info() -> IrTransitionStepInfo {
     }
 }
 
-struct IrTransitionProtocolInfo {
+pub struct IrTransitionProtocolInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1586,7 +2962,7 @@ fn ir_empty_transition_protocol_info() -> IrTransitionProtocolInfo {
     }
 }
 
-struct IrTransitionPlanInfo {
+pub struct IrTransitionPlanInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1624,7 +3000,7 @@ fn ir_empty_transition_plan_info() -> IrTransitionPlanInfo {
     }
 }
 
-struct IrTransitionReasonWitnessInfo {
+pub struct IrTransitionReasonWitnessInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1640,7 +3016,7 @@ fn ir_empty_transition_reason_witness_info() -> IrTransitionReasonWitnessInfo {
     }
 }
 
-struct IrMonitoringPolicyInfo {
+pub struct IrMonitoringPolicyInfo {
     id: i64,
     name: Name,
     target_ty: TypeEntry,
@@ -1662,7 +3038,7 @@ fn ir_empty_monitoring_policy_info() -> IrMonitoringPolicyInfo {
     }
 }
 
-struct IrObservedTransitionInfo {
+pub struct IrObservedTransitionInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1694,7 +3070,7 @@ fn ir_empty_observed_transition_info() -> IrObservedTransitionInfo {
     }
 }
 
-struct IrRollbackCertificateInfo {
+pub struct IrRollbackCertificateInfo {
     id: i64,
     span_start: i64,
     span_end: i64,
@@ -1880,8 +3256,18 @@ pub fn ir_empty_epistemic_section() -> IrEpistemicSection {
     }
 }
 
+// Build a heap IrEpistemicSection in THIS leaf's own short frame and return only
+// the Box pointer. Callers that would otherwise hold the MB-scale struct in a deep
+// stack frame (e.g. the native streaming driver) must use this to avoid lean_single's
+// layout-sensitive stale-stack crash. Inlining Box::new(ir_empty_epistemic_section())
+// at the caller does NOT help — the struct literal is still built on the caller frame.
+pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc, Mut, Panic, Div {
+    var ep = ir_empty_epistemic_section()
+    Box::new(ep)
+}
+
 pub struct IrModule {
-    pub functions: [IrFunction; 1024],
+    pub functions: [IrFunction; 16384],
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -1892,16 +3278,17 @@ pub struct IrModule {
     pub prof_counter_count: i64,
     pub export_names: [Name; 64],
     pub export_count: i64,
+    pub bss_total_size: i64,
 }
 
-struct IrEnvBinding {
+pub struct IrEnvBinding {
     name: Name,
     reg: i64,
     is_mut: bool,
     depth: i64,
 }
 
-struct IrEnvList {
+pub struct IrEnvList {
     head: IrEnvBinding,
     tail: Option<Box<IrEnvList>>,
 }
@@ -1920,7 +3307,7 @@ pub fn ir_empty_validated_patch_stats() -> IrValidatedPatchStats {
     }
 }
 
-struct IrLowerResult {
+pub struct IrLowerResult {
     module: IrModule,
     error_count: i64,
     had_error: bool,
@@ -1932,29 +3319,90 @@ struct IrLowerResult {
 // ============================================================================
 
 // A single struct field: name + sequential index
-struct StructFieldEntry {
-    name: Name,
+// NAMES ARE INTERNED IDS, NOT Names. A Name is 136 bytes; this entry held two
+// of them, and StructLayoutEntry holds 64 entries, so a single layout cost
+// ~18.6 KB and the table ~4.8 MB at 256 entries. That is what made the capacity
+// unraisable: ir_register_knowledge_layout takes StructLayoutTable BY VALUE and
+// returns it by value, so growing the table to fit the compiler's own closure
+// (693 struct types) put ~57 MB on the stack per call and segfaulted lowering.
+//
+// Two i64 pool ids instead of two Names take the entry from ~18.6 KB to ~2.1 KB.
+// The pool is IR_NAME_POOL_BUF in this file, already used for function names.
+//
+// id 0 IS the empty name -- ir_intern_name returns 0 for an empty input and
+// ir_name_at(0) gives it back -- so a zeroed entry still means "no name", which
+// is what BSS-zeroed globals in this tree rely on.
+pub struct StructFieldEntry {
+    name_id: i64,
     index: i64,
+    is_float: i64,
+    // Element type name of a fixed-size array field (`[T; N]` -> "T"); id 0 for
+    // non-array fields. Used to dispatch trait-method calls on a struct array
+    // element (`a.c[i].m()`) to the real `<T>_<method>` instead of a hardcoded
+    // fallback.
+    elem_type_name_id: i64,
+    // #1479: element count of a `[T; N]` field, ONLY when T is a WORD SCALAR
+    // (i8/u8 .. i64/u64, f32/f64) and N > 0. ZERO in every other case, which
+    // includes "not an array", "element is a struct or a nested array", and
+    // "unknown".
+    //
+    // The zero-means-unknown encoding is deliberate, not an accident of the
+    // default. A struct literal in this language may OMIT fields, and an
+    // omitted field reads back as zero. Had a known length been representable
+    // as 0, any site that forgot this field would present a plain scalar field
+    // as a zero-length array, and the deep copy would replace its live value
+    // with a fresh empty object. Only a strictly POSITIVE value copies.
+    word_scalar_array_len: i64,
+    // #1479: the field own declared type name when the type is written as a
+    // plain named type (`inner: Inner` -> "Inner"); interned id 0 otherwise.
+    // Zero is again the safe default: the deep copy recurses only when this id
+    // resolves to a REGISTERED struct layout, which no primitive name does.
+    // Ported onto main's interned-id representation (was `Name` on the PR).
+    named_type_name_id: i64,
 }
 
-// Layout for one struct type: name + ordered fields
-struct StructLayoutEntry {
+pub struct StructLayoutEntry {
     type_name: Name,
     fields: [StructFieldEntry; 64],
     field_count: i64,
 }
 
 // Table of all known struct layouts (populated during lowering)
-struct StructLayoutTable {
-    entries: [StructLayoutEntry; 256],
+// CAPACITY 1024, raised from 256. The compiler's own closure (120 modules)
+// declares 693 distinct struct types.
+//
+// THERE ARE NINE CAPACITY GUARDS on this table across ir/lower.sio, not the
+// seven a first sweep finds. An attempt at 512 raised seven of them and failed
+// with the identical message and the identical error count, which reads like
+// "the raise did nothing" when it actually meant "lower.sio:9933 and :10039 are
+// still at the old cap".
+//
+// Only ONE of the nine raises a diagnostic; the others skip in silence. The
+// error count is therefore a count of attempts through the guard that speaks,
+// never the shortfall. DO NOT SIZE THIS TABLE FROM IT -- reading "8 over 256"
+// as "needs ~264" is what sent the first attempt to 512.
+//
+// The entry is interned (see StructFieldEntry below): two i64 pool ids instead
+// of two 136-byte Names take it from ~18.6 KB to ~2.1 KB, and this table from
+// ~19 MB to ~2.1 MB at 1024. That matters because ir_register_knowledge_layout
+// takes StructLayoutTable BY VALUE and returns it by value, so every call
+// copies the whole thing -- twice.
+//
+// (An earlier revision of this note blamed a SIGSEGV at 1024 on those by-value
+// copies. That was wrong: the crash was a `ulimit -s 524288` in the measuring
+// shell, which LOWERS the stack on a host whose default is unlimited. The
+// interning is still right, for the reason above, but it was never what fixed
+// the crash.)
+pub struct StructLayoutTable {
+    entries: [StructLayoutEntry; 1024],
     count: i64,
 }
 
-fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0 }
+pub fn empty_struct_field_entry() -> StructFieldEntry {
+    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0 }
 }
 
-fn empty_struct_layout_entry() -> StructLayoutEntry {
+pub fn empty_struct_layout_entry() -> StructLayoutEntry {
     StructLayoutEntry {
         type_name: ir_empty_name(),
         fields: [empty_struct_field_entry(); 64],
@@ -1962,9 +3410,9 @@ fn empty_struct_layout_entry() -> StructLayoutEntry {
     }
 }
 
-fn empty_struct_layout_table() -> StructLayoutTable {
+pub fn empty_struct_layout_table() -> StructLayoutTable {
     StructLayoutTable {
-        entries: [empty_struct_layout_entry(); 256],
+        entries: [empty_struct_layout_entry(); 1024],
         count: 0,
     }
 }
@@ -1974,13 +3422,13 @@ fn empty_struct_layout_table() -> StructLayoutTable {
 // ============================================================================
 
 // Maps enum variant path "EnumName::Variant" to its discriminant value
-struct EnumVariantEntry {
+pub struct EnumVariantEntry {
     enum_name: Name,
     variant_name: Name,
     discriminant: i64,
 }
 
-struct EnumVariantTable {
+pub struct EnumVariantTable {
     entries: [EnumVariantEntry; 1024],
     count: i64,
 }
@@ -1993,7 +3441,7 @@ fn empty_enum_variant_entry() -> EnumVariantEntry {
     }
 }
 
-fn empty_enum_variant_table() -> EnumVariantTable {
+pub fn empty_enum_variant_table() -> EnumVariantTable {
     EnumVariantTable {
         entries: [empty_enum_variant_entry(); 1024],
         count: 0,
@@ -2001,7 +3449,7 @@ fn empty_enum_variant_table() -> EnumVariantTable {
 }
 
 // Mangle a method name: "TypeName" + "_" + "method_name"
-fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, Panic, Div {
+pub fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, Panic, Div {
     var result = Name { buf: [0; 128], len: 0 }
     // Copy type_name
     var i: i64 = 0
@@ -2025,12 +3473,176 @@ fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, P
     result
 }
 
-fn ir_empty_name() -> Name {
+pub fn ir_empty_name() -> Name {
     Name { buf: [0; 128], len: 0 }
 }
 
-fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
+pub(crate) fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
     IrProfCounterInfo { fn_id: -1, fn_name: ir_empty_name(), counter_id: -1 }
+}
+
+// ============================================================================
+// Interned instruction names
+// ============================================================================
+//
+// WHY IrInstr DOES NOT CARRY A Name.
+//
+// `Name` is `{ buf: [i8; 128], len: i64 }` = 136 bytes, and IrInstr used to
+// hold one inline. That made the instruction ~248 bytes, of which 55% was a
+// buffer that MOST INSTRUCTIONS NEVER USE — an add, a jump, a label, a return
+// all carried 128 zero bytes each. Multiplied out through
+// `IrFunction.instrs: [IrInstr; 4096]` and `IrModule.functions:
+// [IrFunction; 2048]`, that was 2.1 GB of the shipped compiler's 3.40 GB BSS,
+// and it is why IR_MAX_FUNCS could not be raised.
+//
+// Measured 2026-08-04: main.sio's own 120-module import closure declares 10697
+// functions against IR_MAX_FUNCS = 2048, and a name-based reachability census
+// from `main` leaves 5997 of them live — 3988 even with the entire test suite
+// cut out of the call graph. Cross-module DCE, working perfectly, does not fit
+// the compiler into its own IrModule. Halving the instruction does.
+//
+// The pool is GLOBAL rather than per-module on purpose: ir_merge_modules_into
+// copies functions between modules, and per-module ids would have to be
+// remapped at every merge — a silent-miscompile shape if one site were missed.
+// Global ids are stable across merges by construction.
+//
+// Id 0 is always the empty name, so a zero-initialised IrInstr (BSS, ir_nop,
+// any `[ir_nop(); N]` fill) already reads as unnamed without touching the pool.
+pub let IR_NAME_POOL_MAX: i64 = 65536
+
+// PARALLEL FLAT ARRAYS, NOT `[Name; N]`. A global whose element is a struct
+// containing an inline array is miscompiled — measured 2026-08-04 with a
+// minimal probe (a 4096-entry global of `struct { buf: [i8;128], len: i64 }`,
+// two writes then two reads) which SIGSEGVs, while the identical program over
+// parallel `[i8; N*128]` + `[i64; N]` round-trips exactly. The first shape is
+// what this pool was written as, and it turned every string literal in every
+// compiled program into nothing at all — the compiler still exited 0.
+//
+// No initialisers, for two more reasons. The seed (lean_single) rejects a
+// `Name { buf: [0; 128], len: 0 }` fill literal in a global, and this compiler
+// BSS-zeroes `var` initialisers anyway, so a non-zero one would be a lie that
+// holds on one engine and not the other. Every invariant here is therefore
+// stated so that ALL-ZERO IS THE CORRECT INITIAL STATE: ids are 1-based,
+// IR_NAME_POOL_COUNT counts what is stored, and an all-zero index means empty.
+var IR_NAME_POOL_BUF: [i8; 8388608]
+var IR_NAME_POOL_LEN: [i64; 65536]
+var IR_NAME_POOL_COUNT: i64 = 0
+// Set when the pool fills. Interning then returns 0 (the empty name), which is
+// wrong but VISIBLE — ir_name_pool_overflowed() lets a driver refuse rather
+// than emit code with silently blanked symbol names.
+var IR_NAME_POOL_OVERFLOW: bool = false
+
+pub fn ir_name_pool_count() -> i64 {
+    IR_NAME_POOL_COUNT
+}
+
+pub fn ir_name_pool_overflowed() -> bool {
+    IR_NAME_POOL_OVERFLOW
+}
+
+// Open-addressed index over the pool: slot -> id, 0 meaning empty. Interning
+// runs once per INSTRUCTION CONSTRUCTED, which is millions of times on a
+// self-compile, while the pool holds one entry per DISTINCT name — a few
+// thousand. A linear scan would be the product of those two numbers, so the
+// index is not an optimisation, it is what makes interning affordable at all.
+// Twice the pool size keeps the load factor at 50%.
+let IR_NAME_SLOTS: i64 = 131072
+
+var IR_NAME_INDEX: [i64; 131072]
+
+fn ir_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    if h < 0 { 0 - h } else { h }
+}
+
+// Ids are 1-BASED: id k holds IR_NAME_POOL[k - 1]. 0 means "no name", which is
+// what a zero-filled IrInstr already reads as, so nothing has to be seeded.
+pub fn ir_intern_name(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len <= 0 {
+        return 0
+    }
+    var slot = ir_name_hash(n) % IR_NAME_SLOTS
+    var probes: i64 = 0
+    while probes < IR_NAME_SLOTS {
+        let id = IR_NAME_INDEX[slot as usize]
+        if id == 0 {
+            if IR_NAME_POOL_COUNT >= IR_NAME_POOL_MAX {
+                IR_NAME_POOL_OVERFLOW = true
+                return 0
+            }
+            let fresh = IR_NAME_POOL_COUNT + 1
+            ir_name_pool_store(fresh, n)
+            IR_NAME_POOL_COUNT = fresh
+            IR_NAME_INDEX[slot as usize] = fresh
+            return fresh
+        }
+        // Compare the NAME, not the hash: a collision must probe on, not alias
+        // two different symbols onto one id.
+        if ir_name_pool_eq(id, n) {
+            return id
+        }
+        slot = (slot + 1) % IR_NAME_SLOTS
+        probes = probes + 1
+    }
+    IR_NAME_POOL_OVERFLOW = true
+    0
+}
+
+// id -> Name. Out of range reads as the empty name rather than trapping: an id
+// that escaped its pool is a bug, but blanking one symbol is survivable where a
+// panic in the middle of codegen is not.
+fn ir_name_pool_store(id: i64, n: Name) with Mut, Panic, Div {
+    let base = (id - 1) * 128
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        IR_NAME_POOL_BUF[(base + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    IR_NAME_POOL_LEN[(id - 1) as usize] = n.len
+}
+
+// Compare without materialising the pooled Name: this runs on every probe of
+// every intern, which is the hot path of the whole pass.
+fn ir_name_pool_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if IR_NAME_POOL_LEN[(id - 1) as usize] != n.len {
+        return false
+    }
+    let base = (id - 1) * 128
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        if IR_NAME_POOL_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn ir_name_at(id: i64) -> Name with Mut, Panic, Div {
+    if id <= 0 || id > IR_NAME_POOL_COUNT || id > IR_NAME_POOL_MAX {
+        return ir_empty_name()
+    }
+    var out = ir_empty_name()
+    let base = (id - 1) * 128
+    let n = IR_NAME_POOL_LEN[(id - 1) as usize]
+    var i: i64 = 0
+    while i < n && i < 128 {
+        out.buf[i as usize] = IR_NAME_POOL_BUF[(base + i) as usize]
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+// Compare an interned id against a Name without materialising the pool entry
+// when the ids happen to match.
+pub fn ir_name_id_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq(ir_name_at(id), n)
 }
 
 pub fn ir_name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
@@ -2066,7 +3678,7 @@ fn ir_name_from_string_list(sl: StringList) -> Name with Mut, Panic, Div {
     n
 }
 
-fn ir_path_first_name(p: AstPath) -> Name with Mut, Panic, Div {
+pub fn ir_path_first_name(p: AstPath) -> Name with Mut, Panic, Div {
     if p.seg_count <= 0 {
         ir_empty_name()
     } else {
@@ -2075,7 +3687,7 @@ fn ir_path_first_name(p: AstPath) -> Name with Mut, Panic, Div {
 }
 
 // Get the last segment of a path (e.g., "Variant" from "Enum::Variant")
-fn ir_path_last_name(p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+pub fn ir_path_last_name(p: AstPath) -> Name with Mut, Panic, Div, Alloc {
     if p.seg_count <= 0 {
         ir_empty_name()
     } else if p.seg_count == 1 {
@@ -2092,22 +3704,49 @@ fn ir_string_list_last(sl: StringList) -> Name with Mut, Panic, Div, Alloc {
     }
 }
 
+// Second-to-last segment of a path (e.g. "Enum" from "Enum::Variant", and from
+// "module::Enum::Variant" too). Empty name when the path has fewer than two
+// segments, so callers can fall back to an unqualified lookup.
+fn ir_string_list_second_last(sl: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match sl.tail {
+        Some(rest) => {
+            match (*rest).tail {
+                Some(_) => ir_string_list_second_last(*rest),
+                _ => ir_name_from_string_list(sl),
+            }
+        }
+        _ => ir_empty_name(),
+    }
+}
+
+// Get the qualifier of a path: "Color" from "Color::Mark".
+// Enum variant discriminants restart at 0 per enum, so a lookup keyed only on
+// the variant name collides across enums that share a variant name. Callers
+// pair this with the variant name to key the lookup by the full path.
+pub fn ir_path_qualifier_name(p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+    if p.seg_count <= 1 {
+        ir_empty_name()
+    } else {
+        ir_string_list_second_last(p.segments)
+    }
+}
+
 // Check if a name is "Some" (for Option matching)
-fn ir_name_is_some(n: Name) -> bool {
+pub fn ir_name_is_some(n: Name) -> bool {
     n.len == 4 && n.buf[0] == 83 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 109 as i8 && n.buf[3] == 101 as i8
 }
 
 // Check if a name is "Box" (for Box::new lowering)
-fn ir_name_is_box(n: Name) -> bool {
+pub fn ir_name_is_box(n: Name) -> bool {
     n.len == 3 && n.buf[0] == 66 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 120 as i8
 }
 
 // Check if a name is "None" (for Option matching)
-fn ir_name_is_none(n: Name) -> bool {
+pub fn ir_name_is_none(n: Name) -> bool {
     n.len == 4 && n.buf[0] == 78 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 110 as i8 && n.buf[3] == 101 as i8
 }
 
-fn ir_empty_reg_list() -> Option<Box<IrRegList>> {
+pub fn ir_empty_reg_list() -> Option<Box<IrRegList>> {
     None
 }
 
@@ -2181,21 +3820,42 @@ pub fn ir_instr_new(op: IrOpcode) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name: ir_empty_name(),
+        name_id: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
 }
 
-fn ir_nop() -> IrInstr {
+pub fn ir_nop() -> IrInstr {
     ir_instr_new(IrOpcode::IrNop)
+}
+
+pub fn ir_mark_float_reg(reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrNop)
+    IrInstr {
+        op: base.op,
+        dst: reg,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: IR_FLOAT_REG_MARKER_FLAG,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: base.name_id,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
 }
 
 fn ir_empty_instr() -> IrInstr {
     ir_instr_new(IrOpcode::IrNop)
 }
 
-fn ir_label(label_id: i64) -> IrInstr {
+pub fn ir_label(label_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrLabel)
     IrInstr {
         op: base.op,
@@ -2210,13 +3870,13 @@ fn ir_label(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_jump(label_id: i64) -> IrInstr {
+pub fn ir_jump(label_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrJump)
     IrInstr {
         op: base.op,
@@ -2231,13 +3891,13 @@ fn ir_jump(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
+pub fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrBranchTrue)
     IrInstr {
         op: base.op,
@@ -2252,13 +3912,13 @@ fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
+pub fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrBranchFalse)
     IrInstr {
         op: base.op,
@@ -2273,7 +3933,7 @@ fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2294,13 +3954,13 @@ pub fn ir_load_imm(dst: i64, value: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_load_float(dst: i64, value: f64) -> IrInstr {
+pub fn ir_load_float(dst: i64, value: f64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrLoadFloat)
     IrInstr {
         op: base.op,
@@ -2315,13 +3975,13 @@ fn ir_load_float(dst: i64, value: f64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
+pub fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrIntToFloat)
     IrInstr {
         op: base.op,
@@ -2336,13 +3996,13 @@ fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
+pub fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrFloatToInt)
     IrInstr {
         op: base.op,
@@ -2357,13 +4017,13 @@ fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
+pub fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrLoadBool)
     IrInstr {
         op: base.op,
@@ -2378,13 +4038,13 @@ fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
+pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrLoadString)
     IrInstr {
         op: base.op,
@@ -2399,13 +4059,13 @@ pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: n,
+        name_id: ir_intern_name(n),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_copy(dst: i64, src: i64) -> IrInstr {
+pub fn ir_copy(dst: i64, src: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrCopy)
     IrInstr {
         op: base.op,
@@ -2420,7 +4080,7 @@ fn ir_copy(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2428,7 +4088,7 @@ fn ir_copy(dst: i64, src: i64) -> IrInstr {
 
 // IrContest: Contest<T> introduction — dst = subject datum, semantically tagged as contested
 // At machine level this is equivalent to IrCopy (MOV); model selection happens at proof-time.
-fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> IrInstr {
+pub fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrContest)
     IrInstr {
         op: base.op,
@@ -2443,7 +4103,7 @@ fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> IrIn
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2451,7 +4111,7 @@ fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> IrIn
 
 // IrProveRobust: prove_robust(contest, policy) introduction — dst = contest datum, Robust<T> tagged
 // At machine level this is equivalent to IrCopy (MOV); policy satisfaction is proof-time only.
-fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i64) -> IrInstr {
+pub fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrProveRobust)
     IrInstr {
         op: base.op,
@@ -2466,7 +4126,7 @@ fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i64) -
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2474,7 +4134,7 @@ fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i64) -
 
 // Check if a name is "prove_robust" (for IR lowering intercept)
 // "prove_robust" = p(112) r(114) o(111) v(118) e(101) _(95) r(114) o(111) b(98) u(117) s(115) t(116), len=12
-fn ir_name_is_prove_robust(n: Name) -> bool {
+pub fn ir_name_is_prove_robust(n: Name) -> bool {
     n.len == 12
     && n.buf[0]  == 112 as i8 && n.buf[1]  == 114 as i8
     && n.buf[2]  == 111 as i8 && n.buf[3]  == 118 as i8
@@ -2486,7 +4146,7 @@ fn ir_name_is_prove_robust(n: Name) -> bool {
 
 // IrValidated: validate_manifest(robust, validation) introduction — dst = robust datum, Validated<T> tagged
 // validation_reg is carried for audit/runtime metadata surfaces, but codegen remains a zero-cost copy of src1.
-fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id: i64) -> IrInstr {
+pub fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrValidated)
     IrInstr {
         op: base.op,
@@ -2501,13 +4161,13 @@ fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id: i64
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_policy_reg: i64, certificate_id: i64) -> IrInstr {
+pub fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_policy_reg: i64, certificate_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrAdmitAction)
     IrInstr {
         op: base.op,
@@ -2522,13 +4182,13 @@ fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_policy_re
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_policy_reg: i64, certificate_id: i64) -> IrInstr {
+pub fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_policy_reg: i64, certificate_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrDeferAction)
     IrInstr {
         op: base.op,
@@ -2543,13 +4203,13 @@ fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_policy_
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisition_policy_reg: i64, plan_id: i64) -> IrInstr {
+pub fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisition_policy_reg: i64, plan_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrPlanAcquisition)
     IrInstr {
         op: base.op,
@@ -2564,13 +4224,13 @@ fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisition_
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_policy_reg: i64, plan_id: i64) -> IrInstr {
+pub fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_policy_reg: i64, plan_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrPlanRecourse)
     IrInstr {
         op: base.op,
@@ -2585,13 +4245,13 @@ fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_policy
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, frontier_reg: i64, alternative_set_id: i64) -> IrInstr {
+pub fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, frontier_reg: i64, alternative_set_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrProposeAlternatives)
     IrInstr {
         op: base.op,
@@ -2606,13 +4266,13 @@ fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, frontier
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol_reg: i64, transition_plan_id: i64) -> IrInstr {
+pub fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol_reg: i64, transition_plan_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrCommitAlternative)
     IrInstr {
         op: base.op,
@@ -2627,7 +4287,7 @@ fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol_reg
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2636,7 +4296,7 @@ fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol_reg
 // Check if a name is "validate_manifest" (for IR lowering intercept)
 // "validate_manifest" = v(118) a(97) l(108) i(105) d(100) a(97) t(116) e(101)
 //                       _(95) m(109) a(97) n(110) i(105) f(102) e(101) s(115) t(116), len=17
-fn ir_name_is_validate_manifest(n: Name) -> bool {
+pub fn ir_name_is_validate_manifest(n: Name) -> bool {
     n.len == 17
     && n.buf[0]  == 118 as i8 && n.buf[1]  == 97  as i8
     && n.buf[2]  == 108 as i8 && n.buf[3]  == 105 as i8
@@ -2649,7 +4309,7 @@ fn ir_name_is_validate_manifest(n: Name) -> bool {
     && n.buf[16] == 116 as i8
 }
 
-fn ir_name_is_admit_action(n: Name) -> bool {
+pub fn ir_name_is_admit_action(n: Name) -> bool {
     n.len == 12
     && n.buf[0]  == 97  as i8 && n.buf[1]  == 100 as i8
     && n.buf[2]  == 109 as i8 && n.buf[3]  == 105 as i8
@@ -2659,7 +4319,7 @@ fn ir_name_is_admit_action(n: Name) -> bool {
     && n.buf[10] == 111 as i8 && n.buf[11] == 110 as i8
 }
 
-fn ir_name_is_defer_action(n: Name) -> bool {
+pub fn ir_name_is_defer_action(n: Name) -> bool {
     n.len == 12
     && n.buf[0]  == 100 as i8 && n.buf[1]  == 101 as i8
     && n.buf[2]  == 102 as i8 && n.buf[3]  == 101 as i8
@@ -2669,7 +4329,7 @@ fn ir_name_is_defer_action(n: Name) -> bool {
     && n.buf[10] == 111 as i8 && n.buf[11] == 110 as i8
 }
 
-fn ir_name_is_deferral_reason(n: Name) -> bool {
+pub fn ir_name_is_deferral_reason(n: Name) -> bool {
     n.len == 15
     && n.buf[0]  == 100 as i8 && n.buf[1]  == 101 as i8
     && n.buf[2]  == 102 as i8 && n.buf[3]  == 101 as i8
@@ -2681,7 +4341,7 @@ fn ir_name_is_deferral_reason(n: Name) -> bool {
     && n.buf[14] == 110 as i8
 }
 
-fn ir_name_is_plan_acquisition(n: Name) -> bool {
+pub fn ir_name_is_plan_acquisition(n: Name) -> bool {
     n.len == 16
     && n.buf[0]  == 112 as i8 && n.buf[1]  == 108 as i8
     && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
@@ -2693,7 +4353,7 @@ fn ir_name_is_plan_acquisition(n: Name) -> bool {
     && n.buf[14] == 111 as i8 && n.buf[15] == 110 as i8
 }
 
-fn ir_name_is_acquisition_reason(n: Name) -> bool {
+pub fn ir_name_is_acquisition_reason(n: Name) -> bool {
     n.len == 18
     && n.buf[0]  == 97  as i8 && n.buf[1]  == 99  as i8
     && n.buf[2]  == 113 as i8 && n.buf[3]  == 117 as i8
@@ -2706,7 +4366,7 @@ fn ir_name_is_acquisition_reason(n: Name) -> bool {
     && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
 }
 
-fn ir_name_is_plan_recourse(n: Name) -> bool {
+pub fn ir_name_is_plan_recourse(n: Name) -> bool {
     n.len == 13
     && n.buf[0]  == 112 as i8 && n.buf[1]  == 108 as i8
     && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
@@ -2717,7 +4377,7 @@ fn ir_name_is_plan_recourse(n: Name) -> bool {
     && n.buf[12] == 101 as i8
 }
 
-fn ir_name_is_recourse_reason(n: Name) -> bool {
+pub fn ir_name_is_recourse_reason(n: Name) -> bool {
     n.len == 15
     && n.buf[0]  == 114 as i8 && n.buf[1]  == 101 as i8
     && n.buf[2]  == 99  as i8 && n.buf[3]  == 111 as i8
@@ -2729,7 +4389,7 @@ fn ir_name_is_recourse_reason(n: Name) -> bool {
     && n.buf[14] == 110 as i8
 }
 
-fn ir_name_is_propose_alternatives(n: Name) -> bool {
+pub fn ir_name_is_propose_alternatives(n: Name) -> bool {
     n.len == 20
     && n.buf[0]  == 112 as i8 && n.buf[1]  == 114 as i8
     && n.buf[2]  == 111 as i8 && n.buf[3]  == 112 as i8
@@ -2743,7 +4403,7 @@ fn ir_name_is_propose_alternatives(n: Name) -> bool {
     && n.buf[18] == 101 as i8 && n.buf[19] == 115 as i8
 }
 
-fn ir_name_is_alternative_count(n: Name) -> bool {
+pub fn ir_name_is_alternative_count(n: Name) -> bool {
     n.len == 17
     && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
     && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
@@ -2756,7 +4416,7 @@ fn ir_name_is_alternative_count(n: Name) -> bool {
     && n.buf[16] == 116 as i8
 }
 
-fn ir_name_is_alternative_option(n: Name) -> bool {
+pub fn ir_name_is_alternative_option(n: Name) -> bool {
     n.len == 18
     && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
     && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
@@ -2769,7 +4429,7 @@ fn ir_name_is_alternative_option(n: Name) -> bool {
     && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
 }
 
-fn ir_name_is_alternative_reason(n: Name) -> bool {
+pub fn ir_name_is_alternative_reason(n: Name) -> bool {
     n.len == 18
     && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
     && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
@@ -2782,7 +4442,7 @@ fn ir_name_is_alternative_reason(n: Name) -> bool {
     && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
 }
 
-fn ir_name_is_commit_alternative(n: Name) -> bool {
+pub fn ir_name_is_commit_alternative(n: Name) -> bool {
     n.len == 18
     && n.buf[0]  == 99  as i8 && n.buf[1]  == 111 as i8
     && n.buf[2]  == 109 as i8 && n.buf[3]  == 109 as i8
@@ -2795,7 +4455,7 @@ fn ir_name_is_commit_alternative(n: Name) -> bool {
     && n.buf[16] == 118 as i8 && n.buf[17] == 101 as i8
 }
 
-fn ir_name_is_transition_reason(n: Name) -> bool {
+pub fn ir_name_is_transition_reason(n: Name) -> bool {
     n.len == 17
     && n.buf[0]  == 116 as i8 && n.buf[1]  == 114 as i8
     && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
@@ -2808,7 +4468,7 @@ fn ir_name_is_transition_reason(n: Name) -> bool {
     && n.buf[16] == 110 as i8
 }
 
-fn ir_name_is_transition_step_count(n: Name) -> bool {
+pub fn ir_name_is_transition_step_count(n: Name) -> bool {
     n.len == 21
     && n.buf[0]  == 116 as i8 && n.buf[1]  == 114 as i8
     && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
@@ -2825,7 +4485,7 @@ fn ir_name_is_transition_step_count(n: Name) -> bool {
 
 // IrLiftKnowledge: lift_knowledge(k: Knowledge<T>) → Contest<T> bridge (H5.4)
 // At machine level this is equivalent to IrCopy (MOV); the bridge is fully type-level.
-fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrInstr {
+pub fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrLiftKnowledge)
     IrInstr {
         op: base.op,
@@ -2840,7 +4500,7 @@ fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2849,7 +4509,7 @@ fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrInstr {
 // Check if a name is "lift_knowledge" (for IR lowering intercept)
 // "lift_knowledge" = l(108) i(105) f(102) t(116) _(95) k(107) n(110) o(111)
 //                   w(119) l(108) e(101) d(100) g(103) e(101), len=14
-fn ir_name_is_lift_knowledge(n: Name) -> bool {
+pub fn ir_name_is_lift_knowledge(n: Name) -> bool {
     n.len == 14
     && n.buf[0]  == 108 as i8 && n.buf[1]  == 105 as i8
     && n.buf[2]  == 102 as i8 && n.buf[3]  == 116 as i8
@@ -2877,14 +4537,14 @@ fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
 // IrDebugGuard: debug-mode policy guard — conditional trap (Sprint 28)
-fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, policy_name: Name) -> IrInstr {
+pub fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, policy_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrDebugGuard)
     IrInstr {
         op: base.op,
@@ -2899,14 +4559,14 @@ fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, po
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: policy_name,
+        name_id: ir_intern_name(policy_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
 // Sprint 44: profiling counter increment — instrumented slow-path entry
-fn ir_prof_counter(counter_id: i64) -> IrInstr {
+pub fn ir_prof_counter(counter_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrProfCounter)
     IrInstr {
         op: base.op,
@@ -2921,7 +4581,7 @@ fn ir_prof_counter(counter_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2929,12 +4589,22 @@ fn ir_prof_counter(counter_id: i64) -> IrInstr {
 
 // Check if a name is "measure" (for IR lowering intercept)
 // "measure" = m(109) e(101) a(97) s(115) u(117) r(114) e(101), len=7
-fn ir_name_is_measure(n: Name) -> bool {
+pub fn ir_name_is_measure(n: Name) -> bool {
     n.len == 7
     && n.buf[0] == 109 as i8 && n.buf[1] == 101 as i8
     && n.buf[2] == 97  as i8 && n.buf[3] == 115 as i8
     && n.buf[4] == 117 as i8 && n.buf[5] == 114 as i8
     && n.buf[6] == 101 as i8
+}
+
+// "Knowledge" -- the constructor-CALL form Knowledge(v, e=.., prov=..).
+pub fn ir_name_is_knowledge_ctor(n: Name) -> bool {
+    n.len == 9
+    && n.buf[0] == 75  as i8 && n.buf[1] == 110 as i8
+    && n.buf[2] == 111 as i8 && n.buf[3] == 119 as i8
+    && n.buf[4] == 108 as i8 && n.buf[5] == 101 as i8
+    && n.buf[6] == 100 as i8 && n.buf[7] == 103 as i8
+    && n.buf[8] == 101 as i8
 }
 
 pub fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
@@ -2952,13 +4622,24 @@ pub fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
+pub fn ir_binop_typed(dst: i64, lhs: i64, op: BinaryOp, rhs: i64, lhs_is_float: bool, rhs_is_float: bool) -> IrInstr {
+    var ins = ir_binop(dst, lhs, op, rhs)
+    if lhs_is_float {
+        ins.imm_flags = ins.imm_flags + 2
+    }
+    if rhs_is_float {
+        ins.imm_flags = ins.imm_flags + 4
+    }
+    ins
+}
+
+pub fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrHyperMulO)
     IrInstr {
         op: base.op,
@@ -2973,7 +4654,7 @@ fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2994,13 +4675,13 @@ fn ir_hyper_mul_s(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
+pub fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrUnaryOp)
     IrInstr {
         op: base.op,
@@ -3015,13 +4696,127 @@ fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
+// Zig-style fixed-width wide-int ops. dst/src1/src2 = BASE vreg of each operand;
+// limb k lives at vreg base+k (consecutive slots, limb 0 = least significant).
+// limb_count = ceil(N/64) for an iN/uN value.
+pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideAdd)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_sub(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideSub)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mul(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMul)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_div(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDiv)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_shr_limb(dst: i64, src: i64, limb_count: i64, shift_limbs: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShrLimb)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_limbs,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mod(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideMod)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_cmp(dst: i64, src1: i64, src2: i64, limb_count: i64, cmp_op: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideCmp)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: cmp_op, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_shr(dst: i64, src: i64, limb_count: i64, shift_bits: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideShr)
+    IrInstr {
+        op: base.op, dst: dst, src1: src, src2: shift_bits,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_div_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideDivFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_mod_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideModFull)
+    IrInstr {
+        op: base.op, dst: dst, src1: src1, src2: src2,
+        imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+pub fn ir_wide_reject(dst: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideReject)
+    IrInstr {
+        op: base.op, dst: dst, src1: base.src1, src2: base.src2,
+        imm_i64: base.imm_i64, imm_f64: base.imm_f64, label_id: base.label_id,
+        fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        call_args: base.call_args, arg_count: base.arg_count,
+    }
+}
+
+pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Div, Mut, Panic {
     let pair_regs = ir_reg_list_first_two(args)
     let arg0 = pair_regs.0
     let arg1 = pair_regs.1
@@ -3039,10 +4834,57 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: fn_name,
+        name_id: ir_intern_name(fn_name),
         // Keep the full argument list. src1/src2 cache the first two for compatibility.
         call_args: args,
         arg_count: arg_count,
+    }
+}
+
+// Caller-side sret call. dest_reg = pre-allocated destination handle vreg (goes in rdi,
+// NOT counted in arg_count). first_arg = vreg of the first EXPLICIT arg (goes in rsi);
+// explicit args are dest contiguous vregs first_arg..first_arg+arg_count.
+pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_arg: i64, arg_count: i64) -> IrInstr with Div, Mut, Panic {
+    let base = ir_instr_new(IrOpcode::IrCallSret)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: dest_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: fn_id,
+        field_idx: first_arg,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: ir_intern_name(fn_name),
+        call_args: base.call_args,
+        arg_count: arg_count,
+    }
+}
+
+// Callee-side sret return. src = vreg holding the hidden destination handle (spilled
+// from rdi in the prologue); returned in rax with the standard epilogue.
+pub fn ir_return_sret(src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrReturnSret)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: base.name_id,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
     }
 }
 
@@ -3074,13 +4916,36 @@ pub fn ir_return(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr {
+// N-limb carry-chain add. dst/src1/src2 = base vregs of L consecutive limb slots;
+// imm_i64 = L. Lowered to add (limb0) + adc (limbs 1..L-1).
+pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrWideAdd)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm_i64: limb_count,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: base.name_id,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+pub fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrFieldGet)
     IrInstr {
         op: base.op,
@@ -3095,13 +4960,13 @@ fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> Ir
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: field_name,
+        name_id: ir_intern_name(field_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr {
+pub fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrFieldSet)
     IrInstr {
         op: base.op,
@@ -3116,13 +4981,13 @@ fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> Ir
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: field_name,
+        name_id: ir_intern_name(field_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
+pub fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrIndexGet)
     IrInstr {
         op: base.op,
@@ -3137,13 +5002,13 @@ fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
+pub fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrIndexSet)
     IrInstr {
         op: base.op,
@@ -3158,13 +5023,40 @@ fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
+// IrArrayLen: dst = LOGICAL element COUNT of the aggregate whose handle is in
+// base_reg. Codegen resolves the handle to the object base and loads the object
+// header `flags` slot, which the alloc emitter populates with the logical N
+// recorded at the array-literal allocation site. This is exact for any element
+// width and any size bucket — unlike payload_size, which is the (over-allocated)
+// bucket capacity in BYTES, not N. Mirrors ir_index_get's base-handle field.
+pub fn ir_array_len(dst: i64, base_reg: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrArrayLen)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: base.name_id,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrAlloc)
     IrInstr {
         op: base.op,
@@ -3179,13 +5071,42 @@ fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_phi(dst: i64) -> IrInstr {
+// ir_alloc_array: like ir_alloc, but additionally records the LOGICAL element
+// count of an array literal so codegen can stamp it into the object header
+// `flags` slot (which IrArrayLen reads back). The count is parked in `field_idx`
+// — a field IrAlloc never otherwise uses and that no register-renaming pass
+// touches (field_idx is an immediate, not a virtual register). ir_alloc's 2-arg
+// form (used by every struct/tuple/box/scalar alloc and by ~35 callers across
+// other modules) is left untouched, so those allocs keep field_idx = -1 and
+// codegen clamps that to flags = 0. type_id still carries the payload BYTES.
+pub fn ir_alloc_array(dst: i64, type_id: i64, elem_count: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrAlloc)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: type_id,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: elem_count,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name_id: base.name_id,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+pub fn ir_phi(dst: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrPhi)
     IrInstr {
         op: base.op,
@@ -3200,30 +5121,302 @@ fn ir_phi(dst: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
+// Word/bit split for float_reg_bits. 32 bits per word keeps every mask positive.
+pub fn ir_float_bits_capacity() -> i64 { 2048 }
+
+// Counts float marks for vregs above the cap, where the bitset cannot represent
+// them and codegen's fixpoint is the only channel. Visible rather than fatal --
+// see ir_float_bits_set.
+pub var IR_FLOAT_BITS_OVER_CAP: i64 = 0
+
+// #1669 probe. The hot sites carry no IO -- giving them any would cascade to
+// every caller, which is the failure that desynchronised the checker -- so the
+// evidence is accumulated here and printed from the driver, where IO already is.
+//
+//   WRITES  bits actually flipped on by ir_float_bits_set
+//   GETS    times ir_float_bits_get answered true
+//   LIVE    bits still set across the module when codegen is about to run
+//
+// WRITES > 0 with LIVE == 0 means the writes are landing somewhere that does not
+// survive to codegen -- a copy, or the 512-byte aggregate store defect that
+// lower.sio:1652 documents for the identically-shaped param_regs.
+// MEASURED 2026-08-06 and the reason the consumers below are inert:
+//
+//   writes=8  live_at_codegen=3683  fresh=0  live_fn0=744
+//
+// Eight bits written; 744 set in the module's function 0 alone. But `fresh=0` --
+// a function straight out of ir_empty_function() is CLEAN. So the initialiser
+// works and my first guess was wrong: the corruption happens between creation
+// and the module's function array, not at initialisation.
+//
+// That points at the copy, not the constructor: `[ir_empty_function(); 2048]` is
+// a repeat initialiser, and IrFunction just grew by a 512-byte array -- the same
+// shape lower.sio:1652 documents as miscompiled for param_regs. The next probe
+// is to count bits immediately after the module is built, before any lowering,
+// which separates "the repeat-copy loses it" from "a lowering copy dirties it".
+//
+// Until then, consumers must not trust the bits. Flip this to 1 only with a
+// probe showing live == writes.
+// NOW 1, and load-bearing -- measured, not asserted.
+//
+// It sat at 0 because flipping it was safe but useless: the bitset agreed with
+// the in-stream markers exactly (5 programs, 67 functions, 3391 bits,
+// bits_only=0 and markers_only=0, ELFs byte-identical either way), yet it could
+// not do the one job it exists for -- surviving a pass that deletes the marker
+// nop. With IR_FLOAT_NO_MARKERS=1 suppressing the in-stream arms:
+//
+//     before the ordering fix   markers OFF -> v=9223372036854775808.000000
+//     after                     markers OFF -> v=2.500000
+//
+// THE BLOCKER WAS ORDERING, not the lattice. codegen's pre-mark loop ran BEFORE
+// the instruction stream was walked, so anything marking a register int later
+// clobbered it; the marker nop worked precisely because it is honoured AT ITS
+// POSITION. Re-asserting the bit for the register each instruction defines --
+// O(1) per instruction, in compile_ir_function_v2_core_ir_into -- makes the bits
+// positional too.
+//
+// (An earlier note here blamed nc_compute_float_types' CONFLICT rule. That was
+// wrong: the marker-suppression experiment never gated that function's marker
+// arm, so the lattice still had marker information and the failure was
+// elsewhere. Corrected rather than quietly dropped.)
+//
+// Emitted code is unchanged: the same 10 ELFs are byte-identical to the
+// pre-flip, pre-fix compiler. Self-test unchanged at 25 OK / 3 FAIL.
+//
+// PROVEN ON A CORPUS, not on one witness. 390 float-bearing run-pass tests,
+// compiled and RUN under -O in three configurations each
+// (scripts/dev/ir-arena/durable_channel_corpus.sh, results .tsv):
+//
+//     A  fixed compiler, markers ON    -- baseline
+//     B  fixed compiler, markers OFF   -- the bits standing alone
+//     C  pre-fix compiler, markers OFF -- the control
+//
+//     A == B  390 / 390        mismatches 0
+//     A != C  169              the corpus can tell the difference
+//
+// The 169 matter as much as the 390: without them "everything matches" would
+// only show the corpus never exercises the path. On 169 tests removing the
+// markers DOES change the program's output on the old compiler, and on none of
+// them does it change it on the new one.
+pub let IR_FLOAT_BITS_TRUSTED: i64 = 1
+
+// #1669 EXPERIMENT SWITCH, set from the environment by module_frontend. When 1,
+// the IN-STREAM float-marker arms in codegen and machine_ir are skipped, leaving
+// only the function-scoped bits. That is how we test whether the bits are a real
+// channel or decoration: if an f64 still comes out right with the markers off,
+// the bits carried it. A global rather than a read_env at each site because
+// read_env carries IO, and the sites that need this have Mut/Panic/Div only --
+// widening them cascades the effect across every caller.
+pub var IR_FLOAT_NO_MARKERS: i64 = 0
+pub var IR_FLOAT_BITS_INHERITED: i64 = 0
+pub var IR_FLOAT_BITS_WRITES: i64 = 0
+pub var IR_FLOAT_BITS_GETS: i64 = 0
+
+fn ir_float_bit_mask(bit: i64) -> i64 {
+    var m: i64 = 1
+    var k: i64 = 0
+    while k < bit {
+        m = m * 2
+        k = k + 1
+    }
+    m
+}
+
+// Returns false when reg is out of range rather than pretending. The caller that
+// matters -- the emit funnel -- latches instead, because a marker for a reg this
+// side of the cap is information the backend cannot represent at all.
+pub fn ir_float_bits_get(f: &IrFunction, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || reg >= ir_float_bits_capacity() { return false }
+    let word = reg / 32
+    let bit = reg % 32
+    let hit = ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
+    if hit { IR_FLOAT_BITS_GETS = IR_FLOAT_BITS_GETS + 1 }
+    hit
+}
+
+// Set bits in ONE function. Used by the initialisation probe to ask the question
+// the module-wide count cannot: is a freshly built IrFunction already dirty, or
+// does it only become dirty on its way into the module array?
+pub fn ir_function_count_float_bits(f: &IrFunction) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < ir_float_bits_capacity() {
+        if ir_float_bits_get(f, r) { n = n + 1 }
+        r = r + 1
+    }
+    n
+}
+
+// Set bits in the slots ABOVE fn_count -- slots the lowering never touched. This
+// is the discriminator: the module array is built by `[ir_empty_function(); 2048]`,
+// so if untouched slots carry bits the array was born dirty and the repeat-copy
+// is the culprit; if they are clean while used slots are dirty, a lowering copy
+// is. Cheaper and more direct than instrumenting the constructor, which would
+// want a 4.2 MB IrModule frame in the probe path.
+pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var k: i64 = 0
+    while k < n {
+        let slot = (*module).fn_count + k
+        if slot >= IR_MAX_FUNCS { return total }
+        // Same hoist as the live counter: a reference into a boxed array element
+        // reads a wrong address under the seed. See the commit that measured it.
+        var uslot = (*module).functions[slot as usize]
+        var r: i64 = 0
+        while r < ir_float_bits_capacity() {
+            if ir_float_bits_get(&uslot, r) { total = total + 1 }
+            r = r + 1
+        }
+        k = k + 1
+    }
+    total
+}
+
+// Set bits still visible across a whole module. Called from the driver just
+// before codegen: this is the number that separates "never written" from
+// "written and lost in transit".
+pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var fi: i64 = 0
+    while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
+        // Hoist the element to a local BEFORE taking a reference to it. Taking
+        // &(*module).functions[i] directly is the same shape that made
+        // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
+        // fix worked but its mechanism was never explained. This is the probe
+        // that explains it -- if the hoisted count differs from the in-place one,
+        // the reference-into-a-boxed-array-element is computing a wrong address,
+        // and every reading in this investigation came from a broken instrument
+        // rather than from broken storage.
+        var fslot = (*module).functions[fi as usize]
+        var r: i64 = 0
+        while r < ir_float_bits_capacity() {
+            if ir_float_bits_get(&fslot, r) { total = total + 1 }
+            r = r + 1
+        }
+        fi = fi + 1
+    }
+    total
+}
+
+pub fn ir_float_bits_set(f: &! IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 || reg >= ir_float_bits_capacity() {
+        // MEASURED, and it is why this does not latch. Latching here was the
+        // first version, and it refused knowledge_octonion_structure.sio, which
+        // uses 7088 vregs and marks some of them float above the cap -- a program
+        // that COMPILES AND PASSES today. Codegen's join-over-defs fixpoint
+        // (nc_compute_float_types) recovers the typing for those registers from
+        // their definitions, so the marker is not the only channel and dropping
+        // it above the cap is not, on this evidence, a miscompile.
+        //
+        // So: above the cap the bits carry nothing and the fixpoint is the
+        // authority, exactly as before this change. That is a real gap in the
+        // guarantee -- it is bounded at 2048 because every consumer is -- and it
+        // is recorded rather than escalated, because escalating it measured worse
+        // than the thing it was meant to prevent.
+        IR_FLOAT_BITS_OVER_CAP = IR_FLOAT_BITS_OVER_CAP + 1
+        return IR_ARENA_ERR_RANGE
+    }
+    let word = reg / 32
+    let bit = reg % 32
+    let mask = ir_float_bit_mask(bit)
+    if ((*f).float_reg_bits[word as usize] / mask) % 2 == 0 {
+        (*f).float_reg_bits[word as usize] = (*f).float_reg_bits[word as usize] + mask
+        IR_FLOAT_BITS_WRITES = IR_FLOAT_BITS_WRITES + 1
+    }
+    IR_ARENA_OK
+}
+
 pub fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
-        instrs: [ir_nop(); 128],
+        region: ir_region_invalid(),
         instr_count: 0,
         reg_count: 0,
         label_count: 0,
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
+        returns_float: 0,
+        return_struct_name: ir_empty_name(),
+        return_fixed_array_len: 0 - 1,
         prof_counter_id: -1,
         hyper_algebra_kind: -1,
+        is_sret: 0,
+        sret_dest_reg: -1,
+        bss_size: 0,
+        first_param_is_ref: 0,
+        float_reg_bits: [0; 64],
+    }
+}
+
+// Reset an IrFunction IN PLACE, without allocating a new one.
+//
+// WHY THIS EXISTS. IrFunction is ~673 KB — almost all of it
+// `instrs: [IrInstr; IR_MAX_INSTRS]` — and the lowerer used to build a fresh
+// one per function and Box it: `var f = ir_empty_function()` then
+// `Box::new(f)`. The runtime allocator is a BUMP CURSOR with no reclamation
+// (native_v2 "fast path: bump cursor"), so every one of those Boxes stays
+// resident for the whole compile.
+//
+// Measured 2026-08-05, sampling /proc/<pid>/status through a 3000-function
+// compile: RSS is 298 MB when lowering starts and 4805 MB when it ends —
+// 1417 KB PER FUNCTION, all of it inside `lower_specialized`, while codegen
+// afterwards costs about 50 KB per function. Reusing the Box removes the
+// allocation entirely.
+//
+// ONLY THE USED PREFIX IS CLEARED. Slots past instr_count have not been
+// written since the last reset, so they still hold the ir_nop() the initial
+// fill put there — clearing all IR_MAX_INSTRS would reintroduce, as a memset,
+// exactly the cost this avoids as an allocation.
+pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic, Div {
+    // #1649: the instruction storage is NOT cleared here, and must not be. This
+    // nop-filled the used prefix of an inline `instrs` array, which was correct
+    // while the array belonged to the function. Under the arena it is not: at this
+    // point in lower_specialized `region` still points at the PREVIOUS function's
+    // region -- the caller restores or allocates the right one only AFTER this
+    // returns -- so a fill here erases instructions that are already published.
+    // Invalidating is correct and cheaper: a fresh region is already nop, and a
+    // restored one must keep exactly the instructions it has.
+    (*f).region = ir_region_invalid()
+    (*f).instr_count = 0
+    (*f).name = name
+    (*f).reg_count = 0
+    (*f).label_count = 0
+    (*f).param_count = 0
+    var pi: i64 = 0
+    while pi < 64 {
+        (*f).param_regs[pi as usize] = IR_INVALID_REG
+        pi = pi + 1
+    }
+    (*f).compile_strategy = IR_STRATEGY_STANDARD
+    (*f).returns_float = 0
+    (*f).return_struct_name = ir_empty_name()
+    (*f).return_fixed_array_len = 0 - 1
+    (*f).prof_counter_id = -1
+    (*f).hyper_algebra_kind = -1
+    (*f).is_sret = 0
+    (*f).sret_dest_reg = -1
+    (*f).bss_size = 0
+    (*f).first_param_is_ref = 0
+    // The reusable function Box retains this side table independently of the
+    // instruction region. Leaving bits set makes registers in the next
+    // function inherit float classification from the previous function.
+    var fw: i64 = 0
+    while fw < 64 {
+        (*f).float_reg_bits[fw as usize] = 0
+        fw = fw + 1
     }
 }
 
 pub fn ir_empty_module() -> IrModule {
     IrModule {
-        functions: [ir_empty_function(); 1024],
+        functions: [ir_empty_function(); 16384],
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
@@ -3234,20 +5427,77 @@ pub fn ir_empty_module() -> IrModule {
         prof_counter_count: 0,
         export_names: [ir_empty_name(); 64],
         export_count: 0,
+        bss_total_size: 0,
     }
 }
 
-pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic {
+// ============================================================================
+// BSS global-variable tracking (mirrors lean_single GL table)
+// ============================================================================
+
+// BSS globals occupy the same fixed IrModule.functions storage as functions.
+// A native entry module needs one shared slot for main, so this is the
+// executable global boundary enforced by the module frontend.
+// Keep this aligned with IR_MAX_FUNCS = 8192; global initializers in the
+// bootstrap compiler do not evaluate a reference-plus-arithmetic expression.
+pub let BSS_MAX_GLOBALS: i64 = 8191
+pub let BSS_BASE_LINUX: i64 = 0x10000000
+pub let IR_STRATEGY_BSS_GLOBAL: i64 = 99
+// Wave15e: module-level string literal BSS init. prof_counter_id holds this
+// magic; return_struct_name carries the normalized payload; codegen LEAs
+// rodata into the BSS slot (imm fill cannot encode a RIP-relative pointer).
+pub let BSS_INIT_STRING_MAGIC: i64 = 0 - 800001
+// Must match native::gc::native_v2_object_header_size(). BSS aggregate & / &!
+// refs stash (bss_addr - header) so native-v2 ref_array_* (load slot; resolve
+// raw ptr; add header to index) lands on the true BSS base. Direct GG[i] still
+// uses raw IndexGet (label_id=2) at BSS_BASE+off with no header.
+pub let IR_NATIVE_V2_OBJECT_HEADER_SIZE: i64 = 32
+
+pub fn bss_name_hash(n: Name) -> i64 with Div {
+    var hash: i64 = 5381
+    var i = 0
+    while i < n.len {
+        hash = hash * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    if hash < 0 { 0 - hash } else { hash }
+}
+
+pub fn ir_load_global(dst: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
+    var instr = ir_instr_new(IrOpcode::IrLoadGlobal)
+    instr.dst = dst
+    instr.imm_i64 = bss_offset
+    instr.name_id = ir_intern_name(name)
+    instr
+}
+
+pub fn ir_store_global(src: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
+    var instr = ir_instr_new(IrOpcode::IrStoreGlobal)
+    instr.src1 = src
+    instr.imm_i64 = bss_offset
+    instr.name_id = ir_intern_name(name)
+    instr
+}
+
+// Store val (src2) through the raw pointer in ptr (src1): [ptr] = val.
+pub fn ir_store_ptr(ptr: i64, val: i64) -> IrInstr with Mut, Panic {
+    var instr = ir_instr_new(IrOpcode::IrStorePtr)
+    instr.src1 = ptr
+    instr.src2 = val
+    instr
+}
+
+pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic, Div {
     var instr = ir_instr_new(IrOpcode::IrCallExtern)
     instr.dst = dst
-    instr.name = symbol
+    instr.name_id = ir_intern_name(symbol)
     instr.call_args = args
     instr.arg_count = arg_count
     instr
 }
 
 // Sprint 228: Load a function reference as a first-class i64 value.
-fn ir_load_fn_ref(dst: i64, fn_id: i64) -> IrInstr with Mut, Panic {
+pub fn ir_load_fn_ref(dst: i64, fn_id: i64) -> IrInstr with Mut, Panic {
     var instr = ir_instr_new(IrOpcode::IrLoadFnRef)
     instr.dst = dst
     instr.fn_id = fn_id
@@ -3264,11 +5514,15 @@ pub fn ir_call_indirect(dst: i64, fn_ref_reg: i64, args: Option<Box<IrRegList>>,
     instr
 }
 
-fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, Panic {
+pub fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, Panic {
     var m = module
     if m.export_count < 64 {
         m.export_names[m.export_count as usize] = name
         m.export_count = m.export_count + 1
     }
     m
+}
+
+pub fn ir_forbidden_law_mask(algebra_tag: i64, strategy: i64) -> i64 {
+    0
 }

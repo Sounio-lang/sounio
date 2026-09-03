@@ -1,0 +1,122 @@
+//! Multi-key (lexicographic) sort for DataFrames.
+//!
+//! Complements the single-column `data::dataframe::df_sort_by` with a stable sort over several key
+//! columns in priority order: ties on the first key are broken by the second, and so on. Built on
+//! the public DataFrame accessors, so it composes with the rest of the surface.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols}
+
+// Lexicographic comparison of rows `i` and `j` over `keys[0..nk)` (ascending):
+// returns -1 if row i < row j, +1 if i > j, 0 if equal on all keys.
+fn cmp_rows(df: &DataFrame, i: i64, j: i64, keys: &[i64; 8], nk: i64) -> i64 with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < nk && k < 8 {
+        let col = keys[k as usize]
+        let a = df_get(df, i, col)
+        let b = df_get(df, j, col)
+        if a < b { return 0 - 1 }
+        if a > b { return 1 }
+        k = k + 1
+    }
+    0
+}
+
+/// Return a new DataFrame with the rows sorted ascending by the columns in `keys[0..n_keys)`,
+/// in priority order (key 0 primary, key 1 tie-break, ...). The sort is stable: rows equal on all
+/// keys keep their original relative order. Up to 8 sort keys.
+pub fn df_sort_by_keys(df: &DataFrame, keys: &[i64; 8], n_keys: i64) -> DataFrame with Mut, Div, Panic {
+    let nr = df_nrows(df)
+    let nc = df_ncols(df)
+    // order[] is a permutation of the row indices
+    var order: [i64; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < nr && i < 1024 { order[i as usize] = i; i = i + 1 }
+    // stable insertion sort on the index array
+    i = 1
+    while i < nr && i < 1024 {
+        let cur = order[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 && cmp_rows(df, order[j as usize], cur, keys, n_keys) > 0 {
+            order[(j + 1) as usize] = order[j as usize]
+            j = j - 1
+        }
+        order[(j + 1) as usize] = cur
+        i = i + 1
+    }
+    // emit rows in sorted order (all columns preserved)
+    var out = df_new(nc)
+    i = 0
+    while i < nr && i < 1024 {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 {
+            row[c as usize] = df_get(df, order[i as usize], c)
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}
+
+// Direction-aware comparison: dirs[k] >= 0 sorts key k ascending, otherwise descending.
+fn cmp_rows_dir(df: &DataFrame, i: i64, j: i64, keys: &[i64; 8], dirs: &[i64; 8], nk: i64) -> i64
+    with Mut, Div, Panic
+{
+    var k: i64 = 0
+    while k < nk && k < 8 {
+        let col = keys[k as usize]
+        let a = df_get(df, i, col)
+        let b = df_get(df, j, col)
+        if a != b {
+            if dirs[k as usize] >= 0 {
+                if a < b { return 0 - 1 } else { return 1 }   // ascending
+            } else {
+                if a > b { return 0 - 1 } else { return 1 }   // descending
+            }
+        }
+        k = k + 1
+    }
+    0
+}
+
+/// Stable multi-key sort with a per-key direction: dirs[k] >= 0 sorts key k ascending, otherwise
+/// descending (so you can mix, e.g. sort by col A ascending then col B descending). Up to 8 keys.
+pub fn df_sort_by_keys_dir(df: &DataFrame, keys: &[i64; 8], dirs: &[i64; 8], n_keys: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    let nr = df_nrows(df)
+    let nc = df_ncols(df)
+    var order: [i64; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < nr && i < 1024 { order[i as usize] = i; i = i + 1 }
+    i = 1
+    while i < nr && i < 1024 {
+        let cur = order[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 && cmp_rows_dir(df, order[j as usize], cur, keys, dirs, n_keys) > 0 {
+            order[(j + 1) as usize] = order[j as usize]
+            j = j - 1
+        }
+        order[(j + 1) as usize] = cur
+        i = i + 1
+    }
+    var out = df_new(nc)
+    i = 0
+    while i < nr && i < 1024 {
+        var row: [f64; 64] = [0.0; 64]
+        var c: i64 = 0
+        while c < nc && c < 64 { row[c as usize] = df_get(df, order[i as usize], c); c = c + 1 }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}
+
+/// Stable multi-key sort with every key descending (convenience over df_sort_by_keys_dir).
+pub fn df_sort_by_keys_desc(df: &DataFrame, keys: &[i64; 8], n_keys: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    var dirs: [i64; 8] = [0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1, 0 - 1]
+    df_sort_by_keys_dir(df, keys, &dirs, n_keys)
+}

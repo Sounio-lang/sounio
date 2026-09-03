@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate_skills_coverage.sh — Validate all required skills exist with correct structure
+# validate_skills_coverage.sh -- Validate all required skills exist with correct structure
 #
 # Every active skill must have:
 #   - skills/<name>/SKILL.md
@@ -9,7 +9,7 @@
 # Exit 0 if all pass, exit 1 if any fail.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PASS=0; FAIL=0; TOTAL=0

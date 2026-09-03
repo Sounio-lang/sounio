@@ -1,0 +1,161 @@
+// data::json — byte-exact JSON writer to stdout (Data & Science I/O, Trilha A).
+//
+// Streaming, member-count-threaded writer for a flat JSON object. The caller
+// carries the number of members already emitted at the current object level and
+// passes it into each json_member_* call; a comma is emitted before every member
+// except the first. json_obj_open / json_obj_close emit the braces.
+//
+// stdout sink only, and NOT importing data::csv on purpose: a program that
+// imports two dependency modules fails native emission on Madaros v0.80.0
+// ("multimodule native thin-link", rc=12; see
+// docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md), so a driver
+// pulling in json + csv would not compile. The integer/f64 fixed-point emission
+// is therefore duplicated from data::csv byte-for-byte; keep the two in sync.
+//
+// Numbers are emitted as JSON numbers (RFC 8259 §6). String escaping (§7) arrives
+// with json_member_str; today's keys are assumed escape-free.
+
+// Emit the digits of a scaled integer as a fixed-point number: `scaled / 10^d`,
+// fractional part zero-padded to exactly `d` digits, sign preserved. Same rules
+// as data::csv csv_field_fixed.
+fn json_emit_fixed(scaled: i64, decimals: i64) with IO, Mut, Div, Panic {
+    var v: i64 = scaled
+    if v < 0 { print("-"); v = 0 - v }
+
+    var pow: i64 = 1
+    var k: i64 = 0
+    while k < decimals { pow = pow * 10; k = k + 1 }
+
+    let int_part = v / pow
+    let frac_part = v - int_part * pow
+    print_int(int_part)
+
+    if decimals > 0 {
+        print(".")
+        var place: i64 = pow / 10
+        while place >= 1 {
+            let digit = (frac_part / place) - ((frac_part / (place * 10)) * 10)
+            print_int(digit)
+            place = place / 10
+        }
+    }
+}
+
+// Emit one hex digit (0-9a-f) for a nibble value 0..15.
+fn json_emit_hexdig(v: i64) with IO, Mut, Div, Panic {
+    if v < 10 { print_int(v) } else { print_char(87 + v) }   // 'a' == 97 == 87+10
+}
+
+// Emit a JSON-escaped string body (no surrounding quotes), per RFC 8259 §7:
+// " \ escaped; \b \t \n \f \r named; other C0 controls (<0x20) as \u00XX; all
+// other bytes (incl. UTF-8) passed through raw. Bytes are read via str_char_at
+// (signed i8) and normalised to unsigned 0..255 so high UTF-8 bytes are not
+// mistaken for controls.
+fn json_emit_escaped(s: string) with IO, Mut, Div, Panic {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        var b: i64 = str_char_at(s, i) as i64
+        if b < 0 { b = b + 256 }
+        if b == 34 { print("\\\"") }
+        else { if b == 92 { print("\\\\") }
+        else { if b == 8 { print("\\b") }
+        else { if b == 9 { print("\\t") }
+        else { if b == 10 { print("\\n") }
+        else { if b == 12 { print("\\f") }
+        else { if b == 13 { print("\\r") }
+        else { if b < 32 {
+            print("\\u00")
+            json_emit_hexdig(b / 16)
+            json_emit_hexdig(b - (b / 16) * 16)
+        } else {
+            print_char(b)
+        } } } } } } } }
+        i = i + 1
+    }
+}
+
+// Emit an object key (`"key":`) with a leading comma when it is not the first
+// member. The key is JSON-escaped. Returns the next member count.
+fn json_key(n: i64, key: string) -> i64 with IO, Mut, Div, Panic {
+    if n > 0 { print(",") }
+    print("\"")
+    json_emit_escaped(key)
+    print("\":")
+    return n + 1
+}
+
+// Open / close a JSON object.
+pub fn json_obj_open() with IO, Mut, Div, Panic { print("{") }
+pub fn json_obj_close() with IO, Mut, Div, Panic { print("}") }
+
+// Open / close a JSON array.
+pub fn json_arr_open() with IO, Mut, Div, Panic { print("[") }
+pub fn json_arr_close() with IO, Mut, Div, Panic { print("]") }
+
+// Separator before an array element: emit a comma for every element except the
+// first (k = number of elements already emitted). Returns the next element count.
+pub fn json_arr_sep(k: i64) -> i64 with IO, Mut, Div, Panic {
+    if k > 0 { print(",") }
+    return k + 1
+}
+
+// Emit an integer member: `"key":v`. Returns the next member count.
+pub fn json_member_int(n: i64, key: string, v: i64) -> i64 with IO, Mut, Div, Panic {
+    let n2 = json_key(n, key)
+    print_int(v)
+    return n2
+}
+
+// Emit just a member key (`"key":`) with the leading-comma logic; the caller
+// then supplies the value — e.g. json_obj_open/json_arr_open for a nested object
+// or array. Returns the next member count.
+pub fn json_member_key(n: i64, key: string) -> i64 with IO, Mut, Div, Panic {
+    return json_key(n, key)
+}
+
+// Emit a boolean member: `"key":true` / `"key":false`. Returns the next count.
+pub fn json_member_bool(n: i64, key: string, v: bool) -> i64 with IO, Mut, Div, Panic {
+    let n2 = json_key(n, key)
+    if v { print("true") } else { print("false") }
+    return n2
+}
+
+// Emit a null member: `"key":null` — the canonical encoding of a missing value.
+// Returns the next member count.
+pub fn json_member_null(n: i64, key: string) -> i64 with IO, Mut, Div, Panic {
+    let n2 = json_key(n, key)
+    print("null")
+    return n2
+}
+
+// Emit a string member: `"key":"escaped-value"`. Both key and value are
+// JSON-escaped. Returns the next member count.
+pub fn json_member_str(n: i64, key: string, s: string) -> i64 with IO, Mut, Div, Panic {
+    let n2 = json_key(n, key)
+    print("\"")
+    json_emit_escaped(s)
+    print("\"")
+    return n2
+}
+
+// Emit an f64 member rounded to `decimals` places (round-half-away-from-zero),
+// zero-padded, sign preserved: `"key":value`. Returns the next member count.
+// Same rounding caveat as data::csv csv_field_f64 (exact-*.5 f64 ties).
+pub fn json_member_f64(n: i64, key: string, value: f64, decimals: i64) -> i64 with IO, Mut, Div, Panic {
+    let n2 = json_key(n, key)
+
+    var powf: f64 = 1.0
+    var k: i64 = 0
+    while k < decimals { powf = powf * 10.0; k = k + 1 }
+
+    var neg: bool = false
+    var mag: f64 = value
+    if mag < 0.0 { neg = true; mag = 0.0 - mag }
+
+    var scaled: i64 = (mag * powf + 0.5) as i64
+    if neg { scaled = 0 - scaled }
+
+    json_emit_fixed(scaled, decimals)
+    return n2
+}

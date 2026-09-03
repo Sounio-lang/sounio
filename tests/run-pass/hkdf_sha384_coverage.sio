@@ -1,0 +1,126 @@
+//@ run-pass
+//@ requires: madaros
+// SHA-384 coverage for hkdf_extract/hkdf_expand and tls13_early_secret,
+// closing the final-whole-plan-review Finding 1 gap ("SHA-384 HKDF/TLS-1.3
+// path has zero test coverage -- reviewer zeroed the SHA-384 HMAC branch,
+// all 3 committed tests still passed").
+//
+// RFC 5869 itself only publishes SHA-256 vectors (Appendix A), so there is
+// no ready-made RFC SHA-384 HKDF trace to transcribe. Per this plan's own
+// precedent (Task 1's RFC 4231 SHA-384 vector was independently
+// re-verified against Python's stdlib `hashlib`/`hmac` rather than merely
+// copied), the expected values below are computed independently from the
+// same RFC 5869 §2.2/2.3 construction, instantiated with SHA-384 instead
+// of SHA-256, using Python's stdlib `hashlib`/`hmac` (a standards-
+// conformant, independent implementation -- not this repo's own code):
+//
+//   import hashlib, hmac
+//   def hkdf_extract(hash_name, salt, ikm):
+//       return hmac.new(salt, ikm, hash_name).digest()
+//   def hkdf_expand(hash_name, prk, info, length):
+//       hash_len = hashlib.new(hash_name).digest_size
+//       t = b""; okm = b""; counter = 1
+//       while len(okm) < length:
+//           t = hmac.new(prk, t + info + bytes([counter]), hash_name).digest()
+//           okm += t; counter += 1
+//       return okm[:length]
+//
+//   salt = bytes(range(0x00, 0x0d))       # 13 bytes: 00 01 .. 0c
+//   ikm  = bytes([0x0b] * 22)             # 22 bytes, matching RFC 5869 A.1's IKM
+//   info = bytes(range(0xf0, 0xfa))       # 10 bytes: f0 f1 .. f9, matching RFC 5869 A.1
+//   prk  = hkdf_extract('sha384', salt, ikm)              # 48 bytes
+//   okm  = hkdf_expand('sha384', prk, info, 82)           # 82 bytes: NOT a multiple
+//                                                          # of 48, exercising the
+//                                                          # truncation-boundary logic
+//                                                          # the same way RFC 5869
+//                                                          # A.1's out_len=42 (not a
+//                                                          # multiple of 32) does for
+//                                                          # SHA-256.
+//   zero48 = bytes(48)
+//   early  = hkdf_extract('sha384', zero48, zero48)       # 48 bytes
+//
+// Computed values (transcribed verbatim from the Python run above):
+//   PRK  = 704b39990779ce1dc548052c7dc39f303570dd13fb39f7acc564680bef80e8dec70ee9a7e1f3e293ef68eceb072a5ade
+//   OKM  = 9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5d95d1da3e62587b22eb8943d0fab6bb631a2fe9df1a68c6ce5d56116a52005b3f122b88b39b7251f
+//   Early Secret (SHA-384) = 7ee8206f5570023e6dc7519eb1073bc4e791ad37b5c382aa10ba18e2357e716971f9362f2c2fe2a76bfd78dfec4ea9b5
+use crypto::hkdf::*
+use net::socket::*
+
+fn main() -> i64 with IO {
+    // salt = 000102030405060708090a0b0c (13 bytes)
+    let salt_bytes: [u8;13] = [0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c]
+    let salt_buf = rawbuf_new(13)
+    var i: i64 = 0
+    while i < 13 { rawbuf_set(&salt_buf, i, salt_bytes[i as usize] as i64); i = i + 1 }
+
+    // ikm = 0x0b repeated 22 times
+    let ikm_bytes: [u8;22] = [0x0b;22]
+    let ikm_buf = rawbuf_new(22)
+    var j: i64 = 0
+    while j < 22 { rawbuf_set(&ikm_buf, j, ikm_bytes[j as usize] as i64); j = j + 1 }
+
+    // info = f0f1f2f3f4f5f6f7f8f9 (10 bytes)
+    let info_bytes: [u8;10] = [0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9]
+    let info_buf = rawbuf_new(10)
+    var k: i64 = 0
+    while k < 10 { rawbuf_set(&info_buf, k, info_bytes[k as usize] as i64); k = k + 1 }
+
+    // Expected PRK (48 bytes), independently computed via Python hmac/hashlib
+    // -- see file header.
+    let expected_prk: [u8;48] = [
+        0x70,0x4b,0x39,0x99,0x07,0x79,0xce,0x1d,0xc5,0x48,0x05,0x2c,0x7d,0xc3,0x9f,0x30,
+        0x35,0x70,0xdd,0x13,0xfb,0x39,0xf7,0xac,0xc5,0x64,0x68,0x0b,0xef,0x80,0xe8,0xde,
+        0xc7,0x0e,0xe9,0xa7,0xe1,0xf3,0xe2,0x93,0xef,0x68,0xec,0xeb,0x07,0x2a,0x5a,0xde
+    ]
+    let prk = hkdf_extract(HKDF_HASH_SHA384, &salt_buf, 13, &ikm_buf, 22)
+    var p: i64 = 0
+    while p < 48 {
+        if rawbuf_get(&prk, p) != (expected_prk[p as usize] as i64) {
+            println("FAIL: SHA-384 PRK mismatch")
+            return 1
+        }
+        p = p + 1
+    }
+
+    // Expected OKM (82 bytes -- NOT a multiple of 48, exercising the
+    // truncation-boundary logic), independently computed via Python
+    // hmac/hashlib -- see file header.
+    let expected_okm: [u8;82] = [
+        0x9b,0x50,0x97,0xa8,0x60,0x38,0xb8,0x05,0x30,0x90,0x76,0xa4,0x4b,0x3a,0x9f,0x38,
+        0x06,0x3e,0x25,0xb5,0x16,0xdc,0xbf,0x36,0x9f,0x39,0x4c,0xfa,0xb4,0x36,0x85,0xf7,
+        0x48,0xb6,0x45,0x77,0x63,0xe4,0xf0,0x20,0x4f,0xc5,0xd9,0x5d,0x1d,0xa3,0xe6,0x25,
+        0x87,0xb2,0x2e,0xb8,0x94,0x3d,0x0f,0xab,0x6b,0xb6,0x31,0xa2,0xfe,0x9d,0xf1,0xa6,
+        0x8c,0x6c,0xe5,0xd5,0x61,0x16,0xa5,0x20,0x05,0xb3,0xf1,0x22,0xb8,0x8b,0x39,0xb7,
+        0x25,0x1f
+    ]
+    let okm = hkdf_expand(HKDF_HASH_SHA384, &prk, 48, &info_buf, 10, 82)
+    var q: i64 = 0
+    while q < 82 {
+        if rawbuf_get(&okm, q) != (expected_okm[q as usize] as i64) {
+            println("FAIL: SHA-384 OKM mismatch")
+            return 1
+        }
+        q = q + 1
+    }
+
+    // tls13_early_secret(HKDF_HASH_SHA384): must be 48 bytes, and must
+    // equal an independently-computed HKDF-Extract(salt=48 zero bytes,
+    // ikm=48 zero bytes) -- see file header.
+    let expected_early: [u8;48] = [
+        0x7e,0xe8,0x20,0x6f,0x55,0x70,0x02,0x3e,0x6d,0xc7,0x51,0x9e,0xb1,0x07,0x3b,0xc4,
+        0xe7,0x91,0xad,0x37,0xb5,0xc3,0x82,0xaa,0x10,0xba,0x18,0xe2,0x35,0x7e,0x71,0x69,
+        0x71,0xf9,0x36,0x2f,0x2c,0x2f,0xe2,0xa7,0x6b,0xfd,0x78,0xdf,0xec,0x4e,0xa9,0xb5
+    ]
+    let early = tls13_early_secret(HKDF_HASH_SHA384)
+    var r: i64 = 0
+    while r < 48 {
+        if rawbuf_get(&early, r) != (expected_early[r as usize] as i64) {
+            println("FAIL: SHA-384 tls13_early_secret mismatch")
+            return 1
+        }
+        r = r + 1
+    }
+
+    println("hkdf_sha384_coverage: HKDF-Extract/Expand and tls13_early_secret match independently-computed SHA-384 values")
+    return 0
+}

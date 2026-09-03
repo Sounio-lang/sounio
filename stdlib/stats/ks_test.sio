@@ -1,0 +1,252 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/ks_test.sio — Kolmogorov-Smirnov tests
+//
+// The distribution-free supremum test of goodness of fit, in both forms:
+//
+//   ks_one_normal(x, n, mu, sigma) -> KSResult   (vs a normal reference)
+//   ks_two(x, nx, y, ny)           -> KSResult   (two-sample)
+//
+// D is the largest vertical gap between the empirical CDF(s):
+//   one-sample  D = supₓ |Fₙ(x) − Φ(x)|,
+//   two-sample  D = supₓ |F₁(x) − F₂(x)|.
+// The asymptotic p-value uses the Kolmogorov distribution
+//   P(D > d) = 2 Σ_{j≥1} (−1)^{j−1} e^{−2 j² λ²},   λ = (√ne + 0.12 + 0.11/√ne)·D,
+// with ne = n one-sample and ne = n₁n₂/(n₁+n₂) two-sample (Stephens 1970).
+//
+// Pure Sounio: inline erf + insertion sort over a fixed [256] scratch; no
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Kolmogorov (1933); Smirnov (1948); Stephens (1970) JRSS-B 32:115.
+
+module stats::ks_test
+
+fn ks_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ks_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ks_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ks_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * ks_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn ks_normal_cdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 + ks_erf((x - mu) / sigma * INV_SQRT2))
+}
+
+// Kolmogorov p-value from the effective-sample statistic; series truncated at
+// 100 terms (converges geometrically for any positive D).
+fn ks_pvalue(ne: f64, d: f64) -> f64 with Mut, Div, Panic {
+    if d <= 0.0 { return 1.0 }
+    let sn = ks_sqrt(ne)
+    let lam = (sn + 0.12 + 0.11 / sn) * d
+    let a = 0.0 - 2.0 * lam * lam
+    var sum = 0.0
+    var sign = 1.0
+    var j = 1
+    while j <= 100 {
+        let term = sign * ks_exp(a * (j as f64) * (j as f64))
+        sum = sum + term
+        let at = if term < 0.0 { 0.0 - term } else { term }
+        if at < 1.0e-12 { j = 101 } else { j = j + 1 }
+        sign = 0.0 - sign
+    }
+    var p = 2.0 * sum
+    if p > 1.0 { p = 1.0 }
+    if p < 0.0 { p = 0.0 }
+    return p
+}
+
+// insertion sort of the first n entries of a [256] buffer, ascending.
+fn ks_sort(a: &![f64; 256], n: i32) with Mut {
+    var i = 1
+    while i < n {
+        let key = a[i as usize]
+        var j = i - 1
+        while j >= 0 && a[j as usize] > key {
+            a[(j + 1) as usize] = a[j as usize]
+            j = j - 1
+        }
+        a[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+pub struct KSResult {
+    pub d: f64,      // KS statistic (sup gap)
+    pub p: f64,      // asymptotic two-sided p-value
+    pub ne: f64,     // effective sample size used
+}
+
+/// One-sample KS test against a Normal(mu, sigma) reference.
+///
+/// Parâmetros: x — sample (copied & sorted internally); n — size (<=256);
+///             mu, sigma — reference mean and sd (sigma>0).
+/// Retorno: KSResult (d, p, ne=n).
+pub fn ks_one_normal(x: &[f64; 256], n: i32, mu: f64, sigma: f64) -> KSResult with Mut, Div, Panic {
+    if n < 1 || sigma <= 0.0 { return KSResult { d: 0.0, p: 1.0, ne: 0.0 } }
+    var s: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { s[i as usize] = x[i as usize]; i = i + 1 }
+    ks_sort(&!s, n)
+    let nf = n as f64
+    var dmax = 0.0
+    var k = 0
+    while k < n {
+        let fx = ks_normal_cdf(s[k as usize], mu, sigma)
+        let dplus = ((k + 1) as f64) / nf - fx     // F_n at/above point minus F
+        let dminus = fx - (k as f64) / nf          // F minus F_n just below point
+        if dplus > dmax { dmax = dplus }
+        if dminus > dmax { dmax = dminus }
+        k = k + 1
+    }
+    return KSResult { d: dmax, p: ks_pvalue(nf, dmax), ne: nf }
+}
+
+/// Two-sample KS test.
+///
+/// Parâmetros: x, y — the two samples (copied & sorted internally); nx, ny — sizes.
+/// Retorno: KSResult (d, p, ne=nx·ny/(nx+ny)).
+pub fn ks_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> KSResult with Mut, Div, Panic {
+    if nx < 1 || ny < 1 { return KSResult { d: 0.0, p: 1.0, ne: 0.0 } }
+    var sx: [f64; 256] = [0.0; 256]
+    var sy: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < nx { sx[i as usize] = x[i as usize]; i = i + 1 }
+    var j = 0
+    while j < ny { sy[j as usize] = y[j as usize]; j = j + 1 }
+    ks_sort(&!sx, nx)
+    ks_sort(&!sy, ny)
+    let nxf = nx as f64
+    let nyf = ny as f64
+    // merge-walk the two ECDFs, tracking the max |F1 - F2|
+    var ia = 0
+    var ib = 0
+    var dmax = 0.0
+    while ia < nx && ib < ny {
+        let va = sx[ia as usize]
+        let vb = sy[ib as usize]
+        if va <= vb { ia = ia + 1 }
+        if vb <= va { ib = ib + 1 }
+        let f1 = (ia as f64) / nxf
+        let f2 = (ib as f64) / nyf
+        var gap = f1 - f2
+        if gap < 0.0 { gap = 0.0 - gap }
+        if gap > dmax { dmax = gap }
+    }
+    let ne = nxf * nyf / (nxf + nyf)
+    return KSResult { d: dmax, p: ks_pvalue(ne, dmax), ne: ne }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// One-sample: data {-1,0,1} vs standard normal.
+// Φ(-1)=0.158655, Φ(0)=0.5, Φ(1)=0.841345.
+// k=0 (x=-1): d+=1/3-0.158655=0.174679; d-=0.158655-0=0.158655
+// k=1 (x=0):  d+=2/3-0.5=0.166667;      d-=0.5-1/3=0.166667
+// k=2 (x=1):  d+=1-0.841345=0.158655;   d-=0.841345-2/3=0.174679
+// D = 0.174679.
+fn test_one() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0] = 0.0 - 1.0; x[1] = 0.0; x[2] = 1.0
+    let r = ks_one_normal(&x, 3, 0.0, 1.0)
+    var ok = true
+    ok = check(1, approx(r.d, 0.174679, 1.0e-4)) && ok
+    ok = check(2, r.p > 0.9) && ok            // tiny sample, no evidence against normal
+    return ok
+}
+
+// Two-sample, fully separated: x={1,2,3}, y={4,5,6} -> ECDFs never overlap, D=1.
+fn test_two_separated() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=4.0; y[1]=5.0; y[2]=6.0
+    let r = ks_two(&x, 3, &y, 3)
+    var ok = true
+    ok = check(10, approx(r.d, 1.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.ne, 1.5, 1.0e-9)) && ok   // 3·3/6
+    return ok
+}
+
+// Two-sample identical samples -> D=0, p=1.
+fn test_two_identical() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    let r = ks_two(&x, 4, &x, 4)
+    var ok = true
+    ok = check(20, approx(r.d, 0.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.p, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// Two-sample partial overlap: x={1,2,3,4}, y={3,4,5,6}.
+// walk: at 1 f1=.25,f2=0 gap .25; at 2 f1=.5 gap .5; at 3 both advance
+// f1=.75,f2=.25 gap .5; at 4 f1=1,f2=.5 gap .5; then y 5,6. D=0.5.
+fn test_two_overlap() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=3.0; y[1]=4.0; y[2]=5.0; y[3]=6.0
+    let r = ks_two(&x, 4, &y, 4)
+    return check(30, approx(r.d, 0.5, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_one() && ok
+    ok = test_two_separated() && ok
+    ok = test_two_identical() && ok
+    ok = test_two_overlap() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,161 @@
+// stdlib/math/hyperbolic.sio — Geometric carriers on the hyperboloid model (Feature C-a)
+//
+// A `HypPoint` is a point on the 2-dimensional hyperboloid model H² embedded in the
+// (2,1)-Minkowski space ℝ^{2,1}: c = (c0, c1, c2) with the Minkowski form
+//     ⟨x, y⟩_M = -x0·y0 + x1·y1 + x2·y2
+// constrained to ⟨x, x⟩_M = -1 and c0 > 0 (upper sheet). The intrinsic Gaussian
+// curvature is K = -1 (unit hyperboloid); `hyp_distance_kappa` rescales to a general
+// curvature K = -κ² without changing the geometry.
+//
+// THE TYPE CARRIES ITS THEORY OF EQUIVALENCE. `HypPoint` is a nominal struct, so the
+// Euclidean operations that are invalid on the manifold are TYPE ERRORS for free:
+// `a + b` on two HypPoints is rejected by the checker (E004 "these types cannot be
+// combined with this operator") — you cannot add two hyperboloid points as if they
+// were ℝⁿ vectors. The admissible operations are the FUNCTIONS below: the Minkowski
+// form, geodesic distance, and the exp / log maps (which pass through the tangent
+// space). Curvature κ is an isometry-invariant of the manifold — in the wider design
+// it is exposed as Invariant<f64, Diff1> (smooth-conjugacy invariant), tying C-a to B.
+//
+// VERIFIED by execution (tests/run-pass/hyperbolic_geodesic.sio): geodesic distance
+// matches the closed form d = arccosh(-⟨x,y⟩_M); exp/log round-trip within tolerance.
+//
+// The elementary transcendentals are kept PRIVATE to this module (rather than imported
+// from math::pure) so the module is dependency-free and runs through the multimodule
+// path with only public cross-module calls.
+
+// ── Private elementary functions (mirrors math::pure) ────────────────────────
+fn hyp_ln2() -> f64 { 0.6931471805599453 }
+
+fn hyp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var v = x
+    var s = 1.0
+    while v < 1.0 { v = v * 4.0; s = s * 2.0 }
+    var y = v
+    var i = 0
+    while i < 20 { y = 0.5 * (y + v / y); i = i + 1 }
+    y / s
+}
+
+fn hyp_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    2.0 * sum + (e_val as f64) * hyp_ln2()
+}
+
+fn hyp_expf(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var k_f = x / hyp_ln2()
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * hyp_ln2()
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+pub fn hyp_cosh(x: f64) -> f64 with Mut, Div, Panic { (hyp_expf(x) + hyp_expf(0.0 - x)) / 2.0 }
+pub fn hyp_sinh(x: f64) -> f64 with Mut, Div, Panic { (hyp_expf(x) - hyp_expf(0.0 - x)) / 2.0 }
+
+// arccosh(x) = ln(x + sqrt(x² - 1)), valid for x >= 1.
+pub fn arccosh(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 1.0 { return 0.0 }
+    hyp_ln(x + hyp_sqrt(x * x - 1.0))
+}
+
+// ── The manifold carrier and its admissible operations ───────────────────────
+pub struct HypPoint { c: [f64; 3] }
+pub struct HypTangent { v: [f64; 3] }
+
+fn mink3(a0: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64) -> f64 {
+    (0.0 - a0 * b0) + a1 * b1 + a2 * b2
+}
+
+// Construct a hyperboloid point from raw ambient coordinates (caller ensures it lies
+// on the sheet ⟨c,c⟩_M = -1, c0 > 0).
+pub fn hyp_point(c0: f64, c1: f64, c2: f64) -> HypPoint {
+    HypPoint { c: [c0, c1, c2] }
+}
+
+// The basepoint (apex): (1, 0, 0).
+pub fn hyp_origin() -> HypPoint { HypPoint { c: [1.0, 0.0, 0.0] } }
+
+// Minkowski inner product ⟨x, y⟩_M.
+pub fn hyp_inner(x: HypPoint, y: HypPoint) -> f64 {
+    mink3(x.c[0], x.c[1], x.c[2], y.c[0], y.c[1], y.c[2])
+}
+
+// Geodesic distance — the closed form d(x, y) = arccosh(-⟨x, y⟩_M) (K = -1).
+pub fn hyp_distance(x: HypPoint, y: HypPoint) -> f64 with Mut, Div, Panic {
+    arccosh(0.0 - hyp_inner(x, y))
+}
+
+// Geodesic distance on a hyperboloid of curvature K = -κ² (κ > 0): scale-covariant.
+pub fn hyp_distance_kappa(x: HypPoint, y: HypPoint, kappa: f64) -> f64 with Mut, Div, Panic {
+    if kappa <= 0.0 { return hyp_distance(x, y) }
+    hyp_distance(x, y) / kappa
+}
+
+fn tangent_norm(v0: f64, v1: f64, v2: f64) -> f64 with Mut, Div, Panic {
+    let q = mink3(v0, v1, v2, v0, v1, v2)
+    if q <= 0.0 { return 0.0 }
+    hyp_sqrt(q)
+}
+
+// Exponential map: exp_x(v) = cosh(|v|)·x + (sinh(|v|)/|v|)·v. exp_x(0) = x.
+pub fn hyp_exp(x: HypPoint, t: HypTangent) -> HypPoint with Mut, Div, Panic {
+    let n = tangent_norm(t.v[0], t.v[1], t.v[2])
+    if n == 0.0 { return x }
+    let a = hyp_cosh(n)
+    let b = hyp_sinh(n) / n
+    var out: [f64; 3] = [0.0; 3]
+    out[0] = a * x.c[0] + b * t.v[0]
+    out[1] = a * x.c[1] + b * t.v[1]
+    out[2] = a * x.c[2] + b * t.v[2]
+    HypPoint { c: out }
+}
+
+// Logarithm map: log_x(y) = (d/sinh d)·(y - cosh(d)·x), d = dist(x, y). Inverse of
+// exp_x on the injectivity domain; |log_x(y)|_M = d. log_x(x) = 0.
+pub fn hyp_log(x: HypPoint, y: HypPoint) -> HypTangent with Mut, Div, Panic {
+    let d = hyp_distance(x, y)
+    if d == 0.0 { return HypTangent { v: [0.0, 0.0, 0.0] } }
+    let cd = hyp_cosh(d)
+    let f = d / hyp_sinh(d)
+    var out: [f64; 3] = [0.0; 3]
+    out[0] = f * (y.c[0] - cd * x.c[0])
+    out[1] = f * (y.c[1] - cd * x.c[1])
+    out[2] = f * (y.c[2] - cd * x.c[2])
+    HypTangent { v: out }
+}
+
+// Minkowski norm of a tangent: equals the geodesic distance for a log image.
+pub fn hyp_tangent_norm(t: HypTangent) -> f64 with Mut, Div, Panic {
+    tangent_norm(t.v[0], t.v[1], t.v[2])
+}

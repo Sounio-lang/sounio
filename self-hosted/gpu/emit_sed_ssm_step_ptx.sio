@@ -1,0 +1,138 @@
+// Sounio emitter for the SEDENION S-SSM linear recurrence step on tensor cores (Convention X, bits=4).
+// sounio_sed_ssm_step(A[16],B[16],x[16],H[256],out[256]): for a 16-wide batch of sedenion states H,
+// the sedenion multiply A⊗H is L16(A)·H — EXACTLY one wmma m16n16k16 tile (no padding) — then thread 0
+// adds B·x: S[k][b] = (A⊗H[:,b])[k] + B[k]·x[b]. The cd_sigma sign table σ(k⊕j,j,4) is emitted as a
+// module .global constant and the XOR index i=k⊕j is computed at runtime, so build/stage/post-add are
+// compact PTX loops (fits the emitter buffer). HW-validated on the DGX Spark GB10, incl. zero-divisor gating.
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    var digits = ""
+    var x = n
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var ch = "0"
+        if d == 1 { ch = "1" }
+        if d == 2 { ch = "2" }
+        if d == 3 { ch = "3" }
+        if d == 4 { ch = "4" }
+        if d == 5 { ch = "5" }
+        if d == 6 { ch = "6" }
+        if d == 7 { ch = "7" }
+        if d == 8 { ch = "8" }
+        if d == 9 { ch = "9" }
+        digits = str_concat(ch, digits)
+        x = x / 10
+    }
+    digits
+}
+fn cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+fn frag(prefix: string, start: i64, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, prefix), i64_to_string(start + i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    print(".version 9.0\n")
+    print(".target sm_121\n")
+    print(".address_size 64\n\n")
+    // sign table: sedsgn[k*16+j] = σ(k⊕j, j, 4) as f32 ±1
+    print(".global .align 4 .b32 sounio_sedsgn[256] = {")
+    var idx: i64 = 0
+    while idx < 256 {
+        let k = idx >> 4
+        let j = idx & 15
+        let i = k ^ j
+        if idx > 0 { print(", ") }
+        if cd_sigma(i, j, 4) < 0 { print("0fBF800000") } else { print("0f3F800000") }
+        idx = idx + 1
+    }
+    print("};\n\n")
+    print(".visible .entry sounio_sed_ssm_step(\n")
+    print("    .param .u64 .ptr .align 4 p_A,\n")
+    print("    .param .u64 .ptr .align 4 p_B,\n")
+    print("    .param .u64 .ptr .align 4 p_x,\n")
+    print("    .param .u64 .ptr .align 4 p_H,\n")
+    print("    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    print("    .reg .pred %p<2>;\n")
+    print("    .reg .b16 %rs<2>;\n")
+    print("    .reg .b32 %r<28>;\n")
+    print("    .reg .f32 %f<12>;\n")
+    print("    .reg .b64 %rd<18>;\n")
+    print("    .shared .align 2 .b8 sL[512];\n")
+    print("    .shared .align 2 .b8 sH[512];\n")
+    print("    ld.param.u64 %rd1, [p_A];\n")
+    print("    ld.param.u64 %rd2, [p_B];\n")
+    print("    ld.param.u64 %rd7, [p_x];\n")
+    print("    ld.param.u64 %rd8, [p_H];\n")
+    print("    ld.param.u64 %rd3, [p_out];\n")
+    print("    cvta.to.global.u64 %rd4, %rd1;\n")
+    print("    cvta.to.global.u64 %rd9, %rd2;\n")
+    print("    cvta.to.global.u64 %rd10, %rd7;\n")
+    print("    cvta.to.global.u64 %rd5, %rd8;\n")
+    print("    cvta.to.global.u64 %rd6, %rd3;\n")
+    print("    mov.u32 %r18, sL;\n")
+    print("    mov.u32 %r19, sH;\n")
+    print("    mov.u64 %rd14, sounio_sedsgn;\n")
+    print("    mov.u32 %r16, %tid.x;\n")
+    print("    setp.ne.u32 %p1, %r16, 0;\n")
+    print("    @%p1 bra $AFTERBUILD;\n")
+    // build L(A): sL[idx] = σ(k⊕j,j,4) * A[k⊕j], idx=k*16+j
+    print("    mov.u32 %r20, 0;\n$BUILD:\n")
+    print("    shr.u32 %r21, %r20, 4;\n")
+    print("    and.b32 %r22, %r20, 15;\n")
+    print("    xor.b32 %r23, %r21, %r22;\n")
+    print("    mul.wide.u32 %rd13, %r23, 4;\n    add.s64 %rd13, %rd4, %rd13;\n    ld.global.f32 %f1, [%rd13];\n")
+    print("    mul.wide.u32 %rd15, %r20, 4;\n    add.s64 %rd15, %rd14, %rd15;\n    ld.global.f32 %f2, [%rd15];\n")
+    print("    mul.f32 %f1, %f1, %f2;\n    cvt.rn.f16.f32 %rs1, %f1;\n")
+    print("    mad.lo.u32 %r24, %r20, 2, %r18;\n    st.shared.u16 [%r24], %rs1;\n")
+    print("    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $BUILD;\n")
+    // stage H col-major (H[b*16+r] already contiguous): sH[idx]=half(H[idx])
+    print("    mov.u32 %r20, 0;\n$STAGE:\n")
+    print("    mul.wide.u32 %rd13, %r20, 4;\n    add.s64 %rd13, %rd5, %rd13;\n    ld.global.f32 %f1, [%rd13];\n")
+    print("    cvt.rn.f16.f32 %rs1, %f1;\n")
+    print("    mad.lo.u32 %r24, %r20, 2, %r19;\n    st.shared.u16 [%r24], %rs1;\n")
+    print("    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $STAGE;\n")
+    print("$AFTERBUILD:\n")
+    print("    bar.sync 0;\n")
+    print("    mov.b32 %r1, 16;\n")
+    print("    mov.f32 %f0, 0f00000000;\n")
+    // AH = L(A)·H : one wmma 16x16x16 tile
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ") print(frag("%r", 2, 8)) print(", [%r18], %r1;\n")
+    print("    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ") print(frag("%r", 10, 8)) print(", [%r19], %r1;\n")
+    print("    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ") print(frag("%f", 2, 8)) print(", ") print(frag("%r", 2, 8)) print(", ") print(frag("%r", 10, 8))
+    print(", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    print("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ") print(frag("%f", 2, 8)) print(", %r1;\n")
+    print("    bar.sync 0;\n")
+    // thread 0: S[k*16+b] += B[k]*x[b]
+    print("    mov.u32 %r16, %tid.x;\n    setp.ne.u32 %p1, %r16, 0;\n    @%p1 bra $DONE;\n")
+    print("    mov.u32 %r20, 0;\n$PADD:\n")
+    print("    shr.u32 %r21, %r20, 4;\n")
+    print("    and.b32 %r22, %r20, 15;\n")
+    print("    mul.wide.u32 %rd13, %r21, 4;\n    add.s64 %rd13, %rd9, %rd13;\n    ld.global.f32 %f5, [%rd13];\n")
+    print("    mul.wide.u32 %rd13, %r22, 4;\n    add.s64 %rd13, %rd10, %rd13;\n    ld.global.f32 %f6, [%rd13];\n")
+    print("    mul.wide.u32 %rd13, %r20, 4;\n    add.s64 %rd13, %rd6, %rd13;\n    ld.global.f32 %f7, [%rd13];\n")
+    print("    fma.rn.f32 %f7, %f5, %f6, %f7;\n    st.global.f32 [%rd13], %f7;\n")
+    print("    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $PADD;\n")
+    print("$DONE:\n    ret;\n}\n")
+}

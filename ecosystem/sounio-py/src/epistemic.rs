@@ -31,7 +31,7 @@ pub struct SensitivityCoefficient {
 impl SensitivityCoefficient {
     pub fn __repr__(&self) -> String {
         format!(
-            "SensitivityCoefficient(name='{}', c={:.4g}, share={:.1f}%)",
+            "SensitivityCoefficient(name='{}', c={}, share={}%)",
             self.name, self.coefficient, self.contribution * 100.0
         )
     }
@@ -86,7 +86,7 @@ impl EpistemicResult {
 
     pub fn __repr__(&self) -> String {
         let names: Vec<&str> = self.outputs.iter().map(|(n, _)| n.as_str()).collect();
-        format!("EpistemicResult('{}', outputs=[{}], confidence={:.2f})",
+        format!("EpistemicResult('{}', outputs=[{}], confidence={})",
             self.label, names.join(", "), self.confidence())
     }
 }
@@ -207,7 +207,7 @@ impl GUMPropagation {
         println!("{:<20} {:>12} {:>12} {:>10}", "Input", "Sensitivity", "|c·u|", "Share%");
         println!("{}", "-".repeat(58));
         for c in &coeffs {
-            println!("{:<20} {:>12.4g} {:>12.4g} {:>9.1f}%",
+            println!("{} {} {} {}",
                 c.name, c.coefficient, c.abs_contribution, c.contribution * 100.0);
         }
         Ok(())

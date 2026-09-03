@@ -1,0 +1,242 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/cochran_q.sio — Cochran's Q test
+//
+// The extension of McNemar's test to k ≥ 2 matched binary conditions: n
+// subjects each measured 0/1 under k treatments, testing whether the success
+// proportion differs across treatments.
+//
+//   cochran_q(data, n, k) -> CochranQResult      (data row-major n×k, 0/1)
+//
+// With column success totals Cⱼ, row totals Rᵢ and grand total N=ΣCⱼ=ΣRᵢ,
+//   Q = (k−1)·( k·ΣCⱼ² − N² ) / ( k·N − ΣRᵢ² )  ~  χ²(k−1).
+//
+// Pure Sounio: one pass for the row/column totals; χ² tail via inline Lanczos
+// log-gamma + regularised incomplete gamma; no nested data-array calls.
+//
+// References:
+//   Cochran (1950) Biometrika 37:256; Sheskin, "Handbook of Parametric and
+//   Nonparametric Statistical Procedures" 5e.
+
+module stats::cochran_q
+
+fn cq_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / cq_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn cq_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn cq_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * cq_ln(tt) - tt + cq_ln(a)
+}
+
+fn cq_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * cq_exp(0.0 - x + s * cq_ln(x) - cq_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = cq_exp(0.0 - x + s * cq_ln(x) - cq_lgamma(s)) * h
+    return 1.0 - q
+}
+
+fn cq_chi2_sf(x: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    if df <= 0.0 { return 1.0 }
+    return 1.0 - cq_igamma_p(df * 0.5, x * 0.5)
+}
+
+pub struct CochranQResult {
+    pub q: f64,    // Cochran's Q statistic
+    pub df: i64,   // k - 1
+    pub p: f64,    // asymptotic chi-squared p-value
+}
+
+/// Cochran's Q test on a row-major n×k matrix of 0/1 outcomes.
+///
+/// Parâmetros: data — n·k binary values, row i = subject i; n — subjects (>=2);
+///             k — conditions (2..16).
+/// Retorno: CochranQResult (q, df, p).
+/// Referências: Cochran (1950).
+pub fn cochran_q(data: &[f64; 256], n: i32, k: i32) -> CochranQResult with Mut, Div, Panic {
+    if n < 2 || k < 2 || k > 16 { return CochranQResult { q: 0.0, df: 0, p: 1.0 } }
+    var col: [f64; 16] = [0.0; 16]
+    var sum_r = 0.0
+    var sum_r2 = 0.0
+    var i = 0
+    while i < n {
+        var ri = 0.0
+        var j = 0
+        while j < k {
+            let v = data[(i * k + j) as usize]
+            col[j as usize] = col[j as usize] + v
+            ri = ri + v
+            j = j + 1
+        }
+        sum_r = sum_r + ri
+        sum_r2 = sum_r2 + ri * ri
+        i = i + 1
+    }
+    var sum_c2 = 0.0
+    var jj = 0
+    while jj < k { sum_c2 = sum_c2 + col[jj as usize] * col[jj as usize]; jj = jj + 1 }
+    let kf = k as f64
+    let bigN = sum_r                     // grand total of successes
+    let denom = kf * bigN - sum_r2
+    var q = 0.0
+    if denom > 0.0 {
+        q = (kf - 1.0) * (kf * sum_c2 - bigN * bigN) / denom
+    }
+    let df = k - 1
+    let p = cq_chi2_sf(q, df as f64)
+    return CochranQResult { q: q, df: df as i64, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 4 subjects × 3 conditions. rows (1,1,0)(1,0,0)(0,1,0)(1,1,1).
+// C=(3,3,1) N=7 ΣC²=19; R=(2,1,1,3) ΣR²=15.
+// Q = 2·(3·19 - 49)/(3·7 - 15) = 2·8/6 = 2.666667. df=2.
+fn test_q() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    d[0]=1.0; d[1]=1.0; d[2]=0.0
+    d[3]=1.0; d[4]=0.0; d[5]=0.0
+    d[6]=0.0; d[7]=1.0; d[8]=0.0
+    d[9]=1.0; d[10]=1.0; d[11]=1.0
+    let r = cochran_q(&d, 4, 3)
+    var ok = true
+    ok = check(1, approx(r.q, 2.666667, 1.0e-4)) && ok
+    ok = check(2, r.df == 2) && ok
+    return ok
+}
+
+// strong difference: condition 1 always 1, others always 0 (3 subjects).
+// C=(3,0,0) N=3 ΣC²=9; R=(1,1,1) ΣR²=3. Q=2·(3·9-9)/(3·3-3)=2·18/6=6. df=2.
+fn test_strong() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    d[0]=1.0; d[1]=0.0; d[2]=0.0
+    d[3]=1.0; d[4]=0.0; d[5]=0.0
+    d[6]=1.0; d[7]=0.0; d[8]=0.0
+    let r = cochran_q(&d, 3, 3)
+    var ok = true
+    ok = check(10, approx(r.q, 6.0, 1.0e-4)) && ok
+    ok = check(11, r.p < 0.05) && ok
+    return ok
+}
+
+// no difference: all rows (1,1,1) -> denom 0 -> Q 0, p 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    d[0]=1.0; d[1]=1.0; d[2]=1.0
+    d[3]=1.0; d[4]=1.0; d[5]=1.0
+    let r = cochran_q(&d, 2, 3)
+    var ok = true
+    ok = check(20, approx(r.q, 0.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.p, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_q() && ok
+    ok = test_strong() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

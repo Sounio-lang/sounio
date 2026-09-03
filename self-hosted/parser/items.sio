@@ -4,7 +4,992 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::types::*
+use parser::exprs::*
+use parser::stmts::*
+
+fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    items_reverse_item_list_loop(items, None)
+}
+
+// Scratch env for pure-fn multi-stmt body fold (`let x = 10; x`).
+// Active only while items_maybe_record_pure_fn_const walks a body; never
+// published into GLOBAL_VAR_INIT (avoids local/global name collisions).
+// Wave13e: also binds const call-site args for pure paramful callees.
+var PURE_FN_LOCAL_N: i64 = 0
+var PURE_FN_LOCAL_H: [i64; 32] = [0; 32]
+var PURE_FN_LOCAL_V: [i64; 32] = [0; 32]
+
+// Pure paramful registry (Wave13e / Wave15a) — call-site scratch +
+// GLOBAL_VAR_INIT multi-word descriptors (seed-safe append-only table).
+//   KIND 1 = binary of two Idents → OP + ARG_V0/1
+//   KIND 2 = bare Ident 1-param → ARG_V0
+//   KIND 3 = multi-stmt / general pure return chain → body walker
+// Wave13e residual: a `[*mut StmtList; N]` body-pointer table poisoned
+// same-module KIND 1/2 when a multi-stmt paramful was merely defined.
+// Wave15a stores StmtList pointer bits as i64 inside GLOBAL_VAR_INIT
+// (same pattern as check/specializer SPEC_*_PTRS) — no raw-pointer array.
+var PURE_FN_REG_N: i64 = 0
+var PURE_FN_REG_HASH: [i64; 128] = [0; 128]
+var PURE_FN_REG_PC: [i64; 128] = [0; 128]
+var PURE_FN_REG_KIND: [i64; 128] = [0; 128]
+var PURE_FN_REG_OP: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH0: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH1: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH2: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH3: [i64; 128] = [0; 128]
+var PURE_FN_CALL_DEPTH: i64 = 0
+var PURE_FN_ACTIVE_SLOT: i64 = 0 - 1
+var PURE_FN_ARG_V0: i64 = 0
+var PURE_FN_ARG_V1: i64 = 0
+var PURE_FN_ARG_V2: i64 = 0
+var PURE_FN_ARG_V3: i64 = 0
+
+fn pure_fn_local_reset() with Mut {
+    PURE_FN_LOCAL_N = 0
+}
+
+pub fn items_reset_pure_fn_reg() with Mut {
+    PURE_FN_REG_N = 0
+    PURE_FN_CALL_DEPTH = 0
+    PURE_FN_ACTIVE_SLOT = 0 - 1
+    pure_fn_local_reset()
+}
+
+// #1547: an `extern "C" { ... }` block declares N functions but
+// parse_extern_fn_item returns a single Item. Decls 2..N queue on this
+// module-global side channel (same pattern as TPLET_PENDING in stmts.sio and
+// the AST claim registry — the Parser struct is copied by value and must not
+// grow) and are drained by parse_program_loop / parse_items_loop in
+// parser::mod right after each parse_item call.
+//
+// The queue is intentionally self-clearing with NO per-parse reset fn: under
+// the pinned source-bootstrap stage2 chain, a reset write to this global from
+// parse_items_preloaded corrupts parser state for subsequent tokens and every
+// --check parse fails (CI job "Source-Bootstrap Self-Host (Linux x86_64)",
+// step "Source-bootstrap modular typecheck proof"). items_drain_extern_pending
+// empties the queue after every parse_item call, and both top-level loops run
+// to EOF, so no reset is needed. Do not re-add one without re-running that CI
+// step against a stage2-built lean check-out.
+var EXTERN_PENDING_ITEMS: Option<Box<ItemList>> = None
+
+fn items_push_extern_pending(item: Item) with Mut, Alloc {
+    EXTERN_PENDING_ITEMS = Some(Box::new(ItemList { head: item, tail: EXTERN_PENDING_ITEMS }))
+}
+
+// Drain queued extern decls onto rev_items_opt preserving source order, and
+// clear the queue. Safe to call when the queue is empty (returns input).
+pub fn items_drain_extern_pending(rev_items_opt: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    var out = rev_items_opt
+    var pend = EXTERN_PENDING_ITEMS
+    EXTERN_PENDING_ITEMS = None
+    // Queue head is the LAST parsed decl (cons order); reverse once so decls
+    // land on the item stream in source order after the caller's final reverse.
+    var fwd: Option<Box<ItemList>> = None
+    while true {
+        match pend {
+            Some(node) => {
+                fwd = Some(Box::new(ItemList { head: (*node).head, tail: fwd }))
+                pend = (*node).tail
+            },
+            None => break,
+        }
+    }
+    while true {
+        match fwd {
+            Some(node) => {
+                out = Some(Box::new(ItemList { head: (*node).head, tail: out }))
+                fwd = (*node).tail
+            },
+            None => break,
+        }
+    }
+    out
+}
+
+fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
+    if PURE_FN_LOCAL_N < 32 {
+        PURE_FN_LOCAL_H[PURE_FN_LOCAL_N as usize] = ast_name_hash(name)
+        PURE_FN_LOCAL_V[PURE_FN_LOCAL_N as usize] = value
+        PURE_FN_LOCAL_N = PURE_FN_LOCAL_N + 1
+    }
+}
+
+fn pure_fn_local_bind_hash(h: i64, value: i64) with Mut {
+    if PURE_FN_LOCAL_N < 32 {
+        PURE_FN_LOCAL_H[PURE_FN_LOCAL_N as usize] = h
+        PURE_FN_LOCAL_V[PURE_FN_LOCAL_N as usize] = value
+        PURE_FN_LOCAL_N = PURE_FN_LOCAL_N + 1
+    }
+}
+
+fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
+    let h = ast_name_hash(name)
+    // Positional param values for the active pure call first (by registered
+    // param name-hash). Prefer these over the local-env hash table so two
+    // short params cannot shadow each other if their djb2 hashes collide or
+    // the hash table store is lossy under the seed.
+    if PURE_FN_ACTIVE_SLOT >= 0 {
+        let slot = PURE_FN_ACTIVE_SLOT
+        let pc = PURE_FN_REG_PC[slot as usize]
+        if pc >= 1 && PURE_FN_REG_PH0[slot as usize] == h {
+            return (true, PURE_FN_ARG_V0)
+        }
+        if pc >= 2 && PURE_FN_REG_PH1[slot as usize] == h {
+            return (true, PURE_FN_ARG_V1)
+        }
+        if pc >= 3 && PURE_FN_REG_PH2[slot as usize] == h {
+            return (true, PURE_FN_ARG_V2)
+        }
+        if pc >= 4 && PURE_FN_REG_PH3[slot as usize] == h {
+            return (true, PURE_FN_ARG_V3)
+        }
+    }
+    // Multi-stmt pure bodies: immutable `let` binders (most-recent wins).
+    var i = PURE_FN_LOCAL_N
+    while i > 0 {
+        i = i - 1
+        if PURE_FN_LOCAL_H[i as usize] == h {
+            return (true, PURE_FN_LOCAL_V[i as usize])
+        }
+    }
+    (false, 0)
+}
+
+// Fold a binary op over two already-bound pure-call arg words.
+fn pure_fn_fold_binop(op: BinaryOp, a: i64, b: i64) -> (bool, i64) with Div {
+    if op == BinaryOp::OpAdd {
+        return (true, a + b)
+    }
+    if op == BinaryOp::OpSub {
+        return (true, a - b)
+    }
+    if op == BinaryOp::OpMul {
+        return (true, a * b)
+    }
+    if op == BinaryOp::OpDiv {
+        if b == 0 {
+            return (false, 0)
+        }
+        return (true, a / b)
+    }
+    if op == BinaryOp::OpRem {
+        if b == 0 {
+            return (false, 0)
+        }
+        return (true, a % b)
+    }
+    if op == BinaryOp::OpBitAnd {
+        return (true, a & b)
+    }
+    if op == BinaryOp::OpBitOr {
+        return (true, a | b)
+    }
+    if op == BinaryOp::OpBitXor {
+        return (true, a ^ b)
+    }
+    (false, 0)
+}
+
+// Fast path: 2-param pure body is a single binary of two Idents → ARG_V0 op ARG_V1.
+fn pure_fn_try_binary_ident_body(body_ptr: *mut StmtList) -> (bool, i64) with Div {
+    match (*body_ptr).tail {
+        Some(_) => {
+            return (false, 0)
+        }
+        None => {}
+    }
+    if (*body_ptr).head.kind != StmtKind::StmtExpr {
+        return (false, 0)
+    }
+    match (*body_ptr).head.expr {
+        Some(ex) => {
+            if (*ex).kind != ExprKind::ExprBinary {
+                return (false, 0)
+            }
+            match (*ex).left {
+                Some(lhs) => {
+                    match (*ex).right {
+                        Some(rhs) => {
+                            if (*lhs).kind != ExprKind::ExprIdent {
+                                return (false, 0)
+                            }
+                            if (*rhs).kind != ExprKind::ExprIdent {
+                                return (false, 0)
+                            }
+                            pure_fn_fold_binop((*ex).bin_op, PURE_FN_ARG_V0, PURE_FN_ARG_V1)
+                        }
+                        None => {
+                            (false, 0)
+                        }
+                    }
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+        None => {
+            (false, 0)
+        }
+    }
+}
+
+fn pure_fn_reg_find(name: Name) -> (bool, i64) with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < PURE_FN_REG_N {
+        if PURE_FN_REG_HASH[i as usize] == h {
+            return (true, i)
+        }
+        i = i + 1
+    }
+    (false, 0)
+}
+
+// Classify pure body shape for registry. Returns (kind, op_as_i64).
+// kind 1 = binary two Idents, kind 2 = bare Ident, kind 3 = general.
+fn pure_fn_classify_body(body: &Block, nparams: i64) -> (i64, i64) with Div {
+    match (*body).stmts {
+        None => {
+            return (0, 0)
+        }
+        Some(list) => {
+            match (*list).tail {
+                Some(_) => {
+                    // multi-stmt
+                    return (3, 0)
+                }
+                None => {
+                    if (*list).head.kind != StmtKind::StmtExpr {
+                        return (3, 0)
+                    }
+                    match (*list).head.expr {
+                        Some(ex) => {
+                            if (*ex).kind == ExprKind::ExprBinary && nparams == 2 {
+                                match (*ex).left {
+                                    Some(lhs) => {
+                                        match (*ex).right {
+                                            Some(rhs) => {
+                                                if (*lhs).kind == ExprKind::ExprIdent && (*rhs).kind == ExprKind::ExprIdent {
+                                                    return (1, (*ex).bin_op as i64)
+                                                }
+                                            }
+                                            None => {}
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                            if (*ex).kind == ExprKind::ExprIdent && nparams == 1 {
+                                return (2, 0)
+                            }
+                            return (3, 0)
+                        }
+                        None => {
+                            return (0, 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Magic words stored as the first GLOBAL_VAR_INIT entry under a pure paramful
+// function name. Zero-arg pure stores a single ordinary value (count==1);
+// paramful stores a multi-word descriptor (count>=3) beginning with a magic.
+// Uses the proven GLOBAL_VAR_INIT_* side-table (append works for many entries).
+//   MAGIC_BINOP   = -900001 → words: magic, op, pc, ph0, ph1
+//   MAGIC_IDENT   = -900002 → words: magic, pc, ph0
+//   MAGIC_GENERAL = -900003 → words: magic, pc, body_bits, ph0..ph3
+//     body_bits = StmtList* cast to i64 (seed-safe; not a REG slot index)
+
+// Structural accept for KIND 3: zero-or-more immutable `let`, then a final
+// StmtExpr (`x` / `return x` / binary / …). Rejects `var`/assign/control.
+// Foldability of expressions is deferred to the call site (params bound).
+fn pure_fn_is_pure_return_chain_shape(list: &StmtList) -> bool with Div {
+    match (*list).tail {
+        Some(rest) => {
+            if (*list).head.kind != StmtKind::StmtLet {
+                return false
+            }
+            match (*list).head.expr {
+                Some(_) => {
+                    pure_fn_is_pure_return_chain_shape(&(*rest))
+                }
+                None => {
+                    false
+                }
+            }
+        }
+        None => {
+            if (*list).head.kind != StmtKind::StmtExpr {
+                return false
+            }
+            match (*list).head.expr {
+                Some(_) => {
+                    true
+                }
+                None => {
+                    false
+                }
+            }
+        }
+    }
+}
+
+// Record pure paramful body into GLOBAL_VAR_INIT multi-word form. ≤4 params.
+fn pure_fn_reg_record(
+    name: Name,
+    params: &Option<Box<ParamList>>,
+    body: &Block
+) with Mut, Div {
+    // Already has any init words under this name — do not clobber.
+    if ast_global_var_init_count(name) != 0 {
+        return
+    }
+    var ph0: i64 = 0
+    var ph1: i64 = 0
+    var ph2: i64 = 0
+    var ph3: i64 = 0
+    var n: i64 = 0
+    var cur = *params
+    while true {
+        match cur {
+            Some(node) => {
+                let hh = ast_name_hash((*node).head.name)
+                if n == 0 {
+                    ph0 = hh
+                } else if n == 1 {
+                    ph1 = hh
+                } else if n == 2 {
+                    ph2 = hh
+                } else if n == 3 {
+                    ph3 = hh
+                }
+                n = n + 1
+                cur = (*node).tail
+            }
+            None => {
+                break
+            }
+        }
+    }
+    if n < 1 || n > 4 {
+        return
+    }
+    let cls = pure_fn_classify_body(body, n)
+    if cls.0 == 0 {
+        return
+    }
+    if cls.0 == 1 {
+        // magic, op, pc, ph0, ph1
+        ast_record_global_var_init(name, 0 - 900001)
+        ast_record_global_var_init(name, cls.1)
+        ast_record_global_var_init(name, n)
+        ast_record_global_var_init(name, ph0)
+        ast_record_global_var_init(name, ph1)
+        return
+    }
+    if cls.0 == 2 {
+        // magic, pc, ph0
+        ast_record_global_var_init(name, 0 - 900002)
+        ast_record_global_var_init(name, n)
+        ast_record_global_var_init(name, ph0)
+        return
+    }
+    // kind 3 (multi-stmt / general pure return chain) — Wave15a.
+    // Store StmtList pointer bits as i64 inside GLOBAL_VAR_INIT multi-word.
+    // Wave13e residual path wrote a fixed `[*mut StmtList; N]` table and
+    // poisoned same-module kind-1/2; this design never touches that table.
+    match (*body).stmts {
+        Some(list) => {
+            if !pure_fn_is_pure_return_chain_shape(&(*list)) {
+                return
+            }
+            let body_ptr = list as *mut StmtList
+            let body_bits = body_ptr as i64
+            if body_bits == 0 {
+                return
+            }
+            // magic, pc, body_bits, ph0, ph1, ph2, ph3
+            ast_record_global_var_init(name, 0 - 900003)
+            ast_record_global_var_init(name, n)
+            ast_record_global_var_init(name, body_bits)
+            ast_record_global_var_init(name, ph0)
+            ast_record_global_var_init(name, ph1)
+            ast_record_global_var_init(name, ph2)
+            ast_record_global_var_init(name, ph3)
+        }
+        None => {}
+    }
+}
+
+// Const-fold a global-init expression to one i64 word (int value or f64 bits).
+// Returns (ok, word). Covers the Sounio negative idiom `0 - n` (no unary-minus
+// in the style guide) so element-list packing does not silently drop slots and
+// collapse into a wrong array-repeat fill of the remaining literal.
+//
+// Wave9: also folds `as T` casts of const words, and Ident referring to a
+// previously recorded *scalar* global init (`var X: i64 = 7; [X, 20, 30]`).
+// Wave10: zero-arg pure function calls fold when the callee was recorded as a
+// pure const (`fn ten() -> i64 { 10 }; [ten(), 20, 30]` → real values, not
+// BSS zeros).
+// Wave12: pure multi-stmt return chains (`let x = 10; x`) fold via the
+// pure-fn local env.
+// Wave13e: pure paramful single-stmt calls with const args
+//   (`fn add(a,b){a+b}; [add(10,20),1,2]`).
+// Wave15a: pure paramful multi-stmt pure return chains
+//   (`fn f(a){ let x = a + 1; x }; [f(9), 2]` → `10 2`).
+// Non-foldable residual (effects, mutation, non-const, >4 params) still returns
+// ok=false — element-list recording is fail-closed (all slots or none).
+fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
+    if (*e).kind == ExprKind::ExprIntLit {
+        return (true, (*e).int_val)
+    }
+    if (*e).kind == ExprKind::ExprFloatLit {
+        return (true, f64_to_bits((*e).float_val))
+    }
+    if (*e).kind == ExprKind::ExprBoolTrue {
+        return (true, 1)
+    }
+    if (*e).kind == ExprKind::ExprBoolFalse {
+        return (true, 0)
+    }
+    // Cast of a const word keeps the init word (identity on BSS fill bits).
+    // Unblocks `[1 as i64, 2 as i64]` which wave8 still dropped entirely.
+    if (*e).kind == ExprKind::ExprCast {
+        match (*e).left {
+            Some(operand) => {
+                let pair = items_eval_global_init_word(&(*operand))
+                if pair.0 {
+                    return (true, pair.1)
+                }
+            }
+            _ => {}
+        }
+        return (false, 0)
+    }
+    // `return <const>` as a bare statement expression (function body form).
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(operand) => {
+                return items_eval_global_init_word(&(*operand))
+            }
+            _ => {
+                return (false, 0)
+            }
+        }
+    }
+    // Pure function call:
+    //   - zero-arg: body pre-folded into GLOBAL_VAR_INIT (Wave10/12)
+    //   - with const args: bind params from PURE_FN_REG and fold body (Wave13e)
+    // Callee must be a simple Ident. Effects / non-const / arity mismatch → fail.
+    if (*e).kind == ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee) => {
+                if (*callee).kind != ExprKind::ExprIdent {
+                    return (false, 0)
+                }
+                match (*e).args {
+                    None => {
+                        // Zero-arg pure word under the function name.
+                        let c = ast_global_var_init_count((*callee).name)
+                        if c == 1 {
+                            return (true, ast_global_var_init_nth((*callee).name, 0))
+                        }
+                        return (false, 0)
+                    }
+                    Some(_) => {
+                        // Paramful pure: descriptor lives in GLOBAL_VAR_INIT multi-word.
+                        let c = ast_global_var_init_count((*callee).name)
+                        if c < 3 {
+                            return (false, 0)
+                        }
+                        if PURE_FN_CALL_DEPTH >= 8 {
+                            return (false, 0)
+                        }
+                        let magic = ast_global_var_init_nth((*callee).name, 0)
+                        // Decode descriptor.
+                        var kind: i64 = 0
+                        var op_i: i64 = 0
+                        var pc: i64 = 0
+                        var ph0: i64 = 0
+                        var ph1: i64 = 0
+                        var ph2: i64 = 0
+                        var ph3: i64 = 0
+                        var body_bits: i64 = 0
+                        if magic == 0 - 900001 {
+                            // binop: magic, op, pc, ph0, ph1
+                            if c < 5 {
+                                return (false, 0)
+                            }
+                            kind = 1
+                            op_i = ast_global_var_init_nth((*callee).name, 1)
+                            pc = ast_global_var_init_nth((*callee).name, 2)
+                            ph0 = ast_global_var_init_nth((*callee).name, 3)
+                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                        } else if magic == 0 - 900002 {
+                            // ident: magic, pc, ph0
+                            if c < 3 {
+                                return (false, 0)
+                            }
+                            kind = 2
+                            pc = ast_global_var_init_nth((*callee).name, 1)
+                            ph0 = ast_global_var_init_nth((*callee).name, 2)
+                        } else if magic == 0 - 900003 {
+                            // general: magic, pc, body_bits, ph0..ph3
+                            // body_bits = StmtList* as i64 (Wave15a; not a REG index)
+                            if c < 7 {
+                                return (false, 0)
+                            }
+                            kind = 3
+                            pc = ast_global_var_init_nth((*callee).name, 1)
+                            body_bits = ast_global_var_init_nth((*callee).name, 2)
+                            ph0 = ast_global_var_init_nth((*callee).name, 3)
+                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                            ph2 = ast_global_var_init_nth((*callee).name, 5)
+                            ph3 = ast_global_var_init_nth((*callee).name, 6)
+                        } else {
+                            return (false, 0)
+                        }
+                        // Save outer local env.
+                        var saved_n = PURE_FN_LOCAL_N
+                        var saved_h: [i64; 32] = [0; 32]
+                        var saved_v: [i64; 32] = [0; 32]
+                        var si: i64 = 0
+                        while si < saved_n {
+                            saved_h[si as usize] = PURE_FN_LOCAL_H[si as usize]
+                            saved_v[si as usize] = PURE_FN_LOCAL_V[si as usize]
+                            si = si + 1
+                        }
+                        pure_fn_local_reset()
+                        PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH + 1
+                        // Stash ph* into REG slot 0 temporarily for lookup (ACTIVE uses 0).
+                        // For kind 1/2 we don't need REG; set PH scratch via ARG path only.
+                        PURE_FN_ACTIVE_SLOT = 0
+                        PURE_FN_REG_PC[0] = pc
+                        PURE_FN_REG_PH0[0] = ph0
+                        PURE_FN_REG_PH1[0] = ph1
+                        PURE_FN_REG_PH2[0] = ph2
+                        PURE_FN_REG_PH3[0] = ph3
+                        PURE_FN_ARG_V0 = 0
+                        PURE_FN_ARG_V1 = 0
+                        PURE_FN_ARG_V2 = 0
+                        PURE_FN_ARG_V3 = 0
+                        var bound = true
+                        var an: i64 = 0
+                        var acur = (*e).args
+                        while true {
+                            match acur {
+                                Some(anode) => {
+                                    if an >= pc {
+                                        bound = false
+                                        break
+                                    }
+                                    let ap = items_eval_global_init_word(&(*anode).head)
+                                    if !ap.0 {
+                                        bound = false
+                                        break
+                                    }
+                                    if an == 0 {
+                                        PURE_FN_ARG_V0 = ap.1
+                                        pure_fn_local_bind_hash(ph0, ap.1)
+                                    } else if an == 1 {
+                                        PURE_FN_ARG_V1 = ap.1
+                                        pure_fn_local_bind_hash(ph1, ap.1)
+                                    } else if an == 2 {
+                                        PURE_FN_ARG_V2 = ap.1
+                                        pure_fn_local_bind_hash(ph2, ap.1)
+                                    } else {
+                                        PURE_FN_ARG_V3 = ap.1
+                                        pure_fn_local_bind_hash(ph3, ap.1)
+                                    }
+                                    an = an + 1
+                                    acur = (*anode).tail
+                                }
+                                None => {
+                                    break
+                                }
+                            }
+                        }
+                        if an != pc {
+                            bound = false
+                        }
+                        var result_ok = false
+                        var result_word: i64 = 0
+                        if bound {
+                            if kind == 1 {
+                                let op = op_i as BinaryOp
+                                let folded = pure_fn_fold_binop(op, PURE_FN_ARG_V0, PURE_FN_ARG_V1)
+                                result_ok = folded.0
+                                result_word = folded.1
+                            } else if kind == 2 {
+                                result_ok = true
+                                result_word = PURE_FN_ARG_V0
+                            } else if kind == 3 {
+                                // Wave15a: body_bits is StmtList* stored as i64 in
+                                // GLOBAL_VAR_INIT (seed-safe). Walk pure return chain:
+                                // let-binders then final StmtExpr, with params bound.
+                                let body_ptr = body_bits as *mut StmtList
+                                if body_ptr != 0 as *mut StmtList {
+                                    var bcur: *mut StmtList = body_ptr
+                                    while bcur != 0 as *mut StmtList {
+                                        var has_tail = false
+                                        match (*bcur).tail {
+                                            Some(_) => { has_tail = true }
+                                            None => { has_tail = false }
+                                        }
+                                        if has_tail {
+                                            if (*bcur).head.kind != StmtKind::StmtLet {
+                                                result_ok = false
+                                                break
+                                            }
+                                            match (*bcur).head.expr {
+                                                Some(ex) => {
+                                                    let bp = items_eval_global_init_word(&(*ex))
+                                                    if !bp.0 {
+                                                        result_ok = false
+                                                        break
+                                                    }
+                                                    pure_fn_local_bind((*bcur).head.name, bp.1)
+                                                }
+                                                None => {
+                                                    result_ok = false
+                                                    break
+                                                }
+                                            }
+                                            match (*bcur).tail {
+                                                Some(next) => { bcur = next as *mut StmtList }
+                                                None => { bcur = 0 as *mut StmtList }
+                                            }
+                                        } else {
+                                            if (*bcur).head.kind != StmtKind::StmtExpr {
+                                                result_ok = false
+                                                break
+                                            }
+                                            match (*bcur).head.expr {
+                                                Some(ex) => {
+                                                    let bp = items_eval_global_init_word(&(*ex))
+                                                    result_ok = bp.0
+                                                    result_word = bp.1
+                                                }
+                                                None => { result_ok = false }
+                                            }
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH - 1
+                        PURE_FN_ACTIVE_SLOT = 0 - 1
+                        pure_fn_local_reset()
+                        var ri: i64 = 0
+                        while ri < saved_n {
+                            pure_fn_local_bind_hash(saved_h[ri as usize], saved_v[ri as usize])
+                            ri = ri + 1
+                        }
+                        if result_ok {
+                            return (true, result_word)
+                        }
+                        return (false, 0)
+                    }
+                }
+            }
+            _ => {
+                return (false, 0)
+            }
+        }
+    }
+    // Scalar global already recorded earlier in the same compile unit.
+    // Only count==1 (scalar / array-repeat fill word) is safe to re-use.
+    // (Also pure zero-arg fns recorded by items_maybe_record_pure_fn_const.)
+    // Wave12: pure-fn locals shadow globals during multi-stmt body fold.
+    if (*e).kind == ExprKind::ExprIdent {
+        let lp = pure_fn_local_lookup((*e).name)
+        if lp.0 {
+            return (true, lp.1)
+        }
+        let c = ast_global_var_init_count((*e).name)
+        if c == 1 {
+            return (true, ast_global_var_init_nth((*e).name, 0))
+        }
+        return (false, 0)
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(operand) => {
+                let pair = items_eval_global_init_word(&(*operand))
+                if pair.0 {
+                    // Integers: arithmetic negate. Floats: re-negate via bits
+                    // only when the operand was a float lit (bits path above).
+                    if (*operand).kind == ExprKind::ExprFloatLit {
+                        return (true, f64_to_bits(0.0 - (*operand).float_val))
+                    }
+                    return (true, 0 - pair.1)
+                }
+            }
+            _ => {}
+        }
+        return (false, 0)
+    }
+    if (*e).kind == ExprKind::ExprBinary {
+        match (*e).left {
+            Some(lhs) => {
+                match (*e).right {
+                    Some(rhs) => {
+                        let lp = items_eval_global_init_word(&(*lhs))
+                        let rp = items_eval_global_init_word(&(*rhs))
+                        if !lp.0 || !rp.0 {
+                            return (false, 0)
+                        }
+                        // Float binary: both sides float lits → fold bits.
+                        if (*lhs).kind == ExprKind::ExprFloatLit && (*rhs).kind == ExprKind::ExprFloatLit {
+                            let a = (*lhs).float_val
+                            let b = (*rhs).float_val
+                            if (*e).bin_op == BinaryOp::OpAdd {
+                                return (true, f64_to_bits(a + b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpSub {
+                                return (true, f64_to_bits(a - b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                return (true, f64_to_bits(a * b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpDiv {
+                                return (true, f64_to_bits(a / b))
+                            }
+                            return (false, 0)
+                        }
+                        // Integer / mixed-folded int words.
+                        let a = lp.1
+                        let b = rp.1
+                        if (*e).bin_op == BinaryOp::OpAdd {
+                            return (true, a + b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpSub {
+                            return (true, a - b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpMul {
+                            return (true, a * b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpDiv {
+                            if b == 0 {
+                                return (false, 0)
+                            }
+                            return (true, a / b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpRem {
+                            if b == 0 {
+                                return (false, 0)
+                            }
+                            return (true, a % b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitAnd {
+                            return (true, a & b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitOr {
+                            return (true, a | b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitXor {
+                            return (true, a ^ b)
+                        }
+                        return (false, 0)
+                    }
+                    None => { return (false, 0) }
+                }
+            }
+            None => { return (false, 0) }
+        }
+    }
+    (false, 0)
+}
+
+// Const-eval a pure function body as a return-only chain:
+//   zero or more `let name = <const-expr>` binders, then a final `StmtExpr`
+//   (`<const-expr>` or `return <const-expr>`).
+// Locals bind into PURE_FN_LOCAL_*; caller resets the table.
+// Rejects mut (`var`/`=`), control flow, and non-foldable exprs → ok=false.
+fn items_eval_pure_stmt_list(list: &StmtList) -> (bool, i64) with Mut, Div {
+    match (*list).tail {
+        Some(rest) => {
+            // Non-final: must be immutable `let` with a foldable initializer.
+            if (*list).head.kind != StmtKind::StmtLet {
+                return (false, 0)
+            }
+            match (*list).head.expr {
+                Some(e) => {
+                    let pair = items_eval_global_init_word(&(*e))
+                    if !pair.0 {
+                        return (false, 0)
+                    }
+                    pure_fn_local_bind((*list).head.name, pair.1)
+                    items_eval_pure_stmt_list(&(*rest))
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+        None => {
+            // Final statement: expression (incl. bare `return <const>`).
+            if (*list).head.kind != StmtKind::StmtExpr {
+                return (false, 0)
+            }
+            match (*list).head.expr {
+                Some(e) => {
+                    items_eval_global_init_word(&(*e))
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+    }
+}
+
+// If `fn name(...) -> T { ... }` is effect-free and its body is a pure const
+// return chain, register it for global element-list call fold:
+//
+//   zero-param (Wave10/12): fold body now → GLOBAL_VAR_INIT word under `name`
+//     so later `[ten(), 20, 30]` / `[multi(), 20, 30]` read real values.
+//   paramful ≤4 (Wave13e): register body+param hashes so later
+//     `[add2(10, 20), 1, 2]` binds const args and folds the body at the call site.
+//
+// Accepted bodies:
+//   { 10 }
+//   { return 10 }
+//   { let x = 10; x }
+//   { let x = 10; let y = x + 1; y }
+//   { a + b }          // params as Idents
+//   { let x = a + 1; x }
+// Intermediate statements must be immutable `let`. Mutation / effects /
+// non-const / >4 params remain residual fail-closed zeros (no left-shift).
+fn items_maybe_record_pure_fn_const(
+    name: Name,
+    params: &Option<Box<ParamList>>,
+    effects: &Option<Box<EffectList>>,
+    body: &Block
+) with Mut, Div {
+    match *effects {
+        Some(_) => {
+            return
+        }
+        None => {}
+    }
+    // Already has init words (prior global of same name) — do not overwrite/extend.
+    if ast_global_var_init_count(name) != 0 {
+        return
+    }
+    match *params {
+        Some(_) => {
+            // Wave13e: pure paramful → body registry (call-site fold).
+            pure_fn_reg_record(name, params, body)
+            return
+        }
+        None => {}
+    }
+    // Zero-param: fold now into GLOBAL_VAR_INIT (Wave10/12).
+    match (*body).stmts {
+        Some(list) => {
+            pure_fn_local_reset()
+            let pair = items_eval_pure_stmt_list(&(*list))
+            pure_fn_local_reset()
+            if pair.0 {
+                ast_record_global_var_init(name, pair.1)
+            }
+        }
+        None => {}
+    }
+}
+
+// Record a compile-time integer/float/bool global initializer for native BSS fill.
+// Covers:
+//   - scalar `42` / `-42` / `0 - n` / `1.5` / unary-neg floats / true|false
+//   - array-repeat `[V; N]`  → one fill word (i64 value or f64 bits)
+//   - element-list `[a, b, c]` → one word per element, same name hash, source order
+//   - cast/ident of the above (wave9)
+//   - zero-arg pure calls of the above (wave10), when callee body was recorded
+//   - multi-stmt pure return chains (wave12): `let x = c; x` / nested pure lets
+//   - pure paramful calls with const args (wave13e): `add2(10, 20)` etc.
+//   - pure paramful multi-stmt return chains (wave15a): `f(9)` with `{ let x = a+1; x }`
+//   - string literal scalars (wave15e): `let S: string = "hi"` → GLOBAL_STR_INIT_*
+// Element-list is fail-closed: every slot must const-fold or *none* are recorded.
+// (Wave8 partial skip shifted remaining words left — `[f(),20,30]` → `20 30 0`.)
+// Residual: effects / mutation / non-const / >4-param / recursion → BSS zero, no silent shift.
+fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
+    // Wave15e: module-level string literal init cannot be an i64 BSS fill word —
+    // the pointer lives in rodata and must be LEA'd at entry. Side-table only.
+    if (*init).kind == ExprKind::ExprStringLit {
+        ast_record_global_str_init(name, (*init).name)
+        return
+    }
+    if (*init).kind == ExprKind::ExprArrayLit {
+        // Repeat form: left = fill value, right = count → single fill word
+        match (*init).left {
+            Some(repeat_val) => {
+                items_record_global_int_init(name, &(*repeat_val))
+            }
+            None => {
+                // Element-list form: [a, b, c] — evaluate all slots first.
+                // (args is already reversed into source order by parse_array_literal).
+                var cur = (*init).args
+                var words: [i64; 128] = [0; 128]
+                var n: i64 = 0
+                var all_ok = true
+                while true {
+                    match cur {
+                        Some(node) => {
+                            let pair = items_eval_global_init_word(&(*node).head)
+                            if !pair.0 {
+                                all_ok = false
+                                break
+                            }
+                            if n < 128 {
+                                words[n as usize] = pair.1
+                                n = n + 1
+                            } else {
+                                all_ok = false
+                                break
+                            }
+                            cur = (*node).tail
+                        }
+                        None => { break }
+                    }
+                }
+                if all_ok {
+                    var i: i64 = 0
+                    while i < n {
+                        ast_record_global_var_init(name, words[i as usize])
+                        i = i + 1
+                    }
+                }
+            }
+        }
+        return
+    }
+    let pair = items_eval_global_init_word(init)
+    if pair.0 {
+        ast_record_global_var_init(name, pair.1)
+    }
+}
+
+fn items_reverse_item_list_loop(
+    current: Option<Box<ItemList>>,
+    acc: Option<Box<ItemList>>,
+) -> Option<Box<ItemList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = ItemList { head: (*node).head, tail: acc }
+            items_reverse_item_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
 
 impl Parser {
     // ============================================================
@@ -15,11 +1000,12 @@ impl Parser {
         let k = self.peek()
 
         // Handle optional 'pub' visibility
-        var is_pub = false
+        var visibility = visibility_private()
         var p = self
         if k == TokenKind::Pub {
-            is_pub = true
-            p = p.advance()
+            let vis_pair = p.parse_pub_visibility()
+            p = vis_pair.0
+            visibility = vis_pair.1
         }
 
         // Handle optional 'linear' or 'affine' modifier
@@ -32,6 +1018,21 @@ impl Parser {
             is_affine = true
             p = p.advance()
         }
+        if parser_peek(p) == TokenKind::Ident {
+            let mod_name = p.current_name()
+            if mod_name.len == 8
+                && mod_name.buf[0] == (114 as i8)
+                && mod_name.buf[1] == (101 as i8)
+                && mod_name.buf[2] == (108 as i8)
+                && mod_name.buf[3] == (101 as i8)
+                && mod_name.buf[4] == (118 as i8)
+                && mod_name.buf[5] == (97 as i8)
+                && mod_name.buf[6] == (110 as i8)
+                && mod_name.buf[7] == (116 as i8)
+                && parser_peek_ahead(p, 1) == TokenKind::Struct {
+                p = p.advance()
+            }
+        }
 
         // Handle optional 'kernel' modifier for GPU kernel functions
         var is_kernel = false
@@ -40,70 +1041,124 @@ impl Parser {
             p = p.advance()
         }
 
+        if parser_peek(p) == TokenKind::Const && parser_peek_ahead(p, 1) == TokenKind::Fn {
+            p = p.advance()
+        }
+        if parser_peek(p) == TokenKind::Async && parser_peek_ahead(p, 1) == TokenKind::Fn {
+            p = p.advance()
+        }
+
         let item_kind = parser_peek(p)
 
-        if item_kind == TokenKind::Fn {
-            p.parse_fn_item(is_pub, is_kernel)
+        // Detect "module NAME" declarations when module is treated as an identifier
+        // (the boot4-safe lexer returns Ident for "module" to avoid keyword conflicts).
+        var is_module_decl = false
+        if item_kind == TokenKind::Ident {
+            let probe_name = p.current_name()
+            if probe_name.len == 6
+                && probe_name.buf[0] == (109 as i8)
+                && probe_name.buf[1] == (111 as i8)
+                && probe_name.buf[2] == (100 as i8)
+                && probe_name.buf[3] == (117 as i8)
+                && probe_name.buf[4] == (108 as i8)
+                && probe_name.buf[5] == (101 as i8) {
+                let next_kind = parser_peek_ahead(p, 1)
+                if next_kind == TokenKind::ColonColon || next_kind == TokenKind::Ident || next_kind == TokenKind::Ontology {
+                    is_module_decl = true
+                }
+            }
+        }
+
+        // Detect "claim NAME {" declarations when claim is treated as an
+        // identifier (the boot4-safe lexer returns Ident for "claim", same as
+        // "module"). Requires both the name and the opening brace so ordinary
+        // uses of `claim` as an identifier fall through to error recovery.
+        var is_claim_decl = false
+        if item_kind == TokenKind::Ident {
+            let claim_probe = p.current_name()
+            if claim_probe.len == 5
+                && claim_probe.buf[0] == (99 as i8)
+                && claim_probe.buf[1] == (108 as i8)
+                && claim_probe.buf[2] == (97 as i8)
+                && claim_probe.buf[3] == (105 as i8)
+                && claim_probe.buf[4] == (109 as i8) {
+                if parser_peek_ahead(p, 1) == TokenKind::Ident
+                    && parser_peek_ahead(p, 2) == TokenKind::LBrace {
+                    is_claim_decl = true
+                }
+            }
+        }
+
+        if is_module_decl {
+            p.parse_module_item(visibility)
+        } else if is_claim_decl {
+            parse_claim_item(p, visibility)
+        } else if item_kind == TokenKind::Fn {
+            p.parse_fn_item(visibility, is_kernel)
         } else if item_kind == TokenKind::Struct {
-            p.parse_struct_item(is_linear, is_affine, is_pub)
+            p.parse_struct_item(is_linear, is_affine, visibility)
         } else if item_kind == TokenKind::Enum {
-            p.parse_enum_item(is_pub)
+            p.parse_enum_item(visibility)
         } else if item_kind == TokenKind::Impl {
-            p.parse_impl_item(is_pub)
+            p.parse_impl_item(visibility)
         } else if item_kind == TokenKind::Type {
-            p.parse_type_alias_item(is_pub)
+            p.parse_type_alias_item(visibility)
+        } else if item_kind == TokenKind::Const {
+            p.parse_global_let_item(visibility)
         } else if item_kind == TokenKind::ModelsLower {
-            p.parse_models_item(is_pub)
+            p.parse_models_item(visibility)
         } else if item_kind == TokenKind::PolicyLower {
-            p.parse_policy_item(is_pub)
+            p.parse_policy_item(visibility)
         } else if item_kind == TokenKind::AcquisitionPolicyLower {
-            p.parse_acquisition_policy_item(is_pub)
+            p.parse_acquisition_policy_item(visibility)
         } else if item_kind == TokenKind::RecoursePolicyLower {
-            p.parse_recourse_policy_item(is_pub)
+            p.parse_recourse_policy_item(visibility)
         } else if item_kind == TokenKind::MonitoringPolicyLower {
-            p.parse_monitoring_policy_item(is_pub)
+            p.parse_monitoring_policy_item(visibility)
         } else if item_kind == TokenKind::TransitionPolicyLower {
-            p.parse_transition_policy_item(is_pub)
+            p.parse_transition_policy_item(visibility)
         } else if item_kind == TokenKind::TransitionProtocolLower {
-            p.parse_transition_protocol_item(is_pub)
+            p.parse_transition_protocol_item(visibility)
         } else if item_kind == TokenKind::AlternativePolicyLower {
-            p.parse_alternative_policy_item(is_pub)
+            p.parse_alternative_policy_item(visibility)
         } else if item_kind == TokenKind::AlternativeFrontierLower {
-            p.parse_alternative_frontier_item(is_pub)
+            p.parse_alternative_frontier_item(visibility)
         } else if item_kind == TokenKind::DecisionPolicyLower {
-            p.parse_decision_policy_item(is_pub)
+            p.parse_decision_policy_item(visibility)
         } else if item_kind == TokenKind::DeferralPolicyLower {
-            p.parse_deferral_policy_item(is_pub)
+            p.parse_deferral_policy_item(visibility)
         } else if item_kind == TokenKind::ValidationLower {
-            p.parse_validation_item(is_pub)
+            p.parse_validation_item(visibility)
         } else if item_kind == TokenKind::AuditLower {
-            p.parse_audit_item(is_pub)
+            p.parse_audit_item(visibility)
         } else if item_kind == TokenKind::Use {
-            p.parse_use_item(is_pub)
+            p.parse_use_item(visibility)
         } else if item_kind == TokenKind::Import {
-            p.parse_use_item(is_pub)
+            p.parse_use_item(visibility)
+        } else if item_kind == TokenKind::Module {
+            p.parse_module_item(visibility)
         } else if item_kind == TokenKind::Let {
-            p.parse_global_let_item(is_pub)
+            p.parse_global_let_item(visibility)
         } else if item_kind == TokenKind::Var {
-            p.parse_global_var_item(is_pub)
+            p.parse_global_var_item(visibility)
         } else if item_kind == TokenKind::Unit {
-            p.parse_unit_item(is_pub)
+            p.parse_unit_item(visibility)
         } else if item_kind == TokenKind::Effect {
-            p.parse_effect_item(is_pub)
+            p.parse_effect_item(visibility)
         } else if item_kind == TokenKind::Session {
-            p.parse_session_item(is_pub)
+            p.parse_session_item(visibility)
         } else if item_kind == TokenKind::Trait {
-            p.parse_trait_item(is_pub)
+            p.parse_trait_item(visibility)
         } else if item_kind == TokenKind::Algebra {
-            p.parse_algebra_item(is_pub)
+            parse_algebra_item(p, visibility)
         } else if item_kind == TokenKind::Study {
-            p.parse_study_item(is_pub)
+            parse_study_item(p, visibility)
         } else if item_kind == TokenKind::Ontology {
-            p.parse_ontology_item(is_pub)
+            parse_ontology_item(p, visibility)
         } else if item_kind == TokenKind::Extern {
-            p.parse_extern_fn_item(is_pub)
+            p.parse_extern_fn_item(visibility)
         } else if item_kind == TokenKind::Export {
-            p.parse_export_fn_item(is_pub)
+            p.parse_export_fn_item(visibility)
         } else {
             // Error recovery: skip token
             let span = p.current_span()
@@ -115,7 +1170,7 @@ impl Parser {
             let result_item = Item {
                 kind: ItemKind::ItemFn,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: en,
                 fn_def: None,
                 struct_def: None,
@@ -150,10 +1205,115 @@ impl Parser {
     }
 
     // ============================================================
-    // Global bindings (top-level): let/var NAME [: Type] = expr
+    // Visibility modifier: pub, pub(crate), pub(super), pub(path)
     // ============================================================
 
-    fn parse_global_let_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_pub_visibility(self) -> (Parser, Visibility) with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip 'pub'
+        if parser_peek(p) == TokenKind::LParen {
+            p = p.advance()  // skip '('
+            let k = parser_peek(p)
+            if k == TokenKind::Crate {
+                p = p.advance()  // skip 'crate'
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_crate())
+            } else if k == TokenKind::Super {
+                p = p.advance()  // skip 'super'
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_super())
+            } else {
+                // pub(path::to)
+                let path_pair = p.parse_type_path()
+                p = path_pair.0
+                let path = path_pair.1
+                p = p.expect(TokenKind::RParen)
+                (p, visibility_pub_in(path))
+            }
+        } else {
+            (p, visibility_pub())
+        }
+    }
+
+    // ============================================================
+    // Module declaration: module foo::bar
+    // ============================================================
+
+    fn parse_module_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'module'
+
+        // Consume the module path (Ident (:: Ident)*) directly. The boot4-safe lexer
+        // (lex_source_to_globals) does NOT emit Newline tokens, so the previous
+        // "consume until Newline" loop ran to EOF and swallowed the entire file as a
+        // single item — leaving every subsequent fn/struct unparsed in multi-module
+        // compilation (the imported typecheck then saw 0 functions for these modules).
+        // Consumed STRUCTURALLY -- one segment, then (:: segment)* -- rather than
+        // by a flat "keep taking tokens of these kinds" loop. A segment may be a
+        // keyword: `module resolve::scope` and `module interop::kernel` are real
+        // declarations in this tree, and the flat loop rejected them, stopping
+        // after `resolve::` so the item dispatch met `scope` where an item should
+        // start (items.sio:1115). The old loop had already been patched once with
+        // TokenKind::Ontology for exactly this reason, one word at a time.
+        //
+        // Blanket-accepting keywords in the FLAT loop would have been wrong: the
+        // token after the last segment is usually `struct` or `fn`, themselves
+        // keywords, and the loop would swallow the rest of the file -- the very
+        // failure the comment above records. Structure stops it: after the last
+        // segment the next token is not `::`, so the loop ends.
+        if parser_peek(p) == TokenKind::Ident || tk_is_keyword(parser_peek(p)) {
+            p = p.advance_raw()
+            while parser_peek(p) == TokenKind::ColonColon {
+                p = p.advance_raw()
+                if parser_peek(p) == TokenKind::Ident || tk_is_keyword(parser_peek(p)) {
+                    p = p.advance_raw()
+                }
+            }
+        }
+        if parser_peek(p) == TokenKind::Newline {
+            p = p.advance_raw()
+        }
+
+        let span = p.span_from(start)
+        (p, Item {
+            kind: ItemKind::ItemUnit,
+            span: span,
+            visibility: visibility,
+            name: empty_name(),
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            acquisition_policy_def: None,
+            recourse_policy_def: None,
+            decision_policy_def: None,
+            deferral_policy_def: None,
+            transition_policy_def: None,
+            transition_protocol_def: None,
+            monitoring_policy_def: None,
+            alternative_policy_def: None,
+            alternative_frontier_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+            session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
+        })
+    }
+
+    // ============================================================
+    // Global bindings (top-level): let/const NAME [: Type] = expr; var NAME [: Type] [= expr]
+    // ============================================================
+
+    fn parse_global_let_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'let'
 
@@ -163,23 +1323,27 @@ impl Parser {
         // Optional type annotation
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
+        let global_ty: Option<Box<TypeExpr>> = ty_pair.1
 
-        // = expr
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
-        // expr value not used in Item (global let initialiser stored separately)
+        let init_let_box = parser_take_expr_box()
+        items_record_global_int_init(name, &(*init_let_box))
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
             enum_def: None,
             impl_def: None,
-            type_alias_ty: None,
+            type_alias_ty: global_ty,
             policy_def: None,
             acquisition_policy_def: None,
             recourse_policy_def: None,
@@ -198,10 +1362,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_global_var_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_global_var_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'var'
 
@@ -211,23 +1379,29 @@ impl Parser {
         // Optional type annotation
         let ty_pair = p.parse_optional_type()
         p = ty_pair.0
+        let global_ty: Option<Box<TypeExpr>> = ty_pair.1
 
-        // = expr
-        p = p.expect(TokenKind::Eq)
-        p = p.parse_expr()
-        // expr value not used in Item (global var initialiser stored separately)
+        if parser_peek(p) == TokenKind::Eq {
+            p = p.advance()
+            p = p.parse_expr()
+            let init_var_box = parser_take_expr_box()
+            items_record_global_int_init(name, &(*init_var_box))
+        }
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
             enum_def: None,
             impl_def: None,
-            type_alias_ty: None,
+            type_alias_ty: global_ty,
             policy_def: None,
             acquisition_policy_def: None,
             recourse_policy_def: None,
@@ -246,6 +1420,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -253,7 +1431,7 @@ impl Parser {
     // Function: fn name(params) -> RetType with Effects { body }
     // ============================================================
 
-    fn parse_fn_item(self, is_pub: bool, is_kernel: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_fn_item(self, visibility: Visibility, is_kernel: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let pfi_k = self.peek()
         if pfi_k != TokenKind::Fn {
             // Recovery: consume one token so callers never stall.
@@ -265,7 +1443,7 @@ impl Parser {
             return (p_bad, Item {
                 kind: ItemKind::ItemFn,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: empty_name(),
                 fn_def: None,
                 struct_def: None,
@@ -290,6 +1468,9 @@ impl Parser {
                 use_items: None,
                 effect_def: None,
                 session_decl: None,
+                algebra_def: None,
+                study_def: None,
+                ontology_def: None,
                 trait_def: None,
             })
         }
@@ -298,6 +1479,9 @@ impl Parser {
         var p = self.advance()  // skip 'fn'
         let name = p.current_name()
         p = p.expect_ident()
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.parse_type_param_header()
+        }
         // Parameters
         p = p.expect(TokenKind::LParen)
         let pair = p.parse_param_list()
@@ -320,8 +1504,20 @@ impl Parser {
         let pair4 = p.parse_block()
         p = pair4.0
         let body = pair4.1
+        if parser_peek(p) == TokenKind::With {
+            let pair5 = p.parse_effect_list()
+            p = pair5.0
+            match effects_opt {
+                None => {
+                    effects_opt = Some(Box::new(pair5.1))
+                },
+                Some(_) => {},
+            }
+        }
 
         let span = p.span_from(start)
+        // Wave10: register pure zero-arg const bodies for global element-list calls.
+        items_maybe_record_pure_fn_const(name, &params_opt, &effects_opt, &body)
         let fn_def = FnDef {
             name: name,
             params: params_opt,
@@ -330,12 +1526,13 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: is_kernel,
+            is_extern: false,
         }
 
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: Some(Box::new(fn_def)),
             struct_def: None,
@@ -373,7 +1570,8 @@ impl Parser {
 
     fn parse_param_list(self) -> (Parser, Option<Box<ParamList>>) with Mut, IO, Panic, Div, Alloc {
         if self.peek() == TokenKind::RParen {
-            return (self, None)
+            let none_params: Option<Box<ParamList>> = None
+            return (self, none_params)
         }
         let pair = self.parse_param()
         var p = pair.0
@@ -402,11 +1600,18 @@ impl Parser {
         if self.peek() == TokenKind::SelfLower {
             // self parameter
             let name = self.current_name()
-            let p = self.advance()
+            var p = self.advance()
+            var ty = dummy_type_expr()
+            if parser_peek(p) == TokenKind::Colon {
+                p = p.advance()
+                let pair = p.parse_type()
+                p = pair.0
+                ty = pair.1
+            }
             let span = p.span_from(start)
             (p, Param {
                 name: name,
-                ty: dummy_type_expr(),
+                ty: ty,
                 is_self: true,
                 is_self_mut: false,
                 span: span,
@@ -433,7 +1638,7 @@ impl Parser {
     // Struct: struct Name { field: Type, ... }
     // ============================================================
 
-    fn parse_struct_item(self, is_linear: bool, is_affine: bool, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_struct_item(self, is_linear: bool, is_affine: bool, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'struct'
 
@@ -447,11 +1652,21 @@ impl Parser {
             var rev_tparams: Option<Box<TypeParamDefList>> = None
             while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
                 let tp_span = p.current_span()
+                if parser_peek(p) == TokenKind::Const {
+                    p = p.advance()
+                }
                 let tp_name = p.current_name()
                 p = p.expect_ident()
+                if parser_peek(p) == TokenKind::Colon {
+                    p = p.advance()
+                    let ann_pair = p.parse_type()
+                    p = ann_pair.0
+                }
                 let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
                 rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
                 if parser_peek(p) == TokenKind::Comma {
+                    p = p.advance()
+                } else if parser_peek(p) != TokenKind::Gt {
                     p = p.advance()
                 }
             }
@@ -466,6 +1681,9 @@ impl Parser {
 
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_start = p.current_span()
+            if parser_peek(p) == TokenKind::Pub {
+                p = p.advance()
+            }
             let field_name = p.current_name()
             p = p.expect_ident()
             p = p.expect(TokenKind::Colon)
@@ -490,7 +1708,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemStruct,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: Some(Box::new(sdef)),
@@ -515,14 +1733,39 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
+    }
+
+    fn parse_type_param_header(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        var p = self.expect(TokenKind::Lt)
+        while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
+            if parser_peek(p) == TokenKind::Const {
+                p = p.advance()
+            }
+            p = p.expect_ident()
+            if parser_peek(p) == TokenKind::Colon {
+                p = p.advance()
+                let ann_pair = p.parse_type()
+                p = ann_pair.0
+            }
+            if parser_peek(p) == TokenKind::Comma {
+                p = p.advance()
+            } else if parser_peek(p) != TokenKind::Gt {
+                p = p.advance()
+            }
+        }
+        p.expect(TokenKind::Gt)
     }
 
     // ============================================================
     // Enum: enum Name { Variant1, Variant2, ... }
     // ============================================================
 
-    fn parse_enum_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_enum_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'enum'
 
@@ -543,6 +1786,9 @@ impl Parser {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
                 while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                    if parser_peek(p) == TokenKind::Pub {
+                        p = p.advance()
+                    }
                     let f_name = p.current_name()
                     p = p.expect_ident()
                     p = p.expect(TokenKind::Colon)
@@ -578,7 +1824,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemEnum,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -603,6 +1849,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -610,13 +1860,25 @@ impl Parser {
     // Impl: impl Type { fn method() { } ... }
     // ============================================================
 
-    fn parse_impl_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_impl_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'impl'
 
         let pair = p.parse_type()
         p = pair.0
-        let target_ty = pair.1
+        var target_ty = pair.1
+        var trait_name = empty_name()
+
+        // `impl TraitName for Type { ... }` — the first type parsed above is
+        // actually the trait name; re-parse the real target type after `for`.
+        if parser_peek(p) == TokenKind::For {
+            p = p.advance()  // skip 'for'
+            trait_name = extract_impl_name(target_ty)
+            let pair_target = p.parse_type()
+            p = pair_target.0
+            target_ty = pair_target.1
+        }
+
         p = p.expect(TokenKind::LBrace)
 
         // Build methods in reverse for O(1) cons, reverse once at the end.
@@ -629,33 +1891,46 @@ impl Parser {
             }
 
             if parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                var method_visibility = visibility_private()
+                if parser_peek(p) == TokenKind::Pub {
+                    let visibility_pair = p.parse_pub_visibility()
+                    p = visibility_pair.0
+                    method_visibility = visibility_pair.1
+                }
+
                 if parser_peek(p) == TokenKind::Fn {
-                    let pair2 = p.parse_fn_item(false, false)
+                    // First arg is `visibility: Visibility` (a struct), NOT a bool. Passing
+                    // `false` here was an ABI mismatch (bool bits read as a Visibility) that
+                    // corrupted the call and SIGSEGV'd on every impl method; it built only
+                    // because the type error is a non-fatal warning. Methods default private.
+                    let pair2 = p.parse_fn_item(method_visibility, false)
                     p = pair2.0
                     let method = pair2.1
                     rev_methods_opt = Some(Box::new(ItemList { head: method, tail: rev_methods_opt }))
                 } else {
-                    // Recovery: consume one unexpected token inside impl body.
+                    // Record unexpected input, but preserve the impl boundary after incomplete visibility.
                     p.had_error = true
                     p.error_count = p.error_count + 1
-                    p = p.advance()
+                    if parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                        p = p.advance()
+                    }
                 }
             }
         }
 
         p = p.expect(TokenKind::RBrace)
         let span = p.span_from(start)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         // Extract name from target type path
         let impl_name = extract_impl_name(target_ty)
 
-        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: empty_name() }
+        let idef = ImplDef { target_type: target_ty, methods: methods_opt, span: span, trait_name: trait_name }
 
         (p, Item {
             kind: ItemKind::ItemImpl,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: impl_name,
             fn_def: None,
             struct_def: None,
@@ -680,6 +1955,9 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
             trait_def: None,
         })
     }
@@ -688,31 +1966,47 @@ impl Parser {
     // Trait definition: trait Name { fn method(); ... }
     // ============================================================
 
-    fn parse_trait_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_trait_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'trait'
         let name = p.current_name()
         p = p.advance()  // skip name
 
-        // Parse trait body: { fn m1(); fn m2(x: i64) -> i64; ... }
+        // Parse trait body: { fn m1(self, o: Self) -> Self  fn m2(x: i64) -> i64 { ... } ... }
+        // Trait methods may be bodyless signatures (no `{ ... }`) or carry a default
+        // implementation body; parse_trait_method_sig handles both.
         p = p.expect(TokenKind::LBrace)
         var rev_methods_opt: Option<Box<ItemList>> = None
         while parser_peek(p) != TokenKind::RBrace && !parser_at_eof(p) {
-            let method_pair = p.parse_item()
-            p = method_pair.0
-            let method_item = method_pair.1
-            rev_methods_opt = Some(Box::new(ItemList { head: method_item, tail: rev_methods_opt }))
+            // Ignore trivia and doc comments between method signatures.
+            while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+                p = p.advance()
+            }
+            if parser_peek(p) == TokenKind::RBrace || parser_at_eof(p) {
+                break
+            }
+            if parser_peek(p) == TokenKind::Fn {
+                let method_pair = p.parse_trait_method_sig()
+                p = method_pair.0
+                let method_item = method_pair.1
+                rev_methods_opt = Some(Box::new(ItemList { head: method_item, tail: rev_methods_opt }))
+            } else {
+                // Recovery: consume one unexpected token inside trait body.
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                p = p.advance()
+            }
         }
         p = p.expect(TokenKind::RBrace)
-        let methods_opt = reverse_item_list_opt(rev_methods_opt)
+        let methods_opt = items_reverse_item_list_opt(rev_methods_opt)
 
         let span = p.span_from(start)
-        let tdef = TraitDef { name: name, methods: methods_opt, supertraits: None, span: span }
+        let tdef = TraitItemDef { name: name, methods: methods_opt, supertraits: None, span: span }
 
         (p, Item {
             kind: ItemKind::ItemTrait,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -737,7 +2031,88 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
             trait_def: Some(Box::new(tdef)),
+        })
+    }
+
+    // Trait method signature: `fn name(self, o: Self) -> Self` optionally followed
+    // by a `{ ... }` default body. When no body follows, an empty Block is stored
+    // (v1: bodyless signatures are parsed and carried, not semantically dispatched).
+    fn parse_trait_method_sig(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'fn'
+        let name = p.current_name()
+        p = p.expect_ident()
+        if parser_peek(p) == TokenKind::Lt {
+            p = p.parse_type_param_header()
+        }
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+        var effects_opt: Option<Box<EffectList>> = None
+        if parser_peek(p) == TokenKind::With {
+            let pair3 = p.parse_effect_list()
+            p = pair3.0
+            effects_opt = Some(Box::new(pair3.1))
+        }
+        var body = Block { stmts: None, span: p.current_span() }
+        if parser_peek(p) == TokenKind::LBrace {
+            let pair4 = p.parse_block()
+            p = pair4.0
+            body = pair4.1
+        }
+        let span = p.span_from(start)
+        let fn_def = FnDef {
+            name: name,
+            params: params_opt,
+            return_type: ret_ty,
+            effects: effects_opt,
+            body: body,
+            span: span,
+            is_kernel: false,
+            is_extern: false,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemFn,
+            span: span,
+            visibility: visibility_private(),
+            name: name,
+            fn_def: Some(Box::new(fn_def)),
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            acquisition_policy_def: None,
+            recourse_policy_def: None,
+            decision_policy_def: None,
+            deferral_policy_def: None,
+            transition_policy_def: None,
+            transition_protocol_def: None,
+            monitoring_policy_def: None,
+            alternative_policy_def: None,
+            alternative_frontier_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+            session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -745,7 +2120,7 @@ impl Parser {
     // Type alias: type Name = Type
     // ============================================================
 
-    fn parse_type_alias_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_type_alias_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'type'
 
@@ -758,11 +2133,14 @@ impl Parser {
             let ref_pair = p.parse_refinement_type()
             p = ref_pair.0
             let ref_ty = ref_pair.1
+            if parser_peek(p) == TokenKind::Semi {
+                p = p.advance()
+            }
             let span = p.span_from(start)
             return (p, Item {
                 kind: ItemKind::ItemTypeAlias,
                 span: span,
-                is_pub: is_pub,
+                visibility: visibility,
                 name: name,
                 fn_def: None,
                 struct_def: None,
@@ -787,6 +2165,9 @@ impl Parser {
                 use_items: None,
                 effect_def: None,
                 session_decl: None,
+                algebra_def: None,
+                study_def: None,
+                ontology_def: None,
                 trait_def: None,
             })
         }
@@ -794,12 +2175,15 @@ impl Parser {
         let pair = p.parse_type()
         p = pair.0
         let ty = pair.1
+        if parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
 
         let span = p.span_from(start)
         (p, Item {
             kind: ItemKind::ItemTypeAlias,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -824,6 +2208,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -831,7 +2219,7 @@ impl Parser {
     // Policy: policy Name for Type { require metric >= value }
     // ============================================================
 
-    fn parse_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'policy'
 
@@ -894,7 +2282,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -919,10 +2307,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_acquisition_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_acquisition_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'acquisition_policy'
 
@@ -986,7 +2378,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAcquisitionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1011,10 +2403,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_recourse_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_recourse_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'recourse_policy'
 
@@ -1078,7 +2474,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemRecoursePolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1103,10 +2499,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_transition_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_transition_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'transition_policy'
 
@@ -1186,7 +2586,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTransitionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1211,10 +2611,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_monitoring_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_monitoring_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'monitoring_policy'
 
@@ -1282,7 +2686,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemMonitoringPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1307,10 +2711,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_transition_protocol_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_transition_protocol_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'transition_protocol'
 
@@ -1366,7 +2774,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemTransitionProtocol,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1391,10 +2799,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_alternative_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_alternative_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'alternative_policy'
 
@@ -1468,7 +2880,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAlternativePolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1493,10 +2905,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_alternative_frontier_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_alternative_frontier_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'alternative_frontier'
 
@@ -1552,7 +2968,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAlternativeFrontier,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1577,6 +2993,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -1760,7 +3180,7 @@ impl Parser {
     // Decision policy: decision_policy Name for Type { require metric >= value }
     // ============================================================
 
-    fn parse_decision_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_decision_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'decision_policy'
 
@@ -1808,7 +3228,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemDecisionPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1833,10 +3253,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_deferral_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_deferral_policy_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'deferral_policy'
 
@@ -1892,7 +3316,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemDeferralPolicy,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1917,10 +3341,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_models_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_models_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'models'
 
@@ -1960,7 +3388,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemModels,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -1985,10 +3413,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_validation_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_validation_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'validation'
 
@@ -2016,7 +3448,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemValidation,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2041,10 +3473,14 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_audit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_audit_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'audit'
 
@@ -2090,7 +3526,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemAudit,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2115,6 +3551,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -2206,6 +3646,26 @@ impl Parser {
         }
     }
 
+    fn parse_policy_compare_op(self) -> (Parser, CompareOp) with Mut, IO, Panic, Div {
+        let op_tok = self.peek()
+        if op_tok == TokenKind::Lt {
+            (self.advance(), CompareOp::CmpLt)
+        } else if op_tok == TokenKind::LtEq {
+            (self.advance(), CompareOp::CmpLe)
+        } else if op_tok == TokenKind::Gt {
+            (self.advance(), CompareOp::CmpGt)
+        } else if op_tok == TokenKind::GtEq {
+            (self.advance(), CompareOp::CmpGe)
+        } else if op_tok == TokenKind::EqEq {
+            (self.advance(), CompareOp::CmpEq)
+        } else {
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p.advance(), CompareOp::CmpEq)
+        }
+    }
+
     fn parse_policy_requirement(self) -> (Parser, PolicyRequirement) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.expect(TokenKind::Require)
@@ -2213,9 +3673,28 @@ impl Parser {
         let metric_name = p.current_name()
         p = p.expect_ident()
 
-        let cmp_pair = p.parse_policy_compare_op()
-        p = cmp_pair.0
-        let cmp_op = cmp_pair.1
+        var cmp_op: CompareOp = CompareOp::CmpEq
+        let op_tok = parser_peek(p)
+        if op_tok == TokenKind::Lt {
+            cmp_op = CompareOp::CmpLt
+            p = p.advance()
+        } else if op_tok == TokenKind::LtEq {
+            cmp_op = CompareOp::CmpLe
+            p = p.advance()
+        } else if op_tok == TokenKind::Gt {
+            cmp_op = CompareOp::CmpGt
+            p = p.advance()
+        } else if op_tok == TokenKind::GtEq {
+            cmp_op = CompareOp::CmpGe
+            p = p.advance()
+        } else if op_tok == TokenKind::EqEq {
+            cmp_op = CompareOp::CmpEq
+            p = p.advance()
+        } else {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            p = p.advance()
+        }
 
         var threshold: f64 = 0.0
         var threshold_kind: i64 = 0
@@ -2259,131 +3738,17 @@ impl Parser {
         })
     }
 
-    fn parse_policy_compare_op(self) -> (Parser, CompareOp) with Mut, IO, Panic, Div {
-        let op_tok = self.peek()
-        if op_tok == TokenKind::Lt {
-            (self.advance(), CompareOp::CmpLt)
-        } else if op_tok == TokenKind::LtEq {
-            (self.advance(), CompareOp::CmpLe)
-        } else if op_tok == TokenKind::Gt {
-            (self.advance(), CompareOp::CmpGt)
-        } else if op_tok == TokenKind::GtEq {
-            (self.advance(), CompareOp::CmpGe)
-        } else if op_tok == TokenKind::EqEq {
-            (self.advance(), CompareOp::CmpEq)
-        } else {
-            var p = self
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            (p.advance(), CompareOp::CmpEq)
-        }
-    }
-
     // ============================================================
     // Refinement type: { var: Type | var op value }
     // ============================================================
-
-    fn parse_refinement_type(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
-        let start = self.current_span()
-        var p = self.advance()  // skip '{'
-
-        // Parse: var_name : BaseType
-        let var_name = p.current_name()
-        p = p.expect_ident()
-        p = p.expect(TokenKind::Colon)
-        let type_pair = p.parse_type()
-        p = type_pair.0
-        let base_ty = type_pair.1
-
-        // Expect '|'
-        p = p.expect(TokenKind::Pipe)
-
-        // Parse predicate: var_name op literal_value
-        // Skip the variable reference (should match var_name)
-        p = p.advance()  // skip var ident in predicate
-
-        // Parse comparison operator
-        var pred_op: i64 = 0
-        let op_tok = parser_peek(p)
-        if op_tok == TokenKind::Gt {
-            pred_op = 1  // refinement_op_gt
-            p = p.advance()
-        } else if op_tok == TokenKind::GtEq {
-            pred_op = 2  // refinement_op_gt_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::Lt {
-            pred_op = 3  // refinement_op_lt
-            p = p.advance()
-        } else if op_tok == TokenKind::LtEq {
-            pred_op = 4  // refinement_op_lt_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::EqEq {
-            pred_op = 5  // refinement_op_eq
-            p = p.advance()
-        } else if op_tok == TokenKind::BangEq {
-            pred_op = 6  // refinement_op_neq
-            p = p.advance()
-        } else {
-            // Unexpected token — flag error and continue
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            p = p.advance()
-        }
-
-        // Parse literal value (int or float)
-        var pred_int_val: i64 = 0
-        var pred_float_val: f64 = 0.0
-        var pred_is_float = false
-        let val_tok = parser_peek(p)
-        if val_tok == TokenKind::IntLit {
-            let tok = p.current()
-            pred_int_val = tok.int_value
-            pred_float_val = pred_int_val as f64
-            p = p.advance()
-        } else if val_tok == TokenKind::FloatLit {
-            let tok = p.current()
-            pred_float_val = tok.float_value
-            pred_int_val = pred_float_val as i64
-            pred_is_float = true
-            p = p.advance()
-        } else {
-            p.had_error = true
-            p.error_count = p.error_count + 1
-            p = p.advance()
-        }
-
-        // Expect '}'
-        p = p.expect(TokenKind::RBrace)
-
-        let span = p.span_from(start)
-        let ri = RefinementInfo {
-            var_name: var_name,
-            base_type: Some(Box::new(base_ty)),
-            pred_op: pred_op,
-            pred_int_val: pred_int_val,
-            pred_float_val: pred_float_val,
-            pred_is_float: pred_is_float,
-        }
-        (p, TypeExpr {
-            kind: TypeExprKind::TypeRefinement,
-            span: span,
-            path: empty_path(),
-            type_args: None,
-            inner: None,
-            array_size: None,
-            effects: None,
-            knowledge_info: None,
-            refinement_info: Some(Box::new(ri)),
-        })
-    }
 
     // ============================================================
     // Use declaration: use path::to::module [::*]
     // ============================================================
 
-    fn parse_use_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_use_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'use'
+        var p = parser_advance(self)  // skip 'use'
 
         let pair = p.parse_type_path()
         p = pair.0
@@ -2392,28 +3757,28 @@ impl Parser {
         var is_glob = false
         var use_items_opt: Option<Box<ImportItemList>> = None
 
-        if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Star {
+        if (parser_peek(p) == TokenKind::ColonColon || pt_read_kind_code(p.pos) == 162) && (parser_peek_ahead(p, 1) == TokenKind::Star || pt_read_kind_code(p.pos + 1) == 134) {
             // Glob import: use path::*
-            p = p.advance()  // skip ::
-            p = p.advance()  // skip *
+            p = parser_advance(p)  // skip ::
+            p = parser_advance(p)  // skip *
             is_glob = true
-        } else if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::LBrace {
+        } else if (parser_peek(p) == TokenKind::ColonColon || pt_read_kind_code(p.pos) == 162) && (parser_peek_ahead(p, 1) == TokenKind::LBrace || pt_read_kind_code(p.pos + 1) == 176) {
             // Selective import: use path::{A, B, C}
-            p = p.advance()  // skip ::
-            p = p.advance()  // skip {
+            p = parser_advance(p)  // skip ::
+            p = parser_advance(p)  // skip {
 
             // Parse comma-separated identifiers
             var rev_items: Option<Box<ImportItemList>> = None
             if parser_peek(p) != TokenKind::RBrace {
                 let first_name = p.current_name()
-                p = p.advance()  // skip ident
+                p = parser_advance(p)  // skip ident
                 rev_items = Some(Box::new(ImportItemList { head: first_name, tail: None }))
 
                 while parser_peek(p) == TokenKind::Comma {
-                    p = p.advance()  // skip ,
+                    p = parser_advance(p)  // skip ,
                     if parser_peek(p) == TokenKind::RBrace { break }
                     let next_name = p.current_name()
-                    p = p.advance()  // skip ident
+                    p = parser_advance(p)  // skip ident
                     rev_items = Some(Box::new(ImportItemList { head: next_name, tail: rev_items }))
                 }
             }
@@ -2423,11 +3788,15 @@ impl Parser {
         }
         // Else: whole-module import (use path) — no glob, no items
 
+        if parser_peek(p) == TokenKind::Semi {
+            p = parser_advance(p)
+        }
+
         let span = p.span_from(start)
         (p, Item {
             kind: ItemKind::ItemUse,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: empty_name(),
             fn_def: None,
             struct_def: None,
@@ -2452,11 +3821,15 @@ impl Parser {
             use_items: use_items_opt,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
     // ============================================================
-    // Unit declaration: unit mg; | unit kg = 1000 * mg;
+    // Unit declaration: unit mg; | unit velocity = m / s;
     // ============================================================
 
     // ============================================================
@@ -2489,7 +3862,7 @@ impl Parser {
         })
     }
 
-    fn parse_effect_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_effect_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'effect'
 
@@ -2532,7 +3905,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemEffect,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2557,10 +3930,14 @@ impl Parser {
             use_items: None,
             effect_def: Some(Box::new(edef)),
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
-    fn parse_unit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_unit_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()   // consume 'unit'
 
@@ -2568,12 +3945,42 @@ impl Parser {
         let name = p.current_name()
         p = p.advance()
 
-        // Optional conversion: = expr ;
+        // Optional derived unit expression: = m / s / s ;
         var conv_ty: Option<Box<TypeExpr>> = None
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()          // consume '='
-            // Parse the conversion expression as a type expression
-            // (for now, skip to semicolon — conversion is stored but not evaluated)
+            let first_pair = p.parse_type()
+            p = first_pair.0
+            var unit_ty = first_pair.1
+
+            while parser_peek(p) == TokenKind::Slash || parser_peek(p) == TokenKind::Star {
+                let op = parser_peek(p)
+                p = p.advance()
+                let rhs_pair = p.parse_type()
+                p = rhs_pair.0
+                let rhs_ty = rhs_pair.1
+                let unit_kind = if op == TokenKind::Slash {
+                    TypeExprKind::TypeReference
+                } else {
+                    TypeExprKind::TypeRefMut
+                }
+                let op_span = p.span_from(start)
+                unit_ty = TypeExpr {
+                    kind: unit_kind,
+                    span: op_span,
+                    path: empty_path(),
+                    type_args: Some(Box::new(TypeExprList {
+                        head: unit_ty,
+                        tail: None,
+                    })),
+                    inner: Some(Box::new(rhs_ty)),
+                    array_size: None,
+                    effects: None,
+                    knowledge_info: None,
+                    refinement_info: None,
+                }
+            }
+            conv_ty = Some(Box::new(unit_ty))
         }
 
         // Expect semicolon
@@ -2585,13 +3992,13 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemUnit,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
             enum_def: None,
             impl_def: None,
-            type_alias_ty: None,
+            type_alias_ty: conv_ty,
             policy_def: None,
             acquisition_policy_def: None,
             recourse_policy_def: None,
@@ -2610,6 +4017,10 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: None,
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
@@ -2617,7 +4028,7 @@ impl Parser {
     // Session declaration: session Name { send T, recv T, close }
     // ============================================================
 
-    fn parse_session_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_session_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'session'
 
@@ -2723,7 +4134,7 @@ impl Parser {
         (p, Item {
             kind: ItemKind::ItemSession,
             span: span,
-            is_pub: is_pub,
+            visibility: visibility,
             name: name,
             fn_def: None,
             struct_def: None,
@@ -2748,20 +4159,86 @@ impl Parser {
             use_items: None,
             effect_def: None,
             session_decl: Some(Box::new(sdecl)),
+            trait_def: None,
+            algebra_def: None,
+            study_def: None,
+            ontology_def: None,
         })
     }
 
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
-    fn parse_extern_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    // Brace-form extern blocks retain ALL declarations: the first is returned
+    // as the Item, decls 2..N queue on EXTERN_PENDING_ITEMS for the top-level
+    // loops to drain (#1547). All extern decls carry is_extern: true.
+    fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        if parser_peek(p) == TokenKind::LBrace {
+            p = p.advance()
+            var first_name = empty_name()
+            var first_params_opt: Option<Box<ParamList>> = None
+            var first_ret_ty: Option<Box<TypeExpr>> = None
+            var have_first = false
+
+            while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                while parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+                    p = p.advance()
+                }
+                if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
+                    break
+                }
+                if parser_peek(p) != TokenKind::Fn {
+                    p.had_error = true
+                    p.error_count = p.error_count + 1
+                    p = p.advance()
+                } else {
+                    p = p.advance()  // skip 'fn'
+                    let name = p.current_name()
+                    p = p.expect_ident()
+                    p = p.expect(TokenKind::LParen)
+                    let pair = p.parse_param_list()
+                    p = pair.0
+                    let params_opt = pair.1
+                    p = p.expect(TokenKind::RParen)
+                    let pair2 = p.parse_optional_return_type()
+                    p = pair2.0
+                    let ret_ty = pair2.1
+                    if !have_first {
+                        first_name = name
+                        first_params_opt = params_opt
+                        first_ret_ty = ret_ty
+                        have_first = true
+                    } else {
+                        // #1547: retain decls 2..N (previously dropped, then
+                        // re-created as name-only stubs only for builtin names —
+                        // non-builtin externs vanished entirely). Queue each as a
+                        // full ItemFn; parse_program_loop/parse_items_loop drain
+                        // EXTERN_PENDING_ITEMS right after parse_item returns.
+                        let decl_span = p.span_from(start)
+                        let decl_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: decl_span }, span: decl_span, is_kernel: false, is_extern: true }
+                        items_push_extern_pending(Item { kind: ItemKind::ItemFn, span: decl_span, visibility: visibility, name: name, fn_def: Some(Box::new(decl_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+                    }
+                    while parser_peek(p) == TokenKind::Semi {
+                        p = p.advance()
+                    }
+                }
+            }
+
+            p = p.expect(TokenKind::RBrace)
+            let span = p.span_from(start)
+            if have_first {
+                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
+                return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+            }
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+        }
         if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
             p.had_error = true
             p.error_count = p.error_count + 1
             p = p.advance()
-            return (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None })
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
         }
         p = p.advance()  // skip 'fn'
         let name = p.current_name()
@@ -2774,16 +4251,27 @@ impl Parser {
         let pair2 = p.parse_optional_return_type()
         p = pair2.0
         let ret_ty = pair2.1
+        while parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
         let span = p.span_from(start)
-        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: true }
-        (p, Item { kind: ItemKind::ItemFn, span: span, is_pub: is_pub, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None })
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
+        (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
     // Sprint 109: export "C" fn
-    fn parse_export_fn_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    fn parse_export_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'export'
-        if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
-        p.parse_fn_item(true, false)
+        if parser_peek(p) == TokenKind::Extern {
+            return p.parse_extern_fn_item(visibility)
+        }
+        if parser_peek(p) == TokenKind::StringLit {
+            p = p.advance()
+            if parser_peek(p) == TokenKind::Extern {
+                return p.parse_extern_fn_item(visibility)
+            }
+        }
+        p.parse_fn_item(visibility, false)
     }
 
 }
@@ -3061,7 +4549,7 @@ fn audit_section_kind_from_name(name: Name) -> AuditSectionKind with Panic, Div 
     AuditSectionKind::AuditSectionUnknown
 }
 
-fn extract_impl_name(ty: TypeExpr) -> Name with Mut, Panic, Div, Alloc {
+pub fn extract_impl_name(ty: TypeExpr) -> Name with Mut, Panic, Div, Alloc {
     if ty.kind == TypeExprKind::TypeNamed && ty.path.seg_count > 0 {
         copy_string_list_tail_to_name(ty.path.segments)
     } else {
@@ -3129,7 +4617,7 @@ fn parser_name_is_metrics(name: Name) -> bool with Panic, Div {
         && name.buf[6] == 115 as i8
 }
 
-fn copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
+pub fn copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: seg.head_len }
     var i: i64 = 0
     while i < seg.head_len && i < 128 {
@@ -3139,7 +4627,7 @@ fn copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
     n
 }
 
-fn copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
+pub fn copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
     match seg.tail {
         Some(rest) => copy_string_list_tail_to_name(*rest)
         None => copy_string_list_to_name(seg)
@@ -3151,7 +4639,7 @@ fn copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, 
 // ============================================================
 // Parses: algebra Name over Type { op: prop, prop; ... reassociate: strategy }
 
-fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
+fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut, Panic, Div {
     if n.len != slen { return false }
     var i: i64 = 0
     while i < slen {
@@ -3161,7 +4649,7 @@ fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut {
     true
 }
 
-fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut {
+fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut, Panic, Div {
     var out = Name { buf: [0; 128], len: 0 }
     var i: i64 = 0
     while i < slen && i < 64 && i < 128 {
@@ -3404,8 +4892,11 @@ fn study_correction_from_name(name: Name) -> i32 with Panic, Div {
 
 fn parse_study_hypothesis(p: Parser) -> (Parser, StudyHypothesis) with Mut, IO, Panic, Div, Alloc {
     var pa = p.advance()  // skip "hypothesis"
-    let name = pa.current_name()
-    pa = pa.expect_ident()
+    var name = empty_name()
+    if parser_peek(pa) != TokenKind::LBrace {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
     pa = pa.expect(TokenKind::LBrace)
 
     var outcome = empty_name()
@@ -3421,16 +4912,24 @@ fn parse_study_hypothesis(p: Parser) -> (Parser, StudyHypothesis) with Mut, IO, 
         }
 
         let field_name = pa.current_name()
-        if field_name.len == 7 && field_name.buf[0] == 111 as i8 && field_name.buf[1] == 117 as i8 {
+        if field_name.len == 4 && field_name.buf[0] == 110 as i8 && field_name.buf[3] == 101 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
-            outcome = pa.current_name()
-            pa = pa.expect_ident()
+            let name_pair = pa.parse_audit_name_value()
+            pa = name_pair.0
+            name = name_pair.1
+        } else if field_name.len == 7 && field_name.buf[0] == 111 as i8 && field_name.buf[1] == 117 as i8 {
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Colon)
+            let outcome_pair = pa.parse_audit_name_value()
+            pa = outcome_pair.0
+            outcome = outcome_pair.1
         } else if field_name.len == 9 && field_name.buf[0] == 100 as i8 && field_name.buf[1] == 105 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
-            let dir_name = pa.current_name()
-            pa = pa.expect_ident()
+            let dir_pair = pa.parse_audit_name_value()
+            pa = dir_pair.0
+            let dir_name = dir_pair.1
             direction = study_direction_from_name(dir_name)
         } else if field_name.len == 11 && field_name.buf[0] == 101 as i8 && field_name.buf[6] == 95 as i8 {
             pa = pa.advance()
@@ -3503,7 +5002,7 @@ fn parse_algebra_op_decl(p: Parser) -> (Parser, AlgebraOpDecl) with Mut, IO, Pan
     })
 }
 
-fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_algebra_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'algebra'
 
@@ -3517,7 +5016,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     // "over" = 4 chars: o=111, v=118, e=101, r=114
     if peek_name.len == 4 && peek_name.buf[0] == 111 as i8 && peek_name.buf[1] == 118 as i8 {
         pa = pa.advance()  // consume "over"
-        let ty_pair = pa.parse_type_expr()
+        let ty_pair = pa.parse_type()
         pa = ty_pair.0
         over_ty = Some(Box::new(ty_pair.1))
     }
@@ -3577,7 +5076,7 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     (pa, Item {
         kind: ItemKind::ItemAlgebra,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -3609,12 +5108,15 @@ fn parse_algebra_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, P
     })
 }
 
-fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_study_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'study'
 
-    let name = pa.current_name()
-    pa = pa.expect_ident()
+    var name = empty_name()
+    if parser_peek(pa) != TokenKind::LBrace {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
     pa = pa.expect(TokenKind::LBrace)
 
     var title = empty_name()
@@ -3639,7 +5141,18 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
 
         let entry_name = pa.current_name()
 
-        if entry_name.len == 5 && entry_name.buf[0] == 116 as i8 && entry_name.buf[1] == 105 as i8 {
+        if parser_peek(pa) == TokenKind::Fn {
+            // visibility param is a Visibility struct, not a bool (see parse_impl_item).
+            let fn_pair = pa.parse_fn_item(visibility_private(), false)
+            pa = fn_pair.0
+        } else if entry_name.len == 10 && entry_name.buf[0] == 104 as i8 && entry_name.buf[9] == 115 as i8 {
+            let hyp_pair = parse_study_hypothesis(pa)
+            pa = hyp_pair.0
+            if n_hypotheses < 8 {
+                hypotheses[n_hypotheses as usize] = hyp_pair.1
+                n_hypotheses = n_hypotheses + 1
+            }
+        } else if entry_name.len == 5 && entry_name.buf[0] == 116 as i8 && entry_name.buf[1] == 105 as i8 {
             pa = pa.advance()
             pa = pa.expect(TokenKind::Colon)
             let title_pair = pa.parse_audit_name_value()
@@ -3796,7 +5309,7 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
     (pa, Item {
         kind: ItemKind::ItemStudy,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -3833,7 +5346,7 @@ fn parse_study_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Pan
 // ============================================================
 // Parses: ontology Name { class A; class B subclass_of A; disjoint X, Y }
 
-fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+fn parse_ontology_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
     let start = p.current_span()
     var pa = p.advance()  // skip 'ontology'
 
@@ -3927,24 +5440,25 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
                             pa = pa.advance()  // consume "where"
                             pa = pa.expect_ident()  // consume variable name (should match prop_name)
 
-                            // Parse comparison operator
+                            // Parse comparison operator. The lexer emits combined
+                            // tokens for >= <= == != (GtEq/LtEq/EqEq/BangEq) — the
+                            // earlier `Gt` then `Eq` two-token form never matched a
+                            // `>=`/`<=`, leaving prop_op=0 so weakening (E041) never
+                            // fired. Check the combined tokens directly (mirrors
+                            // types.sio's refinement-predicate parser).
                             if pa.peek() == TokenKind::Gt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 2  // GtEq
-                                } else {
-                                    prop_op = 1  // Gt
-                                }
+                                prop_op = 1  // Gt
+                            } else if pa.peek() == TokenKind::GtEq {
+                                pa = pa.advance()
+                                prop_op = 2  // GtEq
                             } else if pa.peek() == TokenKind::Lt {
                                 pa = pa.advance()
-                                if pa.peek() == TokenKind::Eq {
-                                    pa = pa.advance()
-                                    prop_op = 4  // LtEq
-                                } else {
-                                    prop_op = 3  // Lt
-                                }
-                            } else if pa.peek() == TokenKind::EqEq {
+                                prop_op = 3  // Lt
+                            } else if pa.peek() == TokenKind::LtEq {
+                                pa = pa.advance()
+                                prop_op = 4  // LtEq
+                            } else if pa.peek() == TokenKind::EqEq || pa.peek() == TokenKind::Eq {
                                 pa = pa.advance()
                                 prop_op = 5  // Eq
                             } else if pa.peek() == TokenKind::BangEq {
@@ -3961,11 +5475,11 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
                             }
                             if pa.peek() == TokenKind::FloatLit {
                                 prop_is_float = true
-                                prop_rhs_float = pa.current_float()
+                                prop_rhs_float = pa.current().float_value
                                 if negate { prop_rhs_float = 0.0 - prop_rhs_float }
                                 pa = pa.advance()
                             } else if pa.peek() == TokenKind::IntLit {
-                                prop_rhs_int = pa.current_int()
+                                prop_rhs_int = pa.current_int_value()
                                 if negate { prop_rhs_int = 0 - prop_rhs_int }
                                 pa = pa.advance()
                             }
@@ -4141,7 +5655,7 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
     (pa, Item {
         kind: ItemKind::ItemOntology,
         span: span,
-        is_pub: is_pub,
+        visibility: visibility,
         name: name,
         fn_def: None,
         struct_def: None,
@@ -4170,5 +5684,135 @@ fn parse_ontology_item(p: Parser, is_pub: bool) -> (Parser, Item) with Mut, IO, 
         algebra_def: None,
         study_def: None,
         ontology_def: Some(Box::new(odef)),
+    })
+}
+
+// ============================================================
+// Claim declaration parser
+// ============================================================
+// Parses: claim name { field = value, ... }
+//   value ::= string-literal | int-literal | float-literal | ident | path
+// Fields may be separated by commas, semicolons, or newlines; a trailing
+// separator is allowed. The parsed ClaimDecl is recorded in the AST claim
+// registry (ast_record_claim). The returned Item carries
+// ItemKind::ItemClaim and is dropped from the item stream by the parse
+// driver (parser::mod), so claims never reach resolve/check/codegen.
+
+fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'claim'
+
+    var name = empty_name()
+    if parser_peek(pa) == TokenKind::Ident {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
+    pa = pa.expect(TokenKind::LBrace)
+
+    var decl = empty_claim_decl()
+    decl.name = name
+    // Feed the text-preserving registry directly from the parser local (the
+    // ClaimDecl storage path is lossy for nested Names; see
+    // ast_claim_note_field_text).
+    ast_claim_note_name_text(name)
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline || pa.peek() == TokenKind::Comma {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        if parser_peek(pa) != TokenKind::Ident {
+            // Unknown token in claim body: skip it (error recovery, same as
+            // parse_study_item's fallthrough) without poisoning had_error.
+            pa = pa.advance()
+        } else {
+            let field_name = pa.current_name()
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Eq)
+            let vstart = pt_read_start(pa.pos)
+
+            var fv = empty_claim_field()
+            fv.name = field_name
+            var fv_ok = true
+            let vk = pa.peek()
+            if vk == TokenKind::StringLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_STRING
+                pa = pa.advance()
+            } else if vk == TokenKind::IntLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_INT
+                pa = pa.advance()
+            } else if vk == TokenKind::FloatLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_FLOAT
+                pa = pa.advance()
+            } else if vk == TokenKind::Ident {
+                // Bare identifier or path (Evidence::InstrumentControlled).
+                let val_pair = pa.parse_audit_name_value()
+                pa = val_pair.0
+                fv.value = val_pair.1
+                fv.kind = CLAIM_VALUE_PATH
+            } else {
+                fv_ok = false
+                pa.had_error = true
+                pa.error_count = pa.error_count + 1
+                pa = pa.advance()
+            }
+            let vend = pt_read_end(pa.pos - 1)
+            if fv_ok && decl.n_fields < 16 {
+                // Text-preserving registry (self-falsifying compiler rung):
+                // feed the field name and the value's source span directly
+                // from parser state. Names nested in ClaimDecl do not survive
+                // the struct store path (values arrive truncated), so the
+                // value text is recovered by slicing the source file.
+                ast_claim_note_field_name(decl.n_fields as i64, field_name)
+                ast_claim_note_field_span(decl.n_fields as i64, vstart, vend)
+                decl.fields[decl.n_fields as usize] = fv
+                decl.n_fields = decl.n_fields + 1
+            }
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    ast_record_claim(decl)
+
+    (pa, Item {
+        kind: ItemKind::ItemClaim,
+        span: span,
+        visibility: visibility,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: None,
     })
 }

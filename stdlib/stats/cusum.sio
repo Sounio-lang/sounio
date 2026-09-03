@@ -1,0 +1,127 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/cusum.sio — tabular CUSUM control chart
+//
+// The cumulative-sum control chart, far more sensitive than a Shewhart chart to
+// small sustained shifts away from a target:
+//
+//   cusum(x, n, target, k, h) -> CusumResult
+//
+// With reference value k (the allowance, typically ½σ) and decision interval h
+// (typically 4σ or 5σ),
+//   Cᵢ⁺ = max(0, Cᵢ₋₁⁺ + (xᵢ − (target + k))),
+//   Cᵢ⁻ = max(0, Cᵢ₋₁⁻ + ((target − k) − xᵢ)),
+// and the process signals the first time Cᵢ⁺ > h or Cᵢ⁻ > h.
+//
+// Pure Sounio: a single recurrence pass. No external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Page (1954) Biometrika 41:100; Montgomery, "Statistical Quality Control"
+//   7e, §9.1.
+
+module stats::cusum
+
+pub struct CusumResult {
+    pub c_plus: f64,        // final upper CUSUM
+    pub c_minus: f64,       // final lower CUSUM
+    pub signaled: i64,      // 1 if the chart ever crossed h
+    pub signal_index: i64,  // first index that signalled, or -1
+}
+
+/// Tabular CUSUM control chart for a shift from `target`.
+///
+/// Parâmetros: x — series; n — length (>=1); target — process target;
+///             k — reference value (allowance); h — decision interval.
+/// Retorno: CusumResult (c_plus, c_minus, signaled, signal_index).
+/// Referências: Page (1954); Montgomery §9.1.
+pub fn cusum(x: &[f64; 256], n: i32, target: f64, k: f64, h: f64) -> CusumResult with Mut, Div, Panic {
+    if n < 1 { return CusumResult { c_plus: 0.0, c_minus: 0.0, signaled: 0, signal_index: 0 - 1 } }
+    var cp = 0.0
+    var cm = 0.0
+    var signaled = 0
+    var sig_idx = 0 - 1
+    let up = target + k
+    let dn = target - k
+    var i = 0
+    while i < n {
+        let xi = x[i as usize]
+        cp = cp + (xi - up)
+        if cp < 0.0 { cp = 0.0 }
+        cm = cm + (dn - xi)
+        if cm < 0.0 { cm = 0.0 }
+        if signaled == 0 {
+            if cp > h || cm > h { signaled = 1; sig_idx = i }
+        }
+        i = i + 1
+    }
+    return CusumResult { c_plus: cp, c_minus: cm, signaled: signaled as i64, signal_index: sig_idx as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// target=10, k=0.5, h=4. x={10,10,11,12,13,14}.
+// C+: 0,0,0.5,2.0,4.5(>4 signal @4),8.0. C- stays 0.
+fn test_cusum() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=10.0; x[2]=11.0; x[3]=12.0; x[4]=13.0; x[5]=14.0
+    let r = cusum(&x, 6, 10.0, 0.5, 4.0)
+    var ok = true
+    ok = check(1, approx(r.c_plus, 8.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.c_minus, 0.0, 1.0e-9)) && ok
+    ok = check(3, r.signaled == 1) && ok
+    ok = check(4, r.signal_index == 4) && ok
+    return ok
+}
+
+// on-target series never signals.
+fn test_on_target() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=9.5; x[2]=10.5; x[3]=10.0; x[4]=9.8; x[5]=10.2
+    let r = cusum(&x, 6, 10.0, 0.5, 4.0)
+    var ok = true
+    ok = check(10, r.signaled == 0) && ok
+    ok = check(11, r.signal_index == 0 - 1) && ok
+    return ok
+}
+
+// downward shift trips the lower CUSUM. target=10, x drifting down.
+fn test_downward() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=9.0; x[2]=8.0; x[3]=7.0; x[4]=6.0
+    let r = cusum(&x, 5, 10.0, 0.5, 4.0)
+    var ok = true
+    ok = check(20, r.signaled == 1) && ok
+    ok = check(21, r.c_minus > 4.0) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_cusum() && ok
+    ok = test_on_target() && ok
+    ok = test_downward() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

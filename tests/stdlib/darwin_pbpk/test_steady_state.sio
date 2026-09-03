@@ -1,0 +1,207 @@
+//@ run-pass
+//@ expect-stdout: STEADY_STATE_OK
+// Validates the 14-compartment PBPK model reaches steady-state under constant
+// IV infusion.  Uses operator splitting: advance PBPK by dt, then add infusion
+// amount to blood compartment.
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn local_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // ------------------------------------------------------------------
+    // 1. Set up parameters with low clearance so steady-state is reachable
+    // ------------------------------------------------------------------
+    let prm = default_pbpk_params()
+    var prm_low = prm
+    prm_low.cl_hepatic = 2.0
+    prm_low.cl_renal = 1.0
+
+    let val = pbpk_params_validate(prm_low)
+    if val != 0 { return val }
+
+    let dose_rate = 1.0   // mg/h
+    let cfg = tight_ode_config()
+
+    // ------------------------------------------------------------------
+    // 2. Initialise state
+    // ------------------------------------------------------------------
+    var st = pbpk_state_zero()
+    var t = 0.0
+    var dt = cfg.dt_init
+    var nsteps: i64 = 0
+    var nreject: i64 = 0
+
+    let checkpoints: [f64; 7] = [24.0, 48.0, 72.0, 96.0, 120.0, 144.0, 168.0]
+    let n_points = 7
+
+    var blood_vals: [f64; 7] = [0.0; 7]
+    var mass_vals: [f64; 7] = [0.0; 7]
+    var deriv_blood: [f64; 7] = [0.0; 7]
+    var deriv_liver: [f64; 7] = [0.0; 7]
+    var deriv_kidney: [f64; 7] = [0.0; 7]
+    var deriv_brain: [f64; 7] = [0.0; 7]
+    var deriv_heart: [f64; 7] = [0.0; 7]
+    var deriv_lung: [f64; 7] = [0.0; 7]
+    var deriv_muscle: [f64; 7] = [0.0; 7]
+    var deriv_adipose: [f64; 7] = [0.0; 7]
+    var deriv_gut: [f64; 7] = [0.0; 7]
+    var deriv_skin: [f64; 7] = [0.0; 7]
+    var deriv_bone: [f64; 7] = [0.0; 7]
+    var deriv_spleen: [f64; 7] = [0.0; 7]
+    var deriv_pancreas: [f64; 7] = [0.0; 7]
+    var deriv_other: [f64; 7] = [0.0; 7]
+
+    var point_i: i32 = 0
+
+    // ------------------------------------------------------------------
+    // 3. Integration loop with checkpoint recording
+    // ------------------------------------------------------------------
+    while point_i < n_points {
+        let idx = point_i as usize
+        let target = checkpoints[idx]
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt > target { target - t } else { dt }
+
+            let result = tsit5_step_pbpk(st, t, dt_use, prm_low)
+            let err_norm = compute_error_norm_14(result.err, st, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                // Accept step
+                st = result.state_new
+                t = t + dt_use
+                nsteps = nsteps + 1
+
+                // Operator-split infusion into blood
+                st.blood = st.blood + dose_rate * dt_use / prm_low.v_blood
+
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                // Reject step
+                nreject = nreject + 1
+                dt = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+
+            dt = if dt < cfg.dt_min { cfg.dt_min } else { dt }
+            dt = if dt > cfg.dt_max { cfg.dt_max } else { dt }
+
+            if nreject > 10000 {
+                return 99
+            }
+        }
+
+        if t + cfg.dt_min < target {
+            return 98
+        }
+
+        // Record blood concentration and total mass
+        blood_vals[idx] = st.blood
+        mass_vals[idx] = pbpk_state_total_mass(st, prm_low)
+
+        // Compute derivatives at checkpoint via pbpk_ode
+        let d = pbpk_ode(st, t, prm_low)
+        deriv_blood[idx] = d.blood
+        deriv_liver[idx] = d.liver
+        deriv_kidney[idx] = d.kidney
+        deriv_brain[idx] = d.brain
+        deriv_heart[idx] = d.heart
+        deriv_lung[idx] = d.lung
+        deriv_muscle[idx] = d.muscle
+        deriv_adipose[idx] = d.adipose
+        deriv_gut[idx] = d.gut
+        deriv_skin[idx] = d.skin
+        deriv_bone[idx] = d.bone
+        deriv_spleen[idx] = d.spleen
+        deriv_pancreas[idx] = d.pancreas
+        deriv_other[idx] = d.other
+
+        point_i = point_i + 1
+    }
+
+    // ------------------------------------------------------------------
+    // 4. Validation
+    // ------------------------------------------------------------------
+
+    // 4a. Total mass positive and bounded at every checkpoint
+    var chk_i: i32 = 0
+    while chk_i < n_points {
+        let cidx = chk_i as usize
+        let mass = mass_vals[cidx]
+        let t_chk = checkpoints[cidx]
+
+        if mass <= 0.0 { return 10 }
+        // Upper bound: cannot exceed total infused amount (plus 1% slack)
+        if mass > dose_rate * t_chk * 1.01 { return 11 }
+
+        chk_i = chk_i + 1
+    }
+
+    // 4b. Blood concentration at 168 h is positive
+    let blood_final = blood_vals[6]
+    if blood_final <= 0.0 { return 20 }
+
+    // 4c. Blood concentration monotonically non-decreasing after 48 h
+    // Checkpoints after 48 h: 72, 96, 120, 144, 168
+    // Indices: 1=48, 2=72, 3=96, 4=120, 5=144, 6=168
+    if blood_vals[2] < blood_vals[1] { return 30 }
+    if blood_vals[3] < blood_vals[2] { return 31 }
+    if blood_vals[4] < blood_vals[3] { return 32 }
+    if blood_vals[5] < blood_vals[4] { return 33 }
+    if blood_vals[6] < blood_vals[5] { return 34 }
+
+    // 4d. Compartments approach equilibrium (steady-state check).
+    // High-perfusion compartments (e.g. lung, Q/V ~ 600 h^-1) produce large
+    // raw |dC/dt| even when concentrations are within 0.0002 mg/L of
+    // equilibrium.  We therefore normalise each derivative by its
+    // characteristic perfusion rate Q/V, which is equivalent to checking
+    // |C_plasma - C_tissue/Kp| < tol_eq.
+    let tol_eq = 0.01   // mg/L concentration mismatch tolerance
+
+    // Liver:  Q/V = 90/1.8 = 50
+    if local_abs(deriv_liver[6])    * prm_low.v_liver    / prm_low.q_liver    >= tol_eq { return 40 }
+    // Kidney: Q/V = 60/0.31 ≈ 194
+    if local_abs(deriv_kidney[6])   * prm_low.v_kidney   / prm_low.q_kidney   >= tol_eq { return 41 }
+    // Brain:  Q/V = 50/1.4 ≈ 36
+    if local_abs(deriv_brain[6])    * prm_low.v_brain    / prm_low.q_brain    >= tol_eq { return 42 }
+    // Heart:  Q/V = 20/0.33 ≈ 61
+    if local_abs(deriv_heart[6])    * prm_low.v_heart    / prm_low.q_heart    >= tol_eq { return 43 }
+    // Lung:   Q/V = 300/0.5 = 600
+    if local_abs(deriv_lung[6])     * prm_low.v_lung     / prm_low.q_lung     >= tol_eq { return 44 }
+    // Muscle: Q/V = 75/30 = 2.5
+    if local_abs(deriv_muscle[6])   * prm_low.v_muscle   / prm_low.q_muscle   >= tol_eq { return 45 }
+    // Adipose: Q/V = 12/15 = 0.8
+    if local_abs(deriv_adipose[6])  * prm_low.v_adipose  / prm_low.q_adipose  >= tol_eq { return 46 }
+    // Gut:    Q/V = 45/1.1 ≈ 41
+    if local_abs(deriv_gut[6])      * prm_low.v_gut      / prm_low.q_gut      >= tol_eq { return 47 }
+    // Skin:   Q/V = 10/3.3 ≈ 3.0
+    if local_abs(deriv_skin[6])     * prm_low.v_skin     / prm_low.q_skin     >= tol_eq { return 48 }
+    // Bone:   Q/V = 5/10 = 0.5
+    if local_abs(deriv_bone[6])     * prm_low.v_bone     / prm_low.q_bone     >= tol_eq { return 49 }
+    // Spleen: Q/V = 15/0.18 ≈ 83
+    if local_abs(deriv_spleen[6])   * prm_low.v_spleen   / prm_low.q_spleen   >= tol_eq { return 50 }
+    // Pancreas: Q/V = 5/0.1 = 50
+    if local_abs(deriv_pancreas[6]) * prm_low.v_pancreas / prm_low.q_pancreas >= tol_eq { return 51 }
+    // Other:  Q/V = 20/5 = 4
+    if local_abs(deriv_other[6])    * prm_low.v_other    / prm_low.q_other    >= tol_eq { return 52 }
+
+    // 4e. Blood compartment stability: empirical rate of change over the
+    // final 24 h must be small (< 0.001 mg/L/h).  The instantaneous
+    // pbpk_ode blood derivative includes high-Q/V circulation terms that
+    // are numerically noisy; the empirical rate reflects the true trend.
+    let blood_empirical_rate = local_abs(blood_vals[6] - blood_vals[5]) / 24.0
+    if blood_empirical_rate >= 0.001 { return 53 }
+
+    // 4f. Derivatives trend toward equilibrium: 24 h scaled liver
+    // derivative is larger than at 168 h.
+    if local_abs(deriv_liver[0]) * prm_low.v_liver / prm_low.q_liver
+        <= local_abs(deriv_liver[6]) * prm_low.v_liver / prm_low.q_liver {
+        return 60
+    }
+
+    println("STEADY_STATE_OK")
+    0
+}

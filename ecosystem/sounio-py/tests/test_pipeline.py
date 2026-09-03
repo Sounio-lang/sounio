@@ -218,6 +218,11 @@ class TestGenerateReportUnit:
             molecules_passed=1,
             pk_fitted=1,
             simulation=sim,
+            knowledge_values=[
+                Knowledge(1.0, 0.94, "lipinski_screen"),
+                Knowledge(4.62, 0.767, "pk_half_life"),
+                Knowledge(0.75, 0.95, "trial_efficacy")
+            ],
             provenance_chain=["lipinski_screen", "pk_half_life", "trial_efficacy"],
             stdout="STAGE 1\nSTAGE 2\nKnowledge { value: 4.620 epsilon: 0.767 prov: \"pk_half_life\" }",
             exit_code=0,

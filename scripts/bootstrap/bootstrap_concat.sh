@@ -15,7 +15,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
+PINNED_BIN="${PINNED_BIN:-bin/souc-linux-x86_64}"
 if [ ! -x "$PINNED_BIN" ]; then
   JIT_FALLBACK="bin/souc"
   if [ -x "$JIT_FALLBACK" ]; then
@@ -83,6 +83,7 @@ FILES=(
   self-hosted/check/effects.sio
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
+  self-hosted/check/ontology_side_table_cache.sio
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
   self-hosted/check/patterns.sio
@@ -280,7 +281,7 @@ FILES=(
   self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
 
   # ── 22. WebAssembly backend ─────────────────────────────────────
-  self-hosted/wasm/mod.sio
+  self-hosted/wasm/emitter.sio
   self-hosted/wasm/encode.sio
   self-hosted/wasm/lower.sio
 
@@ -292,6 +293,8 @@ FILES=(
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/interop/contract.sio
+  self-hosted/io/env.sio
+  self-hosted/io/trace.sio
   self-hosted/io/file_write.sio
   stdlib/compiler/ontology/model.sio
   stdlib/compiler/ontology/cache.sio
@@ -415,6 +418,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/effects.sio
     self-hosted/check/refinement.sio
     self-hosted/check/compat.sio
+    self-hosted/check/ontology_side_table_cache.sio
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
     self-hosted/check/patterns.sio
@@ -478,6 +482,12 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/abi.sio
     self-hosted/native/lower_hir.sio
     self-hosted/native/elf.sio
+    self-hosted/native/machine_ir.sio
+    self-hosted/native/runtime_context.sio
+    self-hosted/native/target_policy.sio
+    self-hosted/native/gc.sio
+    self-hosted/native/stack_maps.sio
+    self-hosted/native/peephole.sio
     self-hosted/native/codegen.sio
     self-hosted/native/lower_ir.sio
     self-hosted/native/riscv.sio
@@ -496,7 +506,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
-    self-hosted/wasm/mod.sio
+    self-hosted/wasm/emitter.sio
     self-hosted/wasm/encode.sio
     self-hosted/wasm/lower.sio
 
@@ -519,6 +529,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/vm/mod.sio
 
     # 9. I/O helpers + module loader
+    self-hosted/io/env.sio
+    self-hosted/io/trace.sio
     self-hosted/io/file_write.sio
     self-hosted/compiler/module_loader.sio
 
@@ -673,10 +685,21 @@ for f in "${FILES[@]}"; do
     echo "// SOURCE: $f  ($LINES lines)"
     echo "// ════════════════════════════════════════════════════════════════"
     echo ""
-    sed \
-      -e '/^[[:space:]]*module[[:space:]]\+[A-Za-z0-9_:]\+[[:space:]]*;*[[:space:]]*$/d' \
-      -e '/^[[:space:]]*use[[:space:]].*$/d' \
-      "$f"
+    awk '
+      /^[[:space:]]*module[[:space:]]+[A-Za-z0-9_:]+[[:space:]]*;?[[:space:]]*$/ { next }
+      in_use {
+        if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) {
+          in_use = 0
+        }
+        next
+      }
+      /^[[:space:]]*use[[:space:]].*\{[[:space:]]*$/ {
+        in_use = 1
+        next
+      }
+      /^[[:space:]]*use[[:space:]].*$/ { next }
+      { print }
+    ' "$f"
   } >> "$OUTPUT_FILE"
 
   if [ "$DECL_LINES" -gt 0 ]; then
@@ -692,23 +715,49 @@ OUTPUT_LINES=$(wc -l < "$OUTPUT_FILE")
 echo "  Output file: $OUTPUT_LINES lines (includes separator comments)"
 echo "  Stripped module/use declarations: $STRIPPED_DECL_LINES"
 
-# ── Run the pinned binary checker ──────────────────────────────────
+# ── Run the pinned binary compile ──────────────────────────────────
+#
+# IMPORTANT: the souc ELF (lean_single.sio's compiled main) takes its
+# source path as positional argv[1] — there is NO `check` subcommand,
+# despite the historical naming.  Invoking `souc check <file>` would
+# have souc try to open a source file literally named "check" (which
+# doesn't exist → 0 bytes read), then write the empty-source ELF to
+# <file> — clobbering the bundle.  Until 2026-05-18 this script
+# silently produced a "no main" error from compiling the prelude alone
+# and reported it as the bundle's typecheck status.
+#
+# Fix: invoke positionally — `souc <bundle> <elf-out>` — so the
+# checker actually exercises the concatenated bundle.  The bundle has
+# no `fn main`, so a successful compile-stage will still exit non-zero
+# with "error: no main".  We treat that single error as PASS at the
+# typecheck level (it means the bundle typechecked clean and only
+# failed at the entry-point lookup).  Any OTHER error count, or a
+# SIGSEGV (exit 139), is a real bundle-compile failure.
 echo ""
-echo "=== Running pinned checker: $PINNED_BIN check $OUTPUT_FILE ==="
+BUNDLE_ELF_OUT="$ARTIFACT_DIR/bootstrap_stage1.elf"
+if "$PINNED_BIN" --help 2>&1 | grep -q "Commands:"; then
+  PINNED_CMD=( "$PINNED_BIN" build "$OUTPUT_FILE" -o "$BUNDLE_ELF_OUT" )
+else
+  PINNED_CMD=( "$PINNED_BIN" "$OUTPUT_FILE" "$BUNDLE_ELF_OUT" )
+fi
+echo "=== Running pinned compile: ${PINNED_CMD[*]} ==="
 echo ""
 
 CHECKER_EXIT=0
 FULL_CHECK_LOG="$ARTIFACT_DIR/bootstrap_full_check.log"
 set +e
+CHECKER_STACK_KB="${CHECKER_STACK_KB:-unlimited}"
 if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
-  CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
-    "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1
+    "${PINNED_CMD[@]}" 2>&1
   ) | tee "$FULL_CHECK_LOG"
   CHECKER_EXIT="${PIPESTATUS[0]}"
 else
-  "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1
+  (
+    ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
+    "${PINNED_CMD[@]}" 2>&1
+  )
   CHECKER_EXIT="$?"
 fi
 set -e

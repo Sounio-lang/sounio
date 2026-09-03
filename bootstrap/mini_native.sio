@@ -108,12 +108,12 @@ var GL_BSS_BASE: i64 = 0
 
 // Hash: pack name length + first 6 bytes into i64 (avoids sb()-based comparison during lookup)
 fn gl_name_hash(ns: i64, ne: i64) -> i64 with Panic {
-    // Hash: length + sum of (byte * position) — collision-resistant for same-prefix names
+    // Hash: FNV-1a 32-bit with 37-bit mask — collision-resistant, overflow-safe
     let l = ne - ns
-    var h: i64 = l * 1000003
+    var h: i64 = 2166136261
     var hi: i64 = 0
     while hi < l {
-        h = h + (sb(ns + hi) & 0xFF) * (hi + 1) * 31
+        h = ((h ^ (sb(ns + hi) & 0xFF)) * 16777619) & 0x1FFFFFFFFF
         hi = hi + 1
     }
     return h
@@ -453,13 +453,22 @@ fn emit_read_file() with Mut {
 }
 
 fn emit_file_size() with Mut {
-    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48
+    // rax = path. stat(path, &statbuf) → statbuf.st_size at offset 48.
+    // A directory (st_mode S_IFDIR at offset 24) returns -1 so a directory is
+    // treated as an unreadable/absent file (matches lean_single emit_file_size).
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (path)
     em(0x48); em(0x83); em(0xec); em(0x90 as i64 & 0xFF)  // sub rsp, 144 (struct stat)
     em(0x48); em(0x89); em(0xe6)  // mov rsi, rsp (statbuf)
     em(0xb8); em32(4)  // mov eax, 4 (sys_stat)
     em(0x0f); em(0x05)
+    // reject directories: (st_mode & S_IFMT) == S_IFDIR → -1
+    em(0x8b); em(0x44); em(0x24); em(24)  // mov eax, [rsp+24] (st_mode)
+    em(0x25); em32(0xF000)  // and eax, 0xF000 (S_IFMT)
+    em(0x3d); em32(0x4000)  // cmp eax, 0x4000 (S_IFDIR)
+    em(0x74); em(0x07)  // je +7 (directory → -1)
     em(0x48); em(0x8b); em(0x44); em(0x24); em(48)  // mov rax, [rsp+48] (st_size)
+    em(0xeb); em(0x07)  // jmp +7 (done)
+    em(0x48); em(0xc7); em(0xc0); em32(-1)  // mov rax, -1 (directory)
     em(0x48); em(0x83); em(0xc4); em(0x90 as i64 & 0xFF)  // add rsp, 144
 }
 
@@ -712,21 +721,21 @@ fn compile_primary() with IO, Mut, Panic, Div {
             let bh = gl_name_hash(ns, ne)
             let bl = ne - ns
             // f64_add/sub/mul/div: 7 chars each
-            if bl == 7 && bh == 7078482 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7084000 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7085240 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 7 && bh == 7083783 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 14456679815 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x58); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 121920845326 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5c); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 47722337034 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x59); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 17692084031 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0xf2); em(0x0f); em(0x5e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
             // f64_neg: 7 chars
-            if bl == 7 && bh == 7081334 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 7 && bh == 92612984778 { EP = EP + 1; compile_or(); em(0x48); em(0x0f); em(0xba); em(0xf8); em(63); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
             // f64_lt/le/eq/gt/ge: 6 chars
-            if bl == 6 && bh == 6061460 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6058670 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6059817 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6060685 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 6 && bh == 6057895 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 8815569132 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x92); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 9100788655 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x96); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 129361299966 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x94); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 17440780175 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x97); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 6 && bh == 17155560652 { EP = EP + 1; compile_or(); em(0x50); if TK[EP as usize] == 28 { EP = EP + 1 }; compile_or(); em(0x59); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8); em(0x66); em(0x0f); em(0x2e); em(0xc1); em(0x0f); em(0x93); em(0xc0); em(0x48); em(0x0f); em(0xb6); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
             // f64_to_i64 / i64_to_f64: 10 chars
-            if bl == 10 && bh == 10139623 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
-            if bl == 10 && bh == 10138972 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 10 && bh == 5531541079 { EP = EP + 1; compile_or(); em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0); em(0xf2); em(0x48); em(0x0f); em(0x2c); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+            if bl == 10 && bh == 86668110853 { EP = EP + 1; compile_or(); em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0); em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
             // User function call
             let fi = fn_find(ns, ne)
             EP = EP + 1

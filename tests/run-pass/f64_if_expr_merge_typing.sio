@@ -1,0 +1,49 @@
+//@ run-pass
+//@ expect-stdout: PASS
+//
+// Regression: an if-expression whose arms are f64 must type its merge register
+// as a float, so a downstream float consumer (`acc_in + k`) does not run the
+// f64 bit-pattern through cvtsi2sd.
+//
+// Bug (native-v2 / Madaros codegen): the if-merge register was typed
+// flow-insensitively — the last linear ir_copy won — and an f64-literal else arm
+// (`else { 0.0 }`) lowers to IrLoadImm (int-flagged), so the merge result was
+// left untyped. A subsequent `acc_in + k` then took the SSE add (acc_in is a
+// genuine f64 param) but loaded the *unflagged* `k` operand via cvtsi2sd,
+// reinterpreting its IEEE-754 bits as an integer → garbage.
+//
+// Fixed in self-hosted/ir/lower.sio: expr_result_is_float_ref now has an ExprIf
+// case (arms join), and lower_if_expr_ref marks the merge register float when the
+// if-expression is float. lean_single always compiled this correctly.
+//
+// Both arms reachable: float condition (step_fcond) and int condition
+// (step_icond) — the latter proves the defect is the float *result* merge, not
+// the condition.
+
+fn step_fcond(acc_in: f64, numer: f64) -> f64 with Mut, Panic, Div {
+    var sigma_sq = 1.0
+    var j = 0
+    while j < 3 { sigma_sq = sigma_sq - 0.2; j = j + 1 }
+    let k = if sigma_sq > 1.0e-15 { numer / sigma_sq } else { 0.0 }
+    acc_in + k
+}
+
+fn step_icond(acc_in: f64, numer: f64) -> f64 with Mut, Panic, Div {
+    var sigma_sq = 1.0
+    var j = 0
+    while j < 3 { sigma_sq = sigma_sq - 0.2; j = j + 1 }
+    let k = if j == 3 { numer / sigma_sq } else { 0.0 }
+    acc_in + k
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    // sigma_sq = 1.0 - 0.2*3 = 0.4 ; k = 0.8 / 0.4 = 2.0 ; acc_in + k = 2.0
+    let r1 = step_fcond(0.0, 0.8)
+    let r2 = step_icond(0.0, 0.8)
+    if r1 > 1.9 && r1 < 2.1 && r2 > 1.9 && r2 < 2.1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}

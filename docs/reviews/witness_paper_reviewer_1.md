@@ -1,0 +1,60 @@
+<!-- docs:meta
+topic_id: repo.docs.reviews.witness-paper-reviewer-1
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reviews.witness-paper-reviewer-1
+-->
+
+# Review — "Witness-Based Compilation: When the Verdict Is Right but the Evidence Is Wrong"
+
+**Reviewer:** 1 (PL theory)
+**Paper:** `docs/papers/witness_based_compilation_2026-07-28.md`
+**Perspective:** type systems, formal verification, soundness/completeness, the invariance-group theory, strict refinement over token binding.
+**Artifact check:** I verified that the cited anchors exist and match the text: the witness-bound claim (`examples/epistemic/rupture_claims_verified.sio:183-188`, token and fingerprint as quoted), the real and perturbed gates (`scripts/ci/zd_fiber_spectra_witness_gate.sh`, `..._perturbed_gate.sh`), the executor's witness path (`self-hosted/compiler/claim_executor.sio:213-278, 573-591`), and the companion paper gate (`scripts/ci/witness_based_compilation_paper_gate.sh`). I did not re-run the gates.
+
+---
+
+## Summary
+
+The paper observes that a verifier bound to the *truth* of an empirical proposition is blind to transformations that preserve the proposition while replacing the *evidence* that established it. It formalises this via the invariance group Inv(p) of a proposition p and the stabiliser Stab(w) of an evidence function w, proves (trivially but correctly) that Stab(w) ≤ Inv(p) when p factors through w, and exhibits the gap on a real contract: a single Cayley–Dickson sign flip replaces all 24 spectra while their count stays 24. The proposed repair, *witness binding*, declares a SHA-256 fingerprint of the evidence in the claim and refuses code generation on mismatch; soundness/completeness relative to an idealised injective fingerprint is one line (Thm 2.11), and strict refinement over token binding is characterised (Thm 2.12). Implementation in the Sounio claim executor is demonstrated with a perturbed-twin gate that passes exit-code and token checks yet is refused with `CLAIM_WITNESS_MISMATCH`.
+
+## Strengths
+
+1. **The exactness of the blindness characterisation is real, not just a one-way implication.** Any two states with equal p are related by a transposition in Inv(p), so indistinguishability for the class of proposition-bound verifiers coincides with the Inv(p)-orbit relation. Theorem 2.8 is elementary but it is a complete scoping statement, and the paper is right that "exact" beats "anecdotal" here.
+2. **Theorem 2.12's converse is correct and mildly non-obvious.** The transposition construction showing that strictness on reachable states holds *iff* some σ ∈ Inv(p) ∖ Stab(w) maps reachable to reachable is the best piece of formal work in the paper. It converts an existential group condition into "p does not determine w on reachable states," which is the right criterion.
+3. **The exhibited witness of strictness is non-trivial and controlled.** The flip σ(H/2, H+H/2) is a concrete element of Inv(p) ∖ Stab(w) on a production contract, with generic flips changing the count as controls. This is what separates the paper from a toy example; most "resolution limit" observations never produce the group element.
+4. **Status discipline is exemplary.** Measured vs. derived claims are separated (§2.3), the open equivariance lemma is disclosed rather than hidden (§2.5), the inherited scope limit (shared misinterpretation) is stated in the theory section rather than the fine print, and 1-of-~295 deployment is admitted. This is how empirical PL work should report.
+5. **"What is Inv(p)?" is a genuinely useful design question** for authors of verified empirical claims, and Corollary 2.13 (classification claims are exactly the coarse ones) gives it teeth.
+
+## Weaknesses
+
+1. **The theory is set theory, not PL theory.** S is an unstructured set of "everything relevant"; there is no operational semantics, no program model, no transition relation, and — critically — no definition of *reachable*, a term that does load-bearing work in Theorem 2.12 (and again in §4.2, where reachability is silently bounded by a 30 s per-gate budget). Nothing in §2 uses anything about programs; claims run "after type-checking," yet the type system appears nowhere in the formalism. As a PLDI/OOPSLA/ICFP theory submission, the formal content is one page of elementary group theory over an unstructured set. Either develop the semantics (what is a state, what is a check as a mathematical object, what is reachable) or reposition the paper honestly as a systems/experience contribution with a scoping theorem.
+2. **The group language is vacuous on an unstructured state space.** Because transpositions always exist, blindness to Inv(p) is the same as blindness to the fibres of p, and Theorem 2.12's strictness condition collapses to "two reachable states with equal p and different w exist" — the group element adds nothing. The group framing would pay off only when S carries structure and Inv(p) is *computed* or at least constrained; the paper concedes (§2.5) that the group is characterised, not computed, and only elements are exhibited. As written, the group theory is a redescription of the partition p⁻¹ with better branding. The authors should either exploit structure (the Cayley–Dickson case has plenty) or say plainly that the group is a vocabulary, not a tool.
+3. **The formalism silently identifies the evidence in the world with the evidence the gate computed.** Def 2.2 makes w a function of the state; §3.4 fingerprints what the *gate emitted*. These coincide only if the gate deterministically and correctly extracts w(s). Nondeterministic or flaky gates, gate bugs, and world drift are indistinguishable to witness binding — all refuse the build — and the theory has no vocabulary to separate them, because there is no model of the check as an observation function distinct from p and w. Theorem 2.11's soundness is about the idealised w, not about the implemented mechanism; the gap should be named as a formal gap, not left to the "behaviour receipt" engineering substitute.
+4. **Prior-art gap that threatens the novelty framing.** Nix fixed-output derivations, Bazel's `repository_ctx.download(sha256=…)`, and go.sum all implement: declare a hash of an impure fetch/computation, and the build refuses when reality disagrees. A fixed-output derivation is non-hermetic on first build and bound to the world's fingerprint thereafter — that is very close to witness binding, and §6's positioning of reproducible builds as "the opposite design goal" never engages with this hybrid. The defensible novelty claim is narrower than the abstract's: the *combination* of proposition + verdict token + evidence fingerprint, enforced by a compiler after type-checking, is plausibly first. As written, "the first claim in any compiler whose build is conditioned on a fingerprint of its evidence" invites a one-line rebuttal.
+5. **Proposition 2.9 is wrong as stated.** For set-valued evidence (W = 2^X), "only those that fix the produced subset *pointwise* lie in Stab(w)" is false: a permutation of X that maps w(s) to itself *setwise* while permuting its elements internally also satisfies w ∘ σ = w. The stabiliser of set-valued evidence is the setwise stabiliser. This is the paper's only quantitative proposition, it is stated incorrectly, and the error is live — the implementation itself hashes sorted spectra, i.e., a set. The binomial count C(M,N) − 1 survives (it counts witness *values*, which the text should say explicitly), but the quantifier must be fixed.
+
+## Specific comments
+
+- **Def 2.3 / §2.2:** V_p is defined as [p(s) = 1], but the mechanism compares an emitted token *string* against a declared one. If tokens are arbitrary observations t : S → T, the three "grades" differ only in the observation function; there is no hierarchy by construction, only by what t aggregates. One sentence of generality would make the grading honest.
+- **Theorem 2.8, "exactly":** for a *fixed* verifier V (e.g., the constant-true verifier) blindness can be larger than Inv(p); exactness holds only for the class of verifiers factoring through p. The justifying transposition argument currently appears later, in Theorem 2.12's converse — cross-reference or reorder.
+- **Theorem 2.11:** the theorem's f operates on W; the implementation's f operates on a *serialisation* of W (sorted spectra). Injectivity requires canonical serialisation; the paper does the canonicalisation but never names it in the theory. Also state explicitly that completeness requires w deterministic in s — a flaky gate breaks "the correct evidence always passes" on legitimate rebuilds, and no retry/staleness policy is discussed (empirical lockfiles are deferred to future work).
+- **Inv(p) is enormous and mostly junk:** it includes all permutations of state components irrelevant to p and w. The blind spot is the orbit relation on the *support* of (p, w), not the group itself; restricting S or quotienting would sharpen every statement in §2 at no cost.
+- **No compositionality.** What is the witness of a conjunction of claims, or of a library's claims? The module-closure wall is acknowledged as engineering, but the theory offers no structure (no monoid of witnesses, no claim composition) that would guide lifting it. For a PL audience this is a conspicuous absence.
+- **Missed connections that would strengthen the paper.** (a) *Proof relevance / BHK*: "the proposition is not the evidence" is the founding distinction of constructive type theory; the contribution here is evidence that is *empirical* and *hash-identified* rather than a proof term, and saying so preempts the obvious ICFP-reviewer reaction. (b) *Abstract interpretation*: Theorem 2.12 is precisely an (in)completeness statement — token binding is complete relative to witness binding on reachable states iff no strictness witness exists — yet the Cousot citation is one paragraph that never uses the completeness vocabulary. (c) No formal link between Theorem 2.11 and the string-matching implementation; fine for systems, but name it.
+- **§2.3:** "verified mechanically for n = 5…12" — name the checker and the artifact location.
+- **§7 overreach:** "Compilation can now tell the difference" — one claim of ~295 can. Soften or scope to match §4.3's own honesty.
+
+## Overall recommendation
+
+**Weak reject** for a PL-theory track in current form.
+
+The core observation is correct, the case study is real and unusually well-controlled, and the reporting discipline is the best I have seen in an empirical PL-adjacent draft. But the formal core is elementary set theory over an unstructured state space with an undefined notion of reachability; the group-theoretic framing currently buys nothing that the partition p⁻¹ does not; the only quantitative proposition contains a false quantifier (pointwise for setwise); the world-evidence/gate-evidence identification hides the mechanism's real blind spot; and the novelty claim is exposed to a fixed-output-derivation rebuttal that §6 does not pre-empt. A revision that (i) fixes Proposition 2.9, (ii) defines states/reachability/checks semantically or repositions the paper, (iii) engages fixed-output derivations and proof relevance, and (iv) models the gate as an observation channel distinct from w would move this to weak accept for me — the phenomenon and the mechanism deserve publication, but not on the current theoretical framing alone.
+
+**Confidence:** 4/5 on the theory assessment (I checked every proof in §2 line by line; the errors flagged are certain). 3/5 on novelty — the fixed-output-derivation contrast is within my knowledge, but I cannot rule out a closer precedent in the build-systems literature, which is not my primary area.
+
+---
+
+*Review notes for the parent agent: this review file was authored directly; per `.claude/AGENT_OFFLOAD_POLICY.md` the mandatory offload applies to the paper itself (which I did not modify), not to review commentary. No commits were made.*

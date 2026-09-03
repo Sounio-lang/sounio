@@ -1,0 +1,120 @@
+//@ run-pass
+//@ requires: madaros
+use asn1::der::*
+use net::socket::*
+
+fn main() with IO {
+    // OCTET STRING copy: 04 03 AA BB CC
+    let os_buf = rawbuf_new(5)
+    rawbuf_set(&os_buf, 0, 0x04)
+    rawbuf_set(&os_buf, 1, 0x03)
+    rawbuf_set(&os_buf, 2, 0xAA)
+    rawbuf_set(&os_buf, 3, 0xBB)
+    rawbuf_set(&os_buf, 4, 0xCC)
+    let r1 = der_reader_new(&os_buf, 0, 5)
+    let (r1b, t1, s1) = der_read_tlv(&r1)
+    assert(s1 == DER_OK)
+    let out1 = rawbuf_new(3)
+    let copy_status1 = der_read_raw_bytes(&r1b, &t1, &out1, 0)
+    assert(copy_status1 == DER_OK)
+    assert(rawbuf_get(&out1, 0) == 0xAA)
+    assert(rawbuf_get(&out1, 1) == 0xBB)
+    assert(rawbuf_get(&out1, 2) == 0xCC)
+
+    // BIT STRING copy: 03 02 00 F0 -- the decoder makes no interpretation
+    // of the leading "unused bits" byte; it is copied like any other byte.
+    let bs_buf = rawbuf_new(4)
+    rawbuf_set(&bs_buf, 0, 0x03)
+    rawbuf_set(&bs_buf, 1, 0x02)
+    rawbuf_set(&bs_buf, 2, 0x00)
+    rawbuf_set(&bs_buf, 3, 0xF0)
+    let r2 = der_reader_new(&bs_buf, 0, 4)
+    let (r2b, t2, s2) = der_read_tlv(&r2)
+    assert(s2 == DER_OK)
+    let out2 = rawbuf_new(2)
+    let copy_status2 = der_read_raw_bytes(&r2b, &t2, &out2, 0)
+    assert(copy_status2 == DER_OK)
+    assert(rawbuf_get(&out2, 0) == 0x00)
+    assert(rawbuf_get(&out2, 1) == 0xF0)
+
+    // Adversarial: length field claims 5 bytes of content but the buffer
+    // (relative to the reader's own `end`) only has 2 left. 04 05 AA BB
+    // inside a reader whose end == 4.
+    let trunc_buf = rawbuf_new(4)
+    rawbuf_set(&trunc_buf, 0, 0x04)
+    rawbuf_set(&trunc_buf, 1, 0x05)
+    rawbuf_set(&trunc_buf, 2, 0xAA)
+    rawbuf_set(&trunc_buf, 3, 0xBB)
+    let r3 = der_reader_new(&trunc_buf, 0, 4)
+    let (_, s3) = der_peek_tag(&r3)
+    assert(s3 == DER_ERR_TRUNCATED)
+
+    // Adversarial: long-form length encoding 65537 (0x83 01 00 01), one
+    // over DER_MAX_LENGTH (65536). The buffer is sized to hold all 3
+    // length bytes so DER_ERR_LENGTH_TOO_LARGE fires rather than a
+    // spurious DER_ERR_TRUNCATED masking the real check.
+    let huge_buf2 = rawbuf_new(5)
+    rawbuf_set(&huge_buf2, 0, 0x04)
+    rawbuf_set(&huge_buf2, 1, 0x83)
+    rawbuf_set(&huge_buf2, 2, 0x01)
+    rawbuf_set(&huge_buf2, 3, 0x00)
+    rawbuf_set(&huge_buf2, 4, 0x01)
+    let r4 = der_reader_new(&huge_buf2, 0, 5)
+    let (_, s4) = der_peek_tag(&r4)
+    assert(s4 == DER_ERR_LENGTH_TOO_LARGE)
+
+    // Adversarial: non-minimal long-form length. 04 81 05 <5 bytes> encodes
+    // length 5 using one long-form byte, but 5 fits in short form -- this
+    // is non-minimal DER and must be rejected.
+    let nonmin_buf = rawbuf_new(8)
+    rawbuf_set(&nonmin_buf, 0, 0x04)
+    rawbuf_set(&nonmin_buf, 1, 0x81)
+    rawbuf_set(&nonmin_buf, 2, 0x05)
+    var i: i64 = 0
+    while i < 5 {
+        rawbuf_set(&nonmin_buf, 3 + i, 0xAA)
+        i = i + 1
+    }
+    let r5 = der_reader_new(&nonmin_buf, 0, 8)
+    let (_, s5) = der_peek_tag(&r5)
+    assert(s5 == DER_ERR_BAD_LENGTH_FORM)
+
+    // Adversarial: der_enter on a primitive tag must fail.
+    let prim_buf = rawbuf_new(3)
+    rawbuf_set(&prim_buf, 0, 0x02)
+    rawbuf_set(&prim_buf, 1, 0x01)
+    rawbuf_set(&prim_buf, 2, 0x05)
+    let r6 = der_reader_new(&prim_buf, 0, 3)
+    let (_, t6, s6) = der_read_tlv(&r6)
+    assert(s6 == DER_OK)
+    let (_, enter_status) = der_enter(&r6, &t6)
+    assert(enter_status == DER_ERR_NOT_CONSTRUCTED)
+
+    // Adversarial: indefinite-length rejection. Tag byte 04 (OCTET STRING)
+    // followed by length byte 0x80 alone -- BER's indefinite-length
+    // marker, which DER forbids.
+    let indef_buf = rawbuf_new(2)
+    rawbuf_set(&indef_buf, 0, 0x04)
+    rawbuf_set(&indef_buf, 1, 0x80)
+    let r7 = der_reader_new(&indef_buf, 0, 2)
+    let (_, s7) = der_peek_tag(&r7)
+    assert(s7 == DER_ERR_BAD_LENGTH_FORM)
+
+    // Adversarial: leading-zero long-form length rejection. Tag byte
+    // followed by 0x82 0x00 0xC8 -- long form declaring 2 length bytes,
+    // but the first is 0x00, a non-minimal encoding even though the
+    // resulting value (0x00C8 = 200) genuinely needs long form. Per
+    // der_peek_tag's checks, the leading-zero rejection happens before
+    // any content-truncation check, so the buffer only needs to hold the
+    // tag + length bytes -- no real content bytes are required.
+    let leadzero_buf = rawbuf_new(4)
+    rawbuf_set(&leadzero_buf, 0, 0x04)
+    rawbuf_set(&leadzero_buf, 1, 0x82)
+    rawbuf_set(&leadzero_buf, 2, 0x00)
+    rawbuf_set(&leadzero_buf, 3, 0xC8)
+    let r8 = der_reader_new(&leadzero_buf, 0, 4)
+    let (_, s8) = der_peek_tag(&r8)
+    assert(s8 == DER_ERR_BAD_LENGTH_FORM)
+
+    println("asn1_raw_bytes_and_errors: all cases passed")
+}

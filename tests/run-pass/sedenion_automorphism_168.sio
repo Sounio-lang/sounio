@@ -1,0 +1,196 @@
+//@ run-pass
+//@ expect-stdout: AUT OK
+// FRENTE B — the automorphism group behind every 168, executed exactly.
+//
+// The 168 = |PSL(2,7)| that pervades the sedenion geometry (ZD census, non-Fano, fibers, quartets)
+// IS a genuine group: the sedenion SIGNED-AUTOMORPHISM group. A linear map M in GL(4,2) (acting on
+// indices 1..15 as F_2^4 vectors, preserving xor) is a signed automorphism iff the sign ratio
+// sigma(Mi,Mj)*sigma(i,j) is a COBOUNDARY delta(eps)(i,j) = eps(i)eps(j)eps(i^j) for some signs eps.
+// This test counts them exactly:
+//   * octonions {1..7}: ALL 168 = |GL(3,2)| linear maps are signed automorphisms;
+//   * sedenions {1..15}: exactly 168 of the |GL(4,2)| = 20160 linear maps are  (= the SAME 168);
+//   * every sedenion automorphism FIXES e8 (index 8) — the doubling seam is the unique fixed point.
+// So 168 is the group Aut ~ PSL(2,7); 1848 = 11*168 is NOT a group order (the 11 is combinatorial).
+//
+// Decidable F_2 linear algebra + integer signs, no float. SELF-CONTAINED. Cross-verified vs
+// scripts/research/sedenion_automorphism_168_oracle.py by the matching gate + Lean file.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+// popcount parity of a small int
+fn par(x: i64) -> i64 with Mut, Panic, Div {
+    var c = 0
+    var b = 0
+    while b < 8 {
+        if (x & (1 << b)) != 0 { c = c + 1 }
+        b = b + 1
+    }
+    c & 1
+}
+
+// M is d rows (m0..m3), each a d-bit int. Apply to vector x (d bits): bit r = parity(row_r & x).
+fn apply(m0: i64, m1: i64, m2: i64, m3: i64, x: i64, d: i64) -> i64 with Mut, Panic, Div {
+    var y = 0
+    if par(m0 & x) == 1 { y = y | 1 }
+    if par(m1 & x) == 1 { y = y | 2 }
+    if d >= 3 { if par(m2 & x) == 1 { y = y | 4 } }
+    if d >= 4 { if par(m3 & x) == 1 { y = y | 8 } }
+    y
+}
+
+// F_2 rank of the d rows (d<=4) -> invertible iff rank == d.
+fn invertible(m0: i64, m1: i64, m2: i64, m3: i64, d: i64) -> bool with Mut, Panic, Div {
+    var r = [0; 4]
+    r[0 as usize] = m0
+    r[1 as usize] = m1
+    r[2 as usize] = m2
+    r[3 as usize] = m3
+    var rank = 0
+    var col = 0
+    while col < d {
+        var piv = 0 - 1
+        var i = rank
+        while i < d {
+            if piv < 0 && (r[i as usize] & (1 << col)) != 0 { piv = i }
+            i = i + 1
+        }
+        if piv >= 0 {
+            let tmp = r[rank as usize]
+            r[rank as usize] = r[piv as usize]
+            r[piv as usize] = tmp
+            var k = 0
+            while k < d {
+                if k != rank && (r[k as usize] & (1 << col)) != 0 { r[k as usize] = r[k as usize] ^ r[rank as usize] }
+                k = k + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank == d
+}
+
+// highest set bit of x>0 (x < 65536); returns 0 if x==0.
+fn highbit(x: i64) -> i64 with Mut, Panic, Div {
+    var h = 0
+    var b = 0
+    while b < 20 {
+        if (x & (1 << b)) != 0 { h = b }
+        b = b + 1
+    }
+    h
+}
+
+// Is M a signed automorphism? Build F_2 system a(i)+a(j)+a(i^j) = b(i,j) over vars 1..n-1,
+// b = 0 if sigma(Mi,Mj)*sigma(i,j)=+1 else 1. RIGOROUS highest-variable-bit pivoting (order-
+// independent): pivot[h] holds a mask whose variable part has highest bit h. Consistent => coboundary.
+fn is_auto(m0: i64, m1: i64, m2: i64, m3: i64, d: i64) -> bool with Mut, Panic, Div {
+    let n = 1 << d
+    var pivmask = [0; 16]   // pivot for each variable-highbit column (var bits shifted: 0..n-2)
+    var haspiv = [0; 16]
+    var i = 1
+    while i < n {
+        let mi = apply(m0, m1, m2, m3, i, d)
+        var j = i + 1
+        while j < n {
+            let mj = apply(m0, m1, m2, m3, j, d)
+            let k = i ^ j
+            let s = cd_sigma_c(mi, mj, d) * cd_sigma_c(i, j, d)
+            var m = (1 << i) | (1 << j) | (1 << k)   // variable bits in positions 1..n-1
+            if s < 0 { m = m | 1 }                    // bit 0 carries rhs (i,j,k >= 1 so bit0 free)
+            // reduce: while the variable part (m>>1) is nonzero, pivot by its highest bit
+            var done = 0
+            var guard = 0
+            while done == 0 && guard < n + 2 {
+                let vpart = (m >> 1)
+                if vpart == 0 {
+                    if (m & 1) != 0 { return false }  // 0 = 1 inconsistent
+                    done = 1
+                } else {
+                    let h = highbit(vpart)
+                    if haspiv[h as usize] == 0 {
+                        pivmask[h as usize] = m
+                        haspiv[h as usize] = 1
+                        done = 1
+                    } else {
+                        m = m ^ pivmask[h as usize]
+                    }
+                }
+                guard = guard + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn count_autos(d: i64, require_fix8: i64) -> i64 with Mut, Panic, Div {
+    let n = 1 << d
+    var cnt = 0
+    var m0 = 0
+    while m0 < n {
+        var m1 = 0
+        while m1 < n {
+            var m2 = 0
+            let m2cap = if d >= 3 { n } else { 1 }
+            while m2 < m2cap {
+                var m3 = 0
+                let m3cap = if d >= 4 { n } else { 1 }
+                while m3 < m3cap {
+                    if invertible(m0, m1, m2, m3, d) {
+                        if is_auto(m0, m1, m2, m3, d) {
+                            var ok = 1
+                            if require_fix8 == 1 {
+                                if apply(m0, m1, m2, m3, 8, d) != 8 { ok = 0 }
+                            }
+                            if ok == 1 { cnt = cnt + 1 }
+                        }
+                    }
+                    m3 = m3 + 1
+                }
+                m2 = m2 + 1
+            }
+            m1 = m1 + 1
+        }
+        m0 = m0 + 1
+    }
+    cnt
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let oct = count_autos(3, 0)
+    let sed = count_autos(4, 0)
+    let sed_fix8 = count_autos(4, 1)
+    print("OCT_AUTOS ")
+    print_int(oct)
+    print("\n")
+    print("SED_AUTOS ")
+    print_int(sed)
+    print("\n")
+    print("SED_FIX_E8 ")
+    print_int(sed_fix8)
+    print("\n")
+    // octonion Aut = 168 = |GL(3,2)| ; sedenion Aut = 168 (same PSL(2,7)) ; ALL fix e8 (168 = 168).
+    if oct == 168 && sed == 168 && sed_fix8 == 168 {
+        println("AUT OK")
+    } else {
+        println("AUT FAIL")
+    }
+}

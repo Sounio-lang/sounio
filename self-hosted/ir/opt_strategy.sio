@@ -51,11 +51,11 @@ pub fn ir_opt_remap_label(label_id: i64, label_offset: i64) -> i64 {
 
 // Scan the flat instruction array for the maximum vreg ID used (dst, src1, src2).
 // Returns -1 if no valid vregs found.
-pub fn ir_opt_max_vreg_ref(func: &IrFunction) -> i64 {
+pub fn ir_opt_max_vreg_ref(func: &IrFunction) -> i64 with Mut, Panic, Div {
     var max_id: i64 = -1
     var i: i64 = 0
     while i < (*func).instr_count {
-        let instr = (*func).instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r((*func).region, (i)))
         if instr.dst > max_id { max_id = instr.dst }
         if instr.src1 > max_id { max_id = instr.src1 }
         if instr.src2 > max_id { max_id = instr.src2 }
@@ -64,24 +64,24 @@ pub fn ir_opt_max_vreg_ref(func: &IrFunction) -> i64 {
     max_id
 }
 
-pub fn ir_opt_max_vreg(func: IrFunction) -> i64 {
+pub fn ir_opt_max_vreg(func: IrFunction) -> i64 with Mut, Panic, Div {
     ir_opt_max_vreg_ref(&func)
 }
 
 // Scan the flat instruction array for the maximum label_id (IrLabel, IrJump, IrBranch*).
 // Returns -1 if no labels found.
-pub fn ir_opt_max_label_ref(func: &IrFunction) -> i64 {
+pub fn ir_opt_max_label_ref(func: &IrFunction) -> i64 with Mut, Panic, Div {
     var max_id: i64 = -1
     var i: i64 = 0
     while i < (*func).instr_count {
-        let instr = (*func).instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r((*func).region, (i)))
         if instr.label_id > max_id { max_id = instr.label_id }
         i = i + 1
     }
     max_id
 }
 
-pub fn ir_opt_max_label(func: IrFunction) -> i64 {
+pub fn ir_opt_max_label(func: IrFunction) -> i64 with Mut, Panic, Div {
     ir_opt_max_label_ref(&func)
 }
 
@@ -112,7 +112,7 @@ pub fn ir_opt_clone_instr(
         imm_flags: instr.imm_flags,
         bin_op:    instr.bin_op,
         un_op:     instr.un_op,
-        name:      instr.name,
+        name_id: instr.name_id,
         call_args: instr.call_args,
         arg_count: instr.arg_count,
     }
@@ -125,20 +125,27 @@ pub fn ir_opt_clone_instr(
 // Helper: append one instruction to the output array and advance the count.
 // Mutating in place avoids copying the entire fixed-size instruction buffer
 // on every append during the dual-path rewrite.
+// #1649: writes through the arena region, not an inline [IrInstr; 4096].
+// IrFunction no longer HAS an inline instruction array. The reads in this file
+// were converted; this write path was not, and `&! out.instrs` survived the
+// build as `warning: unknown field access` rather than an error -- the checker
+// rejects a value read of a missing field but only warns on a borrow of one.
+// The resulting wild pointer crashed the self-test at T08 and took the
+// remaining ~1140 tests with it.
 pub fn ir_opt_append(
-    instrs: &! [IrInstr; 128],
+    region: IrInstrRegion,
     count: i64,
     instr: IrInstr
-) -> i64 with Mut, Panic {
-    if count < 128 {
-        (*instrs)[count as usize] = instr
+) -> i64 with Mut, Panic, Div {
+    if count < IR_MAX_INSTRS {
+        ir_arena_store(ir_region_slot_w(region, (count)), instr)
     }
     count + 1
 }
 
 pub fn ir_opt_apply_strategy_instrs_into(
     func: &IrFunction,
-    instrs: &! [IrInstr; 128],
+    out_region: IrInstrRegion,
     vreg_offset: i64,
     label_offset: i64,
     count: i64,
@@ -149,48 +156,48 @@ pub fn ir_opt_apply_strategy_instrs_into(
     let merge_label = label_offset + 2
 
     var out_count = count
-    out_count = ir_opt_append(instrs, out_count, ir_label(dispatch_label))
-    out_count = ir_opt_append(instrs, out_count, ir_branch_true((*func).param_regs[0], 0))
-    out_count = ir_opt_append(instrs, out_count, ir_jump(instr_label))
+    out_count = ir_opt_append(out_region, out_count, ir_label(dispatch_label))
+    out_count = ir_opt_append(out_region, out_count, ir_branch_true((*func).param_regs[0], 0))
+    out_count = ir_opt_append(out_region, out_count, ir_jump(instr_label))
 
     var fi: i64 = 0
     while fi < (*func).instr_count {
-        var orig = (*func).instrs[fi as usize]
+        var orig = ir_arena_load(ir_region_slot_r((*func).region, (fi)))
         if orig.op == IrOpcode::IrReturn {
             orig = ir_jump(merge_label)
         }
-        out_count = ir_opt_append(instrs, out_count, orig)
+        out_count = ir_opt_append(out_region, out_count, orig)
         fi = fi + 1
     }
-    out_count = ir_opt_append(instrs, out_count, ir_jump(merge_label))
-    out_count = ir_opt_append(instrs, out_count, ir_label(instr_label))
+    out_count = ir_opt_append(out_region, out_count, ir_jump(merge_label))
+    out_count = ir_opt_append(out_region, out_count, ir_label(instr_label))
 
     if (*func).prof_counter_id >= 0 {
-        out_count = ir_opt_append(instrs, out_count, ir_prof_counter((*func).prof_counter_id))
+        out_count = ir_opt_append(out_region, out_count, ir_prof_counter((*func).prof_counter_id))
     }
 
     var ii: i64 = 0
     while ii < (*func).instr_count {
-        var cloned = ir_opt_clone_instr((*func).instrs[ii as usize], vreg_offset, label_offset, (*func).param_count)
+        var cloned = ir_opt_clone_instr(ir_arena_load(ir_region_slot_r((*func).region, (ii))), vreg_offset, label_offset, (*func).param_count)
         if cloned.op == IrOpcode::IrReturn {
             cloned = ir_jump(merge_label)
         }
-        out_count = ir_opt_append(instrs, out_count, cloned)
+        out_count = ir_opt_append(out_region, out_count, cloned)
         ii = ii + 1
     }
-    out_count = ir_opt_append(instrs, out_count, ir_jump(merge_label))
-    out_count = ir_opt_append(instrs, out_count, ir_label(merge_label))
-    out_count = ir_opt_append(instrs, out_count, ir_return(merge_result_vreg))
+    out_count = ir_opt_append(out_region, out_count, ir_jump(merge_label))
+    out_count = ir_opt_append(out_region, out_count, ir_label(merge_label))
+    out_count = ir_opt_append(out_region, out_count, ir_return(merge_result_vreg))
     out_count
 }
 
 // Scan flat IrFunction for the first IrReturn and return its src1 (the result vreg).
 // Returns 0 as fallback if no IrReturn is found (functions with no explicit return).
 // Used by ir_opt_apply_strategy() to determine what vreg to return from the merge_block.
-pub fn ir_opt_find_return_vreg_ref(func: &IrFunction) -> i64 {
+pub fn ir_opt_find_return_vreg_ref(func: &IrFunction) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*func).instr_count {
-        let instr = (*func).instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r((*func).region, (i)))
         if instr.op == IrOpcode::IrReturn {
             return instr.src1
         }
@@ -199,7 +206,7 @@ pub fn ir_opt_find_return_vreg_ref(func: &IrFunction) -> i64 {
     0
 }
 
-pub fn ir_opt_find_return_vreg(func: IrFunction) -> i64 {
+pub fn ir_opt_find_return_vreg(func: IrFunction) -> i64 with Mut, Panic, Div {
     ir_opt_find_return_vreg_ref(&func)
 }
 
@@ -226,9 +233,13 @@ pub fn ir_opt_apply_strategy(func: IrFunction) -> IrFunction with Mut, Panic, Di
         pi = pi + 1
     }
 
+    // The region cannot come from ir_empty_function(): it hands back
+    // ir_region_invalid(), and a fresh module's slots would otherwise all share
+    // one region. Allocate here, exactly as the lowerer does per function.
+    ir_function_alloc_region(&! out)
     out.instr_count = ir_opt_apply_strategy_instrs_into(
         &func,
-        &! out.instrs,
+        out.region,
         vreg_offset,
         label_offset,
         0,
@@ -249,7 +260,7 @@ pub fn ir_opt_apply_strategy_into_ref(func: &IrFunction, out: &! IrFunction) wit
     let transformed = ir_opt_apply_strategy((*func))
     var i: i64 = 0
     while i < transformed.instr_count {
-        (*out).instrs[i as usize] = transformed.instrs[i as usize]
+        ir_arena_copy_slot(ir_region_slot_w((*out).region, (i)),ir_region_slot_r(transformed.region, (i)))
         i = i + 1
     }
     var pi: i64 = 0

@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.phase3-swarm-parallel-summary
 -->
 
-
 # Phase 3: Cross-File Analysis + Swarm Parallel Performance 🚀🔥
 
 ## Overview

@@ -8,6 +8,15 @@
 //   launch     admission + cuLaunchKernel with dummy params
 //   store_u32_const  launch + device writeback verification for 42
 //   vec_add_f32  launch + device vector add verification against CPU oracle
+//   vec_add_f64  launch + device vector add verification against CPU oracle
+//   vec_sub_f64  launch + device vector subtract verification against CPU oracle
+//   vec_mul_f64  launch + device vector multiply verification against CPU oracle
+//   vec_div_f64  launch + device vector divide verification against CPU oracle
+//   fma_f64  launch + device affine fused multiply-add verification
+//   vec_sub_f32  launch + device vector subtract verification against CPU oracle
+//   vec_mul_f32  launch + device vector multiply verification against CPU oracle
+//   vec_div_f32  launch + device vector divide verification against CPU oracle
+//   fma_f32  launch + device affine fused multiply-add verification
 //   epistemic_elementwise_f32  vec add kernel with nonzero epsilon lane
 //   epistemic_dual_lane_f32  two-launch value lane + uncertainty lane oracle
 //   epistemic_dual_output_f32  one launch, value + uncertainty output buffers
@@ -142,7 +151,7 @@ static unsigned char *read_all(const char *path, size_t *len_out) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags]\n", argv[0]);
+        fprintf(stderr, "usage: %s <cubin> <kernel> [admission|launch|store_u32_const|vec_add_f32|vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma_f64|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_elementwise_f32|epistemic_dual_lane_f32|epistemic_dual_output_f32|epistemic_dual_output_f32_l4cc_alias|epistemic_dual_output_f32_sm89_l4|epistemic_dual_output_f32_sm89_l4_layout|epistemic_dual_output_f32_sm89_l4_flags]\n", argv[0]);
         return 2;
     }
     const char *mode = argc >= 4 ? argv[3] : "admission";
@@ -150,10 +159,19 @@ int main(int argc, char **argv) {
         strcmp(mode, "launch") != 0 &&
         strcmp(mode, "store_u32_const") != 0 &&
         strcmp(mode, "vec_add_f32") != 0 &&
+        strcmp(mode, "vec_add_f64") != 0 &&
+        strcmp(mode, "vec_sub_f64") != 0 &&
+        strcmp(mode, "vec_mul_f64") != 0 &&
+        strcmp(mode, "vec_div_f64") != 0 &&
+        strcmp(mode, "fma_f64") != 0 &&
+        strcmp(mode, "vec_sub_f32") != 0 &&
+        strcmp(mode, "vec_mul_f32") != 0 &&
+        strcmp(mode, "vec_div_f32") != 0 &&
+        strcmp(mode, "fma_f32") != 0 &&
         strcmp(mode, "epistemic_elementwise_f32") != 0 &&
         strcmp(mode, "epistemic_dual_lane_f32") != 0 &&
         !is_dual_output_mode(mode)) {
-        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or a supported epistemic_dual_output_f32 diagnostic rung\n");
+        fprintf(stderr, "usage: mode must be admission, launch, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_lane_f32, or a supported epistemic_dual_output_f32 diagnostic rung\n");
         return 2;
     }
 
@@ -206,6 +224,15 @@ int main(int argc, char **argv) {
     LOAD_SYM_ALIAS(cuCtxDestroy, cuCtxDestroy_t, "cuCtxDestroy_v2", "cuCtxDestroy");
     if (strcmp(mode, "store_u32_const") == 0 ||
         strcmp(mode, "vec_add_f32") == 0 ||
+        strcmp(mode, "vec_add_f64") == 0 ||
+        strcmp(mode, "vec_sub_f64") == 0 ||
+        strcmp(mode, "vec_mul_f64") == 0 ||
+        strcmp(mode, "vec_div_f64") == 0 ||
+        strcmp(mode, "fma_f64") == 0 ||
+        strcmp(mode, "vec_sub_f32") == 0 ||
+        strcmp(mode, "vec_mul_f32") == 0 ||
+        strcmp(mode, "vec_div_f32") == 0 ||
+        strcmp(mode, "fma_f32") == 0 ||
         strcmp(mode, "epistemic_elementwise_f32") == 0 ||
         strcmp(mode, "epistemic_dual_lane_f32") == 0 ||
         is_dual_output_mode(mode)) {
@@ -291,13 +318,17 @@ int main(int argc, char **argv) {
         rc = cuMemFree(d_out);
         if (rc != 0) { emit_status("fail", "cuMemFree_failed", "cuMemFree", rc); cuModuleUnload(mod); cuCtxDestroy(ctx); free(cubin); return 1; }
         if (observed != 42u) {
-            printf("sounio_nvidia_bare_runtime status=fail reason=store_u32_const_mismatch stage=verify_store_u32_const cuda_result=0 observed_u32=%u expected_u32=42\n", observed);
+            printf("sounio_nvidia_bare_runtime status=fail reason=store_u32_const_mismatch stage=verify_store_u32_const cuda_result=0");
+            print_cuda_probe_suffix();
+            printf(" observed_u32=%u expected_u32=42\n", observed);
             cuModuleUnload(mod);
             cuCtxDestroy(ctx);
             free(cubin);
             return 1;
         }
-        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_store_u32_const_pass stage=cuMemcpyDtoH cuda_result=0 observed_u32=%u expected_u32=42\n", observed);
+        printf("sounio_nvidia_bare_runtime status=pass reason=runtime_store_u32_const_pass stage=cuMemcpyDtoH cuda_result=0");
+        print_cuda_probe_suffix();
+        printf(" observed_u32=%u expected_u32=42\n", observed);
         cuModuleUnload(mod);
         cuCtxDestroy(ctx);
         free(cubin);
@@ -619,9 +650,156 @@ dual_cleanup:
         return dual_failed ? 1 : 0;
     }
 
-    if (strcmp(mode, "vec_add_f32") == 0 || strcmp(mode, "epistemic_elementwise_f32") == 0) {
+    if (strcmp(mode, "vec_add_f64") == 0 ||
+        strcmp(mode, "vec_sub_f64") == 0 ||
+        strcmp(mode, "vec_mul_f64") == 0 ||
+        strcmp(mode, "vec_div_f64") == 0 ||
+        strcmp(mode, "fma_f64") == 0) {
+        const char *vec_label = mode;
+        int subtract = strcmp(mode, "vec_sub_f64") == 0;
+        int multiply = strcmp(mode, "vec_mul_f64") == 0;
+        int divide = strcmp(mode, "vec_div_f64") == 0;
+        int fma = strcmp(mode, "fma_f64") == 0;
+        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", 64, 1, 256);
+        size_t bytes = (size_t)n_arg * sizeof(double);
+        double *h_x = (double *)calloc(n_arg, sizeof(double));
+        double *h_y = (double *)calloc(n_arg, sizeof(double));
+        double *h_z = (double *)calloc(n_arg, sizeof(double));
+        double *h_out = (double *)calloc(n_arg, sizeof(double));
+        double *h_expected = (double *)calloc(n_arg, sizeof(double));
+        CUdeviceptr d_x = 0;
+        CUdeviceptr d_y = 0;
+        CUdeviceptr d_z = 0;
+        CUdeviceptr d_out = 0;
+        uint64_t x_arg = 0;
+        uint64_t y_arg = 0;
+        uint64_t z_arg = 0;
+        uint64_t out_arg = 0;
+        double max_abs_err = 0.0;
+        int vec_failed = 0;
+
+        if (!h_x || !h_y || !h_z || !h_out || !h_expected) {
+            emit_status("fail", "host_alloc_failed", "calloc", 0);
+            vec_failed = 1;
+            goto vec_f64_cleanup;
+        }
+
+        for (uint32_t i = 0; i < n_arg; i++) {
+            h_x[i] = (double)((int)(i % 17) - 8) * 0.5;
+            h_y[i] = (double)((int)(i % 11) - 5) * 1.25;
+            h_z[i] = (double)((int)(i % 13) - 6) * 0.125;
+            if (multiply || divide || fma) {
+                h_x[i] = (double)((int)(i % 19) + 1) * 0.25;
+                h_y[i] = (double)((int)(i % 7) + 1) * 0.5;
+            }
+            if (subtract) {
+                h_expected[i] = h_x[i] - h_y[i];
+            } else if (multiply) {
+                h_expected[i] = h_x[i] * h_y[i];
+            } else if (divide) {
+                h_expected[i] = h_x[i] / h_y[i];
+            } else if (fma) {
+                h_expected[i] = (h_x[i] * h_y[i]) + h_z[i];
+            } else {
+                h_expected[i] = h_x[i] + h_y[i];
+            }
+        }
+
+#define VEC_F64_FAIL(reason, stage, code) do { \
+            emit_status("fail", reason, stage, code); \
+            vec_failed = 1; \
+            goto vec_f64_cleanup; \
+        } while (0)
+
+        rc = cuMemAlloc(&d_x, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemAlloc_x_failed", "cuMemAlloc", rc);
+        rc = cuMemAlloc(&d_y, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemAlloc_y_failed", "cuMemAlloc", rc);
+        if (fma) {
+            rc = cuMemAlloc(&d_z, bytes);
+            if (rc != 0) VEC_F64_FAIL("cuMemAlloc_z_failed", "cuMemAlloc", rc);
+        }
+        rc = cuMemAlloc(&d_out, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemAlloc_out_failed", "cuMemAlloc", rc);
+        rc = cuMemcpyHtoD(d_x, h_x, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemcpyHtoD_x_failed", "cuMemcpyHtoD", rc);
+        rc = cuMemcpyHtoD(d_y, h_y, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemcpyHtoD_y_failed", "cuMemcpyHtoD", rc);
+        if (fma) {
+            rc = cuMemcpyHtoD(d_z, h_z, bytes);
+            if (rc != 0) VEC_F64_FAIL("cuMemcpyHtoD_z_failed", "cuMemcpyHtoD", rc);
+        }
+        rc = cuMemsetD32(d_out, 0, n_arg * 2);
+        if (rc != 0) VEC_F64_FAIL("cuMemsetD32_out_failed", "cuMemsetD32", rc);
+
+        x_arg = (uint64_t)d_x;
+        y_arg = (uint64_t)d_y;
+        z_arg = (uint64_t)d_z;
+        out_arg = (uint64_t)d_out;
+        void *vec3_params[] = { &x_arg, &y_arg, &out_arg };
+        void *fma_params[] = { &x_arg, &y_arg, &z_arg, &out_arg };
+        rc = cuLaunchKernel(fn, 1, 1, 1, n_arg, 1, 1, 0, NULL, fma ? fma_params : vec3_params, NULL);
+        if (rc != 0) VEC_F64_FAIL("cuLaunchKernel_failed", "cuLaunchKernel", rc);
+        rc = cuCtxSynchronize();
+        if (rc != 0) VEC_F64_FAIL("cuCtxSynchronize_failed", "cuCtxSynchronize", rc);
+        rc = cuMemcpyDtoH(h_out, d_out, bytes);
+        if (rc != 0) VEC_F64_FAIL("cuMemcpyDtoH_failed", "cuMemcpyDtoH", rc);
+
+        for (uint32_t i = 0; i < n_arg; i++) {
+            double err = h_out[i] - h_expected[i];
+            if (err < 0.0) err = -err;
+            if (err > max_abs_err) max_abs_err = err;
+        }
+        if (max_abs_err > 0.000000000001) {
+            printf("sounio_nvidia_bare_runtime status=fail reason=%s_mismatch stage=verify_%s cuda_result=0",
+                   vec_label,
+                   vec_label);
+            print_cuda_probe_suffix();
+            printf(" %s_n=%u %s_max_abs_err=%.17g observed0=%.17g expected0=%.17g observed_last=%.17g expected_last=%.17g\n",
+                   vec_label, n_arg,
+                   vec_label, max_abs_err,
+                   h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
+            vec_failed = 1;
+            goto vec_f64_cleanup;
+        }
+        printf("sounio_nvidia_bare_runtime status=pass reason=%s stage=cuMemcpyDtoH cuda_result=0",
+               divide ? "runtime_vec_div_f64_pass" : (multiply ? "runtime_vec_mul_f64_pass" : (fma ? "runtime_fma_f64_pass" : (subtract ? "runtime_vec_sub_f64_pass" : "runtime_vec_add_f64_pass"))));
+        print_cuda_probe_suffix();
+        printf(" %s_n=%u %s_max_abs_err=%.17g observed0=%.17g expected0=%.17g observed_last=%.17g expected_last=%.17g\n",
+               vec_label, n_arg,
+               vec_label, max_abs_err,
+               h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
+
+vec_f64_cleanup:
+        if (d_out) cuMemFree(d_out);
+        if (d_z) cuMemFree(d_z);
+        if (d_y) cuMemFree(d_y);
+        if (d_x) cuMemFree(d_x);
+        cuModuleUnload(mod);
+        cuCtxDestroy(ctx);
+        free(cubin);
+        free(h_expected);
+        free(h_out);
+        free(h_z);
+        free(h_y);
+        free(h_x);
+#undef VEC_F64_FAIL
+        return vec_failed ? 1 : 0;
+    }
+
+    if (strcmp(mode, "vec_add_f32") == 0 ||
+        strcmp(mode, "vec_sub_f32") == 0 ||
+        strcmp(mode, "vec_mul_f32") == 0 ||
+        strcmp(mode, "vec_div_f32") == 0 ||
+        strcmp(mode, "fma_f32") == 0 ||
+        strcmp(mode, "epistemic_elementwise_f32") == 0) {
+        const char *vec_label = mode;
+        int subtract = strcmp(mode, "vec_sub_f32") == 0;
+        int multiply = strcmp(mode, "vec_mul_f32") == 0;
+        int divide = strcmp(mode, "vec_div_f32") == 0;
+        int fma = strcmp(mode, "fma_f32") == 0;
         int epistemic = strcmp(mode, "epistemic_elementwise_f32") == 0;
-        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", epistemic ? 64 : 16, 1, 256);
+        uint32_t n_arg = (uint32_t)read_env_int("SOUNIO_NVIDIA_BARE_VEC_N", (epistemic || fma || multiply || divide) ? 64 : 16, 1, 256);
         size_t bytes = (size_t)n_arg * sizeof(float);
         float *h_x = (float *)calloc(n_arg, sizeof(float));
         float *h_y = (float *)calloc(n_arg, sizeof(float));
@@ -646,9 +824,14 @@ dual_cleanup:
         }
 
         for (uint32_t i = 0; i < n_arg; i++) {
-            h_x[i] = (float)((int)(i % 17) - 8) * 0.5f;
+            h_x[i] = (multiply || divide) ? 0.0f : (float)((int)(i % 17) - 8) * 0.5f;
             h_y[i] = (float)((int)(i % 11) - 5) * 1.25f;
-            h_eps[i] = epistemic ? ((float)((int)(i % 7) - 3) * 0.03125f) : 0.0f;
+            if (divide) {
+                float denom = (float)(1U << (i % 4));
+                h_eps[i] = (1.0f / denom) - 1.0f;
+            } else {
+                h_eps[i] = subtract ? -2.0f : ((multiply || epistemic || fma) ? ((float)((int)(i % 7) - 3) * 0.03125f) - (multiply ? 1.0f : 0.0f) : 0.0f);
+            }
             h_expected[i] = h_x[i] + h_y[i] * (1.0f + h_eps[i]);
         }
 
@@ -694,24 +877,24 @@ dual_cleanup:
         }
         if (max_abs_err > 0.000001f) {
             printf("sounio_nvidia_bare_runtime status=fail reason=%s_mismatch stage=verify_%s cuda_result=0",
-                   epistemic ? "epistemic_elementwise_f32" : "vec_add_f32",
-                   epistemic ? "epistemic_elementwise_f32" : "vec_add_f32");
+                   vec_label,
+                   vec_label);
             print_cuda_probe_suffix();
             printf(" %s_n=%u %s_max_abs_err=%.9g %s_eps_nonzero=%d observed0=%.9g expected0=%.9g observed_last=%.9g expected_last=%.9g\n",
-                   epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", n_arg,
-                   epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", max_abs_err,
-                   epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", epistemic,
+                   vec_label, n_arg,
+                   vec_label, max_abs_err,
+                   vec_label, (epistemic || subtract || multiply || divide || fma),
                    h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
             vec_failed = 1;
             goto vec_cleanup;
         }
         printf("sounio_nvidia_bare_runtime status=pass reason=%s stage=cuMemcpyDtoH cuda_result=0",
-               epistemic ? "runtime_epistemic_elementwise_f32_pass" : "runtime_vec_add_f32_pass");
+               divide ? "runtime_vec_div_f32_pass" : (multiply ? "runtime_vec_mul_f32_pass" : (fma ? "runtime_fma_f32_pass" : (subtract ? "runtime_vec_sub_f32_pass" : (epistemic ? "runtime_epistemic_elementwise_f32_pass" : "runtime_vec_add_f32_pass")))));
         print_cuda_probe_suffix();
         printf(" %s_n=%u %s_max_abs_err=%.9g %s_eps_nonzero=%d observed0=%.9g expected0=%.9g observed_last=%.9g expected_last=%.9g\n",
-               epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", n_arg,
-               epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", max_abs_err,
-               epistemic ? "epistemic_elementwise_f32" : "vec_add_f32", epistemic,
+               vec_label, n_arg,
+               vec_label, max_abs_err,
+               vec_label, (epistemic || subtract || multiply || divide || fma),
                h_out[0], h_expected[0], h_out[n_arg - 1], h_expected[n_arg - 1]);
 
 vec_cleanup:

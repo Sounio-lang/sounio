@@ -1,0 +1,93 @@
+// D15 live probe. Like every other file in tests/interop/, it carries no
+// harness annotation and is NOT part of the automated suite: it needs
+// outbound network access and the system CA bundle.
+//
+// WHAT THIS PROBE MEASURED (2026-08-27, after the ecdsa-with-SHA384 fix):
+// `tls_connect` against Cloudflare's `1.1.1.1:443` still returned
+// **-8** (TLS_CONNECT_ERR_CERT_CHAIN). That was the CORRECT result at the
+// time, and it corrected D15's own stated root cause, which was
+// incomplete.
+//
+// D15 recorded that `1.1.1.1` was blocked because its chain is signed
+// ecdsa-with-SHA384 while `ecdsa_p256_verify` only hashed with SHA-256.
+// The hash half of that is true and was fixed first. But fetching the
+// real chain (`openssl s_client -connect 1.1.1.1:443 -servername
+// cloudflare-dns.com -showcerts`) showed the other, larger half:
+//
+//   leaf          CN=cloudflare-dns.com                  key P-256
+//                 Signature Algorithm: ecdsa-with-SHA384
+//   intermediate  CN=SSL.com SSL Intermediate CA ECC R2  key **P-384**
+//                 Signature Algorithm: ecdsa-with-SHA384
+//
+// The leaf's signature was made by the intermediate's **P-384** key, so
+// verifying it needed P-384 curve arithmetic -- a different curve, not a
+// different hash. `stdlib/crypto/ecdsa_p256.sio` implements P-256 only, so
+// at that point `x509_verify_signature`'s algorithm guard rejected the
+// link fail-closed (measured directly).
+//
+// UPDATE (2026-08-27, madaros-ecdsa-p384-design plan, Task 6): P-384
+// support has since landed end to end -- curve constants and the verifier
+// (`stdlib/crypto/ecdsa_p384.sio`), the secp384r1 OID
+// (`stdlib/x509/oid.sio`), public-key parsing
+// (`PUBKEY_ALG_EC_P384` in `stdlib/x509/cert.sio`), and dispatch by issuer
+// algorithm in `x509_verify_signature` plus the trust-store guard. Re-run
+// live against the same host on the same date: `tls_connect` now returns
+// **0** and the chain VERIFIES. See
+// `tests/run-pass/x509_chain_ecdsa_p384_signature.sio` for the pinned,
+// openssl-independent, offline proof of the same curve-dispatch path
+// (real P-384 root signing a P-256 leaf), and
+// `tests/run-pass/x509_chain_ecdsa_p384_cross_curve_rejected.sio` for the
+// adversarial proof that an unrelated P-256 root is still rejected for
+// that same leaf. The ecdsa-with-SHA384 fix itself remains separately
+// proven against a real openssl-generated P-256-only chain in
+// `tests/run-pass/x509_chain_ecdsa_sha384_signature.sio`.
+//
+// NOTE: the pre-Task-4 regression test that used to pin this exact real
+// Cloudflare chain as REJECTED (`x509_ecdsa_sha384_p384_issuer_rejected.sio`,
+// which asserted `inter.public_key_algorithm == PUBKEY_ALG_UNKNOWN` and
+// `x509_verify_signature == false`) has been updated in place and renamed
+// to `tests/run-pass/x509_chain_ecdsa_p384_cloudflare_accepted.sio`: it
+// now asserts `PUBKEY_ALG_EC_P384` and `x509_verify_signature == true`,
+// matching the now-correct behaviour and this same live rc-0 result.
+//
+// Run: souc run tests/interop/tls_connect_1111_sha384_probe.sio
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let (store, terr) = trust_store_load()
+    if terr != 0 {
+        println("probe: trust_store_load failed")
+        print_int(terr)
+        return 1
+    }
+    println("probe: trust store roots:")
+    print_int(store.count as i64)
+
+    let host_text = "1.1.1.1"
+    let host_len = str_len(host_text)
+    let host = rawbuf_new(host_len + 8)
+    var hi: i64 = 0
+    while hi < host_len {
+        rawbuf_set(&host, hi, str_char_at(host_text, hi))
+        hi = hi + 1
+    }
+
+    let (conn, rc) = tls_connect(&host, host_len, 443 as u16, &store, now_unix())
+    println("probe: tls_connect rc (0 == handshake + chain verified;")
+    println("       -8 == TLS_CONNECT_ERR_CERT_CHAIN):")
+    print_int(rc)
+    if rc != 0 {
+        return 1
+    }
+    tls_close(conn)
+    println("probe: 1.1.1.1 chain VERIFIED")
+    return 0
+}

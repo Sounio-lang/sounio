@@ -1,0 +1,199 @@
+// stdlib/dataframe/pure/core.sio — DataFrame core operations.
+//
+// Flat fixed-array layout: max 4 columns, max 64 rows.
+//   data[col * 64 + row]  (64 rows per column)
+//
+// All functions are promoted directly from tests/stdlib_dataframe/test_dataframe_e2e.sio,
+// which validates them at 11/11 PASS. No new algorithms.
+
+module dataframe::pure::core
+
+pub struct DataFrame {
+    pub n_cols: i32,
+    pub n_rows: i32,
+    pub col_names: [string; 4],
+    pub data: [f64; 256],
+}
+
+pub fn df_new() -> DataFrame {
+    DataFrame { n_cols: 0, n_rows: 0, col_names: [""; 4], data: [0.0; 256] }
+}
+
+pub fn df_cell_idx(col: i32, row: i32) -> usize {
+    (col * 64 + row) as usize
+}
+
+pub fn df_get(df: &DataFrame, col: i32, row: i32) -> f64 {
+    df.data[df_cell_idx(col, row)]
+}
+
+pub fn df_set(df: &! DataFrame, col: i32, row: i32, v: f64) with Mut {
+    df.data[df_cell_idx(col, row)] = v
+}
+
+pub fn df_col_idx(df: &DataFrame, name: string) -> i32 with Mut {
+    var i: i32 = 0
+    while i < df.n_cols {
+        if df.col_names[i as usize] == name { return i }
+        i = i + 1
+    }
+    -1
+}
+
+pub fn df_head(df: &DataFrame, n: i32) -> DataFrame with Mut {
+    var out = df_new()
+    out.n_cols = df.n_cols
+    out.n_rows = if n < df.n_rows { n } else { df.n_rows }
+    var c: i32 = 0
+    while c < df.n_cols {
+        out.col_names[c as usize] = df.col_names[c as usize]
+        var r: i32 = 0
+        while r < out.n_rows {
+            out.data[df_cell_idx(c, r)] = df.data[df_cell_idx(c, r)]
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out
+}
+
+pub fn df_tail(df: &DataFrame, n: i32) -> DataFrame with Mut {
+    var out = df_new()
+    out.n_cols = df.n_cols
+    let take = if n < df.n_rows { n } else { df.n_rows }
+    let start = df.n_rows - take
+    out.n_rows = take
+    var c: i32 = 0
+    while c < df.n_cols {
+        out.col_names[c as usize] = df.col_names[c as usize]
+        var r: i32 = 0
+        while r < take {
+            out.data[df_cell_idx(c, r)] = df.data[df_cell_idx(c, start + r)]
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out
+}
+
+pub fn df_unique_count(df: &DataFrame, col_name: string) -> i32 with Mut {
+    let ci = df_col_idx(df, col_name)
+    if ci < 0 { return -1 }
+    var seen: [f64; 16] = [0.0; 16]
+    var n_seen: i32 = 0
+    var r: i32 = 0
+    while r < df.n_rows {
+        let v = df_get(df, ci, r)
+        var found: i32 = 0
+        var s: i32 = 0
+        while s < n_seen {
+            if seen[s as usize] == v { found = 1 }
+            s = s + 1
+        }
+        if found == 0 && n_seen < 16 {
+            seen[n_seen as usize] = v
+            n_seen = n_seen + 1
+        }
+        r = r + 1
+    }
+    n_seen
+}
+
+pub fn col_mean(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        sum = sum + data[i as usize]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+// Population variance (÷ n). Use col_covariance for sample variance (÷ n-1).
+pub fn col_variance(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let m = col_mean(data, n)
+    var v = 0.0
+    var i: i32 = 0
+    while i < n {
+        let d = data[i as usize] - m
+        v = v + d * d
+        i = i + 1
+    }
+    v / (n as f64)
+}
+
+pub fn f64_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    var i: i32 = 0
+    while i < 40 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+pub fn f64_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+pub fn col_std(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    f64_sqrt(col_variance(data, n))
+}
+
+pub fn col_correlation(xa: &[f64; 64], xb: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let ma = col_mean(xa, n)
+    let mb = col_mean(xb, n)
+    var num = 0.0
+    var da = 0.0
+    var db = 0.0
+    var i: i32 = 0
+    while i < n {
+        let a = xa[i as usize] - ma
+        let b = xb[i as usize] - mb
+        num = num + a * b
+        da = da + a * a
+        db = db + b * b
+        i = i + 1
+    }
+    let denom = f64_sqrt(da) * f64_sqrt(db)
+    if denom == 0.0 { return 0.0 }
+    num / denom
+}
+
+// Sample covariance (÷ n-1).
+pub fn col_covariance(xa: &[f64; 64], xb: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    let ma = col_mean(xa, n)
+    let mb = col_mean(xb, n)
+    var cov = 0.0
+    var i: i32 = 0
+    while i < n {
+        cov = cov + (xa[i as usize] - ma) * (xb[i as usize] - mb)
+        i = i + 1
+    }
+    cov / ((n - 1) as f64)
+}
+
+// Median via insertion sort. O(n²) — suitable for n ≤ 64.
+pub fn col_quantile_50(data: &[f64; 64], n: i32) -> f64 with Mut, Div {
+    var sorted: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < n {
+        sorted[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    var j: i32 = 1
+    while j < n {
+        let key = sorted[j as usize]
+        var k: i32 = j - 1
+        while k >= 0 && sorted[k as usize] > key {
+            sorted[(k + 1) as usize] = sorted[k as usize]
+            k = k - 1
+        }
+        sorted[(k + 1) as usize] = key
+        j = j + 1
+    }
+    if n % 2 == 0 {
+        (sorted[(n / 2 - 1) as usize] + sorted[(n / 2) as usize]) / 2.0
+    } else {
+        sorted[(n / 2) as usize]
+    }
+}

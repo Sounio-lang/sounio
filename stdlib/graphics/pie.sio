@@ -1,0 +1,194 @@
+// Graphics Pie — Pie chart rendering
+//
+// Simple raster pie charts (and donut) with angle-based slice determination.
+
+use graphics::drawing::{Color, color_white}
+use graphics::surface::{Surface, surface_new, surface_clear}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear, tiled_set_pixel, tiled_export_png}
+use graphics::png::{png_encode_surface}
+
+pub struct PieConfig {
+    pub cx: i64,
+    pub cy: i64,
+    pub radius: i64,
+    pub bg_color: Color,
+    pub donut: bool,
+    pub donut_radius: i64,
+}
+
+pub fn pie_config_default() -> PieConfig {
+    PieConfig {
+        cx: 128,
+        cy: 128,
+        radius: 100,
+        bg_color: color_white(),
+        donut: false,
+        donut_radius: 50,
+    }
+}
+
+pub fn draw_pie_raster(s: Surface, values: &[f64; 16], n: i64, colors: &[Color; 16], config: PieConfig) -> Surface with Mut, Panic, Div {
+    if n <= 0 || n > 16 { return s }
+    var out = s
+
+    var total: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        total = total + values[i]
+        i = i + 1
+    }
+    if total == 0.0 { return out }
+
+    var cumsum: [f64; 16] = [0.0; 16]
+    var running: f64 = 0.0
+    i = 0
+    while i < n {
+        running = running + values[i]
+        cumsum[i] = running / total
+        i = i + 1
+    }
+
+    let two_pi = 6.283185307179586
+    let radius_f = config.radius as f64
+    let donut_radius_f = config.donut_radius as f64
+
+    var py = config.cy - config.radius
+    while py <= config.cy + config.radius {
+        var px = config.cx - config.radius
+        while px <= config.cx + config.radius {
+            let dx = (px - config.cx) as f64
+            let dy = (py - config.cy) as f64
+            let dist = sqrt(dx * dx + dy * dy)
+
+            if dist <= radius_f {
+                let in_donut = config.donut && dist < donut_radius_f
+                if !in_donut {
+                    var angle = atan2(dy, dx)
+                    if angle < 0.0 {
+                        angle = angle + two_pi
+                    }
+                    let frac = angle / two_pi
+
+                    var slice_idx: i64 = 0
+                    while slice_idx < n {
+                        let end = cumsum[slice_idx]
+                        if frac < end {
+                            break
+                        }
+                        slice_idx = slice_idx + 1
+                    }
+                    if slice_idx >= n {
+                        slice_idx = n - 1
+                    }
+
+                    let c = colors[slice_idx]
+                    if px >= 0 && px < out.width && py >= 0 && py < out.height {
+                        let idx = py * out.width + px
+                        out.r[idx] = c.r
+                        out.g[idx] = c.g
+                        out.b[idx] = c.b
+                        out.a[idx] = c.a
+                    }
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+
+    out
+}
+
+pub fn tiled_draw_pie_raster(ts: TiledSurface, values: &[f64; 16], n: i64, colors: &[Color; 16], config: PieConfig) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 || n > 16 { return ts }
+    var out = ts
+
+    var total: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        total = total + values[i]
+        i = i + 1
+    }
+    if total == 0.0 { return out }
+
+    var cumsum: [f64; 16] = [0.0; 16]
+    var running: f64 = 0.0
+    i = 0
+    while i < n {
+        running = running + values[i]
+        cumsum[i] = running / total
+        i = i + 1
+    }
+
+    let two_pi = 6.283185307179586
+    let radius_f = config.radius as f64
+    let donut_radius_f = config.donut_radius as f64
+
+    var py = config.cy - config.radius
+    while py <= config.cy + config.radius {
+        var px = config.cx - config.radius
+        while px <= config.cx + config.radius {
+            let dx = (px - config.cx) as f64
+            let dy = (py - config.cy) as f64
+            let dist = sqrt(dx * dx + dy * dy)
+
+            if dist <= radius_f {
+                let in_donut = config.donut && dist < donut_radius_f
+                if !in_donut {
+                    var angle = atan2(dy, dx)
+                    if angle < 0.0 {
+                        angle = angle + two_pi
+                    }
+                    let frac = angle / two_pi
+
+                    var slice_idx: i64 = 0
+                    while slice_idx < n {
+                        let end = cumsum[slice_idx]
+                        if frac < end {
+                            break
+                        }
+                        slice_idx = slice_idx + 1
+                    }
+                    if slice_idx >= n {
+                        slice_idx = n - 1
+                    }
+
+                    let c = colors[slice_idx]
+                    out = tiled_set_pixel(out, px, py, c)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+
+    out
+}
+
+pub fn plot_pie_png(values: &[f64; 16], n: i64, colors: &[Color; 16], width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    var s = surface_new(width, height)
+    s = surface_clear(s, color_white())
+    var config = pie_config_default()
+    config.cx = width / 2
+    config.cy = height / 2
+    let min_dim = if width < height { width } else { height }
+    config.radius = min_dim / 2 - 10
+    if config.radius < 10 { config.radius = 10 }
+    s = draw_pie_raster(s, values, n, colors, config)
+    png_encode_surface(&s, filename)
+}
+
+pub fn tiled_plot_pie_png(values: &[f64; 16], n: i64, colors: &[Color; 16], width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    var config = pie_config_default()
+    config.cx = width / 2
+    config.cy = height / 2
+    let min_dim = if width < height { width } else { height }
+    config.radius = min_dim / 2 - 10
+    if config.radius < 10 { config.radius = 10 }
+    ts = tiled_draw_pie_raster(ts, values, n, colors, config)
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }

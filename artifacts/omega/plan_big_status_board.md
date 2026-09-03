@@ -1,6 +1,6 @@
 # Plan BIG Status Board
 
-- generated_at_utc: 2026-03-02T08:25:23Z
+- generated_at_utc: 2026-05-07T19:07:02Z
 - overall: attention
 - run_gates: true
 
@@ -13,10 +13,10 @@
 - lsp_smoke: pass
 
 ## UI Type Backlog
-- ignored_files: 38
+- ignored_files: 6
 - ready_count: 0
-- needs_fix_count: 0
-- still_blocked_count: 38
+- needs_fix_count: 6
+- still_blocked_count: 0
 - reclassify_candidates: 0
 - backlog_quality_status: pass
 
@@ -24,8 +24,8 @@
 - claude_plan_consistency: pass
 - claude_operational_contract: pass
 - lsp_smoke: pass
-- ui_type_deignore: fail
+- ui_type_deignore: pass
 - ui_type_backlog_quality: pass
 
 ## Workspace
-- git_dirty_count: 110
+- git_dirty_count: 139

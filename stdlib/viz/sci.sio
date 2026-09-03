@@ -1,0 +1,274 @@
+// stdlib/viz/sci.sio — Domain-specific scientific visualizations
+//
+// Specialised chart types for Sounio's physics and epistemic types:
+//   sci_lattice_heatmap   — Lattice64 as a 64-column heatmap
+//   sci_lattice_variance  — Lattice64 variance as a second heatmap layer
+//   sci_pbpk_series       — PBPK concentration-time with GUM uncertainty bands
+//   sci_mcmc_trace        — trace plot for one parameter of an MCMCChain
+//   sci_mcmc_histogram    — posterior histogram for one parameter
+
+use display::canvas::{Canvas, canvas_fill_rect}
+use display::canvas_ext::{canvas_draw_line_aa}
+use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
+use physics::phonon_quantity::{Lattice64}
+
+// ============================================================
+// Internal helpers
+// ============================================================
+
+fn sci_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+fn sci_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// Colormap: blue (cold, low) → red (hot, high)
+fn sci_heatmap_r(t: i64) -> i64 {
+    if t < 128 { t * 2 } else { 255 }
+}
+
+fn sci_heatmap_g(t: i64) -> i64 {
+    if t < 64 { 0 }
+    else if t < 128 { (t - 64) * 4 }
+    else if t < 192 { 255 - (t - 128) * 4 }
+    else { 0 }
+}
+
+fn sci_heatmap_b(t: i64) -> i64 {
+    if t < 128 { 255 - t * 2 } else { 0 }
+}
+
+// Variance overlay: orange tint proportional to variance ratio.
+fn sci_variance_r(t: i64) -> i64 { 220 }
+fn sci_variance_g(t: i64) -> i64 { sci_clamp(180 - t, 60, 180) }
+fn sci_variance_b(t: i64) -> i64 { 0 }
+
+// ============================================================
+// Lattice64 heatmap — 64 sites as columns, value as color
+// ============================================================
+
+pub fn sci_lattice_heatmap(
+    cs: &CoordSystem,
+    lat: &Lattice64,
+    c: &!Canvas,
+) with Mut, Div {
+    let n = lat.n
+    if n == 0 { return }
+
+    // Find min/max across sites
+    var vmin = lat.values[0]
+    var vmax = lat.values[0]
+    var i: i64 = 1
+    while i < n {
+        let v = lat.values[i as usize]
+        if v < vmin { vmin = v }
+        if v > vmax { vmax = v }
+        i = i + 1
+    }
+    let range = if vmax > vmin { vmax - vmin } else { 1.0 }
+
+    let cell_w = cs.screen_w / n
+    let cw = if cell_w < 1 { 1 } else { cell_w }
+
+    var j: i64 = 0
+    while j < n {
+        let v = lat.values[j as usize]
+        let t = sci_clamp(((v - vmin) / range * 255.0) as i64, 0, 255)
+        let cr = sci_heatmap_r(t)
+        let cg = sci_heatmap_g(t)
+        let cb = sci_heatmap_b(t)
+        canvas_fill_rect(c, cs.screen_x + j * cw, cs.screen_y, cw, cs.screen_h, cr, cg, cb)
+        j = j + 1
+    }
+}
+
+// Draw variance as a semi-transparent orange overlay on top of an existing heatmap.
+pub fn sci_lattice_variance(
+    cs: &CoordSystem,
+    lat: &Lattice64,
+    c: &!Canvas,
+) with Mut, Div {
+    let n = lat.n
+    if n == 0 { return }
+
+    var vmax: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = lat.variances[i as usize]
+        if v > vmax { vmax = v }
+        i = i + 1
+    }
+    if vmax == 0.0 { return }
+
+    let cell_w = cs.screen_w / n
+    let cw = if cell_w < 1 { 1 } else { cell_w }
+
+    var j: i64 = 0
+    while j < n {
+        let var_v = lat.variances[j as usize]
+        let t = sci_clamp((var_v / vmax * 255.0) as i64, 0, 255)
+        // Overlay only upper portion of cell proportional to variance
+        let overlay_h = sci_clamp(t * cs.screen_h / 255, 1, cs.screen_h)
+        canvas_fill_rect(
+            c,
+            cs.screen_x + j * cw,
+            cs.screen_y,
+            cw, overlay_h,
+            sci_variance_r(t), sci_variance_g(t), sci_variance_b(t),
+        )
+        j = j + 1
+    }
+}
+
+// ============================================================
+// PBPK time series with GUM uncertainty bands
+// ============================================================
+//
+// vals[i], uncerts[i]: concentration value and GUM standard uncertainty
+// times[i]: time in data-space units
+
+pub fn sci_pbpk_series(
+    cs: &CoordSystem,
+    vals: &[f64; 1024],
+    uncerts: &[f64; 1024],
+    times: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n < 2 { return }
+
+    // Draw uncertainty envelope (band between val-u and val+u)
+    var i: i64 = 0
+    while i < n {
+        let sx   = coord_map_x(cs, times[i as usize])
+        let y_lo = coord_map_y(cs, vals[i as usize] - uncerts[i as usize])
+        let y_hi = coord_map_y(cs, vals[i as usize] + uncerts[i as usize])
+        let top    = if y_hi < y_lo { y_hi } else { y_lo }
+        let bottom = if y_hi > y_lo { y_hi } else { y_lo }
+        // Alternating-pixel transparency trick (every other pixel)
+        var py = top
+        while py <= bottom {
+            if (sx + py) % 2 == 0 {
+                canvas_fill_rect(c, sx - 1, py, 3, 1, 80, 160, 220)
+            }
+            py = py + 1
+        }
+        i = i + 1
+    }
+
+    // Draw center line (solid blue-white)
+    var j: i64 = 0
+    while j < n - 1 {
+        let sx0 = coord_map_x(cs, times[j as usize])
+        let sy0 = coord_map_y(cs, vals[j as usize])
+        let sx1 = coord_map_x(cs, times[(j + 1) as usize])
+        let sy1 = coord_map_y(cs, vals[(j + 1) as usize])
+        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, 120, 200, 255)
+        j = j + 1
+    }
+}
+
+// ============================================================
+// MCMC trace plot — param_idx column of chain.samples
+// ============================================================
+//
+// MCMCChain struct layout (as defined in stdlib/epistemic/mcmc.sio):
+//   samples: [f64; 65536]   -- flat: samples[sample_i * n_params + param_j]
+//   n_samples: i64
+//   n_params:  i64
+//
+// We accept the samples array directly to avoid importing the full MCMCChain.
+
+pub fn sci_mcmc_trace(
+    cs: &CoordSystem,
+    samples: &[f64; 65536],
+    n_samples: i64,
+    n_params: i64,
+    param_idx: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n_samples < 2 { return }
+    // Build x-axis (sample index) and y-axis (parameter value) arrays
+    // Draw as a line chart directly to avoid large stack allocations
+    var prev_sx = coord_map_x(cs, 0.0)
+    var prev_sy = coord_map_y(cs, samples[(param_idx) as usize])
+    var i: i64 = 1
+    while i < n_samples {
+        let idx = (i * n_params + param_idx) as usize
+        let val = samples[idx]
+        let sx = coord_map_x(cs, i as f64)
+        let sy = coord_map_y(cs, val)
+        canvas_draw_line_aa(c, prev_sx, prev_sy, sx, sy, 100, 200, 160)
+        prev_sx = sx
+        prev_sy = sy
+        i = i + 1
+    }
+}
+
+// ============================================================
+// MCMC posterior histogram for one parameter
+// ============================================================
+
+pub fn sci_mcmc_histogram(
+    cs: &CoordSystem,
+    samples: &[f64; 65536],
+    n_samples: i64,
+    n_params: i64,
+    param_idx: i64,
+    n_bins: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n_samples == 0 || n_bins <= 0 { return }
+
+    // Find range
+    var vmin = samples[param_idx as usize]
+    var vmax = samples[param_idx as usize]
+    var i: i64 = 0
+    while i < n_samples {
+        let v = samples[(i * n_params + param_idx) as usize]
+        if v < vmin { vmin = v }
+        if v > vmax { vmax = v }
+        i = i + 1
+    }
+    let range = if vmax > vmin { vmax - vmin } else { 1.0 }
+
+    // Bin counts (up to 64 bins)
+    let nb = if n_bins > 64 { 64 } else { n_bins }
+    var counts: [i64; 64] = [0; 64]
+    var j: i64 = 0
+    while j < n_samples {
+        let v = samples[(j * n_params + param_idx) as usize]
+        let bin = sci_clamp(((v - vmin) / range * (nb as f64)) as i64, 0, nb - 1)
+        counts[bin as usize] = counts[bin as usize] + 1
+        j = j + 1
+    }
+
+    // Find max count for normalization
+    var max_count: i64 = 1
+    var k: i64 = 0
+    while k < nb {
+        if counts[k as usize] > max_count { max_count = counts[k as usize] }
+        k = k + 1
+    }
+
+    // Draw bars
+    let bar_w = cs.screen_w / nb
+    let bw = if bar_w < 1 { 1 } else { bar_w }
+    var m: i64 = 0
+    while m < nb {
+        let bar_h = sci_clamp(counts[m as usize] * cs.screen_h / max_count, 1, cs.screen_h)
+        let px = cs.screen_x + m * bw
+        let py = cs.screen_y + cs.screen_h - bar_h
+        canvas_fill_rect(c, px, py, bw - 1, bar_h, 100, 180, 255)
+        m = m + 1
+    }
+}

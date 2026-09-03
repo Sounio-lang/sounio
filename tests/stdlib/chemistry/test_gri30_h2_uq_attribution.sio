@@ -1,0 +1,73 @@
+//@ run-pass
+//@ timeout: 120
+// The public attribution table must close to the reported one-sigma values.
+// This catches dropped sources, accidental per-step noise accumulation, and
+// ranking regressions without depending on a Python replica as an oracle.
+use chemistry::gri30_h2::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn rel(a: f64, b: f64, tol: f64) -> bool { absf(a - b) < tol * absf(b) }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let t = 1500.0;
+    let m = 1.0 / (82.057 * t);
+    var c0: [f64; 10] = [0.0; 10];
+    var u0: [f64; 10] = [0.0; 10];
+    c0[0] = m * 0.02;
+    c0[1] = 1.0e-11;
+    c0[3] = m * 0.01;
+    c0[8] = m * 0.97;
+    u0[0] = 0.01 * c0[0];
+    u0[3] = 0.01 * c0[3];
+
+    var y: [f64; 10] = [0.0; 10]
+    var u: [f64; 10] = [0.0; 10]
+    var contribution: [f64; 310] = [0.0; 310]
+    simulate_gri30_h2_epistemic_attributed_into(&c0, &u0, t, 1.0e-8, 10000 as i64, &!y, &!u, &!contribution)
+    var species: i64 = 0;
+    // The reactive H/O state is indices 0..7. N2 and AR are fixed bath
+    // components in this reduced mechanism and have no propagated input
+    // uncertainty in this protocol.
+    while species < 8 {
+        var total = 0.0;
+        var source: i64 = 0;
+        while source < 31 {
+            if contribution[species*31+source] < 0.0 { return 10 }
+            total = total + contribution[species*31+source];
+            source = source + 1;
+        }
+        let variance = u[species] * u[species];
+        if variance > 0.0 {
+            if !rel(total, variance, 1.0e-12) { return 20 + (species as i32) }
+        } else if total != 0.0 { return 30 + (species as i32) }
+        let top = g30_h2_uq_top3(&contribution, species);
+        if top[0] == top[1] || top[1] == top[2] || top[0] == top[2] { return 40 + (species as i32) }
+        if contribution[species*31+top[0]] < contribution[species*31+top[1]] { return 60 + (species as i32) }
+        if contribution[species*31+top[1]] < contribution[species*31+top[2]] { return 80 + (species as i32) }
+        species = species + 1;
+    }
+    // At this Cantera-pinned induction checkpoint, chain branching R10
+    // (H + O2 <=> O + OH) is the leading rate-uncertainty driver in each
+    // reported radical/product channel.
+    if g30_h2_uq_top3(&contribution, 1 as i64)[0] != 10 { return 90 }
+    if g30_h2_uq_top3(&contribution, 4 as i64)[0] != 10 { return 91 }
+    if g30_h2_uq_top3(&contribution, 5 as i64)[0] != 10 { return 92 }
+    if g30_h2_uq_top3(&contribution, 7 as i64)[0] != 10 { return 93 }
+
+    // A second invocation owns independent workspace storage and must not
+    // mutate the completed first result.
+    let first_y0 = y[0]
+    let first_u0 = u[0]
+    let first_c0 = contribution[0]
+    var y2: [f64; 10] = [0.0 - 1.0; 10]
+    var u2: [f64; 10] = [0.0 - 1.0; 10]
+    var contribution2: [f64; 310] = [0.0 - 1.0; 310]
+    simulate_gri30_h2_epistemic_attributed_into(&c0, &u0, t, 1.0e-8, 1 as i64, &!y2, &!u2, &!contribution2)
+    if y[0] != first_y0 || u[0] != first_u0 || contribution[0] != first_c0 { return 94 }
+    var total2 = 0.0
+    var source2: i64 = 0
+    while source2 < 31 { total2 = total2 + contribution2[source2]; source2 = source2 + 1 }
+    if !rel(total2, u2[0] * u2[0], 1.0e-12) { return 95 }
+    print("GRI30 H2 UQ ATTRIBUTION PASS\n");
+    0
+}

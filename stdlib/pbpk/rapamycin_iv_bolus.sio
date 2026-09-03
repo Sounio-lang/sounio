@@ -1,0 +1,259 @@
+// stdlib/pbpk/rapamycin_iv_bolus.sio — IV bolus rapamycin 2-compartment GUM
+//
+// Novel contribution: GUM variance propagation for IV bolus rapamycin in a
+// 2-compartment model (central → peripheral), with a 3-channel uncertainty
+// budget (ke, k12, k21). Completes the four-route delivery atlas.
+//
+// Sprint 16 dissertation finding: for IV administration, k12 (central→peripheral
+// distribution rate) dominates the 24h trough uncertainty — NOT ke (elimination),
+// despite ke being the parameter most often targeted by clinicians.
+//
+// ── Mechanistic unity of the route atlas ─────────────────────────────────────
+//
+//   Each delivery route has a characteristic primary flux; the dominant
+//   uncertainty source always governs that flux:
+//
+//   Stent (S12):    peripheral depot → central       → k21 dominant
+//   IV bolus (S16): central bolus  → peripheral      → k12 dominant
+//   Oral (S13–15):  gut bolus → central (absorption) → ka dominant
+//
+//   The IV bolus creates a large A1(0) = D_iv. Per-step budget injections scale
+//   as dt² × Var(param) × A². With k12_var = 1.56e-4 and ke_var = 8.41e-6,
+//   the distribution rate contributes 18.5× more variance per step than
+//   elimination, regardless of A1's magnitude.
+//
+// ── Why ke is irrelevant for IV ───────────────────────────────────────────────
+//
+//   Both ke and k12 terms scale as Var × A1². Their ratio is fixed:
+//   k12_var / ke_var ≈ 18.5. No amount of ke improvement changes conf or dom
+//   as long as k12_var remains at its standard value.
+//
+//   Even ke÷64 leaves conf=900 and dom=k12 — ke is structurally irrelevant
+//   for IV TDM under current PK population variance estimates.
+//
+// ── Second bottleneck after extreme k12 tightening ───────────────────────────
+//
+//   When k12_var is tightened below ke_var (at k12÷20 ≈ 7.8e-6 < ke_var 8.41e-6),
+//   dom shifts to ke. The crossover: k12÷16 (dom=k12) → k12÷25 (dom=ke).
+//
+// ── Standard IV scenario ──────────────────────────────────────────────────────
+//
+//   D_iv=1.5mg bolus, ke=0.01118 h⁻¹, k12=0.05, k21=0.005, Vc=75L
+//   dt=1h, n_steps=24 (24h trough)
+//   Results: dec=1 (THERAPEUTIC), conf=900, dom=1 (k12)
+//
+//   D=1.0mg → UNCERTAIN (trough at therapeutic window lower boundary; conf=900
+//   insufficient because concentration CI straddles 0.004 mg/L floor)
+//
+// ── Improvement hierarchy ─────────────────────────────────────────────────────
+//
+//   ke÷4   → unchanged (900/k12)   — ke irrelevant for IV
+//   ke÷64  → unchanged (900/k12)   — even extreme ke tightening is wasted
+//   k12÷4  → conf=950 (k12 still)  — distribution rate improvement crosses gate
+//   k12÷16 → conf=950, dom=k12 (barely: k12_var/16 ≈ 9.75e-6 > ke_var 8.41e-6)
+//   k12÷25 → conf=950, dom=ke      — ke surfaces as second bottleneck
+//
+// ── Clinical implication ──────────────────────────────────────────────────────
+//
+//   For IV rapamycin TDM, dense PK sampling around the distribution phase
+//   (Tmax for peripheral: ≈2–6h post-dose) to characterise k12 is the only
+//   intervention that improves epistemic certainty. Measuring elimination rate
+//   more accurately is a wasted diagnostic resource for IV dosing.
+//
+// ── Budget channel indices ─────────────────────────────────────────────────────
+//   0 = ke (elimination)         ← second bottleneck when k12 tightened ÷25
+//   1 = k12 (distribution rate)  ← dominant
+//   2 = k21 (return rate)        ← minor
+//
+// Effect annotations:
+//   classify_iv_trough:        with Epistemic, Mut, Div, Panic
+//   conf_iv_trough:            with Mut, Div, Panic
+//   dom_iv_trough:             with Mut, Div, Panic
+//   classify_standard_iv:      with Epistemic, Mut, Div, Panic
+//   conf_standard_iv:          with Mut, Div, Panic
+//   dom_standard_iv:           with Mut, Div, Panic
+//   iv_k12_dominant:           with Mut, Div, Panic
+//   iv_ke_irrelevant:          with Mut, Div, Panic
+//   iv_k12_tighten_fires:      with Mut, Div, Panic
+//   iv_ke_second_bottleneck:   with Mut, Div, Panic
+
+module pbpk::rapamycin_iv_bolus
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_clinical::{
+    assess_trough, conf_from_rel,
+    decision_therapeutic, decision_uncertain
+}
+
+fn iv_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn iv_argmax3(b0: f64, b1: f64, b2: f64) -> i64 {
+    var idx = 0; var dv = b0
+    if b1 > dv { idx = 1; dv = b1 }
+    if b2 > dv { idx = 2 }
+    idx
+}
+
+// ── classify_iv_trough ─────────────────────────────────────────────────────────
+// IV bolus: A1(0)=d_iv, A2(0)=0, dt=1h (hardcoded), n_steps steps.
+// Returns trough classification at t_end = n_steps hours.
+
+pub fn classify_iv_trough(
+    ke_val: f64, ke_var: f64,
+    k12_val: f64, k12_var: f64,
+    k21_val: f64, k21_var: f64,
+    d_iv: f64, vc: f64, n_steps: i64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + j11;  let g12 = j12
+    let g21 = j21;         let g22 = 1.0 + j22
+
+    var a1 = d_iv;  var a2 = 0.0
+    var v1 = 0.0;   var v2 = 0.0
+
+    var step = 0
+    while step < n_steps {
+        let new_a1 = a1 + (j11 * a1 + j12 * a2)
+        let new_a2 = a2 + (j21 * a1 + j22 * a2)
+        let cke  = ke_var  * a1 * a1
+        let ck12 = k12_var * a1 * a1
+        let ck21 = k21_var * a2 * a2
+        let new_v1 = g11*g11*v1 + g12*g12*v2 + cke + ck12 + ck21
+        let new_v2 = g21*g21*v1 + g22*g22*v2 + k12_var*a1*a1 + k21_var*a2*a2
+        a1 = new_a1; a2 = new_a2; v1 = new_v1; v2 = new_v2
+        step = step + 1
+    }
+    let c_t   = a1 / vc
+    let std_t = iv_sqrt(v1) / vc
+    let conf  = conf_from_rel(c_t, std_t)
+    let c_ep  = Epistemic::new(c_t, v1 / (vc * vc), conf)
+    assess_trough(&c_ep)
+}
+
+// ── conf_iv_trough ─────────────────────────────────────────────────────────────
+
+pub fn conf_iv_trough(
+    ke_val: f64, ke_var: f64,
+    k12_val: f64, k12_var: f64,
+    k21_val: f64, k21_var: f64,
+    d_iv: f64, vc: f64, n_steps: i64
+) -> i64 with Mut, Div, Panic {
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + j11;  let g12 = j12
+    let g21 = j21;         let g22 = 1.0 + j22
+
+    var a1 = d_iv;  var a2 = 0.0
+    var v1 = 0.0;   var v2 = 0.0
+
+    var step = 0
+    while step < n_steps {
+        let new_a1 = a1 + (j11 * a1 + j12 * a2)
+        let new_a2 = a2 + (j21 * a1 + j22 * a2)
+        let cke  = ke_var  * a1 * a1
+        let ck12 = k12_var * a1 * a1
+        let ck21 = k21_var * a2 * a2
+        let new_v1 = g11*g11*v1 + g12*g12*v2 + cke + ck12 + ck21
+        let new_v2 = g21*g21*v1 + g22*g22*v2 + k12_var*a1*a1 + k21_var*a2*a2
+        a1 = new_a1; a2 = new_a2; v1 = new_v1; v2 = new_v2
+        step = step + 1
+    }
+    let c_t   = a1 / vc
+    let std_t = iv_sqrt(v1) / vc
+    conf_from_rel(c_t, std_t)
+}
+
+// ── dom_iv_trough ──────────────────────────────────────────────────────────────
+
+pub fn dom_iv_trough(
+    ke_val: f64, ke_var: f64,
+    k12_val: f64, k12_var: f64,
+    k21_val: f64, k21_var: f64,
+    d_iv: f64, vc: f64, n_steps: i64
+) -> i64 with Mut, Div, Panic {
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + j11;  let g12 = j12
+    let g21 = j21;         let g22 = 1.0 + j22
+    let g11sq = g11 * g11
+
+    var a1 = d_iv;  var a2 = 0.0
+    var v1 = 0.0;   var v2 = 0.0
+    var bud_ke = 0.0;  var bud_k12 = 0.0;  var bud_k21 = 0.0
+
+    var step = 0
+    while step < n_steps {
+        let new_a1 = a1 + (j11 * a1 + j12 * a2)
+        let new_a2 = a2 + (j21 * a1 + j22 * a2)
+        let cke  = ke_var  * a1 * a1
+        let ck12 = k12_var * a1 * a1
+        let ck21 = k21_var * a2 * a2
+        let new_v1 = g11*g11*v1 + g12*g12*v2 + cke + ck12 + ck21
+        let new_v2 = g21*g21*v1 + g22*g22*v2 + k12_var*a1*a1 + k21_var*a2*a2
+        a1 = new_a1; a2 = new_a2; v1 = new_v1; v2 = new_v2
+        bud_ke  = g11sq * bud_ke  + cke
+        bud_k12 = g11sq * bud_k12 + ck12
+        bud_k21 = g11sq * bud_k21 + ck21
+        step = step + 1
+    }
+    iv_argmax3(bud_ke, bud_k12, bud_k21)
+}
+
+// ── Standard variance constants ────────────────────────────────────────────────
+
+pub fn iv_ke_var_std()  -> f64 { 0.00000841 }
+pub fn iv_k12_var_std() -> f64 { 0.000156 }
+pub fn iv_k21_var_std() -> f64 { 0.0000016 }
+
+// ── Standard wrappers: D=1.5mg, standard PK, 24-step trough ───────────────────
+
+pub fn classify_standard_iv(ke_var: f64, k12_var: f64) -> i64
+    with Epistemic, Mut, Div, Panic {
+    classify_iv_trough(0.01118, ke_var, 0.05, k12_var,
+                       0.005, iv_k21_var_std(), 1.5, 75.0, 24)
+}
+
+pub fn conf_standard_iv(ke_var: f64, k12_var: f64) -> i64
+    with Mut, Div, Panic {
+    conf_iv_trough(0.01118, ke_var, 0.05, k12_var,
+                   0.005, iv_k21_var_std(), 1.5, 75.0, 24)
+}
+
+pub fn dom_standard_iv(ke_var: f64, k12_var: f64) -> i64
+    with Mut, Div, Panic {
+    dom_iv_trough(0.01118, ke_var, 0.05, k12_var,
+                  0.005, iv_k21_var_std(), 1.5, 75.0, 24)
+}
+
+// ── Gate summary functions ─────────────────────────────────────────────────────
+
+// k12 dominates at standard D=1.5mg, 24h trough
+pub fn iv_k12_dominant() -> bool with Mut, Div, Panic {
+    dom_standard_iv(iv_ke_var_std(), iv_k12_var_std()) == 1
+}
+
+// ke÷4 leaves dec/conf/dom unchanged — ke is structurally irrelevant for IV
+pub fn iv_ke_irrelevant() -> bool with Mut, Div, Panic {
+    let conf_base = conf_standard_iv(iv_ke_var_std(), iv_k12_var_std())
+    let conf_kei  = conf_standard_iv(iv_ke_var_std() / 4.0, iv_k12_var_std())
+    let dom_base  = dom_standard_iv(iv_ke_var_std(), iv_k12_var_std())
+    let dom_kei   = dom_standard_iv(iv_ke_var_std() / 4.0, iv_k12_var_std())
+    conf_base == conf_kei && dom_base == dom_kei
+}
+
+// k12÷4 → conf=950 (clinically meaningful improvement over 900 baseline)
+pub fn iv_k12_tighten_fires() -> bool with Mut, Div, Panic {
+    conf_standard_iv(iv_ke_var_std(), iv_k12_var_std() / 4.0) == 950
+}
+
+// k12÷25 → dom shifts to ke (second bottleneck, k12_var/25 < ke_var)
+pub fn iv_ke_second_bottleneck() -> bool with Mut, Div, Panic {
+    dom_standard_iv(iv_ke_var_std(), iv_k12_var_std() / 25.0) == 0
+}

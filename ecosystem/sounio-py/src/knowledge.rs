@@ -59,7 +59,7 @@ impl Knowledge {
     pub fn __repr__(&self) -> String {
         let unit_str = if self.unit.is_empty() { String::new() } else { format!(" {}", self.unit) };
         format!(
-            "Knowledge({:.4g} ± {:.4g}{}, confidence={:.2f})",
+            "Knowledge({} ± {}{}, confidence={})",
             self.value, self.uncertainty, unit_str, self.confidence
         )
     }
@@ -282,7 +282,7 @@ pub fn measure(
 pub fn confidence_gate(k: &Knowledge, min_confidence: f64) -> PyResult<()> {
     if k.confidence < min_confidence {
         Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "confidence_gate failed: {:.4f} < {:.4f} (prov='{}')",
+            "confidence_gate failed: {} < {} (prov='{}')",
             k.confidence, min_confidence, k.prov,
         )))
     } else {

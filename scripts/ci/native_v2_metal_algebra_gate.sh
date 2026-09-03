@@ -62,58 +62,63 @@ run_oracle() {
 run_oracle "ossm_cpu_f64_oracle" "$ORACLE_OSSM" "PASS: GPU epistemic f64 O-SSM parity"
 run_oracle "sedenion_cpu_f64_oracle" "$ORACLE_SED" "PASS: GPU epistemic f64 S-SSM parity"
 
+# Pure-bash structural MSL walker (replaces python3 heredoc).
+# Per-row checks: kernel_name, metal_f64_policy, source_semantics=f64,
+# thread_position_in_grid, device float* present, no plain "double" or
+# "device double*" anywhere. Append results.tsv rows with same fields
+# (case_id, lane, path, status, detail) and same ordering as python.
 set +e
-python3 - "$MANIFEST" "$RESULTS_TSV" <<'PY'
-import pathlib
-import sys
-
-manifest = pathlib.Path(sys.argv[1])
-results = pathlib.Path(sys.argv[2])
-
-def append(case_id, lane, path, status, detail):
-    with results.open("a", encoding="utf-8") as f:
-        f.write(f"{case_id}\t{lane}\t{path}\t{status}\t{detail}\n")
-
-if not manifest.exists():
-    append("metal_manifest", "structural", str(manifest), "fail", "missing_manifest")
-    raise SystemExit(1)
-
-fail = 0
-with manifest.open("r", encoding="utf-8") as f:
-    header = f.readline().rstrip("\n").split("\t")
-    for line in f:
-        line = line.rstrip("\n")
-        if not line or line.startswith("#"):
-            continue
-        row = dict(zip(header, line.split("\t")))
-        case_id = row["case_id"]
-        path = pathlib.Path(row["kernel_path"])
-        kernel = row["kernel_name"]
-        policy = row["policy"]
-        if not path.exists():
-            append(case_id, "structural_msl", str(path), "fail", "missing_msl")
-            fail += 1
-            continue
-        text = path.read_text(encoding="utf-8")
-        checks = [
-            ("kernel_name", f"kernel void {kernel}" in text),
-            ("policy", f"sounio.metal_f64_policy={policy}" in text),
-            ("source_f64", "sounio.source_semantics=f64" in text),
-            ("thread_id", "thread_position_in_grid" in text),
-            ("device_float", "device float*" in text),
-            ("no_double", "double" not in text),
-            ("no_device_double", "device double*" not in text),
-        ]
-        bad = [name for name, ok in checks if not ok]
-        if bad:
-            append(case_id, "structural_msl", str(path), "fail", "missing_" + ",".join(bad))
-            fail += 1
-        else:
-            append(case_id, "structural_msl", str(path), "pass", "metal_f64_policy_structural_ok")
-
-raise SystemExit(1 if fail else 0)
-PY
-structural_rc=$?
+structural_rc=0
+if [[ ! -f "$MANIFEST" ]]; then
+  printf '%s\t%s\t%s\t%s\t%s\n' "metal_manifest" "structural" "$MANIFEST" "fail" "missing_manifest" >> "$RESULTS_TSV"
+  structural_rc=1
+else
+  # Manifest row floor: the structural loop appends exactly one results row
+  # per non-comment data row. An empty or header-only manifest runs the loop
+  # zero times, every count stays 0, and status computes "pass" -- an
+  # instrument that answered nothing certifying itself.
+  manifest_rows="$(tail -n +2 "$MANIFEST" | grep -vE '^[[:space:]]*(#|$)' | grep -c . || true)"
+  if [[ "$manifest_rows" -lt 1 ]]; then
+    echo "[native-v2-metal-algebra] FAIL: manifest $MANIFEST has no data rows -- nothing to verify" >&2
+    exit 1
+  fi
+  fail=0
+  # Skip header, read each row positionally (manifest schema:
+  # case_id, kernel_path, kernel_name, policy).
+  while IFS=$'\t' read -r case_id kernel_path kernel_name policy _rest; do
+    [[ -z "$case_id" ]] && continue
+    [[ "$case_id" == \#* ]] && continue
+    if [[ ! -f "$kernel_path" ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' "$case_id" "structural_msl" "$kernel_path" "fail" "missing_msl" >> "$RESULTS_TSV"
+      fail=$((fail + 1))
+      continue
+    fi
+    bad=()
+    grep -qF "kernel void $kernel_name" "$kernel_path" || bad+=("kernel_name")
+    grep -qF "sounio.metal_f64_policy=$policy" "$kernel_path" || bad+=("policy")
+    grep -qF "sounio.source_semantics=f64" "$kernel_path" || bad+=("source_f64")
+    grep -qF "thread_position_in_grid" "$kernel_path" || bad+=("thread_id")
+    grep -qF "device float*" "$kernel_path" || bad+=("device_float")
+    grep -qF "double" "$kernel_path" && bad+=("no_double")
+    grep -qF "device double*" "$kernel_path" && bad+=("no_device_double")
+    if [[ ${#bad[@]} -gt 0 ]]; then
+      detail="missing_$(IFS=,; echo "${bad[*]}")"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$case_id" "structural_msl" "$kernel_path" "fail" "$detail" >> "$RESULTS_TSV"
+      fail=$((fail + 1))
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' "$case_id" "structural_msl" "$kernel_path" "pass" "metal_f64_policy_structural_ok" >> "$RESULTS_TSV"
+    fi
+  done < <(tail -n +2 "$MANIFEST")
+  # Every data row must have answered exactly once (the loop appends one
+  # results row per case, pass or fail); a shortfall means rows were lost
+  # between the manifest and the results, not that the corpus was smaller.
+  structural_rows="$(awk -F'\t' '$2=="structural_msl"' "$RESULTS_TSV" | wc -l | tr -d ' ')"
+  if [[ "$structural_rows" -ne "$manifest_rows" ]]; then
+    echo "[native-v2-metal-algebra] FAIL: $structural_rows of $manifest_rows manifest rows produced results -- incomplete structural pass" >&2
+    exit 1
+  fi
+  [[ "$fail" -gt 0 ]] && structural_rc=1
+fi
 set -e
 if [[ "$structural_rc" -eq 0 ]]; then
   structural_passes="$(tail -n +2 "$RESULTS_TSV" | awk -F'\t' '$2=="structural_msl" && $4=="pass"{c++} END{print c+0}')"
@@ -145,71 +150,92 @@ else
   not_run_count=$((not_run_count + 1))
 fi
 
-python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$MANIFEST" "$SOUC_BIN" "$pass_count" "$not_run_count" "$fail_count" "$OUT_DIR" <<'PY'
-import csv
-import hashlib
-import json
-import pathlib
-import sys
+# Pure-bash summary JSON emitter (replaces python3 csv.DictReader + json.dump heredoc).
+# Status: "fail" if fail_count>0, "partial" if not_run_count>0 else "pass".
+# cases: TSV rows -> JSON array of objects (keys sorted alphabetically per row).
+# remaining_boundaries: 3 always-present + 1 conditional (only if not_run_count>0).
+if [[ "$fail_count" -gt 0 ]]; then
+  status_str="fail"
+elif [[ "$not_run_count" -gt 0 ]]; then
+  status_str="partial"
+else
+  status_str="pass"
+fi
 
-summary_path = pathlib.Path(sys.argv[1])
-results_path = pathlib.Path(sys.argv[2])
-manifest_path = pathlib.Path(sys.argv[3])
-souc_bin = sys.argv[4]
-pass_count = int(sys.argv[5])
-not_run_count = int(sys.argv[6])
-fail_count = int(sys.argv[7])
-out_dir = pathlib.Path(sys.argv[8])
+if [[ -f "$MANIFEST" ]]; then
+  MANIFEST_SHA256="$(sha256sum "$MANIFEST" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$MANIFEST" | awk '{print $1}')"
+else
+  MANIFEST_SHA256=""
+fi
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-with results_path.open("r", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f, delimiter="\t"))
-
-status = "pass"
-if fail_count:
-    status = "fail"
-elif not_run_count:
-    status = "partial"
-
-payload = {
-    "schema": "sounio.native_v2_metal_algebra.v1",
-    "status": status,
-    "target": "apple-metal-algebra",
-    "fallback_path": "none",
-    "host_callback": "none",
-    "souc_bin": souc_bin,
-    "manifest": str(manifest_path),
-    "manifest_sha256": sha256(manifest_path) if manifest_path.exists() else "",
-    "pass_count": pass_count,
-    "not_run_count": not_run_count,
-    "fail_count": fail_count,
-    "results_tsv": str(results_path),
-    "artifact_dir": str(out_dir),
-    "cases": rows,
-    "remaining_boundaries": [
-        "Apple Metal runtime requires xcrun, swiftc, and an Apple GPU host" if not_run_count else "",
-        "Metal f64 is represented by explicit Sounio lowering policy, not native MSL double",
-        "float2 compensated f64 lowering is named but not yet the promoted runtime policy",
-        "this gate does not prove tensor-core performance, ROCm, WebGPU, CUDA PTX parity, or DDC",
-    ],
+# Convert results.tsv to JSON array of objects with keys sorted alphabetically
+# (case_id, detail, lane, path, status — matches python json.dumps sort_keys=True).
+# awk emits one '{ ... }' object per row, comma-separated, wrapped in [].
+CASES_JSON="$(awk -F'\t' '
+function jsesc(s,    out, i, c) {
+  out = ""
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c == "\\") out = out "\\\\"
+    else if (c == "\"") out = out "\\\""
+    else if (c == "\n") out = out "\\n"
+    else if (c == "\r") out = out "\\r"
+    else if (c == "\t") out = out "\\t"
+    else out = out c
+  }
+  return out
 }
-payload["remaining_boundaries"] = [x for x in payload["remaining_boundaries"] if x]
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if fail_count:
-    raise SystemExit(1)
-PY
+NR==1 { next }   # skip header
+NR>1 && NF>=5 {
+  if (printed) printf ",\n"
+  printed = 1
+  printf "    {\n"
+  printf "      \"case_id\": \"%s\",\n", jsesc($1)
+  printf "      \"detail\": \"%s\",\n", jsesc($5)
+  printf "      \"lane\": \"%s\",\n",    jsesc($2)
+  printf "      \"path\": \"%s\",\n",    jsesc($3)
+  printf "      \"status\": \"%s\"\n",   jsesc($4)
+  printf "    }"
+}
+END { if (printed) printf "\n" }
+' "$RESULTS_TSV")"
+CASES_JSON="[
+$CASES_JSON
+  ]"
 
-summary_status="$(python3 - "$SUMMARY_JSON" <<'PY'
-import json, sys
-print(json.load(open(sys.argv[1]))["status"])
-PY
-)"
+# remaining_boundaries: filter empty per python `[x for x in ... if x]`.
+boundaries_args=()
+if [[ "$not_run_count" -gt 0 ]]; then
+  boundaries_args+=("Apple Metal runtime requires xcrun, swiftc, and an Apple GPU host")
+fi
+boundaries_args+=("Metal f64 is represented by explicit Sounio lowering policy, not native MSL double")
+boundaries_args+=("float2 compensated f64 lowering is named but not yet the promoted runtime policy")
+boundaries_args+=("this gate does not prove tensor-core performance, ROCm, WebGPU, CUDA PTX parity, or DDC")
+boundaries_joined="$(IFS='|'; echo "${boundaries_args[*]}")"
+
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --string "artifact_dir=$OUT_DIR" \
+  --raw-json "cases=$CASES_JSON" \
+  --int    "fail_count=$fail_count" \
+  --string "fallback_path=none" \
+  --string "host_callback=none" \
+  --string "manifest=$MANIFEST" \
+  --string "manifest_sha256=$MANIFEST_SHA256" \
+  --int    "not_run_count=$not_run_count" \
+  --int    "pass_count=$pass_count" \
+  --array-strings "remaining_boundaries=$boundaries_joined" \
+  --string "results_tsv=$RESULTS_TSV" \
+  --string "schema=sounio.native_v2_metal_algebra.v1" \
+  --string "souc_bin=$SOUC_BIN" \
+  --string "status=$status_str" \
+  --string "target=apple-metal-algebra" \
+  > "$SUMMARY_JSON"
+
+if [[ "$fail_count" -gt 0 ]]; then
+  exit 1
+fi
+
+summary_status="$("$ROOT_DIR/bin/kretikos" kaxi-validate-evidence "$SUMMARY_JSON" --print "status")"
 
 echo "[native-v2-metal-algebra] status=$summary_status summary=$SUMMARY_JSON"
 if [[ "$summary_status" == "fail" ]]; then

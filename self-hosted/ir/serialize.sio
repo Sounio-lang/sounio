@@ -48,6 +48,17 @@ let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 4
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
+// Detectable capacity refusal. Returning ir_empty_module() on an oversized
+// fn_count / string_count (or ir_empty_function() on an oversized instr_count)
+// used to be a silent clamp: the caller could not tell "empty input" from
+// "refused because it would write past the buffer". Incremented on every
+// capacity refuse so a gate / test can observe that deserialize declined.
+pub var SOIR_DESER_REFUSAL_COUNT: i64 = 0
+
+fn soir_note_deser_refusal() with Mut {
+    SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
+}
+
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     b[pos] = val
@@ -274,6 +285,8 @@ fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64
         IrOpcode::IrRollbackTransition => 32,
         IrOpcode::IrDebugGuard => 33,
         IrOpcode::IrProfCounter => 34,
+        IrOpcode::IrCallSret => 35,
+        IrOpcode::IrReturnSret => 36,
     }
     write_i8(buf, pos, tag)
 }
@@ -317,6 +330,8 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
         else if tag == 32 { IrOpcode::IrRollbackTransition }
         else if tag == 33 { IrOpcode::IrDebugGuard }
         else if tag == 34 { IrOpcode::IrProfCounter }
+        else if tag == 35 { IrOpcode::IrCallSret }
+        else if tag == 36 { IrOpcode::IrReturnSret }
         else { IrOpcode::IrNop }
     (op, next_pos)
 }
@@ -525,7 +540,7 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
         imm_flags: 0,
         bin_op: bin_op,
         un_op: un_op,
-        name: name,
+        name_id: ir_intern_name(name),
         call_args: ir_empty_reg_list(),  // Not serialized
         arg_count: arg_count,
     }
@@ -580,7 +595,7 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
-        let instr_pair = serialize_ir_instr(b, p, func.instrs[j])
+        let instr_pair = serialize_ir_instr(b, p, ir_arena_load(ir_region_slot_r(func.region, (j))))
         b = instr_pair.0
         p = instr_pair.1
         j = j + 1
@@ -638,27 +653,52 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         p = hyper_alg_pair.1
     }
 
-    // Read instructions
-    var instrs: [IrInstr; 2048] = [ir_nop(); 2048]
+    // Read instructions into the arena (post-#1649: IrFunction has `region`,
+    // not an inline `instrs` array). Allocate a region sized to instr_count,
+    // then store each deserialized instruction at its slot. instr_count is
+    // bounded by IR_MAX_INSTRS; a larger count is refused below.
+    if instr_count < 0 || instr_count > IR_MAX_INSTRS {
+        // Refuse an oversized function rather than allocating past the arena.
+        soir_note_deser_refusal()
+        let empty = ir_empty_function()
+        return (empty, p)
+    }
+    var region = ir_region_invalid()
+    if instr_count > 0 {
+        let alloc_rc = ir_instr_arena_alloc(instr_count, &! region)
+        if alloc_rc != IR_ARENA_OK {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+    }
     var j: i64 = 0
     while j < instr_count {
         let instr_pair = deserialize_ir_instr(buf, p)
-        instrs[j] = instr_pair.0
+        ir_arena_store(ir_region_slot_w(region, (j)), instr_pair.0)
         p = instr_pair.1
         j = j + 1
     }
 
     let func = IrFunction {
         name: name,
-        instrs: instrs,
+        region: region,
         instr_count: instr_count,
         reg_count: reg_count,
         label_count: label_count,
         param_count: param_count,
         param_regs: param_regs,
         compile_strategy: compile_strategy,
+        returns_float: 0,
+        return_struct_name: ir_empty_name(),
+        return_fixed_array_len: 0 - 1,
         prof_counter_id: prof_counter_id,
         hyper_algebra_kind: hyper_algebra_kind,
+        is_sret: 0,
+        sret_dest_reg: -1,
+        bss_size: 0,
+        first_param_is_ref: 0,
+        float_reg_bits: [0; 64],
     }
     (func, p)
 }
@@ -3489,6 +3529,14 @@ fn read_hyper_expr_info(buf: [i8; 131072], pos: i64) -> (IrHyperExprInfo, i64) w
         algebra_tag: algebra_tag,
         op_kind: op_kind,
         knowledge_wrapped: knowledge_wrapped,
+        grade_mask: -1,
+        grade_known: false,
+        cl_p: 0,
+        cl_q: 0,
+        reassoc_strategy: 0,
+        forbidden_law_mask: 0,
+        law_profile_source: 0,
+        law_profile_fingerprint: 0,
     }, p)
 }
 
@@ -4442,8 +4490,20 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let fn_count = fn_count_pair.0
     pos = fn_count_pair.1
 
-    // Read functions
-    var functions: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    // Read functions.
+    // The array literal MUST match IR_MAX_FUNCS (ir.sio:35). Sounio array sizes
+    // are literals; the coherence gate verifies IR_MAX_FUNCS. The runtime bounds
+    // check below uses IR_MAX_FUNCS directly, so an oversized module is REFUSED
+    // (returns empty module) rather than written past the buffer.
+    if fn_count < 0 || fn_count > IR_MAX_FUNCS {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    // Literal MUST equal IR_MAX_FUNCS. Sounio array sizes are compile-time
+    // literals, so this cannot be written `[IrFunction; IR_MAX_FUNCS]`.
+    // scripts/ci/irfunction_instr_capacity_coherence_gate.sh fails if the
+    // handwritten 16384 drifts from the constant.
+    var functions: [IrFunction; 16384] = [ir_empty_function(); 16384]
     var i: i64 = 0
     while i < fn_count {
         let func_pair = deserialize_ir_function(buf, pos, version)
@@ -4457,7 +4517,13 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let string_count = string_count_pair.0
     pos = string_count_pair.1
 
-    // Read string table
+    // Read string table. Literal matches IR_MAX_STRINGS (ir.sio:36).
+    // Refuse oversized modules rather than writing past the buffer.
+    if string_count < 0 || string_count > IR_MAX_STRINGS {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    // Literal MUST equal IR_MAX_STRINGS; same gate as the function table.
     var string_table: [Name; 4096] = [ir_empty_name(); 4096]
     var j: i64 = 0
     while j < string_count {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 CANONICAL_DOC="${SOUNIO_CLAUDE_CANONICAL_DOC:-.claude/PLAN_CANONICAL_EXECUTION.md}"
+PLAN_ORIGINAL_DOC="${SOUNIO_CLAUDE_PLAN_ORIGINAL_DOC:-docs/archived/PLAN_ORIGINAL.md}"
 
 search_fixed() {
   local file="$1"
@@ -92,12 +93,12 @@ assert_historical_redirect() {
   assert_contains_literal "$file" ".claude/PROMPT_EXECUTION_CONTRACT.md"
 }
 
-require_file "PLAN_ORIGINAL.md"
+require_file "$PLAN_ORIGINAL_DOC"
 require_file "$CANONICAL_DOC"
 require_file ".claude/OPERATIONAL_CANONICAL_INDEX.md"
 require_file ".claude/PROMPT_EXECUTION_CONTRACT.md"
 
-assert_order_in_file "PLAN_ORIGINAL.md"
+assert_order_in_file "$PLAN_ORIGINAL_DOC"
 assert_order_in_file "$CANONICAL_DOC"
 
 assert_has_marker "$CANONICAL_DOC" "CANONICAL_PRECEDENCE_START"
@@ -117,8 +118,8 @@ assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/sessio
 
 assert_contains_literal ".claude/PROMPT_EXECUTION_CONTRACT.md" ".claude/PLAN_CANONICAL_EXECUTION.md"
 
-if [[ -x "scripts/check_prompt_execution_contract.sh" ]]; then
-  bash scripts/check_prompt_execution_contract.sh
+if [[ -x "scripts/ci/check_prompt_execution_contract.sh" ]]; then
+  bash scripts/ci/check_prompt_execution_contract.sh
 fi
 
 if [[ -f ".claude/plan.md" ]]; then

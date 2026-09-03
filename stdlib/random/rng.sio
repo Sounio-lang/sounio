@@ -44,112 +44,66 @@ fn splitmix64_next(rng: SplitMix64) -> (SplitMix64, i64) {
 // PCG64 — DEFAULT GENERATOR
 // ============================================================================
 
-// PCG64 state (simplified for interpreter)
-struct Pcg64 {
-    state_hi: i64,
-    state_lo: i64,
-    inc_hi: i64,
-    inc_lo: i64,
+// R.3.1 Phase D — Pcg64 unified via type alias over canonical PcgState.
+// The R.2.8/R.2.9 deferred wiring lands here: TUP_CACHE_KEY collisions
+// in Pass 1c.5 are now resolved (R.3.1 compiler patch).
+use stdlib::random::pcg64_core::{
+    PcgState, pcg_u_lt, pcg_umod, pcg_step, pcg_next_f64, pcg_next_f64_nonzero,
 }
 
+type Pcg64 = PcgState
+
 fn pcg64_new(seed: i64) -> Pcg64 {
-    // Initialize using SplitMix64
+    // Preserves the multi-stream design rng.sio was built around: each
+    // (seed, state_hi, state_lo, inc_hi, inc_lo) tuple is derived from
+    // four splitmix64 outputs, giving independent streams across seeds.
+    // inc_hi|1 and inc_lo|1 ensure the stream constant is odd (PCG req).
     var sm = splitmix64_new(seed)
     let r1 = splitmix64_next(sm)
     sm = r1.0
     let s1 = r1.1
-
     let r2 = splitmix64_next(sm)
     sm = r2.0
     let s2 = r2.1
-
     let r3 = splitmix64_next(sm)
     sm = r3.0
     let s3 = r3.1
-
     let r4 = splitmix64_next(sm)
     let s4 = r4.1
-
-    Pcg64 {
+    PcgState {
         state_hi: s1,
         state_lo: s2,
-        inc_hi: s3 | 1,  // Ensure odd
+        inc_hi: s3 | 1,
         inc_lo: s4 | 1,
     }
 }
 
-fn pcg64_next_i64(rng: Pcg64) -> (Pcg64, i64) {
-    let old_state = rng.state_lo
+fn pcg64_next_i64(rng: Pcg64) -> (Pcg64, i64) { return pcg_step(rng) }
 
-    // Linear congruential update (simplified)
-    // state = state * MULTIPLIER + inc
-    let new_lo = rng.state_lo * 6364136223846793005 as i64 + rng.inc_lo
-    let new_hi = rng.state_hi + rng.inc_hi
+fn pcg64_next_f64(rng: Pcg64) -> (Pcg64, f64) { return pcg_next_f64(rng) }
 
-    // XSL-RR output function (simplified)
-    let xorshifted = (old_state >> 18) ^ old_state
-    let rot = (old_state >> 59) as i64
-    let result = xorshifted >> (rot & 63)
+fn pcg64_next_f64_nonzero(rng: Pcg64) -> (Pcg64, f64) { return pcg_next_f64_nonzero(rng) }
 
-    (Pcg64 {
-        state_hi: new_hi,
-        state_lo: new_lo,
-        inc_hi: rng.inc_hi,
-        inc_lo: rng.inc_lo,
-    }, result)
-}
-
-// Generate f64 in [0, 1)
-fn pcg64_next_f64(rng: Pcg64) -> (Pcg64, f64) {
-    let result = pcg64_next_i64(rng)
-    let new_rng = result.0
-    let bits = result.1
-
-    // Use upper bits for better distribution
-    let positive = if bits < 0 { 0 - bits } else { bits }
-    let fraction = (positive as f64) / 9223372036854775807.0
-
-    (new_rng, fraction)
-}
-
-// Generate f64 in (0, 1) — excludes 0
-fn pcg64_next_f64_nonzero(rng: Pcg64) -> (Pcg64, f64) {
-    var current = rng
-    var value = 0.0
-
-    // Keep generating until we get non-zero
-    var attempts = 0
-    while attempts < 10 {
-        let result = pcg64_next_f64(current)
-        current = result.0
-        value = result.1
-        if value > 0.0 {
-            return (current, value)
-        }
-        attempts = attempts + 1
-    }
-
-    // Fallback to small positive value
-    (current, 0.0000001)
-}
-
-// Generate bool with probability p
 fn pcg64_next_bool(rng: Pcg64, p: f64) -> (Pcg64, bool) {
-    let result = pcg64_next_f64(rng)
+    let result = pcg_next_f64(rng)
     (result.0, result.1 < p)
 }
 
-// Generate integer in [0, n)
 fn pcg64_bounded(rng: Pcg64, n: i64) -> (Pcg64, i64) {
-    let result = pcg64_next_i64(rng)
-    let new_rng = result.0
-    let x = result.1
-
-    // Simple modulo (with bias for simplicity)
-    let positive = if x < 0 { 0 - x } else { x }
-    let bounded = positive % n
-
-    (new_rng, bounded)
+    if n <= 0 { return (rng, 0) }
+    let neg_n = 0 - n
+    let threshold = pcg_umod(neg_n, n)
+    var current = rng
+    var attempts: i64 = 0
+    while attempts < 100 {
+        let r = pcg_step(current)
+        current = r.0
+        if !pcg_u_lt(r.1, threshold) {
+            return (current, pcg_umod(r.1, n))
+        }
+        attempts = attempts + 1
+    }
+    (current, 0)
 }
 
 // ============================================================================
@@ -221,11 +175,11 @@ fn xoshiro256_next_f64(rng: RngXoshiro256) -> (RngXoshiro256, f64) {
 // Since global mutable state isn't supported, we use a functional approach
 // where the RNG state is passed through and returned
 
-struct RngPcgWrapper {
+pub struct RngPcgWrapper {
     rng: Pcg64,
 }
 
-fn rng_pcg_new(seed: i64) -> RngPcgWrapper {
+pub fn rng_pcg_new(seed: i64) -> RngPcgWrapper {
     RngPcgWrapper { rng: pcg64_new(seed) }
 }
 
@@ -244,7 +198,7 @@ fn rng_pcg_next_bool(state: RngPcgWrapper, p: f64) -> (RngPcgWrapper, bool) {
     (RngPcgWrapper { rng: result.0 }, result.1)
 }
 
-fn rng_pcg_bounded(state: RngPcgWrapper, n: i64) -> (RngPcgWrapper, i64) {
+pub fn rng_pcg_bounded(state: RngPcgWrapper, n: i64) -> (RngPcgWrapper, i64) {
     let result = pcg64_bounded(state.rng, n)
     (RngPcgWrapper { rng: result.0 }, result.1)
 }
@@ -535,7 +489,7 @@ fn rng_fill_uniform(state: RngState, n: i32) -> (RngState, [f64; 256]) with Mut,
 
 // Fill first n elements with normal samples N(mu, sigma)
 // Returns (new_state, filled_array) — by-value for JIT compatibility
-fn rng_fill_normal(state: RngState, n: i32, mu: f64, sigma: f64) -> (RngState, [f64; 256]) with Mut, Div, Panic {
+pub fn rng_fill_normal(state: RngState, n: i32, mu: f64, sigma: f64) -> (RngState, [f64; 256]) with Mut, Div, Panic {
     var cur = state
     var arr: [f64; 256] = [0.0; 256]
     var i = 0

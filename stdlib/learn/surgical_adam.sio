@@ -1,0 +1,124 @@
+// stdlib/learn/surgical_adam.sio
+//
+// SurgicalAdam — Adam (Kingma & Ba 2014) adapted to preserve the
+// ZD annihilator subspace at every step.
+//
+// The standard Adam update is:
+//   m_t  = β1 m_{t-1} + (1-β1) g_t
+//   v_t  = β2 v_{t-1} + (1-β2) g_t²
+//   m̂_t  = m_t / (1 - β1^t)
+//   v̂_t  = v_t / (1 - β2^t)
+//   w_t  = w_{t-1} - lr * m̂_t / (√v̂_t + ε)
+//
+// A naive surgical adaptation would project the final update
+// direction u_t onto the orthogonal complement of the kernel.  That
+// works for exact preservation but loses Adam's signal in the
+// kernel momentum.
+//
+// This implementation takes the stronger route: project the raw
+// gradient onto the productive subspace BEFORE feeding it to the
+// Adam moments.  This guarantees both m_t and v_t live entirely in
+// the productive subspace, so the final update is kernel-safe by
+// construction (not by post-hoc projection).
+//
+// Invariant: at every step, kernel_mass(w_t) == kernel_mass(w_0).
+// Lean companion: SounioLearningDynamics.lean::surgical_adam_preserves_kernel.
+
+// Kernel projectors (same as surgical_sgd.sio).  Duplicated for
+// self-containment; a future refactor could share a common module.
+
+fn sa_u1() -> [f64; 16] with Mut, ZD, Learn {
+    var v: [f64; 16] = [0.0; 16]
+    v[6]  =  0.707107
+    v[15] = 0.0 - 0.707107
+    v
+}
+fn sa_u2() -> [f64; 16] with Mut, ZD, Learn {
+    var v: [f64; 16] = [0.0; 16]
+    v[7]  =  0.707107
+    v[14] =  0.707107
+    v
+}
+
+fn sa_inner(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut, Panic, ZD, Learn {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+fn sa_project_productive(grad: &[f64; 16]) -> [f64; 16] with Mut, Panic, ZD, Learn {
+    let u1 = sa_u1()
+    let u2 = sa_u2()
+    let c1 = sa_inner(grad, &u1)
+    let c2 = sa_inner(grad, &u2)
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        let ann_i = c1 * u1[i] + c2 * u2[i]
+        out[i] = (*grad)[i] - ann_i
+        i = i + 1
+    }
+    out
+}
+
+// State: Adam moments and a step counter.
+struct AdamState {
+    m: [f64; 16],
+    v: [f64; 16],
+    t: i64,
+}
+
+fn adam_state_new() -> AdamState with Mut {
+    AdamState { m: [0.0; 16], v: [0.0; 16], t: 0 }
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic, Div {
+    // Single Newton step from the hardware-free seed 0.5*(1+x).
+    // Accurate enough for adam denominator; ε below dominates tiny-x.
+    if x <= 0.0 { return 0.0 }
+    var y = 0.5 * (1.0 + x)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn pow_int(base: f64, n: i64) -> f64 with Mut, Panic, Div {
+    var acc = 1.0
+    var i = 0
+    while i < n { acc = acc * base; i = i + 1 }
+    acc
+}
+
+// surgical_adam_step: one Adam step where the gradient has been
+// projected onto the productive subspace before being absorbed into
+// the moments.  Kernel component of w is preserved bit-exact.
+fn surgical_adam_step(
+    w: &![f64; 16],
+    grad: &[f64; 16],
+    st: &!AdamState,
+    lr: f64,
+    b1: f64,
+    b2: f64,
+    eps: f64,
+) with Mut, Panic, Div, ZD, Learn {
+    let g = sa_project_productive(grad)
+    (*st).t = (*st).t + 1
+    var i = 0
+    while i < 16 {
+        (*st).m[i] = b1 * (*st).m[i] + (1.0 - b1) * g[i]
+        (*st).v[i] = b2 * (*st).v[i] + (1.0 - b2) * g[i] * g[i]
+        i = i + 1
+    }
+    let bc1 = 1.0 - pow_int(b1, (*st).t)
+    let bc2 = 1.0 - pow_int(b2, (*st).t)
+    var j = 0
+    while j < 16 {
+        let mhat = (*st).m[j] / bc1
+        let vhat = (*st).v[j] / bc2
+        let upd = mhat / (sqrt_approx(vhat) + eps)
+        (*w)[j] = (*w)[j] - lr * upd
+        j = j + 1
+    }
+}

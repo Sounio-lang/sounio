@@ -1,4 +1,5 @@
 //@ run-pass
+//@ expect-stdout: ALL 11 TESTS PASSED
 // interpolation.sio - Integration tests for interpolation algorithms
 //
 // Tests piecewise linear, natural cubic spline, Lagrange, and Akima
@@ -146,17 +147,19 @@ fn piecewise_linear_eval(interp: PiecewiseLinear, x: f64) -> f64 with Mut, Panic
 // NATURAL CUBIC SPLINE
 // ============================================================================
 
-fn cubic_spline_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> NaturalSpline with Mut, Panic, Div {
-    var spline = NaturalSpline {
-        xs: xs,
-        a: ys,
-        b: [0.0; 256],
-        c: [0.0; 256],
-        d: [0.0; 256],
-        n: n
+fn cubic_spline_fit_into(out: &!NaturalSpline, xs: [f64; 256], ys: [f64; 256], n: i32) with Mut, Panic, Div {
+    out.xs = xs
+    out.a = ys
+    out.n = n
+    var zi: i32 = 0
+    while zi < 256 {
+        out.b[zi] = 0.0
+        out.c[zi] = 0.0
+        out.d[zi] = 0.0
+        zi = zi + 1
     }
 
-    if n < 2 { return spline }
+    if n < 2 { return }
 
     var h: [f64; 256] = [0.0; 256]
     var i: i32 = 0
@@ -167,9 +170,9 @@ fn cubic_spline_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> NaturalSpline wit
 
     if n == 2 {
         if abs_f64(h[0]) > 1.0e-30 {
-            spline.b[0] = (ys[1] - ys[0]) / h[0]
+            out.b[0] = (ys[1] - ys[0]) / h[0]
         }
-        return spline
+        return
     }
 
     let m = n - 2
@@ -194,30 +197,45 @@ fn cubic_spline_fit(xs: [f64; 256], ys: [f64; 256], n: i32) -> NaturalSpline wit
         i = i + 1
     }
 
-    let c_interior = tridiag_solve(lower, diag, upper, rhs, m)
-
-    spline.c[0] = 0.0
-    i = 0
+    // Thomas algorithm inlined — tridiag_solve() array return is zeroed by codegen
+    var c_prime: [f64; 256] = [0.0; 256]
+    var d_prime: [f64; 256] = [0.0; 256]
+    var x_out: [f64; 256] = [0.0; 256]
+    c_prime[0] = upper[0] / diag[0]
+    d_prime[0] = rhs[0] / diag[0]
+    i = 1
     while i < m {
-        spline.c[i + 1] = c_interior[i]
+        c_prime[i] = upper[i] / (diag[i] - lower[i] * c_prime[i - 1])
+        d_prime[i] = (rhs[i] - lower[i] * d_prime[i - 1]) / (diag[i] - lower[i] * c_prime[i - 1])
         i = i + 1
     }
-    spline.c[n - 1] = 0.0
+    x_out[m - 1] = d_prime[m - 1]
+    i = m - 2
+    while i >= 0 {
+        x_out[i] = d_prime[i] - c_prime[i] * x_out[i + 1]
+        i = i - 1
+    }
+
+    out.c[0] = 0.0
+    i = 0
+    while i < m {
+        out.c[i + 1] = x_out[i]
+        i = i + 1
+    }
+    out.c[n - 1] = 0.0
 
     i = 0
     while i < n - 1 {
         let hi = h[i]
         if abs_f64(hi) < 1.0e-30 {
-            spline.b[i] = 0.0
-            spline.d[i] = 0.0
+            out.b[i] = 0.0
+            out.d[i] = 0.0
         } else {
-            spline.b[i] = (ys[i + 1] - ys[i]) / hi - hi * (2.0 * spline.c[i] + spline.c[i + 1]) / 3.0
-            spline.d[i] = (spline.c[i + 1] - spline.c[i]) / (3.0 * hi)
+            out.b[i] = (ys[i + 1] - ys[i]) / hi - hi * (2.0 * out.c[i] + out.c[i + 1]) / 3.0
+            out.d[i] = (out.c[i + 1] - out.c[i]) / (3.0 * hi)
         }
         i = i + 1
     }
-
-    return spline
 }
 
 fn cubic_spline_eval(spline: NaturalSpline, x: f64) -> f64 with Mut, Panic, Div {
@@ -497,7 +515,8 @@ fn test_cubic_spline_exact() -> bool with IO, Mut, Panic, Div {
     xs[3] = 3.0; ys[3] = 1.0
     xs[4] = 4.0; ys[4] = 0.0
 
-    let spline = cubic_spline_fit(xs, ys, 5)
+    var spline = NaturalSpline { xs: [0.0; 256], a: [0.0; 256], b: [0.0; 256], c: [0.0; 256], d: [0.0; 256], n: 0 }
+    cubic_spline_fit_into(&!spline, xs, ys, 5)
 
     var max_err: f64 = 0.0
     var i: i32 = 0
@@ -523,9 +542,10 @@ fn test_cubic_spline_smooth() -> bool with IO, Mut, Panic, Div {
     xs[3] = 3.0; ys[3] = 9.0
     xs[4] = 4.0; ys[4] = 16.0
 
-    let spline = cubic_spline_fit(xs, ys, 5)
+    var spline = NaturalSpline { xs: [0.0; 256], a: [0.0; 256], b: [0.0; 256], c: [0.0; 256], d: [0.0; 256], n: 0 }
+    cubic_spline_fit_into(&!spline, xs, ys, 5)
 
-    // Evaluate at fine grid and check that consecutive values differ smoothly
+    // Evaluate at fine grid
     var max_jump: f64 = 0.0
     var prev_val: f64 = cubic_spline_eval(spline, 0.0)
     let step = 0.01
@@ -560,7 +580,8 @@ fn test_cubic_spline_quadratic() -> bool with IO, Mut, Panic, Div {
     xs[3] = 3.0; ys[3] = 9.0
     xs[4] = 4.0; ys[4] = 16.0
 
-    let spline = cubic_spline_fit(xs, ys, 5)
+    var spline = NaturalSpline { xs: [0.0; 256], a: [0.0; 256], b: [0.0; 256], c: [0.0; 256], d: [0.0; 256], n: 0 }
+    cubic_spline_fit_into(&!spline, xs, ys, 5)
 
     // Test at interior points where the spline should closely match x^2.
     // Natural cubic spline reproduces quadratics exactly on interior intervals
@@ -599,7 +620,8 @@ fn test_cubic_spline_derivative() -> bool with IO, Mut, Panic, Div {
     xs[3] = 3.0; ys[3] = 9.0
     xs[4] = 4.0; ys[4] = 16.0
 
-    let spline = cubic_spline_fit(xs, ys, 5)
+    var spline = NaturalSpline { xs: [0.0; 256], a: [0.0; 256], b: [0.0; 256], c: [0.0; 256], d: [0.0; 256], n: 0 }
+    cubic_spline_fit_into(&!spline, xs, ys, 5)
 
     // For y=x^2, derivative should be 2x.
     // Test at interior points.

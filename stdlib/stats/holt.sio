@@ -1,0 +1,110 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/holt.sio — Holt's linear-trend exponential smoothing
+//
+// Double exponential smoothing: a level and a trend component, for series with
+// a (locally) linear trend but no seasonality:
+//
+//   holt(x, n, alpha, beta, h) -> HoltResult
+//
+//   ℓ₀ = x₀,  b₀ = x₁ − x₀,
+//   ℓₜ = α·xₜ + (1−α)(ℓₜ₋₁ + bₜ₋₁),
+//   bₜ = β(ℓₜ − ℓₜ₋₁) + (1−β)·bₜ₋₁,
+//   forecast(h) = ℓₙ₋₁ + h·bₙ₋₁.
+//
+// Pure Sounio: a single recurrence pass. No external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Holt (1957); Hyndman & Athanasopoulos, "Forecasting", §7.2.
+
+module stats::holt
+
+pub struct HoltResult {
+    pub level: f64,      // final level ℓ
+    pub trend: f64,      // final trend b
+    pub forecast: f64,   // ℓ + h·b
+    pub sse: f64,        // one-step forecast SSE
+}
+
+/// Holt's linear-trend exponential smoothing with an h-step forecast.
+///
+/// Parâmetros: x — series; n — length (>=3); alpha, beta — smoothing in (0,1];
+///             h — forecast horizon (>=1).
+/// Retorno: HoltResult (level, trend, forecast, sse).
+/// Referências: Holt (1957).
+pub fn holt(x: &[f64; 256], n: i32, alpha: f64, beta: f64, h: i32) -> HoltResult with Mut, Div, Panic {
+    if n < 3 { return HoltResult { level: 0.0, trend: 0.0, forecast: 0.0, sse: 0.0 } }
+    var l = x[0]
+    var b = x[1] - x[0]
+    var sse = 0.0
+    var t = 1
+    while t < n {
+        let fcast = l + b                    // one-step forecast for time t
+        let err = x[t as usize] - fcast
+        sse = sse + err * err
+        let l_prev = l
+        l = alpha * x[t as usize] + (1.0 - alpha) * (l + b)
+        b = beta * (l - l_prev) + (1.0 - beta) * b
+        t = t + 1
+    }
+    let forecast = l + (h as f64) * b
+    return HoltResult { level: l, trend: b, forecast: forecast, sse: sse }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect linear x={2,4,6,8}, alpha=beta=0.5. l0=2,b0=2.
+// t=1: l=4,b=2; t=2: l=6,b=2; t=3: l=8,b=2. forecast(h=2)=8+2·2=12.
+// one-step forecasts are exact (linear) -> SSE=0.
+fn test_holt() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=4.0; x[2]=6.0; x[3]=8.0
+    let r = holt(&x, 4, 0.5, 0.5, 2)
+    var ok = true
+    ok = check(1, approx(r.level, 8.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.trend, 2.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.forecast, 12.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.sse, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+// perfect linear captured for any alpha/beta: x={0,3,6,9,12}, forecast(1)=15.
+fn test_linear() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=3.0; x[2]=6.0; x[3]=9.0; x[4]=12.0
+    let r = holt(&x, 5, 0.4, 0.3, 1)
+    var ok = true
+    ok = check(10, approx(r.trend, 3.0, 1.0e-6)) && ok
+    ok = check(11, approx(r.forecast, 15.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_holt() && ok
+    ok = test_linear() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,102 @@
+
+// stdlib/stats/multiple_comparisons.sio — p-value adjustment for multiple tests
+//
+// When many hypotheses are tested at once the family-wise error inflates. These
+// procedures adjust the p-values (and count rejections at a level alpha):
+//
+//   bonferroni(p, m, alpha, out_adj)   -> n_rejected   (FWER, most conservative)
+//   holm(p, m, alpha, out_adj)         -> n_rejected   (FWER, step-down, uniformly better)
+//   bh_fdr(p, m, alpha, out_adj)       -> n_rejected   (FDR, Benjamini-Hochberg)
+//
+//   Bonferroni:  p_adj = min(1, m·p).
+//   Holm (step-down):  sort ascending, p_adj_(i) = max_{j<=i} min(1, (m-j+1)·p_(j)).
+//   BH (step-up FDR):  sort ascending, p_adj_(i) = min_{j>=i} min(1, (m/j)·p_(j)).
+//
+// `p` holds the m raw p-values; `out_adj` receives the adjusted p-values in the
+// SAME order (m <= 256). Only the existing stdlib piece is
+// stats::multiple_testing::holm_bonferroni; this adds Bonferroni and BH-FDR and a
+// consistent trio.
+//
+// Pure Sounio, no external dependency.
+//
+// References:
+//   Bonferroni (1936); Holm (1979) "A simple sequentially rejective multiple test
+//     procedure"; Benjamini & Hochberg (1995) "Controlling the false discovery rate"
+
+module stats::multiple_comparisons
+
+fn mc_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn mc_count_rejected(out_adj: &[f64; 64], m: i32, alpha: f64) -> i64 {
+    var c = 0
+    var i = 0
+    while i < m { if out_adj[i as usize] <= alpha { c = c + 1 }; i = i + 1 }
+    return c as i64
+}
+
+/// Bonferroni: p_adj = min(1, m·p). Returns the number rejected at `alpha`.
+pub fn bonferroni(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic {
+    let mf = m as f64
+    var i = 0
+    while i < m { out_adj[i as usize] = mc_min(1.0, mf * p[i as usize]); i = i + 1 }
+    return mc_count_rejected(out_adj, m, alpha)
+}
+
+// ascending rank of position `i` (1-based) = #{ p_j <= p_i }
+fn mc_rank(p: &[f64; 64], m: i32, i: i32) -> f64 {
+    var r = 0
+    var j = 0
+    while j < m { if p[j as usize] <= p[i as usize] { r = r + 1 }; j = j + 1 }
+    return r as f64
+}
+
+/// Holm step-down (FWER). Returns the number rejected at `alpha`.
+/// Ranks are computed by O(m²) counting (no sort array) — a function with big
+/// local arrays crashes the current engine when called with arrays live (#852).
+pub fn holm(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic {
+    let mf = m as f64
+    // p_adj_i = max over k with p_k <= p_i of min(1, (m - rank_k + 1)·p_k)
+    var i = 0
+    while i < m {
+        var best = 0.0
+        var k = 0
+        while k < m {
+            if p[k as usize] <= p[i as usize] {
+                let rank_k = mc_rank(p, m, k)
+                var raw = 1.0
+                let cand = (mf - rank_k + 1.0) * p[k as usize]
+                if cand < 1.0 { raw = cand }
+                if raw > best { best = raw }
+            }
+            k = k + 1
+        }
+        out_adj[i as usize] = best
+        i = i + 1
+    }
+    return mc_count_rejected(out_adj, m, alpha)
+}
+
+/// Benjamini-Hochberg FDR (step-up). Returns the number rejected at `alpha`.
+pub fn bh_fdr(p: &[f64; 64], m: i32, alpha: f64, out_adj: &![f64; 64]) -> i64 with Mut, Div, Panic {
+    let mf = m as f64
+    // p_adj_i = min over k with p_k >= p_i of min(1, (m/rank_k)·p_k)
+    var i = 0
+    while i < m {
+        var best = 1.0e300
+        var k = 0
+        while k < m {
+            if p[k as usize] >= p[i as usize] {
+                let rank_k = mc_rank(p, m, k)
+                var raw = 1.0
+                let cand = mf / rank_k * p[k as usize]
+                if cand < 1.0 { raw = cand }
+                if raw < best { best = raw }
+            }
+            k = k + 1
+        }
+        out_adj[i as usize] = best
+        i = i + 1
+    }
+    return mc_count_rejected(out_adj, m, alpha)
+}
+

@@ -563,6 +563,11 @@ if isinstance(l4_report, dict):
 hotspots = unique([json.dumps(x, sort_keys=True) for x in hotspots])
 hotspots = [json.loads(x) for x in hotspots]
 
+def _tc(obj):
+    t = obj.get("toolchain") if isinstance(obj, dict) else None
+    return t if isinstance(t, dict) and t.get("capture_status") not in (None, "not_captured") else None
+toolchain = _tc(runtime) or _tc(parity) or _tc(binary) or _tc(public_contract.get("support_evidence", {})) or {"capture_status": "not_captured"}
+
 payload = {
     "schema": "sounio.omega.gpu_comprehensive_run.v1",
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -573,6 +578,7 @@ payload = {
         "gpu_host": gpu_host,
         "gpu_user": gpu_user,
         "remote_dir": remote_dir,
+        "toolchain": toolchain,
     },
     "artifacts": {
         "stdlib_status": rel(stdlib_status_path),

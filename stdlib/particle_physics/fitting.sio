@@ -1,0 +1,269 @@
+// ============================================================================
+// FITTING — Minimization and least-squares fitting for HEP histograms
+// ============================================================================
+//
+// Golden-section 1D minimization, linear least-squares, and Gaussian
+// peak fitting for histograms.
+
+module particle_physics::fitting
+
+use math::libm::{libm_fabs}
+
+use particle_physics::histogram::{Histogram1D, hist_new, hist_bin_content, hist_integral}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// 1D Minimization (Golden Section Search)
+// ============================================================================
+
+/// Minimize a 1D function on [x_lo, x_hi] using golden section search.
+/// Returns the x value at the minimum.
+pub fn minimize_1d(f: fn(f64) -> f64, x_lo: f64, x_hi: f64, tol: f64) -> f64 with Mut {
+    let phi = 0.5 * (sqrt(5.0) + 1.0)   // golden ratio ~1.618
+    let resphi = 2.0 - phi              // ~0.382
+
+    var a: f64 = x_lo
+    var b: f64 = x_hi
+    var c: f64 = a + resphi * (b - a)
+    var d: f64 = b - resphi * (b - a)
+    var fc: f64 = f(c)
+    var fd: f64 = f(d)
+
+    var iter: i64 = 0
+    while iter < 100 {
+        if libm_fabs(b - a) < tol { return (b + a) * 0.5 }
+        if fc < fd {
+            b = d
+            d = c
+            fd = fc
+            c = a + resphi * (b - a)
+            fc = f(c)
+        } else {
+            a = c
+            c = d
+            fc = fd
+            d = b - resphi * (b - a)
+            fd = f(d)
+        }
+        iter = iter + 1
+    }
+    return (b + a) * 0.5
+}
+
+// ============================================================================
+// Linear Least-Squares Fit
+// ============================================================================
+
+/// Result of a linear fit y = a + b*x.
+pub struct FitLinearResult {
+    pub a: f64,
+    pub b: f64,
+    pub chi2: f64,
+    pub ndof: i64,
+}
+
+/// Fit y = a + b*x to data points (x[i], y[i]) with optional weights w[i].
+/// If all weights are zero, uses unweighted least squares.
+pub fn fit_linear(x: &[f64; 64], y: &[f64; 64], w: &[f64; 64], n: i64) -> FitLinearResult with Mut, Div, Panic {
+    var result: FitLinearResult
+    result.a = 0.0
+    result.b = 0.0
+    result.chi2 = 0.0
+    result.ndof = n - 2
+    if n <= 1 { return result }
+
+    var sum_w: f64 = 0.0
+    var sum_x: f64 = 0.0
+    var sum_y: f64 = 0.0
+    var sum_xy: f64 = 0.0
+    var sum_x2: f64 = 0.0
+
+    var i: i64 = 0
+    while i < n {
+        let wi = if w[i as usize] > 0.0 { w[i as usize] } else { 1.0 }
+        let xi = x[i as usize]
+        let yi = y[i as usize]
+        sum_w = sum_w + wi
+        sum_x = sum_x + wi * xi
+        sum_y = sum_y + wi * yi
+        sum_xy = sum_xy + wi * xi * yi
+        sum_x2 = sum_x2 + wi * xi * xi
+        i = i + 1
+    }
+
+    let denom = sum_w * sum_x2 - sum_x * sum_x
+    if denom == 0.0 { return result }
+
+    result.a = (sum_y * sum_x2 - sum_x * sum_xy) / denom
+    result.b = (sum_w * sum_xy - sum_x * sum_y) / denom
+
+    // Chi2
+    var chi2: f64 = 0.0
+    i = 0
+    while i < n {
+        let pred = result.a + result.b * x[i as usize]
+        let diff = y[i as usize] - pred
+        let wi = if w[i as usize] > 0.0 { w[i as usize] } else { 1.0 }
+        chi2 = chi2 + wi * diff * diff
+        i = i + 1
+    }
+    result.chi2 = chi2
+
+    return result
+}
+
+// ============================================================================
+// Gaussian Peak Fit (Moment Matching)
+// ============================================================================
+
+/// Result of a Gaussian fit to a histogram.
+pub struct FitGaussResult {
+    pub amplitude: f64,
+    pub mean: f64,
+    pub sigma: f64,
+    pub chi2: f64,
+}
+
+/// Fit Gaussian to histogram using weighted mean and stddev of bin contents.
+pub fn fit_gaussian_hist(hist: &!Histogram1D) -> FitGaussResult with Mut, Div, Panic {
+    var result: FitGaussResult
+    result.amplitude = 0.0
+    result.mean = 0.0
+    result.sigma = 0.0
+    result.chi2 = 0.0
+
+    let n = hist.n_bins
+    if n <= 0 { return result }
+
+    // Weighted mean
+    var sum_w: f64 = 0.0
+    var sum_wx: f64 = 0.0
+    var i: i64 = 1
+    while i <= n {
+        let w = hist.counts[i as usize]
+        let center = hist.x_min + (i as f64 - 0.5) * hist.bin_width
+        sum_w = sum_w + w
+        sum_wx = sum_wx + w * center
+        i = i + 1
+    }
+    if sum_w == 0.0 { return result }
+    result.mean = sum_wx / sum_w
+
+    // Weighted stddev
+    var sum_wdx2: f64 = 0.0
+    i = 1
+    while i <= n {
+        let w = hist.counts[i as usize]
+        let center = hist.x_min + (i as f64 - 0.5) * hist.bin_width
+        let dx = center - result.mean
+        sum_wdx2 = sum_wdx2 + w * dx * dx
+        i = i + 1
+    }
+    let var_val = sum_wdx2 / sum_w
+    if var_val > 0.0 {
+        result.sigma = sqrt(var_val)
+    }
+    result.amplitude = sum_w / (result.sigma * sqrt(2.0 * 3.141592653589793))
+
+    // Approximate chi2
+    var chi2: f64 = 0.0
+    i = 1
+    while i <= n {
+        let center = hist.x_min + (i as f64 - 0.5) * hist.bin_width
+        let model = result.amplitude * exp(-0.5 * ((center - result.mean) / result.sigma) * ((center - result.mean) / result.sigma))
+        let obs = hist.counts[i as usize]
+        let err2 = hist.sumw2[i as usize]
+        if err2 > 0.0 {
+            chi2 = chi2 + (obs - model) * (obs - model) / err2
+        } else if model > 0.0 {
+            chi2 = chi2 + (obs - model) * (obs - model) / model
+        }
+        i = i + 1
+    }
+    result.chi2 = chi2
+
+    return result
+}
+
+// ============================================================================
+// Chi2 between histogram and reference
+// ============================================================================
+
+/// Compute chi2 between two histograms with identical binning.
+pub fn chi2_hist_ref(hist: &!Histogram1D, ref_hist: &!Histogram1D) -> f64 {
+    if hist.n_bins != ref_hist.n_bins { return 0.0 }
+    var chi2: f64 = 0.0
+    var i: i64 = 1
+    while i <= hist.n_bins {
+        let diff = hist.counts[i as usize] - ref_hist.counts[i as usize]
+        let err2 = hist.sumw2[i as usize] + ref_hist.sumw2[i as usize]
+        if err2 > 0.0 {
+            chi2 = chi2 + diff * diff / err2
+        }
+        i = i + 1
+    }
+    return chi2
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+fn parabola(x: f64) -> f64 {
+    return (x - 3.0) * (x - 3.0) + 2.0
+}
+
+pub fn test_minimize_1d() -> bool with Mut {
+    let xmin = minimize_1d(parabola, 0.0, 10.0, 1.0e-6)
+    if xmin < 2.9 || xmin > 3.1 { return false }
+    let fmin = parabola(xmin)
+    if fmin > 2.1 { return false }
+    return true
+}
+
+pub fn test_fit_linear() -> bool with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    var y: [f64; 64] = [0.0; 64]
+    var w: [f64; 64] = [0.0; 64]
+    x[0 as usize] = 0.0
+    y[0 as usize] = 1.0
+    x[1 as usize] = 1.0
+    y[1 as usize] = 3.0
+    x[2 as usize] = 2.0
+    y[2 as usize] = 5.0
+    w[0 as usize] = 1.0
+    w[1 as usize] = 1.0
+    w[2 as usize] = 1.0
+    let res = fit_linear(&x, &y, &w, 3)
+    if res.a != 1.0 { return false }
+    if res.b != 2.0 { return false }
+    return true
+}
+
+pub fn test_fit_gaussian_hist() -> bool with Mut, Div, Panic {
+    var h = hist_new(0.0, 10.0, 20)
+    // Fill a Gaussian-ish peak around x=5
+    hist_fill(&!h, 4.5, 10.0)
+    hist_fill(&!h, 4.75, 15.0)
+    hist_fill(&!h, 5.0, 20.0)
+    hist_fill(&!h, 5.25, 15.0)
+    hist_fill(&!h, 5.5, 10.0)
+    let res = fit_gaussian_hist(&h)
+    if res.mean < 4.0 || res.mean > 6.0 { return false }
+    if res.sigma <= 0.0 { return false }
+    return true
+}
+
+pub fn test_chi2_hist_ref() -> bool with Mut {
+    var h1 = hist_new(0.0, 5.0, 5)
+    var h2 = hist_new(0.0, 5.0, 5)
+    hist_fill(&!h1, 0.5, 10.0)
+    hist_fill(&!h2, 0.5, 10.0)
+    let chi2 = chi2_hist_ref(&h1, &h2)
+    if chi2 != 0.0 { return false }
+    return true
+}

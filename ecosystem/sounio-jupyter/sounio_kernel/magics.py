@@ -39,6 +39,7 @@ class SounioMagics:
             "%writefile": self.magic_writefile,
             "%sounio": self.magic_sounio,
             "%check": self.magic_check,
+            "%reset": self.magic_reset,
             "%ast": self.magic_ast,
             "%types": self.magic_types,
             "%ontology_search": self.magic_ontology_search,
@@ -118,6 +119,15 @@ class SounioMagics:
 
         return result
 
+    def magic_reset(self, _line: str) -> str:
+        """Clear the accumulated session declarations.
+
+        Usage:
+            %reset
+        """
+        self.executor.reset_session()
+        return "Session reset."
+
     def magic_writefile(self, line: str, cell: Optional[str] = None) -> str:
         """
         Write cell content to a file.
@@ -153,15 +163,17 @@ class SounioMagics:
             %sounio info       - Show kernel version and config
             %sounio stdlib     - Show stdlib path
             %sounio souc       - Show souc binary path
+            %sounio session    - Show accumulated session source
         """
         subcmd = line.strip().lower() if line.strip() else "info"
 
         if subcmd == "info":
-            return f"""Sounio Kernel v0.1.0
+            return f"""Sounio Kernel v0.2.0
 Language: Sounio 1.0.0-beta.4
 Stdlib: {self.executor.stdlib_path or 'not found'}
 Souc binary: {self.executor.souc_binary or 'not found'}
-Features: Epistemic programming, uncertainty quantification, provenance tracking"""
+Session declarations: {len(getattr(self.executor, '_declarations', []))}
+Features: Epistemic programming, uncertainty quantification, provenance tracking, session persistence"""
 
         elif subcmd == "stdlib":
             if self.executor.stdlib_path:
@@ -175,11 +187,19 @@ Features: Epistemic programming, uncertainty quantification, provenance tracking
             else:
                 return "Souc binary not found. Set SOUC environment variable."
 
+        elif subcmd == "session":
+            src = self.executor.get_session_source()
+            decls = getattr(self.executor, '_declarations', [])
+            if src:
+                return f"Current session ({len(decls)} declarations):\n{src}"
+            return "Session is empty."
+
         else:
             return """Available %sounio subcommands:
-  %sounio info    - Show kernel version and config
-  %sounio stdlib  - Show stdlib path
-  %sounio souc    - Show souc binary path"""
+  %sounio info     - Show kernel version and config
+  %sounio stdlib   - Show stdlib path
+  %sounio souc     - Show souc binary path
+  %sounio session  - Show accumulated session source"""
 
     def _ontology_module(self):
         """Import ontology helpers from sounio-py, adding the repo path when needed."""
@@ -259,39 +279,17 @@ Features: Epistemic programming, uncertainty quantification, provenance tracking
 
         code = line.strip()
 
-        # Wrap in main if needed
+        # Build source with session context
+        session = self.executor.get_session_source()
         if not code.startswith("fn "):
             code = f"fn main() with IO {{\n    {code}\n}}"
 
-        # Write to temp file and check
-        with tempfile.NamedTemporaryFile(suffix=".sio", mode="w", delete=False) as f:
-            f.write(code)
-            f.flush()
-            temp_file = f.name
+        src = f"{session}\n{code}\n"
 
-        try:
-            # Use souc check command
-            import subprocess
-
-            env = os.environ.copy()
-            if self.executor.stdlib_path:
-                env["SOUNIO_STDLIB_PATH"] = self.executor.stdlib_path
-
-            result = subprocess.run(
-                [self.executor.souc_binary, "check", temp_file],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-            )
-
-            if result.returncode == 0:
-                return "✓ Type check passed"
-            else:
-                return f"✗ Type check failed:\n{result.stderr}"
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+        ok, err = self.executor._compile_source_str(src)
+        if ok:
+            return "✓ Type check passed"
+        return f"✗ Type check failed:\n{err}"
 
     def magic_ast(self, line: str) -> str:
         """

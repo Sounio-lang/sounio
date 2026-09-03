@@ -1,0 +1,454 @@
+// stdlib/darwin_pbpk/cumulants.sio
+//
+// M5: fourth-order GUM cumulant budget for PBPK28.
+//
+// The implementation is intentionally direct and scalar.  It does not depend
+// on the D.2 tensor tape because the PBPK28 AUC endpoint is already exposed as
+// a deterministic scalar model; finite differences over that scalar are the
+// smallest honest derivative extractor for this branch.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors}
+use darwin_pbpk::epistemic_pbpk28_hessian::{Pbpk28HessianBudget, hessian_pbpk28_auc}
+
+// ============================================================================
+// BASIC NUMERICS
+// ============================================================================
+
+fn m5_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn m5_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn m5_finite(x: f64) -> bool {
+    if x != x { return false }
+    return m5_abs(x) < 1.0e14
+}
+
+pub fn m5_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+pub fn m5_ln(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale: f64 = 0.0
+    let e = 2.718281828459045
+    while sx > 2.0 { sx = sx / e; scale = scale + 1.0 }
+    while sx < 0.5 { sx = sx * e; scale = scale - 1.0 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let r = 2.0 * (u + u * u2 / 3.0
+                     + u * u2 * u2 / 5.0
+                     + u * u2 * u2 * u2 / 7.0
+                     + u * u2 * u2 * u2 * u2 / 9.0
+                     + u * u2 * u2 * u2 * u2 * u2 / 11.0)
+    return r + scale
+}
+
+pub fn m5_exp(x: f64) -> f64 with Mut, Div {
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    let n_f = x * inv_ln2
+    var n: i64 = n_f as i64
+    if (n as f64) > n_f { n = n - 1 }
+    let r = x - (n as f64) * ln2
+    var t: f64 = 1.0
+    var result: f64 = 1.0
+    var k: i64 = 1
+    while k < 24 {
+        t = t * r / (k as f64)
+        result = result + t
+        k = k + 1
+    }
+    var factor: f64 = 1.0
+    if n > 0 {
+        var i: i64 = 0
+        while i < n { factor = factor * 2.0; i = i + 1 }
+    }
+    if n < 0 {
+        let neg_n = 0 - n
+        var i: i64 = 0
+        while i < neg_n { factor = factor * 0.5; i = i + 1 }
+    }
+    return result * factor
+}
+
+// ============================================================================
+// PEBAY/WEST ONLINE CENTRAL MOMENTS
+// ============================================================================
+
+pub struct CumulantState {
+    n:  i64,
+    m1: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+}
+
+pub struct CumulantSummary {
+    mean:     f64,
+    variance: f64,
+    kappa3:   f64,
+    kappa4:   f64,
+}
+
+pub fn cumulant_init() -> CumulantState {
+    CumulantState { n: 0, m1: 0.0, m2: 0.0, m3: 0.0, m4: 0.0 }
+}
+
+pub fn cumulant_update(state: CumulantState, x: f64) -> CumulantState with Div {
+    let n1 = state.n
+    let n = n1 + 1
+    let nf = n as f64
+    let n1f = n1 as f64
+    let delta = x - state.m1
+    let delta_n = delta / nf
+    let delta_n2 = delta_n * delta_n
+    let term1 = delta * delta_n * n1f
+    let m1_new = state.m1 + delta_n
+    let m4_new = state.m4
+               + term1 * delta_n2 * (nf * nf - 3.0 * nf + 3.0)
+               + 6.0 * delta_n2 * state.m2
+               - 4.0 * delta_n * state.m3
+    let m3_new = state.m3
+               + term1 * delta_n * (nf - 2.0)
+               - 3.0 * delta_n * state.m2
+    let m2_new = state.m2 + term1
+    CumulantState { n: n, m1: m1_new, m2: m2_new, m3: m3_new, m4: m4_new }
+}
+
+pub fn cumulant_finalize(state: CumulantState) -> CumulantSummary with Div {
+    if state.n <= 0 {
+        return CumulantSummary { mean: 0.0, variance: 0.0, kappa3: 0.0, kappa4: 0.0 }
+    }
+    let nf = state.n as f64
+    let variance = state.m2 / nf
+    let k3 = state.m3 / nf
+    let mu4 = state.m4 / nf
+    let k4 = mu4 - 3.0 * variance * variance
+    CumulantSummary { mean: state.m1, variance: variance, kappa3: k3, kappa4: k4 }
+}
+
+// ============================================================================
+// LOGNORMAL CUMULANTS
+// ============================================================================
+
+pub struct LognormalCumulants {
+    sigma2_log: f64,
+    variance:   f64,
+    kappa3:     f64,
+    kappa4:     f64,
+    central4:   f64,
+}
+
+pub fn lognormal_cumulants_from_mean_variance(mean: f64, variance: f64) -> LognormalCumulants with Mut, Div, Panic {
+    if mean <= 0.0 || variance <= 0.0 {
+        return LognormalCumulants { sigma2_log: 0.0, variance: 0.0, kappa3: 0.0, kappa4: 0.0, central4: 0.0 }
+    }
+    let cv2 = variance / (mean * mean)
+    let s2 = m5_ln(1.0 + cv2)
+    let e1 = m5_exp(s2)
+    let e2 = m5_exp(2.0 * s2)
+    let e3 = m5_exp(3.0 * s2)
+    let e6 = m5_exp(6.0 * s2)
+    let m3 = mean * mean * mean * (e3 - 3.0 * e1 + 2.0)
+    let mu4 = mean * mean * mean * mean * (e6 - 4.0 * e3 + 6.0 * e1 - 3.0)
+    let k4 = mu4 - 3.0 * variance * variance
+    LognormalCumulants { sigma2_log: s2, variance: variance, kappa3: m3, kappa4: k4, central4: mu4 }
+}
+
+// ============================================================================
+// DIRECT PBPK28 AUC MODEL AND FINITE DIFFERENCES
+// ============================================================================
+
+pub struct DerivativeBudget {
+    d1:      [f64; 8],
+    d2:      [f64; 8],
+    d3:      [f64; 8],
+    success: bool,
+}
+
+fn m5_derivatives_zero() -> DerivativeBudget {
+    DerivativeBudget { d1: [0.0; 8], d2: [0.0; 8], d3: [0.0; 8], success: false }
+}
+
+fn m5_perturb(prm: PBPKParams28, idx: i32, delta: f64) -> PBPKParams28 with Mut, Div {
+    var p = prm
+    let fu_ref = 0.08
+    if idx == 0 { p.cl_central = p.cl_central + delta }
+    if idx == 1 { p.cl_central = p.cl_central + delta }
+    if idx == 2 {
+        if fu_ref > 0.0 {
+            let scale = (fu_ref + delta) / fu_ref
+            p.cl_central = p.cl_central * scale
+        }
+    }
+    if idx == 3 { p.kp[3] = p.kp[3] + delta }
+    if idx == 4 { p.kp[1] = p.kp[1] + delta }
+    if idx == 5 { p.kp[2] = p.kp[2] + delta }
+    if idx == 6 { p.kp[7] = p.kp[7] + delta }
+    return p
+}
+
+fn m5_simulate_auc(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
+    let dt = 0.1
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose_mg / prm.v_ref[0]
+    var t = 0.0
+    var auc = 0.0
+    var c_prev = st.cv[0]
+    var steps = 0
+    while t < t_end {
+        if steps > 5000 { return 0.0 }
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
+        let c_new = st_new.cv[0]
+        if !m5_finite(c_new) { return 0.0 }
+        auc = auc + 0.5 * (c_prev + c_new) * dt_use
+        c_prev = c_new
+        t = t + dt_use
+        st = st_new
+        steps = steps + 1
+    }
+    return auc
+}
+
+fn m5_step(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
+    let h_rel = 1.0e-4 * m5_abs(mean)
+    let h_abs = 0.02 * m5_sqrt(variance)
+    m5_max(h_rel, h_abs)
+}
+
+pub fn extract_pbpk28_derivatives(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    t_end:    f64,
+) -> DerivativeBudget with Mut, Div, Panic, Epistemic {
+    let n = priors.n
+    var out = m5_derivatives_zero()
+    let f0 = m5_simulate_auc(base_prm, dose_mg, t_end)
+    if f0 <= 0.0 || !m5_finite(f0) { return out }
+
+    var i: i32 = 0
+    while i < n {
+        let h = m5_step(priors.kn[i].value, priors.kn[i].variance)
+        if h > 0.0 {
+            let f_p1 = m5_simulate_auc(m5_perturb(base_prm, i, h), dose_mg, t_end)
+            let f_n1 = m5_simulate_auc(m5_perturb(base_prm, i, 0.0 - h), dose_mg, t_end)
+            let f_p2 = m5_simulate_auc(m5_perturb(base_prm, i, 2.0 * h), dose_mg, t_end)
+            let f_n2 = m5_simulate_auc(m5_perturb(base_prm, i, 0.0 - 2.0 * h), dose_mg, t_end)
+            out.d1[i] = (0.0 - f_p2 + 8.0 * f_p1 - 8.0 * f_n1 + f_n2) / (12.0 * h)
+            out.d2[i] = (0.0 - f_p2 + 16.0 * f_p1 - 30.0 * f0 + 16.0 * f_n1 - f_n2) / (12.0 * h * h)
+            out.d3[i] = (f_p2 - 2.0 * f_p1 + 2.0 * f_n1 - f_n2) / (2.0 * h * h * h)
+        }
+        i = i + 1
+    }
+    out.success = true
+    return out
+}
+
+// AUC = D/(CL*V) analytical validation helper, independent of PBPK runtime.
+pub fn extract_auc_inverse_derivatives(dose: f64, cl: f64, v: f64, h: f64) -> DerivativeBudget with Div {
+    var out = m5_derivatives_zero()
+    let f0 = dose / (cl * v)
+    let fp1 = dose / ((cl + h) * v)
+    let fn1 = dose / ((cl - h) * v)
+    let fp2 = dose / ((cl + 2.0 * h) * v)
+    let fn2 = dose / ((cl - 2.0 * h) * v)
+    out.d1[0] = (0.0 - fp2 + 8.0 * fp1 - 8.0 * fn1 + fn2) / (12.0 * h)
+    out.d2[0] = (0.0 - fp2 + 16.0 * fp1 - 30.0 * f0 + 16.0 * fn1 - fn2) / (12.0 * h * h)
+    out.d3[0] = (fp2 - 2.0 * fp1 + 2.0 * fn1 - fn2) / (2.0 * h * h * h)
+    out.success = true
+    return out
+}
+
+// ============================================================================
+// FOURTH-ORDER VARIANCE BUDGET
+// ============================================================================
+
+pub struct VarianceBudget4th {
+    u_1st:               f64,
+    u_2nd_hessian:       f64,
+    u_2nd_skewness:      f64,
+    u_4th_kurtosis:      f64,
+    u_4th_cubic:         f64,
+    u_total:             f64,
+    var_1st:             f64,
+    var_hessian:         f64,
+    var_skewness:        f64,
+    var_kurtosis:        f64,
+    var_cubic:           f64,
+    var_total:           f64,
+    rel_hess_residual:   f64,
+    rel_fourth_residual: f64,
+    dominant_index:      i32,
+    success:             bool,
+}
+
+fn m5_variance_zero() -> VarianceBudget4th {
+    VarianceBudget4th {
+        u_1st: 0.0, u_2nd_hessian: 0.0, u_2nd_skewness: 0.0,
+        u_4th_kurtosis: 0.0, u_4th_cubic: 0.0, u_total: 0.0,
+        var_1st: 0.0, var_hessian: 0.0, var_skewness: 0.0,
+        var_kurtosis: 0.0, var_cubic: 0.0, var_total: 0.0,
+        rel_hess_residual: 0.0, rel_fourth_residual: 0.0,
+        dominant_index: 0, success: false,
+    }
+}
+
+pub fn variance_budget_4th(
+    derivatives: DerivativeBudget,
+    priors:      EpPrior28,
+    u_mc:        f64,
+) -> VarianceBudget4th with Mut, Div, Panic, Epistemic {
+    var out = m5_variance_zero()
+    if !derivatives.success { return out }
+    let n = priors.n
+
+    var i: i32 = 0
+    var max_abs_corr: f64 = 0.0
+    while i < n {
+        let c = derivatives.d1[i]
+        let d = derivatives.d2[i]
+        let e = derivatives.d3[i]
+        let lc = lognormal_cumulants_from_mean_variance(priors.kn[i].value, priors.kn[i].variance)
+        let v = lc.variance
+        let k3 = lc.kappa3
+        let k4 = lc.kappa4
+        let central4 = lc.central4
+
+        let v1 = c * c * v
+        let v_skew = c * d * k3
+        let v_kurt = 0.25 * d * d * (k4 + 2.0 * v * v)
+        let v_cubic = (c * e * central4) / 3.0
+
+        out.var_1st = out.var_1st + v1
+        out.var_skewness = out.var_skewness + v_skew
+        out.var_kurtosis = out.var_kurtosis + v_kurt
+        out.var_cubic = out.var_cubic + v_cubic
+
+        let abs_corr = m5_abs(v_skew) + m5_abs(v_kurt) + m5_abs(v_cubic)
+        if abs_corr > max_abs_corr {
+            max_abs_corr = abs_corr
+            out.dominant_index = i
+        }
+        i = i + 1
+    }
+
+    out.var_hessian = out.var_1st + out.var_kurtosis
+    out.var_total = out.var_1st + out.var_skewness + out.var_kurtosis + out.var_cubic
+    if out.var_total < 0.0 {
+        // A truncated asymptotic expansion can go negative when skew/cubic
+        // terms dominate.  Keep the signed variance in var_total, but avoid
+        // returning NaN for u_total.
+        out.u_total = 0.0
+    } else {
+        out.u_total = m5_sqrt(out.var_total)
+    }
+    out.u_1st = m5_sqrt(out.var_1st)
+    out.u_2nd_hessian = m5_sqrt(out.var_hessian)
+    out.u_2nd_skewness = if out.var_skewness >= 0.0 { m5_sqrt(out.var_skewness) } else { 0.0 - m5_sqrt(0.0 - out.var_skewness) }
+    out.u_4th_kurtosis = if out.var_kurtosis >= 0.0 { m5_sqrt(out.var_kurtosis) } else { 0.0 - m5_sqrt(0.0 - out.var_kurtosis) }
+    out.u_4th_cubic = if out.var_cubic >= 0.0 { m5_sqrt(out.var_cubic) } else { 0.0 - m5_sqrt(0.0 - out.var_cubic) }
+
+    if u_mc > 1.0e-12 {
+        out.rel_hess_residual = m5_abs(out.u_2nd_hessian - u_mc) / u_mc
+        out.rel_fourth_residual = m5_abs(out.u_total - u_mc) / u_mc
+    }
+    out.success = true
+    return out
+}
+
+pub fn variance_budget_4th_from_hessian(
+    derivatives: DerivativeBudget,
+    hessian:     Pbpk28HessianBudget,
+    priors:      EpPrior28,
+    u_mc:        f64,
+) -> VarianceBudget4th with Mut, Div, Panic, Epistemic {
+    var out = m5_variance_zero()
+    if !derivatives.success || !hessian.success { return out }
+    let n = priors.n
+
+    out.var_1st = hessian.var_first_order
+    out.var_hessian = hessian.var_second_order
+
+    var i: i32 = 0
+    var max_abs_corr: f64 = 0.0
+    while i < n {
+        let c = hessian.sensitivity[i]
+        let d = hessian.hessian[i * 8 + i]
+        let e = derivatives.d3[i]
+        let lc = lognormal_cumulants_from_mean_variance(priors.kn[i].value, priors.kn[i].variance)
+        let k3 = lc.kappa3
+        let k4 = lc.kappa4
+        let central4 = lc.central4
+
+        let v_skew = c * d * k3
+        let v_extra_kurt = 0.25 * d * d * k4
+        let v_cubic = (c * e * central4) / 3.0
+
+        out.var_skewness = out.var_skewness + v_skew
+        out.var_kurtosis = out.var_kurtosis + v_extra_kurt
+        out.var_cubic = out.var_cubic + v_cubic
+
+        let abs_corr = m5_abs(v_skew) + m5_abs(v_extra_kurt) + m5_abs(v_cubic)
+        if abs_corr > max_abs_corr {
+            max_abs_corr = abs_corr
+            out.dominant_index = i
+        }
+        i = i + 1
+    }
+
+    out.var_total = out.var_hessian + out.var_skewness + out.var_kurtosis + out.var_cubic
+    if out.var_total < 0.0 {
+        out.u_total = 0.0
+    } else {
+        out.u_total = m5_sqrt(out.var_total)
+    }
+    out.u_1st = m5_sqrt(out.var_1st)
+    out.u_2nd_hessian = m5_sqrt(out.var_hessian)
+    out.u_2nd_skewness = if out.var_skewness >= 0.0 { m5_sqrt(out.var_skewness) } else { 0.0 - m5_sqrt(0.0 - out.var_skewness) }
+    out.u_4th_kurtosis = if out.var_kurtosis >= 0.0 { m5_sqrt(out.var_kurtosis) } else { 0.0 - m5_sqrt(0.0 - out.var_kurtosis) }
+    out.u_4th_cubic = if out.var_cubic >= 0.0 { m5_sqrt(out.var_cubic) } else { 0.0 - m5_sqrt(0.0 - out.var_cubic) }
+
+    if u_mc > 1.0e-12 {
+        out.rel_hess_residual = m5_abs(out.u_2nd_hessian - u_mc) / u_mc
+        out.rel_fourth_residual = m5_abs(out.u_total - u_mc) / u_mc
+    }
+    out.success = true
+    return out
+}
+
+pub fn m5_pbpk28_convergence_budget() -> VarianceBudget4th with Mut, Div, Panic, Epistemic {
+    let prm = ep28_rapamycin_params()
+    let priors = ep28_rapamycin_priors()
+    let der = extract_pbpk28_derivatives(prm, priors, 5.0, 168.0)
+    let hess = hessian_pbpk28_auc(prm, priors, 5.0, 168.0)
+    // M6 canonical MC truth, N=2000 seed=1729 dt=0.5h, documented in
+    // docs/dissertation/results/m6_prior_update_v1.md.
+    variance_budget_4th_from_hessian(der, hess, priors, 0.357945)
+}
+
+pub fn m5_pbpk28_second_order_reference() -> Pbpk28HessianBudget with Mut, Div, Panic, Epistemic {
+    hessian_pbpk28_auc(ep28_rapamycin_params(), ep28_rapamycin_priors(), 5.0, 168.0)
+}

@@ -87,7 +87,7 @@ fn hyper_binary_result(left_alg: i64, right_alg: i64) -> i64 {
 
 // --- Check binary expression involving Hyper types ---
 
-fn check_hyper_binary(c: Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+pub fn check_hyper_binary(c: Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     let left_alg = hyper_algebra(left)
     let right_alg = hyper_algebra(right)
     let result_alg = hyper_binary_result(left_alg, right_alg)
@@ -162,7 +162,7 @@ fn can_coerce_hyper(from_alg: i64, to_alg: i64) -> bool {
 // --- Resolve algebra name to tag ---
 // Uses byte-comparison helpers from compat.sio
 
-fn resolve_algebra_name(n: Name) -> i64 with Panic, Div {
+pub fn resolve_algebra_name(n: Name) -> i64 with Panic, Div {
     // "Real" = 4 chars: 82, 101, 97, 108
     if name_matches_str4(n, 82, 101, 97, 108) { return 0 }
     // "Complex" = 7 chars: 67, 111, 109, 112, 108, 101, 120
@@ -214,7 +214,9 @@ fn check_hyper_field_access(c: Checker, span: Span, ty: TypeEntry, field: Name) 
     }
 
     checker = checker.report_error_at(span, 12, 0, 0, 0)  // E012: unknown field
-    (checker, ty_error())
+    // Return inner (plausible field type) after error to keep tail return types consistent
+    // (avoids tail type mismatch / return-sig warnings in self-host build).
+    (checker, inner)
 }
 
 // --- Method calls for Hyper types ---
@@ -223,28 +225,34 @@ fn check_hyper_field_access(c: Checker, span: Span, ty: TypeEntry, field: Name) 
 fn check_hyper_method_call(c: Checker, span: Span, ty: TypeEntry, method: Name) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     let alg = hyper_algebra(ty)
     var checker = c
+    var result_ty: TypeEntry = ty   // default to receiver; assigned per method. Single tail return avoids tail type / sig mismatch in branches.
 
     // .conjugate() -> same Hyper type
     if name_matches_str9(method, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-        return (checker, ty)
+        result_ty = ty
+        return (checker, result_ty)
     }
 
     // .norm() -> inner element type (scalar)
     if name_matches_str4(method, 110, 111, 114, 109) {
-        return (checker, hyper_inner(ty))
+        result_ty = hyper_inner(ty)
+        return (checker, result_ty)
     }
 
     // .inverse() -> same Hyper type (only for division algebras)
     if name_matches_str7(method, 105, 110, 118, 101, 114, 115, 101) {
         if !is_division_algebra(alg) {
             checker = checker.report_error_at(span, 32, 0, 0, 0)  // E032
-            return (checker, ty_error())
+            result_ty = ty_error()
+            return (checker, result_ty)
         }
-        return (checker, ty)
+        result_ty = ty
+        return (checker, result_ty)
     }
 
     checker = checker.report_error_at(span, 11, 0, 0, 0)  // E011: method not found
-    (checker, ty_error())
+    result_ty = ty_error()
+    (checker, result_ty)
 }
 
 // --- Print helpers ---

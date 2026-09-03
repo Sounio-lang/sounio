@@ -1,0 +1,25 @@
+//@ check-only
+
+// Verify the MachineInstr-level scheduler API + port model type-checks.
+// We can't `//@ run-pass` this: CodegenPlan is ~27 MB and the native
+// compiler does not emit stack probes for large frames, so calling
+// cgplan_schedule_all_blocks from a standalone binary SIGSEGVs (this
+// is a pre-existing limit; cgplan_run_tests in suite.sio hits it too).
+// Type-checking is still meaningful: it pins down the port-aware
+// constructor + scheduler entry points used by codegen_x86_linux.sio.
+
+use native::codegen_plan::*
+
+fn main() with IO, Mut, Panic, Div {
+    // LOAD r1 (lat=4, P2/P3); ADD r2←r1 (lat=1, P0/P1/P5/P6);
+    // MOV r3 (lat=1, P0/P1/P5/P6) — independent, port-pressure should
+    // prefer it over the chain when LOAD is still in flight.
+    var plan = codegen_plan_new()
+    plan = cgplan_add_instr(plan, codegen_instr_with_port(0, CGOP_LOAD, 1, 0 - 1, 0 - 1, 4, 12, 1))
+    plan = cgplan_add_instr(plan, codegen_instr_with_port(1, CGOP_ADD,  2, 1,     0 - 1, 1, 99, 2))
+    plan = cgplan_add_instr(plan, codegen_instr_with_port(2, CGOP_MOV,  3, 0 - 1, 0 - 1, 1, 99, 2))
+    plan = cgplan_build_deps(plan)
+    plan = cgplan_schedule_all_blocks(plan)
+    let slen = plan.blocks[0].schedule_len
+    if slen >= 0 { println("typecheck ok") }
+}

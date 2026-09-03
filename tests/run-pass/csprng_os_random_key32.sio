@@ -1,0 +1,84 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::csprng::*
+use net::socket::*
+
+// crypto_os_random_key32 must round-trip the same underlying entropy as a
+// manual crypto_os_random_bytes(32) + rawbuf_get extraction: confirm it
+// succeeds, produces 32 bytes that are not all-zero, and that two
+// independent calls differ (same sanity floors as csprng_os_random.sio,
+// applied to the array-returning convenience wrapper).
+fn main() -> i64 with IO {
+    let (key1, ok1) = crypto_os_random_key32()
+    if !ok1 {
+        print_int(1)
+        return 1
+    }
+
+    let (key2, ok2) = crypto_os_random_key32()
+    if !ok2 {
+        print_int(2)
+        return 1
+    }
+
+    var all_same: bool = true
+    var i: i64 = 0
+    while i < 32 {
+        if key1[i as usize] != key2[i as usize] {
+            all_same = false
+        }
+        i = i + 1
+    }
+    if all_same {
+        print_int(3)
+        return 1
+    }
+
+    var all_zero: bool = true
+    var j: i64 = 0
+    while j < 32 {
+        if key1[j as usize] != 0 {
+            all_zero = false
+        }
+        j = j + 1
+    }
+    if all_zero {
+        print_int(4)
+        return 1
+    }
+
+    // Cross-check against the manual RawBuf extraction it wraps: draw a
+    // fresh 32-byte RawBuf directly and confirm crypto_os_random_key32's
+    // internal loop shape (rawbuf_get(&buf, i) as u8) is exactly what a
+    // hand-rolled caller would have written -- i.e. the same values land
+    // in the same positions when fed the same underlying bytes. We cannot
+    // feed the *same* draw through both paths (each call reads fresh
+    // entropy), so this instead confirms the manual path itself succeeds
+    // and produces the same 32-byte, not-all-zero shape as the wrapper.
+    let (buf3, ok3) = crypto_os_random_bytes(32)
+    if !ok3 {
+        print_int(5)
+        return 1
+    }
+    var manual: [u8; 32] = [0; 32]
+    var k: i64 = 0
+    while k < 32 {
+        manual[k as usize] = rawbuf_get(&buf3, k) as u8
+        k = k + 1
+    }
+    var manual_all_zero: bool = true
+    var m: i64 = 0
+    while m < 32 {
+        if manual[m as usize] != 0 {
+            manual_all_zero = false
+        }
+        m = m + 1
+    }
+    if manual_all_zero {
+        print_int(6)
+        return 1
+    }
+
+    println("csprng_os_random_key32: two independent 32-byte keys succeed, differ, are not all-zero")
+    return 0
+}

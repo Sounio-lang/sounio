@@ -1,0 +1,163 @@
+// research::erdos90_epistemic — an epistemic unit-distance graph (Sounio capability study)
+//
+// CAPABILITY DEMONSTRATION, NOT a new u(n) bound, and it does not beat the Erdős grid.
+//
+// The classical Erdős [90] count treats "is this distance exactly 1?" as a boolean. For a
+// measured / non-lattice configuration that question carries an error budget. This file
+// reframes a unit-distance edge as a PROBABILITY OF CONFORMANCE to the unit spec [1-τ,1+τ]
+// under the GUM uncertainty on the distance (JCGM 106:2012). The propagation is real GUM
+// (variance_of); the conformance probability has a principled FORM (a Gaussian coverage
+// integral) but rests on explicit MODELING CHOICES (see qualifications below) — it is not a
+// parameter-free deduction.
+//
+// What is STATIC vs RUNTIME (read before any "compile-time" claim):
+//   STATIC (compiler-enforced): extracting Knowledge<f64>.value requires `with Epistemic`
+//     (error E170). This unwrap-safety is the one static guarantee we rely on; it is
+//     witnessed by tests/compile-fail/erdos90_unwrap_unsafe.sio.
+//   RUNTIME: the conformance probability, the p_c >= p* decision, the counts, and the
+//     graph-grade quadrature are ordinary float computations.
+//   (The language also has Knowledge<f64, epsilon<τ> subsumption and `with Epistemic(N)`
+//    completeness, but we found them finicky/unclear in the current compiler — see the doc's
+//    "Honest limitations"; we do NOT rely on them here.)
+//
+// Qualifications on the metric (also in the doc): (i) Gaussian / large-effective-DOF model
+// of the combined uncertainty; (ii) τ is a CHOSEN tolerance, not derived; (iii) σ_d =
+// σ_{d²}/(2d) is first-order GUM linearization, valid for σ_{d²} ≪ d², undefined at d→0;
+// (iv) independence assumed in propagation. Self-contained; runs with `souc run`.
+
+module research::erdos90_epistemic
+
+fn sqrtf(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var r = x; var i = 0
+    while i < 40 { r = 0.5 * (r + x / r); i = i + 1 }
+    return r
+}
+
+// exp via range-reduced Taylor (verified: exp(1)=2.718282); needed for erf.
+fn exp_approx(x: f64) -> f64 with Mut, Div {
+    if x < -40.0 { return 0.0 }
+    var n = 0; var t = x
+    while t > 0.5  { t = t - 1.0; n = n + 1 }
+    while t < -0.5 { t = t + 1.0; n = n - 1 }
+    var term = 1.0; var sum = 1.0; var k = 1
+    while k < 18 { term = term * t / (k as f64); sum = sum + term; k = k + 1 }
+    let e = 2.718281828459045
+    var p = 1.0; var i = 0
+    if n >= 0 { while i < n { p = p * e; i = i + 1 } }
+    else { while i > n { p = p / e; i = i - 1 } }
+    return sum * p
+}
+
+// erf via Abramowitz–Stegun 7.1.26 (verified: erf(1)=0.842701, erf(2)=0.995322; |err|<1.5e-7)
+fn erf_approx(x: f64) -> f64 with Mut, Div {
+    var s = 1.0; var z = x
+    if z < 0.0 { s = 0.0 - 1.0; z = 0.0 - z }
+    let t = 1.0 / (1.0 + 0.3275911 * z)
+    let poly = ((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592
+    return s * (1.0 - poly * t * exp_approx(0.0 - z*z))
+}
+
+fn phi(z: f64) -> f64 with Mut, Div { return 0.5 * (1.0 + erf_approx(z / 1.4142135623730951)) }
+
+// Probability that the TRUE distance conforms to the unit spec [1-τ, 1+τ] under N(d, σ_d).
+// JCGM 106:2012 conformance probability. Principled form; τ + Gaussian model are choices.
+fn conformance_prob(d2: f64, vd2: f64, tau: f64) -> f64 with Mut, Div {
+    let d = sqrtf(d2)
+    if d <= 0.0 { return 0.0 }
+    let sigma_d = sqrtf(vd2) / (2.0 * d)              // GUM linearization σ_d = σ_{d²}/(2d)
+    if sigma_d <= 0.0 {
+        if (d - 1.0) < tau && (1.0 - d) < tau { return 1.0 } else { return 0.0 }
+    }
+    return phi((1.0 + tau - d) / sigma_d) - phi((1.0 - tau - d) / sigma_d)
+}
+
+// σ_d for the GUM-propagated squared distance (read after computing d2 from .value).
+fn sigma_of_dist(d2: f64, vd2: f64) -> f64 with Mut { let d = sqrtf(d2); if d <= 0.0 { return 0.0 }; return sqrtf(vd2) / (2.0 * d) }
+
+// squared distance of two uncertain points. `with Epistemic` is REQUIRED to read .value
+// (E170) — this is the static unwrap-safety guarantee. GUM variance propagates through ±×.
+fn dist2_gum(ax: Knowledge<f64>, ay: Knowledge<f64>,
+             bx: Knowledge<f64>, by: Knowledge<f64>) -> f64 with Mut, Div, Epistemic {
+    let dx = ax.value - bx.value
+    let dy = ay.value - by.value
+    return dx * dx + dy * dy
+}
+
+var CLASSICAL: i64 = 0     // naive boolean count (|d-1|<0.15) — what every other tool reports
+var CERTIFIED: i64 = 0     // RUNTIME decision: conformance p_c >= p*
+var FLAGGED: i64 = 0       // classical-unit but conformance below p* (uncertainty-flagged)
+var PSUM: f64 = 0.0        // expected conformance count Σ p_c
+// Variance of the expected count under an INDEPENDENCE approximation: treating each edge as
+// a Bernoulli(p_c), Var(Σ) = Σ p_c(1-p_c). NB the edges SHARE coordinate uncertainty, so
+// they are positively correlated and this UNDER-estimates the true variance (math-review,
+// DeepSeek 2026-05-25). The earlier `√(Σσ_d²)` was a mislabeled geometric aggregate, removed.
+var VAR_COUNT: f64 = 0.0
+
+fn consider_pair(ax: Knowledge<f64>, ay: Knowledge<f64>,
+                 bx: Knowledge<f64>, by: Knowledge<f64>,
+                 tau: f64, pstar: f64, tag: i64) with IO, Mut, Div, Epistemic {
+    let d2 = dist2_gum(ax, ay, bx, by)
+    let vd2 = variance_of(d2)
+    let d = sqrtf(d2)
+    let sd = sigma_of_dist(d2, vd2)
+    let pc = conformance_prob(d2, vd2, tau)
+    var off = d - 1.0
+    if off < 0.0 { off = 0.0 - off }
+    print("  pair "); print_int(tag); print(": d="); print_f64(d)
+    print("  sigma_d="); print_f64(sd); print("  p_conform="); print_f64(pc)
+    if off < 0.15 { CLASSICAL = CLASSICAL + 1 }
+    PSUM = PSUM + pc
+    VAR_COUNT = VAR_COUNT + pc * (1.0 - pc)     // Bernoulli variance per edge (independence)
+    if pc >= pstar { CERTIFIED = CERTIFIED + 1; print("  [conformance>=p*]\n") }
+    else {
+        if off < 0.15 { FLAGGED = FLAGGED + 1; print("  [classical-unit, conformance<p*]\n") }
+        else { print("\n") }
+    }
+}
+
+// Standard deviation of the expected conformance count under the independence
+// approximation, σ = √(Σ p_c(1-p_c)). RUNTIME aggregate; an UNDER-estimate because edges
+// share coordinate uncertainty (positively correlated). Not a static bound.
+fn count_std() -> f64 with Mut { return sqrtf(VAR_COUNT) }
+
+pub fn run(unc: f64, tau: f64, pstar: f64) -> i64 with IO, Mut, Div, Epistemic {
+    // u(4)=5 unit rhombus (two equilateral triangles share edge p0p1); √3/2≈0.8660254.
+    // Offset to strictly-positive coordinates (distances are translation-invariant).
+    let p0x = measure(2.0, uncertainty: unc); let p0y = measure(2.0, uncertainty: unc)
+    let p1x = measure(3.0, uncertainty: unc); let p1y = measure(2.0, uncertainty: unc)
+    let p2x = measure(2.5, uncertainty: unc); let p2y = measure(2.8660254, uncertainty: unc)
+    let p3x = measure(2.5, uncertainty: unc); let p3y = measure(1.1339746, uncertainty: unc)
+    CLASSICAL = 0; CERTIFIED = 0; FLAGGED = 0; PSUM = 0.0; VAR_COUNT = 0.0
+    print("--- rhombus, coord uncertainty sigma="); print_f64(unc)
+    print("  tau="); print_f64(tau); print("  p*="); print_f64(pstar); print(" ---\n")
+    consider_pair(p0x, p0y, p1x, p1y, tau, pstar, 1)   // unit
+    consider_pair(p0x, p0y, p2x, p2y, tau, pstar, 2)   // unit
+    consider_pair(p1x, p1y, p2x, p2y, tau, pstar, 3)   // unit
+    consider_pair(p0x, p0y, p3x, p3y, tau, pstar, 4)   // unit
+    consider_pair(p1x, p1y, p3x, p3y, tau, pstar, 5)   // unit
+    consider_pair(p2x, p2y, p3x, p3y, tau, pstar, 6)   // √3 — NOT unit
+    print("  classical boolean count = "); print_int(CLASSICAL)
+    print("   conformance-certified (p_c>=p*) = "); print_int(CERTIFIED)
+    print("   classical-but-flagged = "); print_int(FLAGGED); print("\n")
+    print("  expected conformance count (Σ p_c) = "); print_f64(PSUM)
+    print(" ± "); print_f64(count_std())
+    print(" (1σ, independence approx — edges share coord uncertainty ⇒ under-estimate)\n")
+    return CERTIFIED
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    print("=== Erdos [90] epistemic unit-distance graph (capability study) ===\n")
+    print("Static guarantee: .value extraction requires `with Epistemic` (E170 unwrap-safety).\n")
+    print("Runtime: conformance probability (JCGM 106), counts, decision. Not a u(n) bound.\n\n")
+    let a = run(0.005, 0.1, 0.9)   // precise: high conformance, all 5 certified
+    print("\n")
+    let b = run(0.08, 0.1, 0.9)    // noisy: classical still 5; conformance drops, edges flagged
+    print("\n--- τ-sensitivity at sigma=0.02 (roadmap item: τ is a modeling choice) ---\n")
+    let c1 = run(0.02, 0.02, 0.9)
+    let c2 = run(0.02, 0.05, 0.9)
+    let c3 = run(0.02, 0.10, 0.9)
+    print("\nThe boolean count is 5 in every case; the conformance count and certification\n")
+    print("track measurement precision and the chosen tolerance τ. Capability demo, not a bound.\n")
+    return 0
+}

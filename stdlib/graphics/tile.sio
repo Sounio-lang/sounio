@@ -1,0 +1,844 @@
+// Graphics Tile — Tiled surface for resolutions beyond 256×256
+//
+// Composes multiple 256×256 Surfaces into a larger logical canvas.
+// This is the scaling strategy from docs/design/native_graphics_library.md §4.3.
+//
+// Current limit: 9 tiles (3×3) = 768×768 pixels.
+// Extend the tiles array size for larger canvases.
+
+use graphics::drawing::{Color}
+use graphics::surface::{
+    Surface, surface_new, surface_clear, surface_set_pixel,
+    surface_draw_line, surface_draw_rect,
+    surface_get_pixel_r, surface_get_pixel_g, surface_get_pixel_b
+}
+use graphics::png::{
+    BLOCK_MAX, PNG_COLOR_RGB, PNG_COLOR_RGBA,
+    png_write_sig, png_write_ihdr, png_write_iend, png_write_deflate_block,
+    pixel_to_i8
+}
+
+pub struct TiledSurface {
+    pub width: i64,
+    pub height: i64,
+    pub tile_w: i64,
+    pub tile_h: i64,
+    pub tiles_wide: i64,
+    pub tiles_high: i64,
+    pub tile0: Surface,
+    pub tile1: Surface,
+    pub tile2: Surface,
+    pub tile3: Surface,
+    pub tile4: Surface,
+    pub tile5: Surface,
+    pub tile6: Surface,
+    pub tile7: Surface,
+    pub tile8: Surface,
+}
+
+pub fn tiled_surface_new(total_w: i64, total_h: i64, tile_w: i64, tile_h: i64) -> TiledSurface {
+    let tw = (total_w + tile_w - 1) / tile_w
+    let th = (total_h + tile_h - 1) / tile_h
+    TiledSurface {
+        width: total_w,
+        height: total_h,
+        tile_w: tile_w,
+        tile_h: tile_h,
+        tiles_wide: tw,
+        tiles_high: th,
+        tile0: surface_new(tile_w, tile_h),
+        tile1: surface_new(tile_w, tile_h),
+        tile2: surface_new(tile_w, tile_h),
+        tile3: surface_new(tile_w, tile_h),
+        tile4: surface_new(tile_w, tile_h),
+        tile5: surface_new(tile_w, tile_h),
+        tile6: surface_new(tile_w, tile_h),
+        tile7: surface_new(tile_w, tile_h),
+        tile8: surface_new(tile_w, tile_h),
+    }
+}
+
+pub fn tiled_clear(ts: TiledSurface, c: Color) -> TiledSurface with Mut, Panic {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+    if n > 0 { out.tile0 = surface_clear(out.tile0, c) }
+    if n > 1 { out.tile1 = surface_clear(out.tile1, c) }
+    if n > 2 { out.tile2 = surface_clear(out.tile2, c) }
+    if n > 3 { out.tile3 = surface_clear(out.tile3, c) }
+    if n > 4 { out.tile4 = surface_clear(out.tile4, c) }
+    if n > 5 { out.tile5 = surface_clear(out.tile5, c) }
+    if n > 6 { out.tile6 = surface_clear(out.tile6, c) }
+    if n > 7 { out.tile7 = surface_clear(out.tile7, c) }
+    if n > 8 { out.tile8 = surface_clear(out.tile8, c) }
+    out
+}
+
+pub fn tiled_set_pixel(ts: TiledSurface, x: i64, y: i64, c: Color) -> TiledSurface with Mut, Panic {
+    var out = ts
+    if x < 0 || x >= out.width || y < 0 || y >= out.height { return out }
+    let tx = x / out.tile_w
+    let ty = y / out.tile_h
+    let lx = x % out.tile_w
+    let ly = y % out.tile_h
+    let idx = ty * out.tiles_wide + tx
+    if idx == 0 {
+        out.tile0 = surface_set_pixel(out.tile0, lx, ly, c)
+    } else if idx == 1 {
+        out.tile1 = surface_set_pixel(out.tile1, lx, ly, c)
+    } else if idx == 2 {
+        out.tile2 = surface_set_pixel(out.tile2, lx, ly, c)
+    } else if idx == 3 {
+        out.tile3 = surface_set_pixel(out.tile3, lx, ly, c)
+    } else if idx == 4 {
+        out.tile4 = surface_set_pixel(out.tile4, lx, ly, c)
+    } else if idx == 5 {
+        out.tile5 = surface_set_pixel(out.tile5, lx, ly, c)
+    } else if idx == 6 {
+        out.tile6 = surface_set_pixel(out.tile6, lx, ly, c)
+    } else if idx == 7 {
+        out.tile7 = surface_set_pixel(out.tile7, lx, ly, c)
+    } else if idx == 8 {
+        out.tile8 = surface_set_pixel(out.tile8, lx, ly, c)
+    }
+    out
+}
+
+// Helper: test whether a line bbox intersects a tile.
+fn tile_line_intersects(ox: i64, oy: i64, tw: i64, th: i64, lminx: i64, lmaxx: i64, lminy: i64, lmaxy: i64) -> bool {
+    let tmaxx = ox + tw - 1
+    let tmaxy = oy + th - 1
+    lminx <= tmaxx && lmaxx >= ox && lminy <= tmaxy && lmaxy >= oy
+}
+
+// Bresenham line across tile boundaries.
+// Draws the line on each intersecting tile using local coordinates;
+// out-of-bounds pixels are silently ignored by surface_set_pixel.
+pub fn tiled_draw_line(ts: TiledSurface, x0: i64, y0: i64, x1: i64, y1: i64, c: Color) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+
+    var lminx = x0
+    var lmaxx = x1
+    if x1 < x0 { lminx = x1; lmaxx = x0 }
+    var lminy = y0
+    var lmaxy = y1
+    if y1 < y0 { lminy = y1; lmaxy = y0 }
+
+    if n > 0 {
+        let ox = 0
+        let oy = 0
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile0 = surface_draw_line(out.tile0, x0, y0, x1, y1, c)
+        }
+    }
+    if n > 1 {
+        let tx = 1 % out.tiles_wide
+        let ty = 1 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile1 = surface_draw_line(out.tile1, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 2 {
+        let tx = 2 % out.tiles_wide
+        let ty = 2 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile2 = surface_draw_line(out.tile2, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 3 {
+        let tx = 3 % out.tiles_wide
+        let ty = 3 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile3 = surface_draw_line(out.tile3, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 4 {
+        let tx = 4 % out.tiles_wide
+        let ty = 4 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile4 = surface_draw_line(out.tile4, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 5 {
+        let tx = 5 % out.tiles_wide
+        let ty = 5 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile5 = surface_draw_line(out.tile5, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 6 {
+        let tx = 6 % out.tiles_wide
+        let ty = 6 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile6 = surface_draw_line(out.tile6, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 7 {
+        let tx = 7 % out.tiles_wide
+        let ty = 7 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile7 = surface_draw_line(out.tile7, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    if n > 8 {
+        let tx = 8 % out.tiles_wide
+        let ty = 8 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_line_intersects(ox, oy, out.tile_w, out.tile_h, lminx, lmaxx, lminy, lmaxy) {
+            out.tile8 = surface_draw_line(out.tile8, x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)
+        }
+    }
+    out
+}
+
+// Helper: test whether a rect intersects a tile.
+fn tile_rect_intersects(ox: i64, oy: i64, tw: i64, th: i64, rx: i64, ry: i64, rx1: i64, ry1: i64) -> bool {
+    let tmaxx = ox + tw - 1
+    let tmaxy = oy + th - 1
+    rx <= tmaxx && rx1 >= ox && ry <= tmaxy && ry1 >= oy
+}
+
+// Filled rect across tile boundaries.
+// For each intersecting tile, clips the rect to the tile's bounds and draws only the overlap.
+pub fn tiled_draw_rect(ts: TiledSurface, x: i64, y: i64, w: i64, h: i64, c: Color) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+    let rx1 = x + w
+    let ry1 = y + h
+    if n > 0 {
+        let ox = 0
+        let oy = 0
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile0 = surface_draw_rect(out.tile0, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 1 {
+        let tx = 1 % out.tiles_wide
+        let ty = 1 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile1 = surface_draw_rect(out.tile1, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 2 {
+        let tx = 2 % out.tiles_wide
+        let ty = 2 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile2 = surface_draw_rect(out.tile2, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 3 {
+        let tx = 3 % out.tiles_wide
+        let ty = 3 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile3 = surface_draw_rect(out.tile3, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 4 {
+        let tx = 4 % out.tiles_wide
+        let ty = 4 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile4 = surface_draw_rect(out.tile4, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 5 {
+        let tx = 5 % out.tiles_wide
+        let ty = 5 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile5 = surface_draw_rect(out.tile5, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 6 {
+        let tx = 6 % out.tiles_wide
+        let ty = 6 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile6 = surface_draw_rect(out.tile6, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 7 {
+        let tx = 7 % out.tiles_wide
+        let ty = 7 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile7 = surface_draw_rect(out.tile7, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    if n > 8 {
+        let tx = 8 % out.tiles_wide
+        let ty = 8 / out.tiles_wide
+        let ox = tx * out.tile_w
+        let oy = ty * out.tile_h
+        if tile_rect_intersects(ox, oy, out.tile_w, out.tile_h, x, y, rx1, ry1) {
+            let clip_x = if x > ox { x } else { ox }
+            let clip_y = if y > oy { y } else { oy }
+            let clip_x1 = if rx1 < ox + out.tile_w { rx1 } else { ox + out.tile_w }
+            let clip_y1 = if ry1 < oy + out.tile_h { ry1 } else { oy + out.tile_h }
+            let cw = clip_x1 - clip_x
+            let ch = clip_y1 - clip_y
+            if cw > 0 && ch > 0 {
+                out.tile8 = surface_draw_rect(out.tile8, clip_x - ox, clip_y - oy, cw, ch, c)
+            }
+        }
+    }
+    out
+}
+
+// Batch rectangle draw on TiledSurface — same semantics as tiled_draw_rect,
+// explicitly named for bulk pipelines that expect a "batch" API.
+pub fn tiled_draw_rect_batch(ts: TiledSurface, x: i64, y: i64, w: i64, h: i64, c: Color) -> TiledSurface with Mut, Panic, Div {
+    tiled_draw_rect(ts, x, y, w, h, c)
+}
+
+// Read pixel R channel from global coordinates.
+pub fn tiled_get_pixel_r(ts: &TiledSurface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= ts.width || y < 0 || y >= ts.height { return 0 }
+    let tx = x / ts.tile_w
+    let ty = y / ts.tile_h
+    let lx = x % ts.tile_w
+    let ly = y % ts.tile_h
+    let idx = ty * ts.tiles_wide + tx
+    if idx < 0 || idx >= 9 { return 0 }
+    let pidx = ly * ts.tile_w + lx
+    if idx == 0 {
+        ts.tile0.r[pidx]
+    } else if idx == 1 {
+        ts.tile1.r[pidx]
+    } else if idx == 2 {
+        ts.tile2.r[pidx]
+    } else if idx == 3 {
+        ts.tile3.r[pidx]
+    } else if idx == 4 {
+        ts.tile4.r[pidx]
+    } else if idx == 5 {
+        ts.tile5.r[pidx]
+    } else if idx == 6 {
+        ts.tile6.r[pidx]
+    } else if idx == 7 {
+        ts.tile7.r[pidx]
+    } else {
+        ts.tile8.r[pidx]
+    }
+}
+
+// Read pixel G channel from global coordinates.
+pub fn tiled_get_pixel_g(ts: &TiledSurface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= ts.width || y < 0 || y >= ts.height { return 0 }
+    let tx = x / ts.tile_w
+    let ty = y / ts.tile_h
+    let lx = x % ts.tile_w
+    let ly = y % ts.tile_h
+    let idx = ty * ts.tiles_wide + tx
+    if idx < 0 || idx >= 9 { return 0 }
+    let pidx = ly * ts.tile_w + lx
+    if idx == 0 {
+        ts.tile0.g[pidx]
+    } else if idx == 1 {
+        ts.tile1.g[pidx]
+    } else if idx == 2 {
+        ts.tile2.g[pidx]
+    } else if idx == 3 {
+        ts.tile3.g[pidx]
+    } else if idx == 4 {
+        ts.tile4.g[pidx]
+    } else if idx == 5 {
+        ts.tile5.g[pidx]
+    } else if idx == 6 {
+        ts.tile6.g[pidx]
+    } else if idx == 7 {
+        ts.tile7.g[pidx]
+    } else {
+        ts.tile8.g[pidx]
+    }
+}
+
+// Read pixel B channel from global coordinates.
+pub fn tiled_get_pixel_b(ts: &TiledSurface, x: i64, y: i64) -> i64 {
+    if x < 0 || x >= ts.width || y < 0 || y >= ts.height { return 0 }
+    let tx = x / ts.tile_w
+    let ty = y / ts.tile_h
+    let lx = x % ts.tile_w
+    let ly = y % ts.tile_h
+    let idx = ty * ts.tiles_wide + tx
+    if idx < 0 || idx >= 9 { return 0 }
+    let pidx = ly * ts.tile_w + lx
+    if idx == 0 {
+        ts.tile0.b[pidx]
+    } else if idx == 1 {
+        ts.tile1.b[pidx]
+    } else if idx == 2 {
+        ts.tile2.b[pidx]
+    } else if idx == 3 {
+        ts.tile3.b[pidx]
+    } else if idx == 4 {
+        ts.tile4.b[pidx]
+    } else if idx == 5 {
+        ts.tile5.b[pidx]
+    } else if idx == 6 {
+        ts.tile6.b[pidx]
+    } else if idx == 7 {
+        ts.tile7.b[pidx]
+    } else {
+        ts.tile8.b[pidx]
+    }
+}
+
+// Export composited PPM to stdout.
+pub fn tiled_export_ppm(ts: &TiledSurface) with IO, Mut, Div, Panic {
+    print("P3\n")
+    print_int(ts.width)
+    print(" ")
+    print_int(ts.height)
+    print("\n255\n")
+    var y: i64 = 0
+    while y < ts.height {
+        var x: i64 = 0
+        while x < ts.width {
+            let tx = x / ts.tile_w
+            let ty = y / ts.tile_h
+            let lx = x % ts.tile_w
+            let ly = y % ts.tile_h
+            let idx = ty * ts.tiles_wide + tx
+            let pidx = ly * ts.tile_w + lx
+            var r = 0
+            var g = 0
+            var b = 0
+            if idx == 0 {
+                r = ts.tile0.r[pidx]
+                g = ts.tile0.g[pidx]
+                b = ts.tile0.b[pidx]
+            } else if idx == 1 {
+                r = ts.tile1.r[pidx]
+                g = ts.tile1.g[pidx]
+                b = ts.tile1.b[pidx]
+            } else if idx == 2 {
+                r = ts.tile2.r[pidx]
+                g = ts.tile2.g[pidx]
+                b = ts.tile2.b[pidx]
+            } else if idx == 3 {
+                r = ts.tile3.r[pidx]
+                g = ts.tile3.g[pidx]
+                b = ts.tile3.b[pidx]
+            } else if idx == 4 {
+                r = ts.tile4.r[pidx]
+                g = ts.tile4.g[pidx]
+                b = ts.tile4.b[pidx]
+            } else if idx == 5 {
+                r = ts.tile5.r[pidx]
+                g = ts.tile5.g[pidx]
+                b = ts.tile5.b[pidx]
+            } else if idx == 6 {
+                r = ts.tile6.r[pidx]
+                g = ts.tile6.g[pidx]
+                b = ts.tile6.b[pidx]
+            } else if idx == 7 {
+                r = ts.tile7.r[pidx]
+                g = ts.tile7.g[pidx]
+                b = ts.tile7.b[pidx]
+            } else if idx == 8 {
+                r = ts.tile8.r[pidx]
+                g = ts.tile8.g[pidx]
+                b = ts.tile8.b[pidx]
+            }
+            print_int(clamp_byte(r))
+            print(" ")
+            print_int(clamp_byte(g))
+            print(" ")
+            print_int(clamp_byte(b))
+            print("\n")
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { 0 } else if v > 255 { 255 } else { v }
+}
+
+// ============================================================================
+// TILED SURFACE PNG EXPORT
+// ============================================================================
+
+fn tiled_tile_adler_rgb(ts: &TiledSurface, idx: i64, a: i64, b: i64) -> (i64, i64) with Mut, Panic {
+    var a1 = a
+    var b1 = b
+    if idx == 0 {
+        var y = 0
+        while y < ts.tile0.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile0.width {
+                let pidx = y * ts.tile0.width + x
+                a1 = (a1 + ts.tile0.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile0.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile0.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 1 {
+        var y = 0
+        while y < ts.tile1.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile1.width {
+                let pidx = y * ts.tile1.width + x
+                a1 = (a1 + ts.tile1.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile1.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile1.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 2 {
+        var y = 0
+        while y < ts.tile2.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile2.width {
+                let pidx = y * ts.tile2.width + x
+                a1 = (a1 + ts.tile2.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile2.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile2.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 3 {
+        var y = 0
+        while y < ts.tile3.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile3.width {
+                let pidx = y * ts.tile3.width + x
+                a1 = (a1 + ts.tile3.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile3.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile3.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 4 {
+        var y = 0
+        while y < ts.tile4.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile4.width {
+                let pidx = y * ts.tile4.width + x
+                a1 = (a1 + ts.tile4.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile4.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile4.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 5 {
+        var y = 0
+        while y < ts.tile5.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile5.width {
+                let pidx = y * ts.tile5.width + x
+                a1 = (a1 + ts.tile5.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile5.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile5.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 6 {
+        var y = 0
+        while y < ts.tile6.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile6.width {
+                let pidx = y * ts.tile6.width + x
+                a1 = (a1 + ts.tile6.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile6.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile6.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 7 {
+        var y = 0
+        while y < ts.tile7.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile7.width {
+                let pidx = y * ts.tile7.width + x
+                a1 = (a1 + ts.tile7.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile7.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile7.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    } else if idx == 8 {
+        var y = 0
+        while y < ts.tile8.height {
+            a1 = (a1 + 0) % 65521
+            b1 = (b1 + a1) % 65521
+            var x = 0
+            while x < ts.tile8.width {
+                let pidx = y * ts.tile8.width + x
+                a1 = (a1 + ts.tile8.r[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile8.g[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                a1 = (a1 + ts.tile8.b[pidx]) % 65521
+                b1 = (b1 + a1) % 65521
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    (a1, b1)
+}
+
+fn tiled_compute_adler_rgb(ts: &TiledSurface) -> i64 with Mut, Panic {
+    var a: i64 = 1
+    var b: i64 = 0
+    let n = ts.tiles_wide * ts.tiles_high
+    var idx: i64 = 0
+    while idx < n && idx < 9 {
+        let ab = tiled_tile_adler_rgb(ts, idx, a, b)
+        a = ab.0
+        b = ab.1
+        idx = idx + 1
+    }
+    (b << 16) | a
+}
+
+pub fn tiled_export_png(ts: &TiledSurface, filename: string) -> bool with IO, Mut, Panic, Div {
+    if ts.width <= 0 || ts.height <= 0 { return false }
+
+    let adler = tiled_compute_adler_rgb(ts)
+    let scanline_size = 1 + ts.width * 3
+
+    if !png_write_sig(filename) { return false }
+    if !png_write_ihdr(filename, ts.width, ts.height, PNG_COLOR_RGB) { return false }
+
+    var block_buf: [i8; 32800] = [0; 32800]
+    var block_pos: i64 = 0
+    var block_num: i64 = 0
+    var y: i64 = 0
+
+    while y < ts.height {
+        if block_pos > 0 && block_pos + scanline_size > BLOCK_MAX {
+            if !png_write_deflate_block(filename, block_num, false, block_pos, block_buf, adler) {
+                return false
+            }
+            block_pos = 0
+            block_num = block_num + 1
+        }
+
+        block_buf[block_pos] = 0 as i8
+        block_pos = block_pos + 1
+
+        let ty = y / ts.tile_h
+        let ly = y % ts.tile_h
+        var tx: i64 = 0
+        while tx < ts.tiles_wide {
+            let idx = ty * ts.tiles_wide + tx
+            var tile_width: i64 = 0
+            var r_arr: [i64; 65536] = [0; 65536]
+            var g_arr: [i64; 65536] = [0; 65536]
+            var b_arr: [i64; 65536] = [0; 65536]
+
+            if idx == 0 {
+                tile_width = ts.tile0.width
+                r_arr = ts.tile0.r
+                g_arr = ts.tile0.g
+                b_arr = ts.tile0.b
+            } else if idx == 1 {
+                tile_width = ts.tile1.width
+                r_arr = ts.tile1.r
+                g_arr = ts.tile1.g
+                b_arr = ts.tile1.b
+            } else if idx == 2 {
+                tile_width = ts.tile2.width
+                r_arr = ts.tile2.r
+                g_arr = ts.tile2.g
+                b_arr = ts.tile2.b
+            } else if idx == 3 {
+                tile_width = ts.tile3.width
+                r_arr = ts.tile3.r
+                g_arr = ts.tile3.g
+                b_arr = ts.tile3.b
+            } else if idx == 4 {
+                tile_width = ts.tile4.width
+                r_arr = ts.tile4.r
+                g_arr = ts.tile4.g
+                b_arr = ts.tile4.b
+            } else if idx == 5 {
+                tile_width = ts.tile5.width
+                r_arr = ts.tile5.r
+                g_arr = ts.tile5.g
+                b_arr = ts.tile5.b
+            } else if idx == 6 {
+                tile_width = ts.tile6.width
+                r_arr = ts.tile6.r
+                g_arr = ts.tile6.g
+                b_arr = ts.tile6.b
+            } else if idx == 7 {
+                tile_width = ts.tile7.width
+                r_arr = ts.tile7.r
+                g_arr = ts.tile7.g
+                b_arr = ts.tile7.b
+            } else if idx == 8 {
+                tile_width = ts.tile8.width
+                r_arr = ts.tile8.r
+                g_arr = ts.tile8.g
+                b_arr = ts.tile8.b
+            }
+
+            var lx: i64 = 0
+            while lx < tile_width {
+                let pidx = ly * tile_width + lx
+                block_buf[block_pos] = pixel_to_i8(r_arr[pidx])
+                block_pos = block_pos + 1
+                block_buf[block_pos] = pixel_to_i8(g_arr[pidx])
+                block_pos = block_pos + 1
+                block_buf[block_pos] = pixel_to_i8(b_arr[pidx])
+                block_pos = block_pos + 1
+                lx = lx + 1
+            }
+            tx = tx + 1
+        }
+        y = y + 1
+    }
+
+    if block_pos > 0 {
+        if !png_write_deflate_block(filename, block_num, true, block_pos, block_buf, adler) {
+            return false
+        }
+    }
+
+    png_write_iend(filename)
+}
+
+fn main() -> i32 with IO { 0 }

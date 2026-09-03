@@ -1,0 +1,316 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/wilcoxon.sio — Wilcoxon signed-rank test (paired / one-sample)
+//
+// The non-parametric counterpart to the paired t-test, and the paired analogue
+// of the Mann-Whitney U already in stats::hypothesis. It tests whether the
+// median of the differences (paired) — or of a single sample about a
+// hypothesised median (one-sample) — is zero, using only the ranks of the
+// absolute differences, so it is robust to non-normal, heavy-tailed data.
+//
+//   wilcoxon_signed_rank(x, y, n)      — paired: differences d_i = x_i - y_i
+//   wilcoxon_one_sample(x, n, median0) — one-sample: d_i = x_i - median0
+//
+// Both return a WilcoxonResult carrying W+, W-, the classic W = min(W+,W-),
+// the effective n (non-zero differences), the normal-approximation z, the
+// two-tailed p-value, and a rank-biserial effect size r = z / sqrt(n_eff).
+//
+// Method (Wilcoxon 1945; Hollander & Wolfe 1999 §3.1):
+//   1. d_i = x_i - y_i; drop d_i = 0 (Pratt-style zeros are not implemented —
+//      exact zeros are discarded, the standard textbook convention). n_eff = #nonzero.
+//   2. Rank |d_i| ascending; tied |d_i| receive the average of their ranks.
+//   3. W+ = Σ ranks with d_i > 0,  W- = Σ ranks with d_i < 0,  W+ + W- = n(n+1)/2.
+//   4. Normal approximation with continuity correction:
+//        E[W+]  = n(n+1)/4
+//        Var[W+] = n(n+1)(2n+1)/24 − (Σ (t³ − t)) / 48   (t = tie-group sizes)
+//        z = (|W+ − E| − 0.5) / sqrt(Var),   two-tailed p = 2·(1 − Φ(|z|)).
+//   The normal approximation is accurate for n_eff ≳ 15; for very small samples
+//   an exact permutation p-value would be tighter (not implemented here).
+//
+// Pure Sounio; the only dependency is the standard-normal CDF (special::erf).
+//
+// References:
+//   Wilcoxon (1945) "Individual comparisons by ranking methods", Biometrics 1(6)
+//   Hollander & Wolfe (1999) "Nonparametric Statistical Methods" 2nd ed., §3.1
+//   Conover (1999) "Practical Nonparametric Statistics" 3rd ed., §5.7
+
+module stats::wilcoxon
+
+use special::erf::{normal_cdf}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn wx_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn wx_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct WilcoxonResult {
+    pub w_plus: f64,    // sum of ranks with positive difference
+    pub w_minus: f64,   // sum of ranks with negative difference
+    pub w_stat: f64,    // classic statistic W = min(w_plus, w_minus)
+    pub n_eff: i64,     // number of non-zero differences
+    pub z: f64,         // normal-approx z (continuity-corrected, signed)
+    pub p_value: f64,   // two-tailed p-value
+    pub effect_r: f64,  // rank-biserial effect size r = z / sqrt(n_eff)
+}
+
+// ============================================================================
+// CORE — operate on an array of differences already computed
+// ============================================================================
+
+// Computes the signed-rank result from `m` raw differences in `d[0..m]`.
+fn wx_from_diffs(d: &[f64; 256], m: i32) -> WilcoxonResult with Mut, Div, Panic {
+    let tol = 1.0e-12
+
+    // 1. Extract non-zero differences: absolute value + sign, into parallel arrays.
+    var absd: [f64; 256] = [0.0; 256]
+    var sgn:  [f64; 256] = [0.0; 256]
+    var n = 0
+    var i = 0
+    while i < m {
+        let di = d[i as usize]
+        if wx_abs(di) > tol {
+            absd[n as usize] = wx_abs(di)
+            if di > 0.0 { sgn[n as usize] = 1.0 } else { sgn[n as usize] = 0.0 - 1.0 }
+            n = n + 1
+        }
+        i = i + 1
+    }
+
+    if n == 0 {
+        return WilcoxonResult {
+            w_plus: 0.0, w_minus: 0.0, w_stat: 0.0,
+            n_eff: 0, z: 0.0, p_value: 1.0, effect_r: 0.0,
+        }
+    }
+
+    // 2. Selection sort absd ascending, carrying sgn along.
+    var a = 0
+    while a < n - 1 {
+        var min_i = a
+        var b = a + 1
+        while b < n {
+            if absd[b as usize] < absd[min_i as usize] { min_i = b }
+            b = b + 1
+        }
+        if min_i != a {
+            let ta = absd[a as usize]; absd[a as usize] = absd[min_i as usize]; absd[min_i as usize] = ta
+            let ts = sgn[a as usize];  sgn[a as usize]  = sgn[min_i as usize];  sgn[min_i as usize]  = ts
+        }
+        a = a + 1
+    }
+
+    // 3. Average-rank assignment with tie groups; accumulate W+ and tie correction.
+    var w_plus = 0.0
+    var tie_sum = 0.0     // Σ (t³ − t)
+    var g = 0
+    while g < n {
+        // group [g, h) of equal magnitudes
+        var h = g
+        while h < n && wx_abs(absd[h as usize] - absd[g as usize]) <= tol {
+            h = h + 1
+        }
+        // ranks are 1-based positions (g+1) .. h ; average of an arithmetic run
+        let avg_rank = (((g + 1) + h) as f64) / 2.0
+        var p = g
+        while p < h {
+            if sgn[p as usize] > 0.0 { w_plus = w_plus + avg_rank }
+            p = p + 1
+        }
+        let t = (h - g) as f64
+        tie_sum = tie_sum + (t * t * t - t)
+        g = h
+    }
+
+    let nf = n as f64
+    let total = nf * (nf + 1.0) / 2.0
+    let w_minus = total - w_plus
+    let w_stat = if w_plus < w_minus { w_plus } else { w_minus }
+
+    // 4. Normal approximation with continuity correction.
+    let mean = nf * (nf + 1.0) / 4.0
+    let var_w = nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0 - tie_sum / 48.0
+    let sd = wx_sqrt(var_w)
+
+    var z = 0.0
+    var p_value = 1.0
+    var effect_r = 0.0
+    if sd > 1.0e-15 {
+        let raw = w_plus - mean
+        var cc = wx_abs(raw) - 0.5
+        if cc < 0.0 { cc = 0.0 }
+        let zmag = cc / sd
+        // signed z follows the sign of (W+ − E)
+        if raw < 0.0 { z = 0.0 - zmag } else { z = zmag }
+        p_value = 2.0 * (1.0 - normal_cdf(zmag))
+        if p_value > 1.0 { p_value = 1.0 }
+        effect_r = z / wx_sqrt(nf)
+    }
+
+    return WilcoxonResult {
+        w_plus: w_plus, w_minus: w_minus, w_stat: w_stat,
+        n_eff: n as i64, z: z, p_value: p_value, effect_r: effect_r,
+    }
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/// Paired Wilcoxon signed-rank test on differences d_i = x_i − y_i.
+///
+/// Parâmetros: x, y — paired samples; n — number of pairs (<= 256).
+/// Retorno: WilcoxonResult (W+, W-, W, n_eff, z, two-tailed p, effect r).
+/// Complexidade: O(n²) (selection sort of the absolute differences).
+/// Referências: Wilcoxon (1945); Hollander & Wolfe (1999) §3.1.
+pub fn wilcoxon_signed_rank(x: &[f64; 256], y: &[f64; 256], n: i32) -> WilcoxonResult with Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        d[i as usize] = x[i as usize] - y[i as usize]
+        i = i + 1
+    }
+    return wx_from_diffs(&d, n)
+}
+
+/// One-sample Wilcoxon signed-rank test of H0: median = median0.
+///
+/// Parâmetros: x — sample; n — sample size (<= 256); median0 — hypothesised median.
+/// Retorno: WilcoxonResult on d_i = x_i − median0.
+/// Referências: Wilcoxon (1945); Conover (1999) §5.7.
+pub fn wilcoxon_one_sample(x: &[f64; 256], n: i32, median0: f64) -> WilcoxonResult with Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        d[i as usize] = x[i as usize] - median0
+        i = i + 1
+    }
+    return wx_from_diffs(&d, n)
+}
+
+// ============================================================================
+// INLINE TESTS — validated against hand-computed worked examples
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Example 1 — no ties.  d = [1.5, 2.5, -3.5, 4.0, -1.0, 5.0, 2.0, 3.0], m=8.
+// Sorted |d|: 1.0(-) 1.5(+) 2.0(+) 2.5(+) 3.0(+) 3.5(-) 4.0(+) 5.0(+)
+// ranks     :   1     2     3     4     5     6     7     8
+// W+ = 2+3+4+5+7+8 = 29 ; W- = 1+6 = 7 ; total = 36.
+// E[W+]=18, Var=8·9·17/24=51, sd=7.14143, cc-z=(11-0.5)/7.14143=1.47031.
+fn test_no_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    // encode differences directly via x, y=0
+    x[0] = 1.5;  x[1] = 2.5;  x[2] = 0.0 - 3.5; x[3] = 4.0
+    x[4] = 0.0 - 1.0; x[5] = 5.0; x[6] = 2.0; x[7] = 3.0
+    let r = wilcoxon_signed_rank(&x, &y, 8)
+    var ok = true
+    ok = check(1, r.n_eff == 8) && ok
+    ok = check(2, approx(r.w_plus, 29.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.w_minus, 7.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.w_stat, 7.0, 1.0e-9)) && ok
+    ok = check(5, approx(r.z, 1.4702938, 1.0e-4)) && ok
+    // two-tailed p = 2(1-Φ(1.4703)) ≈ 0.141487
+    ok = check(6, approx(r.p_value, 0.1414866, 1.0e-4)) && ok
+    return ok
+}
+
+// Example 2 — with ties.  d = [1, 1, -2, 2, 3], m=5.
+// |d| sorted: 1,1,2,2,3  ranks: (1,2)->1.5 ; (3,4)->3.5 ; 5
+// W+ = 1.5 + 1.5 + 3.5 + 5 = 11.5 ; W- = 3.5 ; total 15.
+// tie groups t=2,2 -> Σ(t³-t)=6+6=12 ; Var=5·6·11/24 - 12/48 = 13.75-0.25 = 13.5.
+fn test_with_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0] = 1.0; x[1] = 1.0; x[2] = 0.0 - 2.0; x[3] = 2.0; x[4] = 3.0
+    let r = wilcoxon_signed_rank(&x, &y, 5)
+    var ok = true
+    ok = check(10, r.n_eff == 5) && ok
+    ok = check(11, approx(r.w_plus, 11.5, 1.0e-9)) && ok
+    ok = check(12, approx(r.w_minus, 3.5, 1.0e-9)) && ok
+    // reconstruct variance from z: not exposed, so verify z is consistent:
+    // E=7.5, sd=sqrt(13.5)=3.674235, cc-z=(|11.5-7.5|-0.5)/3.674235=3.5/3.674235=0.952565
+    ok = check(13, approx(r.z, 0.9525791, 1.0e-4)) && ok
+    return ok
+}
+
+// Example 3 — zeros are dropped.  d = [0, 0, 2, -3, 4] -> n_eff = 3.
+fn test_zeros_dropped() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0] = 0.0; x[1] = 0.0; x[2] = 2.0; x[3] = 0.0 - 3.0; x[4] = 4.0
+    let r = wilcoxon_signed_rank(&x, &y, 5)
+    var ok = true
+    ok = check(20, r.n_eff == 3) && ok
+    // |d| sorted: 2(+),3(-),4(+) ranks 1,2,3 ; W+ = 1+3 = 4 ; W- = 2
+    ok = check(21, approx(r.w_plus, 4.0, 1.0e-9)) && ok
+    ok = check(22, approx(r.w_minus, 2.0, 1.0e-9)) && ok
+    return ok
+}
+
+// Example 4 — one-sample about a hypothesised median.
+// x = [12, 15, 9, 14, 11], median0 = 10 -> d = [2, 5, -1, 4, 1].
+// |d| sorted: 1(-),1(+),2(+),4(+),5(+) with a tie at |d|=1:
+//   ranks (1,2)->1.5 each ; 2->3 ; 4->4 ; 5->5.
+// W+ = 1.5 + 3 + 4 + 5 = 13.5 ; W- = 1.5 ; total 15.
+fn test_one_sample() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0] = 12.0; x[1] = 15.0; x[2] = 9.0; x[3] = 14.0; x[4] = 11.0
+    let r = wilcoxon_one_sample(&x, 5, 10.0)
+    var ok = true
+    ok = check(30, r.n_eff == 5) && ok
+    ok = check(31, approx(r.w_plus, 13.5, 1.0e-9)) && ok
+    ok = check(32, approx(r.w_minus, 1.5, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_no_ties() && ok
+    ok = test_with_ties() && ok
+    ok = test_zeros_dropped() && ok
+    ok = test_one_sample() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

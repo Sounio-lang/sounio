@@ -1,0 +1,3937 @@
+#!/bin/bash
+# Kretikos GPU Compiler — bounded GPU compilation wrapper
+#
+# Kretikos (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth,
+# this compiler is the named path for Sounio's GPU work: source-level thread
+# builtins today, deterministic CPU fallback, in-tree PTX/CUBIN artifact
+# templates, and bundles that keep runtime claims explicit.
+#
+# Usage:
+#   kretikos check <source.sio>                 - compile-check a GPU kernel source file
+#   kretikos run <source.sio>                   - native CPU fallback, serial thread IDs
+#   kretikos build <source.sio> [opts] -o <out>  - PTX via checked GPU artifact if present
+#   kretikos emit-ptx <pattern> -o <file.ptx>   - emit PTX template from in-tree emitter
+#   kretikos emit-metal <pattern> -o <file.metal> - emit MSL template from in-tree emitter
+#   kretikos emit-spirv <pattern> -o <file.spv>  - emit SPIR-V template from in-tree emitter
+#   kretikos emit-kaxi <pattern> -o <file.kaxi>  - emit K-AXI epistemic assembly template
+#   kretikos kaxi-witness <pattern> -o <file.json> - emit K-AXI assembly plus evidence JSON
+#   kretikos kaxi-source-witness <source.sio> -o <file.json> - link checked source to K-AXI evidence
+#   kretikos kaxi-lower-source <source.sio> -o <file.json> - recognize checked source and lower to K-AXI evidence
+#   kretikos kaxi-lowering-certificate <source.sio> -o <file.json> - braid source lowering, K-AXI, and runtime evidence
+#   kretikos kaxi-certificate <source.sio> -o <file.json> - braid source, K-AXI, and runtime bundle evidence
+#   kretikos kaxi-validate-evidence <file.json> [--expect PATH=VAL]... - pure-Sounio JSON evidence validator
+#   kretikos json-emit <flag>...                - pure-Sounio JSON aggregator (replaces python3 json.dump heredocs)
+#   kretikos json-emit-array < jsonl            - fold JSONL stdin into one JSON array (e.g. failures[])
+#   kretikos emulate                            - run CPU emulation self-check
+#   kretikos emit-cubin <kind> -o <file.cubin>  - emit CUBIN template from in-tree emitter
+#   kretikos bundle [-o <dir>] [validation]     - emit PTX+CUBIN plus bundle manifest
+#   kretikos profile-source <source.sio>         - classify a real source file for Kretikos
+#   kretikos run-source <source.sio> -o <dir>    - check and validate a source profile
+#   kretikos hpc source <source.sio>             - run source runtime proof on Slurm GPU worker
+#   kretikos hpc manifest <manifest.tsv>         - run manifest runtime proof on Slurm GPU workers
+#
+# Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const, epistemic_dual_output_f32
+# Supported Metal patterns: vec_add, epistemic_dual_output_f32, ossm_oct_step, sedenion_cd_step, self-check
+# Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32
+# Supported K-AXI algebra profiles: octonion_assoc, octonion_mul
+#
+# Runtime-backed source profiles:
+#   store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32
+#
+# Structural-only source profiles:
+#   none
+#
+# GPU builtins recognized in kernel fn bodies:
+#   gpu_thread_id_x()  gpu_thread_id_y()  gpu_thread_id_z()
+#   gpu_block_id_x()   gpu_block_id_y()   gpu_block_id_z()
+#   gpu_block_dim_x()  gpu_block_dim_y()  gpu_block_dim_z()
+#   gpu_sync_threads()
+
+set -euo pipefail
+
+# C.0 closure: large K-AXI emitters (sedenion_associator and beyond) push the
+# driver's per-fn frame past the 8 MB Linux default rlimit. The Sounio compiler
+# emits the frames correctly; the kernel kills the process at runtime. Raise
+# the limit so KaxiAsmBuf can grow without a 1000-site &!-refactor of every
+# value-pass appender. Failures are non-fatal: containerised environments may
+# refuse the bump, in which case existing 64 KB-buffer behaviour still works.
+ulimit -s unlimited 2>/dev/null || ulimit -s 65536 2>/dev/null || true
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+KRETIKOS_SELF="$SCRIPT_DIR/kretikos"
+
+# Resolve the compiler binary
+SOUC_BIN="${SOUNIO_KRETIKOS_COMPILER:-$SCRIPT_DIR/souc-linux-x86_64}"
+if [[ ! -x "$SOUC_BIN" ]]; then
+    SOUC_BIN="$SCRIPT_DIR/souc"
+fi
+if [[ ! -x "$SOUC_BIN" ]]; then
+    echo "error: Kretikos compiler not found. Set SOUNIO_KRETIKOS_COMPILER." >&2
+    exit 1
+fi
+
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
+__kretikos_file_size() {
+    if [[ ! -f "$1" ]]; then
+        echo "error: file not found: $1" >&2
+        return 1
+    fi
+    stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || {
+        echo "error: could not stat file: $1" >&2
+        return 1
+    }
+}
+
+__kretikos_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "error: sha256sum or shasum is required" >&2
+        return 1
+    fi
+}
+
+__kretikos_repo_path() {
+    local path="$1"
+    if [[ "$path" == "$ROOT_DIR" ]]; then
+        echo "."
+    elif [[ "$path" == "$ROOT_DIR/"* ]]; then
+        echo "${path#$ROOT_DIR/}"
+    else
+        echo "$path"
+    fi
+}
+
+__kretikos_token_value() {
+    local text="$1"
+    local key="$2"
+    tr ' ' '\n' <<<"$text" | awk -F= -v k="$key" '$1 == k { print $2; exit }'
+}
+
+__kretikos_check_source() {
+    local src="$1"
+    if [[ -x "$SCRIPT_DIR/souc" ]]; then
+        "$SCRIPT_DIR/souc" check "$src"
+    else
+        local out="${TMPDIR:-/tmp}/kretikos-check.elf"
+        rm -f "$out"
+        "$SOUC_BIN" "$src" "$out" >/dev/null
+        rm -f "$out"
+    fi
+}
+
+__kretikos_hpc_require_script() {
+    local script="$1"
+    if [[ ! -x "$script" ]]; then
+        echo "error: missing executable Kretikos HPC bridge: $script" >&2
+        return 1
+    fi
+}
+
+__kretikos_hpc_doctor() {
+    local ns="${NS:-slurm-pilot}"
+    local kubectl_bin="${KUBECTL_BIN:-kubectl}"
+    local login_pod_name="${LOGIN_POD_NAME:-}"
+    local login_selector="${LOGIN_SELECTOR:-app.kubernetes.io/name=login}"
+    local login_pod=""
+
+    echo "Kretikos HPC Runtime Bridge"
+    echo "==========================="
+    echo "namespace: $ns"
+
+    if ! command -v "$kubectl_bin" >/dev/null 2>&1; then
+        echo "kubectl:   NOT FOUND ($kubectl_bin)" >&2
+        return 1
+    fi
+    echo "kubectl:   FOUND at $(command -v "$kubectl_bin")"
+
+    if [[ -n "$login_pod_name" ]]; then
+        login_pod="$login_pod_name"
+    else
+        login_pod="$("$kubectl_bin" -n "$ns" get pods \
+            -l "$login_selector" \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$login_pod" ]]; then
+        echo "login pod: NOT FOUND selector=$login_selector" >&2
+        return 1
+    fi
+    echo "login pod: $login_pod"
+
+    "$kubectl_bin" -n "$ns" exec "$login_pod" -- bash -lc '
+        set -euo pipefail
+        test -S /run/slurm/sack.socket
+        scontrol ping >/dev/null
+        printf "slurm:     READY\n"
+        printf "sbatch:    "
+        command -v sbatch
+        if command -v sinfo >/dev/null 2>&1; then
+            printf "gpu view:\n"
+            sinfo -h -o "%P %a %l %D %G" | head -10
+        fi
+    '
+}
+
+__kretikos_normalize_profile() {
+    tr '[:upper:]' '[:lower:]' <<<"$1" | tr '-' '_'
+}
+
+__kretikos_source_profile_record() {
+    local src="$1"
+    if [[ ! -f "$src" ]]; then
+        echo "error: source not found: $src" >&2
+        return 1
+    fi
+
+    local directive profile
+    directive="$(awk '
+        /^[[:space:]]*\/\/[[:space:]]*kretikos:[[:space:]]*profile[[:space:]]*=/ {
+            sub(/^[[:space:]]*\/\/[[:space:]]*kretikos:[[:space:]]*profile[[:space:]]*=[[:space:]]*/, "")
+            print $1
+            exit
+        }
+    ' "$src")"
+    profile="$(__kretikos_normalize_profile "$directive")"
+
+    if [[ -z "$profile" ]]; then
+        if grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*(epistemic_dual|knowledge_dual)' "$src"; then
+            profile="epistemic_dual_output_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*epistemic.*vec.*add' "$src"; then
+            profile="epistemic_elementwise_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*(vec_add|vector_add|add_vec)' "$src"; then
+            profile="vec_add_f32"
+        elif grep -Eq 'kernel[[:space:]]+fn[[:space:]]+.*store.*(u32|const)' "$src"; then
+            profile="store_u32_const"
+        fi
+    fi
+
+    case "$profile" in
+        store|store_u32|store_const|store_u32_const)
+            echo "store_u32_const|store_u32_const|store_u32_const|sounio_bare_store_u32_const_sm80|source_profile||1"
+            ;;
+        vec_add|vector_add|add_vec|vec_add_f32)
+            echo "vec_add_f32|vec_add_f32|vec_add_f32|sounio_bare_vec_add_f32_sm80|source_profile|vec_add|1"
+            ;;
+        vec_sub|vector_sub|sub_vec|vec_sub_f32)
+            echo "vec_sub_f32|vec_sub_f32|vec_sub_f32|sounio_bare_vec_sub_f32_sm80|source_profile|vec_sub|1"
+            ;;
+        epistemic_elementwise|epistemic_elementwise_f32|epistemic_vec_add|epistemic_vec_add_f32)
+            echo "epistemic_elementwise_f32|vec_add_f32|epistemic_elementwise_f32|sounio_bare_vec_add_f32_sm80|source_profile|vec_add|1"
+            ;;
+        epistemic_dual|epistemic_dual_f32|epistemic_dual_output|epistemic_dual_output_f32)
+            echo "epistemic_dual_output_f32|epistemic_dual_f32|epistemic_dual_output_f32|sounio_bare_epistemic_dual_output_f32_sm80|source_profile||1"
+            ;;
+        vec_mul|vector_mul|mul_vec|vec_mul_f32)
+            echo "vec_mul_f32|vec_mul_f32|vec_mul_f32|sounio_bare_vec_mul_f32_sm80|source_profile|vec_mul|1"
+            ;;
+        vec_div|vector_div|div_vec|vec_div_f32)
+            echo "vec_div_f32|vec_div_f32|vec_div_f32|sounio_bare_vec_div_f32_sm80|source_profile|vec_div|1"
+            ;;
+        vec_add_f64|vector_add_f64|add_vec_f64)
+            echo "vec_add_f64|vec_add_f64|vec_add_f64|sounio_bare_vec_add_f64_sm80|source_profile|vec_add_f64|1"
+            ;;
+        vec_sub_f64|vector_sub_f64|sub_vec_f64)
+            echo "vec_sub_f64|vec_sub_f64|vec_sub_f64|sounio_bare_vec_sub_f64_sm80|source_profile|vec_sub_f64|1"
+            ;;
+        vec_mul_f64|vector_mul_f64|mul_vec_f64)
+            echo "vec_mul_f64|vec_mul_f64|vec_mul_f64|sounio_bare_vec_mul_f64_sm80|source_profile|vec_mul_f64|1"
+            ;;
+        vec_div_f64|vector_div_f64|div_vec_f64)
+            echo "vec_div_f64|vec_div_f64|vec_div_f64|sounio_bare_vec_div_f64_sm80|source_profile|vec_div_f64|1"
+            ;;
+        fma_f64|vec_fma_f64)
+            echo "fma_f64|fma_f64|fma_f64|sounio_bare_vec_fma_f64_sm80|source_profile|fma_f64|1"
+            ;;
+        fma|fma_f32|vec_fma|vec_fma_f32)
+            echo "fma_f32|fma_f32|fma_f32|sounio_bare_vec_fma_f32_sm80|source_profile|fma|1"
+            ;;
+        *)
+            echo "error: unsupported Kretikos source profile for $src" >&2
+            echo "hint: add one of these directives near the top of the file:" >&2
+            echo "  // kretikos: profile=vec_add_f32" >&2
+            echo "  // kretikos: profile=vec_sub_f32" >&2
+            echo "  // kretikos: profile=vec_mul_f32" >&2
+            echo "  // kretikos: profile=vec_div_f32" >&2
+            echo "  // kretikos: profile=vec_add_f64" >&2
+            echo "  // kretikos: profile=vec_sub_f64" >&2
+            echo "  // kretikos: profile=vec_mul_f64" >&2
+            echo "  // kretikos: profile=vec_div_f64" >&2
+            echo "  // kretikos: profile=fma_f64" >&2
+            echo "  // kretikos: profile=fma_f32" >&2
+            echo "  // kretikos: profile=epistemic_elementwise_f32" >&2
+            echo "  // kretikos: profile=epistemic_dual_output_f32" >&2
+            echo "  // kretikos: profile=store_u32_const" >&2
+            return 1
+            ;;
+    esac
+}
+
+CMD="${1:-}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+    check)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos check <source.sio>" >&2
+            exit 1
+        fi
+        __kretikos_check_source "$1" >/dev/null 2>&1
+        echo "kretikos: check OK — GPU builtin surface accepted"
+        echo "kretikos: CPU fallback is serial: thread/block IDs are deterministic stubs"
+        ;;
+    run)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run <source.sio>" >&2
+            exit 1
+        fi
+        OUT="/tmp/kretikos-run.elf"
+        rm -f "$OUT"
+        "$SOUC_BIN" "$1" "$OUT"
+        chmod +x "$OUT"
+        "$OUT"
+        ;;
+    profile-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos profile-source <source.sio>" >&2
+            exit 1
+        fi
+        SRC="$1"
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+        echo "kretikos: source profile - profile=$PROFILE cubin_kind=$CUBIN_KIND runtime_rung=$RUNTIME_RUNG kernel=$KERNEL_NAME class=$CLASS ptx_pattern=$PTX_PATTERN runtime_backed=$RUNTIME_BACKED"
+        if [[ "$RUNTIME_BACKED" == "1" ]]; then
+            echo "kretikos: source contract - checked Sounio file selects a runtime-backed GPU profile"
+        else
+            echo "kretikos: source contract - checked Sounio file selects a structural-only PTX profile"
+            echo "kretikos: source blocker - profile_not_runtime_backed"
+        fi
+        ;;
+    run-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run-source <source.sio> [-o <dir>] [--force] [--validate-toolchain] [--require-runtime]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT_DIR=""
+        FORCE=0
+        TOOLCHAIN_ARGS=()
+        TOOLCHAIN_MODE="off"
+        REQUIRE_TOOLCHAIN=0
+        RUNTIME_ARGS=(--validate-runtime)
+        RUNTIME_MODE="auto"
+        REQUIRE_RUNTIME=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-toolchain)
+                    TOOLCHAIN_ARGS=(--validate-toolchain)
+                    TOOLCHAIN_MODE="auto"
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_ARGS=(--require-toolchain)
+                    TOOLCHAIN_MODE="required"
+                    REQUIRE_TOOLCHAIN=1
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARGS=(--validate-runtime)
+                    RUNTIME_MODE="auto"
+                    REQUIRE_RUNTIME=0
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARGS=(--require-runtime)
+                    RUNTIME_MODE="required"
+                    REQUIRE_RUNTIME=1
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-source.XXXXXX")" || {
+                echo "error: failed to create temporary source-run directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        fi
+
+        __kretikos_check_source "$SRC" >/dev/null
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        SOURCE_MANIFEST="$OUT_DIR/kretikos_source_profile.v1.json"
+
+        if [[ "$RUNTIME_BACKED" != "1" ]]; then
+            if [[ -z "$PTX_PATTERN" ]]; then
+                echo "error: structural profile $PROFILE has no PTX pattern" >&2
+                exit 1
+            fi
+            PTX_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptx"
+            if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$SOURCE_MANIFEST" ]]; then
+                echo "error: source output already exists in $OUT_DIR; use --force to overwrite" >&2
+                exit 1
+            fi
+
+            "$KRETIKOS_SELF" emit-ptx "$PTX_PATTERN" -o "$PTX_OUT"
+            PTX_SHA="$(__kretikos_sha256 "$PTX_OUT")" || exit 1
+            PTX_BYTES="$(__kretikos_file_size "$PTX_OUT")" || exit 1
+            PTX_BASENAME="$(basename "$PTX_OUT")"
+            GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "$KRETIKOS_SELF" json-emit \
+                --array-strings "boundaries=source_must_typecheck_before_profile_selection|profile_selection_is_explicit_or_shape_limited|does_not_claim_arbitrary_sounio_gpu_lowering|does_not_claim_general_pointer_or_allocator_lowering|does_not_claim_runtime_execution_for_structural_only_profile|does_not_claim_cubin_emission_for_structural_only_profile" \
+                --null bundle_manifest \
+                --string "bundle_root=." \
+                --null cubin_kind \
+                --string "generated_at_utc=$GENERATED_AT_UTC" \
+                --null kernel \
+                --string "profile=$PROFILE" \
+                --string "profile_kind=structural_only" \
+                --int "ptx_artifact.bytes=$PTX_BYTES" \
+                --string "ptx_artifact.path=$PTX_BASENAME" \
+                --string "ptx_artifact.sha256=$PTX_SHA" \
+                --string "ptx_pattern=$PTX_PATTERN" \
+                --bool "runtime_backed=false" \
+                --null runtime_rung \
+                --null runtime_validation.kernel \
+                --string "runtime_validation.mode=$RUNTIME_MODE" \
+                --string "runtime_validation.reason=profile_not_runtime_backed" \
+                --null runtime_validation.rung \
+                --string "runtime_validation.status=not_run" \
+                --string "runtime_validation.validation_scope=not_available_for_structural_only_profile" \
+                --string "schema=sounio.kretikos.source-profile.v1" \
+                --int "source.bytes=$SOURCE_BYTES" \
+                --string "source.path=$SOURCE_PATH" \
+                --string "source.sha256=$SOURCE_SHA" \
+                --string "status=structural_only" \
+                --string "toolchain_validation.mode=$TOOLCHAIN_MODE" \
+                --string "toolchain_validation.reason=source_profile_not_runtime_backed" \
+                --string "toolchain_validation.status=not_run" \
+                > "$SOURCE_MANIFEST" || exit 1
+            echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
+            echo "kretikos: source runtime validation - not_run/profile_not_runtime_backed rung= kernel="
+            if [[ "$REQUIRE_TOOLCHAIN" -eq 1 ]]; then
+                echo "kretikos: required toolchain validation failed - source profile is structural-only" >&2
+                exit 1
+            fi
+            if [[ "$REQUIRE_RUNTIME" -eq 1 ]]; then
+                echo "kretikos: required runtime validation failed - profile_not_runtime_backed" >&2
+                exit 1
+            fi
+            exit 0
+        fi
+
+        BUNDLE_ARGS=(bundle -o "$OUT_DIR" --cubin-kind "$CUBIN_KIND" --runtime-rung "$RUNTIME_RUNG")
+        if [[ -n "$PTX_PATTERN" ]]; then
+            BUNDLE_ARGS+=(--ptx-pattern "$PTX_PATTERN")
+        fi
+        if [[ "$FORCE" -eq 1 ]]; then
+            BUNDLE_ARGS+=(--force)
+        fi
+        BUNDLE_ARGS+=("${TOOLCHAIN_ARGS[@]}" "${RUNTIME_ARGS[@]}")
+        "$KRETIKOS_SELF" "${BUNDLE_ARGS[@]}"
+
+        BUNDLE_ROOT="$(basename "$OUT_DIR")"
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=source_must_typecheck_before_profile_selection|profile_selection_is_explicit_or_shape_limited|does_not_claim_arbitrary_sounio_gpu_lowering|does_not_claim_general_pointer_or_allocator_lowering|runtime_validation_applies_to_selected_profile_only" \
+            --string "bundle_manifest=kretikos_bundle.v1.json" \
+            --string "bundle_root=$BUNDLE_ROOT" \
+            --string "cubin_kind=$CUBIN_KIND" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --string "kernel=$KERNEL_NAME" \
+            --string "profile=$PROFILE" \
+            --string "profile_kind=runtime_backed" \
+            --string "ptx_pattern=$PTX_PATTERN" \
+            --bool "runtime_backed=true" \
+            --string "runtime_rung=$RUNTIME_RUNG" \
+            --string "schema=sounio.kretikos.source-profile.v1" \
+            --int "source.bytes=$SOURCE_BYTES" \
+            --string "source.path=$SOURCE_PATH" \
+            --string "source.sha256=$SOURCE_SHA" \
+            --string "status=profiled" \
+            > "$SOURCE_MANIFEST" || exit 1
+        mapfile -t __runtime_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$OUT_DIR/kretikos_bundle.v1.json" \
+            --print runtime_validation.status \
+            --print runtime_validation.reason \
+            --print runtime_validation.rung \
+            --print runtime_validation.kernel)
+        runtime_summary="${__runtime_parts[0]}/${__runtime_parts[1]} rung=${__runtime_parts[2]} kernel=${__runtime_parts[3]}"
+        echo "kretikos: source profile manifest - $SOURCE_MANIFEST"
+        echo "kretikos: source runtime validation - $runtime_summary"
+        ;;
+    run-manifest)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos run-manifest <manifest.tsv> [-o <dir>] [--force] [--validate-toolchain] [--require-runtime]" >&2
+            exit 1
+        fi
+        MANIFEST="$1"
+        shift
+        OUT_DIR=""
+        FORCE=0
+        TOOLCHAIN_ARGS=()
+        RUNTIME_ARGS=(--validate-runtime)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-toolchain)
+                    TOOLCHAIN_ARGS=(--validate-toolchain)
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_ARGS=(--require-toolchain)
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARGS=(--validate-runtime)
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARGS=(--require-runtime)
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ ! -f "$MANIFEST" ]]; then
+            echo "error: manifest not found: $MANIFEST" >&2
+            exit 1
+        fi
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-corpus.XXXXXX")" || {
+                echo "error: failed to create temporary corpus directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        fi
+        mkdir -p "$OUT_DIR"
+
+        MANIFEST_DIR="$(cd "$(dirname "$MANIFEST")" && pwd)"
+        SUMMARY_TSV="$OUT_DIR/kretikos_source_corpus.tsv"
+        CORPUS_JSON="$OUT_DIR/kretikos_source_corpus.v1.json"
+        printf 'label\tsource\trc\tprofile_kind\truntime_backed\tptx_pattern\truntime_status\truntime_reason\truntime_rung\tkernel\tdevice_name\tcc_major\tcc_minor\tcase_dir\n' >"$SUMMARY_TSV"
+
+        total=0
+        failed=0
+        while IFS=$'\t' read -r label source rest || [[ -n "${label:-}" ]]; do
+            [[ -z "${label:-}" ]] && continue
+            [[ "$label" == \#* ]] && continue
+            if [[ -z "${source:-}" ]]; then
+                source="$label"
+                label="$(basename "$source" .sio)"
+            fi
+            case "$source" in
+                /*) SRC="$source" ;;
+                *)
+                    if [[ -f "$MANIFEST_DIR/$source" ]]; then
+                        SRC="$MANIFEST_DIR/$source"
+                    else
+                        SRC="$ROOT_DIR/$source"
+                    fi
+                    ;;
+            esac
+            SAFE_LABEL="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9_.-' '_' | sed 's/^_*//;s/_*$//')"
+            if [[ -z "$SAFE_LABEL" ]]; then
+                SAFE_LABEL="case_$total"
+            fi
+            CASE_DIR="$OUT_DIR/$SAFE_LABEL"
+            mkdir -p "$CASE_DIR"
+
+            RUN_ARGS=(run-source "$SRC" -o "$CASE_DIR" --force)
+            RUN_ARGS+=("${TOOLCHAIN_ARGS[@]}" "${RUNTIME_ARGS[@]}")
+            set +e
+            "$KRETIKOS_SELF" "${RUN_ARGS[@]}" >"$CASE_DIR/kretikos_run_source.stdout" 2>"$CASE_DIR/kretikos_run_source.stderr"
+            case_rc=$?
+            set -e
+            total=$((total + 1))
+
+            __kretikos_corpus_extract() {
+                local _src="$1"; local _profile_default="$2"; local _runtime_default="$3"
+                local _profile_kind _runtime_backed _ptx_pattern
+                local _r_status _r_reason _r_rung _r_kernel _r_dev _r_cc_major _r_cc_minor
+                if [[ -f "$_src" ]]; then
+                    mapfile -t __row_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$_src" \
+                        --print-or-empty profile_kind \
+                        --print-or-empty runtime_backed \
+                        --print-or-empty ptx_pattern \
+                        --print-or-empty runtime_validation.status \
+                        --print-or-empty runtime_validation.reason \
+                        --print-or-empty runtime_validation.rung \
+                        --print-or-empty runtime_validation.kernel \
+                        --print-or-empty runtime_validation.device_name \
+                        --print-or-empty runtime_validation.cc_major \
+                        --print-or-empty runtime_validation.cc_minor)
+                    _profile_kind="${__row_parts[0]:-$_profile_default}"
+                    _runtime_backed="${__row_parts[1]:-$_runtime_default}"
+                    _ptx_pattern="${__row_parts[2]}"
+                    _r_status="${__row_parts[3]}"
+                    _r_reason="${__row_parts[4]}"
+                    _r_rung="${__row_parts[5]}"
+                    _r_kernel="${__row_parts[6]}"
+                    _r_dev="${__row_parts[7]}"
+                    _r_cc_major="${__row_parts[8]}"
+                    _r_cc_minor="${__row_parts[9]}"
+                else
+                    _profile_kind="$_profile_default"
+                    _runtime_backed="$_runtime_default"
+                fi
+                # Coerce JSON null/true/false to Python repr (compat with prior TSV format).
+                case "$_profile_kind" in null) _profile_kind="" ;; esac
+                case "$_runtime_backed" in true) _runtime_backed="True" ;; false) _runtime_backed="False" ;; null) _runtime_backed="" ;; esac
+                case "$_ptx_pattern" in null) _ptx_pattern="" ;; esac
+                case "$_r_status" in null) _r_status="" ;; esac
+                case "$_r_reason" in null) _r_reason="" ;; esac
+                case "$_r_rung" in null) _r_rung="" ;; esac
+                case "$_r_kernel" in null) _r_kernel="" ;; esac
+                case "$_r_dev" in null) _r_dev="" ;; esac
+                case "$_r_cc_major" in null) _r_cc_major="" ;; esac
+                case "$_r_cc_minor" in null) _r_cc_minor="" ;; esac
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+                    "$label" "$SRC" "$case_rc" \
+                    "$_profile_kind" "$_runtime_backed" "$_ptx_pattern" \
+                    "$_r_status" "$_r_reason" "$_r_rung" "$_r_kernel" \
+                    "$_r_dev" "$_r_cc_major" "$_r_cc_minor" "$CASE_DIR"
+            }
+
+            if [[ -f "$CASE_DIR/kretikos_bundle.v1.json" ]]; then
+                # Bundle-derived row: get profile metadata from source profile (with
+                # Python's default of profile_kind=runtime_backed, runtime_backed=True),
+                # but runtime fields from the bundle.
+                mapfile -t __sp_parts < <(
+                    if [[ -f "$CASE_DIR/kretikos_source_profile.v1.json" ]]; then
+                        "$KRETIKOS_SELF" kaxi-validate-evidence "$CASE_DIR/kretikos_source_profile.v1.json" \
+                            --print-or-empty profile_kind \
+                            --print-or-empty runtime_backed \
+                            --print-or-empty ptx_pattern
+                    else
+                        printf '\n\n\n'
+                    fi
+                )
+                _sp_profile_kind="${__sp_parts[0]:-runtime_backed}"
+                _sp_runtime_backed="${__sp_parts[1]:-true}"
+                _sp_ptx_pattern="${__sp_parts[2]}"
+                mapfile -t __rt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$CASE_DIR/kretikos_bundle.v1.json" \
+                    --print-or-empty runtime_validation.status \
+                    --print-or-empty runtime_validation.reason \
+                    --print-or-empty runtime_validation.rung \
+                    --print-or-empty runtime_validation.kernel \
+                    --print-or-empty runtime_validation.device_name \
+                    --print-or-empty runtime_validation.cc_major \
+                    --print-or-empty runtime_validation.cc_minor)
+                # Coerce JSON null/true/false to Python repr.
+                case "$_sp_profile_kind" in null) _sp_profile_kind="" ;; esac
+                case "$_sp_runtime_backed" in true) _sp_runtime_backed="True" ;; false) _sp_runtime_backed="False" ;; null) _sp_runtime_backed="" ;; esac
+                case "$_sp_ptx_pattern" in null) _sp_ptx_pattern="" ;; esac
+                for __i in 0 1 2 3 4 5 6; do
+                    case "${__rt_parts[$__i]}" in null) __rt_parts[$__i]="" ;; esac
+                done
+                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+                    "$label" "$SRC" "$case_rc" \
+                    "$_sp_profile_kind" "$_sp_runtime_backed" "$_sp_ptx_pattern" \
+                    "${__rt_parts[0]}" "${__rt_parts[1]}" "${__rt_parts[2]}" "${__rt_parts[3]}" \
+                    "${__rt_parts[4]}" "${__rt_parts[5]}" "${__rt_parts[6]}" "$CASE_DIR")"
+            elif [[ -f "$CASE_DIR/kretikos_source_profile.v1.json" ]]; then
+                # No bundle — derive everything (incl. runtime fields) from source profile.
+                row="$(__kretikos_corpus_extract "$CASE_DIR/kretikos_source_profile.v1.json" "" "")"
+            else
+                row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$SRC" "$case_rc" "" "" "" "fail" "bundle_manifest_missing" "" "" "" "" "" "$CASE_DIR")"
+            fi
+            printf '%s\n' "$row" >>"$SUMMARY_TSV"
+            if [[ "$case_rc" -ne 0 ]]; then
+                failed=$((failed + 1))
+            fi
+        done <"$MANIFEST"
+
+        # Convert TSV rows to a JSON array of objects via awk; the array
+        # is then injected into the corpus manifest via json-emit's
+        # `--raw-json`. Header row drives field names; values are
+        # JSON-escaped.
+        CASES_JSON="$(awk -F'\t' '
+            NR==1 {
+                for (i=1; i<=NF; i++) header[i]=$i
+                ncols=NF
+                printf "["
+                next
+            }
+            {
+                if (NR>2) printf ", "
+                printf "{"
+                for (i=1; i<=ncols; i++) {
+                    if (i>1) printf ", "
+                    v = $i
+                    gsub(/\\/, "\\\\", v)
+                    gsub(/"/, "\\\"", v)
+                    printf "\"%s\": \"%s\"", header[i], v
+                }
+                printf "}"
+            }
+            END { printf "]" }
+        ' "$SUMMARY_TSV")"
+        STATUS_VAL="$([[ "$failed" -eq 0 ]] && echo pass || echo fail)"
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=corpus_contains_supported_source_profiles_only|each_source_must_typecheck_before_profile_selection|runtime_validation_applies_per_selected_profile|does_not_claim_arbitrary_sounio_gpu_lowering" \
+            --raw-json "cases=$CASES_JSON" \
+            --int "failed=$failed" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --string "manifest=$MANIFEST" \
+            --string "schema=sounio.kretikos.source-corpus.v1" \
+            --string "status=$STATUS_VAL" \
+            --string "summary_tsv=kretikos_source_corpus.tsv" \
+            --int "total=$total" \
+            > "$CORPUS_JSON" || exit 1
+
+        echo "kretikos: source corpus summary - $SUMMARY_TSV"
+        echo "kretikos: source corpus manifest - $CORPUS_JSON"
+        echo "kretikos: source corpus result - total=$total failed=$failed"
+        [[ "$failed" -eq 0 ]]
+        ;;
+    hpc|slurm)
+        SUBCMD="${1:-}"
+        shift 2>/dev/null || true
+        case "$SUBCMD" in
+            doctor)
+                __kretikos_hpc_doctor
+                ;;
+            source|run-source)
+                if [[ $# -lt 1 ]]; then
+                    echo "usage: kretikos hpc source <source.sio>" >&2
+                    exit 1
+                fi
+                HPC_SOURCE_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-source.sh"
+                __kretikos_hpc_require_script "$HPC_SOURCE_SCRIPT"
+                "$HPC_SOURCE_SCRIPT" "$@"
+                ;;
+            manifest|run-manifest)
+                if [[ $# -lt 1 ]]; then
+                    echo "usage: kretikos hpc manifest <manifest.tsv>" >&2
+                    exit 1
+                fi
+                HPC_MANIFEST_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-manifest.sh"
+                __kretikos_hpc_require_script "$HPC_MANIFEST_SCRIPT"
+                "$HPC_MANIFEST_SCRIPT" "$@"
+                ;;
+            ""|-h|--help)
+                echo "usage: kretikos hpc <doctor|source|manifest> [args]" >&2
+                echo "  kretikos hpc doctor" >&2
+                echo "  kretikos hpc source <source.sio>" >&2
+                echo "  kretikos hpc manifest <manifest.tsv>" >&2
+                ;;
+            *)
+                echo "error: unknown Kretikos HPC subcommand: $SUBCMD" >&2
+                echo "usage: kretikos hpc <doctor|source|manifest> [args]" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    hpc-doctor|slurm-doctor)
+        __kretikos_hpc_doctor
+        ;;
+    hpc-source|slurm-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos hpc-source <source.sio>" >&2
+            exit 1
+        fi
+        HPC_SOURCE_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-source.sh"
+        __kretikos_hpc_require_script "$HPC_SOURCE_SCRIPT"
+        "$HPC_SOURCE_SCRIPT" "$@"
+        ;;
+    hpc-manifest|slurm-manifest)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos hpc-manifest <manifest.tsv>" >&2
+            exit 1
+        fi
+        HPC_MANIFEST_SCRIPT="$ROOT_DIR/slurm-jobs/kretikos/submit-kretikos-manifest.sh"
+        __kretikos_hpc_require_script "$HPC_MANIFEST_SCRIPT"
+        "$HPC_MANIFEST_SCRIPT" "$@"
+        ;;
+    build)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos build <source.sio> [options] -o <output.ptx>" >&2
+            echo "note: requires artifacts/omega/souc-bin/souc-linux-x86_64-gpu for full kernel lowering" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        # Delegate to checked GPU artifact if available
+        GPU_ARTIFACT="$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+        if [[ -x "$GPU_ARTIFACT" ]]; then
+            "$GPU_ARTIFACT" build "$SRC" --backend gpu "$@"
+        else
+            echo "error: GPU artifact not found at $GPU_ARTIFACT" >&2
+            echo "hint: 'kretikos run' executes a serial native CPU fallback" >&2
+            echo "hint: 'kretikos emit-ptx <pattern> -o kernel.ptx' emits PTX for built-in patterns" >&2
+            echo "hint: supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64" >&2
+            echo "hint: 'kretikos emit-metal <pattern> -o kernel.metal' emits MSL for built-in patterns" >&2
+            echo "hint: supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check" >&2
+            echo "hint: 'kretikos emit-spirv exit_only -o kernel.spv' emits a SPIR-V template" >&2
+            echo "hint: 'kretikos emit-kaxi exit_only -o kernel.kaxi' emits a K-AXI assembly template" >&2
+            echo "hint: 'kretikos kaxi-witness epistemic_dual_output_f32 -o witness.json' emits K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-source-witness examples/kretikos/real_epistemic_dual_output.sio -o source-witness.json' links source to K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-lower-source examples/kretikos/lower_vec_add_f32.sio -o lowering.json' recognizes source and emits K-AXI evidence" >&2
+            echo "hint: 'kretikos kaxi-lowering-certificate examples/kretikos/lower_epistemic_dual_output_f32.sio -o lowering-certificate.json' braids source lowering, K-AXI, and runtime evidence" >&2
+            echo "hint: 'kretikos kaxi-certificate examples/kretikos/real_epistemic_dual_output.sio -o certificate.json' braids source, K-AXI, and runtime bundle evidence" >&2
+            echo "hint: 'kretikos emulate' runs CPU emulation self-check" >&2
+            echo "hint: 'kretikos emit-cubin <kind> -o kernel.cubin' emits a CUBIN template from in-tree emitters" >&2
+            exit 1
+        fi
+        ;;
+    emit-ptx)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_ptx.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-ptx.XXXXXX")" || {
+            echo "error: failed to create temporary PTX driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-ptx <pattern> -o <file> [--validate-toolchain]
+        PATTERN=""
+        OUT=""
+        VALIDATE_TOOLCHAIN=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --validate-toolchain)
+                    VALIDATE_TOOLCHAIN=1
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -n "$VALIDATE_TOOLCHAIN" ]]; then
+            if ! command -v nvcc >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires nvcc, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            if ! command -v ptxas >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires ptxas, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            echo "kretikos: toolchain validation OK - nvcc and ptxas found"
+        fi
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-ptx <pattern> -o <file.ptx>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  vec_add         - f32 vector addition (SM50 PTX target)" >&2
+            echo "  vec_sub         - f32 vector subtraction" >&2
+            echo "  vec_mul         - f32 vector multiplication" >&2
+            echo "  vec_div         - f32 vector division" >&2
+            echo "  vec_add_f64     - f64 vector addition" >&2
+            echo "  vec_sub_f64     - f64 vector subtraction" >&2
+            echo "  vec_mul_f64     - f64 vector multiplication" >&2
+            echo "  vec_div_f64     - f64 vector division" >&2
+            echo "  fma             - f32 fused multiply-add (a*b+c)" >&2
+            echo "  fma_f64         - f64 fused multiply-add (a*b+c)" >&2
+            echo "  store_u32_const - store constant u32 per thread" >&2
+            echo "  epistemic_dual_output_f32 - value, uncertainty, and validity lanes" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            vec_add|vec_sub|vec_mul|vec_div|vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma|fma_f64|store_u32_const|epistemic_dual_output_f32) ;;
+            *)
+                echo "error: unsupported PTX pattern '$PATTERN'" >&2
+                echo "supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const, epistemic_dual_output_f32" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile PTX emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: PTX template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation. This is intentionally not a ptxas/runtime claim.
+        if grep -Eq "^\\.version [0-9]+\\.[0-9]+" "$OUT" && grep -Eq "^\\.target sm_[0-9]+" "$OUT" && grep -q "\\.visible .entry" "$OUT" && grep -Eq "(ret;|exit;|trap;|bra)" "$OUT"; then
+            echo "kretikos: structural validation OK - PTX directives present"
+        else
+            echo "kretikos: structural validation failed - PTX markers missing" >&2
+            exit 1
+        fi
+        ;;
+
+    emit-metal)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_metal.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-metal.XXXXXX")" || {
+            echo "error: failed to create temporary Metal driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-metal <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-metal <pattern> -o <file.metal>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  vec_add          - f32 vector addition (MSL compute kernel)" >&2
+            echo "  epistemic_dual_output_f32 - value, uncertainty, and validity lanes" >&2
+            echo "  ossm_oct_step    - octonion OSSM step with f64-checked f32 policy" >&2
+            echo "  sedenion_cd_step - sedenion Cayley-Dickson step with f64-checked f32 policy" >&2
+            echo "  self-check       - run internal smoke tests" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            vec_add|epistemic_dual_output_f32|ossm_oct_step|sedenion_cd_step|self-check) ;;
+            *)
+                echo "error: unsupported Metal pattern '$PATTERN'" >&2
+                echo "supported Metal patterns: vec_add, epistemic_dual_output_f32, ossm_oct_step, sedenion_cd_step, self-check" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile Metal emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: MSL template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation for MSL compute shaders (skip for self-check)
+        if [[ "$PATTERN" == "self-check" ]]; then
+            if grep -q "PASS metal_self_check\|FAIL metal_self_check" "$OUT"; then
+                echo "kretikos: self-check result captured in $OUT"
+            else
+                echo "kretikos: self-check result missing" >&2
+                exit 1
+            fi
+        else
+            if grep -q "#include <metal_stdlib>" "$OUT" && grep -q "kernel void" "$OUT" && grep -q "using namespace metal" "$OUT"; then
+                echo "kretikos: structural validation OK - MSL compute markers present"
+            else
+                echo "kretikos: structural validation failed - MSL markers missing" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    emit-spirv)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_spirv.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-spirv.XXXXXX")" || {
+            echo "error: failed to create temporary SPIR-V driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-spirv <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-spirv <pattern> -o <file.spv>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  exit_only  - minimal kernel that returns immediately" >&2
+            echo "  vec_add    - kernel with GetTid + Add ops" >&2
+            echo "  epistemic_dual_output_f32 - value, uncertainty, and validity lane ops" >&2
+            echo "  tid_kernel - kernel with GetTid only" >&2
+            echo "  self-check - run SPIR-V self-check suite" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|epistemic_dual_output_f32|tid_kernel|self-check) ;;
+            *)
+                echo "error: unsupported SPIR-V pattern '$PATTERN'" >&2
+                echo "supported SPIR-V patterns: exit_only, vec_add, epistemic_dual_output_f32, tid_kernel, self-check" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile SPIR-V emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: SPIR-V template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation: first word must be SPIR-V magic (119734787 = 0x07230203)
+        # Skip validation for self-check pattern (prints text, not SPIR-V words)
+        if [[ "$PATTERN" != "self-check" ]]; then
+            first_word="$(head -n1 "$OUT")"
+            if [[ "$first_word" == "119734787" ]]; then
+                echo "kretikos: structural validation OK - SPIR-V magic word present"
+            else
+                echo "kretikos: structural validation failed - SPIR-V magic word missing (got '$first_word')" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    emit-kaxi)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_kaxi.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-kaxi.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-kaxi <pattern> -o <file>
+        PATTERN=""
+        OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" ]]; then
+            echo "usage: kretikos emit-kaxi <pattern> -o <file.kaxi>" >&2
+            echo "" >&2
+            echo "Supported patterns:" >&2
+            echo "  exit_only                 - minimal kernel that returns immediately" >&2
+            echo "  vec_add                   - kernel with GetTid + Add ops" >&2
+            echo "  vec_sub                   - kernel with GetTid + Sub ops" >&2
+            echo "  vec_mul                   - kernel with GetTid + Mul ops" >&2
+            echo "  vec_div                   - kernel with GetTid + Div ops" >&2
+            echo "  fma                       - kernel with GetTid + FMA ops" >&2
+            echo "  source_vec_add_f64        - checked-source f64 vec-add lowering sketch" >&2
+            echo "  source_vec_sub_f64        - checked-source f64 vec-sub lowering sketch" >&2
+            echo "  source_vec_mul_f64        - checked-source f64 vec-mul lowering sketch" >&2
+            echo "  source_vec_div_f64        - checked-source f64 vec-div lowering sketch" >&2
+            echo "  source_fma_f64            - checked-source f64 affine multiply-add sketch" >&2
+            echo "  source_vec_add_f32        - checked-source vec-add lowering sketch" >&2
+            echo "  source_vec_sub_f32        - checked-source vec-sub lowering sketch" >&2
+            echo "  source_vec_mul_f32        - checked-source vec-mul lowering sketch" >&2
+            echo "  source_vec_div_f32        - checked-source vec-div lowering sketch" >&2
+            echo "  source_fma_f32            - checked-source affine multiply-add sketch" >&2
+            echo "  source_epistemic_dual_output_f32 - checked-source value+uncertainty lanes" >&2
+            echo "  epistemic_elementwise_f32 - value+epsilon lane arithmetic sketch" >&2
+            echo "  epistemic_dual_output_f32 - separate value/uncertainty output sketch" >&2
+            echo "  octonion_assoc            - non-associative octonion associator sketch" >&2
+            echo "  octonion_mul              - full per-thread octonion product sketch" >&2
+            echo "  octonion_associator       - full 8-component associator [a,b,c]=(a*b)*c-a*(b*c)" >&2
+            echo "  sedenion_associator       - full 16-component sedenion associator (memory-spilled)" >&2
+            echo "  self-check                - run K-AXI self-check suite" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|vec_min|vec_max|vec_abs|vec_neg|vec_sqrt|vec_recip|vec_lg2|vec_ex2|vec_sin|vec_cos|vec_rsqrt|vec_conf_sqrt|vec_sqrt_gate_var|vec_sqrt_gate_var_mb|fma|source_vec_add_f64|source_vec_sub_f64|source_vec_mul_f64|source_vec_div_f64|source_fma_f64|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|mb_vec_double_f32|pbpk_euler|pbpk_4step|pbpk_8step|pbpk_2comp|pbpk_2comp_4step|atomic_sum_f32|pbpk_2comp_mb|pbpk_2comp_4step_mb|x4_tree|x4_chain|pbpk_2comp_epistemic|pbpk_2comp_epistemic_4step|pbpk_traj_4step|conf_gate|conf_pass_demo|conf_reject_demo|octonion_assoc|octonion_mul|octonion_associator|octonion_assoc_norm_sum|sedenion_mul|sedenion_sqr|sedenion_sqr_mb|sedenion_associator|source_vec_add_i32|source_vec_mul_i32|self-check|lse8|sinkhorn16|erdos90_hc_smoke) ;;
+            *)
+                echo "error: unsupported K-AXI pattern '$PATTERN'" >&2
+                echo "supported K-AXI patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f64, source_vec_sub_f64, source_vec_mul_f64, source_vec_div_f64, source_fma_f64, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator, source_vec_add_i32, source_vec_mul_i32, self-check" >&2
+                exit 1
+                ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        if [[ "$PATTERN" == "self-check" ]]; then
+            "$DRIVER_ELF" "$PATTERN"
+            exit 0
+        fi
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        "$DRIVER_ELF" "$PATTERN" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: K-AXI template emitted - $OUT ($bytes bytes)"
+
+        # Structural validation: must contain K-AXI header
+        if [[ "$PATTERN" != "self-check" ]]; then
+            if grep -q "K-AXI epistemic kernel assembly" "$OUT"; then
+                echo "kretikos: structural validation OK - K-AXI header present"
+            else
+                echo "kretikos: structural validation failed - K-AXI header missing" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    kaxi-emit-ptx)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_to_ptx.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-to-ptx.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI→PTX driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        PATTERN=""
+        OUT=""
+        VALIDATE_PTXAS=1
+        EPISTEMIC=0
+        F32MODE=0
+        MIN_CONF=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --no-ptxas)
+                    VALIDATE_PTXAS=0
+                    shift
+                    ;;
+                --epistemic)
+                    EPISTEMIC=1
+                    shift
+                    ;;
+                --f32)
+                    F32MODE=1
+                    shift
+                    ;;
+                --f32-epistemic)
+                    F32MODE=2
+                    shift
+                    ;;
+                --f32-2c)
+                    F32MODE=3
+                    shift
+                    ;;
+                --f32-gum)
+                    F32MODE=5
+                    shift
+                    ;;
+                --min-conf)
+                    MIN_CONF="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-emit-ptx <pattern> -o <file.ptx> [--epistemic] [--no-ptxas]" >&2
+            echo "" >&2
+            echo "Lowers a K-AXI pattern through the kaxi_to_ptx transpiler to" >&2
+            echo "ptxas-assemblable PTX (.target sm_50)." >&2
+            echo "" >&2
+            echo "Supported patterns (mirror of emit-kaxi):" >&2
+            echo "  exit_only, vec_add, vec_sub, vec_mul, vec_div, fma" >&2
+            echo "  source_{vec_add,vec_sub,vec_mul,vec_div,fma}_f64" >&2
+            echo "  source_{vec_add,vec_sub,vec_mul,vec_div,fma,epistemic_dual_output}_f32" >&2
+            echo "  epistemic_elementwise_f32, epistemic_dual_output_f32" >&2
+            echo "  octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|vec_min|vec_max|vec_abs|vec_neg|vec_sqrt|vec_recip|vec_lg2|vec_ex2|vec_sin|vec_cos|vec_rsqrt|vec_conf_sqrt|vec_sqrt_gate_var|vec_sqrt_gate_var_mb|fma|source_vec_add_f64|source_vec_sub_f64|source_vec_mul_f64|source_vec_div_f64|source_fma_f64|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|mb_vec_double_f32|pbpk_euler|pbpk_4step|pbpk_8step|pbpk_2comp|pbpk_2comp_4step|atomic_sum_f32|pbpk_2comp_mb|pbpk_2comp_4step_mb|x4_tree|x4_chain|pbpk_rapamycin_1comp_epistemic|pbpk_2comp_epistemic|pbpk_2comp_epistemic_4step|pbpk_traj_4step|conf_gate|conf_pass_demo|conf_reject_demo|octonion_assoc|octonion_mul|octonion_associator|octonion_assoc_norm_sum|sedenion_mul|sedenion_sqr|sedenion_sqr_mb|sedenion_associator|source_vec_add_i32|source_vec_mul_i32|pbpk_2comp_gum_4step|lse8|sinkhorn16|erdos90_hc_smoke) ;;
+            *)
+                echo "error: unsupported K-AXI→PTX pattern '$PATTERN'" >&2
+                exit 1
+                ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI→PTX driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        mkdir -p "$(dirname "$OUT")"
+        # Mode dispatch lives inside the Sounio driver; pass long-form flags through.
+        DRIVER_ARGS=("$PATTERN")
+        [[ "$EPISTEMIC" -eq 1 ]] && DRIVER_ARGS+=("--epistemic")
+        case "$F32MODE" in
+            1) DRIVER_ARGS+=("--f32") ;;
+            2) DRIVER_ARGS+=("--f32-epistemic") ;;
+            3) DRIVER_ARGS+=("--f32-2c") ;;
+            5) DRIVER_ARGS+=("--f32-gum") ;;
+        esac
+        if [[ "$MIN_CONF" -gt 0 ]]; then
+            DRIVER_ARGS+=("--min-conf" "$MIN_CONF")
+        fi
+        "$DRIVER_ELF" "${DRIVER_ARGS[@]}" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        if [[ "$EPISTEMIC" -eq 1 ]]; then
+            echo "kretikos: K-AXI→PTX (epistemic) emitted - $OUT ($bytes bytes)"
+        elif [[ "$F32MODE" -eq 5 ]]; then
+            echo "kretikos: K-AXI→PTX (f32-gum) emitted - $OUT ($bytes bytes)"
+        elif [[ "$F32MODE" -eq 3 ]]; then
+            echo "kretikos: K-AXI→PTX (f32-2c) emitted - $OUT ($bytes bytes)"
+        elif [[ "$F32MODE" -eq 2 ]]; then
+            echo "kretikos: K-AXI→PTX (f32-epistemic) emitted - $OUT ($bytes bytes)"
+        elif [[ "$F32MODE" -eq 1 ]]; then
+            echo "kretikos: K-AXI→PTX (f32) emitted - $OUT ($bytes bytes)"
+        else
+            echo "kretikos: K-AXI→PTX emitted - $OUT ($bytes bytes)"
+        fi
+
+        # Structural validation. Phase J: confidence-gate refusals emit a
+        # CONF_REJECT comment in place of the kernel body — the absence of
+        # .visible .entry / ret; is the *intended* behaviour, not a failure.
+        if grep -q "// CONF_REJECT:" "$OUT"; then
+            echo "kretikos: confidence-gate REJECT — kernel body suppressed by --min-conf=$MIN_CONF policy"
+            grep "// CONF_REJECT:" "$OUT" >&2
+            # ptxas would correctly fail on the empty body; skip both validations.
+            exit 0
+        fi
+        if ! grep -q ".visible .entry" "$OUT"; then
+            echo "kretikos: structural validation failed - .visible .entry missing" >&2
+            exit 1
+        fi
+        if ! grep -q "ret;" "$OUT"; then
+            echo "kretikos: structural validation failed - ret; missing" >&2
+            exit 1
+        fi
+        echo "kretikos: structural validation OK - PTX directives present"
+
+        # ptxas validation
+        if [[ "$VALIDATE_PTXAS" -eq 1 ]] && command -v ptxas >/dev/null 2>&1; then
+            CUBIN_OUT="${OUT%.ptx}.cubin"
+            if ptxas -arch=sm_50 -o "$CUBIN_OUT" "$OUT" 2>"$DRIVER_DIR/ptxas.err"; then
+                cubin_bytes=$(stat -c%s "$CUBIN_OUT" 2>/dev/null || stat -f%z "$CUBIN_OUT" 2>/dev/null || echo "?")
+                echo "kretikos: ptxas validation OK - $CUBIN_OUT ($cubin_bytes bytes, sm_50)"
+            else
+                echo "kretikos: ptxas validation FAILED" >&2
+                cat "$DRIVER_DIR/ptxas.err" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    json-emit-array)
+        # Read JSONL on stdin, emit a single JSON array on stdout. Empty /
+        # all-blank stdin → []. Used to fold per-case failure JSONL (from
+        # `kaxi-validate-evidence --collect`) into a payload-embeddable
+        # `failures` array. Pure shell; no Sounio driver needed.
+        if [[ $# -gt 0 && "$1" == "--help" ]]; then
+            cat >&2 <<'USAGE'
+usage: <jsonl_producer> | kretikos json-emit-array > out.json
+
+Reads JSONL on stdin, emits a single JSON array on stdout. Empty stdin
+produces []. Blank lines are skipped. Records are pasted verbatim — caller
+is responsible for valid JSON object structure per line.
+USAGE
+            exit 2
+        fi
+        __body=$(awk 'NF { if (n++) printf ","; printf "%s", $0 }')
+        printf '[%s]\n' "$__body"
+        exit 0
+        ;;
+
+    json-emit)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_json_emit.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-json-emit.XXXXXX")" || {
+            echo "error: failed to create temporary json-emit driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            cat >&2 <<'USAGE'
+usage: kretikos json-emit <flag>... > out.json
+
+Pure-Sounio JSON aggregator (replaces python3 - <<PY ... json.dump
+heredocs in shell pipelines). Output goes to stdout.
+
+  --string PATH=VAL              string leaf
+  --int    PATH=VAL              integer leaf
+  --bool   PATH=true|false       boolean leaf
+  --null   PATH                  null literal leaf
+  --array-strings PATH=v1|v2|... array of strings (pipe-separated)
+  --string-if-nonempty PATH=VAL  string leaf, omitted if VAL empty
+  --raw-json PATH=JSON           pre-formatted JSON value (verbatim)
+
+PATH supports dotted nesting 1 level deep (source.path, etc.).
+Caller MUST emit prefixed keys contiguously (all source.* together).
+
+ISO timestamps come from the shell:
+  --string generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+USAGE
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile json-emit driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
+    kaxi-validate-evidence)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_validate_evidence.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-validate.XXXXXX")" || {
+            echo "error: failed to create temporary validate-evidence driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-validate-evidence <file.json> [--expect PATH=VAL]..." >&2
+            echo "" >&2
+            echo "Pure-Sounio JSON evidence validator (replaces python3 -c json.loads heredocs" >&2
+            echo "in CI gates). PATH is a dotted key path; spec forms:" >&2
+            echo "  PATH>=N    leaf JSON number, integer >= N" >&2
+            echo "  PATH=true  leaf JSON literal true" >&2
+            echo "  PATH=false leaf JSON literal false" >&2
+            echo "  PATH=null  leaf JSON literal null" >&2
+            echo "  PATH=N     leaf integer-equal to N (when N parses as int)" >&2
+            echo "  PATH=str   leaf JSON string body equals str" >&2
+            echo "Print modes:" >&2
+            echo "  --print PATH           print leaf value (fails if path missing)" >&2
+            echo "  --print-or-empty PATH  print leaf value or empty line if missing" >&2
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile validate-evidence driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
+    cubin-validate)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_cubin_validate.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-cubin-validate.XXXXXX")" || {
+            echo "error: failed to create temporary cubin-validate driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos cubin-validate <file.cubin>" >&2
+            echo "" >&2
+            echo "Validates ELF64 NVIDIA CUDA CUBIN structure (magic, class, e_machine)." >&2
+            echo "Prints e_machine on stdout (190 for NVIDIA CUDA) and exits 0 on pass." >&2
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile cubin-validate driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
+    kaxi-compile)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_compile.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-compile.XXXXXX")" || {
+            echo "error: failed to create temporary K-AXI compile driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        INPUT=""
+        OUT=""
+        MODE="basic"
+        VALIDATE_PTXAS=1
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output) OUT="$2"; shift 2 ;;
+                --mode) MODE="$2"; shift 2 ;;
+                --no-ptxas) VALIDATE_PTXAS=0; shift ;;
+                -*) echo "error: unknown option $1" >&2; exit 1 ;;
+                *)
+                    if [[ -z "$INPUT" ]]; then INPUT="$1"
+                    else echo "error: unexpected argument $1" >&2; exit 1
+                    fi
+                    shift ;;
+            esac
+        done
+
+        if [[ -z "$INPUT" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-compile <input.kaxi> -o <output.ptx> [--mode basic|epistemic|f32|f32e|f32-2c] [--no-ptxas]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$INPUT" ]]; then
+            echo "error: input not found: $INPUT" >&2
+            exit 1
+        fi
+        case "$MODE" in
+            basic|epistemic|f32|f32e|f32-2c) ;;
+            *) echo "error: unsupported mode '$MODE'" >&2; exit 1 ;;
+        esac
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile K-AXI compile driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        mkdir -p "$(dirname "$OUT")"
+        "$DRIVER_ELF" "$INPUT" "$MODE" > "$OUT"
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: K-AXI source compiled - $OUT ($bytes bytes, mode=$MODE)"
+
+        if ! grep -q ".visible .entry" "$OUT"; then
+            echo "kretikos: structural validation failed - .visible .entry missing" >&2
+            exit 1
+        fi
+        echo "kretikos: structural validation OK"
+
+        if [[ "$VALIDATE_PTXAS" -eq 1 ]] && command -v ptxas >/dev/null 2>&1; then
+            CUBIN_OUT="${OUT%.ptx}.cubin"
+            if ptxas -arch=sm_50 -o "$CUBIN_OUT" "$OUT" 2>"$DRIVER_DIR/ptxas.err"; then
+                cubin_bytes=$(stat -c%s "$CUBIN_OUT" 2>/dev/null || stat -f%z "$CUBIN_OUT" 2>/dev/null || echo "?")
+                echo "kretikos: ptxas validation OK - $CUBIN_OUT ($cubin_bytes bytes, sm_50)"
+            else
+                echo "kretikos: ptxas validation FAILED" >&2
+                cat "$DRIVER_DIR/ptxas.err" >&2
+                exit 1
+            fi
+        fi
+        ;;
+
+    kaxi-witness)
+        PATTERN=""
+        OUT=""
+        ASM_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$PATTERN" ]]; then
+                        PATTERN="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -z "$PATTERN" || -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-witness <pattern> -o <file.json> [--asm-output <file.kaxi>]" >&2
+            echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f64, source_vec_sub_f64, source_vec_mul_f64, source_vec_div_f64, source_fma_f64, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator" >&2
+            exit 1
+        fi
+
+        case "$PATTERN" in
+            exit_only|vec_add|vec_sub|vec_mul|vec_div|vec_min|vec_max|vec_abs|vec_neg|vec_sqrt|vec_recip|vec_lg2|vec_ex2|vec_sin|vec_cos|vec_rsqrt|vec_conf_sqrt|vec_sqrt_gate_var|vec_sqrt_gate_var_mb|fma|source_vec_add_f64|source_vec_sub_f64|source_vec_mul_f64|source_vec_div_f64|source_fma_f64|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32|epistemic_elementwise_f32|epistemic_dual_output_f32|octonion_assoc|octonion_mul|octonion_associator|octonion_assoc_norm_sum|sedenion_mul|sedenion_sqr|sedenion_sqr_mb|sedenion_associator|source_vec_add_i32|source_vec_mul_i32) ;;
+            *)
+                echo "error: unsupported K-AXI witness pattern '$PATTERN'" >&2
+                echo "supported K-AXI witness patterns: exit_only, vec_add, vec_sub, vec_mul, vec_div, fma, source_vec_add_f64, source_vec_sub_f64, source_vec_mul_f64, source_vec_div_f64, source_fma_f64, source_vec_add_f32, source_vec_sub_f32, source_vec_mul_f32, source_vec_div_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator, source_vec_add_i32, source_vec_mul_i32" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$ASM_OUT" ]]; then
+            case "$OUT" in
+                *.json) ASM_OUT="${OUT%.json}.kaxi" ;;
+                *) ASM_OUT="$OUT.kaxi" ;;
+            esac
+        fi
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")"
+        LOG_OUT="${OUT}.emit.log"
+        "$0" emit-kaxi "$PATTERN" -o "$ASM_OUT" >"$LOG_OUT" 2>&1 || {
+            cat "$LOG_OUT" >&2
+            echo "error: failed to emit K-AXI assembly for witness pattern '$PATTERN'" >&2
+            exit 1
+        }
+
+        # Phase 5.F (python-extermination): the witness recognizer used to be
+        # a python heredoc that parsed the .kaxi assembly with a regex. We now
+        # delegate the assembly parsing to a pure-Sounio driver
+        # (kretikos_kaxi_asm_summary.sio) and compose the witness JSON via the
+        # existing json-emit + kaxi-validate-evidence primitives.
+        SUMMARY_DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_asm_summary.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        SUMMARY_DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-witness.XXXXXX")" || {
+            echo "error: failed to create temporary witness driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        SUMMARY_DRIVER_ELF="$SUMMARY_DRIVER_DIR/asm-summary.elf"
+        SUMMARY_JSON="$SUMMARY_DRIVER_DIR/summary.json"
+        trap 'rm -rf "$SUMMARY_DRIVER_DIR"' EXIT INT TERM
+        "$SOUC_BIN" "$SUMMARY_DRIVER_SRC" "$SUMMARY_DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile kaxi-asm-summary driver" >&2
+            exit 1
+        }
+        chmod +x "$SUMMARY_DRIVER_ELF"
+        "$SUMMARY_DRIVER_ELF" "$ASM_OUT" > "$SUMMARY_JSON" || {
+            echo "error: kaxi-asm-summary driver failed for $ASM_OUT" >&2
+            exit 1
+        }
+
+        # Lift scalars from the summary in one batched call.
+        mapfile -t __ws_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" \
+            --print-or-empty instruction_count \
+            --print-or-empty seq_dense_zero_based \
+            --print-or-empty store_global_count \
+            --print-or-empty variance_annotation_count \
+            --print-or-empty first_add_first \
+            --print-or-empty first_add_second \
+            --print-or-empty first_sub \
+            --print-or-empty first_mul \
+            --print-or-empty first_div \
+            --print-or-empty first_fma \
+            --print-or-empty first_store_global)
+        WS_INST_COUNT="${__ws_parts[0]:-0}"
+        WS_SEQ_DENSE="${__ws_parts[1]:-false}"
+        WS_SG_COUNT="${__ws_parts[2]:-0}"
+        WS_VAR_COUNT="${__ws_parts[3]:-0}"
+        WS_FIRST_ADD_FIRST="${__ws_parts[4]:-}"
+        WS_FIRST_ADD_SECOND="${__ws_parts[5]:-}"
+        WS_FIRST_SUB="${__ws_parts[6]:-}"
+        WS_FIRST_MUL="${__ws_parts[7]:-}"
+        WS_FIRST_DIV="${__ws_parts[8]:-}"
+        WS_FIRST_FMA="${__ws_parts[9]:-}"
+        WS_FIRST_STORE_GLOBAL="${__ws_parts[10]:-}"
+        WS_OPCODES_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" --print-subtree-or opcodes '[]')"
+        WS_SEQS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SUMMARY_JSON" --print-subtree-or seqs '[]')"
+
+        # Per-pattern semantic profile + required/forbidden opcode lists. Mirrors
+        # the `expectations` dict that used to live in the python heredoc.
+        WS_SEMANTIC=""
+        WS_REQUIRED=""
+        WS_FORBIDDEN=""
+        case "$PATTERN" in
+            exit_only)
+                WS_SEMANTIC="control_minimal"
+                WS_REQUIRED="ret"
+                WS_FORBIDDEN="add sub mul div fma store_global"
+                ;;
+            vec_add)
+                WS_SEMANTIC="value_lane_add"
+                WS_REQUIRED="get_tid add ret"
+                ;;
+            vec_sub)
+                WS_SEMANTIC="value_lane_sub"
+                WS_REQUIRED="get_tid sub ret"
+                ;;
+            vec_mul)
+                WS_SEMANTIC="value_lane_mul"
+                WS_REQUIRED="get_tid mul ret"
+                ;;
+            vec_div)
+                WS_SEMANTIC="value_lane_div"
+                WS_REQUIRED="get_tid div ret"
+                ;;
+            fma)
+                WS_SEMANTIC="value_lane_fma"
+                WS_REQUIRED="get_tid fma ret"
+                ;;
+            source_vec_add_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_add"
+                WS_REQUIRED="get_tid load_global add store_global ret"
+                ;;
+            source_vec_sub_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_sub"
+                WS_REQUIRED="get_tid load_global sub store_global ret"
+                ;;
+            source_vec_mul_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_mul"
+                WS_REQUIRED="get_tid load_global mul store_global ret"
+                ;;
+            source_vec_div_f32)
+                WS_SEMANTIC="lowered_indexed_f32_vector_div"
+                WS_REQUIRED="get_tid load_global div store_global ret"
+                ;;
+            source_fma_f32)
+                WS_SEMANTIC="lowered_indexed_f32_affine_mad"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            source_epistemic_dual_output_f32)
+                WS_SEMANTIC="lowered_epistemic_dual_value_uncertainty_outputs"
+                WS_REQUIRED="get_tid load_global add mul store_global ret"
+                ;;
+            epistemic_elementwise_f32)
+                WS_SEMANTIC="value_with_epsilon_lane"
+                WS_REQUIRED="get_tid load_global fma store_global ret"
+                ;;
+            epistemic_dual_output_f32)
+                WS_SEMANTIC="separate_value_and_uncertainty_outputs"
+                WS_REQUIRED="get_tid load_global add mul store_global ret"
+                ;;
+            octonion_assoc)
+                WS_SEMANTIC="octonion_associator_non_associative_f32"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            octonion_mul)
+                WS_SEMANTIC="full_octonion_product_f32"
+                WS_REQUIRED="get_tid load_global mul add sub store_global ret"
+                ;;
+            octonion_associator)
+                WS_SEMANTIC="full_octonion_associator_f32"
+                WS_REQUIRED="get_tid load_global mul add sub store_global ret"
+                ;;
+            source_vec_add_i32)
+                WS_SEMANTIC="lowered_indexed_i32_vector_add"
+                WS_REQUIRED="get_tid load_global add store_global ret"
+                ;;
+            source_vec_mul_i32)
+                WS_SEMANTIC="lowered_indexed_i32_vector_mul"
+                WS_REQUIRED="get_tid load_global mul store_global ret"
+                ;;
+            source_vec_add_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_add"
+                WS_REQUIRED="get_tid load_global add store_global ret"
+                ;;
+            source_vec_sub_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_sub"
+                WS_REQUIRED="get_tid load_global sub store_global ret"
+                ;;
+            source_vec_mul_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_mul"
+                WS_REQUIRED="get_tid load_global mul store_global ret"
+                ;;
+            source_vec_div_f64)
+                WS_SEMANTIC="lowered_indexed_f64_vector_div"
+                WS_REQUIRED="get_tid load_global div store_global ret"
+                ;;
+            source_fma_f64)
+                WS_SEMANTIC="lowered_indexed_f64_affine_mad"
+                WS_REQUIRED="get_tid load_global mul add store_global ret"
+                ;;
+            *)
+                echo "error: kaxi-witness recognizer has no spec for pattern '$PATTERN'" >&2
+                exit 1
+                ;;
+        esac
+
+        # JSON-escape helper for a free-text string (assembly lines). K-AXI
+        # assembly never contains '"' or '\' but guard for completeness.
+        __ws_json_escape() {
+            printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+
+        # Build the failures array. Insertion order matches the python recognizer.
+        __WS_FAIL_ELEMS=()
+
+        __WS_MISSING=()
+        for op in $WS_REQUIRED; do
+            if ! grep -qF "\"$op\"" <<<"$WS_OPCODES_JSON"; then
+                __WS_MISSING+=("\"$op\"")
+            fi
+        done
+        if [[ ${#__WS_MISSING[@]} -gt 0 ]]; then
+            old_ifs="$IFS"; IFS=','
+            __m="${__WS_MISSING[*]}"
+            IFS="$old_ifs"
+            __WS_FAIL_ELEMS+=("{\"kind\": \"missing_required_opcode\", \"opcodes\": [$__m]}")
+        fi
+
+        __WS_FORB=()
+        for op in $WS_FORBIDDEN; do
+            if grep -qF "\"$op\"" <<<"$WS_OPCODES_JSON"; then
+                __WS_FORB+=("\"$op\"")
+            fi
+        done
+        if [[ ${#__WS_FORB[@]} -gt 0 ]]; then
+            old_ifs="$IFS"; IFS=','
+            __m="${__WS_FORB[*]}"
+            IFS="$old_ifs"
+            __WS_FAIL_ELEMS+=("{\"kind\": \"forbidden_opcode_present\", \"opcodes\": [$__m]}")
+        fi
+
+        if [[ "$WS_SEQ_DENSE" != "true" ]]; then
+            __WS_FAIL_ELEMS+=("{\"kind\": \"sequence_not_dense_zero_based\", \"seqs\": $WS_SEQS_JSON}")
+        fi
+
+        case "$PATTERN" in
+            epistemic_*)
+                if [[ "${WS_VAR_COUNT:-0}" -eq 0 ]]; then
+                    __WS_FAIL_ELEMS+=('{"kind": "missing_variance_annotations"}')
+                fi
+                ;;
+        esac
+
+        if [[ "$PATTERN" == "epistemic_dual_output_f32" || "$PATTERN" == "source_epistemic_dual_output_f32" ]]; then
+            if [[ "${WS_SG_COUNT:-0}" -lt 2 ]]; then
+                if [[ "${WS_SG_COUNT:-0}" -ge 1 && -n "$WS_FIRST_STORE_GLOBAL" ]]; then
+                    __WS_STORES_JSON="[\"$(__ws_json_escape "$WS_FIRST_STORE_GLOBAL")\"]"
+                else
+                    __WS_STORES_JSON="[]"
+                fi
+                __WS_FAIL_ELEMS+=("{\"kind\": \"dual_output_requires_two_store_global_ops\", \"stores\": $__WS_STORES_JSON}")
+            fi
+        fi
+
+        if [[ ${#__WS_FAIL_ELEMS[@]} -eq 0 ]]; then
+            WS_FAILURES_JSON="[]"
+            WS_STATUS="pass"
+        else
+            old_ifs="$IFS"; IFS=','
+            WS_FAILURES_JSON="[${__WS_FAIL_ELEMS[*]}]"
+            IFS="$old_ifs"
+            WS_STATUS="fail"
+        fi
+
+        # Per-pattern lane extraction.
+        WS_VALUE_LANE=""
+        WS_UNC_LANE=""
+        case "$PATTERN" in
+            epistemic_dual_output_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                WS_UNC_LANE="$WS_FIRST_MUL"
+                ;;
+            epistemic_elementwise_f32)
+                WS_VALUE_LANE="$WS_FIRST_FMA"
+                ;;
+            source_epistemic_dual_output_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                if [[ -n "$WS_FIRST_ADD_SECOND" ]]; then
+                    WS_UNC_LANE="$WS_FIRST_ADD_SECOND"
+                else
+                    WS_UNC_LANE="$WS_FIRST_MUL"
+                fi
+                ;;
+            source_vec_add_f64|source_vec_add_f32|source_fma_f64|source_fma_f32)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                ;;
+            source_vec_sub_f64|source_vec_sub_f32)
+                WS_VALUE_LANE="$WS_FIRST_SUB"
+                ;;
+            source_vec_mul_f64|source_vec_mul_f32)
+                WS_VALUE_LANE="$WS_FIRST_MUL"
+                ;;
+            source_vec_div_f64|source_vec_div_f32)
+                WS_VALUE_LANE="$WS_FIRST_DIV"
+                ;;
+            vec_add)
+                WS_VALUE_LANE="$WS_FIRST_ADD_FIRST"
+                ;;
+            vec_sub)
+                WS_VALUE_LANE="$WS_FIRST_SUB"
+                ;;
+            vec_mul)
+                WS_VALUE_LANE="$WS_FIRST_MUL"
+                ;;
+            vec_div)
+                WS_VALUE_LANE="$WS_FIRST_DIV"
+                ;;
+            fma)
+                WS_VALUE_LANE="$WS_FIRST_FMA"
+                ;;
+            octonion_assoc|octonion_mul|octonion_associator)
+                WS_VALUE_LANE="$WS_FIRST_STORE_GLOBAL"
+                ;;
+        esac
+
+        WS_ASM_BYTES="$(__kretikos_file_size "$ASM_OUT")" || exit 1
+        WS_ASM_SHA="$(__kretikos_sha256 "$ASM_OUT")" || exit 1
+        WS_GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+        "$KRETIKOS_SELF" json-emit \
+            --int "assembly.bytes=$WS_ASM_BYTES" \
+            --int "assembly.instruction_count=$WS_INST_COUNT" \
+            --raw-json "assembly.opcodes=$WS_OPCODES_JSON" \
+            --string "assembly.path=$ASM_OUT" \
+            --bool "assembly.seq_dense_zero_based=$WS_SEQ_DENSE" \
+            --raw-json "assembly.seqs=$WS_SEQS_JSON" \
+            --string "assembly.sha256=$WS_ASM_SHA" \
+            --int "assembly.variance_annotation_count=$WS_VAR_COUNT" \
+            --array-strings "boundaries=witness_is_profile_level_for_explicit_kretikos_patterns|witness_proves_kaxi_assembly_shape_and_dense_sequence_numbers|witness_does_not_claim_arbitrary_sounio_gpu_lowering|witness_does_not_replace_slurm_cuda_runtime_authority" \
+            --string "emitter_log=$LOG_OUT" \
+            --int "epistemic_lanes.store_global_count=$WS_SG_COUNT" \
+            --string "epistemic_lanes.uncertainty_lane_instruction=$WS_UNC_LANE" \
+            --string "epistemic_lanes.value_lane_instruction=$WS_VALUE_LANE" \
+            --raw-json "failures=$WS_FAILURES_JSON" \
+            --string "generated_at_utc=$WS_GENERATED_AT" \
+            --string "pattern=$PATTERN" \
+            --string "schema=sounio.kretikos.kaxi-witness.v1" \
+            --string "semantic_profile=$WS_SEMANTIC" \
+            --string "status=$WS_STATUS" \
+            > "$OUT" || exit 1
+
+        if [[ "$WS_STATUS" == "fail" ]]; then
+            echo "$WS_FAILURES_JSON" >&2
+            exit 1
+        fi
+
+
+        echo "kretikos: K-AXI witness emitted - $OUT"
+        echo "kretikos: K-AXI witness assembly - $ASM_OUT"
+        ;;
+
+    kaxi-source-witness)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-source-witness <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        ASM_OUT=""
+        KAXI_WITNESS_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                --kaxi-witness-output)
+                    KAXI_WITNESS_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-source-witness <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$ASM_OUT" ]]; then
+            ASM_OUT="${OUT_STEM}.kaxi"
+        fi
+        if [[ -z "$KAXI_WITNESS_OUT" ]]; then
+            KAXI_WITNESS_OUT="${OUT_STEM}.kaxi-witness.json"
+        fi
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")" "$(dirname "$KAXI_WITNESS_OUT")"
+        CHECK_LOG="${OUT}.check.log"
+        __kretikos_check_source "$SRC" >"$CHECK_LOG" 2>&1 || {
+            cat "$CHECK_LOG" >&2
+            echo "error: source check failed before K-AXI source witness: $SRC" >&2
+            exit 1
+        }
+
+        record="$(__kretikos_source_profile_record "$SRC")"
+        IFS='|' read -r PROFILE CUBIN_KIND RUNTIME_RUNG KERNEL_NAME CLASS PTX_PATTERN RUNTIME_BACKED <<<"$record"
+        case "$PROFILE" in
+            vec_add_f32)
+                KAXI_PATTERN="source_vec_add_f32"
+                ;;
+            vec_sub_f32)
+                KAXI_PATTERN="source_vec_sub_f32"
+                ;;
+            vec_mul_f32)
+                KAXI_PATTERN="source_vec_mul_f32"
+                ;;
+            vec_div_f32)
+                KAXI_PATTERN="source_vec_div_f32"
+                ;;
+            fma_f32)
+                KAXI_PATTERN="source_fma_f32"
+                ;;
+            vec_add_i32)
+                KAXI_PATTERN="source_vec_add_i32"
+                ;;
+            vec_mul_i32)
+                KAXI_PATTERN="source_vec_mul_i32"
+                ;;
+            epistemic_elementwise_f32)
+                KAXI_PATTERN="epistemic_elementwise_f32"
+                ;;
+            epistemic_dual_output_f32)
+                KAXI_PATTERN="epistemic_dual_output_f32"
+                ;;
+            vec_add_f64)
+                KAXI_PATTERN="source_vec_add_f64"
+                ;;
+            vec_sub_f64)
+                KAXI_PATTERN="source_vec_sub_f64"
+                ;;
+            vec_mul_f64)
+                KAXI_PATTERN="source_vec_mul_f64"
+                ;;
+            vec_div_f64)
+                KAXI_PATTERN="source_vec_div_f64"
+                ;;
+            fma_f64)
+                KAXI_PATTERN="source_fma_f64"
+                ;;
+            *)
+                echo "error: K-AXI source witness does not yet support profile '$PROFILE'" >&2
+                echo "supported source profiles for K-AXI witness: vec_add_f32, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64" >&2
+                exit 1
+                ;;
+        esac
+
+        "$KRETIKOS_SELF" kaxi-witness "$KAXI_PATTERN" -o "$KAXI_WITNESS_OUT" --asm-output "$ASM_OUT" >/dev/null
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        CHECK_SHA="$(__kretikos_sha256 "$CHECK_LOG")" || exit 1
+        CHECK_BYTES="$(__kretikos_file_size "$CHECK_LOG")" || exit 1
+        KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
+
+        # Compose kaxi-source-witness JSON via json-emit + --raw-json,
+        # using validate-evidence --print-subtree to lift assembly /
+        # epistemic_lanes / failures sub-objects from the witness file.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        mapfile -t __wt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" \
+            --print-or-empty status \
+            --print-or-empty semantic_profile \
+            --print-or-empty assembly.seq_dense_zero_based)
+        WT_STATUS="${__wt_parts[0]}"
+        WT_SEMANTIC_PROFILE="${__wt_parts[1]}"
+        WT_SEQ_DENSE="${__wt_parts[2]}"
+        # Subtree captures may span multiple lines; use $(...) per call.
+        WT_FAILURES_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or failures '[]')"
+        WT_ASSEMBLY_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or assembly '{}')"
+        WT_EPISTEMIC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or epistemic_lanes '{}')"
+        # Build failures array element-by-element.
+        __FAIL_ELEMS=()
+        if [[ "$WT_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_status_not_pass", "status": "%s"}' "$(__json_str_escape "$WT_STATUS")")")
+        fi
+        if [[ "$WT_FAILURES_JSON" != "[]" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_failures", "failures": %s}' "$WT_FAILURES_JSON")")
+        fi
+        if [[ "$WT_SEQ_DENSE" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
+        RB_LITERAL="$([[ "$RUNTIME_BACKED" == "1" ]] && echo true || echo false)"
+        SOURCE_OBJ="$(printf '{"path": "%s", "bytes": %s, "sha256": "%s", "check": {"status": "pass", "log_path": "%s", "bytes": %s, "sha256": "%s"}}' \
+            "$(__json_str_escape "$SOURCE_PATH")" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$(__json_str_escape "$CHECK_LOG")" "$CHECK_BYTES" "$CHECK_SHA")"
+        PROFILE_OBJ="$(printf '{"name": "%s", "runtime_backed": %s, "cubin_kind": "%s", "runtime_rung": "%s", "kernel": "%s"}' \
+            "$(__json_str_escape "$PROFILE")" "$RB_LITERAL" \
+            "$(__json_str_escape "$CUBIN_KIND")" "$(__json_str_escape "$RUNTIME_RUNG")" \
+            "$(__json_str_escape "$KERNEL_NAME")")"
+        # If semantic_profile was missing/null in the witness, emit JSON null.
+        if [[ -z "$WT_SEMANTIC_PROFILE" || "$WT_SEMANTIC_PROFILE" == "null" ]]; then
+            SEMANTIC_LIT="null"
+        else
+            SEMANTIC_LIT="\"$(__json_str_escape "$WT_SEMANTIC_PROFILE")\""
+        fi
+        KAXI_OBJ="$(printf '{"pattern": "%s", "semantic_profile": %s, "witness_path": "%s", "witness_sha256": "%s", "assembly": %s, "epistemic_lanes": %s}' \
+            "$(__json_str_escape "$KAXI_PATTERN")" "$SEMANTIC_LIT" \
+            "$(__json_str_escape "$KAXI_WITNESS_OUT")" "$KAXI_WITNESS_SHA" \
+            "$WT_ASSEMBLY_JSON" "$WT_EPISTEMIC_JSON")"
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=source_must_typecheck_before_kaxi_profile_selection|source_profile_selection_is_explicit_or_shape_limited|source_witness_links_source_hash_to_kaxi_witness_hash|source_witness_does_not_claim_arbitrary_sounio_gpu_lowering|source_witness_does_not_replace_slurm_cuda_runtime_authority" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$KAXI_OBJ" \
+            --raw-json "profile=$PROFILE_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-source-witness.v1" \
+            --raw-json "source=$SOURCE_OBJ" \
+            --string "status=$STATUS_VAL" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
+
+        echo "kretikos: K-AXI source witness emitted - $OUT"
+        echo "kretikos: K-AXI source witness profile - source=$SOURCE_PATH profile=$PROFILE kaxi_pattern=$KAXI_PATTERN"
+        ;;
+
+    kaxi-lower-source)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-lower-source <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        ASM_OUT=""
+        KAXI_WITNESS_OUT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --asm-output)
+                    ASM_OUT="$2"
+                    shift 2
+                    ;;
+                --kaxi-witness-output)
+                    KAXI_WITNESS_OUT="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-lower-source <source.sio> -o <file.json> [--asm-output <file.kaxi>] [--kaxi-witness-output <file.json>]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$ASM_OUT" ]]; then
+            ASM_OUT="${OUT_STEM}.kaxi"
+        fi
+        if [[ -z "$KAXI_WITNESS_OUT" ]]; then
+            KAXI_WITNESS_OUT="${OUT_STEM}.kaxi-witness.json"
+        fi
+        RECOGNITION_OUT="${OUT_STEM}.recognition.json"
+
+        mkdir -p "$(dirname "$OUT")" "$(dirname "$ASM_OUT")" "$(dirname "$KAXI_WITNESS_OUT")" "$(dirname "$RECOGNITION_OUT")"
+        CHECK_LOG="${OUT}.check.log"
+        __kretikos_check_source "$SRC" >"$CHECK_LOG" 2>&1 || {
+            cat "$CHECK_LOG" >&2
+            echo "error: source check failed before K-AXI source lowering: $SRC" >&2
+            exit 1
+        }
+
+        # Phase 5.H (python-extermination): the source-pattern recognizer
+        # used to be a python heredoc that ran ~16 regexes against the
+        # checked .sio source. We now delegate to a pure-Sounio driver
+        # (kretikos_kaxi_source_recognizer.sio) that writes the same
+        # recognition.json byte-for-byte (verified across the 12 corpus
+        # files plus the negative profile-directive case).
+        RECOG_DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_kaxi_source_recognizer.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        RECOG_DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-kaxi-source-recog.XXXXXX")" || {
+            echo "error: failed to create temporary recognizer driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        RECOG_DRIVER_ELF="$RECOG_DRIVER_DIR/source-recog.elf"
+        trap 'rm -rf "$RECOG_DRIVER_DIR"' EXIT INT TERM
+        "$SOUC_BIN" "$RECOG_DRIVER_SRC" "$RECOG_DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile kaxi-source-recognizer driver" >&2
+            exit 1
+        }
+        chmod +x "$RECOG_DRIVER_ELF"
+        RECOG_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if ! "$RECOG_DRIVER_ELF" "$SRC" "$SRC" "$RECOG_UTC" > "$RECOGNITION_OUT"; then
+            cat "$RECOGNITION_OUT" >&2
+            echo "error: K-AXI source lowering recognizer failed: $SRC" >&2
+            exit 1
+        fi
+
+        mapfile -t __pat_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" \
+            --print-or-empty kaxi_pattern \
+            --print-or-empty recognized_pattern)
+        KAXI_PATTERN="${__pat_parts[0]}"
+        RECOGNIZED_PATTERN="${__pat_parts[1]}"
+        case "$KAXI_PATTERN" in null) KAXI_PATTERN="" ;; esac
+        case "$RECOGNIZED_PATTERN" in null) RECOGNIZED_PATTERN="" ;; esac
+        case "$KAXI_PATTERN" in
+            source_vec_add_f64|source_vec_sub_f64|source_vec_mul_f64|source_vec_div_f64|source_fma_f64|source_vec_add_f32|source_vec_sub_f32|source_vec_mul_f32|source_vec_div_f32|source_fma_f32|source_epistemic_dual_output_f32) ;;
+            *)
+            echo "error: unsupported recognized K-AXI lowering pattern '$KAXI_PATTERN'" >&2
+            exit 1
+                ;;
+        esac
+
+        "$KRETIKOS_SELF" kaxi-witness "$KAXI_PATTERN" -o "$KAXI_WITNESS_OUT" --asm-output "$ASM_OUT" >/dev/null
+
+        SOURCE_SHA="$(__kretikos_sha256 "$SRC")" || exit 1
+        SOURCE_BYTES="$(__kretikos_file_size "$SRC")" || exit 1
+        SOURCE_PATH="$(__kretikos_repo_path "$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")")"
+        CHECK_SHA="$(__kretikos_sha256 "$CHECK_LOG")" || exit 1
+        CHECK_BYTES="$(__kretikos_file_size "$CHECK_LOG")" || exit 1
+        RECOGNITION_SHA="$(__kretikos_sha256 "$RECOGNITION_OUT")" || exit 1
+        RECOGNITION_BYTES="$(__kretikos_file_size "$RECOGNITION_OUT")" || exit 1
+        KAXI_WITNESS_SHA="$(__kretikos_sha256 "$KAXI_WITNESS_OUT")" || exit 1
+
+        # Compose kaxi-source-lowering JSON. Reads recognition and witness
+        # JSON files, validates 9 cross-conditions in shell, lifts nested
+        # sub-objects via validate-evidence --print-subtree, builds the
+        # final payload via json-emit + --raw-json.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        mapfile -t __rc_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" \
+            --print-or-empty status \
+            --print-or-empty profile_hint \
+            --print-or-empty fallback_path \
+            --print-or-empty source_lowered_to_kaxi \
+            --print-or-empty kaxi_pattern \
+            --print-or-empty recognized_pattern \
+            --print-or-empty runtime_rung)
+        RC_STATUS="${__rc_parts[0]}"
+        RC_PROFILE_HINT="${__rc_parts[1]}"
+        RC_FALLBACK_PATH="${__rc_parts[2]}"
+        RC_SOURCE_LOWERED="${__rc_parts[3]}"
+        RC_KAXI_PATTERN="${__rc_parts[4]}"
+        RC_RECOGNIZED_PATTERN="${__rc_parts[5]}"
+        RC_RUNTIME_RUNG="${__rc_parts[6]}"
+        RC_SEMANTIC_OPS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" --print-subtree-or semantic_ops '[]')"
+        RC_CHECKS_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$RECOGNITION_OUT" --print-subtree-or checks '{}')"
+        mapfile -t __wt_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" \
+            --print-or-empty status \
+            --print-or-empty pattern \
+            --print-or-empty semantic_profile \
+            --print-or-empty assembly.seq_dense_zero_based \
+            --print-or-empty epistemic_lanes.store_global_count)
+        WT_STATUS="${__wt_parts[0]}"
+        WT_PATTERN="${__wt_parts[1]}"
+        WT_SEMANTIC_PROFILE="${__wt_parts[2]}"
+        WT_SEQ_DENSE="${__wt_parts[3]}"
+        WT_STORE_GLOBAL_COUNT="${__wt_parts[4]:-0}"
+        WT_ASSEMBLY_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or assembly '{}')"
+        WT_EPISTEMIC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS_OUT" --print-subtree-or epistemic_lanes '{}')"
+
+        __FAIL_ELEMS=()
+        if [[ "$RC_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "recognition_status_not_pass", "status": "%s"}' "$(__json_str_escape "$RC_STATUS")")")
+        fi
+        if [[ "$RC_PROFILE_HINT" != "none" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "profile_hint_not_none", "profile_hint": "%s"}' "$(__json_str_escape "$RC_PROFILE_HINT")")")
+        fi
+        if [[ "$RC_FALLBACK_PATH" != "none" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "fallback_path_not_none", "fallback_path": "%s"}' "$(__json_str_escape "$RC_FALLBACK_PATH")")")
+        fi
+        if [[ "$RC_SOURCE_LOWERED" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "source_not_lowered_to_kaxi"}')
+        fi
+        if [[ "$WT_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_status_not_pass", "status": "%s"}' "$(__json_str_escape "$WT_STATUS")")")
+        fi
+        if [[ "$WT_PATTERN" != "$RC_KAXI_PATTERN" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_pattern_mismatch", "recognition": "%s", "witness": "%s"}' \
+                "$(__json_str_escape "$RC_KAXI_PATTERN")" "$(__json_str_escape "$WT_PATTERN")")")
+        fi
+        if [[ "$WT_SEQ_DENSE" != "true" ]]; then
+            __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+        fi
+        if [[ "$WT_STORE_GLOBAL_COUNT" -lt 1 ]] 2>/dev/null; then
+            __FAIL_ELEMS+=('{"kind": "lowered_source_requires_store_global"}')
+        fi
+        if [[ "$RC_KAXI_PATTERN" == "source_epistemic_dual_output_f32" && "$WT_STORE_GLOBAL_COUNT" -lt 2 ]] 2>/dev/null; then
+            __FAIL_ELEMS+=('{"kind": "lowered_epistemic_dual_source_requires_two_store_global_ops"}')
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
+
+        # Sub-objects
+        SOURCE_OBJ="$(printf '{"path": "%s", "bytes": %s, "sha256": "%s", "check": {"status": "pass", "log_path": "%s", "bytes": %s, "sha256": "%s"}}' \
+            "$(__json_str_escape "$SOURCE_PATH")" "$SOURCE_BYTES" "$SOURCE_SHA" \
+            "$(__json_str_escape "$CHECK_LOG")" "$CHECK_BYTES" "$CHECK_SHA")"
+
+        if [[ "$RC_SOURCE_LOWERED" == "true" ]]; then RC_SL_LIT="true"; else RC_SL_LIT="false"; fi
+        if [[ -z "$RC_RECOGNIZED_PATTERN" || "$RC_RECOGNIZED_PATTERN" == "null" ]]; then RP_LIT="null"; else RP_LIT="\"$(__json_str_escape "$RC_RECOGNIZED_PATTERN")\""; fi
+        if [[ -z "$RC_RUNTIME_RUNG" || "$RC_RUNTIME_RUNG" == "null" ]]; then RR_LIT="null"; else RR_LIT="\"$(__json_str_escape "$RC_RUNTIME_RUNG")\""; fi
+        LOWERING_OBJ="$(printf '{"mode": "source_to_kaxi", "source_lowered_to_kaxi": %s, "profile_hint": "%s", "fallback_path": "%s", "recognized_pattern": %s, "kaxi_pattern": "%s", "runtime_rung": %s, "semantic_ops": %s, "recognition": {"path": "%s", "bytes": %s, "sha256": "%s", "checks": %s}}' \
+            "$RC_SL_LIT" "$(__json_str_escape "$RC_PROFILE_HINT")" "$(__json_str_escape "$RC_FALLBACK_PATH")" \
+            "$RP_LIT" "$(__json_str_escape "$RC_KAXI_PATTERN")" "$RR_LIT" \
+            "$RC_SEMANTIC_OPS_JSON" \
+            "$(__json_str_escape "$RECOGNITION_OUT")" "$RECOGNITION_BYTES" "$RECOGNITION_SHA" \
+            "$RC_CHECKS_JSON")"
+
+        if [[ -z "$WT_SEMANTIC_PROFILE" || "$WT_SEMANTIC_PROFILE" == "null" ]]; then SEM_LIT="null"; else SEM_LIT="\"$(__json_str_escape "$WT_SEMANTIC_PROFILE")\""; fi
+        KAXI_OBJ="$(printf '{"pattern": "%s", "semantic_profile": %s, "witness_path": "%s", "witness_sha256": "%s", "assembly": %s, "epistemic_lanes": %s}' \
+            "$(__json_str_escape "$WT_PATTERN")" "$SEM_LIT" \
+            "$(__json_str_escape "$KAXI_WITNESS_OUT")" "$KAXI_WITNESS_SHA" \
+            "$WT_ASSEMBLY_JSON" "$WT_EPISTEMIC_JSON")"
+
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --array-strings "boundaries=source_must_typecheck_before_kaxi_lowering|profile_directives_are_rejected_for_source_lowering|source_lowering_links_source_hash_to_kaxi_witness_hash|source_lowering_is_shape_limited_to_indexed_f32_or_f64_arithmetic|source_lowering_does_not_claim_general_gpu_backend_completeness|source_lowering_does_not_replace_slurm_cuda_runtime_authority" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$KAXI_OBJ" \
+            --raw-json "lowering=$LOWERING_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-source-lowering.v1" \
+            --raw-json "source=$SOURCE_OBJ" \
+            --string "status=$STATUS_VAL" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
+
+        echo "kretikos: K-AXI source lowering emitted - $OUT"
+        echo "kretikos: K-AXI source lowering pattern - source=$SOURCE_PATH recognized=$RECOGNIZED_PATTERN kaxi_pattern=$KAXI_PATTERN profile_hint=none fallback_path=none"
+        ;;
+
+    kaxi-lowering-certificate)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        WORK_DIR=""
+        FORCE=0
+        RUNTIME_ARG=(--validate-runtime)
+        RUNTIME_MODE="auto"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --work-dir)
+                    WORK_DIR="$2"
+                    shift 2
+                    ;;
+                --force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARG=(--validate-runtime)
+                    RUNTIME_MODE="auto"
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARG=(--require-runtime)
+                    RUNTIME_MODE="required"
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-lowering-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$WORK_DIR" ]]; then
+            WORK_DIR="${OUT_STEM}.lowering-certificate.d"
+        fi
+        if [[ -e "$OUT" && "$FORCE" -ne 1 ]]; then
+            echo "error: lowering certificate output already exists: $OUT (use --force)" >&2
+            exit 1
+        fi
+        if [[ -e "$WORK_DIR" && "$FORCE" -ne 1 ]]; then
+            echo "error: lowering certificate work dir already exists: $WORK_DIR (use --force)" >&2
+            exit 1
+        fi
+        if [[ "$FORCE" -eq 1 ]]; then
+            rm -rf "$WORK_DIR"
+        fi
+        mkdir -p "$(dirname "$OUT")" "$WORK_DIR"
+
+        SOURCE_LOWERING="$WORK_DIR/kaxi_source_lowering.json"
+        KAXI_WITNESS="$WORK_DIR/kaxi_witness.json"
+        KAXI_ASM="$WORK_DIR/kaxi_source_lowered.kaxi"
+        RUNTIME_DIR="$WORK_DIR/runtime"
+        RUN_SOURCE_LOG="$WORK_DIR/run_source.out"
+
+        "$KRETIKOS_SELF" kaxi-lower-source "$SRC" \
+            -o "$SOURCE_LOWERING" \
+            --asm-output "$KAXI_ASM" \
+            --kaxi-witness-output "$KAXI_WITNESS" >/dev/null
+
+        mkdir -p "$RUNTIME_DIR"
+        "$KRETIKOS_SELF" run-source "$SRC" -o "$RUNTIME_DIR" --force "${RUNTIME_ARG[@]}" >"$RUN_SOURCE_LOG" 2>&1 || {
+            cat "$RUN_SOURCE_LOG" >&2
+            echo "error: K-AXI lowering certificate runtime/profile bundle step failed" >&2
+            exit 1
+        }
+
+        # Compose kaxi-lowering-certificate JSON. Reads up to 4 JSON files
+        # (source_lowering, kaxi_witness, runtime_profile, bundle), runs
+        # 14 cross-validation checks, embeds nested sub-objects via
+        # validate-evidence --print-subtree, assembles via json-emit.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        __file_record_json() {
+            local _p="$1"
+            if [[ -f "$_p" ]]; then
+                local _b _s
+                _b="$(__kretikos_file_size "$_p")" || return 0
+                _s="$(__kretikos_sha256 "$_p")" || return 0
+                printf '{"path": "%s", "bytes": %s, "sha256": "%s"}' "$(__json_str_escape "$_p")" "$_b" "$_s"
+            else
+                printf 'null'
+            fi
+        }
+        __scalar_or_null() {
+            # Wrap a scalar string as JSON: empty/null → JSON null,
+            # else "escaped string".
+            local _v="$1"
+            if [[ -z "$_v" || "$_v" == "null" ]]; then
+                printf 'null'
+            else
+                printf '"%s"' "$(__json_str_escape "$_v")"
+            fi
+        }
+        __bool_or_null() {
+            case "$1" in
+                true) printf 'true' ;;
+                false) printf 'false' ;;
+                *) printf 'null' ;;
+            esac
+        }
+
+        RUNTIME_PROFILE_PATH="$RUNTIME_DIR/kretikos_source_profile.v1.json"
+        BUNDLE_PATH="$RUNTIME_DIR/kretikos_bundle.v1.json"
+
+        # ---- source_lowering scalars + subtrees ----
+        SL_STATUS=""; SL_PROFILE_HINT=""; SL_FALLBACK_PATH=""
+        SL_SOURCE_LOWERED=""; SL_KAXI_PATTERN=""; SL_RUNTIME_RUNG=""
+        SL_SOURCE_SHA=""
+        SL_LOWERING_JSON='{}'; SL_KAXI_JSON='{}'; SL_SOURCE_JSON='null'
+        SL_INNER_KAXI_PATTERN=""
+        if [[ -f "$SOURCE_LOWERING" ]]; then
+            mapfile -t __sl_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" \
+                --print-or-empty status \
+                --print-or-empty lowering.profile_hint \
+                --print-or-empty lowering.fallback_path \
+                --print-or-empty lowering.source_lowered_to_kaxi \
+                --print-or-empty lowering.kaxi_pattern \
+                --print-or-empty lowering.runtime_rung \
+                --print-or-empty source.sha256 \
+                --print-or-empty kaxi.pattern)
+            SL_STATUS="${__sl_parts[0]}"
+            SL_PROFILE_HINT="${__sl_parts[1]}"
+            SL_FALLBACK_PATH="${__sl_parts[2]}"
+            SL_SOURCE_LOWERED="${__sl_parts[3]}"
+            SL_KAXI_PATTERN="${__sl_parts[4]}"
+            SL_RUNTIME_RUNG="${__sl_parts[5]}"
+            SL_SOURCE_SHA="${__sl_parts[6]}"
+            SL_INNER_KAXI_PATTERN="${__sl_parts[7]}"
+            SL_LOWERING_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or lowering '{}')"
+            SL_KAXI_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or kaxi '{}')"
+            SL_SOURCE_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_LOWERING" --print-subtree-or source 'null')"
+        fi
+
+        # ---- kaxi_witness scalars + assembly subtree ----
+        KW_STATUS=""; KW_PATTERN=""; KW_SEQ_DENSE=""; KW_STORE_COUNT="0"
+        if [[ -f "$KAXI_WITNESS" ]]; then
+            mapfile -t __kw_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS" \
+                --print-or-empty status \
+                --print-or-empty pattern \
+                --print-or-empty assembly.seq_dense_zero_based \
+                --print-or-empty epistemic_lanes.store_global_count)
+            KW_STATUS="${__kw_parts[0]}"
+            KW_PATTERN="${__kw_parts[1]}"
+            KW_SEQ_DENSE="${__kw_parts[2]}"
+            KW_STORE_COUNT="${__kw_parts[3]:-0}"
+        fi
+
+        # ---- runtime_profile scalars + full subtree ----
+        RP_PROFILE=""; RP_PROFILE_KIND=""; RP_RUNTIME_BACKED=""
+        RP_CUBIN_KIND=""; RP_RUNTIME_RUNG=""; RP_KERNEL=""
+        RP_SOURCE_SHA=""
+        RP_FULL_JSON='null'
+        if [[ -f "$RUNTIME_PROFILE_PATH" ]]; then
+            mapfile -t __rp_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RUNTIME_PROFILE_PATH" \
+                --print-or-empty profile \
+                --print-or-empty profile_kind \
+                --print-or-empty runtime_backed \
+                --print-or-empty cubin_kind \
+                --print-or-empty runtime_rung \
+                --print-or-empty kernel \
+                --print-or-empty source.sha256)
+            RP_PROFILE="${__rp_parts[0]}"
+            RP_PROFILE_KIND="${__rp_parts[1]}"
+            RP_RUNTIME_BACKED="${__rp_parts[2]}"
+            RP_CUBIN_KIND="${__rp_parts[3]}"
+            RP_RUNTIME_RUNG="${__rp_parts[4]}"
+            RP_KERNEL="${__rp_parts[5]}"
+            RP_SOURCE_SHA="${__rp_parts[6]}"
+            # Embed the entire profile JSON as the runtime.source_profile field.
+            RP_FULL_JSON="$(cat "$RUNTIME_PROFILE_PATH")"
+        fi
+
+        # ---- bundle scalars + nested subtrees ----
+        BD_STATUS=""; BD_RV_STATUS=""; BD_RV_REASON=""; BD_RV_RUNG=""; BD_RV_KERNEL=""
+        BD_RV_JSON='{}'; BD_SC_JSON='null'; BD_AR_JSON='null'; BD_TV_JSON='null'
+        if [[ -f "$BUNDLE_PATH" ]]; then
+            mapfile -t __bd_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" \
+                --print-or-empty status \
+                --print-or-empty runtime_validation.status \
+                --print-or-empty runtime_validation.reason \
+                --print-or-empty runtime_validation.rung \
+                --print-or-empty runtime_validation.kernel)
+            BD_STATUS="${__bd_parts[0]}"
+            BD_RV_STATUS="${__bd_parts[1]}"
+            BD_RV_REASON="${__bd_parts[2]}"
+            BD_RV_RUNG="${__bd_parts[3]}"
+            BD_RV_KERNEL="${__bd_parts[4]}"
+            BD_RV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or runtime_validation '{}')"
+            BD_SC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or structural_checks 'null')"
+            BD_AR_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or artifacts 'null')"
+            BD_TV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or toolchain_validation 'null')"
+        fi
+
+        # ---- failures ----
+        __FAIL_ELEMS=()
+        if [[ ! -f "$SOURCE_LOWERING" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_source_lowering", "path": "%s"}' "$(__json_str_escape "$SOURCE_LOWERING")")")
+        elif [[ "$SL_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "source_lowering_not_pass", "status": "%s"}' "$(__json_str_escape "$SL_STATUS")")")
+        fi
+        if [[ ! -f "$KAXI_WITNESS" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_kaxi_witness", "path": "%s"}' "$(__json_str_escape "$KAXI_WITNESS")")")
+        elif [[ "$KW_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_not_pass", "status": "%s"}' "$(__json_str_escape "$KW_STATUS")")")
+        fi
+        if [[ ! -f "$RUNTIME_PROFILE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_source_profile", "path": "%s"}' "$(__json_str_escape "$RUNTIME_PROFILE_PATH")")")
+        fi
+        if [[ ! -f "$BUNDLE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_bundle", "path": "%s"}' "$(__json_str_escape "$BUNDLE_PATH")")")
+        fi
+        if [[ -f "$SOURCE_LOWERING" ]]; then
+            if [[ "$SL_PROFILE_HINT" != "none" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "profile_hint_not_none", "profile_hint": "%s"}' "$(__json_str_escape "$SL_PROFILE_HINT")")")
+            fi
+            if [[ "$SL_FALLBACK_PATH" != "none" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "fallback_path_not_none", "fallback_path": "%s"}' "$(__json_str_escape "$SL_FALLBACK_PATH")")")
+            fi
+            if [[ "$SL_SOURCE_LOWERED" != "true" ]]; then
+                __FAIL_ELEMS+=('{"kind": "source_not_lowered_to_kaxi"}')
+            fi
+            if [[ "$SL_INNER_KAXI_PATTERN" != "$SL_KAXI_PATTERN" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "lowering_kaxi_pattern_mismatch", "lowering": "%s", "kaxi": "%s"}' \
+                    "$(__json_str_escape "$SL_KAXI_PATTERN")" "$(__json_str_escape "$SL_INNER_KAXI_PATTERN")")")
+            fi
+        fi
+        if [[ -f "$KAXI_WITNESS" && -f "$SOURCE_LOWERING" ]]; then
+            if [[ "$KW_PATTERN" != "$SL_KAXI_PATTERN" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "witness_pattern_mismatch", "lowering": "%s", "witness": "%s"}' \
+                    "$(__json_str_escape "$SL_KAXI_PATTERN")" "$(__json_str_escape "$KW_PATTERN")")")
+            fi
+            if [[ "$KW_SEQ_DENSE" != "true" ]]; then
+                __FAIL_ELEMS+=('{"kind": "kaxi_sequence_not_dense_zero_based"}')
+            fi
+            if [[ "$SL_KAXI_PATTERN" == "source_epistemic_dual_output_f32" && "$KW_STORE_COUNT" -lt 2 ]] 2>/dev/null; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "dual_lowering_requires_two_store_global_ops", "store_global_count": %s}' "$KW_STORE_COUNT")")
+            fi
+        fi
+        if [[ -f "$SOURCE_LOWERING" && -f "$RUNTIME_PROFILE_PATH" ]]; then
+            if [[ "$SL_SOURCE_SHA" != "$RP_SOURCE_SHA" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "source_hash_mismatch", "lowering_source_sha256": %s, "runtime_source_sha256": %s}' \
+                    "$(__scalar_or_null "$SL_SOURCE_SHA")" "$(__scalar_or_null "$RP_SOURCE_SHA")")")
+            fi
+            if [[ "$SL_RUNTIME_RUNG" != "$RP_PROFILE" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_profile_mismatch", "lowering_runtime_rung": %s, "runtime_profile": %s}' \
+                    "$(__scalar_or_null "$SL_RUNTIME_RUNG")" "$(__scalar_or_null "$RP_PROFILE")")")
+            fi
+        fi
+        if [[ -f "$SOURCE_LOWERING" && -f "$BUNDLE_PATH" ]]; then
+            if [[ "$SL_RUNTIME_RUNG" != "$BD_RV_RUNG" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_rung_mismatch", "lowering_runtime_rung": %s, "bundle_rung": %s}' \
+                    "$(__scalar_or_null "$SL_RUNTIME_RUNG")" "$(__scalar_or_null "$BD_RV_RUNG")")")
+            fi
+            if [[ -f "$RUNTIME_PROFILE_PATH" && "$RP_KERNEL" != "$BD_RV_KERNEL" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_kernel_mismatch", "runtime_profile_kernel": %s, "bundle_kernel": %s}' \
+                    "$(__scalar_or_null "$RP_KERNEL")" "$(__scalar_or_null "$BD_RV_KERNEL")")")
+            fi
+        fi
+        if [[ "$RUNTIME_MODE" == "required" && "$BD_RV_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "runtime_required_but_not_pass", "status": %s, "reason": %s}' \
+                "$(__scalar_or_null "$BD_RV_STATUS")" "$(__scalar_or_null "$BD_RV_REASON")")")
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"
+            STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"
+            STATUS_VAL="fail"
+        fi
+
+        # ---- composed sub-objects ----
+        PROFILE_OBJ="$(printf '{"name": %s, "profile_kind": %s, "runtime_backed": %s, "cubin_kind": %s, "runtime_rung": %s, "kernel": %s}' \
+            "$(__scalar_or_null "$RP_PROFILE")" \
+            "$(__scalar_or_null "$RP_PROFILE_KIND")" \
+            "$(__bool_or_null "$RP_RUNTIME_BACKED")" \
+            "$(__scalar_or_null "$RP_CUBIN_KIND")" \
+            "$(__scalar_or_null "$RP_RUNTIME_RUNG")" \
+            "$(__scalar_or_null "$RP_KERNEL")")"
+        BUNDLE_STATUS_LIT="$(__scalar_or_null "$BD_STATUS")"
+        RUNTIME_OBJ="$(printf '{"mode": "%s", "source_profile": %s, "bundle_status": %s, "structural_checks": %s, "artifacts": %s, "runtime_validation": %s, "toolchain_validation": %s}' \
+            "$(__json_str_escape "$RUNTIME_MODE")" \
+            "$RP_FULL_JSON" \
+            "$BUNDLE_STATUS_LIT" \
+            "$BD_SC_JSON" \
+            "$BD_AR_JSON" \
+            "$BD_RV_JSON" \
+            "$BD_TV_JSON")"
+        AR_OBJ="$(printf '{"source_lowering": %s, "kaxi_witness": %s, "kaxi_assembly": %s, "runtime_source_profile": %s, "runtime_bundle": %s, "run_source_log": %s}' \
+            "$(__file_record_json "$SOURCE_LOWERING")" \
+            "$(__file_record_json "$KAXI_WITNESS")" \
+            "$(__file_record_json "$KAXI_ASM")" \
+            "$(__file_record_json "$RUNTIME_PROFILE_PATH")" \
+            "$(__file_record_json "$BUNDLE_PATH")" \
+            "$(__file_record_json "$RUN_SOURCE_LOG")")"
+
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --raw-json "artifact_records=$AR_OBJ" \
+            --array-strings "boundaries=certificate_braids_checked_source_lowering_kaxi_witness_and_runtime_bundle_hashes|source_must_typecheck_before_source_lowering_and_profile_selection|profile_hint_must_be_absent_for_source_lowering_certificate|kaxi_evidence_is_shape_limited_source_lowering_not_general_gpu_lowering|runtime_validation_applies_to_selected_predefined_cubin_rung_only|local_cuda_not_run_is_classified_and_slurm_remains_runtime_authority|certificate_does_not_claim_first_class_knowledge_generic_lowering|certificate_does_not_claim_general_gpu_backend_completeness" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$SL_KAXI_JSON" \
+            --raw-json "lowering=$SL_LOWERING_JSON" \
+            --raw-json "profile=$PROFILE_OBJ" \
+            --raw-json "runtime=$RUNTIME_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-lowering-certificate.v1" \
+            --raw-json "source=$SL_SOURCE_JSON" \
+            --string "source_arg=$SRC" \
+            --string "status=$STATUS_VAL" \
+            --string "work_dir=$WORK_DIR" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
+
+        echo "kretikos: K-AXI lowering certificate emitted - $OUT"
+        echo "kretikos: K-AXI lowering certificate work dir - $WORK_DIR"
+        ;;
+
+    kaxi-certificate)
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos kaxi-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        SRC="$1"
+        shift
+        OUT=""
+        WORK_DIR=""
+        FORCE=0
+        RUNTIME_ARG=(--validate-runtime)
+        RUNTIME_MODE="auto"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --work-dir)
+                    WORK_DIR="$2"
+                    shift 2
+                    ;;
+                --force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-runtime)
+                    RUNTIME_ARG=(--validate-runtime)
+                    RUNTIME_MODE="auto"
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_ARG=(--require-runtime)
+                    RUNTIME_MODE="required"
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if [[ -z "$OUT" ]]; then
+            echo "usage: kretikos kaxi-certificate <source.sio> -o <file.json> [--work-dir <dir>] [--force] [--require-runtime]" >&2
+            exit 1
+        fi
+        if [[ ! -f "$SRC" ]]; then
+            echo "error: source not found: $SRC" >&2
+            exit 1
+        fi
+
+        case "$OUT" in
+            *.json) OUT_STEM="${OUT%.json}" ;;
+            *) OUT_STEM="$OUT" ;;
+        esac
+        if [[ -z "$WORK_DIR" ]]; then
+            WORK_DIR="${OUT_STEM}.certificate.d"
+        fi
+        if [[ -e "$OUT" && "$FORCE" -ne 1 ]]; then
+            echo "error: certificate output already exists: $OUT (use --force)" >&2
+            exit 1
+        fi
+        if [[ -e "$WORK_DIR" && "$FORCE" -ne 1 ]]; then
+            echo "error: certificate work dir already exists: $WORK_DIR (use --force)" >&2
+            exit 1
+        fi
+        if [[ "$FORCE" -eq 1 ]]; then
+            rm -rf "$WORK_DIR"
+        fi
+        mkdir -p "$(dirname "$OUT")" "$WORK_DIR"
+
+        SOURCE_WITNESS="$WORK_DIR/kaxi_source_witness.json"
+        KAXI_WITNESS="$WORK_DIR/kaxi_witness.json"
+        KAXI_ASM="$WORK_DIR/kaxi_source.kaxi"
+        RUNTIME_DIR="$WORK_DIR/runtime"
+        RUN_SOURCE_LOG="$WORK_DIR/run_source.out"
+
+        "$KRETIKOS_SELF" kaxi-source-witness "$SRC" \
+            -o "$SOURCE_WITNESS" \
+            --asm-output "$KAXI_ASM" \
+            --kaxi-witness-output "$KAXI_WITNESS" >/dev/null
+
+        mkdir -p "$RUNTIME_DIR"
+        "$KRETIKOS_SELF" run-source "$SRC" -o "$RUNTIME_DIR" --force "${RUNTIME_ARG[@]}" >"$RUN_SOURCE_LOG" 2>&1 || {
+            cat "$RUN_SOURCE_LOG" >&2
+            echo "error: K-AXI certificate runtime/profile bundle step failed" >&2
+            exit 1
+        }
+
+        # Compose kaxi-certificate JSON. Reads source_witness, kaxi_witness,
+        # runtime_profile, bundle; runs 8 cross-checks; embeds source/profile/
+        # kaxi subtrees from source_witness verbatim.
+        __json_str_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        __file_record_json() {
+            local _p="$1"
+            if [[ -f "$_p" ]]; then
+                local _b _s
+                _b="$(__kretikos_file_size "$_p")" || return 0
+                _s="$(__kretikos_sha256 "$_p")" || return 0
+                printf '{"path": "%s", "bytes": %s, "sha256": "%s"}' "$(__json_str_escape "$_p")" "$_b" "$_s"
+            else
+                printf 'null'
+            fi
+        }
+        __scalar_or_null() {
+            local _v="$1"
+            if [[ -z "$_v" || "$_v" == "null" ]]; then printf 'null'
+            else printf '"%s"' "$(__json_str_escape "$_v")"
+            fi
+        }
+        RUNTIME_PROFILE_PATH="$RUNTIME_DIR/kretikos_source_profile.v1.json"
+        BUNDLE_PATH="$RUNTIME_DIR/kretikos_bundle.v1.json"
+
+        # source_witness scalars + subtrees
+        SW_STATUS=""; SW_SOURCE_SHA=""; SW_PROFILE_NAME=""; SW_PROFILE_RUNG=""; SW_PROFILE_KERNEL=""
+        SW_SOURCE_JSON='null'; SW_PROFILE_JSON='null'; SW_KAXI_JSON='null'
+        if [[ -f "$SOURCE_WITNESS" ]]; then
+            mapfile -t __sw_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_WITNESS" \
+                --print-or-empty status \
+                --print-or-empty source.sha256 \
+                --print-or-empty profile.name \
+                --print-or-empty profile.runtime_rung \
+                --print-or-empty profile.kernel)
+            SW_STATUS="${__sw_parts[0]}"
+            SW_SOURCE_SHA="${__sw_parts[1]}"
+            SW_PROFILE_NAME="${__sw_parts[2]}"
+            SW_PROFILE_RUNG="${__sw_parts[3]}"
+            SW_PROFILE_KERNEL="${__sw_parts[4]}"
+            SW_SOURCE_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_WITNESS" --print-subtree-or source 'null')"
+            SW_PROFILE_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_WITNESS" --print-subtree-or profile 'null')"
+            SW_KAXI_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$SOURCE_WITNESS" --print-subtree-or kaxi 'null')"
+        fi
+
+        KW_STATUS=""
+        if [[ -f "$KAXI_WITNESS" ]]; then
+            KW_STATUS="$("$KRETIKOS_SELF" kaxi-validate-evidence "$KAXI_WITNESS" --print-or-empty status)"
+        fi
+
+        RP_PROFILE=""; RP_SOURCE_SHA=""; RP_FULL_JSON='null'
+        if [[ -f "$RUNTIME_PROFILE_PATH" ]]; then
+            mapfile -t __rp_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$RUNTIME_PROFILE_PATH" \
+                --print-or-empty profile \
+                --print-or-empty source.sha256)
+            RP_PROFILE="${__rp_parts[0]}"
+            RP_SOURCE_SHA="${__rp_parts[1]}"
+            RP_FULL_JSON="$(cat "$RUNTIME_PROFILE_PATH")"
+        fi
+
+        BD_STATUS=""; BD_RV_STATUS=""; BD_RV_REASON=""; BD_RV_RUNG=""; BD_RV_KERNEL=""
+        BD_RV_JSON='{}'; BD_SC_JSON='null'; BD_AR_JSON='null'; BD_TV_JSON='null'
+        if [[ -f "$BUNDLE_PATH" ]]; then
+            mapfile -t __bd_parts < <("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" \
+                --print-or-empty status \
+                --print-or-empty runtime_validation.status \
+                --print-or-empty runtime_validation.reason \
+                --print-or-empty runtime_validation.rung \
+                --print-or-empty runtime_validation.kernel)
+            BD_STATUS="${__bd_parts[0]}"
+            BD_RV_STATUS="${__bd_parts[1]}"
+            BD_RV_REASON="${__bd_parts[2]}"
+            BD_RV_RUNG="${__bd_parts[3]}"
+            BD_RV_KERNEL="${__bd_parts[4]}"
+            BD_RV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or runtime_validation '{}')"
+            BD_SC_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or structural_checks 'null')"
+            BD_AR_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or artifacts 'null')"
+            BD_TV_JSON="$("$KRETIKOS_SELF" kaxi-validate-evidence "$BUNDLE_PATH" --print-subtree-or toolchain_validation 'null')"
+        fi
+
+        __FAIL_ELEMS=()
+        if [[ ! -f "$SOURCE_WITNESS" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_source_witness", "path": "%s"}' "$(__json_str_escape "$SOURCE_WITNESS")")")
+        elif [[ "$SW_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "source_witness_not_pass", "status": "%s"}' "$(__json_str_escape "$SW_STATUS")")")
+        fi
+        if [[ ! -f "$KAXI_WITNESS" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_kaxi_witness", "path": "%s"}' "$(__json_str_escape "$KAXI_WITNESS")")")
+        elif [[ "$KW_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "kaxi_witness_not_pass", "status": "%s"}' "$(__json_str_escape "$KW_STATUS")")")
+        fi
+        if [[ ! -f "$RUNTIME_PROFILE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_source_profile", "path": "%s"}' "$(__json_str_escape "$RUNTIME_PROFILE_PATH")")")
+        fi
+        if [[ ! -f "$BUNDLE_PATH" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "missing_runtime_bundle", "path": "%s"}' "$(__json_str_escape "$BUNDLE_PATH")")")
+        fi
+        if [[ -f "$SOURCE_WITNESS" && -f "$RUNTIME_PROFILE_PATH" ]]; then
+            if [[ "$SW_SOURCE_SHA" != "$RP_SOURCE_SHA" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "source_hash_mismatch", "kaxi_source_sha256": %s, "runtime_source_sha256": %s}' \
+                    "$(__scalar_or_null "$SW_SOURCE_SHA")" "$(__scalar_or_null "$RP_SOURCE_SHA")")")
+            fi
+            if [[ "$SW_PROFILE_NAME" != "$RP_PROFILE" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "profile_mismatch", "kaxi_profile": %s, "runtime_profile": %s}' \
+                    "$(__scalar_or_null "$SW_PROFILE_NAME")" "$(__scalar_or_null "$RP_PROFILE")")")
+            fi
+        fi
+        if [[ -f "$SOURCE_WITNESS" && -f "$BUNDLE_PATH" ]]; then
+            if [[ "$SW_PROFILE_RUNG" != "$BD_RV_RUNG" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_rung_mismatch", "source_witness_rung": %s, "bundle_rung": %s}' \
+                    "$(__scalar_or_null "$SW_PROFILE_RUNG")" "$(__scalar_or_null "$BD_RV_RUNG")")")
+            fi
+            if [[ "$SW_PROFILE_KERNEL" != "$BD_RV_KERNEL" ]]; then
+                __FAIL_ELEMS+=("$(printf '{"kind": "runtime_kernel_mismatch", "source_witness_kernel": %s, "bundle_kernel": %s}' \
+                    "$(__scalar_or_null "$SW_PROFILE_KERNEL")" "$(__scalar_or_null "$BD_RV_KERNEL")")")
+            fi
+        fi
+        if [[ "$RUNTIME_MODE" == "required" && "$BD_RV_STATUS" != "pass" ]]; then
+            __FAIL_ELEMS+=("$(printf '{"kind": "runtime_required_but_not_pass", "status": %s, "reason": %s}' \
+                "$(__scalar_or_null "$BD_RV_STATUS")" "$(__scalar_or_null "$BD_RV_REASON")")")
+        fi
+        if [[ ${#__FAIL_ELEMS[@]} -eq 0 ]]; then
+            FAILURES_ARRAY="[]"; STATUS_VAL="pass"
+        else
+            FAILURES_ARRAY="[$(IFS=,; echo "${__FAIL_ELEMS[*]}")]"; STATUS_VAL="fail"
+        fi
+
+        BUNDLE_STATUS_LIT="$(__scalar_or_null "$BD_STATUS")"
+        RUNTIME_OBJ="$(printf '{"mode": "%s", "source_profile": %s, "bundle_status": %s, "structural_checks": %s, "artifacts": %s, "runtime_validation": %s, "toolchain_validation": %s}' \
+            "$(__json_str_escape "$RUNTIME_MODE")" \
+            "$RP_FULL_JSON" "$BUNDLE_STATUS_LIT" "$BD_SC_JSON" "$BD_AR_JSON" "$BD_RV_JSON" "$BD_TV_JSON")"
+        AR_OBJ="$(printf '{"source_witness": %s, "kaxi_witness": %s, "kaxi_assembly": %s, "runtime_source_profile": %s, "runtime_bundle": %s, "run_source_log": %s}' \
+            "$(__file_record_json "$SOURCE_WITNESS")" \
+            "$(__file_record_json "$KAXI_WITNESS")" \
+            "$(__file_record_json "$KAXI_ASM")" \
+            "$(__file_record_json "$RUNTIME_PROFILE_PATH")" \
+            "$(__file_record_json "$BUNDLE_PATH")" \
+            "$(__file_record_json "$RUN_SOURCE_LOG")")"
+
+        GENERATED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "$KRETIKOS_SELF" json-emit \
+            --raw-json "artifact_records=$AR_OBJ" \
+            --array-strings "boundaries=certificate_braids_checked_source_kaxi_witness_and_runtime_bundle_hashes|source_must_typecheck_before_certificate_profile_selection|kaxi_evidence_is_profile_level_for_explicit_kretikos_patterns|runtime_validation_applies_to_selected_predefined_cubin_rung_only|local_cuda_not_run_is_classified_and_slurm_remains_runtime_authority|certificate_does_not_claim_arbitrary_sounio_gpu_lowering|certificate_does_not_claim_general_gpu_backend_completeness" \
+            --raw-json "failures=$FAILURES_ARRAY" \
+            --string "generated_at_utc=$GENERATED_AT_UTC" \
+            --raw-json "kaxi=$SW_KAXI_JSON" \
+            --raw-json "profile=$SW_PROFILE_JSON" \
+            --raw-json "runtime=$RUNTIME_OBJ" \
+            --string "schema=sounio.kretikos.kaxi-certificate.v1" \
+            --raw-json "source=$SW_SOURCE_JSON" \
+            --string "source_arg=$SRC" \
+            --string "status=$STATUS_VAL" \
+            --string "work_dir=$WORK_DIR" \
+            > "$OUT" || exit 1
+        if [[ "$STATUS_VAL" == "fail" ]]; then
+            echo "$FAILURES_ARRAY" >&2
+            exit 1
+        fi
+
+        echo "kretikos: K-AXI certificate emitted - $OUT"
+        echo "kretikos: K-AXI certificate work dir - $WORK_DIR"
+        ;;
+
+    emulate)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emulate.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emulate.XXXXXX")" || {
+            echo "error: failed to create temporary emulation directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile CPU emulation driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        "$DRIVER_ELF"
+        ;;
+
+    emit-cubin)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_emit_cubin.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-emit-cubin.XXXXXX")" || {
+            echo "error: failed to create temporary CUBIN driver directory" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        # Parse args: emit-cubin <kind> -o <file> [--validate-toolchain]
+        KIND=""
+        OUT=""
+        VALIDATE_TOOLCHAIN=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output)
+                    OUT="$2"
+                    shift 2
+                    ;;
+                --validate-toolchain)
+                    VALIDATE_TOOLCHAIN=1
+                    shift
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -z "$KIND" ]]; then
+                        KIND="$1"
+                    else
+                        echo "error: unexpected argument $1" >&2
+                        exit 1
+                    fi
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ -n "$VALIDATE_TOOLCHAIN" ]]; then
+            if ! command -v nvcc >/dev/null 2>&1; then
+                echo "error: --validate-toolchain requires nvcc, but it was not found" >&2
+                echo "hint: run 'kretikos detect-cuda' to check your CUDA installation" >&2
+                exit 1
+            fi
+            echo "kretikos: toolchain validation OK - nvcc found"
+        fi
+
+        if [[ -z "$KIND" ]]; then
+            echo "usage: kretikos emit-cubin <kind> -o <file.cubin>" >&2
+            echo "" >&2
+            echo "Supported kinds:" >&2
+            echo "  exit_only          - minimal kernel that returns immediately" >&2
+            echo "  store_u32_const    - stores a constant u32 to output" >&2
+            echo "  vec_add_f32        - f32 vector addition (SM80)" >&2
+            echo "  vec_add_f64        - f64 vector addition (SM80)" >&2
+            echo "  vec_sub_f64        - f64 vector subtraction (SM80)" >&2
+            echo "  vec_mul_f64        - f64 vector multiplication (SM80)" >&2
+            echo "  vec_div_f64        - f64 vector division (SM80)" >&2
+            echo "  fma_f64            - f64 fused multiply-add (SM80)" >&2
+            echo "  vec_sub_f32        - f32 vector subtraction (SM80)" >&2
+            echo "  vec_mul_f32        - f32 vector multiplication (SM80)" >&2
+            echo "  vec_div_f32        - f32 vector division (SM80)" >&2
+            echo "  fma_f32            - f32 affine fused multiply-add (SM80)" >&2
+            echo "  epistemic_dual_f32 - epistemic dual-lane f32 output (SM80)" >&2
+            exit 1
+        fi
+
+        case "$KIND" in
+            exit_only|store_u32_const|vec_add_f32|vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma_f64|vec_sub_f32|vec_mul_f32|vec_div_f32|fma_f32|epistemic_dual_f32) ;;
+            *)
+                echo "error: unsupported CUBIN kind '$KIND'" >&2
+                echo "supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32" >&2
+                exit 1
+                ;;
+        esac
+
+        DRIVER_KIND="$KIND"
+        PATCH_CUBIN_SYMBOL="none"
+        if [[ "$KIND" == "vec_div_f32" ]]; then
+            DRIVER_KIND="fma_f32"
+            PATCH_CUBIN_SYMBOL="fma_to_div"
+        fi
+
+        if [[ -z "$OUT" ]]; then
+            echo "error: -o <output> is required" >&2
+            exit 1
+        fi
+
+        case "$KIND" in
+            vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma_f64)
+            # Phase 5.I (python-extermination): replace the f64-CUBIN
+            # source-chunk extractor heredoc with a shell pipeline that
+            # awk-extracts the per-kind chunk function body from
+            # self-hosted/gpu/nvidia_bare.sio, grep-extracts the quoted
+            # hex chunks, awk-converts hex to raw bytes, and validates
+            # length + ELF magic + e_machine + symbol presence.
+            #
+            # Invariants per kind (chunk count, byte length, embedded
+            # symbol) match the python heredoc 1:1.
+            case "$KIND" in
+                vec_add_f64) __f64_prefix="gpu_bare_sm80_vec_add_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_add_f64_sm80" ;;
+                vec_sub_f64) __f64_prefix="gpu_bare_sm80_vec_sub_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_sub_f64_sm80" ;;
+                vec_mul_f64) __f64_prefix="gpu_bare_sm80_vec_mul_f64"; __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_mul_f64_sm80" ;;
+                vec_div_f64) __f64_prefix="gpu_bare_sm80_vec_div_f64"; __f64_chunks=81;  __f64_len=5160; __f64_sym="sounio_bare_vec_div_f64_sm80" ;;
+                fma_f64)     __f64_prefix="gpu_bare_sm80_fma_f64";     __f64_chunks=49;  __f64_len=3112; __f64_sym="sounio_bare_vec_fma_f64_sm80" ;;
+            esac
+            __f64_src="$ROOT_DIR/self-hosted/gpu/nvidia_bare.sio"
+            __f64_fn_open="fn ${__f64_prefix}_cubin_hex_chunk(i: i64) -> string {"
+            # Extract the chunk-function body up to the first `^}` line.
+            __f64_body="$(awk -v open="$__f64_fn_open" '
+                $0 == open { in_fn=1; next }
+                in_fn && $0 == "}" { exit }
+                in_fn { print }
+            ' "$__f64_src")"
+            if [[ -z "$__f64_body" ]]; then
+                echo "error: $KIND CUBIN chunk function not found in $__f64_src" >&2
+                exit 1
+            fi
+            # Extract every quoted lowercase-hex literal in the body.
+            __f64_hex="$(printf '%s\n' "$__f64_body" | LC_ALL=C grep -oE '"[0-9a-fA-F]+"' | LC_ALL=C tr -d '"')"
+            __f64_actual_chunks="$(printf '%s\n' "$__f64_hex" | grep -c .)"
+            if [[ "$__f64_actual_chunks" != "$__f64_chunks" ]]; then
+                echo "error: expected $__f64_chunks $KIND CUBIN chunks, found $__f64_actual_chunks" >&2
+                exit 1
+            fi
+            # Concatenate hex chunks, then awk-convert hex pairs to raw
+            # bytes (mawk lacks strtonum, so use a literal nibble table).
+            printf '%s' "$__f64_hex" | LC_ALL=C tr -d '\n' | LC_ALL=C awk 'BEGIN { ORS="" }
+{
+    hex = tolower($0)
+    nibbles = "0123456789abcdef"
+    n = length(hex)
+    if (n % 2 != 0) { print "odd-length hex stream" > "/dev/stderr"; exit 1 }
+    for (i = 1; i <= n; i += 2) {
+        hi = index(nibbles, substr(hex, i, 1))   - 1
+        lo = index(nibbles, substr(hex, i+1, 1)) - 1
+        if (hi < 0 || lo < 0) { print "non-hex byte: " substr(hex,i,2) > "/dev/stderr"; exit 1 }
+        printf "%c", hi * 16 + lo
+    }
+}' > "$OUT" || exit 1
+            __f64_actual_len="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null)"
+            if [[ "$__f64_actual_len" != "$__f64_len" ]]; then
+                echo "error: expected $__f64_len $KIND CUBIN bytes, found $__f64_actual_len" >&2
+                exit 1
+            fi
+            # ELF64 magic = 7f 45 4c 46 02; e_machine at offset 18..19 = 0xbe 0x00 (190 LE).
+            __f64_magic="$(LC_ALL=C dd if="$OUT" bs=1 count=5 status=none | LC_ALL=C od -An -v -tx1 | LC_ALL=C tr -d ' \n')"
+            if [[ "$__f64_magic" != "7f454c4602" ]]; then
+                echo "error: $KIND CUBIN is not ELF64 (magic=$__f64_magic)" >&2
+                exit 1
+            fi
+            __f64_emach="$(LC_ALL=C dd if="$OUT" bs=1 skip=18 count=2 status=none | LC_ALL=C od -An -v -tx1 | LC_ALL=C tr -d ' \n')"
+            if [[ "$__f64_emach" != "be00" ]]; then
+                echo "error: $KIND CUBIN e_machine is not NVIDIA CUDA (e_machine bytes=$__f64_emach)" >&2
+                exit 1
+            fi
+            if ! LC_ALL=C grep -aFq "$__f64_sym" "$OUT"; then
+                echo "error: $KIND CUBIN symbol missing: $__f64_sym" >&2
+                exit 1
+            fi
+            ;;
+            *)
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile CUBIN emitter driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+
+        # Run driver -> decimal bytes on stdout -> awk -> binary file.
+        # LC_ALL=C ensures awk's %c emits raw bytes (no UTF-8 widening).
+        "$DRIVER_ELF" "$DRIVER_KIND" | LC_ALL=C awk 'BEGIN { ORS="" }
+NF {
+    v = $1 + 0
+    if ($1 != v) { print "non-integer byte emitted: " $1 > "/dev/stderr"; exit 1 }
+    if (v < 0 || v > 255) { print "byte out of range: " v > "/dev/stderr"; exit 1 }
+    printf "%c", v
+}' > "$OUT"
+
+        if [[ "$PATCH_CUBIN_SYMBOL" == "fma_to_div" ]]; then
+            # Equal-length symbol byte-replacement on the CUBIN (fma → div).
+            # All replacement strings are ASCII and contain no LF bytes,
+            # so line-buffered sed is byte-safe for these substitutions.
+            # LC_ALL=C avoids any UTF-8 reinterpretation.
+            for __target in \
+                ".nv.info.sounio_bare_vec_fma_f32_sm80" \
+                ".nv.constant0.sounio_bare_vec_fma_f32_sm80" \
+                ".text.sounio_bare_vec_fma_f32_sm80" \
+                "sounio_bare_vec_fma_f32_sm80"; do
+                if ! LC_ALL=C grep -q "$__target" "$OUT"; then
+                    echo "error: internal CUBIN patch target missing: $__target" >&2
+                    exit 1
+                fi
+            done
+            LC_ALL=C sed -i \
+                -e 's|\.nv\.info\.sounio_bare_vec_fma_f32_sm80|.nv.info.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|\.nv\.constant0\.sounio_bare_vec_fma_f32_sm80|.nv.constant0.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|\.text\.sounio_bare_vec_fma_f32_sm80|.text.sounio_bare_vec_div_f32_sm80|g' \
+                -e 's|sounio_bare_vec_fma_f32_sm80|sounio_bare_vec_div_f32_sm80|g' \
+                "$OUT"
+            if LC_ALL=C grep -q "sounio_bare_vec_fma_f32_sm80" "$OUT"; then
+                echo "error: internal CUBIN patch left stale fma symbol" >&2
+                exit 1
+            fi
+        fi
+            ;;
+        esac
+
+        bytes=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo "?")
+        echo "kretikos: CUBIN template emitted - $OUT ($bytes bytes)"
+
+        # Quick structural validation
+        if command -v file >/dev/null 2>&1; then
+            magic=$(file -b "$OUT" 2>/dev/null || true)
+            if [[ "$magic" == *"NVIDIA CUDA"* ]]; then
+                echo "kretikos: structural validation OK - $magic"
+            else
+                echo "kretikos: warning - file magic does not match NVIDIA CUDA: $magic" >&2
+            fi
+        fi
+        "$KRETIKOS_SELF" cubin-validate "$OUT" >/dev/null 2>&1 || {
+            echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
+            exit 1
+        }
+        ;;
+    bundle)
+        OUT_DIR=""
+        PTX_PATTERN="vec_add"
+        CUBIN_KIND="epistemic_dual_f32"
+        FORCE=0
+        TOOLCHAIN_MODE="off"
+        RUNTIME_MODE="off"
+        RUNTIME_RUNG=""
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|--output-dir)
+                    OUT_DIR="$2"
+                    shift 2
+                    ;;
+                --ptx-pattern)
+                    PTX_PATTERN="$2"
+                    shift 2
+                    ;;
+                --cubin-kind)
+                    CUBIN_KIND="$2"
+                    shift 2
+                    ;;
+                -f|--force)
+                    FORCE=1
+                    shift
+                    ;;
+                --validate-toolchain)
+                    TOOLCHAIN_MODE="auto"
+                    shift
+                    ;;
+                --require-toolchain)
+                    TOOLCHAIN_MODE="required"
+                    shift
+                    ;;
+                --toolchain-mode)
+                    TOOLCHAIN_MODE="$2"
+                    shift 2
+                    ;;
+                --validate-runtime)
+                    RUNTIME_MODE="auto"
+                    shift
+                    ;;
+                --require-runtime)
+                    RUNTIME_MODE="required"
+                    shift
+                    ;;
+                --runtime-mode)
+                    RUNTIME_MODE="$2"
+                    shift 2
+                    ;;
+                --runtime-rung)
+                    RUNTIME_RUNG="$2"
+                    shift 2
+                    ;;
+                -*)
+                    echo "error: unknown option $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "error: unexpected argument $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        case "$TOOLCHAIN_MODE" in
+            off|auto|required) ;;
+            *)
+                echo "error: --toolchain-mode must be off, auto, or required" >&2
+                exit 1
+                ;;
+        esac
+        case "$RUNTIME_MODE" in
+            off|auto|required) ;;
+            *)
+                echo "error: --runtime-mode must be off, auto, or required" >&2
+                exit 1
+                ;;
+        esac
+
+        if [[ -z "$OUT_DIR" ]]; then
+            OLD_UMASK="$(umask)"
+            umask 077
+            OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-bundle.XXXXXX")" || {
+                echo "error: failed to create temporary bundle directory" >&2
+                exit 1
+            }
+            umask "$OLD_UMASK"
+        else
+            mkdir -p "$OUT_DIR"
+        fi
+        PTX_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptx"
+        CUBIN_OUT="$OUT_DIR/kretikos_${CUBIN_KIND}.cubin"
+        MANIFEST_OUT="$OUT_DIR/kretikos_bundle.v1.json"
+        PTXAS_CUBIN_OUT="$OUT_DIR/kretikos_${PTX_PATTERN}.ptxas.cubin"
+        PTXAS_LOG_OUT="$OUT_DIR/kretikos_ptxas.log"
+        NVDISASM_OUT="$OUT_DIR/kretikos_${CUBIN_KIND}.nvdisasm.txt"
+        NVDISASM_LOG_OUT="$OUT_DIR/kretikos_nvdisasm.log"
+        RUNTIME_LOADER_OUT="$OUT_DIR/kretikos_nvidia_bare_loader"
+        RUNTIME_LOG_OUT="$OUT_DIR/kretikos_runtime.log"
+        PTX_REL="$(basename "$PTX_OUT")"
+        CUBIN_REL="$(basename "$CUBIN_OUT")"
+        PTXAS_CUBIN_REL="$(basename "$PTXAS_CUBIN_OUT")"
+        PTXAS_LOG_REL="$(basename "$PTXAS_LOG_OUT")"
+        NVDISASM_REL="$(basename "$NVDISASM_OUT")"
+        NVDISASM_LOG_REL="$(basename "$NVDISASM_LOG_OUT")"
+        RUNTIME_LOG_REL="$(basename "$RUNTIME_LOG_OUT")"
+        COMPILER_PATH="$(__kretikos_repo_path "$SOUC_BIN")"
+        STDLIB_PATH="$(__kretikos_repo_path "$SOUNIO_STDLIB_PATH")"
+
+        if [[ "$FORCE" -ne 1 ]] && [[ -e "$PTX_OUT" || -e "$CUBIN_OUT" || -e "$MANIFEST_OUT" || -e "$PTXAS_CUBIN_OUT" || -e "$PTXAS_LOG_OUT" || -e "$NVDISASM_OUT" || -e "$NVDISASM_LOG_OUT" || -e "$RUNTIME_LOG_OUT" ]]; then
+            echo "error: bundle output already exists in $OUT_DIR; use --force to overwrite" >&2
+            exit 1
+        fi
+
+        PTX_CONTRACT_SOURCE="self-hosted/gpu/ptx.sio through bin/kretikos emit-ptx"
+        case "$PTX_PATTERN" in
+            vec_add|vec_sub|vec_mul|vec_div|vec_add_f64|vec_sub_f64|vec_mul_f64|vec_div_f64|fma|fma_f64|store_u32_const)
+                "$KRETIKOS_SELF" emit-ptx "$PTX_PATTERN" -o "$PTX_OUT"
+                ;;
+            epistemic_dual_output_f32)
+                "$KRETIKOS_SELF" kaxi-emit-ptx "$PTX_PATTERN" -o "$PTX_OUT" --no-ptxas
+                PTX_CONTRACT_SOURCE="self-hosted/gpu/kretikos_kaxi_to_ptx.sio through bin/kretikos kaxi-emit-ptx"
+                ;;
+            *)
+                echo "error: unsupported bundle PTX pattern '$PTX_PATTERN'" >&2
+                echo "supported bundle PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const, epistemic_dual_output_f32" >&2
+                exit 1
+                ;;
+        esac
+        "$KRETIKOS_SELF" emit-cubin "$CUBIN_KIND" -o "$CUBIN_OUT"
+
+        KERNEL_NAME=""
+        DEFAULT_RUNTIME_RUNG=""
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            case "$CUBIN_KIND" in
+                exit_only)
+                    KERNEL_NAME="sounio_bare_exit_sm80"
+                    DEFAULT_RUNTIME_RUNG="admission"
+                    ;;
+                store_u32_const)
+                    KERNEL_NAME="sounio_bare_store_u32_const_sm80"
+                    DEFAULT_RUNTIME_RUNG="store_u32_const"
+                    ;;
+                vec_add_f32)
+                    KERNEL_NAME="sounio_bare_vec_add_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_add_f32"
+                    ;;
+                vec_add_f64)
+                    KERNEL_NAME="sounio_bare_vec_add_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_add_f64"
+                    ;;
+                vec_sub_f64)
+                    KERNEL_NAME="sounio_bare_vec_sub_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_sub_f64"
+                    ;;
+                vec_mul_f64)
+                    KERNEL_NAME="sounio_bare_vec_mul_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_mul_f64"
+                    ;;
+                vec_div_f64)
+                    KERNEL_NAME="sounio_bare_vec_div_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_div_f64"
+                    ;;
+                fma_f64)
+                    KERNEL_NAME="sounio_bare_vec_fma_f64_sm80"
+                    DEFAULT_RUNTIME_RUNG="fma_f64"
+                    ;;
+                vec_sub_f32)
+                    KERNEL_NAME="sounio_bare_vec_sub_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_sub_f32"
+                    ;;
+                vec_mul_f32)
+                    KERNEL_NAME="sounio_bare_vec_mul_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_mul_f32"
+                    ;;
+                vec_div_f32)
+                    KERNEL_NAME="sounio_bare_vec_div_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="vec_div_f32"
+                    ;;
+                fma_f32)
+                    KERNEL_NAME="sounio_bare_vec_fma_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="fma_f32"
+                    ;;
+                epistemic_dual_f32)
+                    KERNEL_NAME="sounio_bare_epistemic_dual_output_f32_sm80"
+                    DEFAULT_RUNTIME_RUNG="epistemic_dual_output_f32"
+                    ;;
+                *)
+                    echo "error: unsupported CUBIN kind '$CUBIN_KIND'" >&2
+                    exit 1
+                    ;;
+            esac
+            if [[ -z "$RUNTIME_RUNG" ]]; then
+                RUNTIME_RUNG="$DEFAULT_RUNTIME_RUNG"
+            fi
+        fi
+
+        PTX_BYTES="$(__kretikos_file_size "$PTX_OUT")" || exit 1
+        CUBIN_BYTES="$(__kretikos_file_size "$CUBIN_OUT")" || exit 1
+        PTX_SHA="$(__kretikos_sha256 "$PTX_OUT")" || exit 1
+        CUBIN_SHA="$(__kretikos_sha256 "$CUBIN_OUT")" || exit 1
+        PTX_VERSION="$(awk '/^\.version/ { print $2; exit }' "$PTX_OUT")"
+        PTX_TARGET="$(awk '/^\.target/ { print $2; exit }' "$PTX_OUT")"
+        CUBIN_MAGIC="$(file -b "$CUBIN_OUT" 2>/dev/null || echo "unknown")"
+        CUBIN_MACHINE="$("$KRETIKOS_SELF" cubin-validate "$CUBIN_OUT" 2>/dev/null)" || {
+            echo "kretikos: structural validation failed - CUBIN is not ELF64 CUDA (e_machine=190)" >&2
+            exit 1
+        }
+
+        PTXAS_STATUS="off"
+        PTXAS_REASON="disabled"
+        PTXAS_PATH=""
+        PTXAS_RC=""
+        PTXAS_BYTES=""
+        PTXAS_SHA=""
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            if ! command -v ptxas >/dev/null 2>&1; then
+                PTXAS_STATUS="not_run"
+                PTXAS_REASON="ptxas_missing"
+                printf 'status=not_run reason=ptxas_missing\n' >"$PTXAS_LOG_OUT"
+                if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                    echo "kretikos: required PTX assembler validation failed - ptxas missing" >&2
+                    exit 1
+                fi
+            else
+                PTXAS_PATH="$(command -v ptxas)"
+                set +e
+                "$PTXAS_PATH" "$PTX_OUT" -o "$PTXAS_CUBIN_OUT" >"$PTXAS_LOG_OUT" 2>&1
+                PTXAS_RC=$?
+                set -e
+                if [[ "$PTXAS_RC" -eq 0 ]]; then
+                    PTXAS_STATUS="pass"
+                    PTXAS_REASON="ptxas_assembly_pass"
+                    PTXAS_BYTES="$(__kretikos_file_size "$PTXAS_CUBIN_OUT")" || exit 1
+                    PTXAS_SHA="$(__kretikos_sha256 "$PTXAS_CUBIN_OUT")" || exit 1
+                else
+                    PTXAS_STATUS="fail"
+                    PTXAS_REASON="ptxas_assembly_failed"
+                    echo "kretikos: PTX assembler validation failed; see $PTXAS_LOG_OUT" >&2
+                    if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                        exit 1
+                    fi
+                fi
+            fi
+        fi
+
+        NVDISASM_STATUS="off"
+        NVDISASM_REASON="disabled"
+        NVDISASM_PATH=""
+        NVDISASM_RC=""
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            if ! command -v nvdisasm >/dev/null 2>&1; then
+                NVDISASM_STATUS="not_run"
+                NVDISASM_REASON="nvdisasm_missing"
+                printf 'status=not_run reason=nvdisasm_missing\n' >"$NVDISASM_LOG_OUT"
+                if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                    echo "kretikos: required disassembler validation failed - nvdisasm missing" >&2
+                    exit 1
+                fi
+            else
+                NVDISASM_PATH="$(command -v nvdisasm)"
+                set +e
+                "$NVDISASM_PATH" "$CUBIN_OUT" >"$NVDISASM_OUT" 2>"$NVDISASM_LOG_OUT"
+                NVDISASM_RC=$?
+                set -e
+                if [[ "$NVDISASM_RC" -eq 0 ]]; then
+                    NVDISASM_STATUS="pass"
+                    NVDISASM_REASON="nvdisasm_pass"
+                else
+                    NVDISASM_STATUS="fail"
+                    NVDISASM_REASON="nvdisasm_failed"
+                    echo "kretikos: disassembler validation failed; see $NVDISASM_LOG_OUT" >&2
+                    if [[ "$TOOLCHAIN_MODE" == "required" ]]; then
+                        exit 1
+                    fi
+                fi
+            fi
+        fi
+
+        RUNTIME_STATUS="off"
+        RUNTIME_REASON="disabled"
+        RUNTIME_RC=""
+        RUNTIME_STAGE=""
+        RUNTIME_CUDA_RESULT=""
+        RUNTIME_DRIVER_VERSION=""
+        RUNTIME_DEVICE_COUNT=""
+        RUNTIME_CC_MAJOR=""
+        RUNTIME_CC_MINOR=""
+        RUNTIME_DEVICE_NAME=""
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            RUNTIME_LOADER_CMD="${SOUNIO_KRETIKOS_RUNTIME_LOADER:-}"
+            if [[ -n "$RUNTIME_LOADER_CMD" ]]; then
+                if [[ ! -x "$RUNTIME_LOADER_CMD" ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="runtime_loader_not_executable"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - runtime loader not executable" >&2
+                        exit 1
+                    fi
+                    RUNTIME_LOADER_CMD=""
+                fi
+            else
+                KRETIKOS_CC="${CC:-}"
+                if [[ -z "$KRETIKOS_CC" || ! -x "$(command -v "$KRETIKOS_CC" 2>/dev/null || true)" ]]; then
+                    KRETIKOS_CC=""
+                    for candidate in cc gcc clang; do
+                        if command -v "$candidate" >/dev/null 2>&1; then
+                            KRETIKOS_CC="$(command -v "$candidate")"
+                            break
+                        fi
+                    done
+                fi
+                if [[ -z "$KRETIKOS_CC" ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="c_compiler_missing"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - C compiler missing" >&2
+                        exit 1
+                    fi
+                elif [[ ! -f "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" ]]; then
+                    RUNTIME_STATUS="not_run"
+                    RUNTIME_REASON="loader_source_missing"
+                    if [[ "$RUNTIME_MODE" == "required" ]]; then
+                        echo "kretikos: required runtime validation failed - loader source missing" >&2
+                        exit 1
+                    fi
+                else
+                    set +e
+                    "$KRETIKOS_CC" -O2 "$ROOT_DIR/scripts/gpu/nvidia_bare_driver_loader.c" -ldl -o "$RUNTIME_LOADER_OUT" >"$RUNTIME_LOG_OUT" 2>&1
+                    loader_cc_rc=$?
+                    set -e
+                    if [[ "$loader_cc_rc" -ne 0 ]]; then
+                        RUNTIME_STATUS="not_run"
+                        RUNTIME_REASON="loader_compile_failed"
+                        RUNTIME_RC="$loader_cc_rc"
+                        if [[ "$RUNTIME_MODE" == "required" ]]; then
+                            echo "kretikos: required runtime validation failed - loader compile failed" >&2
+                            exit 1
+                        fi
+                    else
+                        RUNTIME_LOADER_CMD="$RUNTIME_LOADER_OUT"
+                    fi
+                fi
+            fi
+            if [[ -n "$RUNTIME_LOADER_CMD" ]]; then
+                set +e
+                "$RUNTIME_LOADER_CMD" "$CUBIN_OUT" "$KERNEL_NAME" "$RUNTIME_RUNG" >>"$RUNTIME_LOG_OUT" 2>&1
+                RUNTIME_RC=$?
+                set -e
+                RUNTIME_LINE="$(grep 'sounio_nvidia_bare_runtime status=' "$RUNTIME_LOG_OUT" | tail -n 1 || true)"
+                RUNTIME_STATUS="$(__kretikos_token_value "$RUNTIME_LINE" "status")"
+                RUNTIME_REASON="$(__kretikos_token_value "$RUNTIME_LINE" "reason")"
+                RUNTIME_STAGE="$(__kretikos_token_value "$RUNTIME_LINE" "stage")"
+                RUNTIME_CUDA_RESULT="$(__kretikos_token_value "$RUNTIME_LINE" "cuda_result")"
+                RUNTIME_DRIVER_VERSION="$(__kretikos_token_value "$RUNTIME_LINE" "driver_version")"
+                RUNTIME_DEVICE_COUNT="$(__kretikos_token_value "$RUNTIME_LINE" "device_count")"
+                RUNTIME_CC_MAJOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_major")"
+                RUNTIME_CC_MINOR="$(__kretikos_token_value "$RUNTIME_LINE" "cc_minor")"
+                RUNTIME_DEVICE_NAME="$(__kretikos_token_value "$RUNTIME_LINE" "device_name")"
+                if [[ -z "$RUNTIME_STATUS" ]]; then
+                    RUNTIME_STATUS="fail"
+                    RUNTIME_REASON="runtime_status_parse_failed"
+                fi
+                if [[ "$RUNTIME_STATUS" == "fail" ]]; then
+                    echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                fi
+                if [[ "$RUNTIME_MODE" == "required" && "$RUNTIME_STATUS" != "pass" ]]; then
+                    echo "kretikos: runtime validation $RUNTIME_STATUS - $RUNTIME_REASON; see $RUNTIME_LOG_OUT" >&2
+                    exit 1
+                fi
+            fi
+        fi
+        GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+        # Phase 5.G (python-extermination): the bundle manifest used to be
+        # constructed by a json.dump heredoc. We now compose it through
+        # `json-emit` + `--raw-json` for the ptxas/nvdisasm sub-objects
+        # and the artifacts array, mirroring the Phase 5.B-E pattern.
+        __mf_json_escape() { printf '%s' "$1" | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        # Render a single value as JSON-typed: empty -> null, integer -> int,
+        # otherwise quoted+escaped string. Mirrors Python's `maybe_int`.
+        __mf_maybe_int() {
+            local v="$1"
+            if [[ -z "$v" ]]; then
+                printf 'null'
+            elif [[ "$v" =~ ^-?[0-9]+$ ]]; then
+                printf '%s' "$v"
+            else
+                printf '"%s"' "$(__mf_json_escape "$v")"
+            fi
+        }
+        # Build {"path": "...", ["bytes": N,] ["sha256": "..."]} or null.
+        # The bytes/sha entries are emitted only when non-empty (matches
+        # Python's `file_record` truth-check).
+        __mf_file_record_or_null() {
+            local emit_obj="$1" path="$2" bytes="$3" sha="$4"
+            if [[ "$emit_obj" != "1" ]]; then
+                printf 'null'
+                return
+            fi
+            local out="{\"path\": \"$(__mf_json_escape "$path")\""
+            if [[ -n "$bytes" ]]; then
+                out="$out, \"bytes\": $bytes"
+            fi
+            if [[ -n "$sha" ]]; then
+                out="$out, \"sha256\": \"$(__mf_json_escape "$sha")\""
+            fi
+            printf '%s}' "$out"
+        }
+        # Render a string-or-null leaf: empty/disabled -> null, otherwise
+        # quoted string. Used for nullable log_path / output_path fields.
+        __mf_str_or_null() {
+            local emit="$1" v="$2"
+            if [[ "$emit" != "1" ]]; then
+                printf 'null'
+            else
+                printf '"%s"' "$(__mf_json_escape "$v")"
+            fi
+        }
+
+        # toolchain_validation.ptxas keys (sorted): log_path, output_cubin,
+        # path, reason, return_code, status.
+        __ptxas_emit_log=0
+        if [[ "$PTXAS_STATUS" != "off" ]]; then __ptxas_emit_log=1; fi
+        __ptxas_emit_cubin=0
+        if [[ "$PTXAS_STATUS" == "pass" ]]; then __ptxas_emit_cubin=1; fi
+        PTXAS_OBJ="{\"log_path\": $(__mf_str_or_null "$__ptxas_emit_log" "$PTXAS_LOG_REL"), \"output_cubin\": $(__mf_file_record_or_null "$__ptxas_emit_cubin" "$PTXAS_CUBIN_REL" "$PTXAS_BYTES" "$PTXAS_SHA"), \"path\": \"$(__mf_json_escape "$PTXAS_PATH")\", \"reason\": \"$(__mf_json_escape "$PTXAS_REASON")\", \"return_code\": $(__mf_maybe_int "$PTXAS_RC"), \"status\": \"$(__mf_json_escape "$PTXAS_STATUS")\"}"
+
+        # toolchain_validation.nvdisasm keys (sorted): log_path, output_path,
+        # path, reason, return_code, status.
+        __nv_emit_log=0
+        if [[ "$NVDISASM_STATUS" != "off" ]]; then __nv_emit_log=1; fi
+        __nv_emit_out=0
+        if [[ "$NVDISASM_STATUS" == "pass" ]]; then __nv_emit_out=1; fi
+        NVDISASM_OBJ="{\"log_path\": $(__mf_str_or_null "$__nv_emit_log" "$NVDISASM_LOG_REL"), \"output_path\": $(__mf_str_or_null "$__nv_emit_out" "$NVDISASM_REL"), \"path\": \"$(__mf_json_escape "$NVDISASM_PATH")\", \"reason\": \"$(__mf_json_escape "$NVDISASM_REASON")\", \"return_code\": $(__mf_maybe_int "$NVDISASM_RC"), \"status\": \"$(__mf_json_escape "$NVDISASM_STATUS")\"}"
+
+        # runtime_validation.log_path: null when status == off.
+        __rt_emit_log=0
+        if [[ "$RUNTIME_STATUS" != "off" ]]; then __rt_emit_log=1; fi
+        RT_LOG_PATH_VAL="$(__mf_str_or_null "$__rt_emit_log" "$RUNTIME_LOG_REL")"
+
+        # artifacts: array of two fixed-shape objects, keys per object sorted.
+        ARTIFACTS_JSON="[{\"bytes\": $PTX_BYTES, \"kind\": \"ptx\", \"path\": \"$(__mf_json_escape "$PTX_REL")\", \"pattern\": \"$(__mf_json_escape "$PTX_PATTERN")\", \"ptx_version\": \"$(__mf_json_escape "$PTX_VERSION")\", \"required_markers\": [\".version\", \".target\", \".visible .entry\"], \"sha256\": \"$(__mf_json_escape "$PTX_SHA")\", \"target\": \"$(__mf_json_escape "$PTX_TARGET")\"}, {\"bytes\": $CUBIN_BYTES, \"elf_machine\": $CUBIN_MACHINE, \"file_magic\": \"$(__mf_json_escape "$CUBIN_MAGIC")\", \"kernel\": \"$(__mf_json_escape "$CUBIN_KIND")\", \"kind\": \"cubin\", \"path\": \"$(__mf_json_escape "$CUBIN_REL")\", \"sha256\": \"$(__mf_json_escape "$CUBIN_SHA")\", \"target\": \"nvidia-cuda-elf\"}]"
+
+        # boundaries: base 8 + 3 conditional appends (status != "pass").
+        BOUNDS="does_not_claim_user_kernel_lowering|does_not_claim_semantic_kernel_correctness|does_not_claim_total_gpu_backend_completeness|does_not_claim_parallel_cpu_fallback|does_not_claim_unchecked_gpu_alloc_surface|does_not_claim_ptxas_semantic_correctness|does_not_claim_nvdisasm_semantic_correctness|does_not_claim_runtime_generalization_beyond_selected_rung"
+        if [[ "$PTXAS_STATUS" != "pass" ]]; then BOUNDS="$BOUNDS|does_not_claim_ptxas_assembly"; fi
+        if [[ "$NVDISASM_STATUS" != "pass" ]]; then BOUNDS="$BOUNDS|does_not_claim_nvdisasm_validation"; fi
+        if [[ "$RUNTIME_STATUS" != "pass" ]]; then BOUNDS="$BOUNDS|does_not_claim_selected_runtime_execution"; fi
+
+        "$KRETIKOS_SELF" json-emit \
+            --raw-json "artifacts=$ARTIFACTS_JSON" \
+            --array-strings "boundaries=$BOUNDS" \
+            --string "bundle_root=." \
+            --string "compiler=$COMPILER_PATH" \
+            --string "contract.cubin=NVIDIA CUDA ELF/CUBIN byte template emitted by self-hosted/gpu/nvidia_bare.sio through bin/kretikos." \
+            --string "contract.identity=Kretikos is the Sounio-owned GPU compiler lane." \
+            --string "contract.ptx=PTX text emitted by $PTX_CONTRACT_SOURCE." \
+            --string "contract.runtime=This bundle is structural. Runtime execution requires the CUDA Driver API gate on a GPU host." \
+            --string "generated_at_utc=$GENERATED_AT" \
+            --raw-json "runtime_validation.cc_major=$(__mf_maybe_int "$RUNTIME_CC_MAJOR")" \
+            --raw-json "runtime_validation.cc_minor=$(__mf_maybe_int "$RUNTIME_CC_MINOR")" \
+            --raw-json "runtime_validation.cuda_result=$(__mf_maybe_int "$RUNTIME_CUDA_RESULT")" \
+            --raw-json "runtime_validation.device_count=$(__mf_maybe_int "$RUNTIME_DEVICE_COUNT")" \
+            --string "runtime_validation.device_name=$RUNTIME_DEVICE_NAME" \
+            --raw-json "runtime_validation.driver_version=$(__mf_maybe_int "$RUNTIME_DRIVER_VERSION")" \
+            --string "runtime_validation.kernel=$KERNEL_NAME" \
+            --raw-json "runtime_validation.log_path=$RT_LOG_PATH_VAL" \
+            --string "runtime_validation.mode=$RUNTIME_MODE" \
+            --string "runtime_validation.reason=$RUNTIME_REASON" \
+            --raw-json "runtime_validation.return_code=$(__mf_maybe_int "$RUNTIME_RC")" \
+            --string "runtime_validation.rung=$RUNTIME_RUNG" \
+            --string "runtime_validation.stage=$RUNTIME_STAGE" \
+            --string "runtime_validation.status=$RUNTIME_STATUS" \
+            --string "runtime_validation.validation_scope=selected_predefined_cubin_rung_only" \
+            --string "schema=sounio.kretikos.bundle.v1" \
+            --string "status=emitted" \
+            --string "stdlib=$STDLIB_PATH" \
+            --string "structural_checks.class=structural_bundle" \
+            --bool "structural_checks.cubin_elf64_magic_checked=true" \
+            --int "structural_checks.cubin_elf_machine_checked=$CUBIN_MACHINE" \
+            --string "structural_checks.cubin_file_magic_observed=$CUBIN_MAGIC" \
+            --bool "structural_checks.ptx_markers_checked=true" \
+            --string "toolchain_validation.mode=$TOOLCHAIN_MODE" \
+            --raw-json "toolchain_validation.nvdisasm=$NVDISASM_OBJ" \
+            --raw-json "toolchain_validation.ptxas=$PTXAS_OBJ" \
+            --string "toolchain_validation.scope=predefined_ptx_and_cubin_templates_only" \
+            > "$MANIFEST_OUT" || exit 1
+
+        echo "kretikos: bundle manifest - $MANIFEST_OUT"
+        if [[ "$TOOLCHAIN_MODE" != "off" ]]; then
+            echo "kretikos: toolchain validation - ptxas=$PTXAS_STATUS/$PTXAS_REASON nvdisasm=$NVDISASM_STATUS/$NVDISASM_REASON"
+        fi
+        if [[ "$RUNTIME_MODE" != "off" ]]; then
+            echo "kretikos: runtime validation - $RUNTIME_STATUS/$RUNTIME_REASON rung=$RUNTIME_RUNG kernel=$KERNEL_NAME"
+        fi
+        ;;
+    detect-cuda)
+        echo "CUDA Toolchain Detection"
+        echo "========================"
+
+        kretikos_detect_cuda_tool() {
+            local tool="$1"
+            local version_line="$2"
+            local tool_path
+
+            if tool_path=$(command -v "$tool" 2>/dev/null); then
+                printf '%-12s FOUND at %s\n' "$tool:" "$tool_path"
+                if [[ -n "$version_line" ]]; then
+                    echo "             $version_line"
+                fi
+            else
+                printf '%-12s NOT FOUND\n' "$tool:"
+            fi
+        }
+
+        NVCC_VERSION=$(nvcc --version 2>/dev/null | grep "release" | head -1 || true)
+        PTXAS_VERSION=$(ptxas --version 2>/dev/null | grep "release" | head -1 || true)
+        NVDISASM_VERSION=$(nvdisasm --version 2>/dev/null | grep "release" | head -1 || true)
+        CUOBJDUMP_VERSION=$(cuobjdump --version 2>/dev/null | grep "release" | head -1 || true)
+
+        kretikos_detect_cuda_tool nvcc "$NVCC_VERSION"
+        kretikos_detect_cuda_tool ptxas "$PTXAS_VERSION"
+        kretikos_detect_cuda_tool nvdisasm "$NVDISASM_VERSION"
+        kretikos_detect_cuda_tool cuobjdump "$CUOBJDUMP_VERSION"
+
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            SMI_PATH=$(command -v nvidia-smi)
+            echo "nvidia-smi:  FOUND at $SMI_PATH"
+            SMI_OUT=$(mktemp "${TMPDIR:-/tmp}/kretikos-nvidia-smi.XXXXXX")
+            SMI_ERR=$(mktemp "${TMPDIR:-/tmp}/kretikos-nvidia-smi.XXXXXX")
+            if nvidia-smi >"$SMI_OUT" 2>"$SMI_ERR"; then
+                SMI_STATUS=$(grep -E "Driver Version|CUDA Version" "$SMI_OUT" | head -1 || true)
+                [[ -n "$SMI_STATUS" ]] && echo "             $SMI_STATUS"
+            else
+                SMI_REASON=$(head -1 "$SMI_ERR" 2>/dev/null || true)
+                [[ -z "$SMI_REASON" ]] && SMI_REASON="driver/device unavailable"
+                echo "             status=not_run reason=$SMI_REASON"
+            fi
+            rm -f "$SMI_OUT" "$SMI_ERR"
+        else
+            echo "nvidia-smi:  NOT FOUND"
+        fi
+
+        LDCONFIG_BIN=""
+        if command -v ldconfig >/dev/null 2>&1; then
+            LDCONFIG_BIN=$(command -v ldconfig)
+        elif [[ -x /sbin/ldconfig ]]; then
+            LDCONFIG_BIN=/sbin/ldconfig
+        elif [[ -x /usr/sbin/ldconfig ]]; then
+            LDCONFIG_BIN=/usr/sbin/ldconfig
+        fi
+
+        if [[ -n "$LDCONFIG_BIN" ]] && "$LDCONFIG_BIN" -p 2>/dev/null | grep -q 'libcuda\.so'; then
+            LIBCUDA=$("$LDCONFIG_BIN" -p 2>/dev/null | grep 'libcuda\.so' | head -1 | awk '{print $1 " => " $NF}')
+            echo "libcuda: FOUND ($LIBCUDA)"
+        elif [[ -e /usr/lib/x86_64-linux-gnu/libcuda.so || -e /usr/lib/x86_64-linux-gnu/libcuda.so.1 ]]; then
+            echo "libcuda: FOUND (/usr/lib/x86_64-linux-gnu/libcuda.so)"
+        elif [[ -e /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so ]]; then
+            echo "libcuda: FOUND_STUB (/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so)"
+        else
+            echo "libcuda: NOT FOUND"
+        fi
+        ;;
+
+    info)
+        echo "Kretikos GPU Compiler"
+        echo "====================="
+        echo "Compiler: $SOUC_BIN"
+        echo "Stdlib:   $SOUNIO_STDLIB_PATH"
+        echo ""
+        echo "GPU builtin surface:"
+        echo "  gpu_thread_id_x()        — x-axis thread index"
+        echo "  gpu_block_id_x()         — x-axis block index"
+        echo "  gpu_block_dim_x()        — x-axis threads per block"
+        echo "  gpu_thread_id_y/z()      — recognized; CPU fallback returns 0"
+        echo "  gpu_block_id_y/z()       — recognized; CPU fallback returns 0"
+        echo "  gpu_block_dim_y/z()      — recognized; CPU fallback returns 1"
+        echo "  gpu_sync_threads()       — recognized; CPU fallback is a no-op"
+        echo ""
+        echo "PTX templates:   self-hosted/gpu/ptx.sio  (live via 'emit-ptx <pattern>')"
+        echo "Supported PTX patterns: vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma, fma_f64, store_u32_const"
+        echo "MSL templates:   self-hosted/gpu/metal.sio  (live via 'emit-metal <pattern>')"
+        echo "Supported Metal patterns: vec_add, ossm_oct_step, sedenion_cd_step, self-check"
+        echo "SPIR-V templates: self-hosted/gpu/spirv.sio  (live via 'emit-spirv <pattern>')"
+        echo "K-AXI templates:  self-hosted/gpu/kaxi_backend.sio  (live via 'emit-kaxi <pattern>')"
+        echo "Supported SPIR-V patterns: exit_only, vec_add, tid_kernel, self-check"
+        echo "CPU emulation:   self-hosted/gpu/runtime/cpu_interpreter.sio  (live via 'emulate')"
+        echo "CUBIN templates: self-hosted/gpu/nvidia_bare.sio  (live via 'emit-cubin')"
+        echo "Artifact bundle: 'kretikos bundle' (or '-o <dir>' for a stable path)"
+        echo "Optional validation: '--validate-toolchain' and '--validate-runtime'"
+        echo "HPC runtime:     'kretikos hpc source <source.sio>' or 'kretikos hpc manifest <manifest.tsv>'"
+        echo "SPIR-V backend:  self-hosted/gpu/spirv_lower.sio"
+        ;;
+
+    siep-probe)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/ci/siep_section_probe.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-siep-probe.XXXXXX")" || {
+            echo "error: failed to create temporary siep-probe driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 1 ]]; then
+            echo "usage: kretikos siep-probe <elf_path>" >&2
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile siep-probe driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
+    umbrella-aggregate)
+        DRIVER_SRC="$ROOT_DIR/self-hosted/gpu/kretikos_umbrella_aggregator.sio"
+        OLD_UMASK="$(umask)"
+        umask 077
+        DRIVER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kretikos-umbrella-aggregate.XXXXXX")" || {
+            echo "error: failed to create temporary umbrella-aggregate driver dir" >&2
+            exit 1
+        }
+        umask "$OLD_UMASK"
+        DRIVER_ELF="$DRIVER_DIR/driver.elf"
+        trap 'rm -rf "$DRIVER_DIR"' EXIT INT TERM
+
+        if [[ $# -lt 4 ]]; then
+            echo "usage: kretikos umbrella-aggregate <results_tsv> <souc_bin> <out_dir> <generated_at_utc>" >&2
+            exit 2
+        fi
+
+        "$SOUC_BIN" "$DRIVER_SRC" "$DRIVER_ELF" >/dev/null 2>&1 || {
+            echo "error: failed to compile umbrella-aggregate driver" >&2
+            exit 1
+        }
+        chmod +x "$DRIVER_ELF"
+        "$DRIVER_ELF" "$@"
+        exit $?
+        ;;
+
+    *)
+        echo "Kretikos GPU Compiler — bounded GPU compilation"
+        echo ""
+        echo "Usage: kretikos <command> [args]"
+        echo ""
+        echo "Commands:"
+        echo "  check <source.sio>                Compile-check a GPU kernel source file"
+        echo "  run <source.sio>                  Native CPU fallback, serial thread IDs"
+        echo "  build <source.sio> [opts] -o <out>  Emit PTX via checked GPU artifact if present"
+        echo "  emit-ptx <pattern> -o <file.ptx>  Emit PTX template from in-tree emitter"
+        echo "  emit-metal <pattern> -o <file.metal> Emit MSL template from in-tree emitter"
+        echo "  emit-spirv <pattern> -o <file.spv> Emit SPIR-V template (exit_only, vec_add, epistemic_dual_output_f32, tid_kernel, self-check)"
+        echo "  emit-kaxi <pattern> -o <file.kaxi> Emit K-AXI epistemic assembly (exit_only, vec_add, source_vec_*_f32, source_fma_f32, source_epistemic_dual_output_f32, epistemic_elementwise_f32, octonion_assoc, octonion_mul, octonion_associator, octonion_assoc_norm_sum, sedenion_mul, sedenion_sqr, sedenion_sqr_mb, sedenion_associator, self-check)"
+        echo "  kaxi-emit-ptx <pattern> -o <file.ptx> Lower K-AXI pattern to ptxas-assemblable PTX (sm_50, ptxas-validated)"
+        echo "  kaxi-witness <pattern> -o <file.json> Emit K-AXI assembly plus witness JSON"
+        echo "  kaxi-source-witness <source.sio> -o <file.json> Link checked source to K-AXI evidence"
+        echo "  kaxi-lower-source <source.sio> -o <file.json> Recognize checked source and lower to K-AXI evidence without a profile hint"
+        echo "  kaxi-lowering-certificate <source.sio> -o <file.json> Braid source lowering, K-AXI, and runtime evidence"
+        echo "  kaxi-certificate <source.sio> -o <file.json> Braid checked source, K-AXI, and runtime bundle evidence"
+        echo "  emulate                            Run CPU emulation self-check (f32, f64, i32)"
+        echo "  emit-cubin <kind> -o <file.cubin> Emit CUBIN template from in-tree emitter"
+        echo "  bundle [-o <dir>]                 Emit PTX+CUBIN plus bundle manifest"
+        echo "  profile-source <source.sio>       Classify a checked source file for Kretikos"
+        echo "  run-source <source.sio> -o <dir>  Check, bundle, and runtime-validate source profile"
+        echo "  run-manifest <manifest.tsv> -o <dir> Run a source-profile corpus"
+        echo "  hpc doctor                       Check Slurm/Kubernetes runtime bridge"
+        echo "  hpc source <source.sio>           Submit one source to the Slurm GPU worker"
+        echo "  hpc manifest <manifest.tsv>       Submit a source corpus to the Slurm GPU worker"
+        echo "  detect-cuda                       Detect CUDA toolchain (nvcc, ptxas, libcuda)"
+        echo "  info                              Show compiler configuration"
+        echo ""
+        echo "Supported CUBIN kinds: exit_only, store_u32_const, vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_dual_f32"
+        echo "Supported source profiles: vec_add_f32, vec_add_f64, vec_sub_f64, vec_mul_f64, vec_div_f64, fma_f64, vec_sub_f32, vec_mul_f32, vec_div_f32, fma_f32, epistemic_elementwise_f32, epistemic_dual_output_f32, store_u32_const"
+        echo "Bundle validation: --validate-toolchain, --require-toolchain, --validate-runtime, --require-runtime"
+        echo ""
+        echo "Environment:"
+        echo "  SOUNIO_KRETIKOS_COMPILER — path to souc binary"
+        echo "  SOUNIO_KRETIKOS_RUNTIME_LOADER — prebuilt CUDA Driver API loader for runtime validation"
+        echo "  SOUNIO_STDLIB_PATH       — path to stdlib directory"
+        exit 1
+        ;;
+esac

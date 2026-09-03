@@ -28,7 +28,8 @@ What this default artifact proves today:
 - version `1.0.0-beta.4`
 - Cranelift JIT enabled
 - LLVM and GPU codegen disabled in this artifact
-- SMT, LSP, ontology, distributed, and package-manager features disabled in this artifact
+- SMT, LSP, distributed, and package-manager features disabled in this artifact
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 Use this profile for the ordinary docs workflow, examples, and `check`-first
 validation.

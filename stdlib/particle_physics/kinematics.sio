@@ -1,0 +1,178 @@
+// stdlib/particle_physics/kinematics.sio — Phase space and kinematics
+//
+// Two-body and three-body phase-space factors, flux factor,
+// and CM-frame kinematics for scattering calculations.
+//
+// References:
+//   - PDG 2024, Kinematics
+//   - Peskin & Schroeder, Ch. 4
+
+module particle_physics::kinematics
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_dot, lorentz_norm_sq}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// FLUX FACTOR
+// ============================================================================
+
+/// Flux factor for 2→2 scattering in the CM frame:
+///   F = 4 E_1 E_2 |v_1 − v_2| = 4 √[(p_1·p_2)² − m_1² m_2²].
+/// For collinear beams this simplifies to 4 |p_1| √s.
+///
+/// # Parameters
+/// - `p1`, `p2`: Initial-state 4-momenta.
+///
+/// # Returns
+/// Flux factor F.
+pub fn flux_factor(p1: LorentzVector, p2: LorentzVector) -> f64 with Mut, Div, Panic {
+    let p1p2 = lorentz_dot(p1, p2)
+    let m1sq = lorentz_norm_sq(p1)
+    let m2sq = lorentz_norm_sq(p2)
+    let arg = p1p2 * p1p2 - m1sq * m2sq
+    if arg < 0.0 { return 0.0 }
+    4.0 * sqrt(arg)
+}
+
+/// Flux factor in the lab frame (target at rest):
+///   F_lab = 4 m_target |p_beam|.
+pub fn flux_factor_lab(p_beam: LorentzVector, m_target: f64) -> f64 with Mut, Div, Panic {
+    let e_beam = p_beam.t
+    let p_sq = p_beam.x * p_beam.x + p_beam.y * p_beam.y + p_beam.z * p_beam.z
+    let p_mag = sqrt(p_sq)
+    4.0 * m_target * p_mag
+}
+
+// ============================================================================
+// CM FRAME KINEMATICS (2 → 2)
+// ============================================================================
+
+/// Center-of-mass energy squared: s = (p1 + p2)².
+pub fn cm_energy_sq(p1: LorentzVector, p2: LorentzVector) -> f64 {
+    let p_sum = lorentz_new(p1.t + p2.t, p1.x + p2.x, p1.y + p2.y, p1.z + p2.z)
+    lorentz_norm_sq(p_sum)
+}
+
+/// CM energy: √s.
+pub fn cm_energy(p1: LorentzVector, p2: LorentzVector) -> f64 with Mut, Div, Panic {
+    let s = cm_energy_sq(p1, p2)
+    if s < 0.0 { return 0.0 }
+    sqrt(s)
+}
+
+/// Final-state 3-momentum magnitude in the CM frame for 2→2 scattering:
+///   |p_f| = λ^(1/2)(s, m3², m4²) / (2√s)
+/// where λ(x,y,z) = x² + y² + z² − 2xy − 2xz − 2yz is the Källén function.
+///
+/// # Parameters
+/// - `s`: CM energy squared.
+/// - `m3`, `m4`: Final-state particle masses.
+///
+/// # Returns
+/// |p_f| in GeV (natural units).
+pub fn cm_momentum_final(s: f64, m3: f64, m4: f64) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+    let lam = kallen_lambda(s, m3 * m3, m4 * m4)
+    if lam < 0.0 { return 0.0 }
+    sqrt(lam) / (2.0 * sqrt(s))
+}
+
+/// Initial-state 3-momentum magnitude in the CM frame:
+///   |p_i| = λ^(1/2)(s, m1², m2²) / (2√s).
+pub fn cm_momentum_initial(s: f64, m1: f64, m2: f64) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+    let lam = kallen_lambda(s, m1 * m1, m2 * m2)
+    if lam < 0.0 { return 0.0 }
+    sqrt(lam) / (2.0 * sqrt(s))
+}
+
+// ============================================================================
+// KÄLLÉN FUNCTION
+// ============================================================================
+
+/// Källén (triangle) function: λ(x, y, z) = x² + y² + z² − 2xy − 2xz − 2yz.
+/// Used in phase-space boundaries and two-body kinematics.
+pub fn kallen_lambda(x: f64, y: f64, z: f64) -> f64 {
+    x * x + y * y + z * z - 2.0 * x * y - 2.0 * x * z - 2.0 * y * z
+}
+
+// ============================================================================
+// DIFFERENTIAL CROSS-SECTION (2 → 2)
+// ============================================================================
+
+/// Differential cross-section dσ/dΩ in the CM frame for 2→2 scattering:
+///   dσ/dΩ = |p_f| / (64 π² s |p_i|) · |M|².
+///
+/// # Parameters
+/// - `s`: CM energy squared.
+/// - `m1`, `m2`: Initial-state masses.
+/// - `m3`, `m4`: Final-state masses.
+/// - `amplitude_sq`: Spin-averaged |M|².
+///
+/// # Returns
+/// dσ/dΩ in GeV⁻².
+pub fn diff_cross_section(s: f64, m1: f64, m2: f64, m3: f64, m4: f64, amplitude_sq: f64) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+    let p_i = cm_momentum_initial(s, m1, m2)
+    let p_f = cm_momentum_final(s, m3, m4)
+    if p_i <= 0.0 { return 0.0 }
+    let denom = 64.0 * PI * PI * s * p_i
+    p_f * amplitude_sq / denom
+}
+
+/// Total cross-section for 2→2 scattering (isotropic |M|²):
+///   σ = ∫ dΩ dσ/dΩ = 4π · dσ/dΩ.
+/// For energy-dependent amplitudes, numerical integration is required.
+pub fn total_cross_section_isotropic(s: f64, m1: f64, m2: f64, m3: f64, m4: f64, amplitude_sq: f64) -> f64 with Mut, Div, Panic {
+    let dsdw = diff_cross_section(s, m1, m2, m3, m4, amplitude_sq)
+    4.0 * PI * dsdw
+}
+
+// ============================================================================
+// CONVERSION: GeV⁻² → picobarn
+// ============================================================================
+
+/// Conversion factor: 1 GeV⁻² = 3.89379 × 10⁸ pb.
+/// Derived from ℏc = 0.1973269804 GeV·fm, giving 1 GeV⁻² = 0.389379 mb.
+pub fn gev2_to_picobarn() -> f64 {
+    389379000.0
+}
+
+/// Convert cross-section from GeV⁻² to picobarn (pb).
+pub fn cross_section_pb(sigma_gev2: f64) -> f64 {
+    sigma_gev2 * gev2_to_picobarn()
+}
+
+// ============================================================================
+// DECAY WIDTH (2-body)
+// ============================================================================
+
+/// Two-body decay width:
+///   Γ = |p_f| / (8π M²) · |M|²
+/// where M is the parent mass and |p_f| is the final-state CM momentum.
+///
+/// # Parameters
+/// - `m_parent`: Decaying particle mass.
+/// - `m3`, `m4`: Final-state masses.
+/// - `amplitude_sq`: Spin-summed |M|².
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn decay_width_2_body(m_parent: f64, m3: f64, m4: f64, amplitude_sq: f64) -> f64 with Mut, Div, Panic {
+    if m_parent <= 0.0 { return 0.0 }
+    let m2 = m_parent * m_parent
+    let lam = kallen_lambda(m2, m3 * m3, m4 * m4)
+    if lam < 0.0 { return 0.0 }
+    let p_f = sqrt(lam) / (2.0 * m_parent)
+    p_f * amplitude_sq / (8.0 * PI * m2)
+}
+
+// ============================================================================
+// LOCAL CONSTANTS
+// ============================================================================
+
+let PI: f64 = 3.14159265358979323846

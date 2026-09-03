@@ -1,0 +1,307 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/correlation.sio — Pearson & Spearman correlation with inference
+//
+// A public correlation module with the confidence interval and significance test
+// that the existing pieces (descriptive::correlation, inferential::spearman_rho)
+// lack. Pearson r comes with a Fisher-z confidence interval and a t-test; Spearman
+// rho is the Pearson correlation of the ranks (average ranks for ties):
+//
+//   pearson(x, y, n, conf)  -> CorrResult
+//   spearman(x, y, n)       -> SpearmanCorr
+//
+// The Fisher variance-stabilising transform z = atanh(r) has SE 1/sqrt(n-3), so
+//   CI on z:  atanh(r) ± z_(1+conf)/2 / sqrt(n-3),  back-transformed by tanh.
+// Significance: t = r·sqrt((n-2)/(1-r²)) on n-2 df.
+//
+// Pure Sounio; dependencies: the t two-tailed tail (stats::student_t) and the
+// normal quantile (special::erf).
+//
+// References:
+//   Fisher (1915) "Frequency distribution of the values of the correlation
+//     coefficient in samples from an indefinitely large population", Biometrika
+//   Spearman (1904) "The proof and measurement of association between two things"
+//   Hollander & Wolfe (1999) "Nonparametric Statistical Methods" §8
+
+module stats::correlation
+
+use stats::student_t::{t_two_tail}
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS (robust: reflect negatives first — no Taylor cancellation)
+// ============================================================================
+
+fn co_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+fn co_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn co_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / co_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return co_exp(x / 2.0) * co_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    return sum
+}
+
+// Fisher z = atanh(r) = 0.5 ln((1+r)/(1-r))
+fn co_atanh(r: f64) -> f64 with Mut, Div, Panic {
+    return 0.5 * co_ln((1.0 + r) / (1.0 - r))
+}
+
+// tanh(z) = (e^{2z} - 1)/(e^{2z} + 1)
+fn co_tanh(z: f64) -> f64 with Mut, Div, Panic {
+    let e2 = co_exp(2.0 * z)
+    return (e2 - 1.0) / (e2 + 1.0)
+}
+
+// ============================================================================
+// RESULT TYPES
+// ============================================================================
+
+pub struct CorrResult {
+    pub n: i64,
+    pub r: f64,          // Pearson correlation
+    pub t_stat: f64,     // t = r·sqrt((n-2)/(1-r²))
+    pub df: f64,         // n - 2
+    pub p_value: f64,    // two-tailed
+    pub ci_lo: f64,      // Fisher-z confidence bound (lower)
+    pub ci_hi: f64,      // Fisher-z confidence bound (upper)
+}
+
+pub struct SpearmanCorr {
+    pub n: i64,
+    pub rho: f64,        // Spearman rank correlation
+    pub t_stat: f64,     // t approximation on n-2 df
+    pub df: f64,
+    pub p_value: f64,
+}
+
+// ============================================================================
+// PEARSON
+// ============================================================================
+
+/// Pearson correlation with a Fisher-z confidence interval and a t-test.
+///
+/// Parâmetros: x, y — paired data; n — count (>= 4 for the CI); conf — level.
+/// Retorno: CorrResult (r, t, df, two-tailed p, Fisher-z CI).
+/// Referências: Fisher (1915).
+pub fn pearson(x: &[f64; 256], y: &[f64; 256], n: i32, conf: f64) -> CorrResult with Mut, Div, Panic {
+    if n < 3 {
+        return CorrResult { n: n as i64, r: 0.0, t_stat: 0.0, df: 0.0, p_value: 1.0, ci_lo: 0.0, ci_hi: 0.0 }
+    }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        sxy = sxy + dx * dy
+        j = j + 1
+    }
+    var r = 0.0
+    let denom = co_sqrt(sxx * syy)
+    if denom > 1.0e-300 { r = sxy / denom }
+    if r > 1.0 { r = 1.0 }
+    if r < 0.0 - 1.0 { r = 0.0 - 1.0 }
+
+    let df = nf - 2.0
+    var t_stat = 0.0
+    var p_value = 0.0
+    let one_minus = 1.0 - r * r
+    if one_minus > 1.0e-15 {
+        t_stat = r * co_sqrt(df / one_minus)
+        p_value = t_two_tail(t_stat, df)
+    } else {
+        // |r| ~ 1: essentially deterministic
+        t_stat = if r >= 0.0 { 1.0e300 } else { 0.0 - 1.0e300 }
+        p_value = 0.0
+    }
+
+    // Fisher-z confidence interval (only for |r| strictly < 1 — atanh(±1) is ±inf)
+    var ci_lo = r
+    var ci_hi = r
+    if n > 3 && one_minus > 1.0e-12 {
+        let z = co_atanh(r)
+        let se = 1.0 / co_sqrt(nf - 3.0)
+        let zc = normal_quantile(0.5 + conf / 2.0)
+        ci_lo = co_tanh(z - zc * se)
+        ci_hi = co_tanh(z + zc * se)
+    }
+
+    return CorrResult { n: n as i64, r: r, t_stat: t_stat, df: df, p_value: p_value, ci_lo: ci_lo, ci_hi: ci_hi }
+}
+
+// ============================================================================
+// SPEARMAN
+// ============================================================================
+
+// Average ranks of the values in `src` (length n) into `dst`.
+fn co_rank(src: &[f64; 256], n: i32, dst: &![f64; 256]) with Mut, Div, Panic {
+    // idx sorted by value (selection sort on a copy of values, carrying original index)
+    var val: [f64; 256] = [0.0; 256]
+    var idx: [i64; 256] = [0; 256]
+    var i = 0
+    while i < n { val[i as usize] = src[i as usize]; idx[i as usize] = i as i64; i = i + 1 }
+    var a = 0
+    while a < n - 1 {
+        var mn = a
+        var b = a + 1
+        while b < n {
+            if val[b as usize] < val[mn as usize] { mn = b }
+            b = b + 1
+        }
+        if mn != a {
+            let tv = val[a as usize]; val[a as usize] = val[mn as usize]; val[mn as usize] = tv
+            let ti = idx[a as usize]; idx[a as usize] = idx[mn as usize]; idx[mn as usize] = ti
+        }
+        a = a + 1
+    }
+    // assign average ranks over tie groups
+    var g = 0
+    while g < n {
+        var h = g
+        while h < n && val[h as usize] == val[g as usize] { h = h + 1 }
+        let avg = (((g + 1) + h) as f64) / 2.0
+        var p = g
+        while p < h { dst[idx[p as usize] as usize] = avg; p = p + 1 }
+        g = h
+    }
+}
+
+/// Spearman rank correlation: the Pearson correlation of the ranks.
+///
+/// Parâmetros: x, y — paired data; n — count (>= 3).
+/// Retorno: SpearmanCorr (rho, t approximation on n-2 df, two-tailed p).
+/// Referências: Spearman (1904); Hollander & Wolfe (1999) §8.
+pub fn spearman(x: &[f64; 256], y: &[f64; 256], n: i32) -> SpearmanCorr with Mut, Div, Panic {
+    if n < 3 {
+        return SpearmanCorr { n: n as i64, rho: 0.0, t_stat: 0.0, df: 0.0, p_value: 1.0 }
+    }
+    var rx: [f64; 256] = [0.0; 256]
+    var ry: [f64; 256] = [0.0; 256]
+    co_rank(x, n, &!rx)
+    co_rank(y, n, &!ry)
+    let c = pearson(&rx, &ry, n, 0.95)
+    return SpearmanCorr { n: n as i64, rho: c.r, t_stat: c.t_stat, df: c.df, p_value: c.p_value }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x=1..5, y=2,4,5,4,5. Sxx=10,Syy=6,Sxy=6 -> r=6/sqrt(60)=0.7745967.
+// t = r·sqrt(3/(1-0.6)) = 0.7745967·sqrt(7.5) = 2.121320.
+// Fisher: z=atanh(0.7745967)=1.033196, se=1/sqrt(2)=0.707107, zc95=1.959964
+//   ci = tanh(1.033196 ∓ 1.386289) -> [tanh(-0.353093), tanh(2.419485)]
+//      = [-0.338977, 0.984383]
+fn test_pearson() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=2.0; y[1]=4.0; y[2]=5.0; y[3]=4.0; y[4]=5.0
+    let c = pearson(&x, &y, 5, 0.95)
+    var ok = true
+    ok = check(1, approx(c.r, 0.7745967, 1.0e-6)) && ok
+    ok = check(2, approx(c.t_stat, 2.121320, 1.0e-4)) && ok
+    ok = check(3, approx(c.df, 3.0, 1.0e-9)) && ok
+    ok = check(4, approx(c.ci_lo, 0.0 - 0.340081, 1.0e-4)) && ok
+    ok = check(5, approx(c.ci_hi, 0.984236, 1.0e-4)) && ok
+    return ok
+}
+
+// Perfect positive correlation -> r = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 6 { x[i as usize] = i as f64; y[i as usize] = 2.0 * (i as f64) + 1.0; i = i + 1 }
+    let c = pearson(&x, &y, 6, 0.95)
+    return check(10, approx(c.r, 1.0, 1.0e-9))
+}
+
+// Spearman on x=1..5, y=2,4,5,4,5 -> ranks give rho = 7/sqrt(90) = 0.737865.
+fn test_spearman() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=2.0; y[1]=4.0; y[2]=5.0; y[3]=4.0; y[4]=5.0
+    let s = spearman(&x, &y, 5)
+    return check(20, approx(s.rho, 0.737865, 1.0e-5))
+}
+
+// Negative correlation sign check.
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 5 { x[i as usize] = i as f64; y[i as usize] = 4.0 - (i as f64); i = i + 1 }
+    let c = pearson(&x, &y, 5, 0.95)
+    return check(30, approx(c.r, 0.0 - 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_pearson() && ok
+    ok = test_perfect() && ok
+    ok = test_spearman() && ok
+    ok = test_negative() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

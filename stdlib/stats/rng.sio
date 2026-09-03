@@ -1,0 +1,206 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/rng.sio — Park-Miller MINSTD pseudo-random generator
+//
+// A deterministic, fully reproducible uniform generator implemented entirely in
+// exact f64 arithmetic (no bit operations) — the seed of any resampling routine:
+//
+//   rng_seed(s)             -> Rng
+//   rng_uniform(&!r)        -> f64 in [0,1)
+//   rng_range(&!r, lo, hi)  -> f64 in [lo,hi)
+//   rng_int(&!r, n)         -> i64 in {0,…,n−1}
+//   rng_normal(&!r)         -> f64 standard normal (Box-Muller)
+//
+// The recurrence is the minimal-standard MCG  xₙ₊₁ = (16807·xₙ) mod 2147483647,
+// uₙ = xₙ/m.  Since 16807·(m−1) ≈ 3.6·10¹³ < 2⁵³ the product is exact in f64, so
+// the whole stream is bit-reproducible from the seed.
+//
+// Pure Sounio: exact modular arithmetic via floor (i64 cast); inline
+// ln/sqrt/cos for the normal. No external dependency, no nested data-array calls.
+//
+// References:
+//   Park & Miller (1988) CACM 31:1192.
+
+module stats::rng
+
+let MINSTD_A: f64 = 16807.0
+let MINSTD_M: f64 = 2147483647.0
+
+fn rg_floor(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+fn rg_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn rg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+// cos via range reduction to [-π,π] then Taylor (12 terms).
+fn rg_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let TWO_PI = 6.283185307179586
+    let PI = 3.141592653589793
+    var a = x
+    // reduce modulo 2π into [0,2π)
+    let k = rg_floor(a / TWO_PI)
+    a = a - k * TWO_PI
+    if a > PI { a = a - TWO_PI }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 12 {
+        term = term * (0.0 - a * a) / (((2 * n - 1) * (2 * n)) as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+pub struct Rng {
+    pub state: f64,
+}
+
+/// Seed a MINSTD generator (state clamped to 1..m−1).
+pub fn rng_seed(s: i64) -> Rng with Mut, Div, Panic {
+    var v = (s as f64)
+    if v < 1.0 { v = 1.0 }
+    // fold into [1, m-1]
+    let m1 = MINSTD_M - 1.0
+    if v > m1 { v = v - rg_floor((v - 1.0) / m1) * m1 }
+    return Rng { state: v }
+}
+
+/// Next uniform in [0,1).
+pub fn rng_uniform(r: &!Rng) -> f64 with Mut, Div, Panic {
+    let prod = MINSTD_A * r.state
+    let next = prod - rg_floor(prod / MINSTD_M) * MINSTD_M
+    r.state = next
+    return next / MINSTD_M
+}
+
+/// Next uniform in [lo, hi).
+pub fn rng_range(r: &!Rng, lo: f64, hi: f64) -> f64 with Mut, Div, Panic {
+    return lo + rng_uniform(r) * (hi - lo)
+}
+
+/// Next integer in {0, …, n−1}.
+pub fn rng_int(r: &!Rng, n: i32) -> i64 with Mut, Div, Panic {
+    if n < 1 { return 0 }
+    let u = rng_uniform(r)
+    var k = rg_floor(u * (n as f64)) as i64
+    if k >= (n as i64) { k = (n as i64) - 1 }
+    return k
+}
+
+/// Next standard-normal deviate (Box-Muller).
+pub fn rng_normal(r: &!Rng) -> f64 with Mut, Div, Panic {
+    var u1 = rng_uniform(r)
+    let u2 = rng_uniform(r)
+    if u1 < 1.0e-300 { u1 = 1.0e-300 }
+    let TWO_PI = 6.283185307179586
+    return rg_sqrt(0.0 - 2.0 * rg_ln(u1)) * rg_cos(TWO_PI * u2)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// seed 1: u1 = 16807/2147483647 = 7.8263693e-6; u2 = 282475249/2147483647 = 0.131538.
+fn test_stream() -> bool with IO, Mut, Div, Panic {
+    var r = rng_seed(1)
+    let a = rng_uniform(&!r)
+    let b = rng_uniform(&!r)
+    var ok = true
+    ok = check(1, approx(a, 0.0000078263693, 1.0e-10)) && ok
+    ok = check(2, approx(b, 0.13153778, 1.0e-6)) && ok
+    return ok
+}
+
+// uniforms stay in [0,1); ints stay in {0..n-1}.
+fn test_bounds() -> bool with IO, Mut, Div, Panic {
+    var r = rng_seed(42)
+    var ok = true
+    var i = 0
+    while i < 200 {
+        let u = rng_uniform(&!r)
+        if u < 0.0 || u >= 1.0 { ok = false }
+        let k = rng_int(&!r, 6)
+        if k < 0 || k > 5 { ok = false }
+        i = i + 1
+    }
+    return check(10, ok)
+}
+
+// reproducibility: two generators with the same seed produce the same value.
+fn test_reproducible() -> bool with IO, Mut, Div, Panic {
+    var r1 = rng_seed(12345)
+    var r2 = rng_seed(12345)
+    var i = 0
+    while i < 50 { let a = rng_uniform(&!r1); i = i + 1 }
+    var j = 0
+    while j < 50 { let b = rng_uniform(&!r2); j = j + 1 }
+    let x = rng_uniform(&!r1)
+    let y = rng_uniform(&!r2)
+    return check(20, approx(x, y, 1.0e-15))
+}
+
+// normal deviates have roughly zero mean over many draws.
+fn test_normal_mean() -> bool with IO, Mut, Div, Panic {
+    var r = rng_seed(7)
+    var s = 0.0
+    var i = 0
+    while i < 1000 { s = s + rng_normal(&!r); i = i + 1 }
+    let mean = s / 1000.0
+    return check(30, approx(mean, 0.0, 0.15))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_stream() && ok
+    ok = test_bounds() && ok
+    ok = test_reproducible() && ok
+    ok = test_normal_mean() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,138 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/huber_location.sio — Huber M-estimator of location
+//
+// A robust estimator of centre that behaves like the mean near the bulk of the
+// data but downweights outliers like the median — the standard M-estimator:
+//
+//   huber_location(x, n, c) -> HuberResult
+//
+// With MAD scale s and tuning constant c (usually 1.345, ~95% efficiency under
+// normality), iterate mₜ₊₁ = Σwᵢxᵢ/Σwᵢ where wᵢ = 1 if |uᵢ|≤c else c/|uᵢ| and
+// uᵢ = (xᵢ − mₜ)/s. The result lies between the mean and the median.
+//
+// Pure Sounio: an inline sort for the median and MAD; a fixed-iteration
+// reweighting loop. No external dependency, no nested data-array calls.
+//
+// References:
+//   Huber (1964) Ann. Math. Stat. 35:73.
+
+module stats::huber_location
+
+fn hl_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// median of the first m entries of a [256] buffer (inline insertion sort).
+fn hl_median(buf: &![f64; 256], m: i32) -> f64 with Mut, Div, Panic {
+    if m < 1 { return 0.0 }
+    var i = 1
+    while i < m {
+        let key = buf[i as usize]
+        var j = i - 1
+        while j >= 0 && buf[j as usize] > key { buf[(j + 1) as usize] = buf[j as usize]; j = j - 1 }
+        buf[(j + 1) as usize] = key
+        i = i + 1
+    }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    return 0.5 * (buf[(m / 2 - 1) as usize] + buf[(m / 2) as usize])
+}
+
+pub struct HuberResult {
+    pub location: f64,   // Huber M-estimate of centre
+    pub scale: f64,      // MAD scale used
+    pub iters: i64,      // iterations to converge
+}
+
+/// Huber M-estimator of location.
+///
+/// Parâmetros: x — data; n — size (>=2, <=256); c — tuning constant (e.g. 1.345).
+/// Retorno: HuberResult (location, scale, iters).
+/// Referências: Huber (1964).
+pub fn huber_location(x: &[f64; 256], n: i32, c: f64) -> HuberResult with Mut, Div, Panic {
+    if n < 2 { return HuberResult { location: 0.0, scale: 0.0, iters: 0 } }
+    var buf: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { buf[i as usize] = x[i as usize]; i = i + 1 }
+    var m = hl_median(&!buf, n)
+    // MAD: median of |x - m|, scaled
+    var dev: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j < n { dev[j as usize] = hl_abs(x[j as usize] - m); j = j + 1 }
+    let mad = 1.482602218505602 * hl_median(&!dev, n)
+    if mad <= 1.0e-300 { return HuberResult { location: m, scale: 0.0, iters: 0 } }
+    var used = 0
+    var it = 0
+    while it < 50 {
+        var num = 0.0
+        var den = 0.0
+        var k = 0
+        while k < n {
+            let u = (x[k as usize] - m) / mad
+            let au = hl_abs(u)
+            var w = 1.0
+            if au > c { w = c / au }
+            num = num + w * x[k as usize]
+            den = den + w
+            k = k + 1
+        }
+        if den <= 0.0 { it = 50 }
+        else {
+            let mnew = num / den
+            used = it + 1
+            if hl_abs(mnew - m) < 1.0e-10 { m = mnew; it = 50 } else { m = mnew; it = it + 1 }
+        }
+    }
+    return HuberResult { location: m, scale: mad, iters: used as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// symmetric {1,2,3,4,5} -> Huber location = 3 (= mean = median).
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = huber_location(&x, 5, 1.345)
+    return check(1, approx(r.location, 3.0, 1.0e-6))
+}
+
+// outlier {1,2,3,4,100}: Huber ≈ 3.0 (fully robust), vs the mean 22 (Python-verified).
+fn test_outlier() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=100.0
+    let r = huber_location(&x, 5, 1.345)
+    var ok = true
+    ok = check(10, approx(r.location, 3.0, 1.0e-2)) && ok
+    ok = check(11, r.location < 5.0) && ok            // far below the mean 22
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_symmetric() && ok
+    ok = test_outlier() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

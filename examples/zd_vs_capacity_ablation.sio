@@ -1,0 +1,466 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZD vs Capacity: The Killer Experiment
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Question: in the S-SSM advantage, is it zero-divisors or just 16D capacity?
+//
+// Models (all 16 A-params, 16D state):
+//   H-SSM-8D  : 2×quat,  8D,  8A — baseline (no ZD, half capacity)
+//   H-SSM-16D : 4×quat, 16D, 16A — capacity control (assoc, NO zero-divisors)
+//   S-nogate  : sedenion,16D, 16A — ZD+capacity, no gate (prev: +11.8pp over H-8D)
+//
+// Interpretation key:
+//   if H-16D ≈ H-8D  AND  S-nogate >> H-16D  →  ZD is the factor, not capacity
+//   if H-16D ≈ S-nogate                       →  capacity is the factor, ZD irrelevant
+//   if H-16D between H-8D and S-nogate        →  both contribute, ZD adds on top
+//
+// Tasks: ListOps L=15 (10-class), Bracket L=12 (binary)
+// Training: 500/epoch × 80 epochs; Eval: 1000 samples (SE ≈ ±1.6%)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── Tasks ───
+var SEQ: [i64; 32] = [0; 32]; var SEQ_POS: i64 = 0
+fn min_v(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_v(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+fn apply_op(op: i64, nv: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 { var r=v0; if nv>=2{r=min_v(r,v1)}; if nv>=3{r=min_v(r,v2)}; r }
+    else { if op==11 { var r=v0; if nv>=2{r=max_v(r,v1)}; if nv>=3{r=max_v(r,v2)}; r }
+           else { if nv>=3{med3(v0,v1,v2)} else { if nv>=2{min_v(v0,v1)} else {v0} } } }
+}
+fn gen_flat() -> i64 with Mut, Div {
+    let op=(rng_next()/100)%3+10; let na=(rng_next()/100)%2+2
+    SEQ[SEQ_POS]=op; SEQ_POS=SEQ_POS+1
+    var v0=(rng_next()/100)%10; var v1=(rng_next()/100)%10; var v2=0
+    SEQ[SEQ_POS]=v0; SEQ_POS=SEQ_POS+1; SEQ[SEQ_POS]=v1; SEQ_POS=SEQ_POS+1
+    if na==3{v2=(rng_next()/100)%10;SEQ[SEQ_POS]=v2;SEQ_POS=SEQ_POS+1}
+    apply_op(op,na,v0,v1,v2)
+}
+fn gen_nested() -> i64 with Mut, Div {
+    let oop=(rng_next()/100)%3+10; let ona=(rng_next()/100)%2+2
+    SEQ[SEQ_POS]=oop; SEQ_POS=SEQ_POS+1
+    var vals: [i64; 3]=[0;3]; var ai=0
+    while ai<ona {
+        let nest=(rng_next()/100)%3
+        if nest==0{vals[ai]=gen_flat()}
+        else{let d=(rng_next()/100)%10;SEQ[SEQ_POS]=d;SEQ_POS=SEQ_POS+1;vals[ai]=d}
+        ai=ai+1
+    }
+    apply_op(oop,ona,vals[0],vals[1],vals[2])
+}
+fn gen_lo(tlen: i64) -> i64 with Mut, Div {
+    SEQ_POS=0; let res=gen_nested()
+    var al=SEQ_POS; while al<tlen{SEQ[al]=0;al=al+1}; SEQ_POS=tlen; res
+}
+
+var BR: [i64; 20]=[0;20]; var BR_LEN: i64=0
+var STK: [i64; 10]=[0;10]; var STK_TOP: i64=0
+fn check_bal(sl: i64) -> i64 with Mut {
+    STK_TOP=0; var i=0
+    while i<sl {
+        let t=BR[i]
+        if t==1{STK[STK_TOP]=1;STK_TOP=STK_TOP+1} if t==3{STK[STK_TOP]=3;STK_TOP=STK_TOP+1}
+        if t==2{if STK_TOP==0{return 0};STK_TOP=STK_TOP-1;if STK[STK_TOP]!=1{return 0}}
+        if t==4{if STK_TOP==0{return 0};STK_TOP=STK_TOP-1;if STK[STK_TOP]!=3{return 0}}
+        if STK_TOP>9{return 0}; i=i+1
+    }
+    if STK_TOP==0{1}else{0}
+}
+fn gen_bal(sl: i64) with Mut, Div {
+    STK_TOP=0; var pos=0
+    while pos<sl {
+        let rem=sl-pos; let can_o=STK_TOP<rem/2; let can_c=STK_TOP>0; var ch=0
+        if can_o{if can_c{ch=(rng_next()/100)%2}} if can_o{if can_c==false{ch=0}}
+        if can_o==false{if can_c{ch=1}}
+        if ch==0{let bt=(rng_next()/100)%2;if bt==0{BR[pos]=1;STK[STK_TOP]=1}if bt==1{BR[pos]=3;STK[STK_TOP]=3};STK_TOP=STK_TOP+1}
+        if ch==1{STK_TOP=STK_TOP-1;let top=STK[STK_TOP];if top==1{BR[pos]=2};if top==3{BR[pos]=4}}
+        pos=pos+1
+    }
+}
+fn gen_unbal(sl: i64) with Mut, Div {
+    var att=0; var done=0
+    while done==0{var i=0;while i<sl{BR[i]=(rng_next()/100)%4+1;i=i+1}
+        if check_bal(sl)==0{done=1};att=att+1;if att>30{BR[0]=2;BR[1]=4;done=1}}
+}
+fn gen_br(sl: i64) -> i64 with Mut, Div {
+    let cls=(rng_next()/100)%2
+    if cls==1{gen_bal(sl)} if cls==0{gen_unbal(sl)}
+    BR_LEN=sl; cls
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H-SSM-8D: 2 quaternion blocks, 8D state, 8 A-params
+// W_H8: embed[0..103], A[104..111], B[112..119], out[120..199]
+// ═══════════════════════════════════════════════════════════════════════════
+var W_H8: [i64; 200]=[0;200]; var H_H8: [i64; 8]=[0;8]
+var L_H8: [i64; 10]=[0;10]; var MOM_H8: [i64; 200]=[0;200]
+fn wh8s(i:i64,v:f64) with Mut { W_H8[i]=(v*100000000.0) as i64 }
+fn wh8g(i:i64)->f64 with Div { (W_H8[i] as f64)/100000000.0 }
+fn hh8s(i:i64,v:f64) with Mut { H_H8[i]=(v*100000000.0) as i64 }
+fn hh8g(i:i64)->f64 with Div { (H_H8[i] as f64)/100000000.0 }
+
+fn init_h8() with Mut, Div {
+    var i=0; while i<104{wh8s(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<8{wh8s(112+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<80{wh8s(120+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<200{MOM_H8[i]=0;i=i+1}
+    wh8s(104,0.95);wh8s(105,((rng_next()%100) as f64-50.0)/500.0)
+    wh8s(106,((rng_next()%100) as f64-50.0)/500.0);wh8s(107,((rng_next()%100) as f64-50.0)/500.0)
+    wh8s(108,0.95);wh8s(109,((rng_next()%100) as f64-50.0)/500.0)
+    wh8s(110,((rng_next()%100) as f64-50.0)/500.0);wh8s(111,((rng_next()%100) as f64-50.0)/500.0)
+}
+fn step_h8(tok: i64) with Mut, Div {
+    let qw=wh8g(104);let qx=wh8g(105);let qy=wh8g(106);let qz=wh8g(107)
+    let hw=hh8g(0);let hx=hh8g(1);let hy=hh8g(2);let hz=hh8g(3)
+    var n0=qw*hw-qx*hx-qy*hy-qz*hz; var n1=qw*hx+qx*hw+qy*hz-qz*hy
+    var n2=qw*hy-qx*hz+qy*hw+qz*hx; var n3=qw*hz+qx*hy-qy*hx+qz*hw
+    n0=n0+wh8g(112)*wh8g(tok*8);n1=n1+wh8g(113)*wh8g(tok*8+1)
+    n2=n2+wh8g(114)*wh8g(tok*8+2);n3=n3+wh8g(115)*wh8g(tok*8+3)
+    if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}
+    if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+    if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}
+    if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+    let qw2=wh8g(108);let qx2=wh8g(109);let qy2=wh8g(110);let qz2=wh8g(111)
+    let hw2=hh8g(4);let hx2=hh8g(5);let hy2=hh8g(6);let hz2=hh8g(7)
+    var n4=qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2; var n5=qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2
+    var n6=qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2; var n7=qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2
+    n4=n4+wh8g(116)*wh8g(tok*8+4);n5=n5+wh8g(117)*wh8g(tok*8+5)
+    n6=n6+wh8g(118)*wh8g(tok*8+6);n7=n7+wh8g(119)*wh8g(tok*8+7)
+    if n4>5.0{n4=5.0}if n4<0.0-5.0{n4=0.0-5.0}
+    if n5>5.0{n5=5.0}if n5<0.0-5.0{n5=0.0-5.0}
+    if n6>5.0{n6=5.0}if n6<0.0-5.0{n6=0.0-5.0}
+    if n7>5.0{n7=5.0}if n7<0.0-5.0{n7=0.0-5.0}
+    hh8s(0,n0);hh8s(1,n1);hh8s(2,n2);hh8s(3,n3);hh8s(4,n4);hh8s(5,n5);hh8s(6,n6);hh8s(7,n7)
+}
+fn logits_h8(nc:i64) with Mut, Div {
+    var c=0; while c<nc{var s=0.0;var d=0;while d<8{s=s+hh8g(d)*wh8g(120+d*nc+c);d=d+1};L_H8[c]=(s*100000000.0) as i64;c=c+1}
+}
+fn pred_h8(nc:i64)->i64 with Mut, Div {
+    var best=0;var bv=(L_H8[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_H8[i] as f64)/100000000.0;if v>bv{bv=v;best=i};i=i+1};best
+}
+fn update_h8(tgt:i64,lr:f64,nc:i64) with Mut, Div, Panic {
+    var mx=(L_H8[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_H8[i] as f64)/100000000.0;if v>mx{mx=v};i=i+1}
+    var probs: [f64;10]=[0.0;10];var se=0.0;i=0
+    while i<nc{probs[i]=exp_q((L_H8[i] as f64)/100000000.0-mx);se=se+probs[i];i=i+1}
+    i=0;while i<nc{probs[i]=probs[i]/se;i=i+1};probs[tgt]=probs[tgt]-1.0
+    var d=0; while d<8{let hd=hh8g(d);var c=0;while c<nc{let idx=120+d*nc+c;var g=hd*probs[c];if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM_H8[idx] as f64)/100000000.0*0.9+g;MOM_H8[idx]=(m*100000000.0) as i64;wh8s(idx,wh8g(idx)-lr*m);c=c+1};d=d+1}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H-SSM-16D: 4 quaternion blocks, 16D state, 16 A-params — NO zero-divisors
+// W_H16: embed[0..207] (13tok×16), A[208..223], B[224..239], out[240..399]
+// ═══════════════════════════════════════════════════════════════════════════
+var W_H16: [i64; 400]=[0;400]; var H_H16: [i64; 16]=[0;16]
+var L_H16: [i64; 10]=[0;10]; var MOM_H16: [i64; 400]=[0;400]
+fn wh16s(i:i64,v:f64) with Mut { W_H16[i]=(v*100000000.0) as i64 }
+fn wh16g(i:i64)->f64 with Div { (W_H16[i] as f64)/100000000.0 }
+fn hh16s(i:i64,v:f64) with Mut { H_H16[i]=(v*100000000.0) as i64 }
+fn hh16g(i:i64)->f64 with Div { (H_H16[i] as f64)/100000000.0 }
+
+fn init_h16() with Mut, Div {
+    var i=0; while i<208{wh16s(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<16{wh16s(224+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<160{wh16s(240+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<400{MOM_H16[i]=0;i=i+1}
+    // 4 quaternions: q1[0..3], q2[4..7], q3[8..11], q4[12..15]
+    var b=0; while b<4{
+        wh16s(208+b*4,0.95)
+        wh16s(208+b*4+1,((rng_next()%100) as f64-50.0)/500.0)
+        wh16s(208+b*4+2,((rng_next()%100) as f64-50.0)/500.0)
+        wh16s(208+b*4+3,((rng_next()%100) as f64-50.0)/500.0)
+        b=b+1
+    }
+}
+
+// 4 independent quaternion products — ZERO cross-block coupling → no ZD possible
+fn step_h16(tok: i64) with Mut, Div {
+    var b=0
+    while b<4 {
+        let base=b*4
+        let qw=wh16g(208+base);let qx=wh16g(209+base);let qy=wh16g(210+base);let qz=wh16g(211+base)
+        let hw=hh16g(base);let hx=hh16g(base+1);let hy=hh16g(base+2);let hz=hh16g(base+3)
+        var n0=qw*hw-qx*hx-qy*hy-qz*hz; var n1=qw*hx+qx*hw+qy*hz-qz*hy
+        var n2=qw*hy-qx*hz+qy*hw+qz*hx; var n3=qw*hz+qx*hy-qy*hx+qz*hw
+        n0=n0+wh16g(224+base)*wh16g(tok*16+base)
+        n1=n1+wh16g(225+base)*wh16g(tok*16+base+1)
+        n2=n2+wh16g(226+base)*wh16g(tok*16+base+2)
+        n3=n3+wh16g(227+base)*wh16g(tok*16+base+3)
+        if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}
+        if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+        if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}
+        if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+        hh16s(base,n0);hh16s(base+1,n1);hh16s(base+2,n2);hh16s(base+3,n3)
+        b=b+1
+    }
+}
+fn logits_h16(nc:i64) with Mut, Div {
+    var c=0; while c<nc{var s=0.0;var d=0;while d<16{s=s+hh16g(d)*wh16g(240+d*nc+c);d=d+1};L_H16[c]=(s*100000000.0) as i64;c=c+1}
+}
+fn pred_h16(nc:i64)->i64 with Mut, Div {
+    var best=0;var bv=(L_H16[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_H16[i] as f64)/100000000.0;if v>bv{bv=v;best=i};i=i+1};best
+}
+fn update_h16(tgt:i64,lr:f64,nc:i64) with Mut, Div, Panic {
+    var mx=(L_H16[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_H16[i] as f64)/100000000.0;if v>mx{mx=v};i=i+1}
+    var probs: [f64;10]=[0.0;10];var se=0.0;i=0
+    while i<nc{probs[i]=exp_q((L_H16[i] as f64)/100000000.0-mx);se=se+probs[i];i=i+1}
+    i=0;while i<nc{probs[i]=probs[i]/se;i=i+1};probs[tgt]=probs[tgt]-1.0
+    var d=0; while d<16{let hd=hh16g(d);var c=0;while c<nc{let idx=240+d*nc+c;var g=hd*probs[c];if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM_H16[idx] as f64)/100000000.0*0.9+g;MOM_H16[idx]=(m*100000000.0) as i64;wh16s(idx,wh16g(idx)-lr*m);c=c+1};d=d+1}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S-nogate: sedenion 16D, 16A, no gate — reusing same layout as H16
+// W_SNG: embed[0..207], A[208..223], B[224..239], out[240..399]
+// ═══════════════════════════════════════════════════════════════════════════
+var W_SNG: [i64; 400]=[0;400]; var H_SNG: [i64; 16]=[0;16]
+var L_SNG: [i64; 10]=[0;10]; var MOM_SNG: [i64; 400]=[0;400]
+var OCT_P: [f64; 8]=[0.0;8]; var OCT_Q: [f64; 8]=[0.0;8]
+fn wsng_s(i:i64,v:f64) with Mut { W_SNG[i]=(v*100000000.0) as i64 }
+fn wsng_g(i:i64)->f64 with Div { (W_SNG[i] as f64)/100000000.0 }
+fn hsng_s(i:i64,v:f64) with Mut { H_SNG[i]=(v*100000000.0) as i64 }
+fn hsng_g(i:i64)->f64 with Div { (H_SNG[i] as f64)/100000000.0 }
+
+fn init_sng() with Mut, Div {
+    var i=0; while i<208{wsng_s(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    wsng_s(208,0.95);i=1;while i<8{wsng_s(208+i,((rng_next()%200) as f64-100.0)/1000.0);i=i+1}
+    i=8;while i<16{wsng_s(208+i,((rng_next()%100) as f64-50.0)/2000.0);i=i+1}
+    i=0;while i<16{wsng_s(224+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<160{wsng_s(240+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<400{MOM_SNG[i]=0;i=i+1}
+}
+
+fn oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+fn oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+
+fn step_sng(tok: i64) with Mut, Div {
+    let a0=wsng_g(208);let a1=wsng_g(209);let a2=wsng_g(210);let a3=wsng_g(211)
+    let a4=wsng_g(212);let a5=wsng_g(213);let a6=wsng_g(214);let a7=wsng_g(215)
+    let a8=wsng_g(216);let a9=wsng_g(217);let a10=wsng_g(218);let a11=wsng_g(219)
+    let a12=wsng_g(220);let a13=wsng_g(221);let a14=wsng_g(222);let a15=wsng_g(223)
+    let h0=hsng_g(0);let h1=hsng_g(1);let h2=hsng_g(2);let h3=hsng_g(3)
+    let h4=hsng_g(4);let h5=hsng_g(5);let h6=hsng_g(6);let h7=hsng_g(7)
+    let h8=hsng_g(8);let h9=hsng_g(9);let h10=hsng_g(10);let h11=hsng_g(11)
+    let h12=hsng_g(12);let h13=hsng_g(13);let h14=hsng_g(14);let h15=hsng_g(15)
+    // result_lo = oct_mul(Alo,hlo) - oct_mul(conj(Ahi),hhi)
+    oct_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_q(a8,0.0-a9,0.0-a10,0.0-a11,0.0-a12,0.0-a13,0.0-a14,0.0-a15, h8,h9,h10,h11,h12,h13,h14,h15)
+    var r0=OCT_P[0]-OCT_Q[0];var r1=OCT_P[1]-OCT_Q[1];var r2=OCT_P[2]-OCT_Q[2];var r3=OCT_P[3]-OCT_Q[3]
+    var r4=OCT_P[4]-OCT_Q[4];var r5=OCT_P[5]-OCT_Q[5];var r6=OCT_P[6]-OCT_Q[6];var r7=OCT_P[7]-OCT_Q[7]
+    // result_hi = oct_mul(Ahi,hlo) + oct_mul(hhi,conj(Alo))
+    oct_p(a8,a9,a10,a11,a12,a13,a14,a15, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_q(h8,h9,h10,h11,h12,h13,h14,h15, a0,0.0-a1,0.0-a2,0.0-a3,0.0-a4,0.0-a5,0.0-a6,0.0-a7)
+    var r8=OCT_P[0]+OCT_Q[0];var r9=OCT_P[1]+OCT_Q[1];var r10=OCT_P[2]+OCT_Q[2];var r11=OCT_P[3]+OCT_Q[3]
+    var r12=OCT_P[4]+OCT_Q[4];var r13=OCT_P[5]+OCT_Q[5];var r14=OCT_P[6]+OCT_Q[6];var r15=OCT_P[7]+OCT_Q[7]
+    // Add B*embed, clamp, store
+    r0=r0+wsng_g(224)*wsng_g(tok*16);r1=r1+wsng_g(225)*wsng_g(tok*16+1)
+    r2=r2+wsng_g(226)*wsng_g(tok*16+2);r3=r3+wsng_g(227)*wsng_g(tok*16+3)
+    r4=r4+wsng_g(228)*wsng_g(tok*16+4);r5=r5+wsng_g(229)*wsng_g(tok*16+5)
+    r6=r6+wsng_g(230)*wsng_g(tok*16+6);r7=r7+wsng_g(231)*wsng_g(tok*16+7)
+    r8=r8+wsng_g(232)*wsng_g(tok*16+8);r9=r9+wsng_g(233)*wsng_g(tok*16+9)
+    r10=r10+wsng_g(234)*wsng_g(tok*16+10);r11=r11+wsng_g(235)*wsng_g(tok*16+11)
+    r12=r12+wsng_g(236)*wsng_g(tok*16+12);r13=r13+wsng_g(237)*wsng_g(tok*16+13)
+    r14=r14+wsng_g(238)*wsng_g(tok*16+14);r15=r15+wsng_g(239)*wsng_g(tok*16+15)
+    if r0>5.0{r0=5.0}if r0<0.0-5.0{r0=0.0-5.0}
+    if r1>5.0{r1=5.0}if r1<0.0-5.0{r1=0.0-5.0}
+    if r2>5.0{r2=5.0}if r2<0.0-5.0{r2=0.0-5.0}
+    if r3>5.0{r3=5.0}if r3<0.0-5.0{r3=0.0-5.0}
+    if r4>5.0{r4=5.0}if r4<0.0-5.0{r4=0.0-5.0}
+    if r5>5.0{r5=5.0}if r5<0.0-5.0{r5=0.0-5.0}
+    if r6>5.0{r6=5.0}if r6<0.0-5.0{r6=0.0-5.0}
+    if r7>5.0{r7=5.0}if r7<0.0-5.0{r7=0.0-5.0}
+    if r8>5.0{r8=5.0}if r8<0.0-5.0{r8=0.0-5.0}
+    if r9>5.0{r9=5.0}if r9<0.0-5.0{r9=0.0-5.0}
+    if r10>5.0{r10=5.0}if r10<0.0-5.0{r10=0.0-5.0}
+    if r11>5.0{r11=5.0}if r11<0.0-5.0{r11=0.0-5.0}
+    if r12>5.0{r12=5.0}if r12<0.0-5.0{r12=0.0-5.0}
+    if r13>5.0{r13=5.0}if r13<0.0-5.0{r13=0.0-5.0}
+    if r14>5.0{r14=5.0}if r14<0.0-5.0{r14=0.0-5.0}
+    if r15>5.0{r15=5.0}if r15<0.0-5.0{r15=0.0-5.0}
+    hsng_s(0,r0);hsng_s(1,r1);hsng_s(2,r2);hsng_s(3,r3)
+    hsng_s(4,r4);hsng_s(5,r5);hsng_s(6,r6);hsng_s(7,r7)
+    hsng_s(8,r8);hsng_s(9,r9);hsng_s(10,r10);hsng_s(11,r11)
+    hsng_s(12,r12);hsng_s(13,r13);hsng_s(14,r14);hsng_s(15,r15)
+}
+fn logits_sng(nc:i64) with Mut, Div {
+    var c=0;while c<nc{var s=0.0;var d=0;while d<16{s=s+hsng_g(d)*wsng_g(240+d*nc+c);d=d+1};L_SNG[c]=(s*100000000.0) as i64;c=c+1}
+}
+fn pred_sng(nc:i64)->i64 with Mut, Div {
+    var best=0;var bv=(L_SNG[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_SNG[i] as f64)/100000000.0;if v>bv{bv=v;best=i};i=i+1};best
+}
+fn update_sng(tgt:i64,lr:f64,nc:i64) with Mut, Div, Panic {
+    var mx=(L_SNG[0] as f64)/100000000.0;var i=1
+    while i<nc{let v=(L_SNG[i] as f64)/100000000.0;if v>mx{mx=v};i=i+1}
+    var probs: [f64;10]=[0.0;10];var se=0.0;i=0
+    while i<nc{probs[i]=exp_q((L_SNG[i] as f64)/100000000.0-mx);se=se+probs[i];i=i+1}
+    i=0;while i<nc{probs[i]=probs[i]/se;i=i+1};probs[tgt]=probs[tgt]-1.0
+    var d=0;while d<16{let hd=hsng_g(d);var c=0;while c<nc{let idx=240+d*nc+c;var g=hd*probs[c];if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM_SNG[idx] as f64)/100000000.0*0.9+g;MOM_SNG[idx]=(m*100000000.0) as i64;wsng_s(idx,wsng_g(idx)-lr*m);c=c+1};d=d+1}
+}
+
+// ─── generic train+eval ───
+fn train_eval_lo_h8(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<8{H_H8[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_h8(SEQ[t]);t=t+1};logits_h8(10);update_h8(tgt,0.01,10);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<8{H_H8[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_h8(SEQ[t]);t=t+1};logits_h8(10);if pred_h8(10)==tgt{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn train_eval_br_h8(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let cls=gen_br(sl);var d=0;while d<8{H_H8[d]=0;d=d+1};var t=0;while t<BR_LEN{step_h8(BR[t]);t=t+1};logits_h8(2);update_h8(cls,0.01,2);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let cls=gen_br(sl);var d=0;while d<8{H_H8[d]=0;d=d+1};var t=0;while t<BR_LEN{step_h8(BR[t]);t=t+1};logits_h8(2);if pred_h8(2)==cls{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn train_eval_lo_h16(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<16{H_H16[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_h16(SEQ[t]);t=t+1};logits_h16(10);update_h16(tgt,0.01,10);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<16{H_H16[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_h16(SEQ[t]);t=t+1};logits_h16(10);if pred_h16(10)==tgt{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn train_eval_br_h16(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let cls=gen_br(sl);var d=0;while d<16{H_H16[d]=0;d=d+1};var t=0;while t<BR_LEN{step_h16(BR[t]);t=t+1};logits_h16(2);update_h16(cls,0.01,2);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let cls=gen_br(sl);var d=0;while d<16{H_H16[d]=0;d=d+1};var t=0;while t<BR_LEN{step_h16(BR[t]);t=t+1};logits_h16(2);if pred_h16(2)==cls{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn train_eval_lo_sng(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<16{H_SNG[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_sng(SEQ[t]);t=t+1};logits_sng(10);update_sng(tgt,0.01,10);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let lbl=gen_lo(sl);var tgt=lbl%10;if tgt<0{tgt=tgt+10};var d=0;while d<16{H_SNG[d]=0;d=d+1};var t=0;while t<SEQ_POS{step_sng(SEQ[t]);t=t+1};logits_sng(10);if pred_sng(10)==tgt{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn train_eval_br_sng(sl:i64)->f64 with IO,Mut,Div,Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let cls=gen_br(sl);var d=0;while d<16{H_SNG[d]=0;d=d+1};var t=0;while t<BR_LEN{step_sng(BR[t]);t=t+1};logits_sng(2);update_sng(cls,0.01,2);s=s+1};ep=ep+1}
+    rng_seed(99999+sl,11111+sl);var correct=0;var s=0
+    while s<1000{let cls=gen_br(sl);var d=0;while d<16{H_SNG[d]=0;d=d+1};var t=0;while t<BR_LEN{step_sng(BR[t]);t=t+1};logits_sng(2);if pred_sng(2)==cls{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════════\n")
+    print("  ZD vs Capacity: The Killer Experiment\n")
+    print("═══════════════════════════════════════════════════════════════════\n\n")
+    print("  H-SSM-8D  :  2xquat,  8D,  8A,  assoc, NO ZD  (baseline)\n")
+    print("  H-SSM-16D :  4xquat, 16D, 16A,  assoc, NO ZD  (capacity control)\n")
+    print("  S-nogate  :  sedenion,16D, 16A,  ZD,    no gate\n\n")
+    print("  If H-16D ≈ H-8D  and  S-nogate >> H-16D  →  ZD is the key\n")
+    print("  If H-16D ≈ S-nogate                       →  just capacity\n\n")
+
+    print("=== ListOps L=15 ===\n")
+
+    print("  H-SSM-8D:   ")
+    rng_seed(55555,77777); init_h8(); rng_seed(12345,67890)
+    let lo_h8 = train_eval_lo_h8(15)
+    print(lo_h8); print("%\n")
+
+    print("  H-SSM-16D:  ")
+    rng_seed(55555,77777); init_h16(); rng_seed(12345,67890)
+    let lo_h16 = train_eval_lo_h16(15)
+    print(lo_h16); print("%\n")
+
+    print("  S-nogate:   ")
+    rng_seed(55555,77777); init_sng(); rng_seed(12345,67890)
+    let lo_sng = train_eval_lo_sng(15)
+    print(lo_sng); print("%\n")
+
+    print("\n=== Bracket L=12 ===\n")
+
+    print("  H-SSM-8D:   ")
+    rng_seed(55555,77777); init_h8(); rng_seed(12345,67890)
+    let br_h8 = train_eval_br_h8(12)
+    print(br_h8); print("%\n")
+
+    print("  H-SSM-16D:  ")
+    rng_seed(55555,77777); init_h16(); rng_seed(12345,67890)
+    let br_h16 = train_eval_br_h16(12)
+    print(br_h16); print("%\n")
+
+    print("  S-nogate:   ")
+    rng_seed(55555,77777); init_sng(); rng_seed(12345,67890)
+    let br_sng = train_eval_br_sng(12)
+    print(br_sng); print("%\n")
+
+    print("\n═══════════════════════════════════════════════════════════════════\n")
+    print("  VERDICT\n")
+    print("═══════════════════════════════════════════════════════════════════\n")
+    print("  Model        ListOps  Bracket  A-params  ZD?\n")
+    print("  H-SSM-8D     "); print(lo_h8); print("%   "); print(br_h8); print("%    8     NO\n")
+    print("  H-SSM-16D    "); print(lo_h16); print("%   "); print(br_h16); print("%   16     NO\n")
+    print("  S-nogate     "); print(lo_sng); print("%   "); print(br_sng); print("%   16     YES\n")
+
+    let cap_gain_lo = lo_h16 - lo_h8
+    let cap_gain_br = br_h16 - br_h8
+    let zd_gain_lo  = lo_sng - lo_h16
+    let zd_gain_br  = br_sng - br_h16
+
+    print("\n  Capacity gain (H16−H8):  ListOps="); print(cap_gain_lo)
+    print("pp  Bracket="); print(cap_gain_br); print("pp\n")
+    print("  ZD gain (Sng−H16):       ListOps="); print(zd_gain_lo)
+    print("pp  Bracket="); print(zd_gain_br); print("pp\n\n")
+
+    if zd_gain_lo > 3.0 {
+        print("  ListOps: ZD provides genuine advantage beyond capacity alone\n")
+    } else {
+        if zd_gain_lo < 0.0 - 3.0 {
+            print("  ListOps: H-16D > S-nogate — ZD actually hurts! capacity wins\n")
+        } else {
+            print("  ListOps: ZD ≈ capacity (within ±3pp)\n")
+        }
+    }
+    if zd_gain_br > 3.0 {
+        print("  Bracket: ZD provides genuine advantage beyond capacity alone\n")
+    } else {
+        if zd_gain_br < 0.0 - 3.0 {
+            print("  Bracket: H-16D > S-nogate — ZD actually hurts! capacity wins\n")
+        } else {
+            print("  Bracket: ZD ≈ capacity (within ±3pp)\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}

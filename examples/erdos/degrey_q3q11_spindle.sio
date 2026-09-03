@@ -1,0 +1,331 @@
+// examples/erdos/degrey_q3q11_spindle.sio
+//
+// BOLD LINE on Erdős #508 (chromatic number of the plane, currently 5 ≤ χ ≤ 7).
+//
+// The prior Sounio attack caged itself in INTEGER coordinates Z^16, where
+// "dist² == 1" forces bipartiteness (χ ≤ 2) by a Hamming-parity 2-coloring —
+// a self-imposed ceiling. The honest reviewer finding (xai math-review,
+// 2026-05-28) is that exactness for unit-distance work does NOT live in Z; it
+// lives in a real NUMBER FIELD. The hard graphs (Moser spindle, de Grey's
+// 5-chromatic graph) are realized exactly over Q(√3, √11).
+//
+// de Grey's 1581-vertex 5-chromatic graph is ASSEMBLED FROM Moser spindles.
+// This file builds the atomic piece — the Moser spindle — with EXACT arithmetic
+// in Q(√3, √11). NOTE (xai math-review, 2026-05-28): the spindle and the 60° /
+// arccos(5/6) rotations provably stay in Q(√3,√11), but it is NOT yet verified
+// that gluing spindles at non-Moser vertices keeps the full de Grey graph inside
+// this field (an auxiliary surd may appear). That field check is the first task
+// when scaling. What is established here:
+//   (1) every unit edge has squared distance exactly 1 (a rational; the √3, √11,
+//       √33 components cancel to zero — verified, not approximated);
+//   (2) the chromatic number χ = 4 is computed by exact brute force (no floats,
+//       native_decide-able), refuting the prior plan's claim that the spindle's
+//       irrational coordinates "break exactness".
+//
+// FIELD REPRESENTATION. A number a + b√3 + c√11 + d√33 (note √33 = √3·√11) is the
+// integer 4-tuple (a, b, c, d). Multiplication table:
+//   √3·√3=3  √11·√11=11  √33·√33=33  √3·√11=√33  √3·√33=3√11  √11·√33=11√3
+//
+// SPINDLE CONSTRUCTION (two unit rhombi sharing apex A, rotated by φ with
+// cos φ = 5/6, sin φ = √11/6 so the far vertices C,F land at unit distance).
+// All coordinates scaled by 12 to clear denominators ⇒ unit distance = 12,
+// unit squared-distance target = 144. Vertices A,B,C,D (rhombus 1) and
+// A,E,F,G (rhombus 2 = rhombus 1 rotated by φ), with the edge C–F closing it.
+//
+// Native SAT/UNSAT: the chromatic certificate is produced INSIDE Sounio (no
+// external SAT solver, no third-party DRAT). χ=4 is certified two independent
+// ways: (a) exact base-k brute force, and (b) the native CDCL solver
+// theorem::smt — 3-coloring is UNSAT, 4-coloring is SAT. Route (b) is the
+// scalable mechanism that templates directly to de Grey's graph (the only limit
+// today is the solver's 64-variable cap; de Grey scale needs that grown, but the
+// path stays native and self-certifying).
+
+use theorem::smt::*
+
+struct Qf { a: i64, b: i64, c: i64, d: i64 }
+
+fn qadd(x: Qf, y: Qf) -> Qf {
+    return Qf { a: x.a + y.a, b: x.b + y.b, c: x.c + y.c, d: x.d + y.d }
+}
+
+fn qsub(x: Qf, y: Qf) -> Qf {
+    return Qf { a: x.a - y.a, b: x.b - y.b, c: x.c - y.c, d: x.d - y.d }
+}
+
+// (a+b√3+c√11+d√33)(a'+b'√3+c'√11+d'√33), reduced via the table above.
+fn qmul(x: Qf, y: Qf) -> Qf {
+    let ra  = x.a*y.a + 3*x.b*y.b + 11*x.c*y.c + 33*x.d*y.d
+    let r3  = x.a*y.b + y.a*x.b + 11*(x.c*y.d + y.c*x.d)
+    let r11 = x.a*y.c + y.a*x.c + 3*(x.b*y.d + y.b*x.d)
+    let r33 = x.a*y.d + y.a*x.d + x.b*y.c + y.b*x.c
+    return Qf { a: ra, b: r3, c: r11, d: r33 }
+}
+
+fn qsq(x: Qf) -> Qf { return qmul(x, x) }
+
+// ============================================================================
+// The 7 spindle vertices, scaled ×12, as exact Q(√3,√11) coordinates.
+// Index: A=0 B=1 C=2 D=3 E=4 F=5 G=6.
+// ============================================================================
+
+var XA: [i64; 7] = [0; 7]   // x: rational part
+var XB: [i64; 7] = [0; 7]   // x: √3 part
+var XC: [i64; 7] = [0; 7]   // x: √11 part
+var XD: [i64; 7] = [0; 7]   // x: √33 part
+var YA: [i64; 7] = [0; 7]   // y: rational part
+var YB: [i64; 7] = [0; 7]   // y: √3 part
+var YC: [i64; 7] = [0; 7]   // y: √11 part
+var YD: [i64; 7] = [0; 7]   // y: √33 part
+
+var ADJ:    [i64; 49] = [0; 49]
+var COLORS: [i64; 7]  = [0; 7]
+
+fn setup_points() with Mut, Panic {
+    // A = (0, 0)
+    XA[0] = 0  XB[0] = 0       XC[0] = 0       XD[0] = 0
+    YA[0] = 0  YB[0] = 0       YC[0] = 0       YD[0] = 0
+    // B = (√3/2, 1/2)  ×12 → (6√3, 6)
+    XA[1] = 0  XB[1] = 6       XC[1] = 0       XD[1] = 0
+    YA[1] = 6  YB[1] = 0       YC[1] = 0       YD[1] = 0
+    // C = (√3, 0)  ×12 → (12√3, 0)
+    XA[2] = 0  XB[2] = 12      XC[2] = 0       XD[2] = 0
+    YA[2] = 0  YB[2] = 0       YC[2] = 0       YD[2] = 0
+    // D = (√3/2, -1/2)  ×12 → (6√3, -6)
+    XA[3] = 0  XB[3] = 6       XC[3] = 0       XD[3] = 0
+    YA[3] = 0 - 6  YB[3] = 0   YC[3] = 0       YD[3] = 0
+    // E = Rφ·B = (5√3/12 - √11/12, √33/12 + 5/12)  ×12 → (5√3 - √11, 5 + √33)
+    XA[4] = 0  XB[4] = 5       XC[4] = 0 - 1   XD[4] = 0
+    YA[4] = 5  YB[4] = 0       YC[4] = 0       YD[4] = 1
+    // F = Rφ·C = (5√3/6, √33/6)  ×12 → (10√3, 2√33)
+    XA[5] = 0  XB[5] = 10      XC[5] = 0       XD[5] = 0
+    YA[5] = 0  YB[5] = 0       YC[5] = 0       YD[5] = 2
+    // G = Rφ·D = (5√3/12 + √11/12, √33/12 - 5/12)  ×12 → (5√3 + √11, √33 - 5)
+    XA[6] = 0  XB[6] = 5       XC[6] = 1       XD[6] = 0
+    YA[6] = 0 - 5  YB[6] = 0   YC[6] = 0       YD[6] = 1
+}
+
+fn get_x(i: i64) -> Qf with Panic {
+    return Qf { a: XA[i as usize], b: XB[i as usize], c: XC[i as usize], d: XD[i as usize] }
+}
+
+fn get_y(i: i64) -> Qf with Panic {
+    return Qf { a: YA[i as usize], b: YB[i as usize], c: YC[i as usize], d: YD[i as usize] }
+}
+
+// Squared Euclidean distance as an exact Q(√3,√11) element.
+fn dist2(i: i64, j: i64) -> Qf with Panic {
+    let dx = qsub(get_x(i), get_x(j))
+    let dy = qsub(get_y(i), get_y(j))
+    return qadd(qsq(dx), qsq(dy))
+}
+
+// Unit edge ⟺ dist² is EXACTLY the rational 1 (scaled 144); the irrational
+// √3/√11/√33 components must all vanish.
+fn is_unit(d: Qf) -> i64 {
+    if d.a == 144 && d.b == 0 && d.c == 0 && d.d == 0 { return 1 }
+    return 0
+}
+
+fn build_edges() with Mut, Panic {
+    var i = 0
+    while i < 7 {
+        var j = 0
+        while j < 7 {
+            ADJ[(i*7 + j) as usize] = 0
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 7 {
+        var j = i + 1
+        while j < 7 {
+            if is_unit(dist2(i, j)) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn count_edges() -> i64 with Mut, Panic {
+    var c = 0
+    var i = 0
+    while i < 7 {
+        var j = i + 1
+        while j < 7 {
+            if ADJ[(i*7 + j) as usize] == 1 { c = c + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Proper k-colorability of ADJ (7 vertices) by exact base-k odometer brute force.
+fn colorable(k: i64) -> i64 with Mut, Panic {
+    var i = 0
+    while i < 7 { COLORS[i as usize] = 0  i = i + 1 }
+    var done = 0
+    while done == 0 {
+        var ok = 1
+        var a = 0
+        while a < 7 {
+            var b = a + 1
+            while b < 7 {
+                if ADJ[(a*7 + b) as usize] == 1 {
+                    if COLORS[a as usize] == COLORS[b as usize] { ok = 0 }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if ok == 1 { return 1 }
+        var pos = 0
+        var carry = 1
+        while pos < 7 && carry == 1 {
+            COLORS[pos as usize] = COLORS[pos as usize] + 1
+            if COLORS[pos as usize] >= k {
+                COLORS[pos as usize] = 0
+                pos = pos + 1
+            } else {
+                carry = 0
+            }
+        }
+        if carry == 1 { done = 1 }
+    }
+    return 0
+}
+
+fn chromatic_number() -> i64 with Mut, Panic {
+    var k = 1
+    while k <= 7 {
+        if colorable(k) == 1 { return k }
+        k = k + 1
+    }
+    return 7
+}
+
+// Native CDCL k-colorability of ADJ (7 vertices). Returns smt_solve: 1=SAT, 0=UNSAT.
+// 1-indexed vars: var(v,c) = v*k + c + 1 ; positive lit = var*2+1, negative = var*2.
+// This is the SAME encoding de Grey's graph needs — only bigger (k*V vars).
+fn sat_kcolorable(k: i64) -> i32 with Mut, Div, Panic {
+    var ctx = smt_new()
+    // at-least-one color per vertex
+    var v: i64 = 0
+    while v < 7 {
+        var lits: [i32; 8] = [0; 8]
+        var c: i64 = 0
+        while c < k {
+            lits[c as usize] = ((v*k + c + 1)*2 + 1) as i32
+            c = c + 1
+        }
+        smt_add_clause(&! ctx, &lits, k as i32)
+        v = v + 1
+    }
+    // at-most-one color per vertex (pairwise negative clauses)
+    v = 0
+    while v < 7 {
+        var c1: i64 = 0
+        while c1 < k {
+            var c2: i64 = c1 + 1
+            while c2 < k {
+                var lp: [i32; 8] = [0; 8]
+                lp[0] = ((v*k + c1 + 1)*2) as i32
+                lp[1] = ((v*k + c2 + 1)*2) as i32
+                smt_add_clause(&! ctx, &lp, 2)
+                c2 = c2 + 1
+            }
+            c1 = c1 + 1
+        }
+        v = v + 1
+    }
+    // edge constraints: adjacent vertices cannot share a color
+    var u: i64 = 0
+    while u < 7 {
+        var w: i64 = u + 1
+        while w < 7 {
+            if ADJ[(u*7 + w) as usize] == 1 {
+                var c: i64 = 0
+                while c < k {
+                    var le: [i32; 8] = [0; 8]
+                    le[0] = ((u*k + c + 1)*2) as i32
+                    le[1] = ((w*k + c + 1)*2) as i32
+                    smt_add_clause(&! ctx, &le, 2)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    return smt_solve(&! ctx)
+}
+
+fn print_edge(i: i64, j: i64) with IO, Panic {
+    let d = dist2(i, j)
+    print("  edge (")
+    print_int(i); print(","); print_int(j)
+    print(")  dist2 = ")
+    print_int(d.a); print(" + "); print_int(d.b); print("*r3 + ")
+    print_int(d.c); print("*r11 + "); print_int(d.d); print("*r33\n")
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    print("=== Erdős #508 — exact Moser spindle over Q(√3, √11) ===\n")
+    print("(scaled ×12; unit distance² target = 144; de Grey's atomic building block)\n\n")
+
+    setup_points()
+    build_edges()
+
+    let e = count_edges()
+    print("vertices: 7   unit edges: "); print_int(e)
+    print("  (expected 11 = Moser spindle)\n\n")
+
+    print("Exact unit edges — note every √3/√11/√33 component is 0 (rational 144):\n")
+    var i = 0
+    while i < 7 {
+        var j = i + 1
+        while j < 7 {
+            if ADJ[(i*7 + j) as usize] == 1 { print_edge(i, j) }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    print("\nSanity (non-edges keep irrational parts / wrong rational):\n")
+    print_edge(0, 2)   // A–C: the √3 long diagonal, dist² = 432 = 144·3
+    print_edge(0, 5)   // A–F: rotated long diagonal, dist² = 432
+
+    let chi = chromatic_number()
+    print("\nchi(spindle) = "); print_int(chi); print("  (route a: exact brute force over 4^7)\n")
+
+    // Route (b): native CDCL SAT/UNSAT — the de Grey-scale mechanism, no external solver.
+    let s3 = sat_kcolorable(3)
+    let s4 = sat_kcolorable(4)
+    print("native SAT: 3-coloring = ")
+    if s3 == 1 { print("SAT") } else { print("UNSAT") }
+    print("  4-coloring = ")
+    if s4 == 1 { print("SAT") } else { print("UNSAT") }
+    print("\n")
+    if s3 == 0 && s4 == 1 {
+        print("=> chi=4 CERTIFIED natively: 3-col UNSAT (no 4th color avoidable) + 4-col SAT.\n")
+        print("   The UNSAT certificate is produced INSIDE Sounio. This is exactly the\n")
+        print("   de Grey mechanism: realize the graph exactly, then certify χ≥5 by a\n")
+        print("   native 4-coloring UNSAT. Today's only gap is the solver's 64-var cap.\n")
+    }
+
+    if chi == 4 {
+        print("RESULT: χ = 4 proved over EXACT Q(√3,√11) coordinates — the prior plan's\n")
+        print("claim that the spindle's irrationals 'break native exactness' is REFUTED.\n")
+        print("The cage was Z, not the problem. The spindle and its 60°/arccos(5/6)\n")
+        print("rotations stay in Q(√3,√11); scaling toward de Grey's 5-chromatic graph\n")
+        print("needs a check that gluing spindles at non-Moser vertices introduces no\n")
+        print("auxiliary surd (xai math-review 2026-05-28 flagged this as unverified).\n")
+    }
+    return 0
+}

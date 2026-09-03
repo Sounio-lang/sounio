@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DEFAULT_RUN_DIR="$ROOT_DIR/artifacts/diagnostic/$TS"
 RUN_DIR="${SOUNIO_RELEASE_PACK_RUN_DIR:-$DEFAULT_RUN_DIR}"
@@ -105,7 +105,7 @@ run_step "16-selfhost-cycle-release-byte-equality" env WORK_DIR="$RUN_DIR/selfho
 run_step "17-selfhost-cycle-gate-seed-root" env WORK_DIR="$RUN_DIR/selfhost-cycle-gate-seed-root" SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC=0 SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE=1 SOUNIO_SELFHOST_CYCLE_SEED_PATH=bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost/selfhost_cycle_gate.sh"
 run_step "18-selfhost-independence-gate" env WORK_DIR="$RUN_DIR/selfhost-independence-gate" SOUC_BIN="$ROOT_DIR/target/release/souc" bash "$ROOT_DIR/scripts/selfhost/selfhost_independence_gate.sh"
 run_step "18a-stdlib-native-lane-gate" env STDLIB_HYPER_GATE_MODE=required STDLIB_HYPER_STATUS_OUT="$RUN_DIR/stdlib_hyper_execution_status.v1.json" STDLIB_NATIVE_LANE_MATRIX_OUT="$RUN_DIR/native_lane_matrix.v1.json" bash "$ROOT_DIR/scripts/stdlib/stdlib_hyper_execution_gate.sh"
-run_step "19-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
+run_step "19-full-gate" bash "$ROOT_DIR/scripts/dev/full_gate.sh"
 run_step "20-sprint14-checker-parity" bash "$ROOT_DIR/scripts/sprint14_checker_parity_gate.sh"
 run_step "21-sprint16-effect-handlers" bash "$ROOT_DIR/scripts/sprint16_effect_handlers_gate.sh"
 

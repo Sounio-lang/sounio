@@ -1,3 +1,6 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
 // stdlib/math/pure.sio — Pure Sounio mathematical functions (zero FFI)
 //
 // Canonical implementations of core math functions. All modules that
@@ -80,15 +83,28 @@ fn min_i32(a: i32, b: i32) -> i32 {
 // Square root — Newton-Raphson
 // =============================================================================
 
-fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
+// Newton-Raphson with range reduction: sqrt(x) = sqrt(x · 4^k) / 2^k.
+// For x < 1 we scale up by 4^k until v ∈ [1, 4), then run Newton on the
+// well-conditioned reduced argument. Without this, Newton starting at
+// y₀ = x with x ~ 10⁻¹⁵ halves each step and needs ≫ 20 iterations to
+// reach the true sqrt — returning ~10⁻⁶ instead of ~10⁻⁸. Range
+// reduction is bit-deterministic and adds at worst ~30 multiplications
+// for f64-representable inputs.
+pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
+    var v = x
+    var s = 1.0
+    while v < 1.0 {
+        v = v * 4.0
+        s = s * 2.0
+    }
+    var y = v
     var i = 0
     while i < 20 {
-        y = 0.5 * (y + x / y)
+        y = 0.5 * (y + v / y)
         i = i + 1
     }
-    y
+    y / s
 }
 
 // =============================================================================
@@ -517,4 +533,118 @@ fn softplus(x: f64) -> f64 with Mut, Div, Panic {
 fn log_sum_exp(a: f64, b: f64) -> f64 with Mut, Div, Panic {
     let m = max(a, b)
     m + ln(exp(a - m) + exp(b - m))
+}
+
+// =============================================================================
+// Inline tests
+// =============================================================================
+
+// CNT[0] = pass, CNT[1] = fail  (array avoids JIT large-offset scalar global bug)
+var CNT: [i64; 2] = [0; 2]
+
+fn check(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_sqrt() with IO, Mut, Div, Panic {
+    check(1, near(sqrt(4.0), 2.0, 1.0e-12))
+    check(2, near(sqrt(2.0), sqrt2(), 1.0e-12))
+    check(3, near(sqrt(0.0), 0.0, 1.0e-30))
+}
+
+fn test_ln_exp() with IO, Mut, Div, Panic {
+    check(4, near(ln(1.0), 0.0, 1.0e-12))
+    check(5, near(exp(0.0), 1.0, 1.0e-12))
+    check(6, near(exp(1.0), e(), 1.0e-8))
+    check(7, near(ln(e()), 1.0, 1.0e-8))
+    check(8, near(exp(ln(3.0)), 3.0, 1.0e-8))
+    check(9, near(log10(100.0), 2.0, 1.0e-8))
+    check(10, near(log2(8.0), 3.0, 1.0e-8))
+}
+
+fn test_trig() with IO, Mut, Div, Panic {
+    check(11, near(sin(0.0), 0.0, 1.0e-12))
+    check(12, near(sin(half_pi()), 1.0, 1.0e-10))
+    check(13, near(cos(0.0), 1.0, 1.0e-12))
+    check(14, near(cos(pi()), 0.0 - 1.0, 1.0e-10))
+    check(15, near(sin(pi()), 0.0, 1.0e-10))
+    check(16, near(atan(1.0), pi() / 4.0, 1.0e-10))
+    check(17, near(atan2(1.0, 1.0), pi() / 4.0, 1.0e-10))
+    check(18, near(asin(1.0), half_pi(), 1.0e-10))
+    check(19, near(acos(0.0), half_pi(), 1.0e-10))
+}
+
+fn test_hyper() with IO, Mut, Div, Panic {
+    check(20, near(sinh(0.0), 0.0, 1.0e-12))
+    check(21, near(cosh(0.0), 1.0, 1.0e-12))
+    check(22, near(tanh(0.0), 0.0, 1.0e-12))
+    check(23, near(tanh(100.0), 1.0, 1.0e-10))
+}
+
+fn test_gamma() with IO, Mut, Div, Panic {
+    // lgamma(1) = 0, lgamma(2) = 0, lgamma(3) = ln(2)
+    check(24, near(lgamma(1.0), 0.0, 1.0e-6))
+    check(25, near(lgamma(2.0), 0.0, 1.0e-6))
+    check(26, near(lgamma(3.0), ln(2.0), 1.0e-6))
+    // gamma(5) = 4! = 24
+    check(27, near(gamma(5.0), 24.0, 1.0e-4))
+    // beta(2,3) = 1/12
+    check(28, near(beta(2.0, 3.0), 1.0 / 12.0, 1.0e-6))
+}
+
+fn test_erf() with IO, Mut, Div, Panic {
+    check(29, near(erf(0.0), 0.0, 1.0e-6))    // A&S rational has ~1e-9 error at x=0
+    check(30, near(erf(1.0), 0.8427007929497149, 1.0e-6))
+    check(31, near(erfc(0.0), 1.0, 1.0e-6))
+    check(32, near(erf(0.0 - 1.0), 0.0 - 0.8427007929497149, 1.0e-6))
+}
+
+fn test_rounding() with IO, Mut, Div, Panic {
+    check(33, near(floor(3.7), 3.0, 1.0e-15))
+    check(34, near(ceil(3.2), 4.0, 1.0e-15))
+    check(35, near(round(3.5), 4.0, 1.0e-15))
+    check(36, near(trunc(3.9), 3.0, 1.0e-15))
+}
+
+fn test_misc() with IO, Mut, Div, Panic {
+    check(37, near(abs(0.0 - 5.0), 5.0, 1.0e-15))
+    check(38, near(hypot(3.0, 4.0), 5.0, 1.0e-10))
+    check(39, near(cbrt(8.0), 2.0, 1.0e-8))
+    check(40, near(sigmoid(0.0), 0.5, 1.0e-10))
+    check(41, near(normal_cdf(0.0, 0.0, 1.0), 0.5, 1.0e-6))
+    check(42, near(lerp(0.0, 10.0, 0.3), 3.0, 1.0e-12))
+    check(43, near(pow(2.0, 10.0), 1024.0, 1.0e-4))
+    check(44, near(log_sum_exp(0.0, 0.0), ln(2.0), 1.0e-8))
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/math/pure tests ───\n")
+    test_sqrt()
+    test_ln_exp()
+    test_trig()
+    test_hyper()
+    test_gamma()
+    test_erf()
+    test_rounding()
+    test_misc()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0] + CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 {
+        print("ALL PASS\n")
+        0
+    } else {
+        1
+    }
 }

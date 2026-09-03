@@ -1027,7 +1027,7 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
     print("\n")
     var ip: i64 = 0
     while ip < func.instr_count {
-        let instr = func.instrs[ip as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (ip)))
         print("  ir[")
         print_int(ip)
         print("]=")
@@ -5768,6 +5768,7 @@ var MC_NEXT_SLOT: i64 = 0
 var MC_EXPR_IS_F64: i64 = 0
 var MC_EXPR_ELEM_SZ: i64 = 8  // element size for postfix [idx]: 1=byte, 8=qword
 var MC_EXPR_IS_LOCAL_ARR: i64 = 0
+var MC_EXPR_ELEM_IS_F64: i64 = 0
 
 // print_f64 helper offset
 var MC_PRINT_F64_OFF: i64 = 0
@@ -6840,6 +6841,7 @@ fn mc_parse_primary() with Mut, Panic, Div {
         we(0x48)
         we(0xb8); we64(val)
         MC_EXPR_IS_F64 = 0
+        MC_EXPR_ELEM_IS_F64 = 0
         return 0
     }
 
@@ -7911,14 +7913,23 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
                     we(0x80)  // mov rax, [rax + disp32]
                     we32(dot_disp)
                 }
-                // Propagate f64 type from struct field
+                // Propagate f64 type from struct field. A value of 2 means this
+                // field is an array whose elements are f64; the field value
+                // itself is still a pointer/base address until postfix [].
                 if dot_is_f64 == 1 {
                     MC_EXPR_IS_F64 = 1
+                    MC_EXPR_ELEM_IS_F64 = 0
                     we(0x66)
                     we(0x48)
                     we(0x0f)
                     we(0x6e)
                     we(0xc0)  // movq xmm0, rax
+                } else if dot_is_f64 == 2 {
+                    MC_EXPR_IS_F64 = 0
+                    MC_EXPR_ELEM_SZ = 8
+                    MC_EXPR_ELEM_IS_F64 = 1
+                } else {
+                    MC_EXPR_ELEM_IS_F64 = 0
                 }
             } else {
                 if dot_off > 0 {
@@ -7939,6 +7950,7 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         let arr_base_slot = mc_alloc_slot()
         mc_emit_store_rax(arr_base_slot)  // save base to named slot
         let saved_elem_sz = MC_EXPR_ELEM_SZ  // save before index parse might overwrite
+        let saved_elem_is_f64 = MC_EXPR_ELEM_IS_F64
         mc_parse_expr()  // index → rax
         if MP_KIND[MC_POS as usize] == 27 { MC_POS = MC_POS + 1 }   // skip 'as'
         if MP_KIND[MC_POS as usize] == 120 { MC_POS = MC_POS + 1 }  // skip 'usize'/'i64'/etc
@@ -7962,6 +7974,12 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
             we(0x48); we(0x8B); we(0x00)  // mov rax, [rax]
         }
         MC_EXPR_ELEM_SZ = 8  // reset
+        MC_EXPR_ELEM_IS_F64 = 0
+        if saved_elem_is_f64 == 1 {
+            MC_EXPR_IS_F64 = 1
+        } else {
+            MC_EXPR_IS_F64 = 0
+        }
     }
     // Handle trailing `as TYPE` casts (e.g., `expr as i64`, `expr as i8`)
     // Just consume the tokens — the value is already in rax
@@ -8914,7 +8932,7 @@ fn mc_stmt_ident() with Mut, Panic, Div {
         return 0
     }
 
-    // Compound assignment: ident += expr, -=, *=
+    // Compound assignment: ident PlusEq expr or MinusEq or StarEq
     if MP_KIND[MC_POS as usize] == 151 {
         mc_stmt_compound_assign()
         return 0
@@ -9103,6 +9121,7 @@ fn mc_scan_structs() with Mut, Panic, Div {
                 // Parse : type
                 var field_struct: i64 = -1
                 var field_flat: i64 = 1
+                var field_is_f64: i64 = 0
                 if MP_KIND[MC_POS as usize] == 178 {
                     MC_POS = MC_POS + 1
                     // Read type name token
@@ -9115,15 +9134,31 @@ fn mc_scan_structs() with Mut, Panic, Div {
                         if field_struct >= 0 {
                             field_flat = MC_ST_FLAT_SIZE[field_struct as usize]
                         }
+                        if tl == 3 {
+                            if (LEAN_SOURCE[ts as usize] as i64) == 102 && (LEAN_SOURCE[(ts + 1) as usize] as i64) == 54 && (LEAN_SOURCE[(ts + 2) as usize] as i64) == 52 {
+                                field_is_f64 = 1
+                            }
+                        }
                         MC_POS = MC_POS + 1
+                    } else if MP_KIND[MC_POS as usize] == 175 {
+                        let arr_ty_pos = MC_POS + 1
+                        if arr_ty_pos < MC_TC {
+                            let ats = MP_START[arr_ty_pos as usize]
+                            let ate = MP_END[arr_ty_pos as usize]
+                            if ate - ats == 3 {
+                                if (LEAN_SOURCE[ats as usize] as i64) == 102 && (LEAN_SOURCE[(ats + 1) as usize] as i64) == 54 && (LEAN_SOURCE[(ats + 2) as usize] as i64) == 52 {
+                                    field_is_f64 = 2
+                                }
+                            }
+                        }
+                        mc_skip_type()
                     } else {
                         // Skip other type tokens (scalars etc)
                         mc_skip_type()
                     }
                 }
-                // Check if field type is f64
-                var field_is_f64: i64 = 0
-                if field_struct < 0 && field_flat == 1 {
+                // Legacy fallback for scalar f64 tokens that were already consumed.
+                if field_is_f64 == 0 && field_struct < 0 && field_flat == 1 {
                     // Re-check type name for "f64"
                     let fts = MC_SF_NAME_START[fi as usize]  // reuse for type check
                     // Actually check the type token we just parsed

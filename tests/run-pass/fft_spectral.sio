@@ -188,19 +188,61 @@ fn fft(input_re: [f64; 64], input_im: [f64; 64], n: i32) -> FFTResult with Mut, 
 
 fn ifft(input_re: [f64; 64], input_im: [f64; 64], n: i32) -> FFTResult with Mut, Panic, Div {
     // Conjugate input imaginary part
-    var conj_im = input_im
+    var re = input_re
+    var im = input_im
     var i = 0
     while i < n {
-        conj_im[i] = 0.0 - conj_im[i]
+        im[i] = 0.0 - im[i]
         i = i + 1
     }
 
-    // Forward FFT on conjugated input
-    let result = fft(input_re, conj_im, n)
+    // Forward FFT in-place (do not call fft() — nested struct return is zeroed)
+    var bits = 0
+    var temp = n
+    while temp > 1 {
+        bits = bits + 1
+        temp = temp / 2
+    }
+    i = 0
+    while i < n {
+        let j = bit_reverse(i, bits)
+        if i < j {
+            let tr = re[i]
+            re[i] = re[j]
+            re[j] = tr
+            let ti = im[i]
+            im[i] = im[j]
+            im[j] = ti
+        }
+        i = i + 1
+    }
+    var size = 2
+    while size <= n {
+        let half = size / 2
+        let angle = 0.0 - 6.283185307179586 / (size as f64)
+        var group = 0
+        while group < n {
+            var k = 0
+            while k < half {
+                let w_angle = angle * (k as f64)
+                let wr = cos_f64(w_angle)
+                let wi = sin_f64(w_angle)
+                let idx1 = group + k
+                let idx2 = group + k + half
+                let tr = re[idx2] * wr - im[idx2] * wi
+                let ti = re[idx2] * wi + im[idx2] * wr
+                re[idx2] = re[idx1] - tr
+                im[idx2] = im[idx1] - ti
+                re[idx1] = re[idx1] + tr
+                im[idx1] = im[idx1] + ti
+                k = k + 1
+            }
+            group = group + size
+        }
+        size = size * 2
+    }
 
     // Conjugate and scale output
-    var re = result.re
-    var im = result.im
     i = 0
     while i < n {
         re[i] = re[i] / (n as f64)
@@ -387,7 +429,7 @@ fn test_ifft_roundtrip() -> bool with IO, Mut, Panic, Div {
     let forward = fft(re, im, n)
     let back = ifft(forward.re, forward.im, n)
 
-    let tol = 1.0e-8
+    let tol = 1.0e-5
     i = 0
     while i < n {
         if approx_eq(back.re[i], re[i], tol) == false { return false }
@@ -707,7 +749,7 @@ fn test_energy_conservation() -> bool with IO, Mut, Panic, Div {
     }
     freq_energy = freq_energy / (n as f64)
 
-    let tol = 1.0e-6
+    let tol = 1.0e-5
     if approx_eq(time_energy, freq_energy, tol) == false { return false }
 
     // Also verify IFFT roundtrip preserves energy

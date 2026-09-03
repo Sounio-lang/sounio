@@ -1,0 +1,44 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_FIELD_CHAIN_OK
+
+// #1706 defect 1: variance_of on a STRUCT FIELD read a silent 0.0, because variance
+// was tracked per local name and per base reg only -- never per field. One hop was
+// enough to lose it, so this is the minimal witness, not a deep-nesting corner case.
+//
+// Before: direct=0.09 (correct), one_hop=0.00, two_hop=0.00
+// After:  all three 0.09
+//
+// `requires: madaros` because the fix lives in self-hosted/ir/lower.sio, which only
+// the Madaros engine runs; souc-stage2 (what CI's Full Test Suite uses) still reads
+// 0.00 for the field hops. Unlike the madaros_gum_fo_* family -- where the same
+// annotation would be FALSE, since Madaros fails those too -- here it states a real
+// engine boundary.
+
+struct A { x: f64 }
+struct C { a: A }
+fn main() with IO, Mut, Div, Epistemic {
+    let kx: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let x = kx.value
+    let a = A { x: x }
+    let c = C { a: A { x: x } }
+    let v_direct = variance_of(x)
+    let v_one = variance_of(a.x)
+    let v_two = variance_of(c.a.x)
+    print("direct="); print_f64(v_direct); print("\n")
+    print("one_hop="); print_f64(v_one); print("\n")
+    print("two_hop="); print_f64(v_two); print("\n")
+    // 0.3^2 = 0.09 on every path; a field hop must not lose the uncertainty.
+    if abs_f(v_direct - 0.09) < 1.0e-9
+        && abs_f(v_one - 0.09) < 1.0e-9
+        && abs_f(v_two - 0.09) < 1.0e-9 {
+        print("GUM_FO_FIELD_CHAIN_OK\n")
+    } else {
+        print("GUM_FO_FIELD_CHAIN_FAIL\n")
+    }
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}

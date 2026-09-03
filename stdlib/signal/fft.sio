@@ -1,243 +1,212 @@
-// signal::fft — Radix-2 Cooley-Tukey FFT with Epistemic Uncertainty Propagation
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/signal/fft.sio — Radix-2 Cooley-Tukey FFT (N ≤ 256, power of 2)
 //
-// Implements the fast Fourier transform with GUM-compliant uncertainty propagation
-// through the butterfly network. Each butterfly stage combines two values linearly
-// via a twiddle factor W_N^k = exp(-2πik/N) with |W_N^k| = 1, so uncertainty
-// propagates as: u²(output) = u²(input_a) + u²(input_b).
+// ComplexArray holds split re/im arrays of fixed size 256. Avoids large-struct SRET:
+// callers declare `var arr = ComplexArray {...}` and pass `&!arr` to init helpers.
+// Forward and inverse (normalized) transforms operate in-place via &!ComplexArray.
 //
-// References:
-//   - Cooley & Tukey (1965): "An algorithm for the machine calculation of complex
-//     Fourier series", Mathematics of Computation 19(90):297–301
-//   - JCGM 100:2008 (GUM): uncertainty propagation through linear operations
-//   - Oppenheim & Schafer (2010): "Discrete-Time Signal Processing", 3rd ed.
-
-use epistemic::gum::{GUMResult, gum_simple}
+// USAGE: import with `use signal::fft::*`. Construct a buffer in the caller's frame:
+//   var arr = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+// then `ca_load_real(&!arr, &data, n)`, `fft_forward(&!arr)`, `fft_magnitude(&arr, &!out)`.
+// (ComplexArray fields are pub so callers can declare one; pass by &! — never by value.)
 
 // ============================================================================
-// CONSTANTS
+// MATH HELPERS — accurate trig via octant reduction
 // ============================================================================
 
-fn fft_pi() -> f64 { 3.14159265358979323846 }
+pub fn fft_pi() -> f64 { 3.14159265358979323846 }
 
-// Maximum supported FFT size (fixed array dimension)
-fn FFT_MAX_N() -> i32 { 256 }
-
-// ============================================================================
-// STRUCTS
-// ============================================================================
-
-pub struct ComplexArray {
-    pub re: [f64; 256],
-    pub im: [f64; 256],
-    pub n: i32,
-}
-
-pub struct EpistemicSpectrum {
-    pub magnitude: [f64; 256],      // |X[k]|
-    pub phase: [f64; 256],          // arg(X[k])
-    pub magnitude_unc: [f64; 256],  // GUM uncertainty on |X[k]|
-    pub n: i32,
-}
-
-// ============================================================================
-// SELF-CONTAINED MATH HELPERS
-// (Taylor series / Newton iterations — no extern "C" dependency)
-// ============================================================================
-
-// fft_abs_f64: absolute value
-fn fft_abs_f64(x: f64) -> f64 {
-    if x < 0.0 { 0.0 - x } else { x }
-}
-
-// fft_sqrt: Newton's method, 20 iterations, good to full f64 precision
-fn fft_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+pub fn fft_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
     var y = x
-    var i: i32 = 0
-    while i < 20 {
-        y = 0.5 * (y + x / y)
-        i = i + 1
-    }
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
     y
 }
 
-// fft_sin: range-reduce to [-π, π] then 9-term Taylor series
-// sin(x) = x - x³/6 + x⁵/120 - x⁷/5040 + x⁹/362880 - ...
-fn fft_sin(x: f64) -> f64 {
-    // Range reduction: bring x into [-2π, 2π]
-    let two_pi = 2.0 * fft_pi()
-    var xr = x
-    // Reduce modulo 2π using floor division approximation
-    // For our use (twiddle angles), x is already in [-2π, 0], but be safe
-    var k_f = xr / two_pi
-    // Truncate toward zero
-    var k_i: i32 = 0
-    if k_f >= 1.0 {
-        k_i = k_f as i32
-        xr = xr - (k_i as f64) * two_pi
-    } else if k_f <= -1.0 {
-        // negative: floor
-        k_i = (0.0 - k_f) as i32
-        xr = xr + (k_i as f64) * two_pi
-    }
-    // Bring to [-π, π]
-    let pi = fft_pi()
-    if xr > pi { xr = xr - two_pi }
-    if xr < (0.0 - pi) { xr = xr + two_pi }
-
-    // Taylor: sin(x) = sum_{n=0}^{8} (-1)^n x^(2n+1) / (2n+1)!
-    let x2 = xr * xr
-    // Coefficients: 1/1!, 1/3!, 1/5!, 1/7!, 1/9!, 1/11!, 1/13!, 1/15!, 1/17!
-    let c1  = 1.0
-    let c3  = 0.16666666666666666667
-    let c5  = 0.00833333333333333333
-    let c7  = 0.00019841269841269841
-    let c9  = 0.00000275573192239859
-    let c11 = 0.00000002505210838544
-    let c13 = 0.00000000016059043836
-    let c15 = 0.00000000000076471637
-    let c17 = 0.00000000000002811457
-    xr * (c1 - x2 * (c3 - x2 * (c5 - x2 * (c7 - x2 * (c9 - x2 * (c11 - x2 * (c13 - x2 * (c15 - x2 * c17))))))))
+// Sin Taylor for |t| ≤ π/4; error < 2e-9
+fn fft_sin_small(t: f64) -> f64 with Div {
+    let t2 = t * t
+    let t3 = t2 * t
+    let t5 = t3 * t2
+    let t7 = t5 * t2
+    let t9 = t7 * t2
+    let t11 = t9 * t2
+    t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0 - t11 / 39916800.0
 }
 
-// fft_cos: cos(x) = sin(x + π/2)
-fn fft_cos(x: f64) -> f64 {
+// Cos Taylor for |t| ≤ π/4; error < 2e-10
+fn fft_cos_small(t: f64) -> f64 with Div {
+    let t2 = t * t
+    let t4 = t2 * t2
+    let t6 = t4 * t2
+    let t8 = t6 * t2
+    let t10 = t8 * t2
+    1.0 - t2 / 2.0 + t4 / 24.0 - t6 / 720.0 + t8 / 40320.0 - t10 / 3628800.0
+}
+
+// Full sin with range reduction to [-π/4, π/4]; accurate to ~1e-9 everywhere
+pub fn fft_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = fft_pi()
+    let pi2 = pi * 0.5
+    let pi4 = pi * 0.25
+    let two_pi = pi * 2.0
+    var t = x
+    var neg: i64 = 0
+    if t < 0.0 { t = 0.0 - t; neg = 1 }
+    // strip whole 2π periods
+    var cnt = t / two_pi
+    while cnt >= 1.0 { cnt = cnt - 1.0 }
+    var k: i64 = 0
+    var tmp = t / two_pi
+    while tmp >= 1.0 { tmp = tmp - 1.0; k = k + 1 }
+    t = t - (k as f64) * two_pi
+    // t in [0, 2π)
+    if t > pi { t = t - pi; neg = if neg == 0 { 1 } else { 0 } }
+    // t in [0, π)
+    if t > pi2 { t = pi - t }
+    // t in [0, π/2]
+    var result: f64 = 0.0
+    if t <= pi4 {
+        result = fft_sin_small(t)
+    } else {
+        result = fft_cos_small(pi2 - t)
+    }
+    if neg == 1 { 0.0 - result } else { result }
+}
+
+pub fn fft_cos(x: f64) -> f64 with Mut, Div, Panic {
     fft_sin(x + fft_pi() * 0.5)
 }
 
-// fft_atan2: four-quadrant arctangent for phase computation
-// Uses identity: atan2(y, x) = 2*atan(y / (sqrt(x²+y²) + x))  for x > -r
-// Falls back to ±π/2 when x is near zero.
 fn fft_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
     let pi = fft_pi()
-    // Handle degenerate cases
-    if x == 0.0 {
-        if y > 0.0 { return pi * 0.5 }
-        if y < 0.0 { return 0.0 - pi * 0.5 }
-        return 0.0
+    let pi2 = pi * 0.5
+    let abs_y = if y < 0.0 { 0.0 - y } else { y }
+    let abs_x = if x < 0.0 { 0.0 - x } else { x }
+    if x == 0.0 && y == 0.0 { return 0.0 }
+    var ang: f64 = 0.0
+    if abs_x >= abs_y {
+        let r = y / x
+        let r2 = r * r
+        // atan(r) via minimax for |r| ≤ 1
+        ang = r * (1.0 - r2 * (1.0 / 3.0 - r2 * (1.0 / 5.0 - r2 * (1.0 / 7.0))))
+        if x < 0.0 {
+            if y >= 0.0 { ang = ang + pi } else { ang = ang - pi }
+        }
+    } else {
+        let r = x / y
+        let r2 = r * r
+        ang = r * (1.0 - r2 * (1.0 / 3.0 - r2 * (1.0 / 5.0 - r2 * (1.0 / 7.0))))
+        if y > 0.0 { ang = pi2 - ang } else { ang = (0.0 - pi2) - ang }
     }
-    // r = sqrt(x² + y²)
-    let r = fft_sqrt(x * x + y * y)
-    // t = atan(y / (r + x))  via Taylor series (Euler's half-angle formula)
-    let denom = r + x
-    if fft_abs_f64(denom) < 1.0e-15 {
-        // x ≈ -r, i.e. x < 0, y ≈ 0
-        if y >= 0.0 { return pi }
-        return 0.0 - pi
-    }
-    let t = y / denom
-    // atan(t) via Taylor: t - t³/3 + t⁵/5 - t⁷/7 + ...  (converges for |t|≤1)
-    let t2 = t * t
-    let atan_t = t * (1.0 - t2 * (0.33333333333333333 - t2 * (0.2 - t2 * (0.14285714285714285 - t2 * (0.11111111111111111 - t2 * 0.09090909090909090)))))
-    2.0 * atan_t
+    ang
 }
 
 // ============================================================================
-// BIT-REVERSAL PERMUTATION
+// BIT-REVERSAL AND LOG2
 // ============================================================================
 
-// Number of bits needed to represent values 0..n-1 (n must be power of 2)
-fn fft_log2_i32(n: i32) -> i32 {
-    var bits: i32 = 0
-    var tmp = n
-    while tmp > 1 {
-        bits = bits + 1
-        tmp = tmp / 2
-    }
+fn fft_log2(n: i64) -> i64 with Mut, Div, Panic {
+    var bits: i64 = 0
+    var v = n
+    while v > 1 { v = v / 2; bits = bits + 1 }
     bits
 }
 
-// Reverse the low `bits` bits of `v`
-fn fft_bit_reverse(v: i32, bits: i32) -> i32 {
-    var result: i32 = 0
-    var vv = v
-    var i: i32 = 0
+fn fft_bit_reverse(v: i64, bits: i64) -> i64 with Mut {
+    var result: i64 = 0
+    var x = v
+    var i: i64 = 0
     while i < bits {
-        result = (result * 2) | (vv & 1)
-        vv = vv / 2
+        result = (result * 2) + (x - (x / 2) * 2)
+        x = x / 2
         i = i + 1
     }
     result
 }
 
 // ============================================================================
-// COMPLEX ARRAY CONSTRUCTORS
+// COMPLEX ARRAY — pass by reference to avoid large-struct SRET (4104 bytes)
 // ============================================================================
 
-pub fn complex_array_new(n: i32) -> ComplexArray {
-    ComplexArray {
-        re: [0.0; 256],
-        im: [0.0; 256],
-        n: n,
-    }
+pub struct ComplexArray {
+    pub re: [f64; 256],
+    pub im: [f64; 256],
+    pub n: i64,
 }
 
-pub fn complex_array_from_real(data: &[f64; 256], n: i32) -> ComplexArray {
-    var out = complex_array_new(n)
-    var i: i32 = 0
+pub fn ca_load_real(arr: &!ComplexArray, data: &[f64; 256], n: i64) with Mut {
+    arr.n = n
+    var i: i64 = 0
     while i < n {
-        out.re[i as usize] = data[i as usize]
+        arr.re[i] = data[i]
+        arr.im[i] = 0.0
         i = i + 1
     }
-    out
+}
+
+pub fn ca_clear(arr: &!ComplexArray, n: i64) with Mut {
+    arr.n = n
+    var i: i64 = 0
+    while i < n {
+        arr.re[i] = 0.0
+        arr.im[i] = 0.0
+        i = i + 1
+    }
 }
 
 // ============================================================================
-// IN-PLACE COOLEY-TUKEY RADIX-2 DIT FFT (forward, W = exp(-2πi k/N))
+// FFT CORE — in-place Cooley-Tukey DIT radix-2
 // ============================================================================
 
-// Perform forward FFT on a mutable ComplexArray (Decimation-In-Time)
-// n must be a power of 2 and <= 256.
-fn fft_forward_inplace(arr: &! ComplexArray) with Mut, Div, Panic {
+pub fn fft_forward(arr: &!ComplexArray) with Mut, Div, Panic {
     let n = arr.n
-    let bits = fft_log2_i32(n)
-
-    // Bit-reversal permutation
-    var i: i32 = 0
+    let bits = fft_log2(n)
+    var i: i64 = 0
     while i < n {
         let j = fft_bit_reverse(i, bits)
-        if i < j {
-            let tmp_re = arr.re[i as usize]
-            let tmp_im = arr.im[i as usize]
-            arr.re[i as usize] = arr.re[j as usize]
-            arr.im[i as usize] = arr.im[j as usize]
-            arr.re[j as usize] = tmp_re
-            arr.im[j as usize] = tmp_im
+        if j > i {
+            let tmp_re = arr.re[i]
+            let tmp_im = arr.im[i]
+            arr.re[i] = arr.re[j]
+            arr.im[i] = arr.im[j]
+            arr.re[j] = tmp_re
+            arr.im[j] = tmp_im
         }
         i = i + 1
     }
-
-    // Butterfly stages: size = 2, 4, 8, ..., n
-    var size: i32 = 2
+    var size: i64 = 2
     while size <= n {
         let half = size / 2
         let angle_step = (0.0 - 2.0) * fft_pi() / (size as f64)
-
-        var k: i32 = 0
+        var k: i64 = 0
         while k < n {
-            var j: i32 = 0
+            var j: i64 = 0
             while j < half {
                 let angle = angle_step * (j as f64)
                 let w_re = fft_cos(angle)
                 let w_im = fft_sin(angle)
-
-                let idx1 = (k + j) as usize
-                let idx2 = (k + j + half) as usize
-
-                let a_re = arr.re[idx1]
-                let a_im = arr.im[idx1]
-                let b_re = arr.re[idx2]
-                let b_im = arr.im[idx2]
-
-                // t = w * b
-                let t_re = w_re * b_re - w_im * b_im
-                let t_im = w_re * b_im + w_im * b_re
-
-                arr.re[idx1] = a_re + t_re
-                arr.im[idx1] = a_im + t_im
-                arr.re[idx2] = a_re - t_re
-                arr.im[idx2] = a_im - t_im
-
+                let idx1 = k + j
+                let idx2 = k + j + half
+                let u_re = arr.re[idx1]
+                let u_im = arr.im[idx1]
+                let v_re = arr.re[idx2] * w_re - arr.im[idx2] * w_im
+                let v_im = arr.re[idx2] * w_im + arr.im[idx2] * w_re
+                arr.re[idx1] = u_re + v_re
+                arr.im[idx1] = u_im + v_im
+                arr.re[idx2] = u_re - v_re
+                arr.im[idx2] = u_im - v_im
                 j = j + 1
             }
             k = k + size
@@ -246,235 +215,165 @@ fn fft_forward_inplace(arr: &! ComplexArray) with Mut, Div, Panic {
     }
 }
 
-// ============================================================================
-// PUBLIC FFT API
-// ============================================================================
-
-/// Forward FFT: radix-2 Cooley-Tukey, W_N^k = exp(-2πik/N).
-/// input.n must be a power of 2 in [1, 256].
-pub fn fft_forward(input: &ComplexArray) -> ComplexArray with Mut, Div, Panic {
-    var out = ComplexArray {
-        re: input.re,
-        im: input.im,
-        n: input.n,
-    }
-    fft_forward_inplace(&! out)
-    out
-}
-
-/// Inverse FFT: conjugate → forward → conjugate → scale by 1/N.
-pub fn fft_inverse(input: &ComplexArray) -> ComplexArray with Mut, Div, Panic {
-    let n = input.n
-    // Step 1: conjugate input (negate imaginary parts)
-    var work = ComplexArray {
-        re: input.re,
-        im: [0.0; 256],
-        n: n,
-    }
-    var i: i32 = 0
+pub fn fft_inverse(arr: &!ComplexArray) with Mut, Div, Panic {
+    let n = arr.n
+    var i: i64 = 0
     while i < n {
-        work.im[i as usize] = 0.0 - input.im[i as usize]
+        arr.im[i] = 0.0 - arr.im[i]
         i = i + 1
     }
-    // Step 2: forward FFT
-    fft_forward_inplace(&! work)
-    // Step 3: conjugate output and scale by 1/N
-    let n_f = n as f64
-    i = 0
-    while i < n {
-        work.im[i as usize] = 0.0 - work.im[i as usize]
-        work.re[i as usize] = work.re[i as usize] / n_f
-        work.im[i as usize] = work.im[i as usize] / n_f
-        i = i + 1
+    fft_forward(arr)
+    var j: i64 = 0
+    while j < n {
+        arr.re[j] = arr.re[j] / (n as f64)
+        arr.im[j] = (0.0 - arr.im[j]) / (n as f64)
+        j = j + 1
     }
-    work
 }
 
-/// Compute magnitude spectrum: |X[k]| = sqrt(re[k]² + im[k]²).
-pub fn fft_magnitude(spectrum: &ComplexArray) -> [f64; 256] with Mut, Div, Panic {
+// ============================================================================
+// SPECTRAL HELPERS
+// ============================================================================
+
+pub fn fft_magnitude(arr: &ComplexArray, out: &![f64; 256]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < arr.n {
+        out[i] = fft_sqrt(arr.re[i] * arr.re[i] + arr.im[i] * arr.im[i])
+        i = i + 1
+    }
+}
+
+pub fn fft_power(arr: &ComplexArray, out: &![f64; 256]) with Mut {
+    var i: i64 = 0
+    while i < arr.n {
+        out[i] = arr.re[i] * arr.re[i] + arr.im[i] * arr.im[i]
+        i = i + 1
+    }
+}
+
+pub fn fft_phase(arr: &ComplexArray, out: &![f64; 256]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < arr.n {
+        out[i] = fft_atan2(arr.im[i], arr.re[i])
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_log2_bit_reverse() with IO, Mut, Div, Panic {
+    chk(1, if fft_log2(1) == 0 { 1 } else { 0 })
+    chk(2, if fft_log2(2) == 1 { 1 } else { 0 })
+    chk(3, if fft_log2(8) == 3 { 1 } else { 0 })
+    chk(4, if fft_log2(256) == 8 { 1 } else { 0 })
+    chk(5, if fft_bit_reverse(6, 3) == 3 { 1 } else { 0 })
+    chk(6, if fft_bit_reverse(1, 3) == 4 { 1 } else { 0 })
+}
+
+fn test_trig() with IO, Mut, Div, Panic {
+    chk(7, near(fft_sin(0.0), 0.0, 1e-12))
+    chk(8, near(fft_sin(fft_pi() * 0.5), 1.0, 1e-9))
+    chk(9, near(fft_cos(0.0), 1.0, 1e-9))
+    chk(10, near(fft_cos(fft_pi()), 0.0 - 1.0, 1e-9))
+    // sin(π) = 0 with octant reduction
+    chk(11, near(fft_sin(fft_pi()), 0.0, 1e-9))
+    // sin(3π/2) = -1
+    chk(12, near(fft_sin(fft_pi() * 1.5), 0.0 - 1.0, 1e-9))
+}
+
+fn test_dc() with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 8 { data[i] = 1.0; i = i + 1 }
+    var arr = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!arr, &data, 8)
+    fft_forward(&!arr)
+    chk(13, near(arr.re[0], 8.0, 1e-8))
+    chk(14, near(arr.im[0], 0.0, 1e-8))
+    chk(15, near(arr.re[1], 0.0, 1e-6))
+    chk(16, near(arr.re[4], 0.0, 1e-6))
+}
+
+fn test_single_tone() with IO, Mut, Div, Panic {
+    let n: i64 = 8
+    let pi = fft_pi()
+    var data: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n {
+        data[i] = fft_cos(2.0 * pi * 1.0 * (i as f64) / (n as f64))
+        i = i + 1
+    }
+    var arr = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!arr, &data, n)
+    fft_forward(&!arr)
+    chk(17, near(arr.re[1], 4.0, 1e-5))
+    chk(18, near(arr.im[1], 0.0, 1e-5))
+    chk(19, near(arr.re[7], 4.0, 1e-5))
+    chk(20, near(arr.re[0], 0.0, 1e-5))
+}
+
+fn test_roundtrip() with IO, Mut, Div, Panic {
+    let n: i64 = 8
+    var data: [f64; 256] = [0.0; 256]
+    data[0] = 1.0; data[1] = 2.0; data[2] = 3.0; data[3] = 4.0
+    data[4] = 5.0; data[5] = 6.0; data[6] = 7.0; data[7] = 8.0
+    var arr = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!arr, &data, n)
+    fft_forward(&!arr)
+    fft_inverse(&!arr)
+    chk(21, near(arr.re[0], 1.0, 1e-6))
+    chk(22, near(arr.re[1], 2.0, 1e-6))
+    chk(23, near(arr.re[3], 4.0, 1e-6))
+    chk(24, near(arr.re[7], 8.0, 1e-6))
+    chk(25, near(arr.im[0], 0.0, 1e-6))
+}
+
+fn test_magnitude_power() with IO, Mut, Div, Panic {
+    let n: i64 = 4
+    var data: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n { data[i] = 2.0; i = i + 1 }
+    var arr = ComplexArray { re: [0.0; 256], im: [0.0; 256], n: 0 }
+    ca_load_real(&!arr, &data, n)
+    fft_forward(&!arr)
     var mag: [f64; 256] = [0.0; 256]
-    var k: i32 = 0
-    while k < spectrum.n {
-        let re = spectrum.re[k as usize]
-        let im = spectrum.im[k as usize]
-        mag[k as usize] = fft_sqrt(re * re + im * im)
-        k = k + 1
-    }
-    mag
+    var pwr: [f64; 256] = [0.0; 256]
+    fft_magnitude(&arr, &!mag)
+    fft_power(&arr, &!pwr)
+    chk(26, near(mag[0], 8.0, 1e-6))
+    chk(27, near(mag[1], 0.0, 1e-6))
+    chk(28, near(pwr[0], 64.0, 1e-5))
 }
 
-/// Compute phase spectrum: arg(X[k]) = atan2(im[k], re[k]) in radians.
-pub fn fft_phase(spectrum: &ComplexArray) -> [f64; 256] with Mut, Div, Panic {
-    var phase: [f64; 256] = [0.0; 256]
-    var k: i32 = 0
-    while k < spectrum.n {
-        phase[k as usize] = fft_atan2(spectrum.im[k as usize], spectrum.re[k as usize])
-        k = k + 1
-    }
-    phase
-}
-
-/// Compute power spectrum: |X[k]|².
-pub fn fft_power_spectrum(input: &ComplexArray) -> [f64; 256] {
-    var power: [f64; 256] = [0.0; 256]
-    var k: i32 = 0
-    while k < input.n {
-        let re = input.re[k as usize]
-        let im = input.im[k as usize]
-        power[k as usize] = re * re + im * im
-        k = k + 1
-    }
-    power
-}
-
-// ============================================================================
-// EPISTEMIC FFT — GUM UNCERTAINTY PROPAGATION
-// ============================================================================
-//
-// The Cooley-Tukey butterfly computes:
-//   X[k]     = A[k] + W·B[k]
-//   X[k+N/2] = A[k] - W·B[k]
-//
-// where W = exp(-2πik/N), |W| = 1. Both outputs are linear combinations
-// of inputs; by GUM (JCGM 100:2008 §5.1.2):
-//
-//   u²(X[k])     = u²(A[k]) + |W|²·u²(B[k]) = u²(A[k]) + u²(B[k])
-//   u²(X[k+N/2]) = u²(A[k]) + |W|²·u²(B[k]) = u²(A[k]) + u²(B[k])
-//
-// After log₂(N) stages each uncertainty is combined log₂(N) times.
-// Propagated variance grows as 2^(log₂N) = N times the per-input variance,
-// so u(output) = sqrt(N) · u(input) for uniform input uncertainty.
-//
-// For the magnitude |X[k]| = sqrt(re² + im²), the sensitivity coefficients
-// are re/|X| and im/|X|, giving:
-//   u(|X[k]|)² = (re/|X|)²·u²(re) + (im/|X|)²·u²(im) ≤ u²(re) + u²(im)
-//
-// We bound by u(|X[k]|) ≤ sqrt(u²_re[k] + u²_im[k]) which is exact when
-// the sensitivity coefficients are both 1 (i.e., |X[k]| is uncertain).
-
-/// FFT with GUM uncertainty propagation through the butterfly network.
-///
-/// input_re:  real part of time-domain signal (n samples)
-/// input_unc: standard uncertainty on each sample (uniform or heterogeneous)
-/// n:         transform size, must be power of 2, ≤ 256
-///
-/// Returns EpistemicSpectrum with magnitude, phase, and magnitude uncertainty.
-pub fn fft_epistemic(input_re: &[f64; 256], input_unc: &[f64; 256], n: i32) -> EpistemicSpectrum with Mut, Div, Panic {
-    // Working arrays: signal values
-    var re: [f64; 256] = [0.0; 256]
-    var im: [f64; 256] = [0.0; 256]
-    // Working arrays: propagated variance (u² per sample)
-    var u2_re: [f64; 256] = [0.0; 256]
-    var u2_im: [f64; 256] = [0.0; 256]
-
-    // Initialise from real input (imaginary part = 0, u²_im = 0)
-    var i: i32 = 0
-    while i < n {
-        re[i as usize] = input_re[i as usize]
-        im[i as usize] = 0.0
-        let u = input_unc[i as usize]
-        u2_re[i as usize] = u * u
-        u2_im[i as usize] = 0.0
-        i = i + 1
-    }
-
-    // Bit-reversal permutation on both values and variances
-    let bits = fft_log2_i32(n)
-    i = 0
-    while i < n {
-        let j = fft_bit_reverse(i, bits)
-        if i < j {
-            let tmp_re  = re[i as usize]
-            let tmp_im  = im[i as usize]
-            let tmp_u2r = u2_re[i as usize]
-            let tmp_u2i = u2_im[i as usize]
-            re[i as usize]   = re[j as usize]
-            im[i as usize]   = im[j as usize]
-            u2_re[i as usize] = u2_re[j as usize]
-            u2_im[i as usize] = u2_im[j as usize]
-            re[j as usize]   = tmp_re
-            im[j as usize]   = tmp_im
-            u2_re[j as usize] = tmp_u2r
-            u2_im[j as usize] = tmp_u2i
-        }
-        i = i + 1
-    }
-
-    // Butterfly stages with uncertainty propagation
-    var size: i32 = 2
-    while size <= n {
-        let half = size / 2
-        let angle_step = (0.0 - 2.0) * fft_pi() / (size as f64)
-
-        var k: i32 = 0
-        while k < n {
-            var j: i32 = 0
-            while j < half {
-                let angle = angle_step * (j as f64)
-                let w_re = fft_cos(angle)
-                let w_im = fft_sin(angle)
-
-                let idx1 = (k + j) as usize
-                let idx2 = (k + j + half) as usize
-
-                let a_re = re[idx1]
-                let a_im = im[idx1]
-                let b_re = re[idx2]
-                let b_im = im[idx2]
-
-                // t = w * b  (twiddle × lower butterfly arm)
-                let t_re = w_re * b_re - w_im * b_im
-                let t_im = w_re * b_im + w_im * b_re
-
-                re[idx1] = a_re + t_re
-                im[idx1] = a_im + t_im
-                re[idx2] = a_re - t_re
-                im[idx2] = a_im - t_im
-
-                // GUM propagation: |W|=1, so u²(output) = u²(a) + u²(b)
-                // For t = w*b: u²(t_re) = w_re²·u²(b_re) + w_im²·u²(b_im)
-                //              u²(t_im) = w_re²·u²(b_im) + w_im²·u²(b_re)
-                // Then u²(a ± t) = u²(a) + u²(t)
-                let w_re2 = w_re * w_re
-                let w_im2 = w_im * w_im
-                let u2t_re = w_re2 * u2_re[idx2] + w_im2 * u2_im[idx2]
-                let u2t_im = w_re2 * u2_im[idx2] + w_im2 * u2_re[idx2]
-
-                let new_u2_re = u2_re[idx1] + u2t_re
-                let new_u2_im = u2_im[idx1] + u2t_im
-                u2_re[idx1] = new_u2_re
-                u2_im[idx1] = new_u2_im
-                u2_re[idx2] = new_u2_re
-                u2_im[idx2] = new_u2_im
-
-                j = j + 1
-            }
-            k = k + size
-        }
-        size = size * 2
-    }
-
-    // Assemble output spectrum
-    var mag: [f64; 256]     = [0.0; 256]
-    var phase: [f64; 256]   = [0.0; 256]
-    var mag_unc: [f64; 256] = [0.0; 256]
-
-    var k: i32 = 0
-    while k < n {
-        let r  = re[k as usize]
-        let im_k = im[k as usize]
-        let m = fft_sqrt(r * r + im_k * im_k)
-        mag[k as usize] = m
-        phase[k as usize] = fft_atan2(im_k, r)
-        // u(|X[k]|) = sqrt(u²_re[k] + u²_im[k])  — conservative bound
-        mag_unc[k as usize] = fft_sqrt(u2_re[k as usize] + u2_im[k as usize])
-        k = k + 1
-    }
-
-    EpistemicSpectrum {
-        magnitude: mag,
-        phase: phase,
-        magnitude_unc: mag_unc,
-        n: n,
-    }
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/signal/fft tests ───\n")
+    test_log2_bit_reverse()
+    test_trig()
+    test_dc()
+    test_single_tone()
+    test_roundtrip()
+    test_magnitude_power()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
 }

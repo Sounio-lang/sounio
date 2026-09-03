@@ -1,0 +1,2477 @@
+module gpu::kaxi_backend;
+
+// self-hosted::gpu::kaxi_backend - K-AXI GPU Backend + Assembler + Simulator
+//
+// Phase 1: Makes K-AXI a first-class GPU target.
+//   1. gpu_lower_to_kaxi(kernel) -> KaxiAsmBuf (text assembly)
+//   2. kaxi_assemble(asm) -> KaxiTransactionStream (binary transactions)
+//   3. kaxi_simulate(stream) -> KaxiTrace (cycle-accurate simulation)
+//
+// Self-contained: no imports from kernel_ir.sio or other GPU modules.
+// Uses parallel primitive arrays to avoid struct-array-repeat compiler bug.
+
+// ============================================================================
+// K-AXI ISA constants (matching kaxi_fabric_emitter.sio + kaxi.sio Verilog)
+// ============================================================================
+
+let KAXI_OP_PASS: i64 = 0
+let KAXI_OP_ADD: i64 = 1
+let KAXI_OP_MUL: i64 = 2
+let KAXI_OP_DIV: i64 = 3
+let KAXI_OP_FMA: i64 = 4
+let KAXI_OP_LOAD_IMM: i64 = 5
+let KAXI_OP_LOAD_PARAM: i64 = 6
+let KAXI_OP_LOAD_GLOBAL: i64 = 7
+let KAXI_OP_STORE_GLOBAL: i64 = 8
+let KAXI_OP_GET_BID: i64 = 9
+let KAXI_OP_GET_NTID: i64 = 10
+let KAXI_OP_RET: i64 = 11
+let KAXI_OP_SUB: i64 = 13
+let KAXI_OP_SETP_LT: i64 = 14
+let KAXI_OP_BARRIER: i64 = 12
+let KAXI_OP_SETP_LE: i64 = 16
+let KAXI_OP_SETP_EQ: i64 = 17
+let KAXI_OP_SETP_GE: i64 = 18
+let KAXI_OP_SETP_GT: i64 = 19
+let KAXI_OP_SETP_NE: i64 = 20
+let KAXI_OP_SELP: i64 = 21
+let KAXI_OP_LOAD_SHARED: i64 = 22
+let KAXI_OP_STORE_SHARED: i64 = 23
+let KAXI_OP_NOP: i64 = 15
+let KAXI_OP_BRANCH: i64 = 24
+let KAXI_OP_RECONVERGE: i64 = 25
+let KAXI_OP_VOTE_BALLOT: i64 = 26
+let KAXI_OP_SHUFFLE_XOR: i64 = 27
+let KAXI_OP_WARP_REDUCE_ADD: i64 = 28
+
+let KAXI_WARP_SIZE: i64 = 8
+
+// GPU IR opcode constants (matching hlir_to_gpu.sio)
+let GPU_IR_GET_TID: i64 = 0
+let GPU_IR_CONST: i64 = 1
+let GPU_IR_CVT: i64 = 2
+let GPU_IR_MUL_IMM: i64 = 3
+let GPU_IR_ADD: i64 = 4
+let GPU_IR_SUB: i64 = 5
+let GPU_IR_MUL: i64 = 6
+let GPU_IR_DIV: i64 = 7
+let GPU_IR_MAX: i64 = 8
+let GPU_IR_MIN: i64 = 9
+let GPU_IR_AND: i64 = 10
+let GPU_IR_OR: i64 = 11
+let GPU_IR_XOR: i64 = 12
+let GPU_IR_SHL: i64 = 13
+let GPU_IR_LOAD_GLOBAL: i64 = 14
+let GPU_IR_STORE_GLOBAL: i64 = 15
+let GPU_IR_RET: i64 = 16
+let GPU_IR_FMA: i64 = 17
+let GPU_IR_GET_BID: i64 = 18
+let GPU_IR_GET_NTID: i64 = 19
+let GPU_IR_ADD_IMM: i64 = 20
+let GPU_IR_BARRIER_SYNC: i64 = 21
+let GPU_IR_SETP_LT: i64 = 22
+let GPU_IR_SETP_LE: i64 = 23
+let GPU_IR_SETP_EQ: i64 = 24
+let GPU_IR_SETP_GE: i64 = 25
+let GPU_IR_SELP: i64 = 26
+let GPU_IR_ATOMIC_ADD: i64 = 27
+let GPU_IR_ATOMIC_SUB: i64 = 28
+let GPU_IR_ATOMIC_MIN: i64 = 29
+let GPU_IR_ATOMIC_MAX: i64 = 30
+let GPU_IR_SQRT: i64 = 31
+let GPU_IR_ABS: i64 = 32
+let GPU_IR_NEG: i64 = 33
+let GPU_IR_SETP_GT: i64 = 34
+let GPU_IR_SETP_NE: i64 = 35
+let GPU_IR_LOAD_PARAM: i64 = 36
+let GPU_IR_GET_NCTAID: i64 = 37
+let GPU_IR_RECIP: i64 = 38
+let GPU_IR_LOG: i64 = 39
+let GPU_IR_EXP: i64 = 40
+let GPU_IR_SIN: i64 = 41
+let GPU_IR_COS: i64 = 42
+let GPU_IR_RSQRT: i64 = 43
+let GPU_IR_GETVAR: i64 = 44
+
+// Variance growth profiles (Q32.32 fractional, matching kaxi.sio Verilog)
+fn kaxi_variance_add(v: i64) -> i64 {
+    v + (v >> 3)
+}
+
+fn kaxi_variance_mul(v: i64) -> i64 {
+    v + (v >> 1) + (v >> 3)
+}
+
+fn kaxi_variance_div(v: i64) -> i64 {
+    v + (v >> 1) + (v >> 2)
+}
+
+fn kaxi_variance_fma(v: i64) -> i64 {
+    v + (v >> 1) + (v >> 2) + (v >> 4)
+}
+
+// ============================================================================
+// Flag packing (matches kaxi_fabric_emitter.sio)
+// ============================================================================
+
+pub fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+    let op = op_kind & 0x1F
+    let failure = (failure_inc & 0xFF) << 8
+    let success = (success_inc & 0xFF) << 16
+    let alpha = (alpha_q8 & 0xFF) << 24
+    op | failure | success | alpha
+}
+
+pub fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
+    flags & 0x1F
+}
+
+// ============================================================================
+// K-AXI transaction stream (parallel arrays, struct-array-bug safe)
+// ============================================================================
+
+let KAXI_TXN_MAX: i64 = 4096
+
+pub struct KaxiTxnStream {
+    value_bits: [i64; 4096],
+    variance_bits: [i64; 4096],
+    prov_lo: [i64; 4096],
+    prov_hi: [i64; 4096],
+    conf_lo: [i64; 4096],
+    conf_hi: [i64; 4096],
+    flags: [i64; 4096],
+    seq: [i64; 4096],
+    count: i64,
+}
+
+pub fn kaxi_txn_stream_new() -> KaxiTxnStream {
+    KaxiTxnStream {
+        value_bits: [0; 4096],
+        variance_bits: [0; 4096],
+        prov_lo: [0; 4096],
+        prov_hi: [0; 4096],
+        conf_lo: [0; 4096],
+        conf_hi: [0; 4096],
+        flags: [0; 4096],
+        seq: [0; 4096],
+        count: 0,
+    }
+}
+
+pub fn kaxi_txn_stream_count(stream: KaxiTxnStream) -> i64 {
+    stream.count
+}
+
+fn kaxi_txn_stream_append(s: KaxiTxnStream, value: i64, variance: i64, pl: i64, ph: i64, cl: i64, ch: i64, fl: i64, sq: i64) -> KaxiTxnStream with Mut, Panic {
+    var out = s
+    if out.count < KAXI_TXN_MAX {
+        let i = out.count
+        out.value_bits[i as usize] = value
+        out.variance_bits[i as usize] = variance
+        out.prov_lo[i as usize] = pl
+        out.prov_hi[i as usize] = ph
+        out.conf_lo[i as usize] = cl
+        out.conf_hi[i as usize] = ch
+        out.flags[i as usize] = fl
+        out.seq[i as usize] = sq
+        out.count = out.count + 1
+    }
+    out
+}
+
+// ============================================================================
+// K-AXI text assembly buffer
+// ============================================================================
+
+pub struct KaxiAsmBuf {
+    data: [i8; 2097152],
+    len: i64,
+}
+
+pub fn kaxi_asm_new() -> KaxiAsmBuf {
+    KaxiAsmBuf {
+        data: [0; 2097152],
+        len: 0,
+    }
+}
+
+pub fn kaxi_asm_push_byte(buf: KaxiAsmBuf, b: i8) -> KaxiAsmBuf with Mut, Panic {
+    var out = buf
+    if out.len >= 0 && out.len < 2097152 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+pub fn kaxi_asm_push_str(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if out.len < 2097152 {
+            out.data[out.len as usize] = str_char_at(s, i) as i8
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+pub fn kaxi_asm_push_line(buf: KaxiAsmBuf, s: string) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = kaxi_asm_push_str(buf, s)
+    out = kaxi_asm_push_byte(out, 10) // newline
+    out
+}
+
+pub fn kaxi_asm_buf_append(a: KaxiAsmBuf, b: KaxiAsmBuf) -> KaxiAsmBuf with Mut, Panic {
+    var out = a
+    var i: i64 = 0
+    while i < b.len && out.len < 2097152 {
+        out.data[out.len as usize] = b.data[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+pub fn kaxi_asm_char_to_str(ch: i64) -> string with Mut, Panic, Div, Alloc {
+    if ch == 10 { return "\n" }
+    else if ch == 32 { return " " }
+    else if ch == 44 { return "," }
+    else if ch == 61 { return "=" }
+    else if ch == 42 { return "*" }
+    else if ch == 43 { return "+" }
+    else if ch == 47 { return "/" }
+    else if ch == 58 { return ":" }
+    else if ch == 33 { return "!" }
+    else if ch == 63 { return "?" }
+    else if ch == 64 { return "@" }
+    else if ch == 37 { return "%" }
+    else if ch == 46 { return "." }
+    else if ch == 59 { return ";" }
+    else if ch == 95 { return "_" }
+    else if ch == 35 { return "#" }
+    else if ch == 45 { return "-" }
+    else if ch == 60 { return "<" }
+    else if ch == 62 { return ">" }
+    else if ch == 34 { return "\"" }
+    else if ch == 92 { return "\\" }
+    else if ch == 124 { return "|" }
+    else if ch == 9 { return "\t" }
+    else if ch == 38 { return "&" }
+    else if ch == 39 { return "'" }
+    else if ch == 40 { return "(" }
+    else if ch == 41 { return ")" }
+    else if ch == 91 { return "[" }
+    else if ch == 93 { return "]" }
+    else if ch == 123 { return "{" }
+    else if ch == 125 { return "}" }
+    else if ch == 48 { return "0" }
+    else if ch == 49 { return "1" }
+    else if ch == 50 { return "2" }
+    else if ch == 51 { return "3" }
+    else if ch == 52 { return "4" }
+    else if ch == 53 { return "5" }
+    else if ch == 54 { return "6" }
+    else if ch == 55 { return "7" }
+    else if ch == 56 { return "8" }
+    else if ch == 57 { return "9" }
+    else if ch >= 65 && ch <= 90 {
+        let base = ch - 65
+        if base == 0 { return "A" }
+        else if base == 1 { return "B" }
+        else if base == 2 { return "C" }
+        else if base == 3 { return "D" }
+        else if base == 4 { return "E" }
+        else if base == 5 { return "F" }
+        else if base == 6 { return "G" }
+        else if base == 7 { return "H" }
+        else if base == 8 { return "I" }
+        else if base == 9 { return "J" }
+        else if base == 10 { return "K" }
+        else if base == 11 { return "L" }
+        else if base == 12 { return "M" }
+        else if base == 13 { return "N" }
+        else if base == 14 { return "O" }
+        else if base == 15 { return "P" }
+        else if base == 16 { return "Q" }
+        else if base == 17 { return "R" }
+        else if base == 18 { return "S" }
+        else if base == 19 { return "T" }
+        else if base == 20 { return "U" }
+        else if base == 21 { return "V" }
+        else if base == 22 { return "W" }
+        else if base == 23 { return "X" }
+        else if base == 24 { return "Y" }
+        else { return "Z" }
+    }
+    else if ch >= 97 && ch <= 122 {
+        let base = ch - 97
+        if base == 0 { return "a" }
+        else if base == 1 { return "b" }
+        else if base == 2 { return "c" }
+        else if base == 3 { return "d" }
+        else if base == 4 { return "e" }
+        else if base == 5 { return "f" }
+        else if base == 6 { return "g" }
+        else if base == 7 { return "h" }
+        else if base == 8 { return "i" }
+        else if base == 9 { return "j" }
+        else if base == 10 { return "k" }
+        else if base == 11 { return "l" }
+        else if base == 12 { return "m" }
+        else if base == 13 { return "n" }
+        else if base == 14 { return "o" }
+        else if base == 15 { return "p" }
+        else if base == 16 { return "q" }
+        else if base == 17 { return "r" }
+        else if base == 18 { return "s" }
+        else if base == 19 { return "t" }
+        else if base == 20 { return "u" }
+        else if base == 21 { return "v" }
+        else if base == 22 { return "w" }
+        else if base == 23 { return "x" }
+        else if base == 24 { return "y" }
+        else { return "z" }
+    }
+    else { return "?" }
+}
+
+pub fn kaxi_asm_to_string(buf: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+    var s = ""
+    var i: i64 = 0
+    while i < buf.len {
+        let ch = buf.data[i as usize] as i64
+        s = str_concat(s, kaxi_asm_char_to_str(ch))
+        i = i + 1
+    }
+    s
+}
+
+// Line-at-a-time stdout emit: avoids O(n^2) giant-string corruption past ~64 KiB.
+pub fn kaxi_asm_print_lines(buf: KaxiAsmBuf) with IO, Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    var line: string = ""
+    while i < buf.len {
+        let ch = buf.data[i as usize] as i64
+        if ch == 10 {
+            println(line)
+            line = ""
+        } else {
+            line = str_concat(line, kaxi_asm_char_to_str(ch))
+        }
+        i = i + 1
+    }
+    if str_len(line) > 0 { println(line) }
+}
+
+fn kaxi_asm_buf_contains(buf: KaxiAsmBuf, needle: string) -> bool with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if buf.len < nlen { return false }
+    var i: i64 = 0
+    while i <= buf.len - nlen {
+        var j: i64 = 0
+        var matched: bool = true
+        while j < nlen {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                matched = false
+                break
+            }
+            j = j + 1
+        }
+        if matched { return true }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Confidence-budget header — Phase J epistemic-PTX
+//
+// Each kernel may declare a compile-time confidence budget on a header line:
+//
+//     ; conf_budget=<int 0..1000>
+//
+// 1000 = max-confidence (default when absent), 0 = no-confidence (refused
+// under any positive policy threshold). The K-AXI → PTX driver consults this
+// against a `--min-conf=<N>` policy and *refuses to lower the kernel body*
+// when budget < min_conf. Compile-time, not runtime — the genuine novelty:
+// the GPU never sees a kernel whose epistemic budget is below policy.
+// ============================================================================
+
+pub fn kaxi_asm_push_conf_budget(buf: KaxiAsmBuf, budget: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "; conf_budget=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(budget))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// Scans the assembly buffer for the literal "; conf_budget=" and parses the
+// integer that follows. Returns 1000 (max confidence) when the header is
+// absent — keeps existing kernels backward-compatible with confidence gating.
+pub fn kaxi_asm_get_conf_budget(buf: KaxiAsmBuf) -> i64 with Mut, Panic, Div {
+    // Pattern: "; conf_budget=" — bytes: ';'=59 ' '=32 'c'=99 'o'=111 'n'=110
+    //   'f'=102 '_'=95 'b'=98 'u'=117 'd'=100 'g'=103 'e'=101 't'=116 '='=61
+    let pat_len: i64 = 14
+    if buf.len < pat_len { return 1000 }
+    var i: i64 = 0
+    while i <= buf.len - pat_len {
+        if buf.data[i as usize] as i8 == 59
+           && buf.data[(i + 1) as usize] as i8 == 32
+           && buf.data[(i + 2) as usize] as i8 == 99
+           && buf.data[(i + 3) as usize] as i8 == 111
+           && buf.data[(i + 4) as usize] as i8 == 110
+           && buf.data[(i + 5) as usize] as i8 == 102
+           && buf.data[(i + 6) as usize] as i8 == 95
+           && buf.data[(i + 7) as usize] as i8 == 98
+           && buf.data[(i + 8) as usize] as i8 == 117
+           && buf.data[(i + 9) as usize] as i8 == 100
+           && buf.data[(i + 10) as usize] as i8 == 103
+           && buf.data[(i + 11) as usize] as i8 == 101
+           && buf.data[(i + 12) as usize] as i8 == 116
+           && buf.data[(i + 13) as usize] as i8 == 61 {
+            // Parse decimal digits after '='
+            var p: i64 = i + pat_len
+            var n: i64 = 0
+            var any: bool = false
+            while p < buf.len {
+                let c = buf.data[p as usize] as i64
+                if c >= 48 && c <= 57 {
+                    n = n * 10 + (c - 48)
+                    any = true
+                    p = p + 1
+                } else {
+                    break
+                }
+            }
+            if any { return n }
+            return 1000
+        }
+        i = i + 1
+    }
+    1000
+}
+
+// True when budget >= min_conf. min_conf <= 0 disables the gate (returns true).
+pub fn kaxi_check_conf_policy(buf: KaxiAsmBuf, min_conf: i64) -> bool with Mut, Panic, Div {
+    if min_conf <= 0 { return true }
+    let budget = kaxi_asm_get_conf_budget(buf)
+    budget >= min_conf
+}
+
+// Build the refusal-PTX header used in place of the kernel body when the
+// emit-time confidence policy fails. Output is valid (empty) PTX with a
+// machine-readable comment that downstream tools can grep for.
+pub fn kaxi_conf_reject_ptx(budget: i64, min_conf: i64) -> string with Mut, Panic, Div, Alloc {
+    var s: string = ".version 7.0\n.target sm_50\n.address_size 64\n\n"
+    s = str_concat(s, "// CONF_REJECT: budget=")
+    s = str_concat(s, kaxi_i64_to_string(budget))
+    s = str_concat(s, " < min_conf=")
+    s = str_concat(s, kaxi_i64_to_string(min_conf))
+    s = str_concat(s, " — kernel refused at K-AXI->PTX emit time.\n")
+    s = str_concat(s, "// No .entry emitted; downstream ptxas must not be invoked.\n")
+    s
+}
+
+// ============================================================================
+// GPU IR -> K-AXI lowerer (parallel arrays input, matching cpu_ir_interpreter.sio)
+// ============================================================================
+
+pub fn gpu_lower_to_kaxi(
+    ops_opcodes: [i64; 256],
+    ops_dst: [i64; 256],
+    ops_src_a: [i64; 256],
+    ops_src_b: [i64; 256],
+    ops_imm: [i64; 256],
+    ops_count: i64
+) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var buf = kaxi_asm_new()
+    buf = kaxi_asm_push_line(buf, "; K-AXI epistemic kernel assembly")
+    buf = kaxi_asm_push_line(buf, "; Auto-generated by gpu_lower_to_kaxi()")
+    buf = kaxi_asm_push_line(buf, "")
+
+    var seq: i64 = 0
+    var oi: i64 = 0
+    while oi < ops_count {
+        if oi < 256 {
+            let opc = ops_opcodes[oi as usize]
+            let dst = ops_dst[oi as usize]
+            let src_a = ops_src_a[oi as usize]
+            let src_b = ops_src_b[oi as usize]
+            let imm = ops_imm[oi as usize]
+
+            if opc == GPU_IR_ADD {
+                buf = kaxi_asm_append_add(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_SUB {
+                buf = kaxi_asm_append_sub(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MUL {
+                buf = kaxi_asm_append_mul(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_DIV {
+                buf = kaxi_asm_append_div(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_FMA {
+                buf = kaxi_asm_append_fma(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MIN {
+                buf = kaxi_asm_append_min(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MAX {
+                buf = kaxi_asm_append_max(buf, dst, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_ABS {
+                buf = kaxi_asm_append_abs(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_NEG {
+                buf = kaxi_asm_append_neg(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_SQRT {
+                buf = kaxi_asm_append_sqrt(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_RECIP {
+                buf = kaxi_asm_append_recip(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_LOG {
+                buf = kaxi_asm_append_log(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_EXP {
+                buf = kaxi_asm_append_exp(buf, dst, src_a, seq)
+            }
+            else if opc == GPU_IR_SIN {
+                buf = kaxi_asm_append_sin(buf, dst, src_a, seq)
+            }
+            else if opc == GPU_IR_COS {
+                buf = kaxi_asm_append_cos(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_RSQRT {
+                buf = kaxi_asm_append_rsqrt(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GETVAR {
+                buf = kaxi_asm_append_getvar(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_TID {
+                buf = kaxi_asm_append_get_tid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_BID {
+                buf = kaxi_asm_append_get_bid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_NTID {
+                buf = kaxi_asm_append_get_ntid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_NCTAID {
+                buf = kaxi_asm_append_get_nctaid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MUL_IMM {
+                // Immediate ops currently lower to a K-AXI load_imm transaction.
+                buf = kaxi_asm_append_load_imm(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_ADD_IMM {
+                // Immediate ops currently lower to a K-AXI load_imm transaction.
+                buf = kaxi_asm_append_load_imm(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_LOAD_PARAM {
+                buf = kaxi_asm_append_load_param(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_LOAD_GLOBAL {
+                buf = kaxi_asm_append_load_global(buf, dst, src_a, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_STORE_GLOBAL {
+                buf = kaxi_asm_append_store_global(buf, src_a, src_b, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_RET {
+                buf = kaxi_asm_append_ret(buf, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_BARRIER_SYNC {
+                buf = kaxi_asm_append_barrier(buf, seq)
+                seq = seq + 1
+            }
+            else {
+                buf = kaxi_asm_append_nop(buf, opc, seq)
+                seq = seq + 1
+            }
+        }
+        oi = oi + 1
+    }
+
+    buf = kaxi_asm_push_line(buf, "")
+    buf = kaxi_asm_push_line(buf, "; end")
+    buf
+}
+
+// ============================================================================
+// Assembly instruction emitters (text)
+// ============================================================================
+
+fn kaxi_digit_to_string(d: i64) -> string {
+    if d == 0 { "0" }
+    else if d == 1 { "1" }
+    else if d == 2 { "2" }
+    else if d == 3 { "3" }
+    else if d == 4 { "4" }
+    else if d == 5 { "5" }
+    else if d == 6 { "6" }
+    else if d == 7 { "7" }
+    else if d == 8 { "8" }
+    else { "9" }
+}
+
+fn kaxi_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 {
+        return str_concat("-", kaxi_i64_to_string(-n))
+    }
+    if n < 10 {
+        return kaxi_digit_to_string(n)
+    }
+    if n < 100 {
+        let tens = kaxi_digit_to_string(n / 10)
+        let ones = kaxi_digit_to_string(n % 10)
+        return str_concat(tens, ones)
+    }
+    if n < 1000 {
+        // Bug fix (Phase J): the prior recursive form used kaxi_i64_to_string(n % 100)
+        // which dropped a digit when n % 100 < 10 (e.g. 300 → "3" + "0" = "30").
+        // Build all three digits explicitly with zero-padding semantics.
+        let hundreds = kaxi_digit_to_string(n / 100)
+        let tens = kaxi_digit_to_string((n / 10) % 10)
+        let ones = kaxi_digit_to_string(n % 10)
+        return str_concat(str_concat(hundreds, tens), ones)
+    }
+    if n < 10000 {
+        let thousands = kaxi_digit_to_string(n / 1000)
+        let hundreds = kaxi_digit_to_string((n / 100) % 10)
+        let tens = kaxi_digit_to_string((n / 10) % 10)
+        let ones = kaxi_digit_to_string(n % 10)
+        return str_concat(str_concat(str_concat(thousands, hundreds), tens), ones)
+    }
+    "?"
+}
+
+fn kaxi_asm_append_add(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "add r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_min(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "min r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_max(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "max r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_abs(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase M unary: "abs rD, rA, var=+0%, seq=N"
+    var out = buf
+    out = kaxi_asm_push_str(out, "abs r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_neg(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "neg r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sqrt(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase N unary: "sqrt rD, rA, var=+0%, seq=N"
+    var out = buf
+    out = kaxi_asm_push_str(out, "sqrt r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_recip(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase O unary: "rcp rD, rA, var=+0%, seq=N"
+    // Mnemonic matches PTX (rcp.approx.f32 / rcp.rn.f64) and avoids the
+    // first-3-char collision with `rec` (reconverge).
+    var out = buf
+    out = kaxi_asm_push_str(out, "rcp r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_log(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase P unary: "lg2 rD, rA, var=+0%, seq=N" — log₂ (PTX-native).
+    var out = buf
+    out = kaxi_asm_push_str(out, "lg2 r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_exp(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase P unary: "ex2 rD, rA, var=+0%, seq=N" — 2^x (PTX-native).
+    var out = buf
+    out = kaxi_asm_push_str(out, "ex2 r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sin(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase R unary: "sin rD, rA, var=+0%, seq=N" — sin(x) (PTX-native sin.approx.f32).
+    var out = buf
+    out = kaxi_asm_push_str(out, "sin r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_cos(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase R unary: "cos rD, rA, var=+0%, seq=N" — cos(x) (PTX-native cos.approx.f32).
+    var out = buf
+    out = kaxi_asm_push_str(out, "cos r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_getvar(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase U unary: "gvr rD, rA, var=+0%, seq=N" — copy variance lane of rA into
+    // value lane of rD. Variance lane of dst becomes 0 (the moved variance is
+    // now a "fact"). Mode 4 (f32_epistemic) only — emits empty in others.
+    var out = buf
+    out = kaxi_asm_push_str(out, "gvr r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_rsqrt(buf: KaxiAsmBuf, dst: i64, src: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    // Phase S unary: "rsq rD, rA, var=+0%, seq=N" — 1/√x (PTX-native rsqrt.approx.f32).
+    var out = buf
+    out = kaxi_asm_push_str(out, "rsq r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", var=+0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sub(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "sub r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_mul(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "mul r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+62.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_div(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "div r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+75.0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_fma(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "fma r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+81.25%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_get_tid(buf: KaxiAsmBuf, dst: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "get_tid r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", var=0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_ret(buf: KaxiAsmBuf, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "ret seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_barrier(buf: KaxiAsmBuf, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "barrier seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_nop(buf: KaxiAsmBuf, opc: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "nop opc=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(opc))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_imm(buf: KaxiAsmBuf, dst: i64, imm: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_imm r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", imm=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(imm))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_param(buf: KaxiAsmBuf, dst: i64, param_idx: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_param r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", idx=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(param_idx))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_global(buf: KaxiAsmBuf, dst: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_store_global(buf: KaxiAsmBuf, src: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "store_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_get_bid(buf: KaxiAsmBuf, dst: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "get_bid r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", var=0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_get_ntid(buf: KaxiAsmBuf, dst: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "get_ntid r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", var=0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// get_nctaid: number of CTAs / blocks in the grid (PTX %nctaid.x). Required
+// for runtime-derived total-thread counts in kernels that span multiple
+// blocks (e.g. connectomics-sweep at N=200, where nctaid×ntid is the only
+// way to address the atomic-sum slot at runtime instead of baking N at emit).
+fn kaxi_asm_append_get_nctaid(buf: KaxiAsmBuf, dst: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "get_nctaid r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", var=0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_setp(buf: KaxiAsmBuf, cmp: string, dst_pred: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "setp.")
+    out = kaxi_asm_push_str(out, cmp)
+    out = kaxi_asm_push_str(out, " p")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst_pred))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_selp(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, pred: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "selp r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", pred=p")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(pred))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_shared(buf: KaxiAsmBuf, dst: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_shared r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_store_shared(buf: KaxiAsmBuf, src: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "store_shared r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// ============================================================================
+// Typed f64 instruction emitters — emit K-AXI with trailing type=f64 metadata.
+// Backward-compatible: untyped transpiler ignores unknown trailing metadata.
+// ============================================================================
+
+fn kaxi_asm_append_add_f64(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "add r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sub_f64(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "sub r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_mul_f64(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "mul r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+62.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_div_f64(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "div r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+75.0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_fma_f64(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "fma r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+81.25%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_global_f64(buf: KaxiAsmBuf, dst: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_store_global_f64(buf: KaxiAsmBuf, src: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "store_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f64")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// ============================================================================
+// Typed f32 instruction emitters — emit K-AXI with trailing type=f32 metadata.
+// ============================================================================
+
+fn kaxi_asm_append_add_f32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "add r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sub_f32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "sub r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_mul_f32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "mul r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+62.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_div_f32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "div r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+75.0%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_fma_f32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "fma r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+81.25%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_global_f32(buf: KaxiAsmBuf, dst: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_store_global_f32(buf: KaxiAsmBuf, src: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "store_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=f32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// ============================================================================
+// Typed i32 instruction emitters — emit K-AXI with trailing type=i32 metadata.
+// ============================================================================
+
+fn kaxi_asm_append_add_i32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "add r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=i32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_sub_i32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "sub r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+12.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=i32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_mul_i32(buf: KaxiAsmBuf, dst: i64, src_a: i64, src_b: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "mul r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_a))
+    out = kaxi_asm_push_str(out, ", r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src_b))
+    out = kaxi_asm_push_str(out, ", var=+62.5%, seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=i32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_load_global_i32(buf: KaxiAsmBuf, dst: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "load_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(dst))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=i32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+fn kaxi_asm_append_store_global_i32(buf: KaxiAsmBuf, src: i64, addr_reg: i64, seq: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = kaxi_asm_push_str(out, "store_global r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(src))
+    out = kaxi_asm_push_str(out, ", addr=r")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(addr_reg))
+    out = kaxi_asm_push_str(out, ", seq=")
+    out = kaxi_asm_push_str(out, kaxi_i64_to_string(seq))
+    out = kaxi_asm_push_str(out, ", type=i32")
+    out = kaxi_asm_push_byte(out, 10)
+    out
+}
+
+// Typed lowering: same as gpu_lower_to_kaxi but ops_types[i]=1 selects f64 PTX emitters.
+// All existing callers keep using gpu_lower_to_kaxi (u64, unchanged).
+// Only hlir_kernels_to_kaxi uses this path when HLIR types are known.
+pub fn gpu_lower_to_kaxi_typed(
+    ops_opcodes: [i64; 256],
+    ops_dst: [i64; 256],
+    ops_src_a: [i64; 256],
+    ops_src_b: [i64; 256],
+    ops_imm: [i64; 256],
+    ops_types: [i64; 256],
+    ops_count: i64
+) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var buf = kaxi_asm_new()
+    buf = kaxi_asm_push_line(buf, "; K-AXI epistemic kernel assembly (typed)")
+    buf = kaxi_asm_push_line(buf, "; Auto-generated by gpu_lower_to_kaxi_typed()")
+    buf = kaxi_asm_push_line(buf, "")
+
+    var seq: i64 = 0
+    var oi: i64 = 0
+    while oi < ops_count {
+        if oi < 256 {
+            let opc = ops_opcodes[oi as usize]
+            let dst = ops_dst[oi as usize]
+            let src_a = ops_src_a[oi as usize]
+            let src_b = ops_src_b[oi as usize]
+            let imm = ops_imm[oi as usize]
+            let op_type = ops_types[oi as usize]
+            let is_f64 = op_type == 1
+            let is_i32 = op_type == 2
+
+            if opc == GPU_IR_ADD {
+                if is_f64 {
+                    buf = kaxi_asm_append_add_f64(buf, dst, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_add_i32(buf, dst, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_add_f32(buf, dst, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_SUB {
+                if is_f64 {
+                    buf = kaxi_asm_append_sub_f64(buf, dst, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_sub_i32(buf, dst, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_sub_f32(buf, dst, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MUL {
+                if is_f64 {
+                    buf = kaxi_asm_append_mul_f64(buf, dst, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_mul_i32(buf, dst, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_mul_f32(buf, dst, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_DIV {
+                if is_f64 {
+                    buf = kaxi_asm_append_div_f64(buf, dst, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_div_f32(buf, dst, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_div_f32(buf, dst, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_FMA {
+                if is_f64 {
+                    buf = kaxi_asm_append_fma_f64(buf, dst, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_fma_f32(buf, dst, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_fma_f32(buf, dst, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_TID {
+                buf = kaxi_asm_append_get_tid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_BID {
+                buf = kaxi_asm_append_get_bid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_NTID {
+                buf = kaxi_asm_append_get_ntid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_GET_NCTAID {
+                buf = kaxi_asm_append_get_nctaid(buf, dst, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_MUL_IMM {
+                buf = kaxi_asm_append_load_imm(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_ADD_IMM {
+                buf = kaxi_asm_append_load_imm(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_LOAD_PARAM {
+                buf = kaxi_asm_append_load_param(buf, dst, imm, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_LOAD_GLOBAL {
+                if is_f64 {
+                    buf = kaxi_asm_append_load_global_f64(buf, dst, src_a, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_load_global_i32(buf, dst, src_a, seq)
+                } else {
+                    buf = kaxi_asm_append_load_global_f32(buf, dst, src_a, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_STORE_GLOBAL {
+                if is_f64 {
+                    buf = kaxi_asm_append_store_global_f64(buf, src_a, src_b, seq)
+                } else if is_i32 {
+                    buf = kaxi_asm_append_store_global_i32(buf, src_a, src_b, seq)
+                } else {
+                    buf = kaxi_asm_append_store_global_f32(buf, src_a, src_b, seq)
+                }
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_RET {
+                buf = kaxi_asm_append_ret(buf, seq)
+                seq = seq + 1
+            }
+            else if opc == GPU_IR_BARRIER_SYNC {
+                buf = kaxi_asm_append_barrier(buf, seq)
+                seq = seq + 1
+            }
+            else {
+                buf = kaxi_asm_append_nop(buf, opc, seq)
+                seq = seq + 1
+            }
+        }
+        oi = oi + 1
+    }
+
+    buf = kaxi_asm_push_line(buf, "")
+    buf = kaxi_asm_push_line(buf, "; end")
+    buf
+}
+
+// ============================================================================
+// K-AXI Assembler: parse text assembly -> binary transaction stream
+// ============================================================================
+
+// Minimal assembler: parses lines like "add r2, r0, r1, var=+12.5%, seq=0"
+// Extracts opcode, dst, src_a, src_b, seq. Variance profile is implicit from opcode.
+
+pub fn kaxi_assemble_ref(asm: &!KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    var stream = kaxi_txn_stream_new()
+    var line_start: i64 = 0
+    var i: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                // Inline parse logic to avoid tuple-return compiler bug
+                let first_char = asm.data[line_start as usize] as i8
+                var parse_ok: i64 = 0
+                var opc: i64 = 0
+                var dst: i64 = -1
+                var src_a: i64 = -1
+                var src_b: i64 = -1
+                var pred_reg: i64 = -1
+                var seq: i64 = 0
+
+                if first_char != 59 && first_char != 0 {
+                    let c0 = asm.data[line_start as usize] as i8
+                    let c1 = asm.data[(line_start + 1) as usize] as i8
+                    let c2 = asm.data[(line_start + 2) as usize] as i8
+                    let c3 = if line_len > 3 { asm.data[(line_start + 3) as usize] as i8 } else { 0 as i8 }
+                    let c4 = if line_len > 4 { asm.data[(line_start + 4) as usize] as i8 } else { 0 as i8 }
+                    let c5 = if line_len > 5 { asm.data[(line_start + 5) as usize] as i8 } else { 0 as i8 }
+                    let c6 = if line_len > 6 { asm.data[(line_start + 6) as usize] as i8 } else { 0 as i8 }
+                    let c7 = if line_len > 7 { asm.data[(line_start + 7) as usize] as i8 } else { 0 as i8 }
+                    let c8 = if line_len > 8 { asm.data[(line_start + 8) as usize] as i8 } else { 0 as i8 }
+                    let c9 = if line_len > 9 { asm.data[(line_start + 9) as usize] as i8 } else { 0 as i8 }
+
+                    if c0 == 97 && c1 == 100 && c2 == 100 { opc = KAXI_OP_ADD; parse_ok = 1 }
+                    else if c0 == 115 && c1 == 117 && c2 == 98 { opc = KAXI_OP_SUB; parse_ok = 1 }
+                    else if c0 == 109 && c1 == 117 && c2 == 108 { opc = KAXI_OP_MUL; parse_ok = 1 }
+                    else if c0 == 100 && c1 == 105 && c2 == 118 { opc = KAXI_OP_DIV; parse_ok = 1 }
+                    else if c0 == 102 && c1 == 109 && c2 == 97 { opc = KAXI_OP_FMA; parse_ok = 1 }
+                    // setp.lt/le/eq/ge/gt/ne
+                    else if c0 == 115 && c1 == 101 && c2 == 116 && c3 == 112 {
+                        if line_len > 6 {
+                            let cmp0 = asm.data[(line_start + 5) as usize] as i8
+                            let cmp1 = asm.data[(line_start + 6) as usize] as i8
+                            if cmp0 == 108 && cmp1 == 116 { opc = KAXI_OP_SETP_LT; parse_ok = 1 }
+                            else if cmp0 == 108 && cmp1 == 101 { opc = KAXI_OP_SETP_LE; parse_ok = 1 }
+                            else if cmp0 == 101 && cmp1 == 113 { opc = KAXI_OP_SETP_EQ; parse_ok = 1 }
+                            else if cmp0 == 103 && cmp1 == 101 { opc = KAXI_OP_SETP_GE; parse_ok = 1 }
+                            else if cmp0 == 103 && cmp1 == 116 { opc = KAXI_OP_SETP_GT; parse_ok = 1 }
+                            else if cmp0 == 110 && cmp1 == 101 { opc = KAXI_OP_SETP_NE; parse_ok = 1 }
+                        }
+                    }
+                    else if c0 == 115 && c1 == 101 && c2 == 108 && c3 == 112 { opc = KAXI_OP_SELP; parse_ok = 1 }
+                    // get_bid
+                    else if c0 == 103 && c1 == 101 && c2 == 116 && c3 == 95 && c4 == 98 && c5 == 105 && c6 == 100 { opc = KAXI_OP_GET_BID; parse_ok = 1 }
+                    // get_ntid
+                    else if c0 == 103 && c1 == 101 && c2 == 116 && c3 == 95 && c4 == 110 && c5 == 116 && c6 == 105 && c7 == 100 { opc = KAXI_OP_GET_NTID; parse_ok = 1 }
+                    else if c0 == 103 && c1 == 101 && c2 == 116 { opc = KAXI_OP_PASS; parse_ok = 1 }
+                    else if c0 == 114 && c1 == 101 && c2 == 116 { parse_ok = 1; opc = KAXI_OP_RET; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 98 && c1 == 97 && c2 == 114 { parse_ok = 1; opc = KAXI_OP_BARRIER; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 110 && c1 == 111 && c2 == 112 { parse_ok = 1; opc = KAXI_OP_NOP; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 98 && c1 == 114 && c2 == 97 && c3 == 110 && c4 == 99 && c5 == 104 { opc = KAXI_OP_BRANCH; parse_ok = 1 }
+                    else if c0 == 114 && c1 == 101 && c2 == 99 && c3 == 111 && c4 == 110 && c5 == 118 && c6 == 101 && c7 == 114 && c8 == 103 && c9 == 101 { parse_ok = 1; opc = KAXI_OP_RECONVERGE; dst = 0; src_a = 0; src_b = 0 }
+                    else if c0 == 118 && c1 == 111 && c2 == 116 && c3 == 101 && c4 == 46 && c5 == 98 { opc = KAXI_OP_VOTE_BALLOT; parse_ok = 1 }
+                    else if c0 == 115 && c1 == 104 && c2 == 117 && c3 == 102 && c4 == 102 && c5 == 108 && c6 == 101 && c7 == 46 && c8 == 120 { opc = KAXI_OP_SHUFFLE_XOR; parse_ok = 1 }
+                    else if c0 == 119 && c1 == 97 && c2 == 114 && c3 == 112 && c4 == 46 && c5 == 114 && c6 == 101 && c7 == 100 && c8 == 117 && c9 == 99 { opc = KAXI_OP_WARP_REDUCE_ADD; parse_ok = 1 }
+                    // load_imm
+                    else if c0 == 108 && c1 == 111 && c2 == 97 && c3 == 100 && c4 == 95 && c5 == 105 && c6 == 109 && c7 == 109 {
+                        opc = KAXI_OP_LOAD_IMM
+                        parse_ok = 1
+                    }
+                    // load_param
+                    else if c0 == 108 && c1 == 111 && c2 == 97 && c3 == 100 && c4 == 95 && c5 == 112 && c6 == 97 && c7 == 114 && c8 == 97 && c9 == 109 { opc = KAXI_OP_LOAD_PARAM; parse_ok = 1 }
+                    // load_global
+                    else if c0 == 108 && c1 == 111 && c2 == 97 && c3 == 100 && c4 == 95 && c5 == 103 && c6 == 108 && c7 == 111 && c8 == 98 { opc = KAXI_OP_LOAD_GLOBAL; parse_ok = 1 }
+                    // store_global
+                    else if c0 == 115 && c1 == 116 && c2 == 111 && c3 == 114 && c4 == 101 && c5 == 95 && c6 == 103 && c7 == 108 && c8 == 111 && c9 == 98 { opc = KAXI_OP_STORE_GLOBAL; parse_ok = 1 }
+                    // load_shared
+                    else if c0 == 108 && c1 == 111 && c2 == 97 && c3 == 100 && c4 == 95 && c5 == 115 && c6 == 104 && c7 == 97 && c8 == 114 && c9 == 101 { opc = KAXI_OP_LOAD_SHARED; parse_ok = 1 }
+                    // store_shared
+                    else if c0 == 115 && c1 == 116 && c2 == 111 && c3 == 114 && c4 == 101 && c5 == 95 && c6 == 115 && c7 == 104 && c8 == 97 && c9 == 114 { opc = KAXI_OP_STORE_SHARED; parse_ok = 1 }
+                    if parse_ok == 1 && opc >= 0 {
+                        var pos = line_start
+                        var end_pos = line_start + line_len
+                        while pos < end_pos && asm.data[pos as usize] as i8 != 32 { pos = pos + 1 }
+                        pos = pos + 1
+
+                        while pos < end_pos {
+                            if asm.data[pos as usize] as i8 == 114 {
+                                pos = pos + 1
+                                var num: i64 = 0
+                                var has_digit: bool = false
+                                while pos < end_pos {
+                                    let ch = asm.data[pos as usize] as i8
+                                    if ch >= 48 && ch <= 57 {
+                                        num = num * 10 + (ch - 48) as i64
+                                        has_digit = true
+                                        pos = pos + 1
+                                    } else {
+                                        break
+                                    }
+                                }
+                                if has_digit {
+                                    if dst < 0 { dst = num }
+                                    else if src_a < 0 { src_a = num }
+                                    else { src_b = num }
+                                }
+                            }
+                            else if asm.data[pos as usize] as i8 == 112 {
+                                // check for "pred=p" first, before bare predicate register
+                                if pos + 6 < end_pos && asm.data[(pos + 1) as usize] as i8 == 114
+                                                && asm.data[(pos + 2) as usize] as i8 == 101
+                                                && asm.data[(pos + 3) as usize] as i8 == 100
+                                                && asm.data[(pos + 4) as usize] as i8 == 61
+                                                && asm.data[(pos + 5) as usize] as i8 == 112 {
+                                    pos = pos + 6
+                                    var num: i64 = 0
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    pred_reg = num
+                                } else {
+                                    // bare predicate register 'pN'
+                                    pos = pos + 1
+                                    var num: i64 = 0
+                                    var has_digit: bool = false
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            has_digit = true
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    if has_digit {
+                                        if dst < 0 { dst = num }
+                                        else if src_a < 0 { src_a = num }
+                                        else { src_b = num }
+                                    }
+                                }
+                            }
+                            else if asm.data[pos as usize] as i8 == 97 {
+                                // check for "addr=r"
+                                if pos + 6 < end_pos && asm.data[(pos + 1) as usize] as i8 == 100
+                                                && asm.data[(pos + 2) as usize] as i8 == 100
+                                                && asm.data[(pos + 3) as usize] as i8 == 114
+                                                && asm.data[(pos + 4) as usize] as i8 == 61
+                                                && asm.data[(pos + 5) as usize] as i8 == 114 {
+                                    pos = pos + 6
+                                    var num: i64 = 0
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    if src_a < 0 { src_a = num } else { src_b = num }
+                                } else {
+                                    pos = pos + 1
+                                }
+                            }
+                            else if asm.data[pos as usize] as i8 == 105 {
+                                // check for "imm="
+                                if pos + 4 < end_pos && asm.data[(pos + 1) as usize] as i8 == 109
+                                                && asm.data[(pos + 2) as usize] as i8 == 109
+                                                && asm.data[(pos + 3) as usize] as i8 == 61 {
+                                    pos = pos + 4
+                                    var num: i64 = 0
+                                    var neg: bool = false
+                                    if pos < end_pos && asm.data[pos as usize] as i8 == 45 {
+                                        neg = true
+                                        pos = pos + 1
+                                    }
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    if neg { num = 0 - num }
+                                    if src_a < 0 { src_a = num } else { src_b = num }
+                                } else {
+                                    pos = pos + 1
+                                }
+                            }
+                            else if asm.data[pos as usize] as i8 == 115 {
+                                if pos + 4 < end_pos && asm.data[(pos + 1) as usize] as i8 == 101
+                                                && asm.data[(pos + 2) as usize] as i8 == 113
+                                                && asm.data[(pos + 3) as usize] as i8 == 61 {
+                                    pos = pos + 4
+                                    var num: i64 = 0
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    seq = num
+                                } else {
+                                    pos = pos + 1
+                                }
+                            }
+                            else if asm.data[pos as usize] as i8 == 116 {
+                                // check for "target="
+                                if pos + 7 < end_pos && asm.data[(pos + 1) as usize] as i8 == 97
+                                                && asm.data[(pos + 2) as usize] as i8 == 114
+                                                && asm.data[(pos + 3) as usize] as i8 == 103
+                                                && asm.data[(pos + 4) as usize] as i8 == 101
+                                                && asm.data[(pos + 5) as usize] as i8 == 116
+                                                && asm.data[(pos + 6) as usize] as i8 == 61 {
+                                    pos = pos + 7
+                                    var num: i64 = 0
+                                    while pos < end_pos {
+                                        let ch = asm.data[pos as usize] as i8
+                                        if ch >= 48 && ch <= 57 {
+                                            num = num * 10 + (ch - 48) as i64
+                                            pos = pos + 1
+                                        } else {
+                                            break
+                                        }
+                                    }
+                                    if src_a < 0 { src_a = num } else { src_b = num }
+                                } else {
+                                    pos = pos + 1
+                                }
+                            }
+                            else {
+                                pos = pos + 1
+                            }
+                        }
+                    }
+                }
+
+                if parse_ok == 1 && opc >= 0 {
+                    // BRANCH: if no fallthrough target, default to next instruction
+                    if opc == KAXI_OP_BRANCH && src_b < 0 {
+                        src_b = stream.count + 1
+                    }
+                    let flags = kaxi_flags_pack(opc, 1, 0, 16)
+                    let packed_dst = if dst < 0 { 0 } else { dst }
+                    let packed_src_a = if src_a < 0 { 0 } else { src_a }
+                    let packed_src_b = if src_b < 0 { 0 } else { src_b }
+                    var value = (packed_dst << 32) | (packed_src_a << 16) | packed_src_b
+                    if opc == KAXI_OP_SELP && pred_reg >= 0 {
+                        value = value | (pred_reg << 48)
+                    }
+                    if stream.count < KAXI_TXN_MAX {
+                        let idx = stream.count
+                        stream.value_bits[idx as usize] = value
+                        stream.flags[idx as usize] = flags
+                        stream.seq[idx as usize] = seq
+                        stream.count = stream.count + 1
+                    }
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    stream
+}
+
+pub fn kaxi_assemble(asm: KaxiAsmBuf) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    var asm_mut = asm
+    kaxi_assemble_ref(&!asm_mut)
+}
+
+// ============================================================================
+// K-AXI Cycle Simulator
+// ============================================================================
+
+struct KaxiSimState {
+    reg_val: [i64; 64],
+    reg_var: [i64; 64],
+    reg_prov: [i64; 64],
+    reg_conf: [i64; 64],
+    mem: [i64; 1024],
+    shared_mem: [i64; 256],
+    pred: [bool; 64],
+    tid: i64,
+    cycle: i64,
+    instr_count: i64,
+    mem_reads: i64,
+    mem_writes: i64,
+    arith_ops: i64,
+    barriers: i64,
+}
+
+fn kaxi_perf_report(state: KaxiSimState) with IO {
+    println("K-AXI perf report:")
+    print("  instructions=")
+    print_int(state.instr_count)
+    print("  cycles=")
+    print_int(state.cycle)
+    print("  mem_reads=")
+    print_int(state.mem_reads)
+    print("  mem_writes=")
+    print_int(state.mem_writes)
+    print("  arith_ops=")
+    print_int(state.arith_ops)
+    print("  barriers=")
+    print_int(state.barriers)
+}
+
+pub fn kaxi_sim_new() -> KaxiSimState {
+    KaxiSimState {
+        reg_val: [0; 64],
+        reg_var: [0; 64],
+        reg_prov: [0; 64],
+        reg_conf: [0xFFFFFFFF; 64],
+        mem: [0; 1024],
+        shared_mem: [0; 256],
+        pred: [false; 64],
+        tid: 0,
+        cycle: 0,
+        instr_count: 0,
+        mem_reads: 0,
+        mem_writes: 0,
+        arith_ops: 0,
+        barriers: 0,
+    }
+}
+
+pub fn kaxi_sim_new_with_tid(tid: i64) -> KaxiSimState {
+    KaxiSimState {
+        reg_val: [0; 64],
+        reg_var: [0; 64],
+        reg_prov: [0; 64],
+        reg_conf: [0xFFFFFFFF; 64],
+        mem: [0; 1024],
+        shared_mem: [0; 256],
+        pred: [false; 64],
+        tid: tid,
+        cycle: 0,
+        instr_count: 0,
+        mem_reads: 0,
+        mem_writes: 0,
+        arith_ops: 0,
+        barriers: 0,
+    }
+}
+
+// ============================================================================
+// K-AXI Warp-Level Simulator
+// ============================================================================
+
+struct KaxiWarpState {
+    // Per-lane register files (lane-major flat arrays)
+    reg_val: [i64; 512],   // 64 regs * 8 lanes
+    reg_var: [i64; 512],
+    reg_prov: [i64; 512],
+    reg_conf: [i64; 512],
+    pred: [bool; 512],      // 64 pred * 8 lanes
+    // Per-lane control state
+    active: [bool; 8],
+    pc: [i64; 8],
+    // Shared resources
+    mem: [i64; 1024],
+    shared_mem: [i64; 256],
+    // Reconvergence stack
+    reconverge_stack: [i64; 64],
+    stack_depth: i64,
+    cycle: i64,
+    // Perf counters
+    instr_count: i64,
+    mem_reads: i64,
+    mem_writes: i64,
+    arith_ops: i64,
+    barriers: i64,
+    divergent_branches: i64,
+    reconvergence_events: i64,
+}
+
+pub fn kaxi_warp_new() -> KaxiWarpState {
+    KaxiWarpState {
+        reg_val: [0; 512],
+        reg_var: [0; 512],
+        reg_prov: [0; 512],
+        reg_conf: [0xFFFFFFFF; 512],
+        pred: [false; 512],
+        active: [true; 8],
+        pc: [0; 8],
+        mem: [0; 1024],
+        shared_mem: [0; 256],
+        reconverge_stack: [0; 64],
+        stack_depth: 0,
+        cycle: 0,
+        instr_count: 0,
+        mem_reads: 0,
+        mem_writes: 0,
+        arith_ops: 0,
+        barriers: 0,
+        divergent_branches: 0,
+        reconvergence_events: 0,
+    }
+}
+
+pub fn kaxi_warp_mem_get(state: KaxiWarpState, addr: i64) -> i64 {
+    if addr >= 0 && addr < 1024 {
+        return state.mem[addr as usize]
+    }
+    return 0
+}
+
+pub fn kaxi_warp_mem_set(state: KaxiWarpState, addr: i64, v: i64) -> KaxiWarpState with Mut {
+    var s = state
+    if addr >= 0 && addr < 1024 {
+        s.mem[addr as usize] = v
+    }
+    s
+}
+
+pub fn kaxi_warp_exec(state: KaxiWarpState, stream: KaxiTxnStream) -> KaxiWarpState with IO, Mut, Panic {
+    var s = state
+    var done: bool = false
+    while !done {
+        // Find minimum PC among active lanes
+        var next_pc: i64 = -1
+        var lane: i64 = 0
+        while lane < KAXI_WARP_SIZE {
+            if s.active[lane as usize] {
+                if next_pc < 0 || s.pc[lane as usize] < next_pc {
+                    next_pc = s.pc[lane as usize]
+                }
+            }
+            lane = lane + 1
+        }
+        if next_pc < 0 || next_pc >= stream.count {
+            done = true
+        } else {
+            let raw_flags = stream.flags[next_pc as usize]
+            let opc = kaxi_flags_unpack_op_kind(raw_flags)
+            let value = stream.value_bits[next_pc as usize]
+            let dst = (value >> 32) & 0xFFFF
+            let src_a = (value >> 16) & 0xFFFF
+            let src_b = value & 0xFFFF
+            let pred_idx = (value >> 48) & 0xFF
+
+            // Count lanes at this PC
+            var lanes_here: i64 = 0
+            lane = 0
+            while lane < KAXI_WARP_SIZE {
+                if s.active[lane as usize] && s.pc[lane as usize] == next_pc {
+                    lanes_here = lanes_here + 1
+                }
+                lane = lane + 1
+            }
+
+            // Execute for all lanes at this PC
+            lane = 0
+            while lane < KAXI_WARP_SIZE {
+                if s.active[lane as usize] && s.pc[lane as usize] == next_pc {
+                    let base = lane * 64
+                    if opc == KAXI_OP_LOAD_IMM {
+                        s.reg_val[(base + dst) as usize] = src_a
+                    }
+                    else if opc == KAXI_OP_LOAD_PARAM {
+                        s.reg_val[(base + dst) as usize] = src_a
+                    }
+                    else if opc == KAXI_OP_LOAD_GLOBAL {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 1024 {
+                            s.reg_val[(base + dst) as usize] = s.mem[addr as usize]
+                        }
+                        s.mem_reads = s.mem_reads + 1
+                    }
+                    else if opc == KAXI_OP_STORE_GLOBAL {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 1024 {
+                            s.mem[addr as usize] = s.reg_val[(base + dst) as usize]
+                        }
+                        s.mem_writes = s.mem_writes + 1
+                    }
+                    else if opc == KAXI_OP_LOAD_SHARED {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 256 {
+                            s.reg_val[(base + dst) as usize] = s.shared_mem[addr as usize]
+                        }
+                        s.mem_reads = s.mem_reads + 1
+                    }
+                    else if opc == KAXI_OP_STORE_SHARED {
+                        let addr = s.reg_val[(base + src_a) as usize]
+                        if addr >= 0 && addr < 256 {
+                            s.shared_mem[addr as usize] = s.reg_val[(base + dst) as usize]
+                        }
+                        s.mem_writes = s.mem_writes + 1
+                    }
+                    else if opc == KAXI_OP_ADD {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a + v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_add(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_SUB {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a - v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_add(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_MUL {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a * v_b
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_mul(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_DIV {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        if v_b != 0 {
+                            s.reg_val[(base + dst) as usize] = v_a / v_b
+                        }
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_div(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_FMA {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.reg_val[(base + dst) as usize] = v_a * v_b + v_a
+                        s.reg_var[(base + dst) as usize] = kaxi_variance_fma(s.reg_var[(base + src_a) as usize])
+                        s.arith_ops = s.arith_ops + 1
+                    }
+                    else if opc == KAXI_OP_SETP_LT {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a < v_b
+                    }
+                    else if opc == KAXI_OP_SETP_LE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a <= v_b
+                    }
+                    else if opc == KAXI_OP_SETP_EQ {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a == v_b
+                    }
+                    else if opc == KAXI_OP_SETP_GE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a >= v_b
+                    }
+                    else if opc == KAXI_OP_SETP_GT {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a > v_b
+                    }
+                    else if opc == KAXI_OP_SETP_NE {
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        s.pred[(lane * 64 + dst) as usize] = v_a != v_b
+                    }
+                    else if opc == KAXI_OP_SELP {
+                        let p_idx = pred_idx
+                        let v_a = s.reg_val[(base + src_a) as usize]
+                        let v_b = s.reg_val[(base + src_b) as usize]
+                        if s.pred[(lane * 64 + p_idx) as usize] {
+                            s.reg_val[(base + dst) as usize] = v_a
+                        } else {
+                            s.reg_val[(base + dst) as usize] = v_b
+                        }
+                    }
+                    else if opc == KAXI_OP_PASS {
+                        s.reg_val[(base + dst) as usize] = lane
+                    }
+                    else if opc == KAXI_OP_GET_BID {
+                        s.reg_val[(base + dst) as usize] = 0
+                    }
+                    else if opc == KAXI_OP_GET_NTID {
+                        s.reg_val[(base + dst) as usize] = KAXI_WARP_SIZE
+                    }
+                    else if opc == KAXI_OP_BARRIER {
+                        s.barriers = s.barriers + 1
+                    }
+                    else if opc == KAXI_OP_BRANCH {
+                        let p_idx = dst
+                        let target_taken = src_a
+                        let target_fallthrough = src_b
+                        if s.pred[(lane * 64 + p_idx) as usize] {
+                            s.pc[lane as usize] = target_taken
+                        } else {
+                            s.pc[lane as usize] = target_fallthrough
+                        }
+                    }
+                    else if opc == KAXI_OP_RECONVERGE {
+                        s.reconvergence_events = s.reconvergence_events + 1
+                        s.pc[lane as usize] = s.pc[lane as usize] + 1
+                    }
+                    else if opc == KAXI_OP_VOTE_BALLOT {
+                        let p_idx = src_a
+                        var mask: i64 = 0
+                        var vl: i64 = 0
+                        while vl < KAXI_WARP_SIZE {
+                            if s.active[vl as usize] && s.pred[(vl * 64 + p_idx) as usize] {
+                                mask = mask | (1 << vl)
+                            }
+                            vl = vl + 1
+                        }
+                        s.reg_val[(base + dst) as usize] = mask
+                    }
+                    else if opc == KAXI_OP_SHUFFLE_XOR {
+                        let mask = src_b
+                        let src_lane = lane ^ mask
+                        if src_lane >= 0 && src_lane < KAXI_WARP_SIZE {
+                            let src_base = src_lane * 64
+                            s.reg_val[(base + dst) as usize] = s.reg_val[(src_base + src_a) as usize]
+                        }
+                    }
+                    else if opc == KAXI_OP_WARP_REDUCE_ADD {
+                        var sum: i64 = 0
+                        var vl: i64 = 0
+                        while vl < KAXI_WARP_SIZE {
+                            if s.active[vl as usize] {
+                                let vb = vl * 64
+                                sum = sum + s.reg_val[(vb + src_a) as usize]
+                            }
+                            vl = vl + 1
+                        }
+                        s.reg_val[(base + dst) as usize] = sum
+                    }
+                    else if opc == KAXI_OP_RET {
+                        s.active[lane as usize] = false
+                    }
+                    else if opc == KAXI_OP_NOP {
+                    }
+
+                    // Advance PC for non-branch/non-reconverge instructions
+                    if opc != KAXI_OP_BRANCH && opc != KAXI_OP_RET && opc != KAXI_OP_RECONVERGE {
+                        s.pc[lane as usize] = s.pc[lane as usize] + 1
+                    }
+
+                    s.instr_count = s.instr_count + 1
+                }
+                lane = lane + 1
+            }
+            s.cycle = s.cycle + 1
+        }
+    }
+    s
+}
+
+fn kaxi_warp_perf_report(state: KaxiWarpState) with IO {
+    println("K-AXI warp perf report:")
+    print("  instructions=")
+    print_int(state.instr_count)
+    print("  cycles=")
+    print_int(state.cycle)
+    print("  mem_reads=")
+    print_int(state.mem_reads)
+    print("  mem_writes=")
+    print_int(state.mem_writes)
+    print("  arith_ops=")
+    print_int(state.arith_ops)
+    print("  barriers=")
+    print_int(state.barriers)
+    print("  divergent_branches=")
+    print_int(state.divergent_branches)
+    print("  reconvergence_events=")
+    print_int(state.reconvergence_events)
+}
+
+pub fn kaxi_sim_exec(state: KaxiSimState, stream: KaxiTxnStream) -> KaxiSimState with IO, Mut, Panic {
+    var s = state
+    var ti: i64 = 0
+    while ti < stream.count {
+        let raw_flags = stream.flags[ti as usize]
+        let opc = kaxi_flags_unpack_op_kind(raw_flags)
+        let value = stream.value_bits[ti as usize]
+        let dst = (value >> 32) & 0xFFFF
+        let src_a = (value >> 16) & 0xFFFF
+        let src_b = value & 0xFFFF
+
+        if opc == KAXI_OP_LOAD_IMM {
+            s.reg_val[dst as usize] = src_a
+        }
+        else if opc == KAXI_OP_LOAD_PARAM {
+            s.reg_val[dst as usize] = src_a
+        }
+        else if opc == KAXI_OP_LOAD_GLOBAL {
+            let addr = s.reg_val[src_a as usize]
+            if addr >= 0 && addr < 1024 {
+                s.reg_val[dst as usize] = s.mem[addr as usize]
+            }
+            s.mem_reads = s.mem_reads + 1
+        }
+        else if opc == KAXI_OP_STORE_GLOBAL {
+            let addr = s.reg_val[src_a as usize]
+            if addr >= 0 && addr < 1024 {
+                s.mem[addr as usize] = s.reg_val[dst as usize]
+            }
+            s.mem_writes = s.mem_writes + 1
+        }
+        else if opc == KAXI_OP_LOAD_SHARED {
+            let addr = s.reg_val[src_a as usize]
+            if addr >= 0 && addr < 256 {
+                s.reg_val[dst as usize] = s.shared_mem[addr as usize]
+            }
+            s.mem_reads = s.mem_reads + 1
+        }
+        else if opc == KAXI_OP_STORE_SHARED {
+            let addr = s.reg_val[src_a as usize]
+            if addr >= 0 && addr < 256 {
+                s.shared_mem[addr as usize] = s.reg_val[dst as usize]
+            }
+            s.mem_writes = s.mem_writes + 1
+        }
+        else if opc == KAXI_OP_ADD {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.reg_val[dst as usize] = v_a + v_b
+            s.reg_var[dst as usize] = kaxi_variance_add(s.reg_var[src_a as usize])
+            s.arith_ops = s.arith_ops + 1
+        }
+        else if opc == KAXI_OP_SUB {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.reg_val[dst as usize] = v_a - v_b
+            s.reg_var[dst as usize] = kaxi_variance_add(s.reg_var[src_a as usize])
+            s.arith_ops = s.arith_ops + 1
+        }
+        else if opc == KAXI_OP_MUL {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.reg_val[dst as usize] = v_a * v_b
+            s.reg_var[dst as usize] = kaxi_variance_mul(s.reg_var[src_a as usize])
+            s.arith_ops = s.arith_ops + 1
+        }
+        else if opc == KAXI_OP_DIV {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            if v_b != 0 {
+                s.reg_val[dst as usize] = v_a / v_b
+            }
+            s.reg_var[dst as usize] = kaxi_variance_div(s.reg_var[src_a as usize])
+            s.arith_ops = s.arith_ops + 1
+        }
+        else if opc == KAXI_OP_FMA {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.reg_val[dst as usize] = v_a * v_b + v_a
+            s.reg_var[dst as usize] = kaxi_variance_fma(s.reg_var[src_a as usize])
+            s.arith_ops = s.arith_ops + 1
+        }
+        else if opc == KAXI_OP_SETP_LT {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a < v_b
+        }
+        else if opc == KAXI_OP_SETP_LE {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a <= v_b
+        }
+        else if opc == KAXI_OP_SETP_EQ {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a == v_b
+        }
+        else if opc == KAXI_OP_SETP_GE {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a >= v_b
+        }
+        else if opc == KAXI_OP_SETP_GT {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a > v_b
+        }
+        else if opc == KAXI_OP_SETP_NE {
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            s.pred[dst as usize] = v_a != v_b
+        }
+        else if opc == KAXI_OP_SELP {
+            let pred_idx = (value >> 48) & 0xFF
+            let v_a = s.reg_val[src_a as usize]
+            let v_b = s.reg_val[src_b as usize]
+            if s.pred[pred_idx as usize] {
+                s.reg_val[dst as usize] = v_a
+            } else {
+                s.reg_val[dst as usize] = v_b
+            }
+        }
+        else if opc == KAXI_OP_PASS {
+            // get_tid: dst = lane id
+            s.reg_val[dst as usize] = s.tid
+        }
+        else if opc == KAXI_OP_GET_BID {
+            s.reg_val[dst as usize] = 0
+        }
+        else if opc == KAXI_OP_GET_NTID {
+            s.reg_val[dst as usize] = 1
+        }
+        else if opc == KAXI_OP_RET {
+        }
+        else if opc == KAXI_OP_BARRIER {
+            s.barriers = s.barriers + 1
+        }
+        else if opc == KAXI_OP_NOP {
+        }
+
+        s.instr_count = s.instr_count + 1
+        s.cycle = s.cycle + 1
+        ti = ti + 1
+    }
+    s
+}
+
+// ============================================================================
+// Self-check: build a vec_add kernel IR, lower to K-AXI, assemble, simulate
+// ============================================================================
+
+fn kaxi_self_check() -> bool with IO, Mut, Panic, Div, Alloc {
+    // ===== Test 1: Basic ADD + RET =====
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_ADD
+    dsts[0] = 2
+    src_a[0] = 0
+    src_b[0] = 1
+    opcodes[1] = GPU_IR_RET
+
+    let asm_buf = gpu_lower_to_kaxi(opcodes, dsts, src_a, src_b, imm, 2)
+
+    let has_add = kaxi_asm_buf_contains(asm_buf, "add r2, r0, r1")
+    if !has_add { print("DEBUG: has_add failed\n"); return false }
+
+    let stream = kaxi_assemble(asm_buf)
+    let txn_ok = stream.count == 2
+    if !txn_ok { print("DEBUG: txn_ok failed, count="); print(stream.count); print("\n"); return false }
+
+    var sim = kaxi_sim_new()
+    sim.reg_val[0] = 10
+    sim.reg_val[1] = 20
+    sim.reg_var[0] = 1000
+    let final_sim = kaxi_sim_exec(sim, stream)
+    let val_ok = final_sim.reg_val[2] == 30
+    if !val_ok { print("DEBUG: val_ok failed, r2="); print(final_sim.reg_val[2]); print("\n"); return false }
+
+    let var_ok = final_sim.reg_var[2] == 1125
+    if !var_ok { print("DEBUG: var_ok failed, var="); print(final_sim.reg_var[2]); print("\n"); return false }
+
+    // ===== Test 2: LOAD_IMM =====
+    var opcodes2: [i64; 256] = [0; 256]
+    var dsts2: [i64; 256] = [0; 256]
+    var src_a2: [i64; 256] = [0; 256]
+    var src_b2: [i64; 256] = [0; 256]
+    var imm2: [i64; 256] = [0; 256]
+
+    opcodes2[0] = GPU_IR_ADD_IMM
+    dsts2[0] = 0
+    imm2[0] = 42
+    opcodes2[1] = GPU_IR_RET
+
+    let asm2 = gpu_lower_to_kaxi(opcodes2, dsts2, src_a2, src_b2, imm2, 2)
+    let stream2 = kaxi_assemble(asm2)
+    let sim2 = kaxi_sim_new()
+    let final_sim2 = kaxi_sim_exec(sim2, stream2)
+    let imm_ok = final_sim2.reg_val[0] == 42
+    if !imm_ok { print("DEBUG: imm_ok failed, r0="); print(final_sim2.reg_val[0]); print("\n"); return false }
+
+    // ===== Test 3: STORE_GLOBAL + LOAD_GLOBAL =====
+    var opcodes3: [i64; 256] = [0; 256]
+    var dsts3: [i64; 256] = [0; 256]
+    var src_a3: [i64; 256] = [0; 256]
+    var src_b3: [i64; 256] = [0; 256]
+    var imm3: [i64; 256] = [0; 256]
+
+    opcodes3[0] = GPU_IR_ADD_IMM
+    dsts3[0] = 0
+    imm3[0] = 100
+    opcodes3[1] = GPU_IR_ADD_IMM
+    dsts3[1] = 1
+    imm3[1] = 1234
+    opcodes3[2] = GPU_IR_STORE_GLOBAL
+    src_a3[2] = 1
+    src_b3[2] = 0
+    opcodes3[3] = GPU_IR_LOAD_GLOBAL
+    dsts3[3] = 2
+    src_a3[3] = 0
+    opcodes3[4] = GPU_IR_RET
+
+    let asm3 = gpu_lower_to_kaxi(opcodes3, dsts3, src_a3, src_b3, imm3, 5)
+    let stream3 = kaxi_assemble(asm3)
+    let sim3 = kaxi_sim_new()
+    let final_sim3 = kaxi_sim_exec(sim3, stream3)
+    let mem_ok = final_sim3.reg_val[2] == 1234
+    if !mem_ok { print("DEBUG: mem_ok failed, r2="); print(final_sim3.reg_val[2]); print("\n"); return false }
+
+    // ===== Test 4: GET_TID, GET_BID, GET_NTID =====
+    var opcodes4: [i64; 256] = [0; 256]
+    var dsts4: [i64; 256] = [0; 256]
+    var src_a4: [i64; 256] = [0; 256]
+    var src_b4: [i64; 256] = [0; 256]
+    var imm4: [i64; 256] = [0; 256]
+
+    opcodes4[0] = GPU_IR_GET_TID
+    dsts4[0] = 0
+    opcodes4[1] = GPU_IR_GET_BID
+    dsts4[1] = 1
+    opcodes4[2] = GPU_IR_GET_NTID
+    dsts4[2] = 2
+    opcodes4[3] = GPU_IR_RET
+
+    let asm4 = gpu_lower_to_kaxi(opcodes4, dsts4, src_a4, src_b4, imm4, 4)
+    let stream4 = kaxi_assemble(asm4)
+    let sim4 = kaxi_sim_new()
+    let final_sim4 = kaxi_sim_exec(sim4, stream4)
+    let tid_ok = final_sim4.reg_val[0] == 0
+    let bid_ok = final_sim4.reg_val[1] == 0
+    let ntid_ok = final_sim4.reg_val[2] == 1
+    if !tid_ok { print("DEBUG: tid_ok failed\n"); return false }
+    if !bid_ok { print("DEBUG: bid_ok failed\n"); return false }
+    if !ntid_ok { print("DEBUG: ntid_ok failed\n"); return false }
+
+    true
+}
+
+fn kaxi_main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let ok = kaxi_self_check()
+    if ok {
+        print("PASS kaxi_self_check\n")
+        return 0 as i32
+    } else {
+        print("FAIL kaxi_self_check\n")
+        return 1 as i32
+    }
+}
+
+// Standalone entry point removed to avoid duplicate main when imported

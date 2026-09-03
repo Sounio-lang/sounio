@@ -1,8 +1,14 @@
 // darwin_pbpk/population/pop_sim.sio — Virtual Population PBPK Simulation
 //
-// Generates a virtual population of N patients by sampling epistemic parameter
-// priors, runs the 14-compartment PBPK model for each, and reports prediction
-// intervals (P5, P25, P50, P75, P95) for AUC and Cmax.
+// Generates a virtual population of N patients by sampling INTER-INDIVIDUAL
+// VARIABILITY (IIV, between-subject) priors, runs the 14-compartment PBPK model
+// for each, and reports prediction intervals (P5, P25, P50, P75, P95) for AUC/Cmax.
+//
+// NOTE (ω² vs u_c): the spread here is population IIV — REAL between-subject
+// scatter (two patients genuinely have different CL). It is NOT epistemic
+// uncertainty about the parameter's true value (GUM u_c); that orthogonal axis is
+// the nested layer in pop_epistemic.sio. Earlier "epistemic priors" wording here
+// conflated the two — corrected to IIV.
 //
 // Method:
 //   1. LCG pseudo-random number generator (Numerical Recipes, seed=42)
@@ -12,10 +18,11 @@
 //   5. Selection sort on outputs for percentile extraction
 //
 // Clinical relevance:
-//   Population prediction intervals bracket the expected inter-individual
-//   variability driven by CYP3A4 polymorphism (CL CV=60%) and other
-//   epistemic parameter uncertainty. If the 90% prediction interval
-//   (P5-P95) is wide, dose individualization (TDM) is justified.
+//   Population prediction intervals bracket the expected INTER-INDIVIDUAL
+//   VARIABILITY driven by CYP3A4 polymorphism (CL CV=60%, between-subject). If
+//   the 90% prediction interval (P5-P95) is wide, dose individualization (TDM)
+//   is justified. (Epistemic uncertainty on the population parameters is a
+//   separate band — see pop_epistemic.sio.)
 //
 // References:
 //   JCGM 100:2008 §8 — Use of probability distributions for uncertainty
@@ -24,7 +31,7 @@
 //
 // Author: Demetrios Chiuratto Agourakis
 
-use tsit5_pbpk14::*
+use darwin_pbpk::tsit5_pbpk14::*
 
 // ============================================================================
 // PSEUDO-RANDOM NUMBER GENERATOR (LCG)
@@ -62,7 +69,7 @@ fn rng_value(rng: RNG) -> f64 {
 // MATH HELPERS
 // ============================================================================
 
-fn ps_sqrt(x: f64) -> f64 {
+fn ps_sqrt(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 }
     var y = x
     var i = 0
@@ -75,7 +82,7 @@ fn ps_abs(x: f64) -> f64 {
     return x
 }
 
-fn ps_ln(x: f64) -> f64 {
+fn ps_ln(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 - 999999.0 }
     var sx = x
     var scale = 0
@@ -214,7 +221,7 @@ fn sort_f64(arr: [f64; 64], n: i32) -> [f64; 64] with Mut {
     return sorted
 }
 
-fn percentile(sorted: [f64; 64], n: i32, pct: f64) -> f64 {
+fn percentile(sorted: [f64; 64], n: i32, pct: f64) -> f64 with Mut, Div {
     if n <= 0 { return 0.0 }
     let nf = n as f64
     let rank = pct / 100.0 * (nf - 1.0)
@@ -232,7 +239,7 @@ fn percentile(sorted: [f64; 64], n: i32, pct: f64) -> f64 {
 // RAPAMYCIN PARAMETERS + PRIORS
 // ============================================================================
 
-fn pop_rapamycin_params() -> PBPKParams14 {
+fn pop_rapamycin_params() -> PBPKParams14 with Mut {
     var prm = default_pbpk_params()
     prm.cl_hepatic = 12.4
     prm.cl_renal = 0.3
@@ -263,7 +270,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
     println("  Virtual Population PBPK — Rapamycin (Sirolimus)")
     println("  20 virtual patients, 14-compartment, adaptive Tsit5")
-    println("  Parameter sampling: N(mean, SD) from epistemic priors")
+    println("  Parameter sampling: N(mean, SD) — inter-individual variability (IIV)")
     println("  Seed: 42 (reproducible)")
     println("======================================================================")
     println("")
@@ -273,9 +280,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let t_end = 168.0
     let n_patients = 20
 
-    // Epistemic prior means and SDs
+    // Inter-individual variability (IIV) prior means and SDs (between-subject)
     let cl_mean = 12.4
-    let cl_sd = 7.4       // CV=60%
+    let cl_sd = 7.4       // IIV CV=60% (between-subject, NOT epistemic u_c)
     let fu_mean = 0.08
     let fu_sd = 0.02
     let kp_brain_mean = 0.08
@@ -523,7 +530,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println("  ALL 6 TESTS PASSED")
         println("")
         println("  Population PBPK simulation validated for rapamycin:")
-        println("    - 20 virtual patients sampled from epistemic priors")
+        println("    - 20 virtual patients sampled from inter-individual variability (IIV) priors")
         println("    - CL CV=60% correctly propagates to AUC variability")
         println("    - 90% prediction interval spans > 2-fold")
         println("    - Median AUC consistent with reference simulation")

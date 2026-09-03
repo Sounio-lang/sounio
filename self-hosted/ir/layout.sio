@@ -38,7 +38,7 @@ fn layout_empty_score() -> LayoutScore {
     LayoutScore { func_idx: -1, count: -1 }
 }
 
-struct LayoutResult {
+pub struct LayoutResult {
     module: IrModule,
     hot_count: i64,
     cold_count: i64,
@@ -53,7 +53,9 @@ fn layout_score_functions(module: &IrModule, profile: &SprofProfile) -> ([Layout
     var scores: [LayoutScore; 1024] = [layout_empty_score(); 1024]
     var i: i64 = 0
     while i < module.fn_count && i < LAYOUT_MAX_FUNCS {
-        let count = sprof_lookup(profile, &module.functions[i as usize].name)
+        // #1678: hoist before taking the reference -- see ir/profile.sio.
+        var f = module.functions[i as usize]
+        let count = sprof_lookup(profile, &f.name)
         scores[i as usize] = LayoutScore { func_idx: i, count: count }
         i = i + 1
     }
@@ -158,12 +160,12 @@ fn layout_patch_fn_ids(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic,
     while fi < module.fn_count {
         var ii: i64 = 0
         while ii < module.functions[fi as usize].instr_count {
-            if layout_is_call_opcode(module.functions[fi as usize].instrs[ii as usize].op) {
-                let old_id = module.functions[fi as usize].instrs[ii as usize].fn_id
+            if layout_is_call_opcode((IR_A_OP[(ir_region_slot_r(module.functions[fi as usize].region, (ii))) as usize] as IrOpcode)) {
+                let old_id = IR_A_FN_ID[(ir_region_slot_r(module.functions[fi as usize].region, (ii))) as usize]
                 if old_id >= 0 && old_id < module.fn_count {
-                    var instr = module.functions[fi as usize].instrs[ii as usize]
+                    var instr = ir_arena_load(ir_region_slot_r(module.functions[fi as usize].region, (ii)))
                     instr.fn_id = remap[old_id as usize]
-                    module.functions[fi as usize].instrs[ii as usize] = instr
+                    ir_arena_store(ir_region_slot_w(module.functions[fi as usize].region, (ii)), instr)
                 }
             }
             ii = ii + 1
@@ -176,10 +178,19 @@ fn layout_patch_fn_ids(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic,
 // Top-level: score -> sort -> reorder -> patch -> return
 // ============================================================================
 
-fn layout_sort_by_profile(module: IrModule, profile: &SprofProfile) -> LayoutResult with Mut, Panic, Div {
-    let scored = layout_score_functions(&module, profile)
-    let scores = scored.0
-    let count = scored.1
+pub(crate) fn layout_sort_by_profile(module: IrModule, profile: &SprofProfile) -> LayoutResult with Mut, Panic, Div {
+    var scores: [LayoutScore; 1024] = [layout_empty_score(); 1024]
+    var si: i64 = 0
+    while si < module.fn_count && si < LAYOUT_MAX_FUNCS {
+        // #1678: hoist before taking the reference. This site is also why
+        // `madaros --self-test` segfaulted at T24 -- the wrong address was
+        // dereferenced rather than merely misread. See #1680.
+        var sf = module.functions[si as usize]
+        let sc = sprof_lookup(profile, &sf.name)
+        scores[si as usize] = LayoutScore { func_idx: si, count: sc }
+        si = si + 1
+    }
+    let count = module.fn_count
 
     let sorted = layout_sort_scores(scores, count)
 

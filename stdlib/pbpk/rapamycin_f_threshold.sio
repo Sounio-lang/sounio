@@ -1,0 +1,354 @@
+// stdlib/pbpk/rapamycin_f_threshold.sio — Bioavailability epistemic threshold theorem
+//
+// Sprint 20 dissertation finding: there exist four bioavailability thresholds
+// that govern the epistemic regime of oral rapamycin TDM. These thresholds
+// unify the CYP3A5 genotype findings (Sprint 18) and DDI findings (Sprint 19)
+// under a single structural principle.
+//
+// ── Four bioavailability thresholds (D=5mg, N=14, ke=0.01118, standard ka_var) ──
+//
+//   F < F_low ≈ 0.048:          conf = 700 (Regime I — epistemic impossibility)
+//   F_low ≤ F < F* ≈ 0.128:    conf = 820 (Regime II — structural ceiling)
+//   F* ≤ F < F_low_ka16 ≈ ...: conf = 900 (Regime III — standard accessible)
+//   F ≥ F** ≈ 0.150 (ka÷16):   conf = 950 (Regime IV — global optimum accessible)
+//   F ≥ F*** ≈ 0.365 (std ka):  conf = 950 (Regime IV via bioavailability alone)
+//
+//   F_low = 0.047 → 0.048 (exact crossover 700→820)
+//   F*    = 0.127 → 0.128 (exact crossover 820→900 at standard ka_var)
+//   F**   = 0.149 → 0.150 (exact crossover 900→950 at ka÷16)
+//   F***  = 0.360 → 0.370 (exact crossover 900→950 at standard ka_var)
+//
+// ── Clinical scenario classification ─────────────────────────────────────────────
+//
+//   Regime I  (F < F_low ≈ 0.048): conf=700
+//     → inducer (F=0.047), *1/*1+inducer (F=0.031), inducer N=14 impossibility
+//   Regime II (F_low ≤ F < F* ≈ 0.128): conf=820 ceiling
+//     → *1/*1 genotype (F=0.094), any DDI producing F < 0.128
+//   Regime III (F* ≤ F < F*** ≈ 0.365): conf=900 at standard; 950 needs ka÷16 if F < F**
+//     → *1/*3 standard (F=0.141), *3/*3 (F=0.188), strong inhibitor (F=0.282)
+//   Regime IV (F ≥ F*** ≈ 0.365): conf=950 at standard ka_var
+//     → *3/*3 + strong inhibitor (F=0.376)
+//
+// ── The F* ceiling is a concentration problem, NOT a variance problem ─────────────
+//
+//   At F < F*, trough concentration is LOW relative to the ka-variance-driven
+//   uncertainty. The conf=820 ceiling cannot be crossed by:
+//   - Dose escalation (D-independent: F=0.094 at D=5,10,20,50mg → all conf=820)
+//   - f_var reduction (f_var÷256 at F=0.094 → still conf=820)
+//
+//   The ceiling CAN be crossed by:
+//   - Raising F (formulation improvement, P-gp modulation)
+//   - Reducing ka_var (ka measurement improvement)
+//   - Route switch to IV (eliminates gut compartment entirely)
+//
+//   The ka_var-dependent F* shift: at ka÷4, F*' shifts from 0.128 to ≈0.073.
+//   This explains Sprint 18's *1/*1 result: F=0.094 < F* at std ka → conf=820;
+//   but F=0.094 > F*' at ka÷4 → conf=900.
+//
+// ── Absorbed dose (D×F) is not the epistemic driver ──────────────────────────────
+//
+//   F=0.141 at D=3.33mg: D×F=0.470mg, conf=900
+//   F=0.094 at D=5.0mg:  D×F=0.470mg, conf=820
+//
+//   Same absorbed dose, different regimes. Conf is determined by F (mean
+//   bioavailability), not by D×F (absorbed amount). Increasing dose to
+//   compensate for low F inflates both signal and noise proportionally.
+//
+// ── Budget channel indices (same as rapamycin_ss_oral) ────────────────────────────
+//   0 = F (bioavailability)   1 = ka   2 = ke   3 = k12   4 = k21
+
+module pbpk::rapamycin_f_threshold
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_clinical::{
+    conf_from_rel, assess_trough, decision_therapeutic, decision_uncertain
+}
+
+fn ft_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Threshold boundary constants ──────────────────────────────────────────────
+
+pub fn f_low_below()         -> f64 { 0.047 }   // conf=700 (Regime I lower bound)
+pub fn f_low_above()         -> f64 { 0.048 }   // conf=820 (F_low upper bound)
+pub fn f_star_below()        -> f64 { 0.127 }   // conf=820 (F* lower bound)
+pub fn f_star_above()        -> f64 { 0.128 }   // conf=900 (F* upper bound)
+pub fn f_starstar_below()    -> f64 { 0.149 }   // ka÷16 → conf=900 (F** lower)
+pub fn f_starstar_above()    -> f64 { 0.150 }   // ka÷16 → conf=950 (F** upper)
+pub fn f_starstar_star_below() -> f64 { 0.360 } // std ka → conf=900 (F*** lower)
+pub fn f_starstar_star_above() -> f64 { 0.370 } // std ka → conf=950 (F*** upper)
+
+// ka_var shift of F*: at ka÷4
+pub fn f_star_ka4_below()    -> f64 { 0.070 }   // ka÷4: conf=820 (F*' lower bound)
+pub fn f_star_ka4_above()    -> f64 { 0.075 }   // ka÷4: conf=900 (F*' upper bound)
+
+// Standard variance constants
+pub fn ft_ka_var_std()  -> f64 { 0.0225 }
+pub fn ft_f_var_std()   -> f64 { 0.001521 }
+pub fn ft_ke_var_std()  -> f64 { 0.00000841 }
+pub fn ft_k12_var_std() -> f64 { 0.000156 }
+pub fn ft_k21_var_std() -> f64 { 0.0000016 }
+
+// ── conf_at_f_ka ──────────────────────────────────────────────────────────────
+// Core function: compute conf at given f_val (bioavailability) and ka_var.
+// Fixed: D=5mg, N=14, ke=0.01118, standard ke/k12/k21/f variances.
+
+pub fn conf_at_f_ka(f_val: f64, ka_var: f64) -> i64 with Mut, Div, Panic {
+    let ke_val = 0.01118;   let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val = 75.0;      let ka_val  = 0.62
+    let ke_var  = ft_ke_var_std()
+    let k12_var = ft_k12_var_std()
+    let k21_var = ft_k21_var_std()
+    let f_var   = ft_f_var_std()
+    let d_oral  = 5.0;      let n_doses = 14
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    conf_from_rel(a1 / vc_val, ft_sqrt(v1) / vc_val)
+}
+
+// ── conf_at_f_d: arbitrary dose (for D-independence proof) ────────────────────
+
+pub fn conf_at_f_d(f_val: f64, ka_var: f64, d_oral: f64) -> i64 with Mut, Div, Panic {
+    let ke_val = 0.01118;   let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val = 75.0;      let ka_val  = 0.62
+    let ke_var  = ft_ke_var_std()
+    let k12_var = ft_k12_var_std()
+    let k21_var = ft_k21_var_std()
+    let f_var   = ft_f_var_std()
+    let n_doses = 14
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    conf_from_rel(a1 / vc_val, ft_sqrt(v1) / vc_val)
+}
+
+// ── conf_at_f_fvar: variable f_var (for f_var reduction proof) ────────────────
+
+pub fn conf_at_f_fvar(f_val: f64, ka_var: f64, f_var: f64) -> i64 with Mut, Div, Panic {
+    let ke_val = 0.01118;   let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val = 75.0;      let ka_val  = 0.62
+    let ke_var  = ft_ke_var_std()
+    let k12_var = ft_k12_var_std()
+    let k21_var = ft_k21_var_std()
+    let d_oral  = 5.0;      let n_doses = 14
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    conf_from_rel(a1 / vc_val, ft_sqrt(v1) / vc_val)
+}
+
+// ── Gate summary functions ─────────────────────────────────────────────────────
+
+// Regime I lower bound: F=0.047 → conf=700 (below F_low)
+pub fn ft_regime_i_below() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_low_below(), ft_ka_var_std()) == 700
+}
+
+// Regime II lower bound: F=0.048 → conf=820 (at/above F_low)
+pub fn ft_regime_ii_below_flow() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_low_above(), ft_ka_var_std()) == 820
+}
+
+// F* lower bound: F=0.127 → conf=820 (below F*)
+pub fn ft_f_star_lower() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_star_below(), ft_ka_var_std()) == 820
+}
+
+// F* upper bound: F=0.128 → conf=900 (at/above F*)
+pub fn ft_f_star_upper() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_star_above(), ft_ka_var_std()) == 900
+}
+
+// *1/*1 F=0.094 < F*: conf=820 at standard ka_var — Sprint 18 explained
+pub fn ft_cyp11_regime_ii() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(0.094, ft_ka_var_std()) == 820
+}
+
+// F** lower bound: F=0.149, ka÷16 → conf=900
+pub fn ft_f_starstar_lower() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_starstar_below(), ft_ka_var_std() / 16.0) == 900
+}
+
+// F** upper bound: F=0.150, ka÷16 → conf=950
+pub fn ft_f_starstar_upper() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_starstar_above(), ft_ka_var_std() / 16.0) == 950
+}
+
+// D-independence: F=0.094 at D=5,10,20,50 → all conf=820
+pub fn ft_dose_independent() -> bool with Mut, Div, Panic {
+    conf_at_f_d(0.094, ft_ka_var_std(), 5.0)  == 820 &&
+    conf_at_f_d(0.094, ft_ka_var_std(), 10.0) == 820 &&
+    conf_at_f_d(0.094, ft_ka_var_std(), 20.0) == 820 &&
+    conf_at_f_d(0.094, ft_ka_var_std(), 50.0) == 820
+}
+
+// Absorbed dose (D×F) not the driver: same D×F but different F → different conf
+pub fn ft_absorbed_dose_insufficient() -> bool with Mut, Div, Panic {
+    let c_low = conf_at_f_d(0.094, ft_ka_var_std(), 5.0)    // D×F = 0.47 at F=0.094
+    let c_std = conf_at_f_d(0.141, ft_ka_var_std(), 3.33)   // D×F ≈ 0.47 at F=0.141
+    c_std == 900 && c_low == 820    // same absorbed dose, different regime
+}
+
+// f_var reduction cannot cross F*: f_var÷256 at F=0.094 → still conf=820
+pub fn ft_fvar_reduction_irrelevant() -> bool with Mut, Div, Panic {
+    let fv = ft_f_var_std()
+    conf_at_f_fvar(0.094, ft_ka_var_std(), fv)        == 820 &&
+    conf_at_f_fvar(0.094, ft_ka_var_std(), fv/4.0)    == 820 &&
+    conf_at_f_fvar(0.094, ft_ka_var_std(), fv/64.0)   == 820 &&
+    conf_at_f_fvar(0.094, ft_ka_var_std(), fv/256.0)  == 820
+}
+
+// ka_var shift of F*: at ka÷4, F=0.094 crosses into Regime III (conf=900)
+pub fn ft_ka4_shifts_f_star() -> bool with Mut, Div, Panic {
+    let conf_std = conf_at_f_ka(0.094, ft_ka_var_std())           // 820 at std ka
+    let conf_ka4 = conf_at_f_ka(0.094, ft_ka_var_std() / 4.0)    // 900 at ka÷4
+    conf_std == 820 && conf_ka4 == 900
+}
+
+// F*' at ka÷4 is between 0.070 and 0.075
+pub fn ft_f_star_ka4_bounds() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_star_ka4_below(), ft_ka_var_std() / 4.0) == 820 &&
+    conf_at_f_ka(f_star_ka4_above(), ft_ka_var_std() / 4.0) == 900
+}
+
+// F*** lower bound: F=0.360, std ka → conf=900
+pub fn ft_f_starstar_star_lower() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_starstar_star_below(), ft_ka_var_std()) == 900
+}
+
+// F*** upper bound: F=0.370, std ka → conf=950
+pub fn ft_f_starstar_star_upper() -> bool with Mut, Div, Panic {
+    conf_at_f_ka(f_starstar_star_above(), ft_ka_var_std()) == 950
+}

@@ -29,7 +29,7 @@
 //     0.65-0.80: replicated in vivo, n>30, consistent
 //     0.80-0.95: meta-analysis or regulatory submission-grade data
 
-use tsit5_pbpk14::*;
+use darwin_pbpk::tsit5_pbpk14::*;
 
 // ============================================================================
 // MATH HELPERS (local, to avoid relying on import availability)
@@ -62,7 +62,7 @@ fn rapa_sqrt_drug(x: f64) -> f64 {
 //   Deep adipose distribution is OUT OF SCOPE for a 48h BBB focus study.
 //   For multi-day deep-tissue studies, use the full 14-compartment tsit5 model.
 
-fn rapamycin_mean_params() -> PBPKParams14 {
+pub fn rapamycin_mean_params() -> PBPKParams14 {
     var prm = default_pbpk_params()
 
     // Clearance: CYP3A4-dominated, fu_plasma=0.08 unbound cleared
@@ -288,9 +288,24 @@ struct RapamycinPriors {
     // Well-characterized in vitro, but in vivo may differ (disease states)
     // Source: Schreiber 1991 (in vitro equilibrium dialysis)
     fu_plasma: RapamycinEpParam,
+
+    // u_kp: Rodgers-Rowland scaled GUM uncertainty for each of 14 tissues.
+    // u_Kp_i = Kp_lit_i × sqrt((ln10 × u_logP)² + (u_fu/fu)²)
+    // High-logP approximation: log_sens ≈ ln10 for all tissues at logP=7.
+    // Source: Rodgers & Rowland (2006); Vaidyanathan 2001 (logP)
+    u_kp: [f64; 14],
+
+    // fu_unc: GNN molecular property inference σ(fu)
+    // From 3-layer dense GNN forward pass with σ_W=0.01 weights.
+    // Source: darwin-pbpk-platform gnn_inference.sio T4 output
+    fu_unc: f64,
+
+    // cl_unc: GNN molecular property inference σ(CL)
+    // Source: darwin-pbpk-platform gnn_inference.sio T4 output
+    cl_unc: f64,
 }
 
-fn rapamycin_priors() -> RapamycinPriors {
+fn rapamycin_priors() -> RapamycinPriors with Mut {
     // CL: SD = 7.4 L/h (CV = 7.4/12.4 = 60%), evidence score 0.65
     let cl_prior = rapa_ep_param(12.4, 54.76, 0.65)
 
@@ -302,9 +317,40 @@ fn rapamycin_priors() -> RapamycinPriors {
     // Good confidence: multiple replicated in vitro studies
     let fu_prior = rapa_ep_param(0.08, 0.0004, 0.72)
 
+    // R-R scaled GUM uncertainties for 14 tissues (14-comp ordering):
+    //   0=blood, 1=liver, 2=kidney, 3=brain, 4=heart, 5=lung, 6=muscle,
+    //   7=adipose, 8=gut, 9=skin, 10=bone, 11=spleen, 12=pancreas, 13=other
+    // u_Kp_i = Kp_lit_i × sqrt((ln10×u_logP)² + (u_fu/fu)²)
+    //        = Kp_lit_i × 2.4306   (high-logP limit, exact at logP=7)
+    // Scale factor: sqrt((2.302585×1.05)² + (0.02/0.08)²) = sqrt(5.8453+0.0625) = 2.4306
+    let rr_scale = 2.4306
+    var u_kp: [f64; 14] = [0.0; 14]
+    u_kp[0]  = 1.0    * rr_scale   // blood   kp=1.0
+    u_kp[1]  = 8.0    * rr_scale   // liver   kp=8.0
+    u_kp[2]  = 4.0    * rr_scale   // kidney  kp=4.0
+    u_kp[3]  = 0.08   * rr_scale   // brain   kp=0.08  (R-R component; Lampen SD=0.025 is separate)
+    u_kp[4]  = 3.5    * rr_scale   // heart   kp=3.5
+    u_kp[5]  = 10.0   * rr_scale   // lung    kp=10.0
+    u_kp[6]  = 3.5    * rr_scale   // muscle  kp=3.5
+    u_kp[7]  = 0.3    * rr_scale   // adipose kp=0.3   (capped model)
+    u_kp[8]  = 5.0    * rr_scale   // gut     kp=5.0
+    u_kp[9]  = 2.0    * rr_scale   // skin    kp=2.0
+    u_kp[10] = 1.5    * rr_scale   // bone    kp=1.5
+    u_kp[11] = 6.0    * rr_scale   // spleen  kp=6.0
+    u_kp[12] = 4.0    * rr_scale   // pancreas kp=4.0
+    u_kp[13] = 0.5    * rr_scale   // other   kp=0.5
+
+    // GNN uncertainties from 3-layer dense forward pass (darwin gnn_inference.sio)
+    // W=0 weights, σ_W=0.01, biases calibrated to population means
+    let fu_unc = 0.000736    // σ(fu) from GUM through 25→64→32→sigmoid
+    let cl_unc = 0.000009    // σ(CL) from GUM through 25→64→32→softplus
+
     RapamycinPriors {
         cl_hepatic: cl_prior,
         kp_brain: kp_brain_prior,
         fu_plasma: fu_prior,
+        u_kp: u_kp,
+        fu_unc: fu_unc,
+        cl_unc: cl_unc,
     }
 }

@@ -62,7 +62,8 @@ On the current repository snapshot, `souc info` for that JIT artifact reports:
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
-- LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
+- LSP, SMT, distributed, and package-manager features disabled in the checked artifact
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 The repository also ships a separate checked GPU artifact:
 
@@ -106,11 +107,11 @@ When documentation or code claims support, confirm it against one of these:
 
 Current committed stdlib status from `artifacts/stdlib/stdlib_reliability_status.v1.json`:
 
-- totals: `pass=81 fail=0 skip=1 total=82`
-- inventory: `604` `.sio` files, `111` disabled files, `44` stub module files, `92` active module entrypoints
+- totals: `pass=251 fail=0 skip=0 total=251`
+- inventory: `927` `.sio` files, `0` disabled files, `0` stub module files, `119` active module entrypoints
 - science pipeline: `pass`, with `2/2` required lanes passing
 - hyper execution: `7/7` required lanes passing
-- runtime regression enforcement for science remains `soft` locally, with `4` recorded regression failures that become release-blocking under strict enforcement
+- runtime regression enforcement for science remains `soft` locally, with `0` recorded regression failures that become release-blocking under strict enforcement
 
 ## 5. Website and docs model
 

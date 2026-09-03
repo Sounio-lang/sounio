@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.epist
 
 # Epistemic Backend Guide
 
+> **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but the epistemic backend/runtime now lives in `self-hosted/` as `.sio` (knowledge-runtime guards in `self-hosted/compiler/knowledge_runtime_guard*.sio`, native emission in `self-hosted/native/`) — not any `epistemic_runtime.rs` / `c_layout.rs` / LLVM backend variant. Do not look for the `.rs` paths below.
+
+
 ## 1. Introduction
 
 Epistemic computing in Sounio represents a paradigm for handling uncertainty and knowledge provenance directly within the computational framework, enabling precise tracking of confidence levels, intervals, and origins in data processing. At its core, the `Knowledge<T>` type serves as a first-class primitive, embedding epistemic metadata alongside the primary value to ensure that computations reflect not just results but also their reliability and context. This approach is particularly vital in scientific computing, where epistemic metadata—such as confidence scores, uncertainty intervals, and provenance trails—facilitates reproducibility, regulatory compliance, and error mitigation in fields like pharmaceuticals, engineering, and data analysis. By making uncertainty explicit, Sounio prevents silent propagation of errors and supports informed decision-making under partial knowledge.

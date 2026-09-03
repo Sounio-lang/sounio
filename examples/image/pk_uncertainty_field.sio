@@ -1,0 +1,76 @@
+// examples/image/pk_uncertainty_field.sio
+//
+// The epistemic pipeline drawing itself: a pharmacokinetic field where every
+// cell is an `Epistemic` value with GUM-propagated variance, rendered natively
+// to PNG — no FFI, no Python, no plotting library.
+//
+//   souc run examples/image/pk_uncertainty_field.sio
+//     -> pk_auc.png            (mean exposure, log scale, inferno)
+//     -> pk_uncertainty.png    (confidence in the therapeutic margin, viridis)
+//
+// Model (one-compartment IV bolus):
+//   clearance CL = ke * V        exposure AUC = Dose / CL     margin = AUC - target
+// Dose, ke, V and the target each carry uncertainty; `Epistemic` propagates it
+// through mul/div/sub by the GUM delta method. The uncertainty panel lights up
+// along the contour AUC = target, where the sign of the margin is unknowable —
+// exactly the information a plain heatmap of the mean cannot show.
+
+use image::pure::types::{Image, image_new, image_set_pixel}
+use image::pure::png::{png_write}
+use viz::colormap::{inferno_r, inferno_g, inferno_b, viridis_r, viridis_g, viridis_b, cm_pack_rgb8}
+use epistemic::knowledge::{Epistemic}
+
+fn main() with IO, Mut, Div, Panic {
+    let n = 240
+    var auc_img = image_new(n as i32, n as i32)
+    var unc_img = image_new(n as i32, n as i32)
+
+    let dose = Epistemic::measured(500.0, 10.0)   // 500 mg, ~2% dosing CV
+    let target = Epistemic::measured(40.0, 4.0)   // target AUC 40 mg·h/L, ~10%
+    let ke_lo = 0.05; let ke_hi = 0.60            // elimination rate constant (1/h)
+    let v_lo = 15.0;  let v_hi = 90.0             // volume of distribution (L)
+    let denom = (n - 1) as f64
+    let logmin = ln(500.0 / (ke_hi * v_hi))       // AUC range, log scale
+    let logmax = ln(500.0 / (ke_lo * v_lo))
+
+    var yy = 0
+    while yy < n {
+        let v = v_lo + ((yy as f64) / denom) * (v_hi - v_lo)
+        var xx = 0
+        while xx < n {
+            let ke = ke_lo + ((xx as f64) / denom) * (ke_hi - ke_lo)
+            let ke_e = Epistemic::measured(ke, ke * 0.10)  // 10% CV on ke
+            let v_e = Epistemic::measured(v, v * 0.08)     // 8% CV on V
+            let cl = ke_e.mul(&v_e)                        // CL = ke·V (variance propagated)
+            let auc = dose.div(&cl)                        // AUC = Dose/CL
+            let margin = auc.sub(&target)                  // therapeutic margin
+
+            // Panel A — mean exposure, log-normalised, inferno
+            let ta = (ln(auc.val()) - logmin) / (logmax - logmin)
+            image_set_pixel(&!auc_img, xx as i32, yy as i32,
+                cm_pack_rgb8(inferno_r(ta), inferno_g(ta), inferno_b(ta)))
+
+            // Panel B — relative uncertainty of the margin, viridis
+            let ru = margin.rel_uncertainty()
+            var tu = ru / 1.5
+            if tu > 1.0 { tu = 1.0 }
+            image_set_pixel(&!unc_img, xx as i32, yy as i32,
+                cm_pack_rgb8(viridis_r(tu), viridis_g(tu), viridis_b(tu)))
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+
+    // A numeric witness for one operating point (ke=0.20/h, V=50 L).
+    let ke_r = Epistemic::measured(0.20, 0.020)
+    let v_r = Epistemic::measured(50.0, 4.0)
+    let cl_r = ke_r.mul(&v_r)
+    let auc_r = dose.div(&cl_r)
+    print("AUC(ke=0.20, V=50) = "); print(auc_r.val())
+    print(" mg*h/L, sigma = "); print(auc_r.std())
+    print(", rel_unc = "); print(auc_r.rel_uncertainty()); print("\n")
+
+    let ok1 = png_write("pk_auc.png", &auc_img)
+    let ok2 = png_write("pk_uncertainty.png", &unc_img)
+    if ok1 && ok2 { print("wrote pk_auc.png + pk_uncertainty.png\n") } else { print("write failed\n") }
+}

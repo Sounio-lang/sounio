@@ -18,7 +18,7 @@ LOCAL_TARBALL="${LOCAL_TARBALL:-/tmp/${RUN_ID}.tgz}"
 LOCAL_TARBALL_TMP="${LOCAL_TARBALL}.tmp"
 LOCAL_SBATCH_FILE="${LOCAL_SBATCH_FILE:-/tmp/${RUN_ID}.sbatch.local}"
 FORCE_RESTAGE="${FORCE_RESTAGE:-0}"
-PERSIST_MODE="${PERSIST_MODE:-orangefs}"
+PERSIST_MODE="${PERSIST_MODE:-worker_local}"
 PAYLOAD_TRANSFER_MODE="${PAYLOAD_TRANSFER_MODE:-embedded}"
 BASELINE_MODELS="${BASELINE_MODELS:-lstm,gru,transformer,tcn}"
 SEED_COUNT="${SEED_COUNT:-20}"
@@ -249,7 +249,7 @@ kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc '
 if [[ ! -s "${LOCAL_TARBALL}" || "${FORCE_RESTAGE}" != "0" ]]; then
   rm -rf "${LOCAL_SNAPSHOT_DIR}"
   rm -f "${LOCAL_TARBALL}" "${LOCAL_TARBALL_TMP}"
-  OUT_ROOT="${LOCAL_SNAPSHOT_DIR}" SOUNIO_DIR="${SOUNIO_DIR}" \
+  OUT_ROOT="${LOCAL_SNAPSHOT_DIR}" SOUNIO_DIR="${SOUNIO_DIR}" ABIDE_MANIFEST_PATH="${ABIDE_MANIFEST_PATH}" \
     bash "${SOUNIO_DIR}/scripts/gpu/prepare_abide_campaign_snapshot.sh" >/dev/null
 
   TAR_READY=0
@@ -425,6 +425,9 @@ fi
 tar -xzf \"\${PAYLOAD_SOURCE_TGZ}\" -C \"\${LOCAL_REPO_DIR}\"
 chmod +x \"\${LOCAL_REPO_DIR}/bin/souc\" \"\${LOCAL_REPO_DIR}/artifacts/self-hosted/souc-self-hosted-x86_64\"
 SOUNIO_DIR=\"\${LOCAL_REPO_DIR}\"
+if [[ -f \"\${SOUNIO_DIR}/abide_source_manifest.tsv\" ]]; then
+  MANIFEST_PATH=\"\${SOUNIO_DIR}/abide_source_manifest.tsv\"
+fi
 RUN_MANIFEST_PATH=\"\${SOUNIO_DIR}/abide_roi_manifest.tsv\"
 SOUC=\"\${SOUNIO_DIR}/bin/souc\"
 \"\${SOUC}\" info >/dev/null
@@ -641,12 +644,12 @@ echo "Submitted ABIDE campaign job:"
 echo "  RUN_ID: ${RUN_ID}"
 echo "  JobID: ${JOB_ID}"
 echo "  Stage root: ${STAGE_ROOT}"
-echo "  Results dir: ${ORANGEFS_RESULTS_DIR}"
 echo "  Persist mode: ${PERSIST_MODE}"
 echo "  Payload transfer: ${PAYLOAD_TRANSFER_MODE}"
 if [[ "${PERSIST_MODE}" = "orangefs" ]]; then
-  echo "  Fetch: /home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_from_orangefs.sh --run-id ${RUN_ID} --dest-dir /home/devsounio/sounio/artifacts/research/abide/${RUN_ID}"
+  echo "  Results dir: ${ORANGEFS_RESULTS_DIR}"
 else
-  echo "  Fetch: /home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_by_run_id.sh --run-id ${RUN_ID} --dest-dir /home/devsounio/sounio/artifacts/research/abide/${RUN_ID}"
+  echo "  Results dir: worker-local bundle on the admitted Slurm worker"
 fi
+echo "  Fetch: /home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_auto.sh --run-id ${RUN_ID} --dest-dir /home/devsounio/sounio/artifacts/research/abide/${RUN_ID}"
 echo "  Inspect: kubectl -n ${NS} exec ${LOGIN_POD} -- sacct -j ${JOB_ID} --format=JobID,State,ExitCode,Start,End"

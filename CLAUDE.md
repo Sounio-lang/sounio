@@ -1,185 +1,400 @@
 # CLAUDE.md
 
-**RECOVERY + REMOTE-FIRST CONTEXT**: [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md) | **START HERE**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md) | **Syntax ref**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md) | **LLM guide**: [docs/llm-guide/](docs/llm-guide/)
+This file is the entry-point for Claude Code (claude.ai/code) and other AI assistants working in the Sounio repository. It is the active source of truth for AI behavior; `AGENTS.md` is the Codex-facing execution contract; together they cover all AI roles in the project.
 
-## Session Bootstrap (Mandatory)
+If you are a human reader: see §11.
 
-Before making non-trivial changes:
+| Quick reference | |
+|---|---|
+| Founder intent and collaboration contract | [`FOUNDER_INTENT.md`](FOUNDER_INTENT.md) |
+| Semantic concept registry | [`docs/internal/concepts/README.md`](docs/internal/concepts/README.md) |
+| Semantic lane contract | [`docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md`](docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md) |
+| Recovery context | [`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md) |
+| Codex contract | [`AGENTS.md`](AGENTS.md) |
+| Programming guide | [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md) |
+| LLM cookbook | [`docs/llm-guide/`](docs/llm-guide/) |
+| Minimum viable Sounio | [`docs/guide/MINIMUM_VIABLE_SOUNIO.md`](docs/guide/MINIMUM_VIABLE_SOUNIO.md) |
+| Style guide | [`docs/guide/SOUNIO_STYLE_GUIDE.md`](docs/guide/SOUNIO_STYLE_GUIDE.md) |
+| Gotchas | [`docs/guide/SOUNIO_GOTCHAS.md`](docs/guide/SOUNIO_GOTCHAS.md) |
+| Known limitations | [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md) |
+| Governance | [`docs/governance/`](docs/governance/) |
+| LLM offload policy | [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md) |
 
-1. Read `CLAUDE_HANDOFF.md` first.
-2. Verify the current repo path and branch.
-3. Treat `/workspace/sounio` as the active remote-first execution surface.
+---
 
-Important recovery details:
+## 1. Calibration — read before any analysis
 
-- This repo was recovered from VM `sounio-dev-01`, not cloned cleanly from scratch.
-- The safe active branch is `integration/sounio-dev-ready-base`.
-- Historical Claude context may still mention the old VM path:
-  - `/home/demetrios/RustroverProjects/sounio`
-- That old path is predecessor history, not the current workspace path.
-- The active path now is:
-  - `/workspace/sounio`
+Sounio is not a small experimental repository. Past AI sessions, including those with many hours of context, have consistently underestimated its scope by roughly an order of magnitude. **Calibrate before producing analysis.** The most predictable AI failure mode in this repository is measuring `stdlib/` and treating it as the whole.
 
-Operational rule:
+Measured 2026-07-11 on `main` via `bash scripts/dev/measure_repo_scale.sh`:
 
-- Do not propose or perform destructive reset/clean/rebase flows to "simplify" the recovery state.
+| Versioned `.sio` source | Value |
+|---|---:|
+| Files | 6,130 |
+| Lines (raw) | 2,208,306 |
+| Bytes | 76 MB |
 
-## Project Identity
+| Subsystem | Files | LOC (raw) | What it is |
+|---|---:|---:|---|
+| `self-hosted/` | 489 | 554,892 | The Sounio compiler (Madaros), written in Sounio |
+| `stdlib/` | 1,316 | 478,355 | Math, special functions, statistics, PBPK, epistemic types, autograd, PINN, fractional calculus, RNG, I/O |
+| `tests/` | 2,978 | 236,693 | Test suite |
+| `examples/` | 483 | 130,370 | Working examples |
+| Other | ~864 | ~808,000 | `archive/` (historical evolution), `bootstrap/` (C → Sounio chain), `benchmarks/`, tools, ecosystem |
 
-**Sounio** — L0 systems + scientific programming language for epistemic computing. NOT a Rust/Julia dialect; own syntax, semantics, philosophy.
+Re-derive any number above with `bash scripts/dev/measure_repo_scale.sh` — do not quote these from memory.
 
-## Working Principles (MANDATORY)
+Verify before disagreeing:
 
-1. **No AI attribution** — No "Co-Authored-By" or similar in commits
-2. **Sounio syntax** — `&!` not `&mut`, `var` not `let mut`
-3. **Atomic commits** — One logical change per commit
-4. **Token efficiency** — Parallel agents, concise ops
-5. **YOLO mode** — Execute routine ops without asking
-6. **Q1+ research first** — Literature review before architecture decisions
-7. **No drift to mean** — Excellence only
-8. **Epistemic honesty** — Cite sources, acknowledge uncertainty
-9. **Edge of novelty** — Don't copy existing languages
-10. **Routing policy** — Before acting, consult `.claude/routing-policy.md` and delegate to the appropriate tier.
-
-## Sounio Syntax (NOT Rust)
-
-**CRITICAL — What doesn't work:**
-
-- `&mut` → use `&!`
-- `assert!()`, `println!()` → no Rust macros (use `assert()`, `println()`)
-- `#[test]`, `#[derive()]` → no attributes
-- `|x| x + 1` → no closure literals (named fn refs work: `let f = square`)
-- Bare `&![T; N]` array mutation → wrap in struct (see KNOWN_LIMITATIONS.md)
-
-**Quick reference:**
-
-```sio
-let x = 5                              // immutable
-var y = 10                             // mutable
-&T / &!T                               // shared / exclusive ref
-fn f(x: i32) -> i32 with IO { }        // effects
-linear struct Handle { fd: i32 }       // linear types
-let dose: mg = 500.0                   // units
-let arr2 = a ++ b                      // concatenation
-type Pos = { x: i32 | x > 0 }          // refinement
-let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic
-algebra Octonion over f64 { add: commutative, associative; mul: alternative, non_commutative; reassociate: fano_selective }
-fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
+```bash
+git ls-files -z '*.sio' | xargs -0 wc -l | tail -1
+git ls-files -z '*.sio' | wc -l
 ```
 
-## Build & Run
+If your measurement gives ~200k LOC, you measured `stdlib/` alone. Do not proceed under that prior.
 
-The compiler is **self-hosted** (written in Sounio). Use the host-aware launcher:
+---
+
+## 2. Project identity
+
+**Sounio** — a self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects. Single-author development since 25 December 2025. Linux x86-64 only. Not a Rust or Julia dialect; own syntax, semantics, philosophy.
+
+Three things are simultaneously true about this repository:
+
+1. **It is a language.** A self-hosted compiler in `self-hosted/`, a bootstrap chain `bootstrap/stage0` (C, ~103 KB) → `boot4` → `gen1` → `gen2` → `gen3` (fixed-point verification: gen2 = gen3 bit-identical).
+
+2. **It is a scientific computing platform.** First-class `Knowledge[T]` with GUM uncertainty propagation, Caputo fractional derivatives, autograd, PINN training, refinement types, algebraic effects (`IO`, `Mut`, `Div`, `Panic`, `Alloc`, `Async`, `GPU`, `Prob`, `Observe`), units, linear types.
+
+3. **It is the platform for a master's dissertation in biomaterials/pharmacology** at PUC-SP (defense Aug–Sep 2026). The dissertation is one application; the language is the broader product.
+
+---
+
+## 3. Session bootstrap
+
+Before non-trivial changes:
+
+1. Read `CLAUDE_HANDOFF.md` — recovery history and workspace context
+2. Verify current branch (workspace default: `integration/sounio-dev-ready-base`)
+3. Do not start from `main` until reconciliation is completed
+4. Do not propose destructive `reset`/`clean`/`rebase` flows on this repo
+
+---
+
+## 4. Build & run
+
+The compiler is self-hosted (written in Sounio, not Rust). **`bin/souc` is the default compiler entrypoint and now routes to Madaros** — the self-hosted *modular* compiler (`artifacts/self-hosted/madaros`, built via `make build-madaros`). The legacy single-file `lean_single` engine that `bin/souc` used to be is preserved as `bin/souc-lean-single-x86_64`; force it with `SOUNIO_SOUC_ENGINE=lean_single`. lean_single remains the **bootstrap seed** (`make build`, `make build-madaros`) and the canonical fixed-point ELF — it is no longer the default *user-facing* compiler. If Madaros has not been built yet, `bin/souc` falls back to lean_single with a notice on stderr.
+
+> **Naming (canonical): the compiler is spelled `Madaros`** — matching `make build-madaros`, `bin/madaros`, and `docs/MADAROS_STATUS.md`. The source string was fixed on 2026-07-11 (`self-hosted/compiler/main.sio`) **and the shipped ELF `bin/madaros-linux-x86_64` was rebuilt to match**, so `./bin/souc --version` now prints `Madaros v0.80.0`. (A freshly-cloned checkout that has *not* re-run `make build-madaros` locally will still show whatever the committed binary carries; on `main` that is now `Madaros`.) Current version: **v0.80.0**.
+
+> **Fixed-point scope:** `make build` verifies the fixed point over `lean_single.sio` (the seed), **not** over `main.sio`/Madaros. Do not describe Madaros itself as fixed-point-verified.
+
+> **CPC 2026 receipts — engine split (verify before quoting):** the two *epistemic* receipts run live under lean_single — `tests/run-pass/order_spread_exact_n4.sio` (exact N=4 spread `2.044226`) and `tests/run-pass/octonion_associator_gum_validation.sio` (GUM variance `0.640000`, abs err ~1.1e-16). The **Python↔Sounio parity delta `2.03e-10` is NOT a lean_single receipt** — it is an `omega 1.0.0-beta.4` cross-language witness (`artifacts/posters/cpc2026-yale/REPRODUCE.md`) requiring the SWOW-EN input from the sibling repo.
+
+> **CPC 2026 Study B artifact location:** the frozen O-SSM reference `results/cpc2026/ossm_statistical_summary.json` (octonion, 10,000 traj × 500 steps, no-training) lives in the **sibling repo `hyperbolic-semantic-networks`**, *not* in this repo. The in-repo `examples/cognitive_ossm/results/ossm_sounio_native_n1000.json` is a historical native re-run that is **excluded from parity claims**: an independent same-subset audit finds up to 21.1% relative metric error. Its repaired source, `run_ossm_native_reference.sio`, passes current Madaros `check` but remains blocked in native-v2 compilation.
+
+> **O-SSM algebra ceiling:** the frozen Study B reference and the canonical `cognitive_ossm/` recurrence are **octonion (8-D, `oct_mul`)**. Do not use separate experimental brain-model sources as evidence for the frozen CPC implementation. The largest non-associative algebra any SSM reaches today is **sedenion (16-D)** in the conversational conflict head `examples/conversational_ossm/o_ssm_conflict.sio` — it lifts the octonion state via `sed_from_pair` and calls `sed_mul` (`stdlib/algebra/sedenion.sio`) to read zero-divisor proximity (`sed_canonical_zd_z/w`); checks clean under lean_single with a live caller in `agent_cli.sio`. Do not conflate array width (`[f64;16]` softmax/sequence buffers) with algebra dimension.
 
 ```bash
 SOUC=./bin/souc
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib   # required when outside repo root
 
-$SOUC --version                        # selected launcher version
-$SOUC info                             # selected host artifact + wrapper contract
-$SOUC check examples/file.sio          # type-check
-$SOUC run examples/file.sio            # compile to temp host binary, execute, clean up
-$SOUC compile file.sio -o output.out   # direct native compilation
-$SOUC compile file.sio -o out.macho --target aarch64-macos
-
-# Pass-through debug flags supported by the checked self-hosted launcher:
-#   --show-ast
-#   --show-types
-#   --r15-monitor
-
-# Not supported by the checked self-hosted launcher:
-#   repl
-#   sysroot ...
+$SOUC --version                           # verify toolchain
+$SOUC check file.sio                      # type-check only
+$SOUC run file.sio                        # compile + execute + clean up
+$SOUC compile file.sio -o output.elf      # emit named ELF binary
+$SOUC info                                # compiler status (Madaros only -- SOUNIO_SOUC_ENGINE=lean_single has no `info` subcommand)
 
 # Bootstrap chain
-./bin/souc self-hosted/compiler/lean_single.sio gen1.out
-./gen1.out self-hosted/compiler/lean_single.sio gen2.out
+make build    # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
+make clean    # remove generated stages
+make check    # type-check compiler + CI gates
 ```
 
-**Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=$(pwd)/stdlib`
+Testing:
 
-## Architecture
+```bash
+bash scripts/run_sio_test_suite.sh                      # full suite
+bash scripts/run_sio_test_suite.sh vancomycin --verbose # single test by pattern
+bash scripts/stdlib_hyper_execution_gate.sh             # stdlib gates
+bash scripts/dev/doctor_workspace.sh                    # workspace health
+```
 
-**Pipeline:** Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen
+Solo / self-hosted-only workflow (skip Cargo): set `SKIP_BUILD=1` for gate scripts.
 
-| Module | Purpose |
-|--------|---------|
+For full lint, harness annotations, and test directory layout, see [`docs/guide/SOUNIO_DEFINITIVE_GUIDE.md`](docs/guide/SOUNIO_DEFINITIVE_GUIDE.md) and [`docs/guide/CHECK_SOUNIO_GUIDE.md`](docs/guide/CHECK_SOUNIO_GUIDE.md).
+
+### Concurrency discipline (workspace stability)
+
+The workspace pod is recycled by the k8s liveness probe under **CPU saturation**
+(not OOM, not disk). On 2026-05-29 the pod was evicted twice when multiple agents
+on the shared checkout each launched a full `souc main.sio` bundle build at once;
+the 15-min load hit ~153 on 64 cores. Two hard rules when more than one agent is
+active:
+
+1. **Serialize heavy builds.** Any full self-compile / bundle check
+   (`souc main.sio`, `lean_single.sio`, `make build`) MUST run through the global
+   build lock — never bare:
+   ```bash
+   scripts/dev/souc-build-lock.sh ./bin/souc self-hosted/compiler/main.sio /tmp/out.elf
+   ```
+   Cheap `souc check <file>` does not need the lock.
+
+   > **Do NOT wrap `scripts/ci/build_modular_madaros.sh`** — it already takes the
+   > global lock itself (twice: for the seed derivation and for the main build).
+   > Wrapping it **self-deadlocks**, and the deadlock is silent: the outer wrapper
+   > waits for a lock its own child is waiting to acquire. Measured 2026-07-26 —
+   > one agent doing this blocked two others for ~27 minutes before the wedge was
+   > noticed. Call it directly:
+   > ```bash
+   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+   > ```
+   > Better still, when the cluster is reachable, keep the build off the pod
+   > entirely — see `scripts/dev/souc-build-remote.sh`, which runs it on an idle
+   > SLURM node and needs no lock at all, because it consumes no pod CPU.
+2. **One worktree per agent.** Do not run a second agent directly on
+   `/workspace/sounio`. Use a dedicated worktree (see [`.claude/AGENT_HANDOFF.md`](.claude/AGENT_HANDOFF.md)).
+   Recommended ceiling: **≤2 agents doing compiler work at once** on this pod.
+
+---
+
+## 5. AI-native tooling
+
+This checkout ships two local agent surfaces:
+
+- [`tools/lsp/README.md`](tools/lsp/README.md) — Sounio LSP: diagnostics, hover, completions, go-to-definition, references, rename over stdio
+- [`tools/mcp/README.md`](tools/mcp/README.md) — Sounio MCP server exposing compiler `check`, `compile`, `run`, `test`, stdlib docs, and compiler-error resources over local stdio
+
+Run the MCP server with Claude Code:
+
+```bash
+pip install -e tools/mcp
+python -m sounio_mcp.server --transport stdio
+claude --mcp-server sounio=python:-m:sounio_mcp.server
+```
+
+Use `sounio_check` as the first repair-loop step for `.sio` edits. The tool returns the same diagnostic wire family as `souc check --json` and `tools/shared/diagnostic_schema.json`, with MCP-friendly `line`/`column`/`span` fields. For compiler errors, read `sounio://errors/{code}`; for stdlib context, read `sounio://stdlib/{module}`.
+
+Sprint cross-references:
+
+- `examples/pbpk_rapamycin/` — CC-3 pharmacometrics proof-domain target
+- `examples/octonion_nn/` — Cx-3 octonion neural-layer proof-domain target
+- [`tools/mcp/examples/claude_code_usage.md`](tools/mcp/examples/claude_code_usage.md) — error → fix loop recipe
+
+---
+
+## 6. Operating principles
+
+The numbered principles below are binding. Each was learned from a measured failure cycle.
+
+1. **Measure before claiming.** Any quantitative statement about this repository must be backed by a command the operator can re-run. Never write "the codebase is small/incomplete/legacy" based on prior probability.
+
+2. **Stubs are not gaps.** Files with low line counts, empty function bodies, or comment-only contents may be intentional structural placeholders (type signatures, design intent, future markers). Do not delete, refactor, or "complete" them without operator confirmation.
+
+3. **Compilation is the test of existence.** A `.sio` file's status is `./bin/souc check <file>` plus the presence of a caller. Running `./bin/souc run` on a library file and reporting it broken is a category error: most files in `stdlib/` and `examples/` are libraries, not executables.
+
+4. **Sounio is the language of this repository.** Science (data generation, statistical analysis, numerical experiments, model comparison) is implemented in Sounio. Introducing Python, JavaScript, or other languages into the science path is drift, even under time pressure. If you find yourself reaching for `import numpy`, stop. Find the Sounio primitive or ask the operator.
+
+5. **Dispatched scope is bounded scope.** Tasks arrive as scoped dispatches. Completing a dispatch does not authorize starting the next one, even if obvious. Halt at the scope boundary and report. See [`.claude/PARALLEL_BLOCKER_CONTRACT.md`](.claude/PARALLEL_BLOCKER_CONTRACT.md).
+
+6. **Numerical values must be derivable, not retrofitted.** When a test fails by a margin, the correct response is to tighten the implementation, broaden the bound with a published derivation, or report `FAIL_HONEST`. Selecting a tolerance because it permits the observed failure to pass is drift.
+
+7. **Auditability over speed.** The operator runs adversarial audits on AI output. Plausible-looking output that does not survive forensic verification is worse than honest partial output. A phase completed much faster than scoped is a flag, not an achievement.
+
+8. **Halt is a deliverable.** Stopping with a clear report of what was done, what was not done, and what blocks the next step is a complete deliverable.
+
+9. **Q1-research first.** Literature review before architecture decisions. Cite sources; acknowledge uncertainty.
+
+10. **Edge of novelty.** Sounio does not copy existing languages. Proposals to match Rust/Julia/Python semantics are rejected unless evidence shows the convergence is correct on first principles.
+
+11. **No drift to mean.** Excellence only. Atomic commits — one logical change per commit. No AI attribution in commit messages.
+
+---
+
+## 7. Sounio syntax (NOT Rust)
+
+Critical differences. **Five of the seven rows below were measured on
+2026-08-20 and are style, not enforcement** — the compiler accepts the Rust form.
+Write the Sounio form; do not expect a diagnostic if you slip. Rows marked ✓ are
+enforced.
+
+| Wrong (Rust) | Correct (Sounio) |
+|---|---|
+| `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
+| `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
+| `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
+| `assert!(cond)` | `assert(cond)` — **DANGEROUS.** `assert!` checks clean and is **inert**: `assert!(1 == 2)` does not halt. `assert(1 == 2)` does. One character apart. |
+| `println!("hi")` | `println("hi")` — **`println!`/`print!`/`panic!` check clean and SIGSEGV at run time (`rc=139`)**, killing every statement after them. See `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md`. |
+| `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
+| ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
+| `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
+
+Helpers must be defined before callers — no forward references.
+
+Quick reference:
+
+```sounio
+let x = 5                              // immutable
+var y = 10                             // mutable
+var buf: [i64; 8] = [0; 8]             // fixed-size array
+&T / &!T                               // shared / exclusive ref
+fn f(x: i32) -> i32 with IO { }        // effects declaration
+linear struct Handle { fd: i32 }       // linear types
+let dose: mg = 500.0                   // units
+let arr2 = a ++ b                      // array concatenation
+type Pos = { x: i32 | x > 0 }          // refinement type
+let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
+fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
+
+// Effects: IO, Mut, Div, Panic, Alloc, Async, GPU, Prob, Observe
+
+impl MyStruct {
+    fn get(self: &MyStruct) -> i64 { self.val }
+    fn set(self: &!MyStruct, v: i64) with Mut { self.val = v }
+}
+
+for i in 0..10 { }      // exclusive range
+for i in 0..=10 { }     // inclusive range
+if x > 0 { "pos" } else { "neg" }   // if is an expression
+```
+
+Full reference: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md).
+
+---
+
+## 8. Architecture
+
+Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen (x86-64 ELF).
+
+| Directory | Purpose |
+|---|---|
 | `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
-| `self-hosted/check/`, `types/` | Bidirectional inference + effects |
-| `self-hosted/ir/` | IR lowering, optimization, e-graph |
-| `self-hosted/native/` | Native ELF and Mach-O emission in the current self-hosted lane |
+| `self-hosted/check/`, `types/` | Bidirectional type inference + algebraic effects |
+| `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
+| `self-hosted/native/` | x86-64 ELF emission |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `stdlib/epistemic/` | Knowledge<T>, uncertainty (GUM) |
+| `self-hosted/gpu/` | PTX/GPU codegen; end-to-end CLI path exists under default Madaros (`souc build --backend gpu`, see §13) -- no GPU CLI surface under `SOUNIO_SOUC_ENGINE=lean_single`, which rejects the invocation outright |
+| `stdlib/epistemic/` | `Knowledge<T>`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
-| `bootstrap/` | stage0 (C) → boot2g → boot1 chain |
+| `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted |
+| `formal/` | Lean 4 proofs (epistemic type invariants) |
 
-See: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
+Bootstrap fixed-point: stage N and N+1 produce bit-identical ELFs. Entrypoint of self-hosted compiler: `self-hosted/compiler/lean_single.sio`.
 
-## Tests
+Compiler bug fixes follow the forensic dispatch protocol documented in `docs/audit/`. Do not patch `self-hosted/` ad hoc; record evidence and proposed fix as a dispatch first.
 
-- `tests/run-pass/` — Should compile and run
-- `tests/compile-fail/` — Should fail to compile
-- `tests/ui/` — Error message snapshots
-- `tests/stdlib/` — Standard library validation
+---
 
-Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `//@ ignore`
+## 9. Documentation style
 
-## Commits
+- EN-UK orthography in new documentation unless preserving quoted source text
+- Papers, IRB-facing material, clinical artefacts, and external submissions follow GAIDeT-ICMJE 2025 AI disclosure pattern; update `AI_DISCLOSURE.md` per artefact
+- Do not overstate semantic milestones. Report the exact command, path, compiler surface, and evidence used
 
-```text
-[component] Brief description
+---
 
-Components: lexer, parser, ast, check, types, effects, hir, hlir,
-           codegen, backend, cli, docs, stdlib, tests, ontology,
-           epistemic, lsp, pkg, sir, units, refinement
-```
+## 10. Mandatory LLM-offload checkpoints
 
-## LLM Offload
+Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is mandatory at the following checkpoints. Full policy: [`.claude/AGENT_OFFLOAD_POLICY.md`](.claude/AGENT_OFFLOAD_POLICY.md).
 
-**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
+| Trigger | Command | Required |
+|---|---|---|
+| Math claims (PK/PD, GUM, p-box, Lean theorem, refinement invariants) | `bin/llm-offload -t math-review -p xai` | Yes |
+| Clinical-pathway code (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations) | `bin/llm-offload -t review -p deepseek` | Yes |
+| External-facing artefacts (papers, dissertation, IRB, cover letters) | `bin/llm-offload --raw <draft> deepseek xai gemini` | Yes |
 
-**Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules, and **MCP Context7** path fix for remote (`~/.claude/settings.json`)
+Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit. Codex agents must not skip this step.
 
-**MiniMax note**: Supports Anthropic messages API via `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. Models: M2.7 (204K ctx), M2.5, M2.1, M2. Supports tools, streaming, thinking.
+Optional but encouraged:
 
 ```bash
-llm-offload -t expand -p grok       # outline → prose
-llm-offload -t scaffold -p glm      # boilerplate code
-llm-offload -t review -p deepseek   # second opinion
-llm-offload -t paraphrase -p minimax # rewrite
-llm-offload --list-providers         # status table
+bin/llm-offload -t expand     -p gemini   -i outline.md   # outline → prose
+bin/llm-offload -t scaffold   -p deepseek -i spec.md      # boilerplate
+bin/llm-offload -t paraphrase -p qwen     -i letter.md    # tone shifts
+bin/llm-offload --status                                  # which keys are loaded
+bin/llm-offload --list-tasks                              # available tasks
 ```
 
-**Slash commands** (use inside Claude Code):
-- `/offload-expand [provider] [file]` — expand outline → prose
-- `/offload-scaffold [provider] [file]` — spec → boilerplate
-- `/offload-review [provider] [file]` — independent code review
-- `/offload-paraphrase [provider] [file]` — rewrite text
+Routing: [`.claude/offload-routing.md`](.claude/offload-routing.md). Task prompts: `.claude/offload-tasks/<task>.md`.
 
-**Pipelines** (multi-model workflows):
+---
+
+## 11. For human readers
+
+This document is written for AI assistants. If you are human:
+
+- **First visit:** start with the project README.
+- **Researcher / collaborator:** dissertation context lives under `docs/dissertation/`; language design rationale will live under `docs/design/` (forthcoming); evolution is accessible via commit log and `archive/`.
+- **Reviewer (banca, peer review, contribution evaluation):** a tailored overview is planned but not yet available; contact the author directly.
+
+---
+
+## 12. Session persistence
+
+Cross-session context lives in `.claude/`:
+
+- `decisions.md` — architectural choices
+- `pending.md` — open questions, work-in-progress
+- `session_state.json` — structured state
+- `llm_offload_log.md` — offload audit trail
+
+---
+
+## 13. Known limitations
+
+Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md)):
+
+- **Imported-module native path — partial closeout.** Historical D1 (`f64→i64` param cast bitcast → GUM k95 stuck at 1.960) and much of D2 (`&local_array`→builtin) are **closed** (D1: #983/#1252 + Wave10 trust gate; D2: #933/#1247 family). Residuals remain: multi-module memory-wall / exclusive-ref fragile chains (D3 family), named-import/`print_f64` papercuts (D4/#862). Finite-dof `gum_k95` is **TRUSTWORTHY** under default Madaros (`scripts/epistemic_trust_gate.sh` → k95i=2776). Map: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Escalation: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md).
+- `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
+- ~~No unary minus — write `0 - x`~~ **STALE (2026-08-20).** Unary minus checks and computes correctly in literal, argument, binary-operand and array-element position, on both engines.
+- `--show-ast` / `--show-types` are unavailable under the default Madaros engine (`bin/souc compile ... --show-ast` -> `error: madaros build: unsupported option`); both work under `SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64` (they're in that engine's own usage string). A REPL does exist (`souc repl` -> `tools/repl.sh`, shipped 2026-05-28 per `docs/compiler/KNOWN_LIMITATIONS.md`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator; "no REPL" itself is stale and superseded by that entry.
+- `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
+- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible under default Madaros**. `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). This is Madaros-only: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc build ... --backend gpu ...` has no GPU CLI surface at all and fails to parse the invocation (verified 2026-08-17). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- **Dual-engine divergence is not a tilde curiosity.** Default Madaros and `SOUNIO_SOUC_ENGINE=lean_single` disagree on more than f128/f256 parse refusal (E218 / V0-A). Two measured cases from 2026-08-17:
+  - **#1798 (CLOSED):** Madaros *accepted* a forward ontology `inverse_of` target that lean_single rejected with **E158**. Source-current Madaros was aligned to lean_single declaration-order semantics; gate `scripts/ci/madaros_ontology_enforcement_gate.sh`.
+  - **#1792 (OPEN, thesis-critical):** Madaros prints `var(...)=0.000000` on dissertation surfaces (e.g. `rapamycin_epistemic_adaptive`) where lean_single shows ~1e-5 / ~1e-9; related ep28 confidence can emit an IEEE bit-pattern as a huge decimal. Fail-closed detection: `scripts/ci/epistemic_fabrication_detect_gate.sh` / `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`. Do not treat Madaros green prints as science until variance is non-zero under the default engine or the fabrication gate is green without lean pin.
+
+---
+
+## 14. Cluster GPU jobs
+
+The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Before GPU work, read:
+
+1. `/home/devsounio/beagle/k8s/hpc-sota/AGENT_BOOTSTRAP.md`
+2. `/home/devsounio/beagle/k8s/hpc-sota/DEV_WORKFLOW.md`
+
+Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
+
+---
+
+*This file is the AI-assistant entry-point. For the Codex-facing execution contract, see [`AGENTS.md`](AGENTS.md). For governance authority matrix, see [`docs/governance/DOCS_AUTHORITY_MATRIX.md`](docs/governance/DOCS_AUTHORITY_MATRIX.md). Last revised 17 May 2026; check `git log -1 CLAUDE.md` for current state.*
+
+## Agent coordination — read the bus before you start
+
+Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
+`kimi-cli1..2`) and one filesystem. Coordination used to be a document that
+nobody wrote to. It is now a channel:
+
 ```bash
-llm-pipeline consensus review -i file.rs    # 3 providers review same code
-llm-pipeline expand-critique outline.md     # Grok expands → DeepSeek critiques
-llm-pipeline multi-scaffold spec.txt        # 2 providers scaffold → diff
+scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events
+scripts/dev/agent-bus.sh claim <res>    # before a build lock, a shared file, a lane
+scripts/dev/agent-bus.sh post finding 'what you learned'
+scripts/dev/agent-bus.sh hazard add <slug> 'what will silently ruin others' measurements'
 ```
 
-**Flow**: Claude designs → `/offload-expand` expands → Claude critiques
+It is not push — nothing interrupts another agent's loop. You hear others when
+you read, so the whole protocol is: **`brief` before you start, `post` when your
+state changes.** Leases expire, so a crashed agent never parks a resource.
 
-## Session Persistence
+For BeagleCockpit and anything else that has to know as things happen, the same
+bus is served over MCP (`scripts/mcp/agent_bus_mcp.py`, merge `scripts/mcp/agent-bus.mcp.json` into your gitignored `.mcp.json`).
+Subscribe to `bus://events` or `bus://hazards` and the server sends
+`notifications/resources/updated` the moment another agent posts — that is real
+push, not polling. Tools: `bus_post`, `bus_claim`, `bus_release`, `bus_hazard`,
+`bus_brief`. Both doors write the same storage, so an agent on the shell CLI and
+an agent on MCP are on one channel.
 
-Garden / metaphor dictionary (archived): `docs/archived/GARDEN_ROSETTA.md` — used by `.claude/prompts/garden.md`; not required for routine compiler work.
-
-Use `.claude/` for cross-session context:
-
-- `decisions.md` — Architectural choices
-- `pending.md` — Open questions, WIP
-- `session_state.json` — Structured state
-
-## Session Hygiene (Token Efficiency)
-
-- **`/clear`** — Use at the start of an unrelated task or after a long exploration session
-- **`/compact`** — Use when context is large but still relevant (summarizes history)
-- **Start sessions with**: read `.claude/session_state.json` — never re-explore what's already tracked
-- **Offload first**: route review, expand, scaffold tasks to `llm-offload` before asking Claude
-- **Grep before Read**: use Grep/Glob for targeted lookups; only Read when full file content is needed
-- **Batch related changes**: group edits to the same module in one session turn
-- **Routing**: see `.claude/offload-routing.md` for which tasks go to which offload provider
+Post a `hazard` for anything that makes a measurement lie rather than fail:
+a poisoned environment variable, a stale artifact, a checkout parked on another
+branch. Those cost hours precisely because the run still exits and prints a
+number. Storage is `/workspace/.agents/bus`, outside every checkout, because
+agents work in different worktrees.

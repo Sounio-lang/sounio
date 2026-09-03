@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.dead-code-analysis-summary
 -->
 
-
 # Dead Code Analysis - Implementation Summary ✅
 
 ## What Was Built

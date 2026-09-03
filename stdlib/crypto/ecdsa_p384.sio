@@ -1,0 +1,234 @@
+// stdlib/crypto/ecdsa_p384.sio
+//
+// NIST P-384 (secp384r1) ECDSA signature verification (FIPS 186-4 SS6.4.2
+// / SEC1 SS4.1.4), for X.509 certificates whose ISSUER key is P-384 and
+// whose signature algorithm is ecdsa-with-SHA384 (OID 1.2.840.10045.4.3.3).
+// See docs/superpowers/specs/2026-08-27-madaros-ecdsa-p384-design.md.
+//
+// CURVE PARAMETERS -- independently re-verified against a live
+// `openssl ecparam -name secp384r1 -param_enc explicit -text -noout`
+// on 2026-08-27 (OpenSSL 3.5.6, 7 Apr 2026), same discipline as
+// stdlib/crypto/ecdsa_p256.sio's own header comment:
+//   - p == 2^384 - 2^128 - 2^96 + 2^32 - 1 (confirmed by direct computation)
+//   - a == p - 3
+//   - G = (Gx, Gy) satisfies Gy^2 == Gx^3 + a*Gx + b (mod p)
+//   - n is prime and satisfies the Hasse bound relative to p
+//
+// Reuses stdlib::crypto::ecdsa_p256's EcPoint, ec_point_add, ec_scalar_mul,
+// ec_is_infinity UNCHANGED -- those functions take the field prime and
+// curve coefficient as parameters and perform generic short-Weierstrass-
+// curve arithmetic, not P-256-specific arithmetic (see that file's own
+// signatures). No new point/field arithmetic is needed here, only new
+// curve-parameter constants and a verification entry point.
+//
+// ec_mod_inverse is the ONE exception: ecdsa_p256.sio's ec_mod_inverse is
+// PRIVATE (not importable), so this file carries a local, functionally-
+// identical duplicate below (same Fermat's-little-theorem formula, generic
+// over the modulus). It is a duplicate, not a reuse -- if either body is
+// ever changed, the other must be updated to match.
+//
+// Digest handling: SHA-384's 48-byte (384-bit) output exactly matches
+// P-384's 384-bit curve order -- no FIPS 186-4 SS6.4.1 truncation is
+// needed (unlike ecdsa_p256_verify_sha384's leftmost-32-of-48-byte
+// truncation, needed there because P-256's order is only 256 bits). All
+// 48 bytes are packed into a 24-limb BigInt directly.
+
+use bignum::bigint::*
+use hash::sha384::*
+use asn1::der::*
+use crypto::ecdsa_p256::EcPoint
+use crypto::ecdsa_p256::ec_point_add
+use crypto::ecdsa_p256::ec_scalar_mul
+use crypto::ecdsa_p256::ec_is_infinity
+
+// Builds a 384-bit BigInt (24 significant limbs) from a little-endian
+// 16-bit limb array. Every curve constant below has a nonzero top limb
+// (index 23), so len == 24 always, matching build_bigint_16's own
+// no-trim convention in ecdsa_p256.sio.
+fn build_bigint_24(values: [u16; 24]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 24 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 24
+    result
+}
+
+// p = 2^384 - 2^128 - 2^96 + 2^32 - 1 (FIPS 186-4 D.1.2.4 / SEC2 secp384r1).
+pub fn p384_field_prime() -> BigInt {
+    build_bigint_24([
+        65535, 65535, 0, 0, 0, 0, 65535, 65535, 65534, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535,
+    ])
+}
+
+// a = p - 3.
+pub fn p384_curve_a() -> BigInt {
+    build_bigint_24([
+        65532, 65535, 0, 0, 0, 0, 65535, 65535, 65534, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535,
+    ])
+}
+
+// b (curve equation y^2 = x^3 + a*x + b mod p).
+pub fn p384_curve_b() -> BigInt {
+    build_bigint_24([
+        10991, 54252, 51437, 10885, 53661, 35374, 14733, 50774, 34650,
+        20499, 2191, 788, 16658, 65153, 40046, 6173, 11545, 58360, 1387,
+        39054, 59364, 57918, 12199, 45873,
+    ])
+}
+
+// n, the group order.
+pub fn p384_order() -> BigInt {
+    build_bigint_24([
+        10611, 52421, 6506, 60652, 42874, 18608, 3506, 22554, 11743, 62519,
+        19841, 51043, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535,
+    ])
+}
+
+// G = (Gx, Gy), the base point.
+pub fn p384_base_point() -> EcPoint {
+    let gx = build_bigint_24([
+        2743, 29302, 24120, 14932, 10604, 48981, 62045, 21762, 10808,
+        33364, 16864, 23031, 39832, 35751, 15202, 28189, 44404, 62240,
+        50974, 36529, 1335, 48779, 51746, 43655,
+    ])
+    let gy = build_bigint_24([
+        3679, 37098, 7548, 31299, 33181, 7550, 45518, 2656, 47296, 46576,
+        12563, 59866, 5244, 10394, 7613, 63732, 56361, 37522, 39103, 23966,
+        11375, 38438, 56906, 13847,
+    ])
+    EcPoint { x: gx, y: gy }
+}
+
+// Modular inverse mod a PRIME modulus via Fermat's little theorem:
+// a^-1 mod m == a^(m-2) mod m. Used locally for P-384 verification
+// (ec_mod_inverse from ecdsa_p256.sio is private and not importable;
+// both use the same formula).
+fn ec_mod_inverse(a: &BigInt, m: &BigInt) -> BigInt {
+    let two = bigint_from_u32(2)
+    let m_minus_2 = bigint_sub(m, &two)
+    bigint_modpow(a, &m_minus_2, m)
+}
+
+// Converts the 48 big-endian bytes of a SHA-384 digest into the digest
+// integer `e`, in BigInt's little-endian 16-bit limb order (limb 0 =
+// least significant = the LAST two bytes). No truncation: SHA-384
+// produces a 384-bit digest and p384_order() has bit-length exactly
+// 384, so per FIPS 186-4 SS6.4.1 no truncation is needed, unlike
+// P-256/SHA-384 which truncates 48 bytes down to 32.
+fn p384_e_from_be48(digest48: &[u8; 48]) -> BigInt {
+    var e = bigint_zero()
+    var ei: i64 = 0
+    while ei < 24 {
+        let hi_idx = 46 - 2 * ei
+        let lo_idx = 47 - 2 * ei
+        let hi: i64 = digest48[hi_idx as usize] as i64
+        let lo: i64 = digest48[lo_idx as usize] as i64
+        e.limbs[ei as usize] = ((hi << 8) | lo) as u16
+        ei = ei + 1
+    }
+    e.len = 24
+    while e.len > 0 && e.limbs[(e.len - 1) as usize] == 0 {
+        e.len = e.len - 1
+    }
+    e
+}
+
+// The ECDSA verification core, shared by (currently the only) public entry
+// point below -- mirrors ecdsa_p256_verify_with_e's structure exactly
+// (stdlib/crypto/ecdsa_p256.sio), parameterized by P-384's own curve
+// constants instead of P-256's.
+fn ecdsa_p384_verify_with_e(
+    pubkey: &EcPoint,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+    e: &BigInt,
+) -> bool with IO {
+    let top = der_reader_new(der_signature, 0, der_signature_len)
+    let (seq_tag, seq_status) = der_peek_tag(&top)
+    if seq_status != DER_OK {
+        return false
+    }
+    if seq_tag.tag_number != DER_TAG_SEQUENCE || seq_tag.constructed == false {
+        return false
+    }
+    let (body, enter_status) = der_enter(&top, &seq_tag)
+    if enter_status != DER_OK {
+        return false
+    }
+
+    let (r_tag, r_tag_status) = der_peek_tag(&body)
+    if r_tag_status != DER_OK {
+        return false
+    }
+    let (r, r_status) = der_read_integer(&body, &r_tag)
+    if r_status != DER_OK {
+        return false
+    }
+    let (body_after_r, next_status) = der_next(&body, &r_tag)
+    if next_status != DER_OK {
+        return false
+    }
+
+    let (s_tag, s_tag_status) = der_peek_tag(&body_after_r)
+    if s_tag_status != DER_OK {
+        return false
+    }
+    let (s, s_status) = der_read_integer(&body_after_r, &s_tag)
+    if s_status != DER_OK {
+        return false
+    }
+
+    let n = p384_order()
+    let p = p384_field_prime()
+    let curve_a = p384_curve_a()
+    let g = p384_base_point()
+
+    let one = bigint_from_u32(1)
+    if bigint_cmp(&r, &one) < 0 || bigint_cmp(&r, &n) >= 0 {
+        return false
+    }
+    if bigint_cmp(&s, &one) < 0 || bigint_cmp(&s, &n) >= 0 {
+        return false
+    }
+
+    let w = ec_mod_inverse(&s, &n)
+    let u1 = bigint_mod(&bigint_mul(e, &w), &n)
+    let u2 = bigint_mod(&bigint_mul(&r, &w), &n)
+
+    let p1 = ec_scalar_mul(&u1, &g, &curve_a, &p)
+    let p2 = ec_scalar_mul(&u2, pubkey, &curve_a, &p)
+    let sum_point = ec_point_add(&p1, &p2, &p)
+    if ec_is_infinity(&sum_point) {
+        return false
+    }
+
+    let v = bigint_mod(&sum_point.x, &n)
+    bigint_cmp(&v, &r) == 0
+}
+
+// ECDSA-with-SHA-384 signature verification over P-384 (FIPS 186-4
+// SS6.4.2 / SEC1 SS4.1.4). `der_signature` must be a DER
+// SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3).
+//
+// Wire use: X.509 certificates signed ecdsa-with-SHA384 (OID
+// 1.2.840.10045.4.3.3) whose ISSUER key is P-384 -- e.g. SSL.com's ECC
+// intermediates (Cloudflare's 1.1.1.1 chain among them).
+pub fn ecdsa_p384_verify_sha384(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha384(message, message_len)
+    let e = p384_e_from_be48(&digest)
+    ecdsa_p384_verify_with_e(pubkey, der_signature, der_signature_len, &e)
+}

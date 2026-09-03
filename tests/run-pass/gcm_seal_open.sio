@@ -1,0 +1,97 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::aes::*
+use crypto::gcm::*
+use net::socket::*
+
+fn main() -> i64 with IO {
+    // GCM Test Case 2 (McGrew & Viega, "The Galois/Counter Mode of
+    // Operation (GCM)"): AES-128, all-zero key, one all-zero 16-byte
+    // plaintext block, empty AAD, all-zero 12-byte IV.
+    //
+    // Independently re-verified 2026-08-25 directly against the
+    // NIST-hosted primary source PDF (not from memory, not from a
+    // secondhand transcription):
+    //   https://csrc.nist.rip/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-spec.pdf
+    // Appendix "Test Case 2" table lists (values reassembled from the
+    // PDF's wrapped hex columns): K = 32 zero hex digits, P = 32 zero hex
+    // digits, IV = 24 zero hex digits, C = 0388dace60b6a392f328c2b971b2fe78,
+    // T = ab6e47d42cec13bdf53a67b21257bddf. This matches this file's
+    // transcription exactly -- no correction needed.
+    let key: [u8;16] = [0;16]
+    let plaintext_bytes: [u8;16] = [0;16]
+    let nonce: [u8;12] = [0;12]
+    let expected_ciphertext: [u8;16] = [
+        0x03,0x88,0xda,0xce,0x60,0xb6,0xa3,0x92,
+        0xf3,0x28,0xc2,0xb9,0x71,0xb2,0xfe,0x78
+    ]
+    let expected_tag: [u8;16] = [
+        0xab,0x6e,0x47,0xd4,0x2c,0xec,0x13,0xbd,
+        0xf5,0x3a,0x67,0xb2,0x12,0x57,0xbd,0xdf
+    ]
+
+    let round_keys = aes128_key_schedule(&key)
+
+    let pt_buf = rawbuf_new(16 + 8)
+    var i: i64 = 0
+    while i < 16 { rawbuf_set(&pt_buf, i, plaintext_bytes[i as usize] as i64); i = i + 1 }
+    let empty_aad = rawbuf_new(1)
+
+    let (sealed, sealed_len) = gcm_seal(&round_keys, &nonce, &pt_buf, 16, &empty_aad, 0)
+    if sealed_len != 32 {   // 16 ciphertext + 16 tag
+        print_int(1)
+        return 1
+    }
+    var j: i64 = 0
+    while j < 16 {
+        if rawbuf_get(&sealed, j) != (expected_ciphertext[j as usize] as i64) {
+            print_int(2)
+            return 1
+        }
+        j = j + 1
+    }
+    var k: i64 = 0
+    while k < 16 {
+        if rawbuf_get(&sealed, 16 + k) != (expected_tag[k as usize] as i64) {
+            print_int(3)
+            return 1
+        }
+        k = k + 1
+    }
+
+    // Round-trip: gcm_open on our own sealed output must recover the
+    // original plaintext and report ok=true.
+    let (opened, ok) = gcm_open(&round_keys, &nonce, &sealed, sealed_len, &empty_aad, 0)
+    if !ok {
+        print_int(4)
+        return 1
+    }
+    var m: i64 = 0
+    while m < 16 {
+        if rawbuf_get(&opened, m) != (plaintext_bytes[m as usize] as i64) {
+            print_int(5)
+            return 1
+        }
+        m = m + 1
+    }
+
+    // Adversarial: flip one tag byte, confirm gcm_open reports ok=false
+    // and the returned plaintext is all-zero (fail-closed, per spec).
+    rawbuf_set(&sealed, 16, (rawbuf_get(&sealed, 16) ^ 0xFF))
+    let (opened_bad, ok_bad) = gcm_open(&round_keys, &nonce, &sealed, sealed_len, &empty_aad, 0)
+    if ok_bad {
+        print_int(6)
+        return 1
+    }
+    var n: i64 = 0
+    while n < 16 {
+        if rawbuf_get(&opened_bad, n) != 0 {
+            print_int(7)
+            return 1
+        }
+        n = n + 1
+    }
+
+    println("gcm_seal_open: AES-128-GCM matches published test vector, round-trips, and fails closed on a tampered tag")
+    return 0
+}

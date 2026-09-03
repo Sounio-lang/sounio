@@ -1,0 +1,370 @@
+// stdlib/particle_physics/spinor.sio — Dirac algebra and spinor bilinears
+//
+// Implements the Dirac representation of Cl(3,1) as explicit 4×4 complex
+// matrices.  All gamma matrices use the chiral (Weyl) basis.
+//
+// For tree-level cross-sections we primarily need:
+//   • slash(p) = p_μ γ^μ
+//   • trace identities up to 4 gamma matrices
+//   • spin-sum projectors: Σ uū = p̸ + m, Σ vv̄ = p̸ − m
+//
+// References:
+//   - Peskin & Schroeder, Ch. 3
+//   - PDG 2024, Dirac Algebra
+
+module particle_physics::spinor
+
+use complex::lib::{Complex, complex_new, complex_zero, complex_one, complex_i,
+                   complex_add, complex_sub, complex_mul, complex_scale, complex_neg,
+                   complex_conj, complex_eq, complex_is_zero}
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, metric_eta}
+
+// ============================================================================
+// DIRAC MATRIX TYPE (4×4 complex, stored as separate real/imag flat arrays)
+// ============================================================================
+
+/// A 4×4 complex matrix stored in row-major order as two flat [f64; 16] arrays:
+///   re[row*4+col] = Re(M_rc), im[row*4+col] = Im(M_rc).
+pub struct DiracMatrix {
+    pub re: [f64; 16],
+    pub im: [f64; 16],
+}
+
+/// A Dirac spinor: 4 complex components stored as separate real/imag [f64; 4].
+pub struct Spinor {
+    pub re: [f64; 4],
+    pub im: [f64; 4],
+}
+
+/// Flat index: row·4 + col, where row,col ∈ {0,1,2,3}.
+pub fn dm_idx(row: i64, col: i64) -> i64 {
+    row * 4 + col
+}
+
+/// Get element (row, col) as a Complex value.
+pub fn dm_get(m: DiracMatrix, row: i64, col: i64) -> Complex {
+    let i = dm_idx(row, col)
+    complex_new(m.re[i], m.im[i])
+}
+
+/// Set element (row, col) from a Complex value (mutates via mutable reference).
+pub fn dm_set(m: &!DiracMatrix, row: i64, col: i64, val: Complex) with Mut {
+    let i = dm_idx(row, col)
+    m.re[i] = val.re
+    m.im[i] = val.im
+}
+
+/// Construct a Dirac matrix from 16 complex coefficients in row-major order.
+pub fn dirac_matrix_new(c00: Complex, c01: Complex, c02: Complex, c03: Complex,
+                        c10: Complex, c11: Complex, c12: Complex, c13: Complex,
+                        c20: Complex, c21: Complex, c22: Complex, c23: Complex,
+                        c30: Complex, c31: Complex, c32: Complex, c33: Complex) -> DiracMatrix with Mut {
+    var m = DiracMatrix {
+        re: [0.0; 16],
+        im: [0.0; 16],
+    }
+    dm_set(&!m, 0, 0, c00); dm_set(&!m, 0, 1, c01); dm_set(&!m, 0, 2, c02); dm_set(&!m, 0, 3, c03)
+    dm_set(&!m, 1, 0, c10); dm_set(&!m, 1, 1, c11); dm_set(&!m, 1, 2, c12); dm_set(&!m, 1, 3, c13)
+    dm_set(&!m, 2, 0, c20); dm_set(&!m, 2, 1, c21); dm_set(&!m, 2, 2, c22); dm_set(&!m, 2, 3, c23)
+    dm_set(&!m, 3, 0, c30); dm_set(&!m, 3, 1, c31); dm_set(&!m, 3, 2, c32); dm_set(&!m, 3, 3, c33)
+    m
+}
+
+/// Zero Dirac matrix.
+pub fn dirac_matrix_zero() -> DiracMatrix {
+    DiracMatrix { re: [0.0; 16], im: [0.0; 16] }
+}
+
+/// Identity matrix I₄.
+pub fn dirac_matrix_identity() -> DiracMatrix with Mut {
+    var id = dirac_matrix_zero()
+    id.re[0]  = 1.0; id.re[5]  = 1.0; id.re[10] = 1.0; id.re[15] = 1.0
+    id
+}
+
+/// Scalar multiple of identity: val · I₄.
+pub fn dirac_matrix_scalar(val: Complex) -> DiracMatrix with Mut {
+    var m = dirac_matrix_zero()
+    m.re[0]  = val.re; m.im[0]  = val.im
+    m.re[5]  = val.re; m.im[5]  = val.im
+    m.re[10] = val.re; m.im[10] = val.im
+    m.re[15] = val.re; m.im[15] = val.im
+    m
+}
+
+// ============================================================================
+// MATRIX OPERATIONS
+// ============================================================================
+
+/// Matrix addition: C = A + B.
+pub fn dirac_matrix_add(a: DiracMatrix, b: DiracMatrix) -> DiracMatrix with Mut {
+    var r = dirac_matrix_zero()
+    var i: i64 = 0
+    while i < 16 {
+        r.re[i] = a.re[i] + b.re[i]
+        r.im[i] = a.im[i] + b.im[i]
+        i = i + 1
+    }
+    r
+}
+
+/// Matrix subtraction: C = A − B.
+pub fn dirac_matrix_sub(a: DiracMatrix, b: DiracMatrix) -> DiracMatrix with Mut {
+    var r = dirac_matrix_zero()
+    var i: i64 = 0
+    while i < 16 {
+        r.re[i] = a.re[i] - b.re[i]
+        r.im[i] = a.im[i] - b.im[i]
+        i = i + 1
+    }
+    r
+}
+
+/// Scalar multiplication: C = s · A.
+pub fn dirac_matrix_scale(a: DiracMatrix, s: Complex) -> DiracMatrix with Mut {
+    var r = dirac_matrix_zero()
+    var i: i64 = 0
+    while i < 16 {
+        // (s_re + i s_im) * (a_re + i a_im) = (s_re*a_re - s_im*a_im) + i(s_re*a_im + s_im*a_re)
+        r.re[i] = s.re * a.re[i] - s.im * a.im[i]
+        r.im[i] = s.re * a.im[i] + s.im * a.re[i]
+        i = i + 1
+    }
+    r
+}
+
+/// Matrix multiplication: C = A · B.
+pub fn dirac_matrix_mul(a: DiracMatrix, b: DiracMatrix) -> DiracMatrix with Mut {
+    var r = dirac_matrix_zero()
+    var i: i64 = 0
+    while i < 4 {
+        var j: i64 = 0
+        while j < 4 {
+            var sum_re: f64 = 0.0
+            var sum_im: f64 = 0.0
+            var k: i64 = 0
+            while k < 4 {
+                let a_re = a.re[dm_idx(i, k)]
+                let a_im = a.im[dm_idx(i, k)]
+                let b_re = b.re[dm_idx(k, j)]
+                let b_im = b.im[dm_idx(k, j)]
+                sum_re = sum_re + a_re * b_re - a_im * b_im
+                sum_im = sum_im + a_re * b_im + a_im * b_re
+                k = k + 1
+            }
+            r.re[dm_idx(i, j)] = sum_re
+            r.im[dm_idx(i, j)] = sum_im
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+/// Trace of a Dirac matrix: tr(M) = Σ_i M_ii.
+pub fn dirac_matrix_trace(a: DiracMatrix) -> Complex {
+    var sum_re: f64 = 0.0
+    var sum_im: f64 = 0.0
+    var i: i64 = 0
+    while i < 4 {
+        let idx = dm_idx(i, i)
+        sum_re = sum_re + a.re[idx]
+        sum_im = sum_im + a.im[idx]
+        i = i + 1
+    }
+    complex_new(sum_re, sum_im)
+}
+
+// ============================================================================
+// GAMMA MATRICES (Chiral / Weyl representation)
+// ============================================================================
+
+/// Gamma matrix γ^μ for μ ∈ {0,1,2,3}.
+///
+/// # Parameters
+/// - `mu`: Lorentz index (0 = time, 1,2,3 = space).
+///
+/// # Returns
+/// The 4×4 complex Dirac matrix γ^μ.
+pub fn gamma_matrix(mu: i64) -> DiracMatrix with Mut {
+    if mu == 0 {
+        // γ^0 = [[0, I], [I, 0]]
+        return dirac_matrix_new(
+            complex_zero(), complex_zero(), complex_one(),  complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_one(),
+            complex_one(),  complex_zero(), complex_zero(), complex_zero(),
+            complex_zero(), complex_one(),  complex_zero(), complex_zero()
+        )
+    }
+    if mu == 1 {
+        // γ^1 = [[0, σ^1], [−σ^1, 0]]
+        return dirac_matrix_new(
+            complex_zero(), complex_zero(), complex_zero(), complex_one(),
+            complex_zero(), complex_zero(), complex_one(),  complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_zero()
+        )
+    }
+    if mu == 2 {
+        // γ^2 = [[0, σ^2], [−σ^2, 0]]
+        let im = complex_i()
+        let nim = complex_neg(im)
+        return dirac_matrix_new(
+            complex_zero(), complex_zero(), complex_zero(), nim,
+            complex_zero(), complex_zero(), im,  complex_zero(),
+            complex_zero(), nim, complex_zero(), complex_zero(),
+            im,  complex_zero(), complex_zero(), complex_zero()
+        )
+    }
+    if mu == 3 {
+        // γ^3 = [[0, σ^3], [−σ^3, 0]]
+        return dirac_matrix_new(
+            complex_zero(), complex_zero(), complex_one(),  complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_zero(),
+            complex_zero(), complex_zero(), complex_zero(), complex_zero()
+        )
+    }
+    // Invalid index: return zero matrix
+    dirac_matrix_zero()
+}
+
+/// γ^5 = i γ^0 γ^1 γ^2 γ^3 = diag(−1, −1, +1, +1) in chiral basis.
+pub fn gamma_5() -> DiracMatrix with Mut {
+    let m1 = complex_new(-1.0, 0.0)
+    let p1 = complex_new(1.0, 0.0)
+    dirac_matrix_new(
+        m1, complex_zero(), complex_zero(), complex_zero(),
+        complex_zero(), m1, complex_zero(), complex_zero(),
+        complex_zero(), complex_zero(), p1,  complex_zero(),
+        complex_zero(), complex_zero(), complex_zero(), p1
+    )
+}
+
+/// Feynman slash: p̸ = p_μ γ^μ = p^0 γ^0 − p^1 γ^1 − p^2 γ^2 − p^3 γ^3.
+///
+/// Note the metric sign: p_μ = η_μν p^ν, so p_0 = p^0, p_i = −p^i.
+pub fn slash(p: LorentzVector) -> DiracMatrix with Mut {
+    var sum = dirac_matrix_zero()
+    // μ = 0: p_0 = +p^0
+    sum = dirac_matrix_add(sum, dirac_matrix_scale(gamma_matrix(0), complex_new(p.t, 0.0)))
+    // μ = 1: p_1 = −p^1
+    sum = dirac_matrix_sub(sum, dirac_matrix_scale(gamma_matrix(1), complex_new(p.x, 0.0)))
+    // μ = 2: p_2 = −p^2
+    sum = dirac_matrix_sub(sum, dirac_matrix_scale(gamma_matrix(2), complex_new(p.y, 0.0)))
+    // μ = 3: p_3 = −p^3
+    sum = dirac_matrix_sub(sum, dirac_matrix_scale(gamma_matrix(3), complex_new(p.z, 0.0)))
+    sum
+}
+
+// ============================================================================
+// CHIRALITY PROJECTORS
+// ============================================================================
+
+/// Left-chirality projector: P_L = (1 − γ^5)/2.
+pub fn projector_left() -> DiracMatrix with Mut {
+    let id = dirac_matrix_identity()
+    let g5 = gamma_5()
+    dirac_matrix_scale(dirac_matrix_sub(id, g5), complex_new(0.5, 0.0))
+}
+
+/// Right-chirality projector: P_R = (1 + γ^5)/2.
+pub fn projector_right() -> DiracMatrix with Mut {
+    let id = dirac_matrix_identity()
+    let g5 = gamma_5()
+    dirac_matrix_scale(dirac_matrix_add(id, g5), complex_new(0.5, 0.0))
+}
+
+// ============================================================================
+// SPIN-SUM PROJECTORS (for |M|² calculations)
+// ============================================================================
+
+/// Positive-energy spin-sum projector: Σ_s u(p,s) ū(p,s) = p̸ + m.
+pub fn spin_sum_u(p: LorentzVector, mass: f64) -> DiracMatrix with Mut {
+    let ps = slash(p)
+    let m_id = dirac_matrix_scalar(complex_new(mass, 0.0))
+    dirac_matrix_add(ps, m_id)
+}
+
+/// Negative-energy spin-sum projector: Σ_s v(p,s) v̄(p,s) = p̸ − m.
+pub fn spin_sum_v(p: LorentzVector, mass: f64) -> DiracMatrix with Mut {
+    let ps = slash(p)
+    let m_id = dirac_matrix_scalar(complex_new(mass, 0.0))
+    dirac_matrix_sub(ps, m_id)
+}
+
+// ============================================================================
+// TRACE IDENTITIES
+// ============================================================================
+
+/// tr(γ^μ) = 0.
+pub fn trace_gamma(mu: i64) -> Complex {
+    complex_zero()
+}
+
+/// tr(γ^μ γ^ν) = 4 η^μν.
+///
+/// # Parameters
+/// - `mu`, `nu`: Lorentz indices.
+///
+/// # Returns
+/// The trace as a complex number (always real).
+pub fn trace_gamma_2(mu: i64, nu: i64) -> Complex {
+    if mu == nu {
+        if mu == 0 {
+            return complex_new(4.0, 0.0)
+        } else {
+            return complex_new(-4.0, 0.0)
+        }
+    }
+    complex_zero()
+}
+
+/// tr(γ^μ γ^ν γ^ρ γ^σ) = 4(η^μν η^ρσ − η^μρ η^νσ + η^μσ η^νρ).
+pub fn trace_gamma_4(mu: i64, nu: i64, rho: i64, sigma: i64) -> Complex {
+    let t1 = metric_eta(mu, nu) * metric_eta(rho, sigma)
+    let t2 = metric_eta(mu, rho) * metric_eta(nu, sigma)
+    let t3 = metric_eta(mu, sigma) * metric_eta(nu, rho)
+    complex_new(4.0 * (t1 - t2 + t3), 0.0)
+}
+
+/// tr(γ^μ γ^ν γ^ρ γ^σ γ^5) = −4i ε^μνρσ.
+/// In our metric (+,−,−,−) with ε^0123 = +1.
+pub fn trace_gamma_4_5(mu: i64, nu: i64, rho: i64, sigma: i64) -> Complex {
+    let eps = levi_civita_4(mu, nu, rho, sigma)
+    complex_new(0.0, -4.0 * eps)
+}
+
+// ============================================================================
+// LEVI-CIVITA SYMBOL (4D)
+// ============================================================================
+
+/// Totally antisymmetric Levi-Civita symbol in 4D.
+/// ε^0123 = +1, odd permutations = −1, repeated indices = 0.
+fn levi_civita_4(i: i64, j: i64, k: i64, l: i64) -> f64 {
+    if i == j || i == k || i == l || j == k || j == l || k == l {
+        return 0.0
+    }
+    var indices: [i64; 4] = [i, j, k, l]
+    var inversions: i64 = 0
+    var a: i64 = 0
+    while a < 4 {
+        var b: i64 = a + 1
+        while b < 4 {
+            if indices[a] > indices[b] {
+                inversions = inversions + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    if inversions % 2 == 0 {
+        return 1.0
+    } else {
+        return -1.0
+    }
+}
+
+// metric_eta: use particle_physics::lorentz::metric_eta (imported above).
+// Local private duplicate removed — prefer the single pub definition in lorentz.

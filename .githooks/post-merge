@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# .githooks/post-merge  (source of truth: scripts/dev/git-hooks/post-merge;
+# installed by copying into the directory core.hooksPath points at)
+#
+# The governance-regen merge driver (see .gitattributes) resolves the generated
+# docs/governance artifacts during a merge, but it runs *mid-merge* — before all
+# of the other side's docs are materialized — so it can leave stale content.
+# This hook regenerates them from the fully-merged doc set after the merge
+# completes, and records a small follow-up commit if anything changed, so a
+# plain `git merge origin/main` leaves the tree correct and CI-green with no
+# manual `sync_governance_metadata.mjs` step.
+#
+# IT STAGES ONLY WHAT THE SYNC ITSELF REWROTE. The earlier version staged with
+# `git add -A docs/`, which on a shared checkout — this repository routinely has
+# three agents on one worktree — swept every other agent's uncommitted docs/
+# work into an automatic commit labelled as metadata regeneration. So the set of
+# dirty paths is measured before the sync and after, and only paths that were
+# CLEAN before and are dirty after get staged. A path that was already dirty is
+# never touched, even if the sync also rewrote it: its content is then a mix of
+# someone's work and the regeneration, the two cannot be separated here, and
+# committing the mix is the failure this narrowing exists to prevent.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -f "$ROOT/scripts/docs/sync_governance_metadata.mjs" ] || exit 0
+cd "$ROOT"
+
+# NUL-separated, so paths with spaces survive; the 3-character status prefix is
+# stripped, and a rename's two paths both land in the set (membership is all
+# this is used for).
+dirty_paths() {
+    git status --porcelain -z -- docs/ 2>/dev/null \
+        | tr '\0' '\n' \
+        | sed -e 's/^...//' -e '/^$/d' \
+        | sort -u
+}
+
+BEFORE="$(dirty_paths)"
+
+node "$ROOT/scripts/docs/sync_governance_metadata.mjs" >/dev/null 2>&1 || exit 0
+
+AFTER="$(dirty_paths)"
+NEW="$(comm -13 <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") || true)"
+NEW="$(printf '%s\n' "$NEW" | sed '/^$/d')"
+
+if [ -n "$BEFORE" ]; then
+    n_before="$(printf '%s\n' "$BEFORE" | sed '/^$/d' | wc -l | tr -d ' ')"
+    echo "post-merge: $n_before docs/ path(s) were already modified before the merge —" >&2
+    echo "  left unstaged, including any the sync also rewrote:" >&2
+    printf '%s\n' "$BEFORE" | sed 's/^/    /' >&2
+fi
+
+[ -n "$NEW" ] || exit 0
+
+mapfile -t NEW_ARR <<<"$NEW"
+
+# The narrowing is carried by `git add`, NOT by a pathspec on commit: a pathspec
+# makes it a partial commit, and git refuses those while a merge is in progress
+# ("fatal: cannot do a partial commit during a merge"). After a merge the index
+# matches HEAD, so staging just this set and committing the index commits
+# exactly this set — but that inference only holds if nothing else is staged, so
+# it is checked rather than assumed.
+STAGED_ALREADY="$(git diff --cached --name-only 2>/dev/null || true)"
+if [ -n "$STAGED_ALREADY" ]; then
+    echo "post-merge: the index already has staged paths, so an automatic commit" >&2
+    echo "  would fold them in. Regenerated tree left UNCOMMITTED; run" >&2
+    echo "  scripts/docs/sync_governance_metadata.mjs and commit docs/ yourself." >&2
+    exit 0
+fi
+
+git add -- "${NEW_ARR[@]}"
+if git commit -q -m "chore(docs): regenerate governance metadata after merge"; then
+    echo "post-merge: regenerated docs/governance metadata (follow-up commit, ${#NEW_ARR[@]} path(s))"
+else
+    echo "post-merge: sync produced changes but the follow-up commit was refused —" >&2
+    echo "  the tree is regenerated but UNCOMMITTED, and the docs-registry gate" >&2
+    echo "  will be red until it is committed" >&2
+fi

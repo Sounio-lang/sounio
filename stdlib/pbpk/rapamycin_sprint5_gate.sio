@@ -1,0 +1,361 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// Dissertation Sprint 5 gate — capstone cross-contribution integration
+//
+// Validates the full clinical pipeline tying all three dissertation contributions:
+//
+// GROUP 1 — Parameter sanity (assertions 1–5)
+//    1.  ke > 0
+//    2.  k12 > 0
+//    3.  k21 > 0
+//    4.  krel > 0
+//    5.  stent load > 0
+//
+// GROUP 2 — Time-array ordering from simulate() (assertions 6–9)
+//    6.  sim_t[0] ≥ 0 (initial state record at t=0)
+//    7.  sim_t[1] > sim_t[0]
+//    8.  sim_t[47] > sim_t[46]
+//    9.  sim_t[47] ≤ 720 h (stays within 30-day window)
+//
+// GROUP 3 — Time-array ordering from simulate_budget() (assertions 10–12)
+//   10.  bud_t[0] ≥ 0
+//   11.  bud_t[47] > bud_t[0]
+//   12.  bud_t[47] ≤ 720 h
+//
+// GROUP 4 — Time arrays agree between contributions (assertions 13–14)
+//   13.  sim_t[0]  ≈ bud_t[0]  (same Euler schedule)
+//   14.  sim_t[47] ≈ bud_t[47]
+//
+// GROUP 5 — Concentration non-negativity (assertions 15–18)
+//   15.  sim_c[0] ≥ 0
+//   16.  sim_c[47] ≥ 0
+//   17.  bud_c[0] ≥ 0
+//   18.  bud_c[47] ≥ 0
+//
+// GROUP 6 — GUM std non-negativity (assertions 19–22)
+//   19.  sim_std[0] ≥ 0
+//   20.  sim_std[47] > 0  (uncertainty accumulated over 720 steps)
+//   21.  bud_std[0] ≥ 0
+//   22.  bud_std[47] > 0
+//
+// GROUP 7 — Uncertainty budget fractions non-negative (assertions 23–27)
+//   23.  bud_frac[0] ≥ 0  (ke fraction)
+//   24.  bud_frac[1] ≥ 0  (k12 fraction)
+//   25.  bud_frac[2] ≥ 0  (k21 fraction)
+//   26.  bud_frac[3] ≥ 0  (krel fraction)
+//   27.  bud_frac[4] ≥ 0  (a0 fraction)
+//
+// GROUP 8 — Budget completeness (assertions 28–30)
+//   28.  budget_sum_ok (fractions sum to 1.0 ± 0.1)
+//   29.  budget_dominant returns valid index ≥ 0
+//   30.  budget_dominant returns valid index ≤ 4
+//
+// GROUP 9 — AUC and Cmax (assertions 31–37)
+//   31.  AUC value > 0
+//   32.  AUC std ≥ 0
+//   33.  AUC std < AUC value  (relative uncertainty < 100%)
+//   34.  Cmax > 0
+//   35.  Cmax std ≥ 0
+//   36.  time of Cmax ≥ 0
+//   37.  AUC < 200 mg·h/L  (systemic exposure below safety ceiling)
+//
+// GROUP 10 — Clinical decisions (assertions 38–41)
+//   38.  trough decision in [0, 3]
+//   39.  trough confidence in [0, 1000]
+//   40.  AUC decision in [0, 3]
+//   41.  stent-only → DECISION_SUB or DECISION_UNCERTAIN at systemic level
+//
+// GROUP 11 — Decision code constants (assertions 42–45)
+//   42.  decision_sub() == 0
+//   43.  decision_therapeutic() == 1
+//   44.  decision_toxic() == 2
+//   45.  decision_uncertain() == 3
+//
+// GROUP 12 — conf_from_rel classification (assertions 46–50)
+//   46.  rel <  5% → confidence 950
+//   47.  rel < 10% → confidence 900
+//   48.  rel < 25% → confidence 820
+//   49.  rel ≥ 25% → confidence 700
+//   50.  val ≤ 0   → confidence 500 (fallback)
+//
+// GROUP 13 — ep_credible boundaries (assertions 51–54)
+//   51.  confidence 900 → credible (≥ 800 threshold)
+//   52.  confidence 700 → not credible
+//   53.  confidence 799 → not credible (just below threshold)
+//   54.  confidence 800 → credible (exactly at threshold)
+//
+// GROUP 14 — assess_trough clinical cases (assertions 55–59)
+//   55.  tight CI in therapeutic window, high conf → THERAPEUTIC
+//   56.  CI entirely below floor, high conf → SUB
+//   57.  CI entirely above ceiling, high conf → TOXIC
+//   58.  confidence < 800 → UNCERTAIN (gate blocks before classification)
+//   59.  point estimate below floor, CI straddles floor → UNCERTAIN
+//
+// GROUP 15 — assess_auc clinical cases (assertions 60–63)
+//   60.  AUC within window, high conf → THERAPEUTIC
+//   61.  AUC entirely below floor, high conf → SUB
+//   62.  AUC above ceiling, high conf → TOXIC
+//   63.  low confidence → UNCERTAIN
+//
+// GROUP 16 — Cross-sprint consistency (assertions 64–66)
+//   64.  concentration trajectories agree: |sim_c[i] − bud_c[i]| ≤ 1e-6
+//   65.  GUM std trajectories agree: |sim_std[i] − bud_std[i]| ≤ 1e-6
+//   66.  trough_conf is reproducible: equals conf_from_rel(bud_c[47], bud_std[47])
+//
+// COMPILE-TIME ENFORCEMENT:
+//   run_sprint5_gate() declares 'with Epistemic' because it calls ep_credible,
+//   assess_trough, assess_auc, and run_30d_scenario — all of which declare
+//   'with Epistemic'. Removing 'Epistemic' from this function causes E035.
+//   This is the dissertation's compile-time contribution: uncertainty-awareness
+//   is a type-level property enforced throughout the clinical decision stack.
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, rap2_params}
+use pbpk::rapamycin_budget::{budget_dominant, budget_sum_ok}
+use pbpk::rapamycin_clinical::{
+    decision_sub, decision_therapeutic, decision_toxic, decision_uncertain,
+    ep_credible, assess_trough, assess_auc, conf_from_rel
+}
+use pbpk::rapamycin_dissertation::{run_30d_scenario, cross_sprint_consistent}
+
+var SPR5_PASS: [i64; 2] = [0; 2]
+
+fn s5_chk(pass: bool, id: i64) with IO, Mut, Panic {
+    if pass {
+        SPR5_PASS[0] = SPR5_PASS[0] + 1
+    } else {
+        print("FAIL sprint5 #")
+        print_int(id)
+        print("\n")
+        SPR5_PASS[1] = SPR5_PASS[1] + 1
+    }
+}
+
+fn s5_near(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let absd = if diff < 0.0 { 0.0 - diff } else { diff }
+    absd < tol
+}
+
+// Gate runner — must declare 'with Epistemic' because it calls ep_credible,
+// assess_trough, assess_auc, and run_30d_scenario (all 'with Epistemic').
+// The compiler enforces this: removing Epistemic causes E035 at those call sites.
+pub fn run_sprint5_gate() with IO, Mut, Div, Panic, Epistemic {
+
+    // ── Setup: build rapamycin 2-cmt parameter cache ─────────────────────────
+
+    let p = rap2_params()
+
+    // GROUP 1 — Parameter sanity
+    s5_chk(p.ke_val   > 0.0, 1)
+    s5_chk(p.k12_val  > 0.0, 2)
+    s5_chk(p.k21_val  > 0.0, 3)
+    s5_chk(p.krel_val > 0.0, 4)
+    s5_chk(p.a_poly0  > 0.0, 5)
+
+    // ── Run the 30-day Cypher® post-PCI clinical scenario ─────────────────────
+
+    var s5_sim_t   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_sim_c   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_sim_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_bud_t   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_bud_c   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_bud_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_bud_frac = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var s5_auc      = [0.0, 0.0]
+    var s5_cmax     = [0.0, 0.0, 0.0]
+    var s5_tdec     = [0]
+    var s5_tconf    = [0]
+    var s5_adec     = [0]
+
+    run_30d_scenario(&p,
+        &!s5_sim_t,  &!s5_sim_c,  &!s5_sim_std,
+        &!s5_bud_t,  &!s5_bud_c,  &!s5_bud_std,
+        &!s5_bud_frac, &!s5_auc, &!s5_cmax,
+        &!s5_tdec, &!s5_tconf, &!s5_adec)
+
+    // GROUP 2 — Time ordering from simulate()
+    // t[0] = 0 (initial state record; stent-only starts at zero plasma conc.)
+    s5_chk(s5_sim_t[0]  >= 0.0,             6)
+    s5_chk(s5_sim_t[1]  > s5_sim_t[0],      7)
+    s5_chk(s5_sim_t[47] > s5_sim_t[46],     8)
+    s5_chk(s5_sim_t[47] <= 720.0,           9)
+
+    // GROUP 3 — Time ordering from simulate_budget()
+    s5_chk(s5_bud_t[0]  >= 0.0,             10)
+    s5_chk(s5_bud_t[47] > s5_bud_t[0],      11)
+    s5_chk(s5_bud_t[47] <= 720.0,           12)
+
+    // GROUP 4 — Time arrays agree between contributions
+    s5_chk(s5_near(s5_sim_t[0],  s5_bud_t[0],  0.001), 13)
+    s5_chk(s5_near(s5_sim_t[47], s5_bud_t[47], 0.001), 14)
+
+    // GROUP 5 — Concentration non-negativity
+    s5_chk(s5_sim_c[0]  >= 0.0, 15)
+    s5_chk(s5_sim_c[47] >= 0.0, 16)
+    s5_chk(s5_bud_c[0]  >= 0.0, 17)
+    s5_chk(s5_bud_c[47] >= 0.0, 18)
+
+    // GROUP 6 — GUM std non-negativity
+    s5_chk(s5_sim_std[0]  >= 0.0, 19)
+    s5_chk(s5_sim_std[47] >  0.0, 20)
+    s5_chk(s5_bud_std[0]  >= 0.0, 21)
+    s5_chk(s5_bud_std[47] >  0.0, 22)
+
+    // GROUP 7 — Budget fractions non-negative
+    s5_chk(s5_bud_frac[0] >= 0.0, 23)
+    s5_chk(s5_bud_frac[1] >= 0.0, 24)
+    s5_chk(s5_bud_frac[2] >= 0.0, 25)
+    s5_chk(s5_bud_frac[3] >= 0.0, 26)
+    s5_chk(s5_bud_frac[4] >= 0.0, 27)
+
+    // GROUP 8 — Budget completeness
+    s5_chk(budget_sum_ok(&s5_bud_frac, 0.1), 28)
+    let bd = budget_dominant(&s5_bud_frac)
+    s5_chk(bd >= 0, 29)
+    s5_chk(bd <= 4, 30)
+
+    // GROUP 9 — AUC and Cmax
+    s5_chk(s5_auc[0]  >  0.0,          31)
+    s5_chk(s5_auc[1]  >= 0.0,          32)
+    s5_chk(s5_auc[1]  <  s5_auc[0],    33)
+    s5_chk(s5_cmax[0] >  0.0,          34)
+    s5_chk(s5_cmax[1] >= 0.0,          35)
+    s5_chk(s5_cmax[2] >= 0.0,          36)
+    s5_chk(s5_auc[0]  <  200.0,        37)
+
+    // GROUP 10 — Clinical decisions valid range
+    s5_chk(s5_tdec[0]  >= 0 && s5_tdec[0]  <= 3,    38)
+    s5_chk(s5_tconf[0] >= 0 && s5_tconf[0] <= 1000, 39)
+    s5_chk(s5_adec[0]  >= 0 && s5_adec[0]  <= 3,    40)
+
+    // 41. Stent-only → sub-therapeutic or uncertain at systemic level
+    //     (local delivery by design; systemic plasma well below window)
+    s5_chk(s5_tdec[0] == 0 || s5_tdec[0] == 3, 41)
+
+    // GROUP 11 — Decision code constants
+    s5_chk(decision_sub()         == 0, 42)
+    s5_chk(decision_therapeutic() == 1, 43)
+    s5_chk(decision_toxic()       == 2, 44)
+    s5_chk(decision_uncertain()   == 3, 45)
+
+    // GROUP 12 — conf_from_rel classification
+    // rel = std/val: th5 = val/20, th10 = val/10, th25 = val/4
+    s5_chk(conf_from_rel(1.0, 0.04) == 950, 46)   // 0.04 < 0.05 → 950
+    s5_chk(conf_from_rel(1.0, 0.09) == 900, 47)   // 0.09 < 0.10 → 900
+    s5_chk(conf_from_rel(1.0, 0.24) == 820, 48)   // 0.24 < 0.25 → 820
+    s5_chk(conf_from_rel(1.0, 0.50) == 700, 49)   // 0.50 ≥ 0.25 → 700
+    s5_chk(conf_from_rel(0.0, 0.50) == 500, 50)   // val ≤ 0 → 500
+
+    // GROUP 13 — ep_credible boundary behaviour
+    //   threshold is conf_clinical_min() = 800
+    let ep_c900 = Epistemic::new(1.0, 0.01, 900)
+    s5_chk(ep_credible(&ep_c900), 51)
+
+    let ep_c700 = Epistemic::new(1.0, 0.01, 700)
+    s5_chk(!ep_credible(&ep_c700), 52)
+
+    let ep_c799 = Epistemic::new(1.0, 0.01, 799)
+    s5_chk(!ep_credible(&ep_c799), 53)
+
+    let ep_c800 = Epistemic::new(1.0, 0.01, 800)
+    s5_chk(ep_credible(&ep_c800), 54)
+
+    // GROUP 14 — assess_trough clinical cases
+    //
+    // 55. Therapeutic: val=0.010 mg/L, std=0.0002, conf=900
+    //     k = 1.96×0.0002 = 0.000392; lo=0.009608, hi=0.010392
+    //     Both within [0.004, 0.020] and point estimate in window → THERAPEUTIC
+    let ep_ther = Epistemic::new(0.010, 0.0002 * 0.0002, 900)
+    s5_chk(assess_trough(&ep_ther) == decision_therapeutic(), 55)
+
+    // 56. Sub-therapeutic: val=0.001 mg/L, std=0.00001, conf=900
+    //     hi = 0.001 + 1.96×0.00001 = 0.00102 < 0.004 floor → SUB
+    let ep_sub = Epistemic::new(0.001, 0.00001 * 0.00001, 900)
+    s5_chk(assess_trough(&ep_sub) == decision_sub(), 56)
+
+    // 57. Toxic: val=0.050 mg/L, std=0.001, conf=900
+    //     lo = 0.050 - 0.00196 = 0.04804 > 0.020 ceiling → TOXIC
+    let ep_tox = Epistemic::new(0.050, 0.001 * 0.001, 900)
+    s5_chk(assess_trough(&ep_tox) == decision_toxic(), 57)
+
+    // 58. Uncertain — low confidence gate fires: conf=500 < 800 → UNCERTAIN
+    let ep_unc_c = Epistemic::new(0.010, 0.0002 * 0.0002, 500)
+    s5_chk(assess_trough(&ep_unc_c) == decision_uncertain(), 58)
+
+    // 59. Uncertain — CI straddles floor: val=0.003, std=0.001, conf=900
+    //     hi = 0.003 + 0.00196 = 0.00496 > floor=0.004 (not pure SUB)
+    //     val=0.003 < floor → not in window → falls through to UNCERTAIN
+    let ep_unc_s = Epistemic::new(0.003, 0.001 * 0.001, 900)
+    s5_chk(assess_trough(&ep_unc_s) == decision_uncertain(), 59)
+
+    // GROUP 15 — assess_auc clinical cases
+    //
+    // 60. Therapeutic: auc=10.0, std=0.1, conf=900
+    //     lo=9.804 > 0.001 floor, hi=10.196 < 200.0 ceiling, val in window → THERAPEUTIC
+    s5_chk(assess_auc(10.0, 0.1, 900) == decision_therapeutic(), 60)
+
+    // 61. Sub: auc=0.0001, std=0.000001, conf=900
+    //     hi = 0.0001 + 1.96×1e-6 ≈ 0.0001020 < 0.001 floor → SUB
+    s5_chk(assess_auc(0.0001, 0.000001, 900) == decision_sub(), 61)
+
+    // 62. Toxic: auc=250.0, std=0.1, conf=900
+    //     lo = 250.0 - 0.196 = 249.804 > 200.0 ceiling → TOXIC
+    s5_chk(assess_auc(250.0, 0.1, 900) == decision_toxic(), 62)
+
+    // 63. Uncertain: low confidence → gate fires before classification
+    s5_chk(assess_auc(10.0, 0.1, 700) == decision_uncertain(), 63)
+
+    // GROUP 16 — Cross-sprint consistency
+    //
+    // 64. Concentration trajectories agree: simulate() vs simulate_budget()
+    //     Both integrate the same 2-cmt Euler ODE for (A1, A2); tolerance 1e-6
+    s5_chk(cross_sprint_consistent(&s5_sim_c, &s5_bud_c, 48, 0.000001), 64)
+
+    // 65. GUM std trajectories agree between contributions
+    s5_chk(cross_sprint_consistent(&s5_sim_std, &s5_bud_std, 48, 0.000001), 65)
+
+    // 66. trough_conf is reproducible: equals conf_from_rel(bud_c[47], bud_std[47])
+    //     run_30d_scenario sets trough_conf[0] = conf_from_rel(bud_c[47], bud_std[47])
+    s5_chk(s5_tconf[0] == conf_from_rel(s5_bud_c[47], s5_bud_std[47]), 66)
+
+    // ── Final gate ────────────────────────────────────────────────────────────
+
+    if SPR5_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL: ")
+        print_int(SPR5_PASS[1])
+        print(" assertions failed\n")
+    }
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    run_sprint5_gate()
+    0
+}

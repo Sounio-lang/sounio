@@ -77,6 +77,21 @@ fn graded_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 // The default inverts. Composition without a witness now yields the CONSERVATIVE
 // bound. Only a discharged proof or an actual measurement buys the tight one —
 // declaring independence buys nothing, because computation cannot create trust.
+//
+// Merge note (#1758 x integration/sounio-dev-ready-base, 2026-09-03): the
+// integration branch grew a parallel IndepWitness/graded_compose_with design,
+// unused by anything else on that branch, that generalized the two composition
+// branches below into one `graded_combine_rho(u1, u2, rho)` call (adopted here
+// -- it is a strict refactor, verified to return the identical value on every
+// path this file already tested). But that design also added an
+// `indep_declared(reason)` escape hatch giving an UNPROVEN claim the same
+// rho=0 treatment as a structurally proven one -- contradicting its own
+// file's stated philosophy ("declaring independence buys nothing") with the
+// one line of code that actually runs. Kept the stricter witness kinds below
+// (no unproven-and-still-tight path exists), and kept the measured-rho sample
+// floor (indep_min_samples) that the other design's `indep_correlated` had no
+// equivalent of -- a rho estimated from a handful of pairs is not evidence of
+// independence either, sample count or not.
 
 fn witness_none() -> i64 { return 0 }
 fn witness_measured() -> i64 { return 1 }
@@ -84,7 +99,7 @@ fn witness_d_separated() -> i64 { return 2 }
 
 // Evidence that two graded quantities may be composed in quadrature.
 //   kind = witness_d_separated: discharged structurally. The causal graph proves
-//          X ⫫ Y | Z by d-separation (self-hosted/check/causal.sio). This is the
+//          X ⪶ Y | Z by d-separation (self-hosted/check/causal.sio). This is the
 //          witness the type-level lift will consume.
 //   kind = witness_measured: rho estimated from n paired samples.
 //   kind = witness_none: no evidence. Conservative bound.
@@ -145,6 +160,24 @@ fn indep_is_usable(w: Independence) -> bool {
 // COMPOSITION
 // ============================================================================
 
+// The full JCGM 100:2008 eq. (13) combination for two epistemic grades under an
+// assumed correlation rho:
+//     u_c = sqrt(u1² + u2² + 2·rho·u1·u2)
+// The two extremes are this same law, not special cases bolted on beside it:
+//     rho = 0 -> quadrature, eq. (10) (the independent case)
+//     rho = 1 -> u1 + u2, the Cauchy-Schwarz bound (the additive fallback)
+// so the "conservative bound" used when no witness is usable is this law
+// evaluated at its worst admissible rho, not a separate formula that could
+// drift from it.
+fn graded_combine_rho(u1: f64, u2: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let sum_sq = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
+    if sum_sq <= 0.0 {
+        0.0
+    } else {
+        graded_sqrt(sum_sq)
+    }
+}
+
 // Grade composition: a ∘ b, WITHOUT evidence of independence.
 //
 // Yields the conservative additive bound. This used to return quadrature, which
@@ -189,25 +222,18 @@ fn graded_compose_indep(a: GradedProb, b: GradedProb, w: Independence) -> Graded
         // JCGM 100:2008 eq. (13) with the measured rho. Note this is not always
         // tighter than additive — with rho near 1 it converges to it, which is
         // exactly right.
-        let base = a.epsilon * a.epsilon + b.epsilon * b.epsilon
-        let cov = 2.0 * w.rho * a.epsilon * b.epsilon
-        let total = base + cov
-        if total <= 0.0 {
-            return GradedProb { value: a.value, epsilon: 0.0, is_aleatoric: false, }
-        }
         return GradedProb {
             value: a.value,
-            epsilon: graded_sqrt(total),
+            epsilon: graded_combine_rho(a.epsilon, b.epsilon, w.rho),
             is_aleatoric: false,
         }
     }
 
     // Structurally proven independent: quadrature, eq. (10). This is the only
     // path on which the historic behaviour survives, and now it costs a proof.
-    let sum_sq = a.epsilon * a.epsilon + b.epsilon * b.epsilon
     GradedProb {
         value: a.value,
-        epsilon: graded_sqrt(sum_sq),
+        epsilon: graded_combine_rho(a.epsilon, b.epsilon, 0.0),
         is_aleatoric: false,
     }
 }

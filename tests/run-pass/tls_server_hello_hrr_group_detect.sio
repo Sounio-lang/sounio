@@ -1,0 +1,174 @@
+//@ run-pass
+//@ requires: madaros
+
+// Final whole-plan review round 1, Finding 3 (Minor): the design spec's
+// own Scope Decision promises "If the server's HRR instead demands a
+// key-exchange group other than X25519, fail closed with a clear error --
+// no other curve is implemented." Before this fix, `decode_server_hello`
+// (stdlib/tls/server_hello.sio) only ever recorded a key_share entry when
+// the group equaled NAMED_GROUP_X25519 -- an HRR naming a DIFFERENT group
+// decoded as "no key share present", indistinguishable from a genuine
+// cookie-only HRR. `client.sio`'s HRR-handling code would then blindly
+// re-send the original X25519 ClientHello, relying on the server to abort
+// the mismatched retry downstream rather than surfacing the specific
+// error the spec promised.
+//
+// The fix adds `ServerHelloInfo.selected_group: u16`, populated
+// UNCONDITIONALLY from the key_share extension's raw NamedGroup value
+// (RFC 8446 SS4.1.4: on a HelloRetryRequest, key_share's extension_data
+// IS the bare selected NamedGroup, not a full KeyShareEntry), and
+// `client.sio`'s HRR branch now checks it explicitly against
+// NAMED_GROUP_X25519 before ever re-sending, failing closed with the new
+// distinct `TLS_CONNECT_ERR_UNSUPPORTED_GROUP` sentinel.
+//
+// This test hand-constructs synthetic HelloRetryRequest wire bytes (same
+// technique as tests/run-pass/tls_handshake_codec_rfc8448.sio's synthetic-
+// message construction) covering the three now-distinguishable cases:
+//   1. HRR naming a non-X25519 group (secp256r1, RFC 8446 SS4.2.7's
+//      0x0017) in its key_share extension -- selected_group must record
+//      0x0017 exactly, and has_key_share must stay false (this plan never
+//      implements a non-X25519 exchange).
+//   2. HRR naming X25519 (0x001d) -- selected_group must record 0x001d, so
+//      `client.sio`'s `selected_group != NAMED_GROUP_X25519` check
+//      correctly lets this case proceed to retry (has_key_share is still
+//      false here too, since an HRR's key_share is a bare NamedGroup, not
+//      a real KeyShareEntry -- what `client.sio` actually branches on is
+//      `selected_group`, not `has_key_share`, for exactly this reason).
+//   3. A cookie-only HRR with NO key_share extension at all --
+//      selected_group must stay 0 (never mistaken for a real "group 0"
+//      selection; RFC 8446 SS4.2.7 has no NamedGroup numbered 0). This is
+//      the one case where the OLD code's "no key share" reading was
+//      actually correct -- confirming this fix doesn't regress it.
+//
+// A full live-network drive of `tls_connect`'s new
+// TLS_CONNECT_ERR_UNSUPPORTED_GROUP return is impractical here (it needs a
+// real server issuing a non-X25519 HRR, which no interop fixture in this
+// repo produces) -- this unit-tests the decisive, now-fixed decode logic
+// directly, the same lower-level approach
+// tests/run-pass/tls_client_recv_pending_split.sio already takes for its
+// own fix. The constant this test compares `selected_group` against
+// (0x001d) is RFC 8446 SS4.2.7's own published X25519 NamedGroup value --
+// the same numeric constant `client.sio`'s own (private) NAMED_GROUP_X25519
+// duplicates (see Finding 4, parked).
+
+use tls::handshake::*
+use tls::client::*
+use net::socket::*
+use hash::sha256::*
+
+const NAMED_GROUP_SECP256R1: i64 = 0x0017
+const NAMED_GROUP_X25519: i64 = 0x001d
+
+fn write_u16(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, (v >> 8) & 0xff)
+    rawbuf_set(buf, pos + 1, v & 0xff)
+}
+
+// Computes SHA-256("HelloRetryRequest") at runtime -- the RFC 8446 SS4.1.3
+// HelloRetryRequest sentinel `random` value -- rather than transcribing a
+// literal 32-byte array, matching `decode_server_hello`'s own approach.
+fn hrr_magic_random() -> [u8; 32] with IO {
+    let magic_text = rawbuf_new(17)
+    let magic_bytes: [u8; 17] = [
+        72 as u8, 101 as u8, 108 as u8, 108 as u8, 111 as u8, 82 as u8, 101 as u8, 116 as u8,
+        114 as u8, 121 as u8, 82 as u8, 101 as u8, 113 as u8, 117 as u8, 101 as u8, 115 as u8, 116 as u8,
+    ] // "HelloRetryRequest"
+    var mi: i64 = 0
+    while mi < 17 {
+        rawbuf_set(&magic_text, mi, magic_bytes[mi as usize] as i64)
+        mi = mi + 1
+    }
+    sha256(&magic_text, 17)
+}
+
+// Builds a synthetic HelloRetryRequest ServerHello message. `key_share_ext`
+// is either empty (cookie-only HRR) or a 2-byte bare NamedGroup value
+// (RFC 8446 SS4.1.4's HRR-specific key_share shape).
+fn build_hrr(group_present: bool, group: i64) -> (RawBuf, i64) with IO {
+    let magic = hrr_magic_random()
+    // extensions: key_share (if present) is type=0x0033 len=2 data=group
+    let ext_len = if group_present { 6 } else { 0 }
+    let body_len = 2 + 32 + 1 + 0 + 2 + 1 + 2 + ext_len
+    let total_len = 4 + body_len
+    let msg = rawbuf_new(total_len + 8)
+
+    rawbuf_set(&msg, 0, 2) // HS_SERVER_HELLO
+    rawbuf_set(&msg, 1, 0)
+    rawbuf_set(&msg, 2, (body_len >> 8) & 0xff)
+    rawbuf_set(&msg, 3, body_len & 0xff)
+
+    var pos: i64 = 4
+    rawbuf_set(&msg, pos, 0x03) // legacy_version
+    rawbuf_set(&msg, pos + 1, 0x03)
+    pos = pos + 2
+
+    var ri: i64 = 0
+    while ri < 32 {
+        rawbuf_set(&msg, pos, magic[ri as usize] as i64)
+        pos = pos + 1
+        ri = ri + 1
+    }
+
+    rawbuf_set(&msg, pos, 0) // legacy_session_id_echo length 0
+    pos = pos + 1
+
+    write_u16(&msg, pos, 0x1301) // TLS_AES_128_GCM_SHA256
+    pos = pos + 2
+
+    rawbuf_set(&msg, pos, 0) // legacy_compression_method
+    pos = pos + 1
+
+    write_u16(&msg, pos, ext_len) // extensions total length
+    pos = pos + 2
+
+    if group_present {
+        write_u16(&msg, pos, 0x0033) // EXT_KEY_SHARE
+        pos = pos + 2
+        write_u16(&msg, pos, 2) // extension_data length (bare NamedGroup)
+        pos = pos + 2
+        write_u16(&msg, pos, group)
+        pos = pos + 2
+    }
+
+    (msg, total_len)
+}
+
+fn main() -> i64 with IO, Div, Panic {
+    // --- Case 1: HRR naming a non-X25519 group -----------------------------
+    let (msg1, len1) = build_hrr(true, NAMED_GROUP_SECP256R1)
+    let (info1, ok1) = decode_server_hello(&msg1, len1)
+    assert(ok1)
+    assert(info1.is_hello_retry_request)
+    assert((info1.selected_group as i64) == NAMED_GROUP_SECP256R1)
+    assert((info1.selected_group as i64) != NAMED_GROUP_X25519)
+    assert(!info1.has_key_share)
+
+    // --- Case 2: HRR naming X25519 -- must still be accepted downstream ----
+    let (msg2, len2) = build_hrr(true, NAMED_GROUP_X25519)
+    let (info2, ok2) = decode_server_hello(&msg2, len2)
+    assert(ok2)
+    assert(info2.is_hello_retry_request)
+    assert((info2.selected_group as i64) == NAMED_GROUP_X25519)
+
+    // --- Case 3: cookie-only HRR, no key_share extension at all -------------
+    let (msg3, len3) = build_hrr(false, 0)
+    let (info3, ok3) = decode_server_hello(&msg3, len3)
+    assert(ok3)
+    assert(info3.is_hello_retry_request)
+    assert((info3.selected_group as i64) == 0)
+    assert(!info3.has_key_share)
+
+    // Case 1 and Case 3 both have has_key_share == false, but are now
+    // distinguishable via selected_group -- exactly the gap this fix
+    // closes (previously indistinguishable at the ServerHelloInfo level).
+    assert((info1.selected_group as i64) != (info3.selected_group as i64))
+
+    // --- Sanity: the new client.sio sentinel exists and is genuinely
+    // distinct from every other TLS_CONNECT_ERR_* value (not aliased). ---
+    assert(TLS_CONNECT_ERR_UNSUPPORTED_GROUP != TLS_CONNECT_ERR_HRR)
+    assert(TLS_CONNECT_ERR_UNSUPPORTED_GROUP != TLS_CONNECT_ERR_KEY_EXCHANGE)
+    assert(TLS_CONNECT_ERR_UNSUPPORTED_GROUP != TLS_CONNECT_OK)
+
+    println("tls_server_hello_hrr_group_detect: all cases passed")
+    return 0
+}

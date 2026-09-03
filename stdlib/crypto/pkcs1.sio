@@ -1,0 +1,285 @@
+// stdlib/crypto/pkcs1.sio
+//
+// RSASSA-PKCS1-v1_5-VERIFY (RFC 8017 SS8.2.2). Public-key verification only
+// -- this project never signs or decrypts with an RSA private key, so no
+// constant-time requirement applies (see docs/superpowers/specs/2026-08-23-
+// madaros-hash-functions-design.md's Context section for the reasoning,
+// which carries forward unchanged here).
+
+use bignum::bigint::*
+use net::socket::*
+
+pub const PKCS1_HASH_SHA1: i32 = 1
+pub const PKCS1_HASH_SHA256: i32 = 2
+pub const PKCS1_HASH_SHA384: i32 = 3
+pub const PKCS1_HASH_SHA512: i32 = 4
+
+// RFC 8017 Appendix, Table (DigestInfo DER prefixes -- the ASN.1 encoding of
+// "SEQUENCE { AlgorithmIdentifier, OCTET STRING }" up to but not including
+// the hash bytes themselves, for each hash algorithm this project supports).
+// DEVIATION FROM THE BRIEF (new finding, not previously documented): a
+// multi-element array literal `[a, b, c, ...]` returned DIRECTLY as a
+// function's result value fails to typecheck against a non-i64 declared
+// element type -- E008 "expected [u8; N], found [i64; N]" -- even though
+// the function's return type annotation should coerce the literal. Minimal
+// repro: `fn f() -> [u8; 3] { [1, 2, 3] }` fails this way; confirmed up to
+// 128 elements. This is DIFFERENT from Finding 18 (top-level const array
+// corruption on whole-value use) -- these are local function bodies, not
+// top-level consts, and the failure is a compile-time type error, not a
+// runtime corruption. WORKAROUND (verified working, both 3- and 128-element
+// cases): bind the literal to a `let` with an explicit type annotation
+// first, then return the binding -- `let r: [u8; N] = [a, b, c]; r`. Every
+// digest_info_prefix_* function below uses this pattern.
+fn digest_info_prefix_sha1() -> [u8; 15] {
+    let r: [u8; 15] = [0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14]
+    r
+}
+fn digest_info_prefix_sha256() -> [u8; 19] {
+    let r: [u8; 19] = [0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20]
+    r
+}
+fn digest_info_prefix_sha384() -> [u8; 19] {
+    let r: [u8; 19] = [0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30]
+    r
+}
+fn digest_info_prefix_sha512() -> [u8; 19] {
+    let r: [u8; 19] = [0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40]
+    r
+}
+
+// Independently cross-check these three (prefix bytes, prefix length, hash
+// length) against RFC 8017 before trusting this transcription -- a wrong
+// value here would make every signature verification silently fail (safe
+// direction: false negative, never a false positive) or, worse, silently
+// succeed on a wrong prefix if two algorithms' prefixes were transposed.
+fn digest_info_len_and_hash_len(hash_algorithm: i32) -> (i64, i64) {
+    if hash_algorithm == PKCS1_HASH_SHA1 {
+        (15, 20)
+    } else if hash_algorithm == PKCS1_HASH_SHA256 {
+        (19, 32)
+    } else if hash_algorithm == PKCS1_HASH_SHA384 {
+        (19, 48)
+    } else {
+        (19, 64)   // PKCS1_HASH_SHA512
+    }
+}
+
+fn digest_info_prefix_byte(hash_algorithm: i32, i: i64) -> i64 {
+    if hash_algorithm == PKCS1_HASH_SHA1 {
+        let p = digest_info_prefix_sha1()
+        ((p[i as usize] as i64) & 255)
+    } else if hash_algorithm == PKCS1_HASH_SHA256 {
+        let p = digest_info_prefix_sha256()
+        ((p[i as usize] as i64) & 255)
+    } else if hash_algorithm == PKCS1_HASH_SHA384 {
+        let p = digest_info_prefix_sha384()
+        ((p[i as usize] as i64) & 255)
+    } else {
+        let p = digest_info_prefix_sha512()
+        ((p[i as usize] as i64) & 255)
+    }
+}
+
+// Converts a BigInt to a big-endian byte string of exactly `out_len` bytes,
+// left-padded with zero bytes if the value's own magnitude is shorter.
+// Local to this file per the spec's explicit ruling (not added to
+// stdlib/bignum/bigint.sio). Returns false if the value is too WIDE to fit
+// in out_len bytes (a real error: a signature value must never exceed the
+// modulus's own byte length).
+//
+// DEVIATION FROM THE BRIEF (new finding, not previously documented): a
+// SEPARATE, WRITE-SIDE counterpart to stdlib/net/socket.sio's documented
+// wide-READ bug. `rawbuf_set(buf, i, v)`'s `*p = v as u8` does not perform a
+// true 1-byte store on this compiler -- writing byte i also CLOBBERS bytes
+// i+1..i+7 (the next 7 bytes) to zero. Minimal repro (see this task's
+// report): fill a buffer with a nonzero sentinel, `rawbuf_set(&out, 5, 77)`,
+// then read positions 0..19 back -- position 5 correctly reads 77, but
+// positions 6..12 (exactly 7 bytes) read back 0 even though they were never
+// touched by this call. The brief's original limb-by-limb loop wrote bytes
+// in DESCENDING address order (limb 0, the least significant, is written
+// first and lands nearest the END of the buffer; the most significant limb
+// is written last and lands at the START) -- under this bug, every
+// lower-address write clobbers everything already written at a higher
+// address, so by the end almost the entire buffer reads back as zero.
+// WORKAROUND (verified working end-to-end against a real openssl-signed
+// RSA-2048/SHA-256 test vector): write in ASCENDING address order instead --
+// process limbs from MOST significant down to LEAST significant (so
+// byte_pos only increases as the loop proceeds), and within each limb write
+// the lower-address (`hi`) byte before the higher-address (`lo`) byte. Every
+// write's forward clobber then only zeroes bytes this same loop is about to
+// (re)write correctly on a later iteration, rather than bytes already
+// finalized. The very last write (the least significant limb, nearest
+// out_len-1) can still clobber up to 7 bytes PAST the end of a tightly-sized
+// buffer; callers of this function are expected to size `out`/`out_len`
+// with that in mind, as `pkcs1_v15_verify` below does not currently add
+// headroom -- flagged in this task's report as a residual risk, not fully
+// closed by this workaround.
+fn bigint_to_bytes_be(v: &BigInt, out: &RawBuf, out_len: i64) -> bool with IO {
+    // Repeated divmod-by-256 would need bigint division by a non-power-of-2
+    // limb count, which this project's BigInt module doesn't provide
+    // generically -- instead, walk the limbs directly: v.limbs is little-
+    // endian 16-bit, so limb i covers output bytes [out_len-1-2*i-1, out_len-1-2*i].
+    var i: i64 = 0
+    while i < out_len {
+        out_set_zero_byte(out, i)
+        i = i + 1
+    }
+    let total_bytes = (v.len as i64) * 2
+    if total_bytes > out_len {
+        return false   // value too wide for the requested output width
+    }
+    // Descending limb_idx (most significant limb first) => ascending
+    // byte_pos, per the write-clobber workaround documented above.
+    var limb_idx: i64 = (v.len as i64) - 1
+    while limb_idx >= 0 {
+        let limb = v.limbs[limb_idx as usize]
+        let lo = (limb as i64) & 255
+        let hi = ((limb as i64) >> 8) & 255
+        let byte_pos_lo = out_len - 1 - (limb_idx * 2)
+        let byte_pos_hi = out_len - 1 - (limb_idx * 2) - 1
+        // hi (lower address) written before lo (higher address): also
+        // ascending, per the same workaround.
+        if byte_pos_hi >= 0 {
+            rawbuf_set(out, byte_pos_hi, hi)
+        }
+        rawbuf_set(out, byte_pos_lo, lo)
+        limb_idx = limb_idx - 1
+    }
+    true
+}
+
+fn out_set_zero_byte(out: &RawBuf, i: i64) with IO {
+    rawbuf_set(out, i, 0)
+}
+
+// DEVIATION FROM THE BRIEF (new finding, not previously documented -- see
+// this task's report for the full minimal-repro trace): calling the
+// IMPORTED cross-module `bigint_modpow` (stdlib/bignum/bigint.sio) directly
+// from this file corrupts the TOP limb of the returned BigInt on real
+// RSA-2048 inputs. Confirmed with a bit-by-bit instrumented trace: every one
+// of the 32 square-and-multiply iterations' intermediate top limb matched an
+// independent Python oracle exactly, INCLUDING the very last iteration
+// (which computed the mathematically correct top limb, 1) -- yet the value
+// bigint_modpow's CALLER observed after the call returned across the module
+// boundary was a different, wrong value (144, not 1). A byte-identical copy
+// of the same loop, defined in the SAME module as the caller (this file, or
+// a test's own main.sio), calling the same imported bigint_mul/bigint_mod
+// leaf functions many times, does NOT corrupt -- isolating the bug to
+// something about a struct value (BigInt, which embeds a 512-element array)
+// crossing back OUT of an imported module after that module's own function
+// internally looped calling further same-module functions many times. This
+// matches the general shape of this branch's documented "multi-module
+// memory-wall / exclusive-ref fragile chains" (D3 family, see
+// docs/compiler/KNOWN_LIMITATIONS.md SS13) but is a new manifestation of it,
+// not previously recorded against bigint_modpow specifically.
+//
+// WORKAROUND (verified working end-to-end against a real openssl-signed
+// RSA-2048/SHA-256 test vector): inline the identical square-and-multiply
+// loop here, in the SAME module as pkcs1_v15_verify, calling only the leaf
+// operations (bigint_mul, bigint_mod, bigint_from_u32) across the module
+// boundary -- never the orchestrating loop itself. Semantics are byte-for-
+// byte identical to bignum::bigint::bigint_modpow; only the call-boundary
+// placement differs.
+fn pkcs1_modpow(base: &BigInt, exponent: &BigInt, modulus: &BigInt) -> BigInt {
+    var result = bigint_from_u32(1)
+    var base_mod = bigint_mod(base, modulus)
+
+    var bit_index = exponent.len * 16 - 1
+    while bit_index >= 0 {
+        let limb_index = bit_index / 16
+        let bit_offset = bit_index % 16
+        let this_limb: u16 = exponent.limbs[limb_index as usize]
+        let bit: u16 = (this_limb >> bit_offset) & 1
+
+        let squared = bigint_mul(&result, &result)
+        result = bigint_mod(&squared, modulus)
+
+        if bit == 1 {
+            let multiplied = bigint_mul(&result, &base_mod)
+            result = bigint_mod(&multiplied, modulus)
+        }
+
+        bit_index = bit_index - 1
+    }
+
+    result
+}
+
+pub fn pkcs1_v15_verify(
+    signature: &BigInt,
+    modulus: &BigInt,
+    exponent: &BigInt,
+    modulus_byte_len: i64,
+    hash_algorithm: i32,
+    message_hash: &[u8; 64],
+    message_hash_len: i64,
+) -> bool with IO {
+    if bigint_cmp(signature, modulus) >= 0 {
+        return false   // a valid signature is always < modulus
+    }
+
+    let em = pkcs1_modpow(signature, exponent, modulus)
+
+    // +8 trailing slack: bigint_to_bytes_be's own documented residual risk
+    // (its last write can clobber up to 7 bytes past a tightly-sized
+    // buffer) was flagged but not closed when this function was written --
+    // caught during the final whole-plan review (2026-08-24). Every other
+    // buffer this plan allocates ahead of a write into it (cert.sio's
+    // entry_buf/tbs_copy/sig_buf) already uses this same +8 pattern;
+    // em_buf was the one site that motivated the pattern and never got it
+    // applied to itself. modulus_byte_len (not the padded allocation size)
+    // is still passed as out_len below, since that's what controls the
+    // byte offsets bigint_to_bytes_be computes -- only the allocation
+    // grows, to safely absorb the trailing clobber.
+    let em_buf = rawbuf_new(modulus_byte_len + 8)
+    let converted = bigint_to_bytes_be(&em, &em_buf, modulus_byte_len)
+    if converted == false {
+        return false
+    }
+
+    let (prefix_len, expected_hash_len) = digest_info_len_and_hash_len(hash_algorithm)
+    if message_hash_len != expected_hash_len {
+        return false
+    }
+
+    // Expected EM = 0x00 0x01 <PS: 0xFF...> 0x00 <DigestInfo prefix> <hash>
+    let ps_len = modulus_byte_len - 3 - prefix_len - expected_hash_len
+    if ps_len < 8 {
+        return false   // RFC 8017 requires at least 8 bytes of 0xFF padding
+    }
+
+    if (rawbuf_get(&em_buf, 0) & 255) != 0 {
+        return false
+    }
+    if (rawbuf_get(&em_buf, 1) & 255) != 1 {
+        return false
+    }
+    var i: i64 = 0
+    while i < ps_len {
+        if (rawbuf_get(&em_buf, 2 + i) & 255) != 255 {
+            return false
+        }
+        i = i + 1
+    }
+    if (rawbuf_get(&em_buf, 2 + ps_len) & 255) != 0 {
+        return false
+    }
+    var j: i64 = 0
+    while j < prefix_len {
+        if (rawbuf_get(&em_buf, 3 + ps_len + j) & 255) != digest_info_prefix_byte(hash_algorithm, j) {
+            return false
+        }
+        j = j + 1
+    }
+    var k: i64 = 0
+    while k < expected_hash_len {
+        let em_byte = rawbuf_get(&em_buf, 3 + ps_len + prefix_len + k) & 255
+        let hash_byte = (message_hash[k as usize] as i64) & 255
+        if em_byte != hash_byte {
+            return false
+        }
+        k = k + 1
+    }
+
+    true
+}

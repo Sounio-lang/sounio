@@ -1,0 +1,207 @@
+// examples/zd_forgettable_training.sio
+//
+// Forgettable Training Dynamics.
+//
+// Setup:
+//   • w ∈ R^16 is the parameter vector of a toy "SSM head".
+//   • We pre-unlearn a subject (alice_kernel) from w at t=0 by
+//     subtracting its ZD-kernel projection.
+//   • We then continue training for N steps on a generic objective
+//     whose gradient has a NON-TRIVIAL kernel component (a mis-
+//     aligned adversary would re-inject alice).
+//   • Standard SGD drifts back into the kernel — "catastrophic
+//     re-remembering".  SurgicalSGD (from stdlib/learn) projects
+//     the gradient onto the productive complement at every step,
+//     so the kernel mass stays bit-exact at 0 throughout.
+//
+// Baseline (standard SGD) vs SurgicalSGD is reported side-by-side.
+//
+// Note: we avoid `&![T; N]` array mutation (a known Sounio
+// limitation) by wrapping 16-dim vectors in a struct-by-value.
+// Each update returns a new struct.
+//
+// Print-pass contract: ends with "ZD FORGETTABLE TRAINING PASS".
+
+// ───────────────────── 16-dim vector (struct wrapper) ─────────────────────
+
+struct V16 {
+    x: [f64; 16],
+}
+
+fn v_zero() -> V16 with Mut {
+    V16 { x: [0.0; 16] }
+}
+
+fn v_set(v: V16, i: i64, val: f64) -> V16 with Mut, Panic {
+    var r = v
+    r.x[i] = val
+    r
+}
+
+fn v_get(v: V16, i: i64) -> f64 with Mut, Panic {
+    v.x[i]
+}
+
+fn inner(a: V16, b: V16) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + a.x[i] * b.x[i]; i = i + 1 }
+    s
+}
+
+fn u1() -> V16 with Mut, Panic {
+    var v = v_zero()
+    v.x[6]  =  0.707107
+    v.x[15] = 0.0 - 0.707107
+    v
+}
+
+fn u2() -> V16 with Mut, Panic {
+    var v = v_zero()
+    v.x[7]  =  0.707107
+    v.x[14] =  0.707107
+    v
+}
+
+fn kernel_mass(w: V16) -> f64 with Mut, Panic {
+    let a = u1(); let b = u2()
+    let c1 = inner(w, a); let c2 = inner(w, b)
+    c1 * c1 + c2 * c2
+}
+
+// Unlearn: subtract the kernel projection from w.  Returns new vec.
+fn unlearn(w: V16) -> V16 with Mut, Panic {
+    let a = u1(); let b = u2()
+    let c1 = inner(w, a); let c2 = inner(w, b)
+    var r = w
+    var i = 0
+    while i < 16 {
+        r.x[i] = w.x[i] - c1 * a.x[i] - c2 * b.x[i]
+        i = i + 1
+    }
+    r
+}
+
+// Standard SGD step.  Does NOT preserve kernel mass.
+fn sgd_step(w: V16, g: V16, lr: f64) -> V16 with Mut, Panic {
+    var r = w
+    var i = 0
+    while i < 16 {
+        r.x[i] = w.x[i] - lr * g.x[i]
+        i = i + 1
+    }
+    r
+}
+
+// Surgical SGD: project gradient onto productive subspace before
+// applying.  Preserves kernel mass bit-exactly.
+fn surgical_sgd_step(w: V16, g: V16, lr: f64) -> V16 with Mut, Panic, ZD, Learn {
+    let a = u1(); let b = u2()
+    let c1 = inner(g, a); let c2 = inner(g, b)
+    var r = w
+    var i = 0
+    while i < 16 {
+        let ann_i = c1 * a.x[i] + c2 * b.x[i]
+        let prod_i = g.x[i] - ann_i
+        r.x[i] = w.x[i] - lr * prod_i
+        i = i + 1
+    }
+    r
+}
+
+// Deterministic "adversarial" gradient: pulls w back toward alice.
+fn adversarial_grad(step: i64) -> V16 with Mut, Panic {
+    let a = u1(); let b = u2()
+    var g = v_zero()
+    var i = 0
+    while i < 16 {
+        let base = 0.5 + 0.1 * (step as f64)
+        g.x[i] = 0.0 - 0.6 * (a.x[i] + b.x[i]) + 0.4 * 0.1 * base
+        i = i + 1
+    }
+    g
+}
+
+fn abs(x: f64) -> f64 with Mut {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn print_micro(x: f64) with IO, Mut, Panic {
+    let scaled = x * 1000000.0
+    let ix = scaled as i64
+    print_int(ix)
+    print(" e-6")
+}
+
+fn initial_weights() -> V16 with Mut, Panic {
+    var w = v_zero()
+    var i = 0
+    while i < 16 {
+        w.x[i] = 0.1 + 0.05 * (i as f64)
+        i = i + 1
+    }
+    w
+}
+
+fn main() with IO, Mut, Panic, Div {
+    println("=== Forgettable Training Dynamics ===")
+    println("")
+
+    var w_sgd  = initial_weights()
+    var w_surg = initial_weights()
+
+    // Pre-training unlearn: remove alice from both copies.
+    w_sgd  = unlearn(w_sgd)
+    w_surg = unlearn(w_surg)
+
+    let m0_sgd  = kernel_mass(w_sgd)
+    let m0_surg = kernel_mass(w_surg)
+
+    print("  initial kernel mass (after unlearn):")
+    print(" sgd="); print_micro(m0_sgd)
+    print(" surg="); print_micro(m0_surg)
+    println("")
+
+    // Training loop: 20 steps of adversarial gradient.
+    let n_steps = 20
+    var step = 1
+    while step <= n_steps {
+        let g = adversarial_grad(step)
+        w_sgd  = sgd_step(w_sgd, g, 0.01)
+        w_surg = surgical_sgd_step(w_surg, g, 0.01)
+        step = step + 1
+    }
+
+    let m_sgd  = kernel_mass(w_sgd)
+    let m_surg = kernel_mass(w_surg)
+
+    println("")
+    println("  after 20 adversarial steps:")
+    print("    standard SGD kernel mass = "); print_micro(m_sgd);  println("")
+    print("    surgical SGD kernel mass = "); print_micro(m_surg); println("")
+    println("")
+
+    let drift_sgd  = abs(m_sgd  - m0_sgd)
+    let drift_surg = abs(m_surg - m0_surg)
+
+    print("    SGD drift      = "); print_micro(drift_sgd);  println("")
+    print("    Surgical drift = "); print_micro(drift_surg); println("")
+    println("")
+
+    let surg_ok  = drift_surg < 0.000001
+    let sgd_fail = drift_sgd  > 0.001
+
+    if surg_ok {
+        if sgd_fail {
+            println("  verdict: surgical optimizer preserves forgetting,")
+            println("           standard SGD re-remembers (catastrophic)")
+            println("")
+            println("ZD FORGETTABLE TRAINING PASS")
+        } else {
+            println("  verdict: surgical preserved, but SGD drift not significant;")
+            println("           probably too small a re-injection signal")
+        }
+    } else {
+        println("  verdict: surgical optimizer did NOT preserve kernel mass -- investigate")
+    }
+}

@@ -90,6 +90,14 @@ parity = load_json(parity_path) or {}
 binary = load_json(binary_path) or {}
 runtime = load_json(runtime_path) or {}
 
+# Surface CUDA toolchain provenance from whichever sub-artifact captured it
+# (runtime ran the kernels; parity/binary ran ptxas). Keeps the contract artifact
+# self-describing about which toolchain backed the shipped GPU profile.
+def _tc(obj):
+    t = obj.get("toolchain") if isinstance(obj, dict) else None
+    return t if isinstance(t, dict) and t.get("capture_status") not in (None, "not_captured") else None
+toolchain = _tc(runtime) or _tc(parity) or _tc(binary) or {"capture_status": "not_captured"}
+
 payload = {
     "schema": "sounio.omega.gpu_public_contract.v1",
     "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -105,6 +113,7 @@ payload = {
         "attested_targets": runtime.get("target_profiles", []),
         "native_lanes": runtime.get("native_lanes", parity.get("native_lanes", [])),
         "binary_provenance": binary.get("target_provenance", binary.get("binaries", [])),
+        "toolchain": toolchain,
     },
     "blockers": blockers,
     "log_path": rel(log_path),

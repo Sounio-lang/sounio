@@ -1,0 +1,185 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint12_gate.sio — Sprint 12 Cypher stent systemic safety gate
+//
+// 56 assertions certifying that the Cypher sirolimus-eluting stent's systemic
+// AUC over 720 h is BELOW the therapeutic window (SUB, conf=950), with k21
+// (peripheral→central return) as the dominant uncertainty source — NOT krel
+// (stent release rate), as one would naively assume.
+//
+// Standard scenario: rap2_params() — stent with 720h simulation, dt=1h, n=48.
+//   AUC(0→720h) ≈ 3.12e-6 mg·h/L → below floor (0.001 mg·h/L) → SUB
+//   GUM confidence = 950 (relative std < 5%)
+//   Dominant source: k21 (peripheral→central, index 2)
+//
+// Dissertation headline (Section D, assertions 21-24):
+//   cypher_safety_certified() = true (AUC=SUB, conf=950)
+//   cypher_monitoring_needed() = false (no systemic TDM needed)
+//   cypher_k21_dominant() = true (k21, not krel, is bottleneck)
+//   cypher_krel_irrelevant() = true (krel_var ÷4 and ×4 leave cert unchanged)
+//
+//   A point-estimate PBPK tool says "stent releases locally, systemic exposure
+//   negligible" — correct conclusion, unverified.  The epistemic system gives a
+//   compile-time-certified SUB with provenance: confidence grade, dominant source,
+//   and robustness to krel measurement uncertainty.
+//
+// Assertion map:
+//   A (1–8):   cypher_systemic_auc_classify basic properties: SUB, conf, dom
+//   B (9–14):  Safety certification and monitoring gate
+//   C (15–20): krel_var÷4 leaves classification unchanged
+//   D (21–26): krel_var×4 leaves classification unchanged
+//   E (27–32): k21_var÷4 → dom shifts to k12; SUB cert holds
+//   F (33–38): k21_var×4 → dom stays k21; SUB cert holds
+//   G (39–44): Confidence sentinel values and properties
+//   H (45–48): Decision sentinel values
+//   I (49–52): Cross-check: scale=1.0 variants match standard
+//   J (53–56): Full narrative: krel_irrelevant + safety_cert + k21_dominant
+
+use pbpk::rapamycin_stent_clinical::{
+    cypher_systemic_auc_classify, cypher_systemic_auc_conf, cypher_dominant_source,
+    cypher_safety_certified, cypher_monitoring_needed, cypher_k21_dominant,
+    cypher_classify_krel_variant, cypher_conf_krel_variant, cypher_dom_krel_variant,
+    cypher_classify_k21_variant, cypher_conf_k21_variant, cypher_dom_k21_variant,
+    cypher_krel_irrelevant
+}
+use pbpk::rapamycin_clinical::{
+    decision_sub, decision_therapeutic, conf_clinical_min
+}
+
+var SPR12_PASS: [i64; 2] = [0; 2]
+
+fn s12_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR12_PASS[0] = SPR12_PASS[0] + 1
+    } else {
+        SPR12_PASS[1] = SPR12_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint12_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: cypher_systemic_auc_classify basic properties (8 assertions) ─
+    // Verified values: dec=0(SUB), conf=950, dom=2(k21)
+
+    // Systemic AUC is below therapeutic floor
+    s12_chk(cypher_systemic_auc_classify() == decision_sub())           // 1
+    // Explicitly not therapeutic (not an immune-suppression dose)
+    s12_chk(cypher_systemic_auc_classify() != decision_therapeutic())   // 2
+    // Confidence = 950 (highest grade: rel std < 5%)
+    s12_chk(cypher_systemic_auc_conf() == 950)                          // 3
+    // Confidence exceeds clinical minimum
+    s12_chk(cypher_systemic_auc_conf() >= conf_clinical_min())          // 4
+    // k21 is the dominant uncertainty source (peripheral→central)
+    s12_chk(cypher_dominant_source() == 2)                              // 5
+    // Not ke (systemic elimination)
+    s12_chk(cypher_dominant_source() != 0)                              // 6
+    // Not k12 (central→peripheral)
+    s12_chk(cypher_dominant_source() != 1)                              // 7
+    // SUB sentinel value is 0
+    s12_chk(decision_sub() == 0)                                        // 8
+
+    // ── Section B: Safety certification and monitoring gate (6 assertions) ──────
+    // The certification claim: safety cert = true, monitoring = false.
+
+    s12_chk(cypher_safety_certified())                                  // 9
+    s12_chk(!cypher_monitoring_needed())                                // 10
+    s12_chk(cypher_k21_dominant())                                      // 11
+    // Safety certified = true implies SUB and conf=950
+    s12_chk(cypher_safety_certified() != false)                         // 12
+    // Monitoring not needed = false implies AUC is not therapeutic
+    s12_chk(cypher_monitoring_needed() != true)                         // 13
+    // k21 dominant = true implies dom==2
+    s12_chk(cypher_k21_dominant() != false)                             // 14
+
+    // ── Section C: krel_var÷4 leaves classification unchanged (6 assertions) ────
+    // Tightening stent release measurement 4× has no effect on systemic cert.
+
+    s12_chk(cypher_classify_krel_variant(0.25) == decision_sub())       // 15
+    s12_chk(cypher_conf_krel_variant(0.25) == 950)                      // 16
+    s12_chk(cypher_dom_krel_variant(0.25) == 2)                         // 17
+    s12_chk(cypher_classify_krel_variant(0.25) == cypher_systemic_auc_classify())   // 18
+    s12_chk(cypher_conf_krel_variant(0.25) == cypher_systemic_auc_conf())           // 19
+    s12_chk(cypher_dom_krel_variant(0.25) == cypher_dominant_source())              // 20
+
+    // ── Section D: krel_var×4 leaves classification unchanged (6 assertions) ────
+    // Loosening stent release measurement 4× has no effect on systemic cert.
+
+    s12_chk(cypher_classify_krel_variant(4.0) == decision_sub())        // 21
+    s12_chk(cypher_conf_krel_variant(4.0) == 950)                       // 22
+    s12_chk(cypher_dom_krel_variant(4.0) == 2)                          // 23
+    s12_chk(cypher_classify_krel_variant(4.0) == cypher_systemic_auc_classify())    // 24
+    s12_chk(cypher_conf_krel_variant(4.0) == cypher_systemic_auc_conf())            // 25
+    s12_chk(cypher_dom_krel_variant(4.0) == cypher_dominant_source())               // 26
+
+    // ── Section E: k21_var÷4 — dom shifts to k12, cert holds (6 assertions) ─────
+    // Reducing the dominant source reveals k12 as the next bottleneck.
+
+    s12_chk(cypher_dom_k21_variant(0.25) == 1)                          // 27 (k12 surfaces)
+    s12_chk(cypher_dom_k21_variant(0.25) != 2)                          // 28 (no longer k21)
+    s12_chk(cypher_dom_k21_variant(0.25) != 0)                          // 29 (not ke)
+    s12_chk(cypher_classify_k21_variant(0.25) == decision_sub())        // 30 (still SUB)
+    s12_chk(cypher_conf_k21_variant(0.25) == 950)                       // 31 (still 950)
+    s12_chk(cypher_dom_k21_variant(0.25) != cypher_dominant_source())   // 32 (dom shifted from 2→1)
+
+    // ── Section F: k21_var×4 — dom stays k21, cert holds (6 assertions) ──────────
+    // Worsening the dominant source keeps dom=2; cert still holds.
+
+    s12_chk(cypher_dom_k21_variant(4.0) == 2)                           // 33 (k21 still dominant)
+    s12_chk(cypher_classify_k21_variant(4.0) == decision_sub())         // 34 (still SUB)
+    s12_chk(cypher_conf_k21_variant(4.0) == 950)                        // 35 (still 950)
+    s12_chk(cypher_dom_k21_variant(4.0) == cypher_dominant_source())    // 36 (same as standard)
+    s12_chk(cypher_dom_k21_variant(4.0) != cypher_dom_k21_variant(0.25))  // 37 (2 ≠ 1)
+    s12_chk(cypher_dom_k21_variant(0.25) < cypher_dom_k21_variant(4.0))   // 38 (1 < 2)
+
+    // ── Section G: Confidence sentinel values and properties (6 assertions) ──────
+
+    s12_chk(cypher_systemic_auc_conf() == 950)                                       // 39
+    s12_chk(cypher_systemic_auc_conf() > conf_clinical_min())                        // 40 (950 > 800)
+    s12_chk(conf_clinical_min() == 800)                                              // 41
+    // krel variants: both tight and loose give same conf
+    s12_chk(cypher_conf_krel_variant(0.25) == cypher_conf_krel_variant(4.0))        // 42
+    // k21 variants: both tight and loose give same conf
+    s12_chk(cypher_conf_k21_variant(0.25) == cypher_conf_k21_variant(4.0))          // 43
+    // k21×4 still gives highest confidence grade
+    s12_chk(cypher_conf_k21_variant(4.0) == 950)                                    // 44
+
+    // ── Section H: Decision sentinel values (4 assertions) ────────────────────────
+
+    s12_chk(decision_sub()         == 0)                                // 45
+    s12_chk(decision_therapeutic() == 1)                                // 46
+    s12_chk(conf_clinical_min()    == 800)                              // 47
+    s12_chk(decision_sub() != decision_therapeutic())                   // 48
+
+    // ── Section I: Cross-check — scale=1.0 variants match standard (4 assertions) ─
+
+    // krel_scale=1.0 is identity → same as standard
+    s12_chk(cypher_dom_krel_variant(1.0) == cypher_dominant_source())              // 49
+    s12_chk(cypher_classify_krel_variant(1.0) == cypher_systemic_auc_classify())   // 50
+    // k21_scale=1.0 is identity → same as standard
+    s12_chk(cypher_dom_k21_variant(1.0) == cypher_dominant_source())               // 51
+    s12_chk(cypher_classify_k21_variant(1.0) == cypher_systemic_auc_classify())    // 52
+
+    // ── Section J: Full narrative (4 assertions) ─────────────────────────────────
+    // These four assertions together constitute the Sprint 12 dissertation claim.
+
+    // krel measurement uncertainty is irrelevant to systemic safety certification
+    s12_chk(cypher_krel_irrelevant())                                   // 53
+    // Systemic AUC is certifiably SUB with confidence 950
+    s12_chk(cypher_safety_certified())                                  // 54
+    // No blood TDM monitoring needed
+    s12_chk(!cypher_monitoring_needed())                                // 55
+    // k21 (peripheral return) is the true epistemic bottleneck
+    s12_chk(cypher_k21_dominant())                                      // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint12_gate()
+    if SPR12_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

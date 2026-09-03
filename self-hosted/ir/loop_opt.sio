@@ -3605,7 +3605,7 @@ struct LoptIrCfg {
     dom: [[bool; 128]; 128],
 }
 
-struct LoptFunctionResult {
+pub struct LoptFunctionResult {
     func: IrFunction,
     changed: bool,
     invariants_hoisted: i64,
@@ -3616,7 +3616,7 @@ struct LoptScheduleResult {
     total: i64,
 }
 
-struct LoptModuleResult {
+pub struct LoptModuleResult {
     module: IrModule,
     functions_processed: i64,
     functions_changed: i64,
@@ -3814,8 +3814,8 @@ fn lopt_ir_build_cfg(func: &IrFunction) -> LoptIrCfg with Mut, Panic, Div {
 
     var i: i64 = 1
     while i < func.instr_count {
-        let prev = func.instrs[(i - 1) as usize]
-        let cur = func.instrs[i as usize]
+        let prev = ir_arena_load(ir_region_slot_r(func.region, ((i - 1))))
+        let cur = ir_arena_load(ir_region_slot_r(func.region, (i)))
         var is_start = false
         if lopt_ir_is_label(cur.op) {
             is_start = true
@@ -3838,8 +3838,8 @@ fn lopt_ir_build_cfg(func: &IrFunction) -> LoptIrCfg with Mut, Panic, Div {
         blk.id = bi
         blk.instr_start = start
         blk.instr_end = end
-        if start < func.instr_count && lopt_ir_is_label(func.instrs[start as usize].op) {
-            blk.label_id = func.instrs[start as usize].label_id
+        if start < func.instr_count && lopt_ir_is_label((IR_A_OP[(ir_region_slot_r(func.region, (start))) as usize] as IrOpcode)) {
+            blk.label_id = IR_A_LABEL_ID[(ir_region_slot_r(func.region, (start))) as usize]
             lopt_ir_record_label(&! cfg, blk.label_id, bi)
         }
         cfg.blocks[bi as usize] = blk
@@ -3857,7 +3857,7 @@ fn lopt_ir_build_cfg(func: &IrFunction) -> LoptIrCfg with Mut, Panic, Div {
     while bi < cfg.block_count {
         let blk = cfg.blocks[bi as usize]
         if blk.instr_end > blk.instr_start {
-            let term = func.instrs[(blk.instr_end - 1) as usize]
+            let term = ir_arena_load(ir_region_slot_r(func.region, ((blk.instr_end - 1))))
             if lopt_ir_is_jump(term.op) {
                 let target = lopt_ir_lookup_label_block(&cfg, term.label_id)
                 cfg = lopt_ir_add_edge(cfg, bi, target)
@@ -4071,7 +4071,7 @@ fn lopt_ir_build_defs(func: &IrFunction, cfg: &LoptIrCfg) -> ([i64; 256], [i64; 
     var def_block: [i64; 256] = [LOPT_INVALID; 256]
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if lopt_ir_has_dst(instr.op) && instr.dst >= 0 && instr.dst < LOPT_IR_MAX_REGS {
             if def_instr[instr.dst as usize] == LOPT_INVALID {
                 def_instr[instr.dst as usize] = i
@@ -4103,7 +4103,7 @@ fn lopt_ir_schedule_loop_hoists(func: &IrFunction, cfg: &LoptIrCfg, body: [bool;
             if result.assigned[i as usize] == LOPT_INVALID {
                 let block_id = cfg.instr_block[i as usize]
                 if lopt_ir_block_in_body(body, block_id) {
-                    let instr = func.instrs[i as usize]
+                    let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
                     if lopt_ir_is_hoistable_opcode(instr.op) {
                         if lopt_ir_operands_invariant(instr, body, def_instr, def_block, hoisted_defs) {
                             result.assigned[i as usize] = preheader
@@ -4137,7 +4137,7 @@ fn lopt_ir_count_assigned(assigned: [i64; 128]) -> i64 {
 
 fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 128]) -> IrFunction with Mut, Panic, Div {
     var result = func
-    var out_instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var out_instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     var out_count: i64 = 0
 
     var b: i64 = 0
@@ -4145,7 +4145,7 @@ fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 1
         let blk = cfg.blocks[b as usize]
         var inserted = false
         let term_idx = if blk.instr_end > blk.instr_start {
-            let term = func.instrs[(blk.instr_end - 1) as usize]
+            let term = ir_arena_load(ir_region_slot_r(func.region, ((blk.instr_end - 1))))
             if lopt_ir_is_terminator(term.op) { blk.instr_end - 1 } else { LOPT_INVALID }
         } else { LOPT_INVALID }
 
@@ -4155,14 +4155,14 @@ fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 1
                 var hi: i64 = 0
                 while hi < func.instr_count {
                     if assigned[hi as usize] == b && out_count < 128 {
-                        out_instrs[out_count as usize] = func.instrs[hi as usize]
+                        out_instrs[out_count as usize] = ir_arena_load(ir_region_slot_r(func.region, (hi)))
                         out_count = out_count + 1
                     }
                     hi = hi + 1
                 }
                 inserted = true
             }
-            var instr = func.instrs[i as usize]
+            var instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
             if assigned[i as usize] != LOPT_INVALID {
                 instr = ir_nop()
             }
@@ -4177,7 +4177,7 @@ fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 1
             var hi: i64 = 0
             while hi < func.instr_count {
                 if assigned[hi as usize] == b && out_count < 128 {
-                    out_instrs[out_count as usize] = func.instrs[hi as usize]
+                    out_instrs[out_count as usize] = ir_arena_load(ir_region_slot_r(func.region, (hi)))
                     out_count = out_count + 1
                 }
                 hi = hi + 1
@@ -4186,12 +4186,20 @@ fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 1
         b = b + 1
     }
 
-    result.instrs = out_instrs
+    // Element copy, not `result.instrs = out_instrs`: the local is [IrInstr; 1024]
+    // and the field is [IrInstr; IR_MAX_INSTRS], and Sounio has no array
+    // subtyping. Bounded by BOTH sizes so neither side can be overrun — the same
+    // shape 770b556464 documented for cp_make_test_func.
+    var ci: i64 = 0
+    while ci < out_count && ci < 1024 && ci < IR_MAX_INSTRS {
+        ir_arena_store(ir_region_slot_w(result.region, (ci)), out_instrs[ci as usize])
+        ci = ci + 1
+    }
     result.instr_count = out_count
     result
 }
 
-fn lopt_optimize_function(func: IrFunction) -> LoptFunctionResult with Mut, Panic, Div {
+pub(crate) fn lopt_optimize_function(func: IrFunction) -> LoptFunctionResult with Mut, Panic, Div {
     var result = lopt_function_result_new(func)
     if func.instr_count <= 0 {
         return result

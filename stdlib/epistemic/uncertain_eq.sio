@@ -1,0 +1,186 @@
+// stdlib/epistemic/uncertain_eq.sio — equality on uncertain values as an UNCERTAIN BOOL
+//
+// The resolution of the graded-equality dialectic: `==` on two Epistemic values
+// returns neither a crisp bool (the certainty lie) nor a raw divergence (which
+// re-booleanizes hidden at every if-site). It returns the BERNOULLI PROBABILITY
+// that the two values coincide at a declared resolution ε:
+//
+//   ep_eq_prob(a, b, ε) = P(|a − b| < ε),   a−b ~ N(Δμ, σ₁²+σ₂²)  (independent)
+//                       = Φ((ε−Δμ)/s) − Φ((−ε−Δμ)/s),  s = √(σ₁²+σ₂²)
+//
+// Control flow commits through ep_decide(p, confidence) — the named-threshold
+// primitive: the bet is visible at the commitment site, never hidden.
+//
+// WHY THIS AND NOT A GRADED METRIC AS `==` (adversarially established):
+//   • Hellinger-as-== has a δ-catastrophe: a point mass vs ANY continuous density
+//     is mutually singular → H = 1 no matter how small σ is or how close the
+//     means — so every literal-vs-measurement comparison reads "maximally
+//     unequal" AND the σ-magnitude is erased. Here instead: literal 10 vs
+//     10±0.01 at ε=0.5 → P ≈ 1 (equal); vs 10±1000 → P ≈ 0.0004. Smooth in σ,
+//     no singularity; the both-certain corner is EXACTLY boolean.
+//   • A raw [0,1]/[0,∞] return forces a hidden threshold at every `if` — the
+//     convenient default this language exists to reject. ep_decide names it.
+//
+// BOTH-CERTAIN CORNER: σ₁=σ₂=0 → P = 1 if |Δμ|<ε else 0 (exact boolean equality,
+// detected explicitly — no division, no 0/0).
+//
+// INDEPENDENCE CAVEAT (honest scope): s² = σ₁²+σ₂² assumes a and b independent.
+// Self-comparison ep_eq_prob(&x, &x, ε) computes with s²=2σ², which is WRONG for
+// the identity case (should be P=1) — value identity/correlation tracking is the
+// perturbation-graph frontier (see epistemic/perturbation_graph.sio), not solved
+// here. ε is an explicit parameter; deriving it from operand precision/units as
+// a language default is the future parser/typechecker lift.
+//
+// HELPERS are local (ueq_exp, ueq_erf): NOT imported from propagate.sio, whose
+// higher-order generic fns do not build on this base (see PR #277). The erf is a
+// 60-term Taylor series with hard clamp at |x| ≥ 4 — verified max abs error
+// 1.5e-8 on [0,4]; the clamp is essential (the series diverges catastrophically
+// past ~4.5). ep_sqrt is reused from epistemic::knowledge.
+//
+// EqField: the diagnostic windows (Hellinger overlap, W₂ closeness, z-score),
+// one artifact computed once — the associator-field pattern. Windows are for
+// MEASURING the relationship between two distributions; p_equal + ep_decide are
+// for branching. Execution-verified: all values cross-checked against two
+// independent computations (python math.erf vs compiled SOUNIO) to 1e-4.
+
+use epistemic::knowledge::{Epistemic, ep_sqrt}
+
+// ============================================================================
+// PRIVATE MATH HELPERS
+// ============================================================================
+
+fn ueq_exp_core(x: f64) -> f64 with Mut, Div, Panic {
+    var s: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / (n as f64)
+        s = s + term
+        n = n + 1
+    }
+    s
+}
+
+fn ueq_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 {
+        return 22026.465794806718 * ueq_exp_core(x - 10.0)
+    }
+    if x < (0.0 - 10.0) {
+        return 0.00004539992976248485 * ueq_exp_core(x + 10.0)
+    }
+    ueq_exp_core(x)
+}
+
+// erf via 60-term Taylor with clamp at |x| >= 4 (series diverges beyond; the
+// clamp's own error 1−erf(4) ≈ 1.5e-8 is the scheme's max error on [0,4]).
+fn ueq_erf(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 {
+        return 0.0 - ueq_erf(0.0 - x)
+    }
+    if x >= 4.0 {
+        return 1.0
+    }
+    let two_over_sqrtpi: f64 = 1.1283791670955126
+    let x2: f64 = x * x
+    var term: f64 = x
+    var s: f64 = x
+    var n: i64 = 0
+    while n < 59 {
+        let num: f64 = (0.0 - x2) * ((2 * n + 1) as f64)
+        let den: f64 = ((n + 1) as f64) * ((2 * n + 3) as f64)
+        term = term * num / den
+        s = s + term
+        n = n + 1
+    }
+    two_over_sqrtpi * s
+}
+
+// standard normal CDF: Φ(t) = 0.5·(1 + erf(t/√2))
+fn ueq_phi(t: f64) -> f64 with Mut, Div, Panic {
+    0.5 * (1.0 + ueq_erf(t / 1.4142135623730951))
+}
+
+// ============================================================================
+// THE UNCERTAIN-BOOL EQUALITY
+// ============================================================================
+
+// P(|a − b| < ε) under independence. Both-certain corner = exact boolean.
+// Result clamped to [0,1] (absorbs erf-scheme rounding at the tails).
+pub fn ep_eq_prob(a: &Epistemic, b: &Epistemic, eps: f64) -> f64 with Mut, Div, Panic {
+    let s2: f64 = a.variance + b.variance
+    let dm: f64 = a.val - b.val
+    if s2 == 0.0 {
+        let abs_dm: f64 = if dm < 0.0 { 0.0 - dm } else { dm }
+        if abs_dm < eps { return 1.0 }
+        return 0.0
+    }
+    let s: f64 = ep_sqrt(s2)
+    let p: f64 = ueq_phi((eps - dm) / s) - ueq_phi((0.0 - eps - dm) / s)
+    if p < 0.0 { return 0.0 }
+    if p > 1.0 { return 1.0 }
+    p
+}
+
+// The named-threshold commitment primitive: branching on an uncertain equality
+// must declare its confidence — `if ep_decide(ep_eq_prob(a,b,eps), 0.95)` — so
+// the bet is visible at the commitment site instead of hidden in the operator.
+pub fn ep_decide(p: f64, confidence: f64) -> bool {
+    p >= confidence
+}
+
+// ============================================================================
+// EqField — diagnostic windows on one comparison (associator-field pattern)
+// ============================================================================
+
+// One artifact, four windows, computed once:
+//   p_equal:   P(|a−b|<ε)            — the control-flow window (via ep_decide)
+//   hellinger: H ∈ [0,1]             — distributional overlap/distinguishability
+//   w2:        √(Δμ²+(σ₁−σ₂)²) ∈ [0,∞] — transport closeness (matches
+//              graded_eq.sio's ep_distance; carries value units)
+//   z:         |Δμ|/√(σ₁²+σ₂²)      — the scientist's significance window
+//
+// Hellinger is a WINDOW, not the operator, because of its δ-pathology: a point
+// mass vs any continuous density is mutually singular → H=1 regardless of how
+// small σ is (σ-magnitude erased). Correct as a measure of distributional
+// distinguishability; catastrophic as a default `==`. Diagnostics only.
+pub struct EqField {
+    p_equal: f64,
+    hellinger: f64,
+    w2: f64,
+    z: f64,
+}
+
+pub fn ep_eq_field(a: &Epistemic, b: &Epistemic, eps: f64) -> EqField with Mut, Div, Panic {
+    let p: f64 = ep_eq_prob(a, b, eps)
+
+    let s1: f64 = ep_sqrt(a.variance)
+    let s2v: f64 = ep_sqrt(b.variance)
+    let dm: f64 = a.val - b.val
+    let abs_dm: f64 = if dm < 0.0 { 0.0 - dm } else { dm }
+    let ssum: f64 = a.variance + b.variance
+
+    // Hellinger: H² = 1 − √(2σ₁σ₂/(σ₁²+σ₂²))·exp(−Δμ²/(4(σ₁²+σ₂²)));
+    // both-certain corner (0/0 in the formula) handled as exact boolean.
+    var h: f64 = 0.0
+    if ssum == 0.0 {
+        if abs_dm > 0.000001 { h = 1.0 }
+    } else {
+        let ratio: f64 = (2.0 * s1 * s2v) / ssum
+        let exp_arg: f64 = (0.0 - dm * dm) / (4.0 * ssum)
+        let h2: f64 = 1.0 - ep_sqrt(ratio) * ueq_exp(exp_arg)
+        if h2 < 0.0 { h = 0.0 } else { h = ep_sqrt(h2) }
+    }
+
+    // W₂ closeness (2-Wasserstein for Gaussians)
+    let w2: f64 = ep_sqrt(dm * dm + (s1 - s2v) * (s1 - s2v))
+
+    // z-score; meaningless in the both-certain corner (sentinel 1e9 if different)
+    var z: f64 = 0.0
+    if ssum == 0.0 {
+        if abs_dm > 0.000001 { z = 1000000000.0 }
+    } else {
+        z = abs_dm / ep_sqrt(ssum)
+    }
+
+    EqField { p_equal: p, hellinger: h, w2: w2, z: z }
+}

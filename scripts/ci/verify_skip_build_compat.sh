@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/verify_skip_build_compat.sh — verify that all gate scripts work with SKIP_BUILD=1.
+# scripts/verify_skip_build_compat.sh -- verify that all gate scripts work with SKIP_BUILD=1.
 #
 # Usage:
 #   bash scripts/verify_skip_build_compat.sh
@@ -7,7 +7,7 @@
 # Prerequisite: souc must already be built (cargo build -p souc && cargo build -p souc --release).
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SOUC_DEBUG="$ROOT_DIR/target/debug/souc"
@@ -44,9 +44,9 @@ check_binary "$SOUC_RELEASE" "release"
 
 echo "verify_skip_build_compat: using debug=$SOUC_DEBUG release=$SOUC_RELEASE"
 
-run_gate "fast_gate.sh (SKIP_BUILD=1)" \
+run_gate "dev/fast_gate.sh (SKIP_BUILD=1)" \
   SKIP_BUILD=1 SOUC_BIN="$SOUC_DEBUG" SOUNIO_REPO_HARD_NO_RUST=0 \
-  bash scripts/fast_gate.sh
+  bash scripts/dev/fast_gate.sh
 
 run_gate "selfhost_independence_gate.sh (SKIP_BUILD=1)" \
   SKIP_BUILD=1 SOUC_BIN="$SOUC_RELEASE" SOUNIO_REPO_HARD_NO_RUST=0 \

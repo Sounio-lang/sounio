@@ -1,0 +1,276 @@
+use net::socket::*
+
+pub const HS_CLIENT_HELLO: u8 = 1
+
+pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804
+pub const SIG_SCHEME_RSA_PSS_RSAE_SHA384: u16 = 0x0805
+pub const SIG_SCHEME_ECDSA_SECP256R1_SHA256: u16 = 0x0403
+
+const NAMED_GROUP_X25519: i64 = 0x001d
+
+const CIPHER_SUITE_AES_128_GCM_SHA256: i64 = 0x1301
+const CIPHER_SUITE_AES_256_GCM_SHA384: i64 = 0x1302
+const CIPHER_SUITE_CHACHA20_POLY1305_SHA256: i64 = 0x1303
+
+const EXT_SERVER_NAME: i64 = 0
+const EXT_SUPPORTED_GROUPS: i64 = 10
+const EXT_SIGNATURE_ALGORITHMS: i64 = 13
+const EXT_ALPN: i64 = 16
+const EXT_SUPPORTED_VERSIONS: i64 = 43
+const EXT_COOKIE: i64 = 44
+const EXT_KEY_SHARE: i64 = 51
+
+pub struct ClientHelloParams {
+    random: [u8; 32],
+    x25519_public: [u8; 32],
+    server_name: RawBuf,
+    server_name_len: i64,
+    cookie: RawBuf,
+    cookie_len: i64,
+}
+
+fn buf_set_u8(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, v & 255)
+}
+
+fn buf_set_u16(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, (v >> 8) & 255)
+    rawbuf_set(buf, pos + 1, v & 255)
+}
+
+fn buf_set_u24(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, (v >> 16) & 255)
+    rawbuf_set(buf, pos + 1, (v >> 8) & 255)
+    rawbuf_set(buf, pos + 2, v & 255)
+}
+
+// Encodes a ClientHello (RFC 8446 SS4.1.2) with exactly the extensions
+// this plan's design calls for (see spec SS"ClientHello extensions"):
+// server_name (SNI, only written if server_name_len > 0),
+// application_layer_protocol_negotiation = "http/1.1",
+// supported_versions = TLS 1.3 only, key_share = X25519 only,
+// signature_algorithms = the three schemes above,
+// supported_groups = X25519 only, and cookie (only written if
+// cookie_len > 0 -- the HelloRetryRequest re-send case). Offers all
+// three RFC 8446 B.4 cipher suites; legacy_session_id is left empty
+// (RFC 8446's own "middlebox compatibility mode" is a wire-compat nicety
+// this plan does not implement). Returns the full handshake-layer
+// message: 4-byte header (msg_type=1, uint24 length) + body.
+//
+// IMPLEMENTATION NOTE -- real, measured `rawbuf_set` write-clobber
+// defect (already documented elsewhere in this codebase, e.g.
+// `stdlib/x509/cert.sio`'s own "Finding 20"/write-clobber comment):
+// every `rawbuf_set` call also clobbers the FOLLOWING 7 bytes of the
+// buffer. Writing a buffer's bytes in ascending, uninterrupted order is
+// safe (each write's clobber is overwritten a moment later by the very
+// next write in the sequence) -- but going BACK to patch an
+// earlier-written length field (e.g. writing the header at position 0
+// only after the body starting at position 4 has already been written,
+// or patching an extensions-length field after the extensions
+// themselves) is NOT safe: that out-of-sequence write's forward clobber
+// corrupts real body bytes with nothing left to correct it. The original
+// implementation attempt here did exactly that (write the body first,
+// then go back and patch the header and the extensions-length field) and
+// silently corrupted `ClientHelloParams.random` in the returned buffer
+// as a result -- confirmed via `print_int` probes showing the random
+// bytes correct immediately after being written, but wrong by the time
+// the header-patch executed. The fix applied below: every length this
+// function needs (the extensions block's total length, and the body
+// length for the 4-byte header) is a pure function of
+// `server_name_len`/`cookie_len` and is computed BEFORE any byte is
+// written, so the whole message -- header through the last extension --
+// is written in one single ascending, uninterrupted pass. The only
+// remaining uncorrected clobber is the very last write's, which lands in
+// this function's own 8 bytes of trailing allocation slack (matching
+// this codebase's established buffer-padding discipline), never in real
+// data.
+pub fn encode_client_hello(params: &ClientHelloParams) -> (RawBuf, i64) with IO {
+    // Every extension here has a byte length that's either fixed or a
+    // simple function of server_name_len/cookie_len -- computed
+    // analytically so the header and the extensions-length field can
+    // both be written correctly on the first pass (see the note above).
+    let server_name_ext_len = if params.server_name_len > 0 {
+        9 + params.server_name_len // type(2)+ext_len(2)+list_len(2)+host_type(1)+name_len(2)+name
+    } else {
+        0
+    }
+    let alpn_ext_len: i64 = 15 // type(2)+ext_len(2)+list_len(2)+proto_len(1)+"http/1.1"(8)
+    let supported_versions_ext_len: i64 = 7 // type(2)+ext_len(2)+list_len(1)+version(2)
+    let supported_groups_ext_len: i64 = 8 // type(2)+ext_len(2)+list_len(2)+group(2)
+    let key_share_ext_len: i64 = 42 // type(2)+ext_len(2)+list_len(2)+group(2)+key_len(2)+key(32)
+    let signature_algorithms_ext_len: i64 = 12 // type(2)+ext_len(2)+list_len(2)+3 schemes(6)
+    let cookie_ext_len = if params.cookie_len > 0 {
+        6 + params.cookie_len // type(2)+ext_len(2)+cookie_len_field(2)+cookie
+    } else {
+        0
+    }
+
+    let ext_total_len = server_name_ext_len + alpn_ext_len + supported_versions_ext_len + supported_groups_ext_len + key_share_ext_len + signature_algorithms_ext_len + cookie_ext_len
+
+    // version(2) + random(32) + session_id_len(1) + cipher_suites_len(2) +
+    // 3 suites(6) + compression_len(1) + compression_val(1) +
+    // extensions_total_len_field(2) + extensions.
+    let body_len = 47 + ext_total_len
+
+    let out = rawbuf_new(4 + body_len + 8) // +8: established trailing-slack idiom
+
+    // Header -- written first, so its own forward clobber is corrected
+    // by the very next (body) writes rather than corrupting them.
+    buf_set_u8(&out, 0, HS_CLIENT_HELLO as i64)
+    buf_set_u24(&out, 1, body_len)
+
+    var pos: i64 = 4
+
+    // legacy_version = { 3, 3 } (RFC 8446 SS4.1.2: always TLS 1.2's wire
+    // value here; the real version is negotiated via supported_versions).
+    buf_set_u8(&out, pos, 3)
+    pos = pos + 1
+    buf_set_u8(&out, pos, 3)
+    pos = pos + 1
+
+    // random: 32 bytes, copied element-by-element off the caller's
+    // fixed-array field (never via `var x = *ref` -- SSD8).
+    var ri: i64 = 0
+    while ri < 32 {
+        buf_set_u8(&out, pos, params.random[ri as usize] as i64)
+        pos = pos + 1
+        ri = ri + 1
+    }
+
+    // legacy_session_id: empty.
+    buf_set_u8(&out, pos, 0)
+    pos = pos + 1
+
+    // cipher_suites: 3 suites, 6 bytes.
+    buf_set_u16(&out, pos, 6)
+    pos = pos + 2
+    buf_set_u16(&out, pos, CIPHER_SUITE_AES_128_GCM_SHA256)
+    pos = pos + 2
+    buf_set_u16(&out, pos, CIPHER_SUITE_CHACHA20_POLY1305_SHA256)
+    pos = pos + 2
+    buf_set_u16(&out, pos, CIPHER_SUITE_AES_256_GCM_SHA384)
+    pos = pos + 2
+
+    // legacy_compression_methods: { 0 } (null compression only).
+    buf_set_u8(&out, pos, 1)
+    pos = pos + 1
+    buf_set_u8(&out, pos, 0)
+    pos = pos + 1
+
+    // extensions total length -- already known, written directly (no
+    // backpatch needed).
+    buf_set_u16(&out, pos, ext_total_len)
+    pos = pos + 2
+
+    // server_name (RFC 6066 SS3), only if the caller supplied one.
+    if params.server_name_len > 0 {
+        buf_set_u16(&out, pos, EXT_SERVER_NAME)
+        pos = pos + 2
+        let sn_list_len = 3 + params.server_name_len // host_name type(1) + length(2) + name
+        buf_set_u16(&out, pos, 2 + sn_list_len) // extension_data length: list length field(2) + list
+        pos = pos + 2
+        buf_set_u16(&out, pos, sn_list_len)
+        pos = pos + 2
+        buf_set_u8(&out, pos, 0) // ServerNameType host_name(0)
+        pos = pos + 1
+        buf_set_u16(&out, pos, params.server_name_len)
+        pos = pos + 2
+        var si: i64 = 0
+        while si < params.server_name_len {
+            buf_set_u8(&out, pos, rawbuf_get(&params.server_name, si))
+            pos = pos + 1
+            si = si + 1
+        }
+    }
+
+    // application_layer_protocol_negotiation (RFC 7301) = "http/1.1"
+    // (8 bytes: h t t p / 1 . 1).
+    buf_set_u16(&out, pos, EXT_ALPN)
+    pos = pos + 2
+    let proto_len: i64 = 8
+    let list_len = 1 + proto_len // 1-byte length prefix + protocol name
+    buf_set_u16(&out, pos, 2 + list_len)
+    pos = pos + 2
+    buf_set_u16(&out, pos, list_len)
+    pos = pos + 2
+    buf_set_u8(&out, pos, proto_len)
+    pos = pos + 1
+    var alpn_bytes: [u8; 8] = [104 as u8, 116 as u8, 116 as u8, 112 as u8, 47 as u8, 49 as u8, 46 as u8, 49 as u8]
+    var ai: i64 = 0
+    while ai < 8 {
+        buf_set_u8(&out, pos, alpn_bytes[ai as usize] as i64)
+        pos = pos + 1
+        ai = ai + 1
+    }
+
+    // supported_versions (RFC 8446 SS4.2.1) = TLS 1.3 (0x0304) only.
+    buf_set_u16(&out, pos, EXT_SUPPORTED_VERSIONS)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 3) // extension_data length: 1(list len) + 2(version)
+    pos = pos + 2
+    buf_set_u8(&out, pos, 2)
+    pos = pos + 1
+    buf_set_u16(&out, pos, 0x0304)
+    pos = pos + 2
+
+    // supported_groups (RFC 8446 SS4.2.7) = X25519 only.
+    buf_set_u16(&out, pos, EXT_SUPPORTED_GROUPS)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 4) // extension_data length: 2(list len) + 2(group)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 2)
+    pos = pos + 2
+    buf_set_u16(&out, pos, NAMED_GROUP_X25519)
+    pos = pos + 2
+
+    // key_share (RFC 8446 SS4.2.8) = a single X25519 KeyShareEntry.
+    buf_set_u16(&out, pos, EXT_KEY_SHARE)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 2 + 2 + 2 + 32) // list_len(2) + group(2) + key_len(2) + key(32)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 2 + 2 + 32) // client_shares list length
+    pos = pos + 2
+    buf_set_u16(&out, pos, NAMED_GROUP_X25519)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 32)
+    pos = pos + 2
+    var ki: i64 = 0
+    while ki < 32 {
+        buf_set_u8(&out, pos, params.x25519_public[ki as usize] as i64)
+        pos = pos + 1
+        ki = ki + 1
+    }
+
+    // signature_algorithms (RFC 8446 SS4.2.3) = the three supported schemes.
+    buf_set_u16(&out, pos, EXT_SIGNATURE_ALGORITHMS)
+    pos = pos + 2
+    buf_set_u16(&out, pos, 2 + 6) // extension_data length: list len field(2) + 3*2
+    pos = pos + 2
+    buf_set_u16(&out, pos, 6)
+    pos = pos + 2
+    buf_set_u16(&out, pos, SIG_SCHEME_RSA_PSS_RSAE_SHA256 as i64)
+    pos = pos + 2
+    buf_set_u16(&out, pos, SIG_SCHEME_RSA_PSS_RSAE_SHA384 as i64)
+    pos = pos + 2
+    buf_set_u16(&out, pos, SIG_SCHEME_ECDSA_SECP256R1_SHA256 as i64)
+    pos = pos + 2
+
+    // cookie (RFC 8446 SS4.2.2), only when re-sending after a
+    // HelloRetryRequest.
+    if params.cookie_len > 0 {
+        buf_set_u16(&out, pos, EXT_COOKIE)
+        pos = pos + 2
+        buf_set_u16(&out, pos, 2 + params.cookie_len)
+        pos = pos + 2
+        buf_set_u16(&out, pos, params.cookie_len)
+        pos = pos + 2
+        var ci: i64 = 0
+        while ci < params.cookie_len {
+            buf_set_u8(&out, pos, rawbuf_get(&params.cookie, ci))
+            pos = pos + 1
+            ci = ci + 1
+        }
+    }
+
+    (out, pos)
+}

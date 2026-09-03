@@ -1,0 +1,238 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bland_altman.sio — Bland-Altman method-agreement analysis
+//
+// The reusable *statistics* behind a Bland-Altman comparison of two measurement
+// methods A and B on the same n subjects. A plot-only routine already exists
+// (viz::epiviz::epiviz_bland_altman) but it computes bias/SD/LoA inline and
+// discards them; nothing returns the numbers, and — the part clinical papers
+// actually require — nothing computes the confidence intervals. This module
+// fills that gap and returns everything as a BAResult:
+//
+//   bias           = mean(A - B)                         (systematic difference)
+//   sd_diff        = sample SD of the differences (n-1 basis)
+//   loa_lo, loa_hi = bias ∓ 1.96·sd_diff                 (95% limits of agreement)
+//   bias_ci_*      = bias ± t·sd/√n                       (CI of the bias)
+//   loa_hi_ci_*, loa_lo_ci_* = LoA ± t·SE(LoA)            (CI of each limit)
+//   n_outside, pct_outside   = points beyond the limits of agreement
+//
+// The confidence intervals use the Student-t multiplier at n-1 degrees of
+// freedom (stats::student_t), following Bland & Altman (1986):
+//   SE(bias) = sd/√n
+//   Var(LoA) = sd²·(1/n + 1.96²/(2(n-1)))   ⇒ SE(LoA) ≈ 1.71·sd/√n
+//
+// Pure Sounio; the only dependency is the t-quantile (stats::student_t).
+//
+// References:
+//   Altman & Bland (1983) "Measurement in medicine", The Statistician 32(3)
+//   Bland & Altman (1986) "Statistical methods for assessing agreement between
+//     two methods of clinical measurement", Lancet 1(8476):307-310
+//   Bland & Altman (1999) "Measuring agreement in method comparison studies",
+//     Stat Methods Med Res 8(2):135-160
+
+module stats::bland_altman
+
+use stats::student_t::{t_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn ba_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct BAResult {
+    pub n: i64,            // number of paired observations
+    pub bias: f64,         // mean difference A - B
+    pub sd_diff: f64,      // sample SD of the differences
+    pub loa_lo: f64,       // lower 95% limit of agreement
+    pub loa_hi: f64,       // upper 95% limit of agreement
+    pub bias_ci_lo: f64,   // CI of the bias, lower
+    pub bias_ci_hi: f64,   // CI of the bias, upper
+    pub loa_lo_ci_lo: f64, // CI of the lower LoA, lower
+    pub loa_lo_ci_hi: f64, // CI of the lower LoA, upper
+    pub loa_hi_ci_lo: f64, // CI of the upper LoA, lower
+    pub loa_hi_ci_hi: f64, // CI of the upper LoA, upper
+    pub n_outside: i64,    // points beyond [loa_lo, loa_hi]
+    pub pct_outside: f64,  // 100 · n_outside / n
+}
+
+// ============================================================================
+// ANALYSIS
+// ============================================================================
+
+/// Bland-Altman agreement analysis of methods A and B over n paired points.
+///
+/// Parâmetros: a, b — paired measurements by the two methods; n — pair count
+///             (3 <= n <= 256); conf — confidence level for the intervals (e.g. 0.95).
+/// Retorno: BAResult with bias, SD of differences, 95% limits of agreement,
+///          t-based CIs for the bias and each limit, and the count/percentage
+///          of points outside the limits.
+/// Complexidade: O(n); one t-quantile evaluation.
+/// Referências: Bland & Altman (1986), Lancet 1:307-310.
+pub fn bland_altman(a: &[f64; 256], b: &[f64; 256], n: i32, conf: f64) -> BAResult with Mut, Div, Panic {
+    if n < 3 {
+        return BAResult {
+            n: n as i64, bias: 0.0, sd_diff: 0.0, loa_lo: 0.0, loa_hi: 0.0,
+            bias_ci_lo: 0.0, bias_ci_hi: 0.0,
+            loa_lo_ci_lo: 0.0, loa_lo_ci_hi: 0.0,
+            loa_hi_ci_lo: 0.0, loa_hi_ci_hi: 0.0,
+            n_outside: 0, pct_outside: 0.0,
+        }
+    }
+
+    let nf = n as f64
+
+    // bias = mean of differences
+    var sum_d = 0.0
+    var i = 0
+    while i < n {
+        sum_d = sum_d + (a[i as usize] - b[i as usize])
+        i = i + 1
+    }
+    let bias = sum_d / nf
+
+    // sample variance of the differences (n-1 basis)
+    var sum_sq = 0.0
+    var j = 0
+    while j < n {
+        let dev = a[j as usize] - b[j as usize] - bias
+        sum_sq = sum_sq + dev * dev
+        j = j + 1
+    }
+    let sd = ba_sqrt(sum_sq / (nf - 1.0))
+
+    // 95% limits of agreement (Bland-Altman use the normal 1.96 factor)
+    let z95 = 1.959963984540054
+    let loa_hi = bias + z95 * sd
+    let loa_lo = bias - z95 * sd
+
+    // Student-t multiplier for the CIs (upper-tail quantile at n-1 dof)
+    let df = nf - 1.0
+    let upper = 0.5 + conf / 2.0
+    let tmult = t_quantile(upper, df)
+
+    // CI of the bias:  bias ± t · sd/√n
+    let se_bias = sd / ba_sqrt(nf)
+    let bias_ci_lo = bias - tmult * se_bias
+    let bias_ci_hi = bias + tmult * se_bias
+
+    // CI of each LoA:  LoA ± t · SE(LoA),  Var(LoA) = sd²·(1/n + z95²/(2(n-1)))
+    let var_loa = sd * sd * (1.0 / nf + z95 * z95 / (2.0 * (nf - 1.0)))
+    let se_loa = ba_sqrt(var_loa)
+    let loa_hi_ci_lo = loa_hi - tmult * se_loa
+    let loa_hi_ci_hi = loa_hi + tmult * se_loa
+    let loa_lo_ci_lo = loa_lo - tmult * se_loa
+    let loa_lo_ci_hi = loa_lo + tmult * se_loa
+
+    // points outside the limits of agreement
+    var out = 0
+    var k = 0
+    while k < n {
+        let d = a[k as usize] - b[k as usize]
+        if d > loa_hi || d < loa_lo { out = out + 1 }
+        k = k + 1
+    }
+
+    return BAResult {
+        n: n as i64, bias: bias, sd_diff: sd, loa_lo: loa_lo, loa_hi: loa_hi,
+        bias_ci_lo: bias_ci_lo, bias_ci_hi: bias_ci_hi,
+        loa_lo_ci_lo: loa_lo_ci_lo, loa_lo_ci_hi: loa_lo_ci_hi,
+        loa_hi_ci_lo: loa_hi_ci_lo, loa_hi_ci_hi: loa_hi_ci_hi,
+        n_outside: out as i64, pct_outside: 100.0 * (out as f64) / nf,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS — validated against a hand-computed worked example
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// a = [1,2,3,4,5], b = [1.1,1.9,3.2,3.8,5.3] -> d = [-0.1,0.1,-0.2,0.2,-0.3]
+// bias = -0.06 ; Σ(d-bias)² = 0.172 ; sd = sqrt(0.172/4) = 0.2073644
+// LoA = -0.06 ± 1.96·0.2073644 -> hi = 0.3464343, lo = -0.4664343
+// t_0.975(4) = 2.7764451 ; SE(bias) = 0.2073644/√5 = 0.0927362
+//   CI_bias = -0.06 ± 0.2574636 -> [-0.3174636, 0.1974636]
+// Var(LoA) = 0.043·(1/5 + 1.96²/8) = 0.043·0.680200 = 0.0292486 ; SE = 0.1710222
+//   CI_LoA_hi = 0.3464343 ± 2.7764451·0.1710222 = 0.3464343 ± 0.4748255
+fn test_worked_example() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    a[0] = 1.0; a[1] = 2.0; a[2] = 3.0; a[3] = 4.0; a[4] = 5.0
+    b[0] = 1.1; b[1] = 1.9; b[2] = 3.2; b[3] = 3.8; b[4] = 5.3
+    let r = bland_altman(&a, &b, 5, 0.95)
+    var ok = true
+    ok = check(1, r.n == 5) && ok
+    ok = check(2, approx(r.bias, 0.0 - 0.06, 1.0e-9)) && ok
+    ok = check(3, approx(r.sd_diff, 0.2073644, 1.0e-6)) && ok
+    ok = check(4, approx(r.loa_hi, 0.3464268, 1.0e-4)) && ok
+    ok = check(5, approx(r.loa_lo, 0.0 - 0.4664268, 1.0e-4)) && ok
+    ok = check(6, approx(r.bias_ci_lo, 0.0 - 0.317477, 1.0e-4)) && ok
+    ok = check(7, approx(r.bias_ci_hi, 0.197477, 1.0e-4)) && ok
+    ok = check(8, approx(r.loa_hi_ci_lo, 0.0 - 0.128401, 1.0e-4)) && ok
+    ok = check(9, approx(r.loa_hi_ci_hi, 0.821254, 1.0e-4)) && ok
+    ok = check(10, r.n_outside == 0) && ok
+    ok = check(11, approx(r.pct_outside, 0.0, 1.0e-9)) && ok
+    return ok
+}
+
+// An outlier beyond the limits is counted.
+// a=[10,10,10,10,10,10], b=[10,10,10,10,10,4] -> d=[0,0,0,0,0,6]
+// bias=1.0 ; Σ(d-1)²=(1·5)+(25)=5+25=30 ; sd=sqrt(30/5)=sqrt(6)=2.449490
+// LoA hi = 1 + 1.96·2.44949 = 5.801 ; d=6 is outside -> n_outside=1
+fn test_outlier() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 6 { a[i as usize] = 10.0; b[i as usize] = 10.0; i = i + 1 }
+    b[5] = 4.0
+    let r = bland_altman(&a, &b, 6, 0.95)
+    var ok = true
+    ok = check(20, approx(r.bias, 1.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.sd_diff, 2.4494897, 1.0e-6)) && ok
+    ok = check(22, r.n_outside == 1) && ok
+    ok = check(23, approx(r.pct_outside, 100.0 / 6.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_worked_example() && ok
+    ok = test_outlier() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

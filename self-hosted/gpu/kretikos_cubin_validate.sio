@@ -1,0 +1,99 @@
+// self-hosted/gpu/kretikos_cubin_validate.sio
+//
+// Pure-Sounio CUBIN/ELF64 binary validator. Replaces the
+// `python3 - <<PY ... struct.unpack` heredocs in bin/kretikos that
+// inspect ELF magic, class, and e_machine fields of NVIDIA CUBIN files.
+//
+// Usage:
+//   driver.elf <file.cubin>
+//
+// Exits 0 if the file is a valid ELF64 NVIDIA CUDA CUBIN, prints
+// the e_machine value to stdout (190 for NVIDIA CUDA). Exits 1 on
+// any structural failure with a diagnostic on stderr.
+
+use gpu::kaxi_backend::*
+use io::binary::*
+
+const ELF_HEADER_BYTES: i64 = 64
+const NVIDIA_E_MACHINE: i64 = 190
+
+struct CubinHeader {
+    data: [u8; 64],
+    len: i64,
+}
+
+fn ch_load(path: string) -> CubinHeader with IO, Mut, Panic, Div, Alloc {
+    var buf = CubinHeader { data: [0u8; 64], len: 0 }
+    let size = file_size(path)
+    if size < 20 { return buf }
+    let bytes = read_file(path)
+    let cap: i64 = if size > ELF_HEADER_BYTES { ELF_HEADER_BYTES } else { size }
+    var i: i64 = 0
+    while i < cap {
+        buf.data[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    buf.len = cap
+    buf
+}
+
+fn print_i64(v: i64) with IO, Mut, Panic, Div, Alloc {
+    var buf = kaxi_asm_new()
+    var x = v
+    if x < 0 {
+        buf = kaxi_asm_push_byte(buf, 45 as i8)
+        x = 0 - x
+    }
+    if x == 0 {
+        buf = kaxi_asm_push_byte(buf, 48 as i8)
+    } else {
+        var digits: [i8; 20] = [0 as i8; 20]
+        var n: i64 = 0
+        while x > 0 {
+            digits[n as usize] = ((x % 10) + 48) as i8
+            x = x / 10
+            n = n + 1
+        }
+        while n > 0 {
+            n = n - 1
+            buf = kaxi_asm_push_byte(buf, digits[n as usize])
+        }
+    }
+    print(kaxi_asm_to_string(buf))
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        println("cubin-validate: usage: driver.elf <file.cubin>")
+        return 2
+    }
+    let path = get_arg(0)
+    let hdr = ch_load(path)
+    if hdr.len < 20 {
+        println("cubin-validate: file too small or unreadable")
+        return 1
+    }
+    // ELF magic 0x7f 'E' 'L' 'F'
+    if byte_u8(&hdr.data, 0) != 127 || byte_u8(&hdr.data, 1) != 69
+       || byte_u8(&hdr.data, 2) != 76 || byte_u8(&hdr.data, 3) != 70 {
+        println("cubin-validate: not an ELF file")
+        return 1
+    }
+    // EI_CLASS == 2 (ELF64)
+    if byte_u8(&hdr.data, 4) != 2 {
+        println("cubin-validate: not ELF64")
+        return 1
+    }
+    // e_machine at offset 18, little-endian u16
+    let machine = read_u16_le(&hdr.data, 18)
+    if machine != NVIDIA_E_MACHINE {
+        print("cubin-validate: e_machine is not NVIDIA CUDA (got ")
+        print_i64(machine)
+        println(")")
+        return 1
+    }
+    print_i64(machine)
+    println("")
+    0
+}

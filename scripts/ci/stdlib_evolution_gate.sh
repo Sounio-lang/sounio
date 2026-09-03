@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# stdlib_evolution_gate.sh — Validate stdlib evolution: docs + modules + tests
+# stdlib_evolution_gate.sh -- Validate stdlib evolution: docs + modules + tests
 # Sprint 230: Making aspirational stubs REAL
 set -eo pipefail
 
@@ -18,7 +18,7 @@ check_file() {
         PASS=$((PASS+1))
     else
         FAIL=$((FAIL+1))
-        echo "  FAIL (check): $label — $file"
+        echo "  FAIL (check): $label -- $file"
     fi
 }
 
@@ -28,14 +28,14 @@ run_file() {
     TOTAL=$((TOTAL+1))
     if ! $SOUC check "$file" >/dev/null 2>&1; then
         FAIL=$((FAIL+1))
-        echo "  FAIL (check): $label — $file"
+        echo "  FAIL (check): $label -- $file"
         return
     fi
     if timeout 30 $SOUC run "$file" >/dev/null 2>&1; then
         PASS=$((PASS+1))
     else
         FAIL=$((FAIL+1))
-        echo "  FAIL (run): $label — $file"
+        echo "  FAIL (run): $label -- $file"
     fi
 }
 

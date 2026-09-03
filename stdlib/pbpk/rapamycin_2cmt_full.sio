@@ -1,0 +1,222 @@
+// stdlib/pbpk/rapamycin_2cmt_full.sio — Full two-compartment epistemic classification
+//
+// Extension of contribution #3 (ISO §E.2 uncertainty budget) to the genuine
+// two-compartment model with non-zero k12 and k21 (peripheral distribution).
+//
+// Clinical context: rapamycin has significant peripheral distribution — primarily
+// into erythrocytes (blood:plasma ratio ≈ 36) and arterial wall tissue.  A proper
+// 2-cmt model captures the biexponential plasma concentration-time profile.
+//
+// ── Standard scenario ────────────────────────────────────────────────────────
+//
+//   ke  = 0.04 h⁻¹  (terminal elimination from central compartment)
+//   k12 = 0.03 h⁻¹  (central → peripheral distribution)
+//   k21 = 0.015 h⁻¹ (peripheral → central return)
+//   Vc  = 70 L       (central volume)
+//   D   = 2 mg IV bolus; assess trough at t = 24 h
+//
+//   Three-source uncertainty budget at baseline:
+//     ke_var=0.002 (dominant, ~50%), k12_var=0.002 (~40%), k21_var=0.001 (~10%)
+//     Combined variance → UNCERTAIN (conf=700 < 800)
+//
+// ── Sequential improvement narrative ─────────────────────────────────────────
+//
+//   Stage 1: Budget identifies ke as dominant source → improve ke assay
+//            ke_var÷4=0.0005 → THERAPEUTIC (conf=820); k12 becomes new #1 (dom=1)
+//
+//   Stage 2: Budget now identifies k12 as dominant → improve compartment sampling
+//            k12_var÷4=0.0005 → THERAPEUTIC (conf=820); k21 becomes new #1 (dom=2)
+//
+//   Stage 3: k21 uncertainty is the remaining bottleneck — peripheral-return kinetics
+//            must be characterised to reduce residual variance further.
+//
+//   Contrast: reducing k21 alone (blind) → UNCERTAIN (insufficient, ke dominates)
+//
+// Effect annotations:
+//   classify_full_2cmt:   with Epistemic, Mut, Div, Panic
+//   conf_full_2cmt:       with Mut, Div, Panic
+//   dominant_full_2cmt:   with Mut, Div, Panic
+//   budget_3stage_fires:  with Epistemic, Mut, Div, Panic
+
+module pbpk::rapamycin_2cmt_full
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, simulate}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant}
+use pbpk::rapamycin_clinical::{
+    assess_trough, conf_from_rel,
+    decision_therapeutic, decision_uncertain
+}
+
+// ── Parameter constructor ──────────────────────────────────────────────────────
+
+// Full 2-cmt params: ke, k12, k21 all nonzero; no stent forcing (krel=0).
+pub fn full_2cmt_params(
+    ke_val:  f64,
+    k12_val: f64,
+    k21_val: f64,
+    ke_var:  f64,
+    k12_var: f64,
+    k21_var: f64,
+    vc:      f64
+) -> Rap2CmtParams {
+    Rap2CmtParams {
+        ke_val:      ke_val
+        ke_var:      ke_var
+        k12_val:     k12_val
+        k12_var:     k12_var
+        k21_val:     k21_val
+        k21_var:     k21_var
+        vc_val:      vc
+        krel_val:    0.0
+        krel_var:    0.0
+        a_poly0:     0.0
+        a_poly0_var: 0.0
+    }
+}
+
+// ── Core full 2-cmt trough classification ──────────────────────────────────────
+
+// Classify trough using full 2-cmt GUM propagation (ke, k12, k21 all contribute).
+pub fn classify_full_2cmt(
+    ke_val:  f64,
+    k12_val: f64,
+    k21_val: f64,
+    ke_var:  f64,
+    k12_var: f64,
+    k21_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let p = full_2cmt_params(ke_val, k12_val, k21_val, ke_var, k12_var, k21_var, vc)
+    var out_t = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_c = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_s = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    let c_val = out_c[idx]
+    let c_std = out_s[idx]
+    let conf  = conf_from_rel(c_val, c_std)
+    let c_ep  = Epistemic::new(c_val, c_std * c_std, conf)
+    assess_trough(&c_ep)
+}
+
+// Confidence score for full 2-cmt trough (no gate).
+pub fn conf_full_2cmt(
+    ke_val:  f64,
+    k12_val: f64,
+    k21_val: f64,
+    ke_var:  f64,
+    k12_var: f64,
+    k21_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Mut, Div, Panic {
+    let p = full_2cmt_params(ke_val, k12_val, k21_val, ke_var, k12_var, k21_var, vc)
+    var out_t = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_c = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_s = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    conf_from_rel(out_c[idx], out_s[idx])
+}
+
+// Return dominant uncertainty source index (0=ke, 1=k12, 2=k21, 3=krel, 4=a0).
+pub fn dominant_full_2cmt(
+    ke_val:  f64,
+    k12_val: f64,
+    k21_val: f64,
+    ke_var:  f64,
+    k12_var: f64,
+    k21_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64
+) -> i64 with Mut, Div, Panic {
+    let p = full_2cmt_params(ke_val, k12_val, k21_val, ke_var, k12_var, k21_var, vc)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(t_end, dt, d_bolus, 0.0, &p, n, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    budget_dominant(&bf)
+}
+
+// ── Standard-scenario wrappers ────────────────────────────────────────────────
+//
+// ke=0.04, k12=0.03, k21=0.015, Vc=70, D=2mg, t=24h, dt=1h, n=25, idx=24.
+
+pub fn classify_standard_full(ke_var: f64, k12_var: f64, k21_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    classify_full_2cmt(0.04, 0.03, 0.015, ke_var, k12_var, k21_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn conf_standard_full(ke_var: f64, k12_var: f64, k21_var: f64) -> i64 with Mut, Div, Panic {
+    conf_full_2cmt(0.04, 0.03, 0.015, ke_var, k12_var, k21_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn dominant_standard_full(ke_var: f64, k12_var: f64, k21_var: f64) -> i64 with Mut, Div, Panic {
+    dominant_full_2cmt(0.04, 0.03, 0.015, ke_var, k12_var, k21_var, 70.0, 2.0, 24.0, 1.0, 25)
+}
+
+// ── Sequential improvement gate ────────────────────────────────────────────────
+//
+// Returns true iff the three-stage budget narrative holds:
+//   Stage 1: baseline (ke_v=0.002, k12_v=0.002, k21_v=0.001) → UNCERTAIN, ke dominant
+//   Stage 2: targeted-ke (ke_v÷4=0.0005) → THERAPEUTIC, k12 becomes dominant
+//   Stage 3: sequential ke+k12 (both ÷4) → THERAPEUTIC, k21 becomes dominant
+//   Contrast: blind-k21 (k21_v÷4 only) → UNCERTAIN, ke still dominant
+//
+// Clinical reading: "Improve ke assay first. After that, improve compartment-
+// sampling for k12. Only then does k21 uncertainty emerge as the next barrier."
+pub fn budget_3stage_fires() -> bool with Epistemic, Mut, Div, Panic {
+    // Stage 1 — baseline UNCERTAIN; ke dominant
+    let dec_base = classify_standard_full(0.002, 0.002, 0.001)
+    let dom_base  = dominant_standard_full(0.002, 0.002, 0.001)
+
+    // Stage 2 — targeted ke ÷4; k12 now dominant
+    let dec_targ  = classify_standard_full(0.0005, 0.002, 0.001)
+    let dom_targ  = dominant_standard_full(0.0005, 0.002, 0.001)
+
+    // Stage 3 — sequential ke+k12 both ÷4; k21 now dominant
+    let dec_seq   = classify_standard_full(0.0005, 0.0005, 0.001)
+    let dom_seq   = dominant_standard_full(0.0005, 0.0005, 0.001)
+
+    // Contrast — blind k21 ÷4 only; ke still top, UNCERTAIN
+    let dec_blind = classify_standard_full(0.002, 0.002, 0.00025)
+
+    dec_base  == decision_uncertain()   &&
+    dom_base  == 0                      &&
+    dec_targ  == decision_therapeutic() &&
+    dom_targ  == 1                      &&
+    dec_seq   == decision_therapeutic() &&
+    dom_seq   == 2                      &&
+    dec_blind == decision_uncertain()
+}

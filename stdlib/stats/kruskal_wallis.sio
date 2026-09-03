@@ -1,0 +1,222 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/kruskal_wallis.sio — Kruskal-Wallis H test (non-parametric ANOVA)
+//
+// The rank-based analogue of one-way ANOVA and the multi-group generalisation of
+// Mann-Whitney U: it tests whether k >= 2 groups come from the same distribution
+// without assuming normality, using the pooled ranks.
+//
+//   kruskal_wallis(data, sizes, k) -> KWResult
+//
+// H = 12/(N(N+1)) · Σ_j R_j²/n_j − 3(N+1), where R_j is group j's rank sum, then
+// divided by the tie-correction factor 1 − Σ(t³−t)/(N³−N). Under H0, H ~ χ²(k-1),
+// so p = chi2_sf(H, k-1) (accurate for n_j ≳ 5 per group).
+//
+// `data` holds the groups concatenated end to end; `sizes[j]` is group j's size;
+// k is the number of groups (2 ≤ k ≤ 16, total N ≤ 256).
+//
+// Pure Sounio; the only dependency is the chi-squared survival (stats::chi_square).
+//
+// References:
+//   Kruskal & Wallis (1952) "Use of ranks in one-criterion variance analysis",
+//     JASA 47(260)
+//   Hollander & Wolfe (1999) "Nonparametric Statistical Methods" §6.1
+
+module stats::kruskal_wallis
+
+use stats::chi_square::{chi2_sf}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct KWResult {
+    pub k: i64,          // number of groups
+    pub n_total: i64,    // total observations
+    pub h: f64,          // tie-corrected H statistic
+    pub h_uncorrected: f64,
+    pub df: f64,         // k - 1
+    pub p_value: f64,    // P(χ²(k-1) > H)
+    pub tie_factor: f64, // 1 − Σ(t³−t)/(N³−N)
+}
+
+// ============================================================================
+// ANALYSIS
+// ============================================================================
+
+/// Kruskal-Wallis H test over k groups laid out consecutively in `data`.
+///
+/// Parâmetros: data — groups concatenated; sizes — sizes[j]=n_j; k — group count.
+/// Retorno: KWResult (H tie-corrected + uncorrected, df, p-value, tie factor).
+/// Complexidade: O(N²) (pooled rank sort).
+/// Referências: Kruskal & Wallis (1952).
+pub fn kruskal_wallis(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> KWResult with Mut, Div, Panic {
+    if k < 2 {
+        return KWResult { k: k as i64, n_total: 0, h: 0.0, h_uncorrected: 0.0,
+                          df: 0.0, p_value: 1.0, tie_factor: 1.0 }
+    }
+
+    // total N
+    var n_total = 0
+    var g0 = 0
+    while g0 < k { n_total = n_total + sizes[g0 as usize]; g0 = g0 + 1 }
+    let nf = n_total as f64
+
+    // pooled average ranks: sort (value, group) by value carrying group id
+    var val: [f64; 256] = [0.0; 256]
+    var grp: [i64; 256] = [0; 256]
+    var idx = 0
+    var g = 0
+    while g < k {
+        var t = 0
+        while t < sizes[g as usize] {
+            val[idx as usize] = data[idx as usize]
+            grp[idx as usize] = g as i64
+            idx = idx + 1
+            t = t + 1
+        }
+        g = g + 1
+    }
+    // selection sort by value, carrying group
+    var a = 0
+    while a < n_total - 1 {
+        var mn = a
+        var b = a + 1
+        while b < n_total {
+            if val[b as usize] < val[mn as usize] { mn = b }
+            b = b + 1
+        }
+        if mn != a {
+            let tv = val[a as usize]; val[a as usize] = val[mn as usize]; val[mn as usize] = tv
+            let tg = grp[a as usize]; grp[a as usize] = grp[mn as usize]; grp[mn as usize] = tg
+        }
+        a = a + 1
+    }
+
+    // average ranks over tie groups; accumulate rank sums per group + tie sum
+    var rank_sum: [f64; 16] = [0.0; 16]
+    var tie_sum = 0.0     // Σ (t³ − t)
+    var p = 0
+    while p < n_total {
+        var h = p
+        while h < n_total && val[h as usize] == val[p as usize] { h = h + 1 }
+        let avg = (((p + 1) + h) as f64) / 2.0
+        var q = p
+        while q < h {
+            let gj = grp[q as usize]
+            rank_sum[gj as usize] = rank_sum[gj as usize] + avg
+            q = q + 1
+        }
+        let tt = (h - p) as f64
+        tie_sum = tie_sum + (tt * tt * tt - tt)
+        p = h
+    }
+
+    // H statistic
+    var acc = 0.0
+    var j = 0
+    while j < k {
+        let rj = rank_sum[j as usize]
+        let njf = sizes[j as usize] as f64
+        acc = acc + rj * rj / njf
+        j = j + 1
+    }
+    let h_unc = 12.0 / (nf * (nf + 1.0)) * acc - 3.0 * (nf + 1.0)
+
+    // tie correction
+    var tie_factor = 1.0
+    let denom = nf * nf * nf - nf
+    if denom > 0.0 { tie_factor = 1.0 - tie_sum / denom }
+    var h_corr = h_unc
+    if tie_factor > 1.0e-12 { h_corr = h_unc / tie_factor }
+
+    let df = (k - 1) as f64
+    var p_value = chi2_sf(h_corr, df)
+    if p_value < 0.0 { p_value = 0.0 }
+    if p_value > 1.0 { p_value = 1.0 }
+
+    return KWResult { k: k as i64, n_total: n_total as i64, h: h_corr, h_uncorrected: h_unc,
+                      df: df, p_value: p_value, tie_factor: tie_factor }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// No ties: G1=1,2,3 G2=4,5,6 G3=7,8,9. R=6,15,24. H=12/90·279-30=7.2. df=2.
+// p = chi2_sf(7.2,2) = exp(-3.6) = 0.0273237.
+fn test_no_ties() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=1.0; data[1]=2.0; data[2]=3.0
+    data[3]=4.0; data[4]=5.0; data[5]=6.0
+    data[6]=7.0; data[7]=8.0; data[8]=9.0
+    sizes[0]=3; sizes[1]=3; sizes[2]=3
+    let r = kruskal_wallis(&data, &sizes, 3)
+    var ok = true
+    ok = check(1, r.n_total == 9) && ok
+    ok = check(2, approx(r.h, 7.2, 1.0e-9)) && ok
+    ok = check(3, approx(r.df, 2.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.tie_factor, 1.0, 1.0e-12)) && ok
+    ok = check(5, approx(r.p_value, 0.0273237, 1.0e-5)) && ok
+    return ok
+}
+
+// With ties: G1=1,1,2 G2=2,3,3. ranks 1.5,1.5,3.5 / 3.5,5.5,5.5. R1=6.5,R2=14.5.
+// H_unc = 12/42·(6.5²/3+14.5²/3)-21 = 3.047619. tie groups 2,2,2 -> Σ=18,
+// factor=1-18/210=0.914286. H = 3.047619/0.914286 = 3.333333.
+fn test_ties() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=1.0; data[1]=1.0; data[2]=2.0
+    data[3]=2.0; data[4]=3.0; data[5]=3.0
+    sizes[0]=3; sizes[1]=3
+    let r = kruskal_wallis(&data, &sizes, 2)
+    var ok = true
+    ok = check(10, approx(r.h_uncorrected, 3.047619, 1.0e-5)) && ok
+    ok = check(11, approx(r.tie_factor, 0.914286, 1.0e-5)) && ok
+    ok = check(12, approx(r.h, 3.333333, 1.0e-5)) && ok
+    return ok
+}
+
+// Identical groups -> H = 0, p = 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=5.0; data[1]=6.0; data[2]=7.0
+    data[3]=5.0; data[4]=6.0; data[5]=7.0
+    sizes[0]=3; sizes[1]=3
+    let r = kruskal_wallis(&data, &sizes, 2)
+    var ok = true
+    ok = check(20, approx(r.h, 0.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.p_value, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_no_ties() && ok
+    ok = test_ties() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,101 @@
+//@ run-pass
+
+use eisa::hypercomplex_zd::*
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let left = sed16_v0_two_support(101, 3, 1, 10, 1)
+    let right = sed16_v0_two_support(202, 6, 1, 15, -1)
+    let proved = zd_exact_attempt_v0(left, right)
+    if !zd_exact_attempt_proved(proved) { println("FAIL positive"); return 1 }
+    let token = zd_exact_token(proved)
+    if !zd_requires_exact(token) { println("FAIL exact-consumer"); return 1 }
+    if !zd_exact_token_matches_ordered(token, left, right) { println("FAIL ordered-match"); return 1 }
+
+    let non_zd_left = sed16_v0_basis(301, 1, 1)
+    let non_zd_right = sed16_v0_basis(302, 2, 1)
+    let non_zd = zd_exact_attempt_v0(non_zd_left, non_zd_right)
+    if zd_exact_attempt_status(non_zd) != zd_status_not_zd() { println("FAIL negative"); return 1 }
+
+    let zero = sed16_v0_zero(401)
+    let zero_attempt = zd_exact_attempt_v0(zero, right)
+    if zd_exact_attempt_status(zero_attempt) != zd_status_zero_operand() { println("FAIL zero-operand"); return 1 }
+
+    // Same support bits as the proved right operand, but the e15 sign is flipped.
+    // The product is 2e5 + 2e12, not zero.
+    let sign_tamper = sed16_v0_two_support(203, 6, 1, 15, 1)
+    let sign_attempt = zd_exact_attempt_v0(left, sign_tamper)
+    if zd_exact_attempt_status(sign_attempt) != zd_status_not_zd() { println("FAIL sign-tamper"); return 1 }
+
+    let identity_tamper = sed16_v0_two_support(999, 3, 1, 10, 1)
+    if zd_exact_token_matches_ordered(token, identity_tamper, right) { println("FAIL identity-tamper"); return 1 }
+    if zd_exact_token_matches_ordered(token, right, left) { println("FAIL orientation"); return 1 }
+
+    let measured = zd_measured_norm_f64_v0(501, 502, 2.0, 2.0, 1.0e-20, 1.0e-12)
+    if !zd_measurement_near_zero(measured) { println("FAIL measured-near-zero"); return 1 }
+    if zd_measurement_status(measured) != zd_status_measured_near_zero() { println("FAIL measured-status"); return 1 }
+    if zd_measurement_is_exact_proof(measured) { println("FAIL proof-measurement"); return 1 }
+
+    let outside_domain = sed16_v0_two_support(601, 3, 2, 10, 1)
+    let outside_domain_attempt = zd_exact_attempt_v0(outside_domain, right)
+    if zd_exact_attempt_status(outside_domain_attempt) != zd_status_unsupported() { println("FAIL coefficient-domain"); return 1 }
+
+    let unsupported = sed16_v0_two_support(701, 3, 1, 3, -1)
+    let unsupported_attempt = zd_exact_attempt_v0(unsupported, right)
+    if zd_exact_attempt_status(unsupported_attempt) != zd_status_unsupported() { println("FAIL unsupported"); return 1 }
+
+    let invalid_identity = sed16_v0_two_support(0, 3, 1, 10, 1)
+    let invalid_attempt = zd_exact_attempt_v0(invalid_identity, right)
+    if zd_exact_attempt_status(invalid_attempt) != zd_status_identity_invalid() { println("FAIL identity-invalid"); return 1 }
+
+    // External struct literals are currently accepted. The forged advisory
+    // status must not admit coefficients whose multiplication could wrap i64.
+    var huge_coeffs: [i64; 16] = [0; 16]
+    huge_coeffs[1] = 4294967296
+    huge_coeffs[2] = 4294967296
+    let forged_huge = SedExact16V0 {
+        coeffs: huge_coeffs,
+        identity: 801,
+        element_status: 0,
+    }
+    let forged_huge_attempt = zd_exact_attempt_v0(forged_huge, forged_huge)
+    if zd_exact_attempt_status(forged_huge_attempt) != zd_status_overflow_risk() { println("FAIL forged-overflow"); return 1 }
+
+    // Clone a checksum from a real token but replace the ordered operands with
+    // e1 and e2. Token acceptance must recompute the nonzero product.
+    var e1_coeffs: [i64; 16] = [0; 16]
+    var e2_coeffs: [i64; 16] = [0; 16]
+    e1_coeffs[1] = 1
+    e2_coeffs[2] = 1
+    let forged_token = ZDExactTokenV0 {
+        left_coeffs: e1_coeffs,
+        right_coeffs: e2_coeffs,
+        left_identity: 901,
+        right_identity: 902,
+        convention_tag: zd_convention_cd_sigma_v0(),
+        domain_tag: zd_domain_sed16_sparse_pm1_i64_v0(),
+        detector_tag: zd_detector_exact_product_v0(),
+        orientation_tag: zd_orientation_ordered(),
+        valid: true,
+        integrity_tag: token.integrity_tag,
+    }
+    if zd_requires_exact(forged_token) { println("FAIL forged-token"); return 1 }
+
+    let inf = 1.0e308 * 10.0
+    let neg_inf = 0.0 - inf
+    let nan = inf - inf
+    let measured_nan = zd_measured_norm_f64_v0(1001, 1002, 2.0, 2.0, nan, 1.0e-12)
+    if zd_measurement_status(measured_nan) != zd_status_unsupported() { println("FAIL measured-nan"); return 1 }
+    let measured_inf = zd_measured_norm_f64_v0(1003, 1004, inf, 2.0, 0.0, 1.0e-12)
+    if zd_measurement_status(measured_inf) != zd_status_unsupported() { println("FAIL measured-inf"); return 1 }
+    let resolution_inf = zd_measured_norm_f64_v0(1005, 1006, 2.0, 2.0, 0.0, inf)
+    if zd_measurement_status(resolution_inf) != zd_status_unsupported() { println("FAIL resolution-inf"); return 1 }
+    let measured_neg_inf = zd_measured_norm_f64_v0(1005, 1006, 2.0, neg_inf, 0.0, 1.0e-12)
+    if zd_measurement_status(measured_neg_inf) != zd_status_unsupported() { println("FAIL measured-neg-inf"); return 1 }
+    let negative_norm = zd_measured_norm_f64_v0(1007, 1008, -1.0, 2.0, 0.0, 1.0e-12)
+    if zd_measurement_status(negative_norm) != zd_status_unsupported() { println("FAIL negative-norm"); return 1 }
+    let threshold_equal = zd_measured_norm_f64_v0(1009, 1010, 2.0, 2.0, 1.0e-12, 1.0e-12)
+    if zd_measurement_status(threshold_equal) != zd_status_not_zd() || zd_measurement_near_zero(threshold_equal) { println("FAIL threshold-equality"); return 1 }
+
+    println("EISA_H_ZD_REF_V0 PASS")
+    0
+}

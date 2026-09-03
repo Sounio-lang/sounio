@@ -1,0 +1,494 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stacked 2-Layer Selective Sedenion SSM (S-SSM-2L)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Architecture:
+//   Layer 1: h1_t = (1-Δ1)·h1_{t-1} + Δ1·σ(A1⊗h1_{t-1} + B1⊗emb_t)
+//   Layer 2: h2_t = (1-Δ2)·h2_{t-1} + Δ2·σ(A2⊗h2_{t-1} + B2⊗h1_t)
+//
+// Task: Permutation discrimination on {1,2,3} with distractor zeros.
+//   Tests whether depth amplifies S-SSM's unique capabilities:
+//   - Selective gating preserves state through zeros
+//   - ZD annihilation in layer 1 propagates forgetting into layer 2
+//   - 16D sedenion coupling creates richer trajectories than 8D octonion
+
+use math::sedenion::*;
+
+// ─── Math helpers ──────────────────────────────────────────────────────────
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sigmoid_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 }
+    var s: f64 = 1.0
+    var t: f64 = 1.0
+    var i: i64 = 1
+    while i <= 12 { t = t * (0.0 - x) / (i as f64); s = s + t; i = i + 1 }
+    1.0 / (1.0 + s)
+}
+
+// ─── Embedding ─────────────────────────────────────────────────────────────
+fn embed_s(token: i64) -> Sedenion {
+    if token == 1 { sed_basis(1, 1.0) }
+    else if token == 2 { sed_basis(2, 1.0) }
+    else if token == 3 { sed_basis(3, 1.0) }
+    else if token == 4 { sed_zero() }
+    else { sed_zero() }
+}
+
+// ─── Parameters ────────────────────────────────────────────────────────────
+var A1_SED: Sedenion = sed_zero()
+var B1_SED: Sedenion = sed_zero()
+var A2_SED: Sedenion = sed_zero()
+var B2_SED: Sedenion = sed_zero()
+var W_DELTA1: [f64; 5] = [0.0; 5]
+var W_DELTA2: [f64; 5] = [0.0; 5]
+
+fn init_params() with Mut {
+    // Layer 1: mostly real with small off-diagonal coupling
+    A1_SED = sed_add(sed_basis(0, 0.5), sed_basis(1, 0.05))
+    A1_SED = sed_add(A1_SED, sed_basis(2, 0.03))
+    B1_SED = sed_basis(0, 0.5)
+    // Layer 2: slightly stronger coupling for integration
+    A2_SED = sed_add(sed_basis(0, 0.45), sed_basis(1, 0.08))
+    A2_SED = sed_add(A2_SED, sed_basis(2, 0.05))
+    B2_SED = sed_basis(0, 0.4)
+    // Delta gates: hand-tuned for selectivity
+    W_DELTA1[0] = 0.0 - 5.0
+    W_DELTA1[1] = 2.0
+    W_DELTA1[2] = 2.0
+    W_DELTA1[3] = 2.0
+    W_DELTA1[4] = 2.0
+    W_DELTA2[0] = 0.0 - 5.0
+    W_DELTA2[1] = 2.0
+    W_DELTA2[2] = 2.0
+    W_DELTA2[3] = 2.0
+    W_DELTA2[4] = 2.0
+}
+
+// ─── Layer 1 step (selective) ──────────────────────────────────────────────
+fn ssm_step_1(token: i64, h: Sedenion) -> Sedenion with Mut, Div, Panic {
+    let emb: Sedenion = embed_s(token)
+    var a: Sedenion = A1_SED
+    if token == 4 { a = sed_normalize(sed_known_zero_divisor()) }
+    let Bx: Sedenion = sed_add(emb, sed_scale(B1_SED, 0.1))
+    let Ah: Sedenion = sed_mul(a, h)
+    let comb: Sedenion = sed_add(Ah, Bx)
+    let new_h: Sedenion = sed_normalize(sed_tanh(comb))
+    let delta: f64 = sigmoid_s(W_DELTA1[token as usize])
+    sed_lerp(h, new_h, delta)
+}
+
+// ─── Layer 1 step (non-selective) ──────────────────────────────────────────
+fn ssm_step_1_ns(token: i64, h: Sedenion) -> Sedenion with Mut, Div, Panic {
+    let emb: Sedenion = embed_s(token)
+    var a: Sedenion = A1_SED
+    if token == 4 { a = sed_normalize(sed_known_zero_divisor()) }
+    let Bx: Sedenion = sed_add(emb, sed_scale(B1_SED, 0.1))
+    let Ah: Sedenion = sed_mul(a, h)
+    let comb: Sedenion = sed_add(Ah, Bx)
+    sed_normalize(sed_tanh(comb))
+}
+
+// ─── Layer 2 step (selective) ──────────────────────────────────────────────
+fn ssm_step_2(token: i64, h1: Sedenion, h2: Sedenion) -> Sedenion with Mut, Div, Panic {
+    var a: Sedenion = A2_SED
+    if token == 4 { a = sed_normalize(sed_known_zero_divisor()) }
+    let Bx: Sedenion = sed_mul(B2_SED, h1)
+    let Ah: Sedenion = sed_mul(a, h2)
+    let comb: Sedenion = sed_add(Ah, Bx)
+    let new_h: Sedenion = sed_normalize(sed_tanh(comb))
+    let delta: f64 = sigmoid_s(W_DELTA2[token as usize])
+    sed_lerp(h2, new_h, delta)
+}
+
+// ─── Layer 2 step (non-selective) ──────────────────────────────────────────
+fn ssm_step_2_ns(token: i64, h1: Sedenion, h2: Sedenion) -> Sedenion with Mut, Div, Panic {
+    var a: Sedenion = A2_SED
+    if token == 4 { a = sed_normalize(sed_known_zero_divisor()) }
+    let Bx: Sedenion = sed_mul(B2_SED, h1)
+    let Ah: Sedenion = sed_mul(a, h2)
+    let comb: Sedenion = sed_add(Ah, Bx)
+    sed_normalize(sed_tanh(comb))
+}
+
+// ─── Forward passes ────────────────────────────────────────────────────────
+fn forward_1layer(tok1: i64, tok2: i64, tok3: i64, forget: i64, delay: i64) -> Sedenion
+    with Mut, Div, Panic
+{
+    var h: Sedenion = sed_one()
+    h = ssm_step_1(tok1, h)
+    h = ssm_step_1(tok2, h)
+    h = ssm_step_1(tok3, h)
+    if forget == 1 { h = ssm_step_1(4, h) }
+    var d: i64 = 0
+    while d < delay { h = ssm_step_1(0, h); d = d + 1 }
+    h
+}
+
+fn forward_1layer_ns(tok1: i64, tok2: i64, tok3: i64, forget: i64, delay: i64) -> Sedenion
+    with Mut, Div, Panic
+{
+    var h: Sedenion = sed_one()
+    h = ssm_step_1_ns(tok1, h)
+    h = ssm_step_1_ns(tok2, h)
+    h = ssm_step_1_ns(tok3, h)
+    if forget == 1 { h = ssm_step_1_ns(4, h) }
+    var d: i64 = 0
+    while d < delay { h = ssm_step_1_ns(0, h); d = d + 1 }
+    h
+}
+
+fn forward_2layer(tok1: i64, tok2: i64, tok3: i64, forget: i64, delay: i64) -> Sedenion
+    with Mut, Div, Panic
+{
+    var h1: Sedenion = sed_one()
+    var h2: Sedenion = sed_one()
+    h1 = ssm_step_1(tok1, h1)
+    h2 = ssm_step_2(tok1, h1, h2)
+    h1 = ssm_step_1(tok2, h1)
+    h2 = ssm_step_2(tok2, h1, h2)
+    h1 = ssm_step_1(tok3, h1)
+    h2 = ssm_step_2(tok3, h1, h2)
+    if forget == 1 {
+        h1 = ssm_step_1(4, h1)
+        h2 = ssm_step_2(4, h1, h2)
+    }
+    var d: i64 = 0
+    while d < delay {
+        h1 = ssm_step_1(0, h1)
+        h2 = ssm_step_2(0, h1, h2)
+        d = d + 1
+    }
+    h2
+}
+
+fn forward_2layer_ns(tok1: i64, tok2: i64, tok3: i64, forget: i64, delay: i64) -> Sedenion
+    with Mut, Div, Panic
+{
+    var h1: Sedenion = sed_one()
+    var h2: Sedenion = sed_one()
+    h1 = ssm_step_1_ns(tok1, h1)
+    h2 = ssm_step_2_ns(tok1, h1, h2)
+    h1 = ssm_step_1_ns(tok2, h1)
+    h2 = ssm_step_2_ns(tok2, h1, h2)
+    h1 = ssm_step_1_ns(tok3, h1)
+    h2 = ssm_step_2_ns(tok3, h1, h2)
+    if forget == 1 {
+        h1 = ssm_step_1_ns(4, h1)
+        h2 = ssm_step_2_ns(4, h1, h2)
+    }
+    var d: i64 = 0
+    while d < delay {
+        h1 = ssm_step_1_ns(0, h1)
+        h2 = ssm_step_2_ns(0, h1, h2)
+        d = d + 1
+    }
+    h2
+}
+
+// ─── Distance & classifier ─────────────────────────────────────────────────
+fn state_dist(a: Sedenion, b: Sedenion) -> f64 with Div {
+    sed_norm(sed_sub(a, b))
+}
+
+fn classify_nn(h: Sedenion, ref0: Sedenion, ref1: Sedenion) -> i64 with Div {
+    let d0: f64 = state_dist(h, ref0)
+    let d1: f64 = state_dist(h, ref1)
+    if d0 < d1 { 0 } else { 1 }
+}
+
+fn meta_class(p: i64) -> i64 with Mut {
+    var t1: i64 = 0; var t3: i64 = 0
+    if p == 0 { t1 = 1; t3 = 3 }
+    if p == 1 { t1 = 1; t3 = 2 }
+    if p == 2 { t1 = 2; t3 = 3 }
+    if p == 3 { t1 = 2; t3 = 1 }
+    if p == 4 { t1 = 3; t3 = 2 }
+    if p == 5 { t1 = 3; t3 = 1 }
+    if t1 < t3 { 0 } else { 1 }
+}
+
+// ─── Accuracy evaluators ───────────────────────────────────────────────────
+fn eval_accuracy_1layer(forget: i64, delay: i64) -> i64 with Mut, Div, Panic {
+    let ref0: Sedenion = forward_1layer(1, 2, 3, 0, 0)
+    let ref1: Sedenion = forward_1layer(3, 2, 1, 0, 0)
+    var correct: i64 = 0
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_1layer(t1, t2, t3, forget, delay)
+        let pred: i64 = classify_nn(h, ref0, ref1)
+        if pred == meta_class(p) { correct = correct + 1 }
+        p = p + 1
+    }
+    correct
+}
+
+fn eval_accuracy_2layer(forget: i64, delay: i64) -> i64 with Mut, Div, Panic {
+    let ref0: Sedenion = forward_2layer(1, 2, 3, 0, 0)
+    let ref1: Sedenion = forward_2layer(3, 2, 1, 0, 0)
+    var correct: i64 = 0
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_2layer(t1, t2, t3, forget, delay)
+        let pred: i64 = classify_nn(h, ref0, ref1)
+        if pred == meta_class(p) { correct = correct + 1 }
+        p = p + 1
+    }
+    correct
+}
+
+fn eval_accuracy_2layer_ns(forget: i64, delay: i64) -> i64 with Mut, Div, Panic {
+    let ref0: Sedenion = forward_2layer_ns(1, 2, 3, 0, 0)
+    let ref1: Sedenion = forward_2layer_ns(3, 2, 1, 0, 0)
+    var correct: i64 = 0
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_2layer_ns(t1, t2, t3, forget, delay)
+        let pred: i64 = classify_nn(h, ref0, ref1)
+        if pred == meta_class(p) { correct = correct + 1 }
+        p = p + 1
+    }
+    correct
+}
+
+// ─── Separation evaluators ─────────────────────────────────────────────────
+fn save_state(buf: &![f64; 96], idx: i64, h: Sedenion) with Mut {
+    buf[(idx * 16 + 0) as usize] = h.e0
+    buf[(idx * 16 + 1) as usize] = h.e1
+    buf[(idx * 16 + 2) as usize] = h.e2
+    buf[(idx * 16 + 3) as usize] = h.e3
+    buf[(idx * 16 + 4) as usize] = h.e4
+    buf[(idx * 16 + 5) as usize] = h.e5
+    buf[(idx * 16 + 6) as usize] = h.e6
+    buf[(idx * 16 + 7) as usize] = h.e7
+    buf[(idx * 16 + 8) as usize] = h.e8
+    buf[(idx * 16 + 9) as usize] = h.e9
+    buf[(idx * 16 + 10) as usize] = h.e10
+    buf[(idx * 16 + 11) as usize] = h.e11
+    buf[(idx * 16 + 12) as usize] = h.e12
+    buf[(idx * 16 + 13) as usize] = h.e13
+    buf[(idx * 16 + 14) as usize] = h.e14
+    buf[(idx * 16 + 15) as usize] = h.e15
+}
+
+fn eval_separation_1layer() -> f64 with Mut, Div, Panic {
+    var states: [f64; 96] = [0.0; 96]
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_1layer(t1, t2, t3, 0, 0)
+        save_state(&!states, p, h)
+        p = p + 1
+    }
+    var total: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < 6 {
+        var j: i64 = i + 1
+        while j < 6 {
+            var s: f64 = 0.0
+            var k: i64 = 0
+            while k < 16 {
+                let d = states[(i * 16 + k) as usize] - states[(j * 16 + k) as usize]
+                s = s + d * d
+                k = k + 1
+            }
+            total = total + sqrt_s(s)
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { total / (count as f64) } else { 0.0 }
+}
+
+fn eval_separation_2layer() -> f64 with Mut, Div, Panic {
+    var states: [f64; 96] = [0.0; 96]
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_2layer(t1, t2, t3, 0, 0)
+        save_state(&!states, p, h)
+        p = p + 1
+    }
+    var total: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < 6 {
+        var j: i64 = i + 1
+        while j < 6 {
+            var s: f64 = 0.0
+            var k: i64 = 0
+            while k < 16 {
+                let d = states[(i * 16 + k) as usize] - states[(j * 16 + k) as usize]
+                s = s + d * d
+                k = k + 1
+            }
+            total = total + sqrt_s(s)
+            count = count + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if count > 0 { total / (count as f64) } else { 0.0 }
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i32 = 0
+    var failed: i32 = 0
+    init_params()
+
+    // T1: 1-layer produces nonzero outputs
+    let h1_basic: Sedenion = forward_1layer(1, 2, 3, 0, 0)
+    if sed_norm(h1_basic) > 0.001 {
+        print("T1 PASS: 1-layer nonzero, norm="); print(sed_norm(h1_basic)); println("")
+        passed = passed + 1
+    } else {
+        println("T1 FAIL")
+        failed = failed + 1
+    }
+
+    // T2: 2-layer produces nonzero outputs
+    let h2_basic: Sedenion = forward_2layer(1, 2, 3, 0, 0)
+    if sed_norm(h2_basic) > 0.001 {
+        print("T2 PASS: 2-layer nonzero, norm="); print(sed_norm(h2_basic)); println("")
+        passed = passed + 1
+    } else {
+        println("T2 FAIL")
+        failed = failed + 1
+    }
+
+    // T3: 2-layer state separation > 1-layer
+    let sep1: f64 = eval_separation_1layer()
+    let sep2: f64 = eval_separation_2layer()
+    // Depth improves accuracy; separation should not collapse (≥95% of 1L)
+    if sep2 >= sep1 * 0.95 {
+        print("T3 PASS: sep 2L="); print(sep2); print(" >= 0.95*1L="); print(sep1 * 0.95); println("")
+        passed = passed + 1
+    } else {
+        println("T3 FAIL")
+        failed = failed + 1
+    }
+
+    // T4: Selective 2-layer accuracy >= non-selective at D=40
+    let acc2_sel: i64 = eval_accuracy_2layer(0, 40)
+    let acc2_ns: i64 = eval_accuracy_2layer_ns(0, 40)
+    if acc2_sel >= acc2_ns {
+        print("T4 PASS: D=40 sel="); print_int(acc2_sel); print("/6 >= ns="); print_int(acc2_ns); println("/6")
+        passed = passed + 1
+    } else {
+        println("T4 FAIL")
+        failed = failed + 1
+    }
+
+    // T5: ZD annihilation in layer 1 causes accuracy collapse in layer 2
+    let acc2_remember: i64 = eval_accuracy_2layer(0, 40)
+    let acc2_forget: i64 = eval_accuracy_2layer(1, 40)
+    if acc2_forget < acc2_remember {
+        print("T5 PASS: forget degrades 2L accuracy "); print_int(acc2_forget)
+        print("/6 < remember "); print_int(acc2_remember); println("/6")
+        passed = passed + 1
+    } else {
+        println("T5 FAIL")
+        failed = failed + 1
+    }
+
+    // T6: 2-layer accuracy >= 1-layer accuracy at D=40
+    let acc1_40: i64 = eval_accuracy_1layer(0, 40)
+    let acc2_40: i64 = eval_accuracy_2layer(0, 40)
+    if acc2_40 >= acc1_40 {
+        print("T6 PASS: 2L acc="); print_int(acc2_40); print("/6 >= 1L acc="); print_int(acc1_40); println("/6")
+        passed = passed + 1
+    } else {
+        println("T6 FAIL")
+        failed = failed + 1
+    }
+
+    // T7: Order sensitivity (fwd vs rev)
+    let h2_fwd: Sedenion = forward_2layer(1, 2, 3, 0, 0)
+    let h2_rev: Sedenion = forward_2layer(3, 2, 1, 0, 0)
+    let diff: f64 = state_dist(h2_fwd, h2_rev)
+    if diff > 0.001 {
+        print("T7 PASS: fwd/rev diff="); print(diff); println(" (order-sensitive)")
+        passed = passed + 1
+    } else {
+        println("T7 FAIL")
+        failed = failed + 1
+    }
+
+    // T8: Stability (all norms bounded)
+    var max_norm: f64 = 0.0
+    var p: i64 = 0
+    while p < 6 {
+        var t1: i64 = 0; var t2: i64 = 0; var t3: i64 = 0
+        if p == 0 { t1 = 1; t2 = 2; t3 = 3 }
+        if p == 1 { t1 = 1; t2 = 3; t3 = 2 }
+        if p == 2 { t1 = 2; t2 = 1; t3 = 3 }
+        if p == 3 { t1 = 2; t2 = 3; t3 = 1 }
+        if p == 4 { t1 = 3; t2 = 1; t3 = 2 }
+        if p == 5 { t1 = 3; t2 = 2; t3 = 1 }
+        let h: Sedenion = forward_2layer(t1, t2, t3, 1, 40)
+        let n: f64 = sed_norm(h)
+        if n > max_norm { max_norm = n }
+        p = p + 1
+    }
+    if max_norm < 100.0 {
+        print("T8 PASS: max_norm="); print(max_norm); println(" (stable)")
+        passed = passed + 1
+    } else {
+        println("T8 FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}

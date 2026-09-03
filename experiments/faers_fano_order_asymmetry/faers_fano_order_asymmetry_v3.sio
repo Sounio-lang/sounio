@@ -1,0 +1,225 @@
+// experiments/faers_fano_order_asymmetry/faers_fano_order_asymmetry_v3.sio
+//
+// FAERS v3 — deeper inference on geometry-correct DrugBank aggregates
+// (data/faers_drugbank.csv after canonical Fano relabel).
+//
+// Beyond v2 bootstrap CI:
+//   1) Unweighted mean contrast + bootstrap (as v2)
+//   2) Temporal-weighted mean contrast
+//   3) Monte-Carlo permutation p-value for H1: mean_N > mean_F
+//      (one-sided; B_perm = 5000, seed = 20260725)
+//
+//   ./bin/souc run experiments/faers_fano_order_asymmetry/faers_fano_order_asymmetry_v3.sio
+
+fn floor_f(v: f64) -> f64 { return (v as i64) as f64 }
+
+fn mean_n(x: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    return s / (n as f64)
+}
+
+fn wmean_n(x: &[f64; 64], w: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var sw = 0.0; var sx = 0.0; var i = 0
+    while i < n {
+        sw = sw + w[i as usize]
+        sx = sx + x[i as usize] * w[i as usize]
+        i = i + 1
+    }
+    if sw <= 0.0 { return 0.0 }
+    return sx / sw
+}
+
+var RNG: f64 = 20260725.0
+
+fn rng_u01() -> f64 with Mut, Div, Panic {
+    let A = 16807.0
+    let M = 2147483647.0
+    let prod = A * RNG
+    let q = (prod / M) as i64
+    RNG = prod - (q as f64) * M
+    if RNG < 1.0 { RNG = 1.0 }
+    return RNG / M
+}
+
+// Fisher–Yates shuffle first `n` entries of a buffer (values only).
+fn shuffle_prefix(a: &![f64; 64], n: i32) with Mut, Div, Panic {
+    var i = n - 1
+    while i > 0 {
+        let u = rng_u01()
+        var j = floor_f(u * ((i + 1) as f64)) as i32
+        if j < 0 { j = 0 }
+        if j > i { j = i }
+        let tmp = a[i as usize]
+        a[i as usize] = a[j as usize]
+        a[j as usize] = tmp
+        i = i - 1
+    }
+}
+
+fn bootstrap_diff(x: &[f64; 64], nx: i32, y: &[f64; 64], ny: i32, b: i32, conf: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    let nxf = nx as f64
+    let nyf = ny as f64
+    let diff0 = mean_n(x, nx) - mean_n(y, ny)
+    var diffs: [f64; 2048] = [0.0; 2048]
+    var bb = b
+    if bb > 2048 { bb = 2048 }
+    var rep = 0
+    while rep < bb {
+        var accx = 0.0; var kx = 0
+        while kx < nx {
+            var idx = floor_f(rng_u01() * nxf) as i32
+            if idx >= nx { idx = nx - 1 }
+            if idx < 0 { idx = 0 }
+            accx = accx + x[idx as usize]
+            kx = kx + 1
+        }
+        var accy = 0.0; var ky = 0
+        while ky < ny {
+            var idy = floor_f(rng_u01() * nyf) as i32
+            if idy >= ny { idy = ny - 1 }
+            if idy < 0 { idy = 0 }
+            accy = accy + y[idy as usize]
+            ky = ky + 1
+        }
+        diffs[rep as usize] = accx / nxf - accy / nyf
+        rep = rep + 1
+    }
+    // insertion sort
+    var p = 1
+    while p < bb {
+        let key = diffs[p as usize]
+        var q = p - 1
+        while q >= 0 && diffs[q as usize] > key {
+            diffs[(q + 1) as usize] = diffs[q as usize]
+            q = q - 1
+        }
+        diffs[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let alpha = 1.0 - conf
+    var ilo = floor_f(alpha * 0.5 * (bb as f64)) as i32
+    var ihi = floor_f((1.0 - alpha * 0.5) * (bb as f64)) as i32
+    if ilo < 0 { ilo = 0 }
+    if ihi > bb - 1 { ihi = bb - 1 }
+    return (diff0, diffs[ilo as usize], diffs[ihi as usize])
+}
+
+fn emit_f(tag: string, v: f64) with IO { print(tag); print_f64(v); print("\n") }
+fn emit_i(tag: string, v: i64) with IO { print(tag); print(v); print("\n") }
+
+fn main() with IO, Mut, Div, Panic {
+    print("FAERS_V3_EXPERIMENT_BEGIN\n")
+    print("FAERS_V3_CSV=data/faers_drugbank.csv\n")
+    print("FAERS_V3_FANO=canonical_cyp450_fano_geometry\n")
+
+    // Geometry-correct Fano (n=7) / non-Fano (n=28) from relabeled drugbank
+    var f_a: [f64; 64] = [0.0; 64]
+    var f_w: [f64; 64] = [0.0; 64]
+    f_a[0]=0.0392; f_w[0]=255.0
+    f_a[1]=0.3193; f_w[1]=119.0
+    f_a[2]=0.1468; f_w[2]=1737.0
+    f_a[3]=0.1933; f_w[3]=150.0
+    f_a[4]=0.0039; f_w[4]=1030.0
+    f_a[5]=0.2377; f_w[5]=244.0
+    f_a[6]=0.0913; f_w[6]=482.0
+    let nf: i32 = 7
+
+    var n_a: [f64; 64] = [0.0; 64]
+    var n_w: [f64; 64] = [0.0; 64]
+    n_a[0]=0.2; n_w[0]=65.0
+    n_a[1]=0.066; n_w[1]=985.0
+    n_a[2]=0.0088; n_w[2]=914.0
+    n_a[3]=0.0816; n_w[3]=625.0
+    n_a[4]=0.5741; n_w[4]=54.0
+    n_a[5]=0.4638; n_w[5]=138.0
+    n_a[6]=0.3672; n_w[6]=128.0
+    n_a[7]=0.2173; n_w[7]=336.0
+    n_a[8]=0.1709; n_w[8]=351.0
+    n_a[9]=0.2294; n_w[9]=218.0
+    n_a[10]=0.1853; n_w[10]=1554.0
+    n_a[11]=0.0932; n_w[11]=1137.0
+    n_a[12]=0.2857; n_w[12]=28.0
+    n_a[13]=0.0235; n_w[13]=170.0
+    n_a[14]=0.0; n_w[14]=69.0
+    n_a[15]=0.2184; n_w[15]=522.0
+    n_a[16]=0.3113; n_w[16]=379.0
+    n_a[17]=0.2319; n_w[17]=332.0
+    n_a[18]=0.2325; n_w[18]=1458.0
+    n_a[19]=0.2286; n_w[19]=1601.0
+    n_a[20]=0.0195; n_w[20]=154.0
+    n_a[21]=0.0182; n_w[21]=55.0
+    n_a[22]=0.0302; n_w[22]=398.0
+    n_a[23]=0.1653; n_w[23]=236.0
+    n_a[24]=0.0457; n_w[24]=219.0
+    n_a[25]=0.1814; n_w[25]=601.0
+    n_a[26]=0.0383; n_w[26]=339.0
+    n_a[27]=0.1006; n_w[27]=2206.0
+    let nn: i32 = 28
+
+    let mean_f = mean_n(&f_a, nf)
+    let mean_n_v = mean_n(&n_a, nn)
+    let wmean_f = wmean_n(&f_a, &f_w, nf)
+    let wmean_n_v = wmean_n(&n_a, &n_w, nn)
+    let obs = mean_n_v - mean_f
+    let wobs = wmean_n_v - wmean_f
+
+    RNG = 20260725.0
+    let boot = bootstrap_diff(&n_a, nn, &f_a, nf, 2000, 0.95)
+
+    emit_i("FAERS_V3_N_FANO=", nf as i64)
+    emit_i("FAERS_V3_N_NONFANO=", nn as i64)
+    emit_f("FAERS_V3_MEAN_FANO=", mean_f)
+    emit_f("FAERS_V3_MEAN_NONFANO=", mean_n_v)
+    emit_f("FAERS_V3_DIFF=", obs)
+    emit_f("FAERS_V3_WDIFF=", wobs)
+    emit_f("FAERS_V3_CI_LO=", boot.1)
+    emit_f("FAERS_V3_CI_HI=", boot.2)
+
+    // One-sided bootstrap support: fraction of resamples with diff > 0
+    // (reuse last bootstrap draw stream would require re-run; report CI rule)
+    if boot.1 > 0.0 { print("FAERS_V3_BOOT_VERDICT=SUPPORT\n") }
+    else {
+        if boot.2 < 0.0 { print("FAERS_V3_BOOT_VERDICT=FAIL_HONEST\n") }
+        else { print("FAERS_V3_BOOT_VERDICT=INCONCLUSIVE\n") }
+    }
+
+    // ---- Monte-Carlo permutation test (one-sided H1: mean_N > mean_F) ----
+    // Pool all 35 asymmetries; randomly assign 7 to Fano arm.
+    var pool: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < nf { pool[i as usize] = f_a[i as usize]; i = i + 1 }
+    var j = 0
+    while j < nn { pool[(nf + j) as usize] = n_a[j as usize]; j = j + 1 }
+    let ntot: i32 = nf + nn
+
+    let bperm: i32 = 5000
+    RNG = 20260725.0
+    var ge = 0
+    var rep = 0
+    while rep < bperm {
+        shuffle_prefix(&!pool, ntot)
+        // first nf → fake Fano, rest → fake non-Fano
+        var sf = 0.0; var k = 0
+        while k < nf { sf = sf + pool[k as usize]; k = k + 1 }
+        var sn = 0.0; var m = nf
+        while m < ntot { sn = sn + pool[m as usize]; m = m + 1 }
+        let mf = sf / (nf as f64)
+        let mn = sn / (nn as f64)
+        let d = mn - mf
+        if d >= obs { ge = ge + 1 }
+        rep = rep + 1
+    }
+    let p_one = ((ge as f64) + 1.0) / ((bperm as f64) + 1.0)
+    emit_i("FAERS_V3_PERM_B=", bperm as i64)
+    emit_i("FAERS_V3_PERM_GE=", ge as i64)
+    emit_f("FAERS_V3_PERM_P_ONE_SIDED=", p_one)
+
+    // alpha=0.05 one-sided
+    if p_one < 0.05 { print("FAERS_V3_PERM_VERDICT=SUPPORT\n") }
+    else { print("FAERS_V3_PERM_VERDICT=INCONCLUSIVE\n") }
+
+    // Joint engineering verdict: complete if both analyses finished
+    print("FAERS_V3_JOINT=BOOT+PERM\n")
+    print("FAERS_V3_EXPERIMENT_COMPLETE\n")
+}

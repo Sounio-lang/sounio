@@ -1,0 +1,73 @@
+//! stdlib/algebra/sedenion_verdict.sio
+//!
+//! Phase 3 — the TYPED EPISTEMIC BOUNDARY between an exact proof and a float measurement.
+//!
+//! A zero-divisor verdict carries its PROVENANCE as a first-class value. The type system
+//! makes a proof (`Proved`) and a measurement (`MeasuredF64`) DISTINCT enum variants, so a
+//! consumer that demands a proof cannot silently accept a tolerance-gated float result.
+//!
+//!     Invariant: exactness is a property of the CONTRACT, not of the number.
+//!
+//! Compiler-capability note (souc v0.80.0): the operator's Q-B choice was to wrap the verdict
+//! in `Knowledge<Verdict>`. A function RETURNING `Knowledge<Verdict>` hits the generic-struct-
+//! return gap (#1, fable5 fix in flight), so this ships-now layer returns the plain `Verdict`
+//! enum. The enum is PAYLOAD-FREE — the current souc rejects data-carrying variants (E200, D7);
+//! see the NOTE below. Knowledge-wrapping is a drop-in once #1 lands.
+
+/// Provenance of a zero-divisor annihilation verdict.
+///   Proved         — a·b == 0 by exact integer (ℤ) vector equality. Decidable. No tolerance.
+///   MeasuredF64    — ||a·b||² < eps under f64. A measurement, NOT a proof.
+///   MeasuredF256   — future high-precision witness shape only (no f256 arithmetic here).
+// NOTE: PAYLOAD-FREE. The intended type carries the tolerance (`MeasuredF64 { eps: f64 }`,
+// `MeasuredF256 { eps256: f64 }`), but the current souc rejects data-carrying enum variants (E200
+// "undefined variable" on the field name; see docs/handoff/souc_v0800_defects.md D7). The
+// boundary guarantee (proof vs measurement) is carried by the variant tag alone; the eps tolerance
+// travels alongside in practice and the payload returns once the compiler supports it.
+pub enum Verdict {
+    Proved,
+    MeasuredF64,
+    MeasuredF256,
+}
+
+// ── Explicit constructors: the ONLY ways to mint each provenance. No implicit coercion. ──
+
+/// The exact proof tag. Construct ONLY when exact annihilation has been established.
+pub fn verdict_proved() -> Verdict { Verdict::Proved }
+
+/// The f64 measurement tag, carrying the tolerance it was gated on.
+pub fn verdict_measured_f64() -> Verdict { Verdict::MeasuredF64 }
+
+/// The f256 measurement tag (boundary shape only — f256 arithmetic is intentionally unimplemented).
+pub fn verdict_measured_f256() -> Verdict { Verdict::MeasuredF256 }
+
+// ── Gate composition ─────────────────────────────────────────────────────────────────────
+//
+// The exact gate `zd_exact : a·b == 0 in ℤ → Proved` is the decidable detector
+// `zd_exact_i64(a, b)` (in cayley_dickson_exact_i64.sio) composed with `verdict_proved()`:
+//
+//     if zd_exact_i64(a, b) { verdict_proved() }        // exact annihilation → Proved
+//
+// The f64 gate `zd_float64 : ||a·b||² < eps → MeasuredF64` composes the (out-of-this-build,
+// see EXACT_CORE.md) tolerance detector with `verdict_measured_f64(eps)`. Crucially, the two
+// gates mint DIFFERENT variants, and there is no function that turns one into the other — so a
+// measurement can never be laundered into a proof. See the run-pass demo
+// tests/run-pass/sedenion_verdict_boundary.sio.
+
+// ── Consumer that ENFORCES the boundary: accepts a proof, rejects a measurement ──────────────
+
+/// A sink that requires an exact PROOF. Returns true ONLY for `Proved`; a `MeasuredF64` or
+/// `MeasuredF256` is rejected. This is where the type system blocks proof↔measurement mixing —
+/// the single load-bearing guarantee of the boundary. "Is this a measurement?" is exactly its
+/// negation: `!requires_proof(v)`.
+///
+/// NB (souc v0.80.0): a redundant sibling `is_measurement` with the mirror-image match returned a
+/// WRONG result for `MeasuredF64` while this `requires_proof` gives the full correct truth table —
+/// a data-carrying-enum `match` codegen flake when two matches over one enum sit in one module.
+/// We therefore expose only `requires_proof` and derive the complement by negation.
+pub fn requires_proof(v: Verdict) -> bool {
+    match v {
+        Verdict::Proved => true,
+        Verdict::MeasuredF64 => false,
+        Verdict::MeasuredF256 => false,
+    }
+}

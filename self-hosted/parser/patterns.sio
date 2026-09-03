@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, parser_advance}
 
 fn empty_pattern(span: Span) -> Pattern {
     Pattern {
@@ -100,10 +100,28 @@ impl Parser {
             self.parse_string_pattern()
         } else if k == TokenKind::LParen {
             self.parse_tuple_pattern()
-        } else if k == TokenKind::Ident {
+        } else if k == TokenKind::Ident || k == TokenKind::Handle || k == TokenKind::Unit || k == TokenKind::Kernel || tk_is_contextual_ident(k) {
             self.parse_ident_or_enum_pattern()
         } else if k == TokenKind::Var {
-            self.parse_mut_binding_pattern()
+            // Contextual keyword: `var name` is a mutable binding pattern, but bare
+            // `var` followed by `=` / `:` / pattern terminators is an identifier
+            // named "var". Scientific code (knightian p-box, stats variance) uses
+            // `let var = ...`; treating every `var` as mut-introducer made Madaros
+            // reject those modules (expected `=`, got the next keyword/ident token).
+            // lean_single already accepted bare `var` bindings.
+            let next = parser_peek_ahead(self, 1)
+            if next == TokenKind::Eq
+                || next == TokenKind::Colon
+                || next == TokenKind::Comma
+                || next == TokenKind::RParen
+                || next == TokenKind::RBrace
+                || next == TokenKind::Pipe
+                || next == TokenKind::FatArrow
+            {
+                self.parse_var_as_ident_binding_pattern()
+            } else {
+                self.parse_mut_binding_pattern()
+            }
         } else {
             // Error recovery: advance past unrecognized token to avoid infinite loops
             let span = self.current_span()
@@ -360,7 +378,7 @@ impl Parser {
         } else {
             // Simple binding
             let span = self.current_span()
-            let p = self.advance()
+            let p = parser_advance(self)
             (p, Pattern {
                 kind: PatternKind::PatBinding,
                 span: span,
@@ -462,6 +480,25 @@ impl Parser {
             sub_patterns: None,
             pat_fields: None,
             is_mut: true,
+        })
+    }
+
+    // Bare `var` as a binding name (not mut-introducer). Source span of the
+    // TokenKind::Var token yields name "var" via current_name().
+    fn parse_var_as_ident_binding_pattern(self) -> (Parser, Pattern) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        let name = self.current_name()
+        var p = self.advance()  // consume `var` as the binding name
+        let span = p.span_from(start)
+        (p, Pattern {
+            kind: PatternKind::PatBinding,
+            span: span,
+            name: name,
+            int_val: 0,
+            path: empty_path(),
+            sub_patterns: None,
+            pat_fields: None,
+            is_mut: false,
         })
     }
 }

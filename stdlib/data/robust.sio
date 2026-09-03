@@ -1,0 +1,117 @@
+//! Robust statistics — location and scale estimators resistant to outliers. On real, messy data a
+//! single bad reading wrecks the mean and the standard deviation; the median, the median absolute
+//! deviation (MAD), and the trimmed/Winsorized means barely move. pandas ships mean/std and a plain
+//! median but not MAD or trimmed/Winsorized means as first-class robust estimators.
+//!
+//! Read-only over the DataFrame. Self-contained on the public data::dataframe accessors; no compiler
+//! changes. Caps at 1024 rows (sort buffer).
+
+use data::dataframe::{DataFrame, df_get, df_nrows}
+
+fn rb_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Copy column `col` into buf ascending-sorted; returns count (cap 1024). Insertion sort.
+fn sort_col(df: &DataFrame, col: i64, buf: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    var i: i64 = 0
+    while i < n && i < 1024 { buf[i as usize] = df_get(df, i, col); i = i + 1 }
+    var a: i64 = 1
+    while a < n && a < 1024 {
+        let cur = buf[a as usize]
+        var b = a - 1
+        var placed = false
+        while b >= 0 && !placed {
+            if buf[b as usize] > cur { buf[(b + 1) as usize] = buf[b as usize]; b = b - 1 } else { placed = true }
+        }
+        buf[(b + 1) as usize] = cur
+        a = a + 1
+    }
+    n
+}
+
+// Median of a sorted buffer of length m.
+fn median_sorted(buf: &[f64; 1024], m: i64) -> f64 with Div, Panic {
+    if m <= 0 { return 0.0 }
+    if m % 2 == 1 { return buf[((m - 1) / 2) as usize] }
+    let hi = m / 2
+    0.5 * (buf[(hi - 1) as usize] + buf[hi as usize])
+}
+
+/// The median of column `col` (robust location).
+pub fn robust_median(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    var buf: [f64; 1024] = [0.0; 1024]
+    let m = sort_col(df, col, &!buf)
+    median_sorted(&buf, m)
+}
+
+/// The median absolute deviation: median(|x - median(x)|). A robust scale estimate — for {1..5,100}
+/// the MAD is 1.5 while the standard deviation is ~40.
+pub fn robust_mad(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    var buf: [f64; 1024] = [0.0; 1024]
+    let m = sort_col(df, col, &!buf)
+    let med = median_sorted(&buf, m)
+    var dev: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < m { dev[i as usize] = rb_abs(buf[i as usize] - med); i = i + 1 }
+    // sort the deviations
+    var a: i64 = 1
+    while a < m {
+        let cur = dev[a as usize]
+        var b = a - 1
+        var placed = false
+        while b >= 0 && !placed {
+            if dev[b as usize] > cur { dev[(b + 1) as usize] = dev[b as usize]; b = b - 1 } else { placed = true }
+        }
+        dev[(b + 1) as usize] = cur
+        a = a + 1
+    }
+    median_sorted(&dev, m)
+}
+
+/// MAD scaled by 1.4826 so that, for normally distributed data, it is a consistent estimator of the
+/// standard deviation.
+pub fn robust_mad_normal(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    1.4826 * robust_mad(df, col)
+}
+
+/// The trimmed mean: drop the lowest and highest `floor(frac * n)` values, average the rest (robust
+/// location). `frac` in [0, 0.5).
+pub fn robust_trimmed_mean(df: &DataFrame, col: i64, frac: f64) -> f64 with Mut, Div, Panic {
+    var buf: [f64; 1024] = [0.0; 1024]
+    let m = sort_col(df, col, &!buf)
+    if m <= 0 { return 0.0 }
+    var f = frac
+    if f < 0.0 { f = 0.0 }
+    if f > 0.49 { f = 0.49 }
+    let k = ((m as f64) * f) as i64
+    var sum = 0.0
+    var cnt: i64 = 0
+    var i = k
+    while i < m - k { sum = sum + buf[i as usize]; cnt = cnt + 1; i = i + 1 }
+    if cnt <= 0 { return median_sorted(&buf, m) }
+    sum / (cnt as f64)
+}
+
+/// The Winsorized mean: clamp the lowest/highest `floor(frac * n)` values to the boundary order
+/// statistics, then average all n (robust location that keeps every point's weight).
+pub fn robust_winsorized_mean(df: &DataFrame, col: i64, frac: f64) -> f64 with Mut, Div, Panic {
+    var buf: [f64; 1024] = [0.0; 1024]
+    let m = sort_col(df, col, &!buf)
+    if m <= 0 { return 0.0 }
+    var f = frac
+    if f < 0.0 { f = 0.0 }
+    if f > 0.49 { f = 0.49 }
+    let k = ((m as f64) * f) as i64
+    let lo = buf[k as usize]
+    let hi = buf[(m - 1 - k) as usize]
+    var sum = 0.0
+    var i: i64 = 0
+    while i < m {
+        var v = buf[i as usize]
+        if v < lo { v = lo }
+        if v > hi { v = hi }
+        sum = sum + v
+        i = i + 1
+    }
+    sum / (m as f64)
+}

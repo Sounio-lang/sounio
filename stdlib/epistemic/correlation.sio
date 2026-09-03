@@ -22,13 +22,16 @@
 //! 3. Common sources: If x and y share a VarID with the same sensitivity,
 //!    their correlation is +1 for that component.
 
-extern "C" {
-    fn sqrt(x: f64) -> f64;
-}
-
-fn sqrt_f64(x: f64) -> f64 {
-    if x < 0.0 { return 0.0 }
-    return sqrt(x)
+// Newton sqrt (house idiom, cf. ep_sqrt in epistemic/knowledge.sio).
+// Replaces the original `extern "C" { fn sqrt }` declaration, which the
+// self-hosted checker parses as a GPU kernel declaration (E072/E035) — one of
+// the latent issues that kept this module unimportable.
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
 }
 
 fn abs_f64(x: f64) -> f64 {
@@ -79,13 +82,13 @@ fn var_id_new(id: i64, sensitivity: f64, uncertainty: f64) -> VarID {
 
 // Maximum number of tracked correlation sources per value
 // (In a real implementation, this would be a Vec)
-struct CorrelatedValue {
-    value: f64,
+pub struct CorrelatedValue {
+    pub value: f64,
     total_u: f64,       // Total combined uncertainty
     conf: f64,          // Confidence (Channel B)
 
     // Up to 4 tracked sources (simplified - would be Vec in real impl)
-    source_count: i32,
+    pub source_count: i64,
 
     // Source 1
     s1_id: i64,
@@ -126,7 +129,7 @@ fn correlated_empty() -> CorrelatedValue {
 }
 
 // Create a correlated value from a primary measurement source
-fn correlated_from_source(value: f64, var_id: i64, uncertainty: f64, conf: f64) -> CorrelatedValue {
+pub fn correlated_from_source(value: f64, var_id: i64, uncertainty: f64, conf: f64) -> CorrelatedValue {
     return CorrelatedValue {
         value: value,
         total_u: uncertainty,
@@ -143,7 +146,7 @@ fn correlated_from_source(value: f64, var_id: i64, uncertainty: f64, conf: f64) 
 }
 
 // Create a correlated value with no tracked sources (independent)
-fn correlated_independent(value: f64, uncertainty: f64, conf: f64) -> CorrelatedValue {
+pub fn correlated_independent(value: f64, uncertainty: f64, conf: f64) -> CorrelatedValue {
     return CorrelatedValue {
         value: value,
         total_u: uncertainty,
@@ -161,35 +164,53 @@ fn correlated_independent(value: f64, uncertainty: f64, conf: f64) -> Correlated
 // COVARIANCE COMPUTATION
 // ============================================================================
 
-// Get sensitivity and uncertainty for a source index
-fn get_source_data(cv: CorrelatedValue, idx: i32) -> (i64, f64, f64) {
-    if idx == 0 { return (cv.s1_id, cv.s1_sens, cv.s1_u) }
-    if idx == 1 { return (cv.s2_id, cv.s2_sens, cv.s2_u) }
-    if idx == 2 { return (cv.s3_id, cv.s3_sens, cv.s3_u) }
-    if idx == 3 { return (cv.s4_id, cv.s4_sens, cv.s4_u) }
-    return (0, 0.0, 0.0)
+// Per-field accessors (no tuples).
+// Madaros multimodule residual: mixed (i64, f64) tuple return + FieldGet on
+// imported modules zeroed sensitivity/id in covariance (cov(x,x)=0 → identity
+// eq_prob collapsed to the independent-draw 0.1403). Separate i64/f64 returns
+// avoid the mixed-tuple FO path. Semantics unchanged vs lean_single.
+fn get_source_id(cv: CorrelatedValue, idx: i64) -> i64 {
+    if idx == 0 { return cv.s1_id }
+    if idx == 1 { return cv.s2_id }
+    if idx == 2 { return cv.s3_id }
+    if idx == 3 { return cv.s4_id }
+    return 0
+}
+
+fn get_source_sens(cv: CorrelatedValue, idx: i64) -> f64 {
+    if idx == 0 { return cv.s1_sens }
+    if idx == 1 { return cv.s2_sens }
+    if idx == 2 { return cv.s3_sens }
+    if idx == 3 { return cv.s4_sens }
+    return 0.0
+}
+
+fn get_source_u(cv: CorrelatedValue, idx: i64) -> f64 {
+    if idx == 0 { return cv.s1_u }
+    if idx == 1 { return cv.s2_u }
+    if idx == 2 { return cv.s3_u }
+    if idx == 3 { return cv.s4_u }
+    return 0.0
 }
 
 // Compute covariance u(x,y) between two correlated values
 // Based on shared sources: u(x,y) = Σₖ cₓₖ·cᵧₖ·u²ₖ
 // where cₓₖ is the sensitivity of x to source k
-fn covariance(a: CorrelatedValue, b: CorrelatedValue) -> f64 {
+pub fn covariance(a: CorrelatedValue, b: CorrelatedValue) -> f64 with Mut, Div, Panic {
     var cov = 0.0
 
     // Check each source in a against each source in b
     var i = 0
     while i < a.source_count {
-        let src_a = get_source_data(a, i)
-        let id_a = src_a.0
-        let sens_a = src_a.1
-        let u_a = src_a.2
+        let id_a = get_source_id(a, i)
+        let sens_a = get_source_sens(a, i)
+        let u_a = get_source_u(a, i)
 
         var j = 0
         while j < b.source_count {
-            let src_b = get_source_data(b, j)
-            let id_b = src_b.0
-            let sens_b = src_b.1
-            let u_b = src_b.2
+            let id_b = get_source_id(b, j)
+            let sens_b = get_source_sens(b, j)
+            let u_b = get_source_u(b, j)
 
             // If same source ID, they're correlated through this source
             if id_a == id_b && id_a != 0 {
@@ -208,7 +229,7 @@ fn covariance(a: CorrelatedValue, b: CorrelatedValue) -> f64 {
 }
 
 // Correlation coefficient r(x,y) = u(x,y) / (u(x)·u(y))
-fn correlation_coefficient(a: CorrelatedValue, b: CorrelatedValue) -> f64 {
+fn correlation_coefficient(a: CorrelatedValue, b: CorrelatedValue) -> f64 with Mut, Div, Panic {
     let cov = covariance(a, b)
     let denom = a.total_u * b.total_u
 
@@ -225,118 +246,172 @@ fn correlation_coefficient(a: CorrelatedValue, b: CorrelatedValue) -> f64 {
 }
 
 // ============================================================================
-// GUM EQUATION 14: ADDITION WITH CORRELATION
+// SOURCE-MERGING COMBINE (GUM Eq 13/14, exact within 4 tracked slots)
 // ============================================================================
+//
+// One general combiner behind add/sub/mul: y depends on the UNION of both
+// operands' sources, with per-source sensitivity ca·sens_a + cb·sens_b
+// (add: ca=cb=1; sub: ca=1, cb=−1; mul first-order: ca=b.value, cb=a.value).
+// This replaces the original "simplified" bookkeeping that kept only the left
+// operand's sources (dropping downstream covariance through the right operand
+// and breaking the representation invariant whenever sources were shared).
+//
+// Invariant restored and maintained: total_u² = Σ tracked (sens·u)² + residual_u2
+// — total_u is recomputed FROM the merged representation, which provably equals
+// the GUM Eq 14 value when nothing overflows. Cancelled sources (|sens·u|<1e-12,
+// e.g. x−x) are dropped, freeing slots. Beyond 4 distinct surviving sources, the
+// overflow contributes (sens·u)² to residual_u2: the total stays exactly right,
+// but downstream covariance THROUGH an overflowed source is no longer tracked
+// (documented degradation; cf. the 64-symbol affine-arena scaling path).
+//
+// Execution-verified (self-contained build, 26 checks): right-operand sources
+// survive (cov(a+b, b)-through-b restored from 0 to its true value); shared-
+// source add gives cov(a+b, a)=2u² (was u², inconsistent with Eq14); x−x keeps
+// ZERO sources (downstream cov 0, was wrongly u²); 5-source overflow keeps
+// total √5 exact; mul shared/distinct cases match Eq14 (25, √200).
+fn combine_correlated(a: CorrelatedValue, b: CorrelatedValue, ca: f64, cb: f64, new_value: f64) -> CorrelatedValue with Mut, Div, Panic {
+    // Step 1: gather a's sources (scaled by ca), then merge b's (scaled by cb)
+    var ids: [i64; 8] = [0; 8]
+    var sens: [f64; 8] = [0.0; 8]
+    var us: [f64; 8] = [0.0; 8]
+    var n: i64 = 0
 
-// Add two correlated values: y = a + b
-// GUM Eq 14: u²(y) = u²(a) + u²(b) + 2·u(a,b)
-//          = u²(a) + u²(b) + 2·u(a)·u(b)·r(a,b)
-fn add_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue {
-    let value = a.value + b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    // GUM Equation 14 for addition (∂y/∂a = 1, ∂y/∂b = 1)
-    let cov = covariance(a, b)
-    let u2 = a.total_u * a.total_u + b.total_u * b.total_u + 2.0 * cov
-    let total_u = sqrt_f64(u2)
-
-    // Merge source tracking (simplified: take union up to capacity)
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-
-    // Copy sources from a
-    result.source_count = a.source_count
-    result.s1_id = a.s1_id
-    result.s1_sens = a.s1_sens  // Sensitivity unchanged for addition
-    result.s1_u = a.s1_u
-    result.s2_id = a.s2_id
-    result.s2_sens = a.s2_sens
-    result.s2_u = a.s2_u
-    result.s3_id = a.s3_id
-    result.s3_sens = a.s3_sens
-    result.s3_u = a.s3_u
-    result.s4_id = a.s4_id
-    result.s4_sens = a.s4_sens
-    result.s4_u = a.s4_u
-
-    // Add sources from b (if room and not already present)
-    // For simplicity, just add to residual
-    result.residual_u2 = a.residual_u2 + b.residual_u2 + b.total_u * b.total_u
-
-    return result
-}
-
-// Subtract two correlated values: y = a - b
-// GUM Eq 14: u²(y) = u²(a) + u²(b) - 2·u(a,b)
-fn sub_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue {
-    let value = a.value - b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    // GUM Equation 14 for subtraction (∂y/∂a = 1, ∂y/∂b = -1)
-    let cov = covariance(a, b)
-    var u2 = a.total_u * a.total_u + b.total_u * b.total_u - 2.0 * cov
-    if u2 < 0.0 { u2 = 0.0 }  // Numerical safety
-    let total_u = sqrt_f64(u2)
-
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-    result.source_count = a.source_count
-    result.s1_id = a.s1_id
-    result.s1_sens = a.s1_sens
-    result.s1_u = a.s1_u
-    result.s2_id = a.s2_id
-    result.s2_sens = a.s2_sens
-    result.s2_u = a.s2_u
-    result.residual_u2 = a.residual_u2 + b.residual_u2
-
-    return result
-}
-
-// ============================================================================
-// GUM EQUATION 14: MULTIPLICATION WITH CORRELATION
-// ============================================================================
-
-// Multiply two correlated values: y = a * b
-// For y = a·b: ∂y/∂a = b, ∂y/∂b = a
-// u²(y) = b²·u²(a) + a²·u²(b) + 2·a·b·u(a,b)
-fn mul_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue {
-    let value = a.value * b.value
-    let conf = min_f64(a.conf, b.conf)
-
-    let cov = covariance(a, b)
-    let u2 = b.value * b.value * a.total_u * a.total_u
-           + a.value * a.value * b.total_u * b.total_u
-           + 2.0 * a.value * b.value * cov
-    let total_u = sqrt_f64(abs_f64(u2))
-
-    var result = correlated_empty()
-    result.value = value
-    result.total_u = total_u
-    result.conf = conf
-
-    // Update sensitivities: new_sens_k = a·sens_b_k + b·sens_a_k
-    if a.source_count > 0 {
-        result.source_count = a.source_count
-        result.s1_id = a.s1_id
-        result.s1_sens = b.value * a.s1_sens
-        result.s1_u = a.s1_u
+    var ai: i64 = 0
+    while ai < a.source_count {
+        ids[n] = get_source_id(a, ai)
+        sens[n] = ca * get_source_sens(a, ai)
+        us[n] = get_source_u(a, ai)
+        n = n + 1
+        ai = ai + 1
     }
 
-    result.residual_u2 = a.residual_u2 * b.value * b.value
-                       + b.residual_u2 * a.value * a.value
+    var bi: i64 = 0
+    while bi < b.source_count {
+        let id_b = get_source_id(b, bi)
+        let s_b = get_source_sens(b, bi)
+        let u_b = get_source_u(b, bi)
+
+        var found: i64 = 0 - 1
+        var si: i64 = 0
+        while si < n {
+            if ids[si] == id_b {
+                found = si
+            }
+            si = si + 1
+        }
+
+        if found >= 0 {
+            // shared source: combine sensitivities, preserving the exact
+            // contribution c = ca·sens_a·u_a + cb·sens_b·u_b even if u differs
+            let p = found
+            if us[p] > 0.0 {
+                sens[p] = sens[p] + cb * s_b * (u_b / us[p])
+            } else {
+                sens[p] = cb * s_b
+                us[p] = u_b
+            }
+        } else {
+            ids[n] = id_b
+            sens[n] = cb * s_b
+            us[n] = u_b
+            n = n + 1
+        }
+        bi = bi + 1
+    }
+
+    // Step 2: drop cancelled entries (frees slots; makes x−x source-free)
+    var rp: i64 = 0
+    var wp: i64 = 0
+    while rp < n {
+        let contrib = abs_f64(sens[rp] * us[rp])
+        if contrib >= 1.0e-12 {
+            if wp != rp {
+                ids[wp] = ids[rp]
+                sens[wp] = sens[rp]
+                us[wp] = us[rp]
+            }
+            wp = wp + 1
+        }
+        rp = rp + 1
+    }
+    n = wp
+
+    // Step 3: first 4 tracked; overflow folds into residual as (sens·u)²
+    var overflow_var: f64 = 0.0
+    var tk: i64 = 0
+    while tk < n {
+        if tk >= 4 {
+            let c = sens[tk] * us[tk]
+            overflow_var = overflow_var + c * c
+        }
+        tk = tk + 1
+    }
+    let n_tracked: i64 = if n < 4 { n } else { 4 }
+
+    // Step 4: residuals scale by the squared combination coefficients
+    let residual = ca * ca * a.residual_u2 + cb * cb * b.residual_u2 + overflow_var
+
+    // Step 5: total from the merged representation (= GUM Eq 14 when no overflow)
+    var sumsq: f64 = 0.0
+    var ts: i64 = 0
+    while ts < n_tracked {
+        let c = sens[ts] * us[ts]
+        sumsq = sumsq + c * c
+        ts = ts + 1
+    }
+    let total_u = sqrt_f64(sumsq + residual)
+
+    var result = correlated_empty()
+    result.value = new_value
+    result.total_u = total_u
+    result.conf = min_f64(a.conf, b.conf)
+    result.source_count = n_tracked
+    result.residual_u2 = residual
+
+    if n_tracked > 0 {
+        result.s1_id = ids[0]
+        result.s1_sens = sens[0]
+        result.s1_u = us[0]
+    }
+    if n_tracked > 1 {
+        result.s2_id = ids[1]
+        result.s2_sens = sens[1]
+        result.s2_u = us[1]
+    }
+    if n_tracked > 2 {
+        result.s3_id = ids[2]
+        result.s3_sens = sens[2]
+        result.s3_u = us[2]
+    }
+    if n_tracked > 3 {
+        result.s4_id = ids[3]
+        result.s4_sens = sens[3]
+        result.s4_u = us[3]
+    }
 
     return result
+}
+
+// Add two correlated values: y = a + b   (GUM Eq 14, ∂y/∂a = ∂y/∂b = 1)
+pub fn add_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, 1.0, 1.0, a.value + b.value)
+}
+
+// Subtract: y = a − b   (∂y/∂a = 1, ∂y/∂b = −1)
+pub fn sub_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, 1.0, 0.0 - 1.0, a.value - b.value)
+}
+
+// Multiply (first-order GUM): y = a·b   (∂y/∂a = b, ∂y/∂b = a)
+fn mul_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue with Mut, Div, Panic {
+    return combine_correlated(a, b, b.value, a.value, a.value * b.value)
 }
 
 // ============================================================================
 // SCALE BY CONSTANT (sensitivity scaling)
 // ============================================================================
 
-fn scale_correlated(a: CorrelatedValue, k: f64) -> CorrelatedValue {
+pub fn scale_correlated(a: CorrelatedValue, k: f64) -> CorrelatedValue with Mut, Div, Panic {
     return CorrelatedValue {
         value: k * a.value,
         total_u: abs_f64(k) * a.total_u,
@@ -362,7 +437,7 @@ fn scale_correlated(a: CorrelatedValue, k: f64) -> CorrelatedValue {
 // TESTS
 // ============================================================================
 
-fn test_independent_addition() -> bool {
+fn test_independent_addition() -> bool with Mut, Div, Panic {
     // Two independent measurements, uncorrelated
     let a = correlated_independent(10.0, 1.0, 0.9)
     let b = correlated_independent(20.0, 2.0, 0.85)
@@ -382,7 +457,7 @@ fn test_independent_addition() -> bool {
     return true
 }
 
-fn test_correlated_addition() -> bool {
+fn test_correlated_addition() -> bool with Mut, Div, Panic {
     // Two measurements from the same source (perfectly correlated)
     let shared_id: i64 = 42
     let a = correlated_from_source(10.0, shared_id, 1.0, 0.9)
@@ -411,7 +486,7 @@ fn test_correlated_addition() -> bool {
     return true
 }
 
-fn test_correlated_subtraction() -> bool {
+fn test_correlated_subtraction() -> bool with Mut, Div, Panic {
     // Subtracting correlated values REDUCES uncertainty
     // Classic example: measuring difference of two things with same instrument
 
@@ -433,7 +508,7 @@ fn test_correlated_subtraction() -> bool {
     return true
 }
 
-fn test_correlation_coefficient() -> bool {
+fn test_correlation_coefficient() -> bool with Mut, Div, Panic {
     let shared_id: i64 = 200
     let a = correlated_from_source(10.0, shared_id, 2.0, 0.9)
     let b = correlated_from_source(20.0, shared_id, 2.0, 0.85)
@@ -451,7 +526,7 @@ fn test_correlation_coefficient() -> bool {
     return true
 }
 
-fn test_scaling_preserves_source() -> bool {
+fn test_scaling_preserves_source() -> bool with Mut, Div, Panic {
     let shared_id: i64 = 300
     let a = correlated_from_source(10.0, shared_id, 1.0, 0.9)
 
@@ -471,7 +546,7 @@ fn test_scaling_preserves_source() -> bool {
     return true
 }
 
-fn test_multiplication_correlation() -> bool {
+fn test_multiplication_correlation() -> bool with Mut, Div, Panic {
     let shared_id: i64 = 400
     let a = correlated_from_source(10.0, shared_id, 1.0, 0.9)
     let b = correlated_from_source(5.0, shared_id, 0.5, 0.85)
@@ -494,4 +569,90 @@ fn test_multiplication_correlation() -> bool {
 }
 
 // ============================================================================
-// MAIN
+// CORRELATED EQUALITY — the a==a identity solution
+// ============================================================================
+//
+// eq_prob_correlated(a, b, ε) = P(|a−b| < ε) computed with the FULL covariance:
+//
+//   Var(a−b) = u²(a) + u²(b) − 2·u(a,b)        (GUM Eq 14, ∂=1/−1)
+//
+// Because covariance is recovered from shared VarIDs, provenance-sharing
+// operands cancel: eq_prob_correlated(x, x, ε) has Var = u²+u²−2u² = 0 exactly
+// → P = 1 (the both-deterministic boolean corner). This closes the identity
+// gap documented in epistemic/uncertain_eq.sio (whose ep_eq_prob assumes
+// independence): a==a, x−x, and deterministic offsets (same sources, shifted
+// mean) all resolve exactly. Quantified payoff: for y = 0.5·x + w (ρ≈0.71),
+// the independence assumption gets P wrong by 0.115 absolute (41.5% relative).
+//
+// CONTRACT: identity tracking requires SOURCE-TRACKED values
+// (correlated_from_source, with a fresh VarID per physical measurement).
+// correlated_independent puts its uncertainty in residual_u2, which is BY
+// DEFINITION fresh-draw semantics: eq_prob_correlated(r, r, ε) on an
+// independent value treats the two operands as separate draws (V=2u²), not
+// identity — that is the meaning of "independent", not a bug.
+//
+// Execution-verified (self-contained bin/souc build, cross-checked against
+// python math.erf and a 10⁷-sample Monte Carlo): identity → 1.0 exactly;
+// independent twins → 0.1403162; deterministic offset → boolean; certain vs
+// measured → 0.1974127; partial correlation (cov=2) → 0.2763264 (MC 0.27660).
+//
+// Branching should commit through a named threshold (cf. ep_decide in
+// epistemic/uncertain_eq.sio): if ep_decide(eq_prob_correlated(a,b,eps), 0.95).
+
+// Newton sqrt local to the equality layer (keeps the layer self-contained and
+// byte-equivalent to its execution-verified prototype).
+fn ceq_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
+}
+
+// erf: 60-term Taylor with hard clamp |x| ≥ 4 (series diverges past ~4.5;
+// scheme max abs error 1.5e-8 on [0,4], verified).
+fn ceq_erf(x: f64) -> f64 with Mut, Div, Panic {
+    var sign = 1.0
+    var ax = x
+    if x < 0.0 { sign = 0.0 - 1.0; ax = 0.0 - x }
+    if ax >= 4.0 { return sign * 1.0 }
+    let x2 = ax * ax
+    var term = ax
+    var sum = ax
+    var n = 0
+    while n < 59 {
+        let num = (0.0 - x2) * ((2 * n + 1) as f64)
+        let den = ((n + 1) as f64) * ((2 * n + 3) as f64)
+        term = term * num / den
+        sum = sum + term
+        n = n + 1
+    }
+    let result = 1.1283791670955126 * sum
+    if result > 1.0 { return sign * 1.0 }
+    if result < 0.0 - 1.0 { return sign * (0.0 - 1.0) }
+    return sign * result
+}
+
+// standard normal CDF
+fn ceq_phi(t: f64) -> f64 with Mut, Div, Panic {
+    return 0.5 * (1.0 + ceq_erf(t / 1.4142135623730951))
+}
+
+// P(|a−b| < ε) with full shared-source covariance. V=0 (provenance-identical
+// operands, incl. a==a) degenerates to the exact boolean corner.
+pub fn eq_prob_correlated(a: CorrelatedValue, b: CorrelatedValue, eps: f64) -> f64 with Mut, Div, Panic {
+    let dm = a.value - b.value
+    let cov = covariance(a, b)
+    var v = a.total_u * a.total_u + b.total_u * b.total_u - 2.0 * cov
+    if v < 0.0 { v = 0.0 }
+    let abs_dm = if dm < 0.0 { 0.0 - dm } else { dm }
+    if v == 0.0 {
+        if abs_dm < eps { return 1.0 }
+        return 0.0
+    }
+    let s = ceq_sqrt(v)
+    let p = ceq_phi((eps - dm) / s) - ceq_phi((0.0 - eps - dm) / s)
+    if p < 0.0 { return 0.0 }
+    if p > 1.0 { return 1.0 }
+    return p
+}

@@ -1,0 +1,125 @@
+//@ run-pass
+//! Epistemic Vancomycin AUC-Guided TDM — GUM-Exact PK Chain
+//!
+//! CLINICAL CONTEXT:
+//!   2020 ASHP/IDSA/SIDP guidelines mandate AUC₀₋₂₄/MIC-guided TDM.
+//!   Every deployed TDM system (InsightRx, DoseMeRx, JPKD) gives point
+//!   estimates without propagating measurement uncertainty through PK equations.
+//!   A clinician sees AUC=450 mg·h/L → "THERAPEUTIC." They do not see
+//!   the 95% CI [362, 538] which crosses the 400 subtherapeutic boundary.
+//!
+//! DISCRIMINATING PATIENT:
+//!   65yr male, 70±1 kg, SCr=1.40±0.14 mg/dL, 500 mg q12h
+//!   GUM chain:
+//!     CrCl (Cockcroft-Gault) = 75×70 / (72×1.40) = 52.1 mL/min
+//!     CL   (Matzke 1984)     = 0.695×(52.1×0.06) + 0.05 = 2.22 L/h
+//!     AUC₀₋₂₄ (q12h)        = 2×500 / 2.22 = 450 mg·h/L
+//!   With GUM: u(CrCl)=5.2, u(CL)=0.22, u(AUC)=44 → CI=[362,538]
+//!   Decision flip: point-estimate TDM says THERAPEUTIC;
+//!                  Sounio epistemic TDM says WARN: possible subtherapeutic.
+//!
+//! COMPILER GUARANTEE: GUM law of propagation (ISO/IEC 98-3) is enforced
+//!   by the type system. Each arithmetic operation on Knowledge<f64> emits
+//!   the correct sensitivity-weighted combination rule at compile time.
+//!   The uncertainty budget cannot be mis-implemented.
+//!
+//! This is a PL/verification contribution: first compile-time-verified GUM
+//! propagation through a clinically realistic PK chain. Not a clinical tool.
+
+fn an_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0
+    while i < 14 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ── GUM PK chain ─────────────────────────────────────────────────────────────
+
+// Cockcroft-Gault CrCl for a 65yr male (age is exact, weight + SCr uncertain)
+// CrCl [mL/min] = (140 - age) * weight / (72 * SCr)  = 75 * weight / (72 * SCr)
+fn cockcroft_gault_65m(weight: Knowledge<f64>, scr: Knowledge<f64>) -> Knowledge<f64> {
+    (weight * 75.0) / (scr * 72.0)
+}
+
+// Matzke 1984 vancomycin clearance
+// CL [L/h] = 0.695 * (CrCl [L/h]) + 0.05
+// Convert CrCl: mL/min → L/h by * 0.06
+fn matzke_cl(crcl: Knowledge<f64>) -> Knowledge<f64> with Epistemic {
+    let cl_renal = (crcl * 0.06) * 0.695
+    let cl_nr = measure(0.05, uncertainty: 0.0)
+    cl_renal + cl_nr
+}
+
+// Steady-state AUC₀₋₂₄ for q12h dosing: AUC = (24/τ) × D/CL = 2×D/CL
+fn auc24_q12h(dose_mg: f64, cl: Knowledge<f64>) -> Knowledge<f64> with Epistemic {
+    measure(dose_mg * 2.0, uncertainty: 0.0) / cl
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i64 with IO, Epistemic, Mut, Div, Panic {
+
+    let weight: Knowledge<f64> = measure(70.0, uncertainty: 1.0)
+    let scr: Knowledge<f64>    = measure(1.40, uncertainty: 0.14)
+
+    let crcl: Knowledge<f64> = cockcroft_gault_65m(weight, scr)
+    let cl:   Knowledge<f64> = matzke_cl(crcl)
+    let auc:  Knowledge<f64> = auc24_q12h(500.0, cl)
+
+    let lower95 = auc.value - 2.0 * auc.uncertainty
+    let upper95 = auc.value + 2.0 * auc.uncertainty
+
+    println("=== Epistemic Vancomycin TDM — GUM Analysis ===")
+    println("Patient: 65yr male, 70kg, SCr=1.40+-0.14 mg/dL")
+    println("Dose: 500 mg q12h")
+    println("")
+
+    print("[1] Cockcroft-Gault CrCl:  "); print(crcl.value)
+    print("  +-  "); print(crcl.uncertainty); println("  mL/min")
+
+    print("[2] Matzke CL:              "); print(cl.value)
+    print("  +-  "); print(cl.uncertainty); println("  L/h")
+
+    print("[3] AUC0-24 (pop-PK):       "); print(auc.value)
+    print("  +-  "); print(auc.uncertainty); println("  mg*h/L")
+
+    print("    95% CI: ["); print(lower95); print(", "); print(upper95); println("]")
+    println("")
+    println("Target: 400-600 mg*h/L")
+
+    if auc.value >= 400.0 && auc.value <= 600.0 {
+        print("Point estimate:   THERAPEUTIC")
+    } else {
+        print("Point estimate:   OUT OF RANGE")
+    }
+    println("")
+
+    // ── GUM decision gate ─────────────────────────────────────────────────────
+    if auc.value >= 400.0 && lower95 < 400.0 {
+        println("GUM decision:     WARN -- lower 95% CI crosses 400 subtherapeutic threshold")
+        println("                  Recommend: obtain serum levels or increase dose")
+        println("")
+        println("KEY INSIGHT: Standard TDM reports THERAPEUTIC.")
+        println("             Epistemic TDM reveals possible subtherapeutic exposure.")
+        println("             The compiler verified the uncertainty budget at build time.")
+        println("")
+        println("GUM_GATE=WARN_SUBTHERAPEUTIC_POSSIBLE")
+        0
+    } else {
+        if auc.value < 400.0 {
+            println("GUM decision:     FAIL -- point estimate subtherapeutic")
+            println("GUM_GATE=FAIL_SUBTHERAPEUTIC")
+            1
+        } else {
+            if upper95 > 600.0 && auc.value <= 600.0 {
+                println("GUM decision:     WARN -- upper 95% CI crosses 600 supratherapeutic threshold")
+                println("GUM_GATE=WARN_SUPRATHERAPEUTIC_POSSIBLE")
+                0
+            } else {
+                println("GUM decision:     PASS -- therapeutic with GUM certification")
+                println("GUM_GATE=PASS")
+                0
+            }
+        }
+    }
+}

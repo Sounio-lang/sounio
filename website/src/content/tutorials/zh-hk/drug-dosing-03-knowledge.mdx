@@ -1,0 +1,125 @@
+---
+title: "知識型態的測量值"
+description: "以知識型態替換原始數字，以追蹤測量值的準確性"
+series: "drug-dosing"
+order: 3
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-02-pk-model"]
+topic_id: "website.tutorials.zh-hk.drug-dosing-03-knowledge"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh-hk.drug-dosing-03-knowledge"
+---
+# 知識型態的測量值
+
+在上堂課中，我們建立了一個具有精確 `f64` 值的 PK 模型。現在，我們將使用 Sounio 的 `Knowledge<T>` 型別來追蹤不確定性。
+
+## 從 f64 到 Knowledge\<f64\>
+
+每一個臨床測量值都有不確定性。血清肌酐為 1.2 mg/dL 實在是「約為 1.2，標準偏差約為 0.06」。在 Sounio 中：
+
+```sio
+// 之前：原始數字，不確定性不明
+let scr: f64 = 1.2
+
+// 之後：值 + 標準不確定性
+let scr: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+`measure()` 建構子創建一個 `Knowledge&lt;f64&gt;` 值，其中包含：
+- **值**：最佳估計（1.2）
+- **不確定性**：標準不確定性（0.06，代表 ±5% CV）
+
+## 建立知識型態的 PK 模型
+
+讓我們重新定義我們的 PK 參數以攜帶不確定性：
+
+```sio
+struct EpistemicPK {
+    clearance: Knowledge<f64>,    // L/h ± 不確定性
+    volume: Knowledge<f64>,       // L ± 不確定性
+    dose: f64,                    // mg（精確控制劑量）
+    tau: f64,                     // 小時（精確設定時間表）
+}
+```
+
+注意 `dose` 和 `tau` 仍然是平面的 `f64` — 這是 **決策**，不是測量值。只有測量值攜帶不確定性。
+
+## 創建患者特定的參數
+
+一個真實的臨床場景對於萬古霉素劑量：
+
+```sio
+fn create_patient_pk() -> EpistemicPK {
+    EpistemicPK {
+        // 清除率：從 Cockcroft-Gault 估計
+        // 人群平均值 4.5 L/h，但 30% 的個人之間變異
+        clearance: measure(4.5, uncertainty: 1.35),
+
+        // 體積：從體重估計
+        // 50 L ± 10%（體重基準估計誤差）
+        volume: measure(50.0, uncertainty: 5.0),
+
+        dose: 1000.0,   // 1g 萬古霉素（精確）
+        tau: 12.0,       // q12h（精確）
+    }
+}
+```
+
+清除率的 1.35 L/h（30% CV）反映了臨床變異性 — 萬古霉素的清除率取決於腎臟功能、年齡、體重和遺傳，我們對於給定的患者並不明確。
+
+## 與知識型態值的算術運算
+
+當你在 `Knowledge<T>` 值之間進行算術運算時，Sounio 自動使用一階誤差傳播（Delta 方法）來傳播不確定性：
+
+```sio
+// 除法傳播兩個操作數的不確定性
+fn epistemic_half_life(pk: EpistemicPK) -> Knowledge<f64> {
+    0.693 * pk.volume / pk.clearance
+}
+
+// 結果攜帶結合的不確定性：
+// σ(t½) = t½ × √((σ_V/V)² + (σ_CL/CL)²)
+```
+
+你不需撰寫傳播公式 — `Knowledge<T>` 型別處理它。編譯器確保所有操作都是不確定性安全的。
+
+## 提取信息
+
+你可以查詢 `Knowledge&lt;f64&gt;` 值以獲取其組件：
+
+```sio
+fn main() with IO {
+    let pk = create_patient_pk()
+    let t_half = epistemic_half_life(pk)
+
+    // 訪問最佳估計值
+    let value = t_half.value        // ~7.7 小時
+
+    // 訪問標準不確定性
+    let uncert = t_half.uncertainty // ~2.7 小時
+
+    // 相對不確定性（係數變異）
+    let cv = uncert / value         // ~35%
+
+    print("半衰期：")
+    println(value)
+    print(" ± ")
+    println(uncert)
+    print("小時（CV：")
+    println(cv)
+    print("）\n")
+}
+```
+
+半衰期的 35% CV 意味著我們的劑量預測有顯著的不確定性。這是臨床上 *至關重要* 的信息，而精確的 `f64` 算術將隱藏這些信息。
+
+## 關鍵總結
+
+- `Knowledge&lt;f64&gt;` 包裹一個值及其標準不確定性
+- 使用 `measure(value, uncertainty: sigma)` 創建知識型態值
+- 算術運算自動傳播不確定性
+- 決策（劑量、時間表）仍然是平面的 `f64` — 只有測量值攜帶不確定性
+- 編譯器確保你從未意外地錯誤地混合確定和不確定值

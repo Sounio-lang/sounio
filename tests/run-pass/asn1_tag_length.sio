@@ -1,0 +1,161 @@
+//@ run-pass
+//@ requires: madaros
+use asn1::der::*
+use net::socket::*
+
+fn main() with IO {
+    // Case 1: short-form length. INTEGER (tag 0x02), length 3, content 01 00 01
+    // (this is the value 65537, reused later as an RSA exponent shape).
+    let buf1 = rawbuf_new(5)
+    rawbuf_set(&buf1, 0, 0x02)
+    rawbuf_set(&buf1, 1, 0x03)
+    rawbuf_set(&buf1, 2, 0x01)
+    rawbuf_set(&buf1, 3, 0x00)
+    rawbuf_set(&buf1, 4, 0x01)
+    let r1 = der_reader_new(&buf1, 0, 5)
+    let (tag1, status1) = der_peek_tag(&r1)
+    assert(status1 == DER_OK)
+    assert(tag1.class == DER_CLASS_UNIVERSAL)
+    assert(tag1.constructed == false)
+    assert(tag1.tag_number == DER_TAG_INTEGER)
+    assert(tag1.content_start == 2)
+    assert(tag1.content_len == 3)
+
+    // Case 2: universal SEQUENCE tag byte 0x30 = constructed, tag 16.
+    let buf2 = rawbuf_new(3)
+    rawbuf_set(&buf2, 0, 0x30)
+    rawbuf_set(&buf2, 1, 0x01)
+    rawbuf_set(&buf2, 2, 0xAA)
+    let r2 = der_reader_new(&buf2, 0, 3)
+    let (tag2, status2) = der_peek_tag(&r2)
+    assert(status2 == DER_OK)
+    assert(tag2.class == DER_CLASS_UNIVERSAL)
+    assert(tag2.constructed == true)
+    assert(tag2.tag_number == DER_TAG_SEQUENCE)
+    assert(tag2.content_start == 2)
+    assert(tag2.content_len == 1)
+
+    // Case 3: context-specific constructed tag [0], byte 0xA0 = class CONTEXT
+    // (bits 7-6 = 10), constructed (bit 5 = 1), tag number 0 (bits 4-0).
+    let buf3 = rawbuf_new(5)
+    rawbuf_set(&buf3, 0, 0xA0)
+    rawbuf_set(&buf3, 1, 0x03)
+    rawbuf_set(&buf3, 2, 0x02)
+    rawbuf_set(&buf3, 3, 0x01)
+    rawbuf_set(&buf3, 4, 0x05)
+    let r3 = der_reader_new(&buf3, 0, 5)
+    let (tag3, status3) = der_peek_tag(&r3)
+    assert(status3 == DER_OK)
+    assert(tag3.class == DER_CLASS_CONTEXT)
+    assert(tag3.constructed == true)
+    assert(tag3.tag_number == 0)
+    assert(tag3.content_start == 2)
+    assert(tag3.content_len == 3)
+
+    // Case 4: long-form length. OCTET STRING (0x04), length byte 0x81 (long
+    // form, 1 subsequent length byte), that byte is 0xC8 = 200 -- a value
+    // that genuinely needs long form (>127), so this is minimally encoded.
+    let buf4 = rawbuf_new(203)
+    rawbuf_set(&buf4, 0, 0x04)
+    rawbuf_set(&buf4, 1, 0x81)
+    rawbuf_set(&buf4, 2, 0xC8)
+    var i: i64 = 0
+    while i < 200 {
+        rawbuf_set(&buf4, 3 + i, 0)
+        i = i + 1
+    }
+    let r4 = der_reader_new(&buf4, 0, 203)
+    let (tag4, status4) = der_peek_tag(&r4)
+    assert(status4 == DER_OK)
+    assert(tag4.class == DER_CLASS_UNIVERSAL)
+    assert(tag4.constructed == false)
+    assert(tag4.tag_number == DER_TAG_OCTET_STRING)
+    assert(tag4.content_start == 3)
+    assert(tag4.content_len == 200)
+
+    // Case 5: multi-byte tag number rejection. Tag byte 0x1F -- class
+    // UNIVERSAL, primitive, bits 4-0 all set -- means a multi-byte tag
+    // number continues in subsequent bytes, which this decoder does not
+    // support. Must be rejected explicitly rather than misinterpreting
+    // the continuation byte as the length byte.
+    let buf5 = rawbuf_new(3)
+    rawbuf_set(&buf5, 0, 0x1F)
+    rawbuf_set(&buf5, 1, 0x01)
+    rawbuf_set(&buf5, 2, 0xAA)
+    let r5 = der_reader_new(&buf5, 0, 3)
+    let (_, status5) = der_peek_tag(&r5)
+    assert(status5 == DER_ERR_BAD_LENGTH_FORM)
+
+    // Case 6: OBJECT IDENTIFIER, tag byte 0x06.
+    let buf_oid = rawbuf_new(3)
+    rawbuf_set(&buf_oid, 0, 0x06)
+    rawbuf_set(&buf_oid, 1, 0x01)
+    rawbuf_set(&buf_oid, 2, 0x2A)
+    let r_oid = der_reader_new(&buf_oid, 0, 3)
+    let (tag_oid, status_oid) = der_peek_tag(&r_oid)
+    assert(status_oid == DER_OK)
+    assert(tag_oid.tag_number == DER_TAG_OBJECT_IDENTIFIER)
+
+    // Case 7: UTF8String, tag byte 0x0C.
+    let buf_utf8 = rawbuf_new(3)
+    rawbuf_set(&buf_utf8, 0, 0x0C)
+    rawbuf_set(&buf_utf8, 1, 0x01)
+    rawbuf_set(&buf_utf8, 2, 0x41)
+    let r_utf8 = der_reader_new(&buf_utf8, 0, 3)
+    let (tag_utf8, status_utf8) = der_peek_tag(&r_utf8)
+    assert(status_utf8 == DER_OK)
+    assert(tag_utf8.tag_number == DER_TAG_UTF8_STRING)
+
+    // Case 8: SET, tag byte 0x31 (constructed).
+    let buf_set = rawbuf_new(3)
+    rawbuf_set(&buf_set, 0, 0x31)
+    rawbuf_set(&buf_set, 1, 0x01)
+    rawbuf_set(&buf_set, 2, 0xAA)
+    let r_set = der_reader_new(&buf_set, 0, 3)
+    let (tag_set, status_set) = der_peek_tag(&r_set)
+    assert(status_set == DER_OK)
+    assert(tag_set.constructed == true)
+    assert(tag_set.tag_number == DER_TAG_SET)
+
+    // Case 9: PrintableString, tag byte 0x13.
+    let buf_ps = rawbuf_new(3)
+    rawbuf_set(&buf_ps, 0, 0x13)
+    rawbuf_set(&buf_ps, 1, 0x01)
+    rawbuf_set(&buf_ps, 2, 0x41)
+    let r_ps = der_reader_new(&buf_ps, 0, 3)
+    let (tag_ps, status_ps) = der_peek_tag(&r_ps)
+    assert(status_ps == DER_OK)
+    assert(tag_ps.tag_number == DER_TAG_PRINTABLE_STRING)
+
+    // Case 10: IA5String, tag byte 0x16.
+    let buf_ia5 = rawbuf_new(3)
+    rawbuf_set(&buf_ia5, 0, 0x16)
+    rawbuf_set(&buf_ia5, 1, 0x01)
+    rawbuf_set(&buf_ia5, 2, 0x41)
+    let r_ia5 = der_reader_new(&buf_ia5, 0, 3)
+    let (tag_ia5, status_ia5) = der_peek_tag(&r_ia5)
+    assert(status_ia5 == DER_OK)
+    assert(tag_ia5.tag_number == DER_TAG_IA5_STRING)
+
+    // Case 11: UTCTime, tag byte 0x17.
+    let buf_utc = rawbuf_new(3)
+    rawbuf_set(&buf_utc, 0, 0x17)
+    rawbuf_set(&buf_utc, 1, 0x01)
+    rawbuf_set(&buf_utc, 2, 0x35)
+    let r_utc = der_reader_new(&buf_utc, 0, 3)
+    let (tag_utc, status_utc) = der_peek_tag(&r_utc)
+    assert(status_utc == DER_OK)
+    assert(tag_utc.tag_number == DER_TAG_UTC_TIME)
+
+    // Case 12: GeneralizedTime, tag byte 0x18.
+    let buf_gt = rawbuf_new(3)
+    rawbuf_set(&buf_gt, 0, 0x18)
+    rawbuf_set(&buf_gt, 1, 0x01)
+    rawbuf_set(&buf_gt, 2, 0x32)
+    let r_gt = der_reader_new(&buf_gt, 0, 3)
+    let (tag_gt, status_gt) = der_peek_tag(&r_gt)
+    assert(status_gt == DER_OK)
+    assert(tag_gt.tag_number == DER_TAG_GENERALIZED_TIME)
+
+    println("asn1_tag_length: all cases passed")
+}

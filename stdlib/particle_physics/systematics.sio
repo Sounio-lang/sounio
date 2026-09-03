@@ -1,0 +1,252 @@
+// ============================================================================
+// SYSTEMATICS — Uncertainty combination and nuisance parameters
+// ============================================================================
+//
+// Simplified BLUE (Best Linear Unbiased Estimate) for up to 8 measurements,
+// nuisance parameter handling, and pull computation.
+//
+// References:
+// - Lykken & Punzi, "Reweighting with the BLUE Method" (CMS NOTE)
+// - Valassi, "Combining correlated measurements of several different physical quantities" (2014)
+
+module particle_physics::systematics
+
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// Nuisance Parameters
+// ============================================================================
+
+/// A single nuisance parameter with central value and uncertainty.
+pub struct NuisanceParam {
+    pub id: i64,
+    pub central: f64,
+    pub sigma: f64,
+}
+
+/// Compute pull = (fitted - central) / sigma.
+pub fn pull(fitted: f64, central: f64, sigma: f64) -> f64 {
+    if sigma == 0.0 { return 0.0 }
+    return (fitted - central) / sigma
+}
+
+/// Absolute pull magnitude.
+pub fn pull_abs(fitted: f64, central: f64, sigma: f64) -> f64 {
+    let p = pull(fitted, central, sigma)
+    if p < 0.0 { return 0.0 - p }
+    return p
+}
+
+// ============================================================================
+// BLUE Combination
+// ============================================================================
+
+/// A measurement with value, statistical error, and up to 4 systematic sources.
+pub struct Measurement {
+    pub value: f64,
+    pub stat_err: f64,
+    pub syst_errs: [f64; 4],
+}
+
+/// BLUE combination result.
+pub struct BLUEResult {
+    pub combined: f64,
+    pub total_err: f64,
+    pub chi2: f64,
+    pub ndof: i64,
+}
+
+/// Combine up to 8 measurements with a simplified correlation model.
+/// corr[i][j] is the correlation coefficient between measurement i and j.
+/// For simplicity, syst errors are treated as fully correlated across measurements
+/// if they share the same source index.
+pub fn blue_combine(
+    measurements: &[Measurement; 8],
+    corr: &[f64; 64],
+    n_meas: i64,
+) -> BLUEResult with Mut, Div, Panic {
+    var result: BLUEResult
+    result.combined = 0.0
+    result.total_err = 0.0
+    result.chi2 = 0.0
+    result.ndof = n_meas - 1
+    if n_meas <= 0 { return result }
+    if n_meas == 1 {
+        result.combined = measurements[0 as usize].value
+        result.total_err = total_error(measurements[0 as usize])
+        return result
+    }
+
+    // Build covariance matrix: C[i][j] = stat_i^2 * delta_ij + sum_k syst_i,k * syst_j,k
+    var cov: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n_meas {
+        let mi = measurements[i as usize]
+        var j: i64 = 0
+        while j < n_meas {
+            let mj = measurements[j as usize]
+            var c: f64 = 0.0
+            if i == j {
+                c = c + mi.stat_err * mi.stat_err
+            } else {
+                let cidx = i * n_meas + j
+                c = c + corr[cidx as usize] * mi.stat_err * mj.stat_err
+            }
+            var k: i64 = 0
+            while k < 4 {
+                c = c + mi.syst_errs[k as usize] * mj.syst_errs[k as usize]
+                k = k + 1
+            }
+            let idx = i * 8 + j
+            cov[idx as usize] = c
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Inverse covariance via simple diagonal approximation for >2 measurements
+    // For n_meas <= 2, do exact 2x2 inversion.
+    var weights: [f64; 8] = [0.0; 8]
+    var sum_w: f64 = 0.0
+    if n_meas == 2 {
+        let c00 = cov[0 as usize]
+        let c11 = cov[9 as usize]
+        let c01 = cov[1 as usize]
+        let det = c00 * c11 - c01 * c01
+        if det != 0.0 {
+            let inv00 = c11 / det
+            let inv11 = c00 / det
+            let inv01 = 0.0 - c01 / det
+            weights[0 as usize] = inv00 + inv01
+            weights[1 as usize] = inv01 + inv11
+            sum_w = weights[0 as usize] + weights[1 as usize]
+        }
+    } else {
+        // Diagonal approximation: weight = 1 / C_ii
+        i = 0
+        while i < n_meas {
+            let cii = cov[i * 8 + i as usize]
+            if cii > 0.0 {
+                weights[i as usize] = 1.0 / cii
+                sum_w = sum_w + weights[i as usize]
+            }
+            i = i + 1
+        }
+    }
+
+    if sum_w == 0.0 { return result }
+
+    // Combined value = sum(w_i * x_i) / sum(w_i)
+    var comb: f64 = 0.0
+    i = 0
+    while i < n_meas {
+        comb = comb + weights[i as usize] * measurements[i as usize].value
+        i = i + 1
+    }
+    result.combined = comb / sum_w
+
+    // Total uncertainty = 1 / sqrt(sum_w)
+    result.total_err = 1.0 / sqrt(sum_w)
+
+    // Approximate chi2 = sum_i (x_i - comb)^2 / C_ii
+    var chi2: f64 = 0.0
+    i = 0
+    while i < n_meas {
+        let dx = measurements[i as usize].value - result.combined
+        let cii = cov[i * 8 + i as usize]
+        if cii > 0.0 {
+            chi2 = chi2 + dx * dx / cii
+        }
+        i = i + 1
+    }
+    result.chi2 = chi2
+
+    return result
+}
+
+/// Total error (quadrature sum of stat and syst).
+pub fn total_error(m: Measurement) -> f64 with Mut, Div, Panic {
+    var sum: f64 = m.stat_err * m.stat_err
+    var i: i64 = 0
+    while i < 4 {
+        let s = m.syst_errs[i as usize]
+        sum = sum + s * s
+        i = i + 1
+    }
+    return sqrt(sum)
+}
+
+/// Construct a measurement from value, stat error, and up to 4 systs.
+pub fn measurement_new(value: f64, stat: f64, s0: f64, s1: f64, s2: f64, s3: f64) -> Measurement {
+    return Measurement {
+        value: value,
+        stat_err: stat,
+        syst_errs: [s0, s1, s2, s3, 0.0, 0.0, 0.0, 0.0],
+    }
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_measurement_new() -> bool {
+    let m = measurement_new(10.0, 1.0, 0.5, 0.0, 0.0, 0.0)
+    if m.value != 10.0 { return false }
+    if m.stat_err != 1.0 { return false }
+    if m.syst_errs[0 as usize] != 0.5 { return false }
+    return true
+}
+
+pub fn test_total_error() -> bool with Mut, Div, Panic {
+    let m = measurement_new(10.0, 3.0, 4.0, 0.0, 0.0, 0.0)
+    let te = total_error(m)
+    if te != 5.0 { return false }
+    return true
+}
+
+pub fn test_pull() -> bool {
+    let p = pull(10.5, 10.0, 0.5)
+    if p != 1.0 { return false }
+    let p2 = pull_abs(9.0, 10.0, 2.0)
+    if p2 != 0.5 { return false }
+    return true
+}
+
+pub fn test_blue_single() -> bool with Mut, Div, Panic {
+    var meas: [Measurement; 8] = [measurement_new(0.0, 1.0, 0.0, 0.0, 0.0, 0.0); 8]
+    meas[0 as usize] = measurement_new(10.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    var corr: [f64; 64] = [0.0; 64]
+    let res = blue_combine(&meas, &corr, 1)
+    if res.combined != 10.0 { return false }
+    if res.total_err != 1.0 { return false }
+    return true
+}
+
+pub fn test_blue_two() -> bool with Mut, Div, Panic {
+    var meas: [Measurement; 8] = [measurement_new(0.0, 1.0, 0.0, 0.0, 0.0, 0.0); 8]
+    meas[0 as usize] = measurement_new(10.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    meas[1 as usize] = measurement_new(12.0, 2.0, 0.0, 0.0, 0.0, 0.0)
+    var corr: [f64; 64] = [0.0; 64]
+    let res = blue_combine(&meas, &corr, 2)
+    if res.combined <= 10.0 { return false }
+    if res.combined >= 12.0 { return false }
+    if res.total_err <= 0.0 { return false }
+    return true
+}
+
+pub fn test_blue_three() -> bool with Mut, Div, Panic {
+    var meas: [Measurement; 8] = [measurement_new(0.0, 1.0, 0.0, 0.0, 0.0, 0.0); 8]
+    meas[0 as usize] = measurement_new(10.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    meas[1 as usize] = measurement_new(11.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    meas[2 as usize] = measurement_new(12.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    var corr: [f64; 64] = [0.0; 64]
+    let res = blue_combine(&meas, &corr, 3)
+    if res.combined <= 10.0 { return false }
+    if res.combined >= 12.0 { return false }
+    if res.total_err <= 0.0 { return false }
+    return true
+}

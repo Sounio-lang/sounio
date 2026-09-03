@@ -1,8 +1,18 @@
-// stdlib/database/pure/types.sio — Fixed-capacity in-memory database types.
+// stdlib/database/pure/types.sio — Database Types
 //
-// Capacities: max 4 tables, max 16 rows/table, max 4 i64 columns/row.
-// Data stored flat in InMemoryDB.data[t*64 + r*4 + c].
-// No heap allocation; no Vec/String — fully compatible with the running Sounio compiler.
+// Fixed-capacity flat-array storage: 4 tables, 16 rows/table, 4 i64 columns/row.
+
+module database::pure::types
+
+fn db_neg_one_i32() -> i32 {
+    let z: i32 = 0
+    z - 1
+}
+
+fn db_neg_one_i64() -> i64 {
+    let z: i64 = 0
+    z - 1
+}
 
 pub struct InMemoryDB {
     pub table_count: i32,
@@ -20,6 +30,69 @@ pub fn in_memory_db_new() -> InMemoryDB {
     }
 }
 
-pub fn db_cell_idx(t: i32, r: i32, c: i32) -> usize {
-    (t * 64 + r * 4 + c) as usize
+pub fn cell_idx(t: i32, r: i32, c: i32) -> i32 {
+    t * 64 + r * 4 + c
+}
+
+pub fn db_find_table(db: &InMemoryDB, name: string) -> i32 with Mut {
+    var i: i32 = 0
+    while i < db.table_count {
+        if db.table_names[i as usize] == name { return i }
+        i = i + 1
+    }
+    db_neg_one_i32()
+}
+
+pub fn db_create_table(db: &!InMemoryDB, name: string) -> i32 with Mut {
+    if db.table_count >= 4 { return db_neg_one_i32() }
+    if db_find_table(db, name) >= 0 { return 0 }
+    let idx = db.table_count as usize
+    db.table_names[idx] = name
+    db.row_counts[idx] = 0
+    db.table_count = db.table_count + 1
+    1
+}
+
+pub fn db_drop_table(db: &!InMemoryDB, name: string) -> i32 with Mut {
+    let idx = db_find_table(db, name)
+    if idx < 0 { return db_neg_one_i32() }
+    var i: i32 = idx
+    while i < db.table_count - 1 {
+        let j = i as usize
+        db.table_names[j] = db.table_names[j + 1]
+        db.row_counts[j] = db.row_counts[j + 1]
+        var d: i32 = 0
+        while d < 64 {
+            db.data[j * 64 + d] = db.data[(j + 1) * 64 + d]
+            d = d + 1
+        }
+        i = i + 1
+    }
+    db.table_count = db.table_count - 1
+    1
+}
+
+pub fn db_table_row_count(db: &InMemoryDB, name: string) -> i32 with Mut {
+    let idx = db_find_table(db, name)
+    if idx < 0 { return db_neg_one_i32() }
+    db.row_counts[idx as usize]
+}
+
+pub fn db_insert_row(db: &!InMemoryDB, name: string, v0: i64, v1: i64) -> i32 with Mut {
+    let idx = db_find_table(db, name)
+    if idx < 0 { return db_neg_one_i32() }
+    let row = db.row_counts[idx as usize]
+    if row >= 16 { return db_neg_one_i32() }
+    let ci = cell_idx(idx, row, 0)
+    db.data[ci as usize] = v0
+    db.data[(ci + 1) as usize] = v1
+    db.row_counts[idx as usize] = row + 1
+    1
+}
+
+pub fn db_get_cell(db: &InMemoryDB, name: string, row: i32, col: i32) -> i64 with Mut {
+    let idx = db_find_table(db, name)
+    if idx < 0 { return db_neg_one_i64() }
+    let ci = cell_idx(idx, row, col)
+    db.data[ci as usize]
 }

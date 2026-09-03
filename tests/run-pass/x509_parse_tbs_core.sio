@@ -1,0 +1,349 @@
+//@ run-pass
+//@ requires: madaros
+
+// RFC 5280 SS4.1 TBSCertificate core-field parsing test: a hand-built,
+// minimal but structurally complete TBSCertificate SEQUENCE.
+//
+// Wire layout (byte offsets into the RawBuf, DER, all length forms
+// short-form since every SEQUENCE/SET here is well under 128 bytes):
+//
+//   [0..2)     TBSCertificate SEQUENCE header: 0x30, 0x7F (len 127)
+//   [2..7)     version [0] EXPLICIT INTEGER 2 (v3):
+//                0xA0, 0x03, 0x02, 0x01, 0x02
+//   [7..11)    serialNumber INTEGER 12345 (0x3039):
+//                0x02, 0x02, 0x30, 0x39
+//   [11..26)   signature AlgorithmIdentifier SEQUENCE { OID
+//              sha256WithRSAEncryption, NULL }:
+//                0x30, 0x0D,
+//                  0x06, 0x09, 0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0B,
+//                  0x05, 0x00
+//   [26..46)   issuer Name SEQUENCE { SET { SEQUENCE { OID commonName,
+//              PrintableString "Test CA" } } }:
+//                0x30, 0x12,
+//                  0x31, 0x10,
+//                    0x30, 0x0E,
+//                      0x06, 0x03, 0x55, 0x04, 0x03,
+//                      0x13, 0x07, "Test CA"
+//   [46..78)   validity SEQUENCE { UTCTime notBefore, UTCTime notAfter }:
+//                0x30, 0x1E,
+//                  0x17, 0x0D, "250101000000Z",
+//                  0x17, 0x0D, "260101000000Z"
+//   [78..100)  subject Name SEQUENCE (same shape, CN "Test Leaf"):
+//                0x30, 0x14,
+//                  0x31, 0x12,
+//                    0x30, 0x10,
+//                      0x06, 0x03, 0x55, 0x04, 0x03,
+//                      0x13, 0x09, "Test Leaf"
+//   [100..129) subjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier
+//              (rsaEncryption + NULL), BIT STRING (RSAPublicKey { modulus
+//              3233, publicExponent 17 }) }:
+//                0x30, 0x1B,
+//                  0x30, 0x0D,
+//                    0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01,
+//                    0x05, 0x00,
+//                  0x03, 0x0A,
+//                    0x00,
+//                    0x30, 0x07,
+//                      0x02, 0x02, 0x0C, 0xA1,
+//                      0x02, 0x01, 0x11
+//
+// Length arithmetic, independently re-verified byte-by-byte:
+//   version wrapper TLV:    5 bytes (0xA0 0x03 + 3-byte inner INTEGER)
+//   serialNumber TLV:       4 bytes
+//   signature AlgId TLV:   15 bytes (2 header + 11-byte OID TLV + 2-byte NULL TLV)
+//   issuer Name TLV:       20 bytes (2 + [2 + [2 + 5-byte OID TLV + 9-byte PrintableString TLV]])
+//   validity TLV:          32 bytes (2 + 15 + 15)
+//   subject Name TLV:      22 bytes (2 + [2 + [2 + 5 + 11]])
+//   subjectPublicKeyInfo:  29 bytes (2 + [2 + 11-byte OID TLV + 2-byte NULL TLV] + [2 + 1 + 9-byte RSAPublicKey TLV])
+//   sum = 5+4+15+20+32+22+29 = 127 = TBSCertificate's declared content length (0x7F). Confirmed.
+//   total buffer = 2 (outer header) + 127 = 129 bytes.
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+fn main() -> i64 with IO {
+    // rawbuf_set has a documented write-side bug (Finding 20 in
+    // docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md): each
+    // single-byte write clobbers the following 7 bytes with zero. Writing
+    // in strictly ascending address order (as below, via a single
+    // sequential array-literal loop, matching
+    // tests/run-pass/asn1_rsa_pubkey_integration.sio's pattern) means every
+    // clobber lands on a not-yet-meaningfully-written byte that a later
+    // write then sets correctly. Trailing slack (buffer allocated larger
+    // than the 129 meaningful bytes) absorbs the final write's
+    // out-of-bounds clobber.
+    let total_len: i64 = 129
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 129] = [
+        // TBSCertificate SEQUENCE header (len 127)
+        0x30, 0x7F,
+        // version [0] EXPLICIT INTEGER 2
+        0xA0, 0x03, 0x02, 0x01, 0x02,
+        // serialNumber INTEGER 12345
+        0x02, 0x02, 0x30, 0x39,
+        // signature AlgorithmIdentifier SEQUENCE { OID sha256WithRSAEncryption, NULL }
+        0x30, 0x0D,
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B,
+        0x05, 0x00,
+        // issuer Name SEQUENCE { SET { SEQUENCE { OID commonName, PrintableString "Test CA" } } }
+        0x30, 0x12,
+        0x31, 0x10,
+        0x30, 0x0E,
+        0x06, 0x03, 0x55, 0x04, 0x03,
+        0x13, 0x07, 0x54, 0x65, 0x73, 0x74, 0x20, 0x43, 0x41,
+        // validity SEQUENCE { UTCTime notBefore, UTCTime notAfter }
+        0x30, 0x1E,
+        0x17, 0x0D, 0x32, 0x35, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A,
+        0x17, 0x0D, 0x32, 0x36, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A,
+        // subject Name SEQUENCE { SET { SEQUENCE { OID commonName, PrintableString "Test Leaf" } } }
+        0x30, 0x14,
+        0x31, 0x12,
+        0x30, 0x10,
+        0x06, 0x03, 0x55, 0x04, 0x03,
+        0x13, 0x09, 0x54, 0x65, 0x73, 0x74, 0x20, 0x4C, 0x65, 0x61, 0x66,
+        // subjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier(rsaEncryption, NULL), BIT STRING(RSAPublicKey) }
+        0x30, 0x1B,
+        0x30, 0x0D,
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01,
+        0x05, 0x00,
+        0x03, 0x0A,
+        0x00,
+        0x30, 0x07,
+        0x02, 0x02, 0x0C, 0xA1,
+        0x02, 0x01, 0x11,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    let top = der_reader_new(&buf, 0, total_len)
+    let (top2, tbs_tag, s0) = der_read_tlv(&top)
+    if s0 != DER_OK {
+        print_int(1)
+        return 1
+    }
+    assert(s0 == DER_OK)
+    if tbs_tag.tag_number != DER_TAG_SEQUENCE {
+        print_int(2)
+        return 1
+    }
+    assert(tbs_tag.tag_number == DER_TAG_SEQUENCE)
+
+    let (tbs_inner, e0) = der_enter(&top, &tbs_tag)
+    if e0 != DER_OK {
+        print_int(3)
+        return 1
+    }
+    assert(e0 == DER_OK)
+
+    // Per docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md's
+    // residual gap: a tuple-destructured binding (`let (cert, ...) = f()`)
+    // does not propagate the struct type of a tuple-typed element the way a
+    // plain `let x = expr` does, so `cert`'s own struct type would stay
+    // unresolved and any later `cert.field` access falls back to the
+    // name-collision-prone global lookup. Work around it without further
+    // compiler changes: declare `cert` first via a plain call that DOES
+    // resolve its struct type correctly (certificate_zero() -> Certificate,
+    // matching the existing ExprCall struct-type-binding path), then
+    // overwrite its VALUE with the real parsed result via plain assignment
+    // -- assignment doesn't touch the struct-type binding table, only `let`/
+    // `var` declarations do, so `cert`'s type stays "Certificate" throughout.
+    var cert = certificate_zero()
+    let (cert_raw, after_spki, status) = x509_parse_tbs_core(&buf, &tbs_inner)
+    cert = cert_raw
+    if status != X509_OK {
+        print_int(4)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    // version == 2 (v3)
+    if cert.version != 2 {
+        print_int(5)
+        return 1
+    }
+    assert(cert.version == 2)
+
+    // serialNumber == 12345
+    let expected_serial = bigint_from_u32(12345)
+    if bigint_cmp(&cert.serial_number, &expected_serial) != 0 {
+        print_int(6)
+        return 1
+    }
+    assert(bigint_cmp(&cert.serial_number, &expected_serial) == 0)
+
+    // signature algorithm OID == sha256WithRSAEncryption
+    let sha256_rsa_oid = oid_sha256_with_rsa()
+    if oid_eq9(&cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len, &sha256_rsa_oid) == false {
+        print_int(7)
+        return 1
+    }
+    assert(oid_eq9(&cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len, &sha256_rsa_oid) == true)
+
+    // issuer: one RDN, CN = "Test CA"
+    if cert.issuer.count != 1 {
+        print_int(8)
+        return 1
+    }
+    assert(cert.issuer.count == 1)
+
+    // Per docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md's
+    // residual gap: `cert` here is bound via tuple destructure (`let (cert,
+    // after_spki, status) = x509_parse_tbs_core(...)` above), and tuple-
+    // destructure bindings do not (yet) propagate a struct's type the way a
+    // plain `let x = expr` does -- so a further `let entry = cert.issuer.
+    // entries[0]` copy-out would fall back to the unresolved global lookup.
+    // Index the array directly at every assertion site instead of binding an
+    // intermediate `let`, matching this whole plan's established
+    // field-by-field/direct-index discipline on the write side.
+    if cert.issuer.entries[0].value_len != 7 {
+        print_int(9)
+        return 1
+    }
+    assert(cert.issuer.entries[0].value_len == 7)
+    if (cert.issuer.entries[0].value[0] as i64) != 0x54 {
+        print_int(10)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[1] as i64) != 0x65 {
+        print_int(11)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[2] as i64) != 0x73 {
+        print_int(12)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[3] as i64) != 0x74 {
+        print_int(13)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[4] as i64) != 0x20 {
+        print_int(14)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[5] as i64) != 0x43 {
+        print_int(15)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[6] as i64) != 0x41 {
+        print_int(16)
+        return 1
+    }
+    assert((cert.issuer.entries[0].value[0] as i64) == 0x54)
+    assert((cert.issuer.entries[0].value[6] as i64) == 0x41)
+
+    // OID check, deliberately added: this is the field a prior version of
+    // this test never verified, which let the read-side corruption in
+    // docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md
+    // go undetected (only .value was checked; .oid held .value's bytes).
+    let issuer_cn_oid = oid_common_name()
+    if oid_eq3(&cert.issuer.entries[0].oid, cert.issuer.entries[0].oid_len, &issuer_cn_oid) == false {
+        print_int(28)
+        return 1
+    }
+    assert(oid_eq3(&cert.issuer.entries[0].oid, cert.issuer.entries[0].oid_len, &issuer_cn_oid) == true)
+
+    // validity: not_before < not_after, both nonzero
+    if cert.not_before_unix == 0 {
+        print_int(17)
+        return 1
+    }
+    assert(cert.not_before_unix != 0)
+    if cert.not_after_unix == 0 {
+        print_int(18)
+        return 1
+    }
+    assert(cert.not_after_unix != 0)
+    if cert.not_before_unix >= cert.not_after_unix {
+        print_int(19)
+        return 1
+    }
+    assert(cert.not_before_unix < cert.not_after_unix)
+
+    // Exact-value checks, deliberately added: this fixture's dates
+    // (250101000000Z / 260101000000Z, both January 1st) are the ONLY
+    // January/February fixture in this whole plan, and the checks above
+    // (nonzero, correctly ordered) are invariant under a uniform one-year
+    // shift of both dates -- exactly the shape of the real bug found
+    // during the final whole-plan review (2026-08-24): an inverted branch
+    // in unix_timestamp_from_ymdhms mis-decoded every January/February
+    // date by very close to a full year. Expected values independently
+    // computed via `date -u -d "2025-01-01 00:00:00" +%s` /
+    // `date -u -d "2026-01-01 00:00:00" +%s`.
+    if cert.not_before_unix != 1735689600 {
+        print_int(30)
+        return 1
+    }
+    assert(cert.not_before_unix == 1735689600)
+    if cert.not_after_unix != 1767225600 {
+        print_int(31)
+        return 1
+    }
+    assert(cert.not_after_unix == 1767225600)
+
+    // subject: one RDN, CN = "Test Leaf"
+    if cert.subject.count != 1 {
+        print_int(20)
+        return 1
+    }
+    assert(cert.subject.count == 1)
+
+    if cert.subject.entries[0].value_len != 9 {
+        print_int(21)
+        return 1
+    }
+    assert(cert.subject.entries[0].value_len == 9)
+    if (cert.subject.entries[0].value[0] as i64) != 0x54 {
+        print_int(22)
+        return 1
+    }
+    if (cert.subject.entries[0].value[5] as i64) != 0x4C {
+        print_int(23)
+        return 1
+    }
+    if (cert.subject.entries[0].value[8] as i64) != 0x66 {
+        print_int(24)
+        return 1
+    }
+    assert((cert.subject.entries[0].value[8] as i64) == 0x66)
+
+    let subject_cn_oid = oid_common_name()
+    if oid_eq3(&cert.subject.entries[0].oid, cert.subject.entries[0].oid_len, &subject_cn_oid) == false {
+        print_int(29)
+        return 1
+    }
+    assert(oid_eq3(&cert.subject.entries[0].oid, cert.subject.entries[0].oid_len, &subject_cn_oid) == true)
+
+    // subjectPublicKeyInfo: modulus == 3233, publicExponent == 17
+    let expected_modulus = bigint_from_u32(3233)
+    if bigint_cmp(&cert.modulus, &expected_modulus) != 0 {
+        print_int(25)
+        return 1
+    }
+    assert(bigint_cmp(&cert.modulus, &expected_modulus) == 0)
+
+    let expected_exponent = bigint_from_u32(17)
+    if bigint_cmp(&cert.public_exponent, &expected_exponent) != 0 {
+        print_int(26)
+        return 1
+    }
+    assert(bigint_cmp(&cert.public_exponent, &expected_exponent) == 0)
+
+    // after_spki reader should be positioned exactly at the end of the
+    // TBSCertificate content (no extensions present in this fixture).
+    if der_at_end(&after_spki) != true {
+        print_int(27)
+        return 1
+    }
+    assert(der_at_end(&after_spki) == true)
+
+    println("x509_parse_tbs_core: version/serial/sig-alg/issuer/validity/subject/SPKI decoded correctly")
+    return 0
+}

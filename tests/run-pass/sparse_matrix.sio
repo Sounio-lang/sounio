@@ -1,4 +1,5 @@
 //@ run-pass
+//@ expect-stdout: ALL 13 TESTS PASSED
 // sparse_matrix.sio - Integration tests for sparse matrix library (CSR format)
 //
 // Tests CSR construction, SpMV, sparse-sparse operations, triangular solves,
@@ -105,11 +106,99 @@ struct SparseCSR {
     nnz: i32
 }
 
-struct CGResult {
-    x: [f64; 128],
+struct CGMeta {
     iterations: i32,
     residual: f64,
     converged: bool
+}
+
+fn cg_solve_into(
+    out_x: &![f64; 128],
+    out_meta: &!CGMeta,
+    a: SparseCSR,
+    b: [f64; 128],
+    x0: [f64; 128],
+    n: i32,
+    tol: f64,
+    max_iter: i32
+) with Mut, Panic, Div {
+    var x: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        x[i] = x0[i]
+        i = i + 1
+    }
+
+    let ax = sparse_matvec(a, x, n)
+    var r = vec_sub(b, ax, n)
+    var p = vec_copy(r, n)
+    var rsold = vec_dot(r, r, n)
+
+    if sqrt_f64(rsold) < tol {
+        i = 0
+        while i < n {
+            out_x[i] = x[i]
+            i = i + 1
+        }
+        out_meta.iterations = 0
+        out_meta.residual = sqrt_f64(rsold)
+        out_meta.converged = true
+        return
+    }
+
+    var iter = 0
+    var converged = false
+    var done = false
+    while iter < max_iter && !done {
+        let ap = sparse_matvec(a, p, n)
+        let pap = vec_dot(p, ap, n)
+        if abs_f64(pap) < 1e-30 {
+            done = true
+        } else {
+            let alpha = rsold / pap
+
+            i = 0
+            while i < n {
+                x[i] = x[i] + alpha * p[i]
+                i = i + 1
+            }
+
+            i = 0
+            while i < n {
+                r[i] = r[i] - alpha * ap[i]
+                i = i + 1
+            }
+
+            let rsnew = vec_dot(r, r, n)
+
+            if sqrt_f64(rsnew) < tol {
+                converged = true
+                done = true
+            } else {
+                let beta = rsnew / rsold
+                i = 0
+                while i < n {
+                    p[i] = r[i] + beta * p[i]
+                    i = i + 1
+                }
+
+                rsold = rsnew
+            }
+        }
+        iter = iter + 1
+    }
+
+    let final_res = sqrt_f64(vec_dot(r, r, n))
+
+    i = 0
+    while i < n {
+        out_x[i] = x[i]
+        i = i + 1
+    }
+
+    out_meta.iterations = iter
+    out_meta.residual = final_res
+    out_meta.converged = converged
 }
 
 // ============================================================================
@@ -626,88 +715,6 @@ fn sparse_is_symmetric(a: SparseCSR, tol: f64) -> bool with Mut, Panic, Div {
 // CONJUGATE GRADIENT SOLVER
 // ============================================================================
 
-fn cg_solve(
-    a: SparseCSR,
-    b: [f64; 128],
-    x0: [f64; 128],
-    n: i32,
-    tol: f64,
-    max_iter: i32
-) -> CGResult with Mut, Panic, Div {
-    var x: [f64; 128] = [0.0; 128]
-    var i = 0
-    while i < n {
-        x[i] = x0[i]
-        i = i + 1
-    }
-
-    let ax = sparse_matvec(a, x, n)
-    var r = vec_sub(b, ax, n)
-    var p = vec_copy(r, n)
-    var rsold = vec_dot(r, r, n)
-
-    if sqrt_f64(rsold) < tol {
-        return CGResult {
-            x: x,
-            iterations: 0,
-            residual: sqrt_f64(rsold),
-            converged: true
-        }
-    }
-
-    var iter = 0
-    var converged = false
-    var done = false
-    while iter < max_iter && !done {
-        let ap = sparse_matvec(a, p, n)
-        let pap = vec_dot(p, ap, n)
-        if abs_f64(pap) < 1e-30 {
-            // Breakdown
-            done = true
-        } else {
-            let alpha = rsold / pap
-
-            i = 0
-            while i < n {
-                x[i] = x[i] + alpha * p[i]
-                i = i + 1
-            }
-
-            i = 0
-            while i < n {
-                r[i] = r[i] - alpha * ap[i]
-                i = i + 1
-            }
-
-            let rsnew = vec_dot(r, r, n)
-
-            if sqrt_f64(rsnew) < tol {
-                converged = true
-                done = true
-            } else {
-                let beta = rsnew / rsold
-                i = 0
-                while i < n {
-                    p[i] = r[i] + beta * p[i]
-                    i = i + 1
-                }
-
-                rsold = rsnew
-            }
-        }
-        iter = iter + 1
-    }
-
-    let final_res = sqrt_f64(vec_dot(r, r, n))
-
-    return CGResult {
-        x: x,
-        iterations: iter,
-        residual: final_res,
-        converged: converged
-    }
-}
-
 // ============================================================================
 // TEST FUNCTIONS
 // ============================================================================
@@ -1072,13 +1079,14 @@ fn test_cg_identity() -> bool with IO, Mut, Panic, Div {
     b[4] = 5.0
 
     var x0: [f64; 128] = [0.0; 128]
-
-    let result = cg_solve(eye, b, x0, n, 1e-10, 100)
+    var x: [f64; 128] = [0.0; 128]
+    var result = CGMeta { iterations: 0, residual: 0.0, converged: false }
+    cg_solve_into(&!x, &!result, eye, b, x0, n, 1e-10, 100)
 
     var err = 0.0
     var i = 0
     while i < n {
-        let diff = abs_f64(result.x[i] - b[i])
+        let diff = abs_f64(x[i] - b[i])
         if diff > err {
             err = diff
         }
@@ -1129,13 +1137,15 @@ fn test_cg_tridiagonal() -> bool with IO, Mut, Panic, Div {
     let b = sparse_matvec(a, x_exact, n)
 
     var x0: [f64; 128] = [0.0; 128]
-    let result = cg_solve(a, b, x0, n, 1e-8, 200)
+    var x: [f64; 128] = [0.0; 128]
+    var result = CGMeta { iterations: 0, residual: 0.0, converged: false }
+    cg_solve_into(&!x, &!result, a, b, x0, n, 1e-8, 200)
 
     // Check solution accuracy
     var max_err = 0.0
     i = 0
     while i < n {
-        let diff = abs_f64(result.x[i] - x_exact[i])
+        let diff = abs_f64(x[i] - x_exact[i])
         if diff > max_err {
             max_err = diff
         }
@@ -1206,7 +1216,9 @@ fn test_cg_poisson() -> bool with IO, Mut, Panic, Div {
     }
 
     var x0: [f64; 128] = [0.0; 128]
-    let result = cg_solve(a, b, x0, n, 1e-10, 500)
+    var x: [f64; 128] = [0.0; 128]
+    var result = CGMeta { iterations: 0, residual: 0.0, converged: false }
+    cg_solve_into(&!x, &!result, a, b, x0, n, 1e-10, 500)
 
     // Check against exact solution u(x_i) = sin(pi * x_i)
     var max_err = 0.0
@@ -1225,7 +1237,7 @@ fn test_cg_poisson() -> bool with IO, Mut, Panic, Div {
         let t9 = t7 * t2
         let t11 = t9 * t2
         let exact = t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0 - t11 / 39916800.0
-        let diff = abs_f64(result.x[i] - exact)
+        let diff = abs_f64(x[i] - exact)
         if diff > max_err {
             max_err = diff
         }

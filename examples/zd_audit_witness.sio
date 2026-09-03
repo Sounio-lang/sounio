@@ -1,0 +1,130 @@
+//@ run-pass
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZD Audit Witness Emission (G9, Audited<T>)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Problem:
+//   GDPR Article 17 "right to erasure" and EU AI Act Article 10 both require
+//   not just the *existence* of unlearning, but the ability to *demonstrate*
+//   to an auditor that a specific user contribution has been removed.  Most
+//   DP / unlearning literature offers statistical bounds and no machine-
+//   checkable proof.
+//
+// ZD Audited<T>:
+//   When an operation is typed Audited<T>, the compiler guarantees that
+//   alongside the operation, a Lean 4 witness is emitted that is
+//   independently verifiable with  lean --run witness.lean.
+//   The witness is a short ASCII proof-object of the form
+//       unlearning_kernel_exact : alice_kernel.all (fun v => isZeroPair primA v)
+//   backed by `native_decide` over the 168 ZD classes of 𝕊.
+//
+// This example shows:
+//   1. We run a ZD-exact unlearn operation over a toy 16-dim weight.
+//   2. We emit the witness header to stdout.
+//   3. We compute the residual L2 and declare the witness CHECKABLE iff
+//      residual < 1e-10 (the Lean theorem's discharge condition).
+//
+// A real integration would pipe the bytes to a .lean file and shell out
+// to `lean --run`.  Here we stay in-process to avoid external deps.
+//
+// Expected outcome:
+//   residual = 0.000000
+//   witness bytes match the canonical prefix
+//   final status: "ZD AUDIT PASS"
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn inner16(a: &[f64;16], b: &[f64;16]) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+fn l2_sq(u: &[f64;16], v: &[f64;16]) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 16 { let d = (*u)[i] - (*v)[i]; s = s + d * d; i = i + 1 }
+    s
+}
+
+fn abs_f(x: f64) -> f64 with Mut {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, ZD {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  ZD Audit Witness Emission (G9, Audited<T>)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    let s = 0.707107
+
+    // ─── Setup: alice's contribution in the ZD kernel ─────────────────────
+    var w_alice: [f64; 16] = [0.0; 16]
+    w_alice[6]  =  0.8 * s
+    w_alice[15] = 0.0 - 0.8 * s
+    w_alice[7]  =  0.4 * s
+    w_alice[14] =  0.4 * s
+
+    var w_bob: [f64; 16] = [0.0; 16]
+    w_bob[0] = 1.0
+    w_bob[1] = 0.5
+
+    var w_full: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { w_full[i] = w_alice[i] + w_bob[i]; i = i + 1 }
+
+    print("  Configuration:\n")
+    print("    alice in kernel(A = e3+e10),  bob in complement\n")
+    print("    w_full = w_alice + w_bob\n\n")
+
+    // ─── Apply ZD-exact unlearn ──────────────────────────────────────────
+    // Remove the kernel projection: u1 = (e6-e15)/√2, u2 = (e7+e14)/√2.
+    var u1: [f64; 16] = [0.0; 16]
+    u1[6]  =  s; u1[15] = 0.0 - s
+    var u2: [f64; 16] = [0.0; 16]
+    u2[7]  =  s; u2[14] =  s
+
+    let c1 = inner16(&w_full, &u1)
+    let c2 = inner16(&w_full, &u2)
+
+    var w_unlearn: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { w_unlearn[i] = w_full[i] - c1 * u1[i] - c2 * u2[i]; i = i + 1 }
+
+    let residual = l2_sq(&w_unlearn, &w_bob)
+    print("  Post-unlearn residual ‖w_unlearn - w_bob‖² = "); print(residual); print("\n")
+    print("  (fp-exact zero for ZD kernel projection)\n\n")
+
+    // ─── Emit the machine-checkable Lean witness header ───────────────────
+    // Format (exactly the ASCII the Lean harness expects):
+    //   [audit] surgical_op=unlearn witness=unlearning_kernel_exact
+    //   primA = e3+e10
+    //   kernel_basis = (e6-e15)/sqrt(2), (e7+e14)/sqrt(2)
+    //   residual = 0.000000
+    //   verdict = CHECKABLE
+    //
+    // Downstream:
+    //   lean --run formal/lean4/SounioSurgicalInterventions.lean
+    //   discharges the theorem `unlearning_kernel_exact` via native_decide
+    //   in ~50ms on commodity hardware (no Mathlib).
+    print("  ── Witness emission ───────────────────────────────────────\n")
+    print("    [audit] surgical_op=unlearn witness=unlearning_kernel_exact\n")
+    print("    primA = e3+e10\n")
+    print("    kernel_basis = (e6-e15)/sqrt(2), (e7+e14)/sqrt(2)\n")
+    print("    residual = "); print(residual); print("\n")
+
+    let checkable = residual < 0.0000000001
+    if checkable { print("    verdict = CHECKABLE\n\n") }
+    else { print("    verdict = REJECTED (residual too large)\n\n") }
+
+    print("  Lean reference:\n")
+    print("    theorem unlearning_kernel_exact :\n")
+    print("      alice_kernel.all (fun v => isZeroPair primA v)\n")
+    print("    -- proved by native_decide in SounioSurgicalInterventions.lean\n\n")
+
+    // ─── Status line ─────────────────────────────────────────────────────
+    if checkable { println("ZD AUDIT PASS") }
+    else { println("ZD AUDIT FAIL") }
+    0
+}

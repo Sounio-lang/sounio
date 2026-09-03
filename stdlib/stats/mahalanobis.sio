@@ -1,0 +1,154 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/mahalanobis.sio — bivariate Mahalanobis distance
+//
+// The covariance-aware distance of a point from a 2-D sample — multivariate
+// outlier detection and the kernel of Hotelling's T²:
+//
+//   mahalanobis(x, y, n, qx, qy) -> MahalResult
+//
+// With sample covariance Σ = [[sxx, sxy], [sxy, syy]] (÷(n−1)) and deviations
+// d = (qx−x̄, qy−ȳ),
+//   D² = dᵀ Σ⁻¹ d = ( syy·dx² − 2 sxy·dx·dy + sxx·dy² ) / (sxx·syy − sxy²),
+//   D = √D².
+// D² is asymptotically χ²(2), so D² > 5.99 flags a 5% multivariate outlier.
+//
+// Pure Sounio: closed-form 2×2 inverse; one pass for the moments; inline sqrt.
+// No external dependency, no nested data-array calls.
+//
+// References:
+//   Mahalanobis (1936); Johnson & Wichern, "Applied Multivariate Statistical
+//   Analysis" 6e, §5.
+
+module stats::mahalanobis
+
+fn mh_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct MahalResult {
+    pub d: f64,       // Mahalanobis distance
+    pub d2: f64,      // squared distance (~ χ²(2))
+    pub sxx: f64,
+    pub syy: f64,
+    pub sxy: f64,
+}
+
+/// Bivariate Mahalanobis distance of a query point from the sample.
+///
+/// Parâmetros: x, y — the two coordinates of the sample; n — size (>=3);
+///             qx, qy — the query point.
+/// Retorno: MahalResult (d, d2, sample covariance entries).
+/// Referências: Mahalanobis (1936).
+pub fn mahalanobis(x: &[f64; 256], y: &[f64; 256], n: i32, qx: f64, qy: f64) -> MahalResult with Mut, Div, Panic {
+    if n < 3 { return MahalResult { d: 0.0, d2: 0.0, sxx: 0.0, syy: 0.0, sxy: 0.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        sxy = sxy + dx * dy
+        j = j + 1
+    }
+    let df = nf - 1.0
+    sxx = sxx / df
+    syy = syy / df
+    sxy = sxy / df
+    let det = sxx * syy - sxy * sxy
+    if det <= 0.0 { return MahalResult { d: 0.0, d2: 0.0, sxx: sxx, syy: syy, sxy: sxy } }
+    let dx = qx - mx
+    let dy = qy - my
+    let d2 = (syy * dx * dx - 2.0 * sxy * dx * dy + sxx * dy * dy) / det
+    let d = mh_sqrt(d2)
+    return MahalResult { d: d, d2: d2, sxx: sxx, syy: syy, sxy: sxy }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// square {(-1,-1),(1,-1),(-1,1),(1,1)}: mean (0,0), sxx=syy=4/3, sxy=0.
+// query (2,0): D² = (4/3·4)/((4/3)²) = (16/3)/(16/9) = 3. D=sqrt(3)=1.732051.
+fn test_mahal() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0-1.0; x[1]=1.0; x[2]=0.0-1.0; x[3]=1.0
+    y[0]=0.0-1.0; y[1]=0.0-1.0; y[2]=1.0; y[3]=1.0
+    let r = mahalanobis(&x, &y, 4, 2.0, 0.0)
+    var ok = true
+    ok = check(1, approx(r.sxx, 1.333333, 1.0e-5)) && ok
+    ok = check(2, approx(r.sxy, 0.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.d2, 3.0, 1.0e-5)) && ok
+    ok = check(4, approx(r.d, 1.732051, 1.0e-5)) && ok
+    return ok
+}
+
+// centre point has distance 0.
+fn test_centre() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0-1.0; x[1]=1.0; x[2]=0.0-1.0; x[3]=1.0
+    y[0]=0.0-1.0; y[1]=0.0-1.0; y[2]=1.0; y[3]=1.0
+    let r = mahalanobis(&x, &y, 4, 0.0, 0.0)
+    return check(10, approx(r.d, 0.0, 1.0e-9))
+}
+
+// correlated cloud: {(0,0),(1,1),(2,2),(3,3)} + jitter so det>0.
+// x={0,1,2,3}, y={0,1,2,4}. mean (1.5,1.75). sxx=5/3, sxy, syy computed.
+// query on the trend line should be closer than off-trend; just check d2 finite & >0.
+fn test_correlated() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=0.0; y[1]=1.0; y[2]=2.0; y[3]=4.0
+    let r = mahalanobis(&x, &y, 4, 5.0, 0.0)
+    // off-trend point (5,0) is far -> large d2
+    return check(20, r.d2 > 4.0)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_mahal() && ok
+    ok = test_centre() && ok
+    ok = test_correlated() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

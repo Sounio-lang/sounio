@@ -1,41 +1,69 @@
 ---
-import { getCollection } from 'astro:content';
+import TutorialLayout from '../../../layouts/TutorialLayout.astro';
+import { getCollection, render } from 'astro:content';
+import { getLocalizedPath, type Locale } from '../../../lib/i18n';
 
 export async function getStaticPaths() {
-  const locales = ['pt', 'el', 'zh', 'ja', 'es'] as const;
-  const tutorials = await getCollection('tutorials');
-  const seriesMap = new Map<string, typeof tutorials>();
+  const locales = ['pt', 'el', 'zh', 'zh-hk', 'ja', 'es'] as const;
+  const allTutorials = await getCollection('tutorials');
+  const paths = [];
 
-  for (const tutorial of tutorials) {
-    const series = tutorial.data.series;
-    if (!seriesMap.has(series)) {
-      seriesMap.set(series, []);
+  for (const lang of locales) {
+    const tutorials = allTutorials.filter((t) => t.id.startsWith(lang + '/'));
+
+    const seriesMap = new Map<string, typeof tutorials>();
+    for (const t of tutorials) {
+      const series = t.data.series;
+      if (!seriesMap.has(series)) seriesMap.set(series, []);
+      seriesMap.get(series)!.push(t);
     }
-    seriesMap.get(series)!.push(tutorial);
-  }
 
-  const slugs: string[] = [];
-  for (const [series, lessons] of seriesMap) {
-    lessons.sort((a, b) => a.data.order - b.data.order);
-    slugs.push(series);
-    for (const lesson of lessons) {
-      slugs.push(`${series}/${lesson.slug}`);
+    for (const [, lessons] of seriesMap) {
+      lessons.sort((a, b) => a.data.order - b.data.order);
+      for (let i = 0; i < lessons.length; i++) {
+        const lessonSlug = lessons[i].id.replace(lang + '/', '').replace(/\.mdx$/, '');
+        paths.push({
+          params: { lang, slug: `${lessons[i].data.series}/${lessonSlug}` },
+          props: {
+            entry: lessons[i],
+            series: lessons[i].data.series,
+            lessonIndex: i,
+            allLessons: lessons.map((l) => ({
+              title: l.data.title,
+              slug: l.id.replace(lang + '/', '').replace(/\.mdx$/, ''),
+            })),
+            locale: lang,
+          },
+        });
+      }
     }
   }
-
-  return locales.flatMap((lang) =>
-    slugs.map((slug) => ({
-      params: { lang, slug },
-    }))
-  );
+  return paths;
 }
 
-const slugParam = Astro.params.slug;
-const slug = Array.isArray(slugParam) ? slugParam.join('/') : slugParam;
+const seriesTitles: Record<string, string> = {
+  'getting-started': 'Getting Started',
+  'drug-dosing': 'Uncertainty-Aware Drug Dosing',
+};
 
-if (!slug) {
-  return Astro.redirect('/tutorials', 308);
-}
-
-return Astro.redirect(`/tutorials/${slug}`, 308);
+const { entry, series, lessonIndex, allLessons, locale } = Astro.props as {
+  entry: any;
+  series: string;
+  lessonIndex: number;
+  allLessons: { title: string; slug: string }[];
+  locale: string;
+};
+const { Content } = await render(entry);
+const loc = locale as Locale;
 ---
+
+<TutorialLayout
+  title={entry.data.title}
+  description={entry.data.description}
+  tutorialTitle={seriesTitles[series] || series}
+  tutorialSlug={getLocalizedPath(`/tutorials/${series}`, loc)}
+  lessons={allLessons}
+  currentLesson={lessonIndex}
+>
+  <Content />
+</TutorialLayout>

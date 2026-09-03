@@ -1,0 +1,191 @@
+// Sounio emitter for the FULL O-SSM octonion forward CELL on tensor cores (Convention X), with an
+// in-kernel recurrence over T timesteps. sounio_ossm_oct_cell(A,B,C,x,H0,out,T): builds L(A),L(C)
+// once, stages H0 col-major, then loops T steps — each: S=L(A)·H (wmma) + B·x post-add; h=cubic
+// sigmoid (1/64 x³ + 1/4 x + 1/2, matching ossm_emit_sigmoid_f64); CH=L(C)·h (wmma); y=Re=CH[0].
+// H persists in shared across steps. Two wmma m16n16k16 tiles/step. HW-validated on the DGX Spark GB10.
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    var digits = ""
+    var x = n
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var ch = "0"
+        if d == 1 { ch = "1" }
+        if d == 2 { ch = "2" }
+        if d == 3 { ch = "3" }
+        if d == 4 { ch = "4" }
+        if d == 5 { ch = "5" }
+        if d == 6 { ch = "6" }
+        if d == 7 { ch = "7" }
+        if d == 8 { ch = "8" }
+        if d == 9 { ch = "9" }
+        digits = str_concat(ch, digits)
+        x = x / 10
+    }
+    digits
+}
+fn cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+fn frag(prefix: string, start: i64, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, prefix), i64_to_string(start + i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+// build L(M) into shared buffer `sbuf` from global f32 param at `rd_ptr`, sign via cd_sigma(,,3)
+fn emit_build_left(sbuf: string, rd_ptr: string) with IO, Mut, Panic, Div, Alloc {
+    var k: i64 = 0
+    while k < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            print("    ld.global.f32 %f1, [") print(rd_ptr) print("+") print(i64_to_string(i * 4)) print("];\n")
+            if cd_sigma(i, j, 3) < 0 { print("    neg.f32 %f1, %f1;\n") }
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [") print(sbuf) print("+") print(i64_to_string((k * 16 + j) * 2)) print("], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+}
+// one wmma tile: acc(d=%f2..9) = L(sA row-major) · H(sH col-major); store row-major to sS(%r21)
+fn emit_tile(sA: string) with IO, Mut, Panic, Div, Alloc {
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    print(frag("%r", 2, 8)) print(", [") print(sA) print("], %r22;\n")
+    print("    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    print(frag("%r", 10, 8)) print(", [%r20], %r22;\n")
+    print("    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    print(frag("%f", 2, 8)) print(", ") print(frag("%r", 2, 8)) print(", ") print(frag("%r", 10, 8))
+    print(", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    print("    wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [%r21], ")
+    print(frag("%f", 2, 8)) print(", %r22;\n")
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    print(".version 9.0\n")
+    print(".target sm_121\n")
+    print(".address_size 64\n\n")
+    print(".visible .entry sounio_ossm_oct_cell(\n")
+    print("    .param .u64 .ptr .align 4 p_A,\n")
+    print("    .param .u64 .ptr .align 4 p_B,\n")
+    print("    .param .u64 .ptr .align 4 p_C,\n")
+    print("    .param .u64 .ptr .align 4 p_x,\n")
+    print("    .param .u64 .ptr .align 4 p_H,\n")
+    print("    .param .u64 .ptr .align 4 p_out,\n")
+    print("    .param .u32 p_T\n)\n{\n")
+    print("    .reg .pred %p<2>;\n")
+    print("    .reg .b16 %rs<2>;\n")
+    print("    .reg .b32 %r<32>;\n")
+    print("    .reg .f32 %f<16>;\n")
+    print("    .reg .b64 %rd<16>;\n")
+    print("    .shared .align 2 .b8 sLA[512];\n")
+    print("    .shared .align 2 .b8 sLC[512];\n")
+    print("    .shared .align 2 .b8 sH[512];\n")
+    print("    .shared .align 4 .b8 sS[1024];\n")
+    print("    ld.param.u64 %rd1, [p_A];\n")
+    print("    ld.param.u64 %rd2, [p_B];\n")
+    print("    ld.param.u64 %rd3, [p_C];\n")
+    print("    ld.param.u64 %rd7, [p_x];\n")
+    print("    ld.param.u64 %rd8, [p_H];\n")
+    print("    ld.param.u64 %rd12, [p_out];\n")
+    print("    ld.param.u32 %r24, [p_T];\n")
+    print("    cvta.to.global.u64 %rd4, %rd1;\n")
+    print("    cvta.to.global.u64 %rd9, %rd2;\n")
+    print("    cvta.to.global.u64 %rd11, %rd3;\n")
+    print("    cvta.to.global.u64 %rd10, %rd7;\n")
+    print("    cvta.to.global.u64 %rd5, %rd8;\n")
+    print("    cvta.to.global.u64 %rd6, %rd12;\n")
+    print("    mov.u32 %r18, sLA;\n")
+    print("    mov.u32 %r19, sLC;\n")
+    print("    mov.u32 %r20, sH;\n")
+    print("    mov.u32 %r21, sS;\n")
+    print("    mov.b32 %r22, 16;\n")
+    print("    mov.f32 %f0, 0f00000000;\n")
+    print("    mov.u32 %r1, %tid.x;\n")
+    print("    setp.ne.u32 %p1, %r1, 0;\n")
+    print("    @%p1 bra $BUILD_DONE;\n")
+    // zero sLA, sLC, sH
+    print("    mov.u16 %rs1, 0;\n")
+    print("    mov.u32 %r28, 0;\n")
+    print("$ZERO:\n")
+    print("    add.s32 %r26, %r18, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    print("    add.s32 %r26, %r19, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    print("    add.s32 %r26, %r20, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    print("    add.s32 %r28, %r28, 2;\n    setp.lt.u32 %p1, %r28, 512;\n    @%p1 bra $ZERO;\n")
+    // build L(A) into sLA, L(C) into sLC
+    emit_build_left("%r18", "%rd4")
+    emit_build_left("%r19", "%rd11")
+    // stage H0 col-major: sH[b*16+r] = H0[b*8+r], r<8
+    var b0: i64 = 0
+    while b0 < 16 {
+        var r0: i64 = 0
+        while r0 < 8 {
+            print("    ld.global.f32 %f1, [%rd5+") print(i64_to_string((b0 * 8 + r0) * 4)) print("];\n")
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r20+") print(i64_to_string((b0 * 16 + r0) * 2)) print("], %rs1;\n")
+            r0 = r0 + 1
+        }
+        b0 = b0 + 1
+    }
+    print("$BUILD_DONE:\n")
+    print("    bar.sync 0;\n")
+    print("    mov.u32 %r23, 0;\n")   // step counter
+    print("$STEP:\n")
+    print("    mul.lo.s32 %r25, %r23, 64;\n")   // x/y byte offset for this step (16 elems * 4)
+    // ---- S = L(A)·H ----
+    emit_tile("%r18")
+    print("    bar.sync 0;\n")
+    // ---- thread 0: h = sigmoid(S[k][b] + B[k]*x[b]) into sH col-major ----
+    print("    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $SKIP1;\n")
+    var b: i64 = 0
+    while b < 16 {
+        // x[step*16+b] -> %f10
+        print("    add.s32 %r26, %r25, ") print(i64_to_string(b * 4)) print(";\n")
+        print("    cvt.s64.s32 %rd13, %r26;\n    add.s64 %rd13, %rd10, %rd13;\n    ld.global.f32 %f10, [%rd13];\n")
+        var k: i64 = 0
+        while k < 8 {
+            print("    ld.shared.f32 %f13, [%r21+") print(i64_to_string((k * 16 + b) * 4)) print("];\n")
+            print("    ld.global.f32 %f11, [%rd9+") print(i64_to_string(k * 4)) print("];\n")
+            print("    fma.rn.f32 %f12, %f11, %f10, %f13;\n")   // s = B[k]*x[b] + S[k][b]
+            print("    mul.f32 %f13, %f12, %f12;\n")            // s2
+            print("    mul.f32 %f14, %f13, %f12;\n")            // s3
+            print("    fma.rn.f32 %f15, %f12, 0f3E800000, 0f3F000000;\n")  // 0.25 s + 0.5
+            print("    fma.rn.f32 %f12, %f14, 0f3C800000, %f15;\n")        // + (1/64) s3
+            print("    cvt.rn.f16.f32 %rs1, %f12;\n    st.shared.u16 [%r20+") print(i64_to_string((b * 16 + k) * 2)) print("], %rs1;\n")
+            k = k + 1
+        }
+        b = b + 1
+    }
+    print("$SKIP1:\n    bar.sync 0;\n")
+    // ---- CH = L(C)·h ----
+    emit_tile("%r19")
+    print("    bar.sync 0;\n")
+    // ---- thread 0: y[step*16+b] = Re(CH) = sS[0*16+b] ----
+    print("    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $SKIP2;\n")
+    var bo: i64 = 0
+    while bo < 16 {
+        print("    ld.shared.f32 %f1, [%r21+") print(i64_to_string(bo * 4)) print("];\n")
+        print("    add.s32 %r26, %r25, ") print(i64_to_string(bo * 4)) print(";\n")
+        print("    cvt.s64.s32 %rd13, %r26;\n    add.s64 %rd13, %rd6, %rd13;\n    st.global.f32 [%rd13], %f1;\n")
+        bo = bo + 1
+    }
+    print("$SKIP2:\n    bar.sync 0;\n")
+    print("    add.s32 %r23, %r23, 1;\n    setp.lt.s32 %p1, %r23, %r24;\n    @%p1 bra $STEP;\n")
+    print("    ret;\n}\n")
+}

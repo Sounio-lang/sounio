@@ -1,0 +1,102 @@
+//! Select rows from a DataFrame: head/tail/slice and the n-largest / n-smallest by a column.
+//!
+//! All verbs are functional: they return a new DataFrame and leave the input unchanged. Column names
+//! are preserved. Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc { df_set_col_name(out, c, df_get_col_name(df, c)); c = c + 1 }
+}
+
+fn append_row(df: &DataFrame, r: i64, out: &!DataFrame) with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var row: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 { row[c as usize] = df_get(df, r, c); c = c + 1 }
+    df_add_row(out, &row)
+}
+
+/// The rows in the half-open range [start, end) (clamped to the frame). Negative start is treated as 0.
+pub fn df_slice(df: &DataFrame, start: i64, end: i64) -> DataFrame with Mut, Div, Panic {
+    var out = df_new(df_ncols(df))
+    copy_col_names(df, &!out)
+    var s = start
+    if s < 0 { s = 0 }
+    var e = end
+    if e > df_nrows(df) { e = df_nrows(df) }
+    var r = s
+    while r < e { append_row(df, r, &!out); r = r + 1 }
+    out
+}
+
+/// The first `n` rows (pandas head). `n <= 0` gives an empty frame.
+pub fn df_head(df: &DataFrame, n: i64) -> DataFrame with Mut, Div, Panic {
+    var take = n
+    if take < 0 { take = 0 }
+    df_slice(df, 0, take)
+}
+
+/// The last `n` rows (pandas tail). `n <= 0` gives an empty frame.
+pub fn df_tail(df: &DataFrame, n: i64) -> DataFrame with Mut, Div, Panic {
+    var take = n
+    if take < 0 { take = 0 }
+    var start = df_nrows(df) - take
+    if start < 0 { start = 0 }
+    df_slice(df, start, df_nrows(df))
+}
+
+// Return an index array of df's rows sorted by column `col`; desc=true for largest-first. Stable
+// insertion sort. Caller passes idx sized to nrows; returns nrows.
+fn sorted_index(df: &DataFrame, col: i64, desc: bool, idx: &![i64; 1024]) -> i64 with Mut, Div, Panic {
+    let nr = df_nrows(df)
+    var i: i64 = 0
+    while i < nr && i < 1024 { idx[i as usize] = i; i = i + 1 }
+    var a: i64 = 1
+    while a < nr && a < 1024 {
+        let cur = idx[a as usize]
+        let cv = df_get(df, cur, col)
+        var b = a - 1
+        var placed = false
+        while b >= 0 && !placed {
+            let bv = df_get(df, idx[b as usize], col)
+            var shift = false
+            if desc { if bv < cv { shift = true } } else { if bv > cv { shift = true } }
+            if shift {
+                idx[(b + 1) as usize] = idx[b as usize]
+                b = b - 1
+            } else { placed = true }
+        }
+        idx[(b + 1) as usize] = cur
+        a = a + 1
+    }
+    nr
+}
+
+/// The `n` rows with the largest values in column `col`, ordered largest-first (pandas nlargest).
+pub fn df_nlargest(df: &DataFrame, col: i64, n: i64) -> DataFrame with Mut, Div, Panic {
+    var out = df_new(df_ncols(df))
+    copy_col_names(df, &!out)
+    var idx: [i64; 1024] = [0; 1024]
+    let nr = sorted_index(df, col, true, &!idx)
+    var take = n
+    if take > nr { take = nr }
+    var t: i64 = 0
+    while t < take { append_row(df, idx[t as usize], &!out); t = t + 1 }
+    out
+}
+
+/// The `n` rows with the smallest values in column `col`, ordered smallest-first (pandas nsmallest).
+pub fn df_nsmallest(df: &DataFrame, col: i64, n: i64) -> DataFrame with Mut, Div, Panic {
+    var out = df_new(df_ncols(df))
+    copy_col_names(df, &!out)
+    var idx: [i64; 1024] = [0; 1024]
+    let nr = sorted_index(df, col, false, &!idx)
+    var take = n
+    if take > nr { take = nr }
+    var t: i64 = 0
+    while t < take { append_row(df, idx[t as usize], &!out); t = t + 1 }
+    out
+}

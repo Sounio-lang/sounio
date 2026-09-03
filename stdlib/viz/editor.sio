@@ -1,0 +1,140 @@
+// stdlib/viz/editor.sio - minimal native scene editor over Visual IR
+
+use display::event::{Event, EV_KEY_PRESS, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::ir::{VizScene, viz_layout_rect}
+
+pub struct VizEditFrame {
+    pub event_kind: i64,
+    pub event_key: i64,
+    pub selected_node: i64,
+    pub audit_hash: i64,
+    pub node_hash: i64,
+    pub changed: bool,
+}
+
+pub struct VizEditTrace {
+    pub frames: [VizEditFrame; 32],
+    pub count: i64,
+}
+
+pub fn viz_edit_frame_empty() -> VizEditFrame {
+    VizEditFrame {
+        event_kind: 0,
+        event_key: 0,
+        selected_node: 0 - 1,
+        audit_hash: 0,
+        node_hash: 0,
+        changed: false,
+    }
+}
+
+pub fn viz_edit_trace_new() -> VizEditTrace {
+    VizEditTrace { frames: [viz_edit_frame_empty(); 32], count: 0 }
+}
+
+pub fn viz_editor_target(scene: &VizScene) -> i64 {
+    if scene.selected_node >= 0 && scene.selected_node < scene.node_count { return scene.selected_node }
+    if scene.focused_node >= 0 && scene.focused_node < scene.node_count { return scene.focused_node }
+    if scene.hovered_node >= 0 && scene.hovered_node < scene.node_count { return scene.hovered_node }
+    0 - 1
+}
+
+pub fn viz_editor_select_node(scene: &!VizScene, node_idx: i64) -> bool with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    scene.selected_node = node_idx
+    scene.focused_node = node_idx
+    scene.hovered_node = node_idx
+    var i: i64 = 0
+    while i < scene.node_count {
+        scene.nodes[i as usize].selected = i == node_idx
+        i = i + 1
+    }
+    true
+}
+
+pub fn viz_editor_nudge_selected(scene: &!VizScene, dx: i64, dy: i64) -> bool with Mut {
+    let idx = viz_editor_target(scene)
+    if idx < 0 || idx >= scene.node_count { return false }
+    var n = scene.nodes[idx as usize]
+    n.layout = viz_layout_rect(n.layout.x + dx, n.layout.y + dy, n.layout.w, n.layout.h)
+    scene.nodes[idx as usize] = n
+    true
+}
+
+pub fn viz_editor_resize_selected(scene: &!VizScene, dw: i64, dh: i64, min_w: i64, min_h: i64) -> bool with Mut {
+    let idx = viz_editor_target(scene)
+    if idx < 0 || idx >= scene.node_count { return false }
+    var n = scene.nodes[idx as usize]
+    var w = n.layout.w + dw
+    var h = n.layout.h + dh
+    if w < min_w { w = min_w }
+    if h < min_h { h = min_h }
+    n.layout = viz_layout_rect(n.layout.x, n.layout.y, w, h)
+    scene.nodes[idx as usize] = n
+    true
+}
+
+pub fn viz_editor_set_selected_tag(scene: &!VizScene, tag: i64) -> bool with Mut {
+    let idx = viz_editor_target(scene)
+    if idx < 0 || idx >= scene.node_count { return false }
+    scene.nodes[idx as usize].tag = tag
+    true
+}
+
+pub fn viz_editor_set_selected_value(scene: &!VizScene, value: f64) -> bool with Mut {
+    let idx = viz_editor_target(scene)
+    if idx < 0 || idx >= scene.node_count { return false }
+    var n = scene.nodes[idx as usize]
+    var v = value
+    if v < n.min_value { v = n.min_value }
+    if v > n.max_value { v = n.max_value }
+    n.value = v
+    scene.nodes[idx as usize] = n
+    true
+}
+
+pub fn viz_editor_handle_event(scene: &!VizScene, ev: Event, step: i64) -> bool with Mut {
+    if ev.kind != EV_KEY_PRESS { return false }
+    var s = step
+    if s <= 0 { s = 1 }
+    if ev.mods == 1 {
+        if ev.key == KEY_LEFT { return viz_editor_resize_selected(scene, 0 - s, 0, 4, 4) }
+        if ev.key == KEY_RIGHT { return viz_editor_resize_selected(scene, s, 0, 4, 4) }
+        if ev.key == KEY_UP { return viz_editor_resize_selected(scene, 0, 0 - s, 4, 4) }
+        if ev.key == KEY_DOWN { return viz_editor_resize_selected(scene, 0, s, 4, 4) }
+    } else {
+        if ev.key == KEY_LEFT { return viz_editor_nudge_selected(scene, 0 - s, 0) }
+        if ev.key == KEY_RIGHT { return viz_editor_nudge_selected(scene, s, 0) }
+        if ev.key == KEY_UP { return viz_editor_nudge_selected(scene, 0, 0 - s) }
+        if ev.key == KEY_DOWN { return viz_editor_nudge_selected(scene, 0, s) }
+    }
+    false
+}
+
+fn viz_editor_record(trace: &!VizEditTrace, scene: &VizScene, ev: Event, changed: bool) with Mut {
+    if trace.count < 0 || trace.count >= 32 { return }
+    let idx = trace.count
+    let target = viz_editor_target(scene)
+    trace.frames[idx as usize] = VizEditFrame {
+        event_kind: ev.kind,
+        event_key: ev.key,
+        selected_node: target,
+        audit_hash: viz_audit_hash(scene),
+        node_hash: viz_audit_node_hash(scene, target),
+        changed: changed,
+    }
+    trace.count = trace.count + 1
+}
+
+pub fn viz_editor_trace_events(scene: &!VizScene, events: &[Event; 32], count: i64, step: i64) -> VizEditTrace with Mut {
+    var trace = viz_edit_trace_new()
+    var i: i64 = 0
+    while i < count && i < 32 {
+        let ev = events[i as usize]
+        let changed = viz_editor_handle_event(scene, ev, step)
+        viz_editor_record(&!trace, scene, ev, changed)
+        i = i + 1
+    }
+    trace
+}

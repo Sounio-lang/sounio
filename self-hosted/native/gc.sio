@@ -33,8 +33,85 @@ pub fn native_v2_handle_entry_field_pin_count() -> i64 { 24 }
 pub fn native_v2_handle_entry_field_flags() -> i64 { 32 }
 pub fn native_v2_handle_entry_field_epoch() -> i64 { 40 }
 pub fn native_v2_handle_entry_size() -> i64 { 48 }
-pub fn native_v2_handle_table_capacity_default() -> i64 { 4096 }
+// Managed-handle ceiling for one native-v2 process. Handles are allocated by a
+// MONOTONIC bump of RuntimeContext.handle_count and are NEVER reclaimed: the
+// only reset emitter (native_v2_emit_gc_empty_frame_reset) is deliberately
+// unwired on this backend because stack maps carry slot COUNTS, not a root
+// bitmap, so no safe liveness point exists (see the "Fail closed" comment at the
+// exit-182 site in native/codegen_x86_linux.sio). This number is therefore a
+// hard per-process allocation budget, not a working-set size.
+//
+// 2^24 (2^20 -> 2^22 on 2026-07-26; 2^22 -> 2^24 on 2026-08-26 together with
+// the arena growth below). This MOVES the wall; it does not remove it. The
+// lifetime problem is unchanged and still open.
+//
+// Cost is zero-sum against the heap, not against the ELF. The table is carved
+// out of the single fixed anonymous mmap taken in the entry trampoline:
+//   handle_table_base = mmap_base + runtime_context_size()
+//   heap_base         = handle_table_base + native_v2_handle_table_bytes()
+//   heap_limit        = heap_base + (native_v2_arena_bytes() - ctx - handle_table_bytes)
+// so ELF FileSiz/MemSiz are unchanged, the virtual mapping is whatever
+// native_v2_arena_bytes() says, and RSS grows only for handle-table pages a
+// program actually touches (demand-paged MAP_ANONYMOUS). What it does spend is
+// heap budget: 48 B/slot, so 2^24 hands 768 MiB of the arena to the table.
+//
+// Headroom check at this capacity: the smallest MANAGED object is 56 B (32 B
+// header + a 24 B three-field aggregate; <=16 B structs are unboxed and take no
+// slot, see native_v2_is_small_value_struct_tag). Filling the table therefore
+// needs >= 56 * 2^24 = 939 MiB of heap against a 768 MiB table -- ~1.7 GiB of
+// the 8 GiB arena, so the handle table stays the FIRST wall reached (the
+// invariant this number exists to preserve) and the heap is not starved.
+//
+// WHY IT MOVED IN LOCKSTEP WITH THE ARENA: leaving it at 2^22 while the arena
+// grew 4x would have made small-object programs hit the handle wall (exit 182)
+// at exactly the same 4.19M objects as before, with ~7.7 GiB of heap sitting
+// unused underneath. The two walls have to stay proportionate or growing one
+// buys nothing for half the workloads.
+pub fn native_v2_handle_table_capacity_default() -> i64 { 16777216 }
+
+// Size of the single fixed anonymous mapping every native-v2 process takes at
+// entry. Raised 2 GiB -> 8 GiB on 2026-08-26; see
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md.
+//
+// This is the WHOLE per-process allocation budget, because nothing in it is
+// ever reclaimed (see the handle-table comment above and Finding 12 of
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md). Real-CA TLS
+// certificate-chain verification spends ~30 MB per verification and ~11.5 MB
+// per certificate parsed, so the 2 GiB arena capped a process at a single-digit
+// number of HTTPS requests.
+//
+// LINUX ONLY. The mapping is MAP_PRIVATE|MAP_ANONYMOUS (r10 = 0x22), so the
+// kernel backs pages lazily: an 8 GiB mapping costs 8 GiB of ADDRESS SPACE and
+// only as much RSS as the program actually touches. The Windows entry path uses
+// VirtualAlloc with MEM_COMMIT, which is NOT lazy in the same way, and the
+// macOS path is untested at this size -- both deliberately stay at 2 GiB, so
+// this constant is referenced only from the two Linux emitters.
+//
+// The worst case is real, though: a program that runs to arena exhaustion has
+// touched everything, so it now reaches ~8 GiB RSS before aborting instead of
+// ~2 GiB. That is the deliberate trade -- a runaway costs 4x more memory before
+// it dies, in exchange for real workloads not dying at all.
+pub fn native_v2_arena_bytes() -> i64 { 8589934592 }
 pub fn native_v2_handle_table_bytes() -> i64 { native_v2_handle_entry_size() * native_v2_handle_table_capacity_default() }
+
+// Values stored in struct-base slots may be either a managed handle id
+// (1 .. capacity-1) or a raw object-base pointer returned by an unboxed
+// small-value allocation. Raw pointers from the native heap always sit
+// strictly above the handle-id range.
+pub fn native_v2_handle_raw_ptr_threshold() -> i64 { native_v2_handle_table_capacity_default() }
+
+// SysV x86-64 register-pair threshold: ≤16 B value structs must not consume
+// a GC handle (issue #919). IR lowering emits aggregate_storage_bytes = n*8
+// for n-field struct literals; tag 8 is the Box special case (16 B payload).
+// Large fixed buckets (tag 0/1/2) stay managed.
+pub fn native_v2_is_small_value_struct_tag(tag: i64) -> bool {
+    if tag == 0 { return false }
+    if tag == 1 { return false }
+    if tag == 2 { return false }
+    if tag == 8 { return true }
+    if tag > 0 && tag <= 16 { return true }
+    false
+}
 
 pub fn native_v2_descriptor_magic() -> i64 { 0x32445353 } // "SSD2"
 pub fn native_v2_descriptor_version() -> i64 { 1 }

@@ -1,4 +1,7 @@
 //@ run-pass
+//@ expect-stdout: PASS
+//@ expect-stdout: inf
+//@ expect-stdout: FAMILY_A_VAR_LIVE
 // ============================================================================
 // RAPAMYCIN 3-COMPARTMENT PBPK — RK4 + ISO UNCERTAINTY BUDGET (JCGM 100:2008 §8)
 // ============================================================================
@@ -15,6 +18,26 @@
 // Dose: 6 mg IV rapamycin (Cypher stent loading dose)
 // Integration: 20 RK4 steps, h = 0.1 h, t_final = 2 h
 // ============================================================================
+
+use epistemic::budget64::{
+    Budget64,
+    budget64_new,
+    budget64_add_type_b,
+    budget64_finalize,
+    budget64_print_report,
+}
+
+struct Concs { blood: f64, brain: f64, periph: f64 }
+
+fn iso_abs_rk4(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn iso_sqrt_rk4(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    return y
+}
 
 // ── RHS helpers (one per compartment) ──
 
@@ -37,9 +60,61 @@ fn rhs_periph(cb: f64, cp: f64, kp_periph: f64, qp_vpe: f64) -> f64 with Div {
     return qp_vpe * (cb - cp / kp_periph)
 }
 
+// ── Plain-f64 RK4 sim (mirrors main; for finite-diff sensitivity) ──
+
+fn sim20_rk4_plain(cl: f64, kp_brain: f64, fu: f64) -> Concs with Mut, Div {
+    let v_blood = 5.0
+    let v_brain = 1.4
+    let v_periph = 40.0
+    let q_brain = 0.7
+    let q_periph = 3.9
+    let kp_periph = 3.0
+
+    let qb_vbl = q_brain / v_blood
+    let qp_vbl = q_periph / v_blood
+    let qsum_vbl = qb_vbl + qp_vbl
+    let qb_vbr = q_brain / v_brain
+    let qp_vpe = q_periph / v_periph
+
+    var c_blood = 6.0 / v_blood
+    var c_brain = 0.0
+    var c_periph = 0.0
+    let dt = 0.1
+    var step: i64 = 0
+    while step < 20 {
+        let k1b = rhs_blood(c_blood, c_brain, c_periph, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k1r = rhs_brain(c_blood, c_brain, kp_brain, qb_vbr)
+        let k1p = rhs_periph(c_blood, c_periph, kp_periph, qp_vpe)
+        let b2 = c_blood + 0.5 * dt * k1b
+        let r2 = c_brain + 0.5 * dt * k1r
+        let p2 = c_periph + 0.5 * dt * k1p
+        let k2b = rhs_blood(b2, r2, p2, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k2r = rhs_brain(b2, r2, kp_brain, qb_vbr)
+        let k2p = rhs_periph(b2, p2, kp_periph, qp_vpe)
+        let b3 = c_blood + 0.5 * dt * k2b
+        let r3 = c_brain + 0.5 * dt * k2r
+        let p3 = c_periph + 0.5 * dt * k2p
+        let k3b = rhs_blood(b3, r3, p3, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k3r = rhs_brain(b3, r3, kp_brain, qb_vbr)
+        let k3p = rhs_periph(b3, p3, kp_periph, qp_vpe)
+        let b4 = c_blood + dt * k3b
+        let r4 = c_brain + dt * k3r
+        let p4 = c_periph + dt * k3p
+        let k4b = rhs_blood(b4, r4, p4, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
+        let k4r = rhs_brain(b4, r4, kp_brain, qb_vbr)
+        let k4p = rhs_periph(b4, p4, kp_periph, qp_vpe)
+        let w = dt / 6.0
+        c_blood = c_blood + w * (k1b + 2.0 * k2b + 2.0 * k3b + k4b)
+        c_brain = c_brain + w * (k1r + 2.0 * k2r + 2.0 * k3r + k4r)
+        c_periph = c_periph + w * (k1p + 2.0 * k2p + 2.0 * k3p + k4p)
+        step = step + 1
+    }
+    return Concs { blood: c_blood, brain: c_brain, periph: c_periph }
+}
+
 // ── Main ──
 
-fn main() with IO, Mut, Div, Epistemic {
+fn main() -> i64 with IO, Mut, Div, Epistemic {
     // ── Uncertain parameters via measure() → seed budget channels ──
     let k_cl: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
     let k_kp: Knowledge<f64> = measure(0.08, uncertainty: 0.008)
@@ -68,38 +143,39 @@ fn main() with IO, Mut, Div, Epistemic {
     var c_brain = 0.0
     var c_periph = 0.0
 
-    // ── RK4 integration: 20 steps × 0.1 h = 2 h ──
+    // Family A contour (2026-08-18): Madaros FO does not cross user fn calls; RHS inlined here.
+// ── RK4 integration: 20 steps × 0.1 h = 2 h ──
     let dt = 0.1
     var step: i64 = 0
     while step < 20 {
         // ── k1: evaluate at current state ──
-        let k1b = rhs_blood(c_blood, c_brain, c_periph, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k1r = rhs_brain(c_blood, c_brain, kp_brain, qb_vbr)
-        let k1p = rhs_periph(c_blood, c_periph, kp_periph, qp_vpe)
+        let k1b = (((qb_vbl) * (c_brain) / (kp_brain)) + ((qp_vbl) * (c_periph) / (kp_periph)) - ((qsum_vbl) * (c_blood)) - ((cl) * (fu) / (v_blood) * (c_blood)))
+        let k1r = ((qb_vbr) * ((c_blood) - (c_brain) / (kp_brain)))
+        let k1p = ((qp_vpe) * ((c_blood) - (c_periph) / (kp_periph)))
 
         // ── k2: evaluate at midpoint using k1 slopes ──
         let b2 = c_blood + 0.5 * dt * k1b
         let r2 = c_brain + 0.5 * dt * k1r
         let p2 = c_periph + 0.5 * dt * k1p
-        let k2b = rhs_blood(b2, r2, p2, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k2r = rhs_brain(b2, r2, kp_brain, qb_vbr)
-        let k2p = rhs_periph(b2, p2, kp_periph, qp_vpe)
+        let k2b = (((qb_vbl) * (r2) / (kp_brain)) + ((qp_vbl) * (p2) / (kp_periph)) - ((qsum_vbl) * (b2)) - ((cl) * (fu) / (v_blood) * (b2)))
+        let k2r = ((qb_vbr) * ((b2) - (r2) / (kp_brain)))
+        let k2p = ((qp_vpe) * ((b2) - (p2) / (kp_periph)))
 
         // ── k3: evaluate at midpoint using k2 slopes ──
         let b3 = c_blood + 0.5 * dt * k2b
         let r3 = c_brain + 0.5 * dt * k2r
         let p3 = c_periph + 0.5 * dt * k2p
-        let k3b = rhs_blood(b3, r3, p3, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k3r = rhs_brain(b3, r3, kp_brain, qb_vbr)
-        let k3p = rhs_periph(b3, p3, kp_periph, qp_vpe)
+        let k3b = (((qb_vbl) * (r3) / (kp_brain)) + ((qp_vbl) * (p3) / (kp_periph)) - ((qsum_vbl) * (b3)) - ((cl) * (fu) / (v_blood) * (b3)))
+        let k3r = ((qb_vbr) * ((b3) - (r3) / (kp_brain)))
+        let k3p = ((qp_vpe) * ((b3) - (p3) / (kp_periph)))
 
         // ── k4: evaluate at endpoint using k3 slopes ──
         let b4 = c_blood + dt * k3b
         let r4 = c_brain + dt * k3r
         let p4 = c_periph + dt * k3p
-        let k4b = rhs_blood(b4, r4, p4, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k4r = rhs_brain(b4, r4, kp_brain, qb_vbr)
-        let k4p = rhs_periph(b4, p4, kp_periph, qp_vpe)
+        let k4b = (((qb_vbl) * (r4) / (kp_brain)) + ((qp_vbl) * (p4) / (kp_periph)) - ((qsum_vbl) * (b4)) - ((cl) * (fu) / (v_blood) * (b4)))
+        let k4r = ((qb_vbr) * ((b4) - (r4) / (kp_brain)))
+        let k4p = ((qp_vpe) * ((b4) - (p4) / (kp_periph)))
 
         // ── Update: y_{n+1} = y_n + (dt/6)(k1 + 2k2 + 2k3 + k4) ──
         let w = dt / 6.0
@@ -121,16 +197,107 @@ fn main() with IO, Mut, Div, Epistemic {
     print("var(brain)="); println(variance_of(c_brain))
     print("var(periph)="); println(variance_of(c_periph))
 
-    // ── ISO SS8 uncertainty budget ──
-    // Which PK parameter drives the uncertainty in predicted concentrations?
+    // ── Variance via Knowledge<f64> propagation (path a) ──
+    let var_blood_k = variance_of(c_blood)
+    let var_brain_k = variance_of(c_brain)
+    let var_periph_k = variance_of(c_periph)
+
+    // ── ISO §8 uncertainty budget via finite-difference Jacobian (path b) ──
+    // Same construction as rapamycin_iso_budget.sio, but propagating sensitivities
+    // through 4 RK4 stages instead of 1 Euler step. Validates that GUM linearization
+    // through a 4th-order integrator stays stable for this 3-parameter model.
+    let cl_nom: f64 = 12.4
+    let kp_nom: f64 = 0.08
+    let fu_nom: f64 = 0.08
+    let u_cl: f64 = 1.24
+    let u_kp: f64 = 0.008
+    let u_fu: f64 = 0.008
+    let h_cl: f64 = 0.124
+    let h_kp: f64 = 0.0008
+    let h_fu: f64 = 0.0008
+
+    let nominal = sim20_rk4_plain(cl_nom, kp_nom, fu_nom)
+    let p_cl = sim20_rk4_plain(cl_nom + h_cl, kp_nom, fu_nom)
+    let p_kp = sim20_rk4_plain(cl_nom, kp_nom + h_kp, fu_nom)
+    let p_fu = sim20_rk4_plain(cl_nom, kp_nom, fu_nom + h_fu)
+
+    let s_blood_cl = (p_cl.blood - nominal.blood) / h_cl
+    let s_blood_kp = (p_kp.blood - nominal.blood) / h_kp
+    let s_blood_fu = (p_fu.blood - nominal.blood) / h_fu
+    let s_brain_cl = (p_cl.brain - nominal.brain) / h_cl
+    let s_brain_kp = (p_kp.brain - nominal.brain) / h_kp
+    let s_brain_fu = (p_fu.brain - nominal.brain) / h_fu
+    let s_periph_cl = (p_cl.periph - nominal.periph) / h_cl
+    let s_periph_kp = (p_kp.periph - nominal.periph) / h_kp
+    let s_periph_fu = (p_fu.periph - nominal.periph) / h_fu
+
     print("\n--- Blood concentration budget (RK4) ---\n")
-    budget_of(c_blood)
+    var bb = budget64_new(nominal.blood, 0.95)
+    budget64_add_type_b(&!bb, 0, cl_nom, u_cl, s_blood_cl)
+    budget64_add_type_b(&!bb, 1, kp_nom, u_kp, s_blood_kp)
+    budget64_add_type_b(&!bb, 2, fu_nom, u_fu, s_blood_fu)
+    budget64_finalize(&!bb)
+    budget64_print_report(&bb)
 
     print("\n--- Brain concentration budget (RK4) ---\n")
-    budget_of(c_brain)
+    var br = budget64_new(nominal.brain, 0.95)
+    budget64_add_type_b(&!br, 0, cl_nom, u_cl, s_brain_cl)
+    budget64_add_type_b(&!br, 1, kp_nom, u_kp, s_brain_kp)
+    budget64_add_type_b(&!br, 2, fu_nom, u_fu, s_brain_fu)
+    budget64_finalize(&!br)
+    budget64_print_report(&br)
 
     print("\n--- Peripheral concentration budget (RK4) ---\n")
-    budget_of(c_periph)
+    var bp = budget64_new(nominal.periph, 0.95)
+    budget64_add_type_b(&!bp, 0, cl_nom, u_cl, s_periph_cl)
+    budget64_add_type_b(&!bp, 1, kp_nom, u_kp, s_periph_kp)
+    budget64_add_type_b(&!bp, 2, fu_nom, u_fu, s_periph_fu)
+    budget64_finalize(&!bp)
+    budget64_print_report(&bp)
 
+    // ── Honest cross-check: see rapamycin_iso_budget.sio rationale ──
+    print("\n--- Cross-check: Knowledge propagation vs Budget64 (RK4) ---\n")
+    let std_blood_k = iso_sqrt_rk4(var_blood_k)
+    let std_brain_k = iso_sqrt_rk4(var_brain_k)
+    let std_periph_k = iso_sqrt_rk4(var_periph_k)
+    print("blood: std(Knowledge)="); println(std_blood_k)
+    print("blood: std(Budget64)="); println(bb.combined_std_uncert)
+    print("brain: std(Knowledge)="); println(std_brain_k)
+    print("brain: std(Budget64)="); println(br.combined_std_uncert)
+    print("periph: std(Knowledge)="); println(std_periph_k)
+    print("periph: std(Budget64)="); println(bp.combined_std_uncert)
+
+    if std_blood_k > 1.0e-15 {
+        let r = std_blood_k / bb.combined_std_uncert
+        if r > 0.9 { if r < 1.1 { print("blood: Knowledge ≈ Budget64 (within 10%)\n") } else { print("blood: Knowledge / Budget64 ratio out of [0.9,1.1]\n") } }
+        else { print("blood: Knowledge / Budget64 ratio out of [0.9,1.1]\n") }
+    } else {
+        print("blood: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
+    }
+    if std_brain_k > 1.0e-15 {
+        let r = std_brain_k / br.combined_std_uncert
+        if r > 0.9 { if r < 1.1 { print("brain: Knowledge ≈ Budget64 (within 10%)\n") } else { print("brain: Knowledge / Budget64 ratio out of [0.9,1.1]\n") } }
+        else { print("brain: Knowledge / Budget64 ratio out of [0.9,1.1]\n") }
+    } else {
+        print("brain: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
+    }
+    if std_periph_k > 1.0e-15 {
+        let r = std_periph_k / bp.combined_std_uncert
+        if r > 0.9 { if r < 1.1 { print("periph: Knowledge ≈ Budget64 (within 10%)\n") } else { print("periph: Knowledge / Budget64 ratio out of [0.9,1.1]\n") } }
+        else { print("periph: Knowledge / Budget64 ratio out of [0.9,1.1]\n") }
+    } else {
+        print("periph: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
+    }
+
+    // Family A is CALCULATION, not print: a live var is ~1e-4 (visible at 6dp).
+    // Collapse to exact 0 must fail, not print PASS and exit 0.
+    let ok_var = var_blood_k > 1.0e-18 && var_brain_k > 0.0 && var_periph_k >= 0.0
+    if !ok_var {
+        print("FABRICATED_ZERO\n")
+        print("EPISTEMIC_FABRICATION: variance_of collapsed to ~0 under this engine\n")
+        return 1
+    }
+    println("FAMILY_A_VAR_LIVE")
     print("PASS\n")
+    0
 }

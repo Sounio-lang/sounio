@@ -1,0 +1,179 @@
+// stdlib/numerical/linalg.sio
+//
+// Fixed 7x7 f64 Cholesky-Banachiewicz factorization for small covariance and
+// correlation matrices used by dissertation PBPK uncertainty propagation.
+
+fn num_linalg_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn num_linalg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+pub struct Cholesky7 {
+    l: [f64; 49],
+    ok: bool,
+    min_pivot: f64,
+}
+
+pub fn mat7_idx(r: i32, c: i32) -> i32 {
+    return r * 7 + c
+}
+
+pub fn mat7_zero() -> [f64; 49] {
+    return [0.0; 49]
+}
+
+pub fn mat7_identity() -> [f64; 49] with Mut, Panic {
+    var a = mat7_zero()
+    var i: i32 = 0
+    while i < 7 {
+        a[mat7_idx(i, i)] = 1.0
+        i = i + 1
+    }
+    return a
+}
+
+pub fn mat7_set(a: [f64; 49], r: i32, c: i32, v: f64) -> [f64; 49] with Mut, Panic {
+    var out = a
+    out[mat7_idx(r, c)] = v
+    return out
+}
+
+pub fn mat7_get(a: [f64; 49], r: i32, c: i32) -> f64 with Panic {
+    return a[mat7_idx(r, c)]
+}
+
+pub fn mat7_frobenius_norm(a: [f64; 49]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i: i32 = 0
+    while i < 49 {
+        s = s + a[i] * a[i]
+        i = i + 1
+    }
+    return num_linalg_sqrt(s)
+}
+
+pub fn cholesky7_banachiewicz(a: [f64; 49]) -> Cholesky7 with Mut, Div, Panic {
+    var l = mat7_zero()
+    var min_pivot = 1.0e99
+    var i: i32 = 0
+    while i < 7 {
+        var j: i32 = 0
+        while j <= i {
+            var sum = mat7_get(a, i, j)
+            var k: i32 = 0
+            while k < j {
+                sum = sum - mat7_get(l, i, k) * mat7_get(l, j, k)
+                k = k + 1
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    return Cholesky7 { l: l, ok: false, min_pivot: sum }
+                }
+                if sum < min_pivot { min_pivot = sum }
+                l = mat7_set(l, i, j, num_linalg_sqrt(sum))
+            } else {
+                let diag = mat7_get(l, j, j)
+                if diag <= 0.0 {
+                    return Cholesky7 { l: l, ok: false, min_pivot: 0.0 }
+                }
+                l = mat7_set(l, i, j, sum / diag)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return Cholesky7 { l: l, ok: true, min_pivot: min_pivot }
+}
+
+pub fn mat7_lower_times_lower_t(l: [f64; 49]) -> [f64; 49] with Mut, Div, Panic {
+    var out = mat7_zero()
+    var i: i32 = 0
+    while i < 7 {
+        var j: i32 = 0
+        while j < 7 {
+            var s = 0.0
+            var k: i32 = 0
+            while k < 7 {
+                s = s + mat7_get(l, i, k) * mat7_get(l, j, k)
+                k = k + 1
+            }
+            out = mat7_set(out, i, j, s)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+pub fn mat7_reconstruction_relative_error(a: [f64; 49], l: [f64; 49]) -> f64 with Mut, Div, Panic {
+    let recon = mat7_lower_times_lower_t(l)
+    var diff = mat7_zero()
+    var i: i32 = 0
+    while i < 49 {
+        diff[i] = recon[i] - a[i]
+        i = i + 1
+    }
+    let denom = mat7_frobenius_norm(a)
+    if denom <= 0.0 { return mat7_frobenius_norm(diff) }
+    return mat7_frobenius_norm(diff) / denom
+}
+
+pub fn mat7_from_nested(a: [[f64; 7]; 7]) -> [f64; 49] with Mut, Panic {
+    var out = mat7_zero()
+    var i: i32 = 0
+    while i < 7 {
+        var j: i32 = 0
+        while j < 7 {
+            out = mat7_set(out, i, j, a[i as usize][j as usize])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+pub fn mat7_to_nested(a: [f64; 49]) -> [[f64; 7]; 7] with Mut, Panic {
+    return [
+        [a[0],  a[1],  a[2],  a[3],  a[4],  a[5],  a[6]],
+        [a[7],  a[8],  a[9],  a[10], a[11], a[12], a[13]],
+        [a[14], a[15], a[16], a[17], a[18], a[19], a[20]],
+        [a[21], a[22], a[23], a[24], a[25], a[26], a[27]],
+        [a[28], a[29], a[30], a[31], a[32], a[33], a[34]],
+        [a[35], a[36], a[37], a[38], a[39], a[40], a[41]],
+        [a[42], a[43], a[44], a[45], a[46], a[47], a[48]],
+    ]
+}
+
+pub fn cholesky(a: [[f64; 7]; 7]) -> [[f64; 7]; 7] with Mut, Div, Panic {
+    let flat = mat7_from_nested(a)
+    let result = cholesky7_banachiewicz(flat)
+    return mat7_to_nested(result.l)
+}

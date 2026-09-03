@@ -1,0 +1,113 @@
+//@ run-pass
+//@ expect-stdout: FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS
+
+// Multi-dose / dosing-interval FO series — Pk-method science companion.
+//
+// Oral steady-state average concentration under three intervals:
+//   Css(τ) = (F·Dose/τ) / (CL0·exp(η))
+// With FO on F, Dose, CL0, η (τ fixed per scenario).
+//
+// Scaling law (Css ∝ 1/τ): Var(Css) ∝ 1/τ² relative to the τ=12 reference
+//   Var(12)=0.795833
+//   Var(8) =0.795833·(12/8)²  = 1.790625
+//   Var(24)=0.795833·(12/24)² = 0.198958
+//
+// Also kel = CL/V with shared η → η cancels; FO only from CL0, V0:
+//   kel=0.1, Var=0.000052
+//
+// Surfaces: struct-lit methods, make_pk call-result, free-fn parity at τ=12.
+// Not clinical guidance. Gate greps science-table numbers.
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+impl Pk {
+    fn clearance(self: &Pk, eta: f64) -> f64 {
+        self.cl0 * exp(eta)
+    }
+    fn volume(self: &Pk, eta: f64) -> f64 {
+        self.v0 * exp(eta)
+    }
+    fn rate(self: &Pk, f: f64, dose: f64, tau: f64) -> f64 {
+        (f * dose) / tau
+    }
+    fn css(self: &Pk, f: f64, dose: f64, tau: f64, eta: f64) -> f64 {
+        self.rate(f, dose, tau) / self.clearance(eta)
+    }
+    // Elimination rate constant CL/V (shared η cancels)
+    fn kel(self: &Pk, eta_cl: f64, eta_v: f64) -> f64 {
+        self.clearance(eta_cl) / self.volume(eta_v)
+    }
+}
+
+fn make_pk(cl0: f64, v0: f64) -> Pk {
+    Pk { cl0: cl0, v0: v0 }
+}
+
+fn free_css(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    ((f * dose) / tau) / (cl0 * exp(eta))
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kV0: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+
+    let f = kF.value
+    let dose = kDose.value
+    let cl0 = kCL0.value
+    let v0 = kV0.value
+    let eta = kEta.value
+
+    let pk = Pk { cl0: cl0, v0: v0 }
+
+    // ── τ=12 reference first (matches parent driver FO budget / Hessian) ──
+    let css12 = pk.css(f, dose, 12.0, eta)
+    let v12 = variance_of(pk.css(f, dose, 12.0, eta))
+    let m2_12 = second_order_mean(pk.css(f, dose, 12.0, eta))
+    let h_12 = hessian_diag_of(pk.css(f, dose, 12.0, eta))
+    let v12_call = variance_of(make_pk(cl0, v0).css(f, dose, 12.0, eta))
+    let v12_free = variance_of(free_css(f, dose, 12.0, cl0, eta))
+    let m2_12_call = second_order_mean(make_pk(cl0, v0).css(f, dose, 12.0, eta))
+
+    // ── τ series wings: 8 h, 24 h ──
+    let css8 = pk.css(f, dose, 8.0, eta)
+    let css24 = pk.css(f, dose, 24.0, eta)
+    let v8 = variance_of(pk.css(f, dose, 8.0, eta))
+    let v24 = variance_of(pk.css(f, dose, 24.0, eta))
+
+    // Scaling (Var ∝ 1/τ²): print fixed analytic ratios for gate stability
+    //  (12/8)²=2.25, (12/24)²=0.25 — measured v8/v12 ≈ 2.25 within float print
+    let scale_8 = v8 / v12
+    let scale_24 = v24 / v12
+
+    // kel FO (shared η cancels → only CL0, V0)
+    let kel_pt = pk.kel(eta, eta)
+    let v_kel = variance_of(pk.kel(eta, eta))
+    let v_kel_call = variance_of(make_pk(cl0, v0).kel(eta, eta))
+    let v_kel_peel = variance_of(cl0 / v0)
+
+    print("=== FO_PK_STRUCT_MULTIDOSE science table ===\n")
+    print("css8="); print_f64(css8); print("\n")
+    print("css12="); print_f64(css12); print("\n")
+    print("css24="); print_f64(css24); print("\n")
+    print("v_css8="); print_f64(v8); print("\n")
+    print("v_css12="); print_f64(v12); print("\n")
+    print("v_css24="); print_f64(v24); print("\n")
+    print("v_css12_call="); print_f64(v12_call); print("\n")
+    print("v_css12_free="); print_f64(v12_free); print("\n")
+    print("m2_css12="); print_f64(m2_12); print("\n")
+    print("m2_css12_call="); print_f64(m2_12_call); print("\n")
+    print("h_css12="); print_f64(h_12); print("\n")
+    print("var_scale_8_over_12="); print_f64(scale_8); print("\n")
+    print("var_scale_24_over_12="); print_f64(scale_24); print("\n")
+    print("kel_point="); print_f64(kel_pt); print("\n")
+    print("v_kel="); print_f64(v_kel); print("\n")
+    print("v_kel_call="); print_f64(v_kel_call); print("\n")
+    print("v_kel_peel="); print_f64(v_kel_peel); print("\n")
+    print("FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS\n")
+}

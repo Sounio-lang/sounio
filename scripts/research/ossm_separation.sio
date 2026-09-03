@@ -1,0 +1,123 @@
+// O-SSM vs H-SSM separation on non-associative triples — clean reimplementation.
+// The label of (e_a,e_b,e_c,mode) is the octonion product under that bracketing:
+//   LEFT = (e_a*e_b)*e_c , RIGHT = e_a*(e_b*e_c) , encoded as 16 classes (sign x index).
+// A triple is mode-sensitive (non-associative) iff LEFT-class != RIGHT-class.
+//
+// Capacity claim (no training, provable):
+//   O-SSM (octonion algebra) computes the product in the given bracketing -> can hit 100%.
+//   H-SSM (associative algebra) has (xy)z = x(yz): its product is MODE-BLIND, so on a
+//   non-assoc triple its single prediction matches at most one of {LEFT,RIGHT} -> <=50%.
+// The associative CEILING is instantiated here by the fairest mode-blind predictor.
+
+struct Oct { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64 }
+
+fn oct_mul(a: Oct, b: Oct) -> Oct {
+    let c0 = a.a*b.a - a.b*b.b - a.c*b.c - a.d*b.d - a.e*b.e - a.f*b.f - a.g*b.g - a.h*b.h
+    let c1 = a.a*b.b + a.b*b.a + a.c*b.d - a.d*b.c + a.e*b.f - a.f*b.e - a.g*b.h + a.h*b.g
+    let c2 = a.a*b.c - a.b*b.d + a.c*b.a + a.d*b.b + a.e*b.g + a.f*b.h - a.g*b.e - a.h*b.f
+    let c3 = a.a*b.d + a.b*b.c - a.c*b.b + a.d*b.a + a.e*b.h - a.f*b.g + a.g*b.f - a.h*b.e
+    let c4 = a.a*b.e - a.b*b.f - a.c*b.g - a.d*b.h + a.e*b.a + a.f*b.b + a.g*b.c + a.h*b.d
+    let c5 = a.a*b.f + a.b*b.e - a.c*b.h + a.d*b.g - a.e*b.b + a.f*b.a - a.g*b.d + a.h*b.c
+    let c6 = a.a*b.g + a.b*b.h + a.c*b.e - a.d*b.f - a.e*b.c + a.f*b.d + a.g*b.a - a.h*b.b
+    let c7 = a.a*b.h - a.b*b.g + a.c*b.f + a.d*b.e - a.e*b.d - a.f*b.c + a.g*b.b + a.h*b.a
+    Oct { a: c0, b: c1, c: c2, d: c3, e: c4, f: c5, g: c6, h: c7 }
+}
+
+fn basis(i: i64) -> Oct {
+    Oct {
+        a: if i == 0 { 1.0 } else { 0.0 }, b: if i == 1 { 1.0 } else { 0.0 },
+        c: if i == 2 { 1.0 } else { 0.0 }, d: if i == 3 { 1.0 } else { 0.0 },
+        e: if i == 4 { 1.0 } else { 0.0 }, f: if i == 5 { 1.0 } else { 0.0 },
+        g: if i == 6 { 1.0 } else { 0.0 }, h: if i == 7 { 1.0 } else { 0.0 },
+    }
+}
+
+fn comp(o: Oct, k: i64) -> f64 {
+    if k == 0 { o.a } else { if k == 1 { o.b } else { if k == 2 { o.c } else {
+    if k == 3 { o.d } else { if k == 4 { o.e } else { if k == 5 { o.f } else {
+    if k == 6 { o.g } else { o.h } } } } } } }
+}
+
+// product of basis elements is +-e_k ; class = k + 8*(sign<0)
+fn oct_class(o: Oct) -> i64 with Mut {
+    var k = 0
+    while k < 8 {
+        let v = comp(o, k)
+        if v > 0.5 { return k }
+        if v < 0.0 - 0.5 { return 8 + k }
+        k = k + 1
+    }
+    0 - 1
+}
+
+fn left_class(a: i64, b: i64, c: i64) -> i64 with Mut {
+    oct_class(oct_mul(oct_mul(basis(a), basis(b)), basis(c)))
+}
+fn right_class(a: i64, b: i64, c: i64) -> i64 with Mut {
+    oct_class(oct_mul(basis(a), oct_mul(basis(b), basis(c))))
+}
+
+fn permil(num: i64, den: i64) -> i64 {
+    if den <= 0 { return 0 - 1 }
+    (1000.0 * (num as f64) / (den as f64)) as i64
+}
+
+fn main() -> i64 with IO, Mut, Panic {
+    println("== O-SSM vs H-SSM: representational separation on bracketing ==")
+    var na512 = 0
+    var na_dimag = 0
+    // (triple, mode) accuracy accumulators
+    var osm_ok_na = 0; var tot_na = 0     // non-assoc (triple,mode) pairs
+    var asc_ok_na = 0
+    var osm_ok_as = 0; var tot_as = 0     // assoc pairs
+    var asc_ok_as = 0
+
+    var a = 0
+    while a < 8 {
+        var b = 0
+        while b < 8 {
+            var c = 0
+            while c < 8 {
+                let lc = left_class(a, b, c)
+                let rc = right_class(a, b, c)
+                let nonassoc = lc != rc
+                if nonassoc {
+                    na512 = na512 + 1
+                    if a > 0 && b > 0 && c > 0 && a != b && b != c && a != c {
+                        na_dimag = na_dimag + 1
+                    }
+                    // two modes: octonion right on both; mode-blind (always LEFT) right on LEFT only
+                    tot_na = tot_na + 2
+                    osm_ok_na = osm_ok_na + 2
+                    asc_ok_na = asc_ok_na + 1
+                } else {
+                    tot_as = tot_as + 2
+                    osm_ok_as = osm_ok_as + 2
+                    asc_ok_as = asc_ok_as + 2
+                }
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    print("non-assoc triples: "); print_int(na512); print(" / 512   (distinct-imag ")
+    print_int(na_dimag); println(" / 210)")
+
+    println("")
+    println("accuracy (permil) on the 16-class bracketing label:")
+    print("  O-SSM (octonion)   non-assoc: "); print_int(permil(osm_ok_na, tot_na))
+    print("   assoc: "); print_int(permil(osm_ok_as, tot_as))
+    print("   overall: "); print_int(permil(osm_ok_na + osm_ok_as, tot_na + tot_as)); println("")
+    print("  H-SSM (associative) non-assoc: "); print_int(permil(asc_ok_na, tot_na))
+    print("   assoc: "); print_int(permil(asc_ok_as, tot_as))
+    print("   overall: "); print_int(permil(asc_ok_na + asc_ok_as, tot_na + tot_as)); println("")
+
+    println("")
+    print("SEPARATION on non-assoc triples (O-SSM - H-SSM, permil): ")
+    print_int(permil(osm_ok_na, tot_na) - permil(asc_ok_na, tot_na))
+    println("")
+    println("(H-SSM ceiling is 500 on non-assoc: an associative algebra cannot use bracketing.)")
+    0
+}

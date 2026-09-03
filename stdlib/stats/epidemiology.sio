@@ -1,0 +1,203 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/epidemiology.sio — risk / odds measures from a 2x2 table
+//
+// The effect measures of a cohort / trial 2x2 table, each with a confidence
+// interval — the language of clinical epidemiology:
+//
+//              outcome+   outcome-
+//   exposed      a          b
+//   unexposed    c          d
+//
+//   epi_2x2(a, b, c, d, conf) -> EpiResult
+//
+//   risk_e = a/(a+b),  risk_u = c/(c+d)
+//   RR  = risk_e/risk_u        (CI on the log scale, SE = sqrt(1/a−1/(a+b)+1/c−1/(c+d)))
+//   OR  = a·d/(b·c)            (CI on the log scale, SE = sqrt(1/a+1/b+1/c+1/d))
+//   RD  = risk_e − risk_u      (CI via the binomial SEs)
+//   ARR = |RD|,  RRR = 1 − RR (protective side),  NNT = 1/|RD|
+//
+// Scalar throughout (no data arrays) — sidesteps the array-heavy codegen crash.
+//
+// Pure Sounio; the only dependency is the normal quantile (special::erf).
+//
+// References:
+//   Altman (1991) "Practical Statistics for Medical Research";
+//   Rothman, Greenland & Lash (2008) "Modern Epidemiology"
+
+module stats::epidemiology
+
+use special::erf::{normal_quantile}
+
+fn epi_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 20 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn epi_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn epi_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / epi_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return epi_exp(x / 2.0) * epi_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    return sum
+}
+
+pub struct EpiResult {
+    pub risk_exposed: f64,
+    pub risk_unexposed: f64,
+    pub rr: f64,        pub rr_lo: f64,  pub rr_hi: f64,     // risk ratio + CI
+    pub or_: f64,       pub or_lo: f64,  pub or_hi: f64,     // odds ratio + CI
+    pub rd: f64,        pub rd_lo: f64,  pub rd_hi: f64,     // risk difference + CI
+    pub arr: f64,       // |risk difference|
+    pub rrr: f64,       // 1 - RR
+    pub nnt: f64,       // 1/|RD| (NNT to benefit or harm)
+}
+
+/// Risk/odds measures from a 2x2 table (a,b top row = exposed; c,d = unexposed).
+///
+/// Parâmetros: a,b,c,d — cell counts; conf — CI level (e.g. 0.95).
+/// Retorno: EpiResult (risks, RR/OR/RD with CIs, ARR, RRR, NNT).
+/// Referências: Altman (1991); Rothman et al. (2008).
+pub fn epi_2x2(a: i64, b: i64, c: i64, d: i64, conf: f64) -> EpiResult with Mut, Div, Panic {
+    let af = a as f64
+    let bf = b as f64
+    let cf = c as f64
+    let df = d as f64
+    let n_e = af + bf
+    let n_u = cf + df
+    let z = normal_quantile(0.5 + conf / 2.0)
+
+    var risk_e = 0.0
+    if n_e > 0.0 { risk_e = af / n_e }
+    var risk_u = 0.0
+    if n_u > 0.0 { risk_u = cf / n_u }
+
+    // risk ratio + log CI
+    var rr = 0.0
+    if risk_u > 1.0e-300 { rr = risk_e / risk_u }
+    var rr_lo = rr
+    var rr_hi = rr
+    if af > 0.0 && cf > 0.0 && rr > 0.0 {
+        let se_ln = epi_sqrt(1.0 / af - 1.0 / n_e + 1.0 / cf - 1.0 / n_u)
+        let lr = epi_ln(rr)
+        rr_lo = epi_exp(lr - z * se_ln)
+        rr_hi = epi_exp(lr + z * se_ln)
+    }
+
+    // odds ratio + log CI
+    var or_ = 0.0
+    if bf > 0.0 && cf > 0.0 { or_ = af * df / (bf * cf) }
+    var or_lo = or_
+    var or_hi = or_
+    if af > 0.0 && bf > 0.0 && cf > 0.0 && df > 0.0 && or_ > 0.0 {
+        let se_ln = epi_sqrt(1.0 / af + 1.0 / bf + 1.0 / cf + 1.0 / df)
+        let lo = epi_ln(or_)
+        or_lo = epi_exp(lo - z * se_ln)
+        or_hi = epi_exp(lo + z * se_ln)
+    }
+
+    // risk difference + CI
+    let rd = risk_e - risk_u
+    var rd_se = 0.0
+    if n_e > 0.0 && n_u > 0.0 {
+        rd_se = epi_sqrt(risk_e * (1.0 - risk_e) / n_e + risk_u * (1.0 - risk_u) / n_u)
+    }
+    let rd_lo = rd - z * rd_se
+    let rd_hi = rd + z * rd_se
+
+    let arr = if rd < 0.0 { 0.0 - rd } else { rd }
+    var nnt = 1.0e300
+    if arr > 1.0e-300 { nnt = 1.0 / arr }
+
+    return EpiResult {
+        risk_exposed: risk_e, risk_unexposed: risk_u,
+        rr: rr, rr_lo: rr_lo, rr_hi: rr_hi,
+        or_: or_, or_lo: or_lo, or_hi: or_hi,
+        rd: rd, rd_lo: rd_lo, rd_hi: rd_hi,
+        arr: arr, rrr: 1.0 - rr, nnt: nnt,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// a=15,b=85,c=5,d=95. risk_e=0.15, risk_u=0.05. RR=3.0, OR=(15·95)/(85·5)=3.352941,
+// RD=0.10, NNT=10. RR 95% CI ≈ [1.133, 7.94]; OR 95% CI ≈ [1.169, 9.61].
+fn test_epi() -> bool with IO, Mut, Div, Panic {
+    let r = epi_2x2(15, 85, 5, 95, 0.95)
+    var ok = true
+    ok = check(1, approx(r.risk_exposed, 0.15, 1.0e-12)) && ok
+    ok = check(2, approx(r.risk_unexposed, 0.05, 1.0e-12)) && ok
+    ok = check(3, approx(r.rr, 3.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.or_, 3.352941, 1.0e-5)) && ok
+    ok = check(5, approx(r.rd, 0.10, 1.0e-12)) && ok
+    ok = check(6, approx(r.nnt, 10.0, 1.0e-9)) && ok
+    ok = check(7, approx(r.rr_lo, 1.133, 5.0e-3)) && ok
+    ok = check(8, approx(r.rr_hi, 7.94, 2.0e-2)) && ok
+    ok = check(9, approx(r.or_lo, 1.169, 5.0e-3)) && ok
+    return ok
+}
+
+// no association: equal risks -> RR=1, OR=1, RD=0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    let r = epi_2x2(20, 80, 20, 80, 0.95)
+    var ok = true
+    ok = check(20, approx(r.rr, 1.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.or_, 1.0, 1.0e-9)) && ok
+    ok = check(22, approx(r.rd, 0.0, 1.0e-12)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_epi() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

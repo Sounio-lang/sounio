@@ -1,18 +1,18 @@
 ## Description
 
-<!-- Describe your changes in detail. What problem does this solve? -->
+<!-- Describe your changes in detail. What problem or issue does this solve? -->
 
 ## Type of Change
 
 <!-- Mark with an `x` all that apply -->
 
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Refactoring (no functional changes)
-- [ ] Documentation update
-- [ ] Test improvement
-- [ ] Performance improvement
+- [ ] Bug fix (non-breaking change that fixes a compiler or runtime bug)
+- [ ] New feature (non-breaking change that adds a language or stdlib capability)
+- [ ] Breaking change (fix or feature that would cause existing Sounio code to fail compilation)
+- [ ] Refactoring (internal compiler or website optimization, no functional changes)
+- [ ] Documentation update (translations, expansions, or spec syncs)
+- [ ] Test improvement (adding compile-fail gates or golden snapshot validations)
+- [ ] Performance improvement (reduction of bootstrap build time or codegen optimization)
 
 ## Related Issues
 
@@ -22,37 +22,36 @@
 
 <!-- Map this PR to release-readiness tracking when relevant -->
 
-- Traceability Matrix ID(s): <!-- e.g., COMP-001, WEB-001 -->
-- Evidence Log(s): <!-- e.g., artifacts/diagnostic/final-.../logs/... -->
+- Traceability Matrix ID(s): <!-- e.g., COMP-001, WEB-001, ONT-042 -->
+- Evidence Log(s): <!-- e.g., artifacts/diagnostic/... -->
 
 ## Release Scope
 
 <!-- Mark with an `x` all that apply -->
 
-- [ ] Compiler
+- [ ] Compiler (self-hosted / codegen)
+- [ ] Stdlib (modules, units, epistemic types, ontology)
 - [ ] Docs
 - [ ] Website
 - [ ] CI / Workflow contracts
 - [ ] Non-release-blocking change
 
-<!-- Intake automation reads this section. Keep scope + traceability populated. -->
+<!-- Sounio automated intake parses this section. Keep scope and traceability populated. -->
 
-## Checklist
+---
 
-<!-- Mark with an `x` all that apply -->
+## Quality Checklist
 
-- [ ] My code follows the project's style guidelines
-- [ ] I have run `cargo fmt` and `cargo clippy`
-- [ ] I have added tests that prove my fix/feature works
-- [ ] All new and existing tests pass (`cargo test`)
-- [ ] I have updated documentation as needed
-- [ ] I completed `Traceability` and `Release Scope` sections (required by PR intake enforcement)
-- [ ] My commits follow the project's commit message format
+<!-- Mark with an `x` all that apply. Sounio's PR intake enforcement requires these to be verified. -->
 
-## Testing
-
-<!-- Describe how you tested your changes -->
-
-## Additional Notes
-
-<!-- Any additional information that reviewers should know -->
+- [ ] **Semicolon Check**: I have verified there are absolutely no semicolons at the end of Sounio statements.
+- [ ] **Sounio Syntax Standards**: I used `var` instead of `let mut`, and `&!` instead of `&mut`.
+- [ ] **Algebraic Effects declared**: Every modified function declares its active side-effects correctly (`with IO, Mut, Div, Panic`, etc.).
+- [ ] **No Rust Macro syntax**: I used standard `println()` and `assert()` instead of `println!` or `assert!`.
+- [ ] **Mathematical Operators**: I wrote negative numbers using explicit math (`0 - x` instead of `-x`).
+- [ ] **Bit Shifts**: Shift operands are explicitly cast or typed as `u8` (e.g. `x >> 4u8`).
+- [ ] **Compile and Type-Check**: I verified my code compiles and type-checks successfully using `./bin/souc check <file>`.
+- [ ] **Test Suite passes**: I have run `bash scripts/run_sio_test_suite.sh` and verified that the entire test suite is green.
+- [ ] **Documentation Registry Sync**: I ran `node scripts/docs/check_docs_registry.mjs` and ensured the topic registry is consistent. If I edited documentation, I updated the metadata with `node scripts/docs/sync_governance_metadata.mjs`.
+- [ ] **LLM-Offload Policy Compliance**: If this PR touches math derivations, Lean 4 proofs, or clinical pathways, I ran the mandatory `bin/llm-offload` audits and appended logs to `.claude/llm_offload_log.md`.
+- [ ] **Apache-2.0 License**: I understand that my contributions will be licensed under the Apache License, Version 2.0.

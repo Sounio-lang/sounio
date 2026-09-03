@@ -9,10 +9,10 @@
 //   3. Fase 3: HTTP/2 nativo com compressão
 //
 // Endpoints suportados:
-//   GET  /api/v1/search?q=<query>&min_score=<score>
+//   GET  /api/v1/search?q=<query>
 //   GET  /api/v1/packages/<name>/<version>
-//   GET  /api/v1/packages/<name>/epistemic-report
-//   POST /api/v1/packages  (publish)
+//   GET  /api/v1/packages/<name>/boundary-report
+//   POST /api/v1/packages  (disabled until registry attestation exists)
 //
 // O parser JSON é minimalista — extrai apenas os campos necessários.
 
@@ -39,7 +39,7 @@ let REG_OK: i64            = 0
 let REG_NOT_FOUND: i64     = 1
 let REG_NETWORK_ERROR: i64 = 2
 let REG_AUTH_ERROR: i64    = 3
-let REG_SCORE_TOO_LOW: i64 = 4
+let REG_BOUNDARY_REQUIRED: i64 = 4
 let REG_PARSE_ERROR: i64   = 5
 let REG_DRY_RUN: i64       = 6
 
@@ -52,13 +52,8 @@ struct RegistryPackage {
     name_len: i64,
     version: [i8; 32],
     version_len: i64,
-    epistemic_score_pct: i64,    // 0–100
-    provenance_level: i64,       // 0=weak..3=regulatory
-    gum_compliant: bool,
-    regulatory_ready: bool,
     description: [i8; 256],
     description_len: i64,
-    tier: i64,                   // 0=experimental..3=regulatory
 }
 
 struct RegistrySearchResult {
@@ -83,13 +78,8 @@ fn registry_pkg_zero() -> RegistryPackage {
         name_len: 0,
         version: [0; 32],
         version_len: 0,
-        epistemic_score_pct: 0,
-        provenance_level: 0,
-        gum_compliant: false,
-        regulatory_ready: false,
         description: [0; 256],
         description_len: 0,
-        tier: 0,
     }
 }
 
@@ -311,12 +301,8 @@ pub fn registry_search(
 
     let base = if use_local { *REGISTRY_LOCAL_URL } else { *REGISTRY_BASE_URL }
     var url = base + "/search?q=" + *query
-    if min_score_pct > 0 {
-        url = url + "&min_score=" + int_to_string(min_score_pct)
-    }
-    if regulatory_only {
-        url = url + "&regulatory=true"
-    }
+    // Legacy score and regulatory filters are accepted by this compatibility
+    // signature but never influence dependency discovery or ordering.
 
     let tmp = reg_tmp_file()
     let curl_ret = reg_curl_get(&url, &tmp)
@@ -370,13 +356,11 @@ pub fn registry_get_package(
     }
     pkg.name_len = ni
 
-    // Parse epistemic score
-    pkg.epistemic_score_pct = json_extract_int(&response, &"epistemic_score_pct")
-
     pkg
 }
 
-// Publica um pacote no registry
+// Publication is intentionally unavailable in R0-R2. The compatibility
+// parameters are ignored; scalar metadata cannot authorize a release.
 pub fn registry_publish(
     name: &str,
     version: &str,
@@ -396,57 +380,19 @@ pub fn registry_publish(
         review_required: false,
     }
 
-    // Valida score mínimo
-    if epistemic_score_pct < 60 {
-        result.status = REG_SCORE_TOO_LOW
-        let msg = "epistemic-score below minimum (60%)"
-        let mlen = str_len(*msg)
-        var mi: i64 = 0
-        while mi < mlen && mi < 255 {
-            result.message[mi as usize] = str_char_at(*msg, mi) as i8
-            mi = mi + 1
-        }
-        result.message_len = mi
-        return result
-    }
-
-    result.review_required = regulatory && epistemic_score_pct >= 90
-
     if dry_run {
         result.status = REG_DRY_RUN
         return result
     }
-
-    // Monta payload JSON
-    let gum_str = if gum_compliant { "true" } else { "false" }
-    let reg_str = if regulatory { "true" } else { "false" }
-    let payload =
-        "{\"name\":\"" + *name +
-        "\",\"version\":\"" + *version +
-        "\",\"epistemic_score_pct\":" + int_to_string(epistemic_score_pct) +
-        ",\"gum_compliant\":" + gum_str +
-        ",\"regulatory_ready\":" + reg_str + "}"
-
-    let base = if use_local { *REGISTRY_LOCAL_URL } else { *REGISTRY_BASE_URL }
-    let url = base + "/packages"
-    let tmp = reg_tmp_file()
-
-    let curl_ret = reg_curl_post(&url, &payload, token, &tmp)
-
-    if curl_ret != 0 {
-        result.status = REG_NETWORK_ERROR
-        return result
+    result.status = REG_BOUNDARY_REQUIRED
+    let msg = "public registry publishing requires future receipt attestation"
+    let mlen = str_len(*msg)
+    var mi: i64 = 0
+    while mi < mlen && mi < 255 {
+        result.message[mi as usize] = str_char_at(*msg, mi) as i8
+        mi = mi + 1
     }
-
-    let response = reg_read_response(&tmp)
-    reg_cleanup_tmp()
-
-    if str_len(*response) == 0 {
-        result.status = REG_NETWORK_ERROR
-        return result
-    }
-
-    result.status = REG_OK
+    result.message_len = mi
     result
 }
 
@@ -467,11 +413,6 @@ pub fn registry_print_package(pkg: &RegistryPackage) with IO, Mut, Panic, Div {
         print_char((*pkg).version[i as usize] as i64)
         i = i + 1
     }
-    print("  score=")
-    print_int((*pkg).epistemic_score_pct)
-    print("%")
-    if (*pkg).gum_compliant { print("  [GUM]") }
-    if (*pkg).regulatory_ready { print("  [REGULATORY]") }
     println("")
 }
 
@@ -496,14 +437,15 @@ pub fn registry_print_search_results(r: &RegistrySearchResult) with IO, Mut, Pan
 // ============================================================================
 
 pub fn registry_client_self_test() -> bool with IO, Mut, Panic, Div {
-    // Testa apenas a lógica de score mínimo (sem rede)
+    // Scalar metadata cannot authorize publication.
     let result = registry_publish(
         &"test-pkg", &"0.1.0",
-        40,       // score too low
+        100,
         false, false,
         &"", false, false
     )
-    if result.status != REG_SCORE_TOO_LOW { return false }
+    if result.status != REG_BOUNDARY_REQUIRED { return false }
+    if result.review_required { return false }
 
     // Dry run deve sempre retornar REG_DRY_RUN
     let dry = registry_publish(

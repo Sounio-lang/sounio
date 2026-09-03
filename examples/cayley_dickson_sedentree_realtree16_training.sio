@@ -1,0 +1,1156 @@
+//! examples/cayley_dickson_sedentree_realtree16_training.sio
+//!
+//! First TRAINED (not just algebra-verified) re-run of the paper's §3.3/§9.4
+//! SedenTree claim in docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md:
+//! that a 16-dimensional sedenion-product tree (SedenTree) solves a
+//! nested-vs-crossed structural discrimination task that a dimensionally-
+//! matched elementwise-product control (RealTree-16) cannot, because the
+//! sedenion product is non-alternative and can therefore represent
+//! parenthesization-order (nesting vs crossing) that a commutative product
+//! cannot. This is the SedenTree counterpart to
+//! examples/cayley_dickson_octtree_realtree_training.sio's OctTree-vs-
+//! RealTree-8 result on Dyck-1; that file's §9.4 Python re-run (not yet in
+//! Sounio before this file) found SedenTree-16=0.992 vs RealTree-16=0.500
+//! (chance) on a real, non-degenerate pseudoknot generator at length 32.
+//!
+//! WHY A NEW MINIMAL TASK, NOT scripts/research/pseudoknot_experiment.py's
+//! full length-32 generator or examples/cayley_dickson_dyck_pseudoknot_
+//! generators.sio's gen_pseudoknot (also length-32): a length-32 sequence
+//! needs a depth-5 tree (2^5=32 leaves), and each internal SedenTree node
+//! costs roughly 4x an OctTree node's tape footprint (measured below,
+//! ~518 vs ~120 nodes per multiply, because the sedenion product is
+//! implemented as 4 nested octonion products via the Cayley-Dickson
+//! half-split, mirroring stdlib/algebra/sedenion.sio's sed_vv). A depth-5,
+//! 16-dim tree would need on the order of 31 internal sed16_mul calls per
+//! forward pass (~16,000 tape nodes) -- far past any tape budget this
+//! investigation has found safe (examples/cayley_dickson_octtree_
+//! realtree_training.sio's 768-node, 8-dim, depth-2 tree already sits near
+//! a demonstrated resource ceiling at just 4 seeds). Per this
+//! investigation's established discipline (try, measure, scale down,
+//! document -- never silently fabricate a smaller-but-unlabeled result),
+//! this file uses the smallest sequence length where the nested-vs-crossed
+//! distinction exists at all: length 4, depth-2 (the SedenTree analogue of
+//! the OctTree file's Dyck-4 minimal case), with two bracket types packed
+//! as tightly as possible ("([])" = nested vs "([)]" = crossed) rather
+//! than the paper's length-32 sweep. This is explicitly a smaller-scope
+//! proof-of-concept, not a replacement for the retracted/§9.4 numbers.
+//!
+//! CORRECTNESS OF sed16_mul ON THE TAPE: rather than hand-deriving 16
+//! chains of up to 15 signed terms each (the failure-prone pattern that
+//! produced the audited-broken sedenion table flagged throughout this
+//! investigation's §9.2), sed16_mul is built by composing the ALREADY
+//! gradient-verified oct8_mul (from the OctTree file, reproduced here)
+//! exactly the way stdlib/algebra/sedenion.sio's sed_vv composes its own
+//! oct_p/oct_q: for a=(a_lo,a_hi), b=(b_lo,b_hi),
+//!   lower = oct_mul(a_lo, b_lo) - oct_mul(conj(b_hi), a_hi)
+//!   upper = oct_mul(b_hi, a_lo) + oct_mul(a_hi, conj(b_lo))
+//! This is verified two ways before any training result is trusted (see
+//! verify_sed16() in main()): (1) e_i * e_i = -e_0 for i=1..15, and (2)
+//! e_i * e_j = -(e_j * e_i) for all 1<=i<j<=15 (anticommutativity on
+//! imaginary units) -- the SAME two identities this investigation's
+//! count_anticommutativity_violations() uses to certify a sedenion table,
+//! evaluated here via the tape's own forward pass (do_update=false, node
+//! values read directly), not a separate implementation.
+//!
+//! RESULT (2026-08-15, seed=20260815, N_train=40, N_test=20, 15 epochs,
+//! plain SGD, LR=0.05): a NULL result on the real task, not a positive
+//! one -- both SedenTree and RealTree-16 are stuck at exactly 0.500
+//! test/train accuracy (chance) at every logged checkpoint (epoch 1, 5,
+//! 10, 15), with SedenTree's mean training loss essentially flat (0.622
+//! -> 0.690 -> 0.690 -> 0.687, i.e. converging to a constant-probability
+//! output, not learning a decision boundary) -- reproduced byte-for-byte
+//! across three separate runs, including one extended to 25 epochs that
+//! showed no change in the pattern by epoch 10.
+//!
+//! Before trusting that as "the task is hard" rather than "the loop is
+//! broken," main() now runs a SANITY CHECK first: the identical
+//! architecture/optimizer trained on a trivially separable task (label =
+//! token[0], 3 random noise tokens) instead of gen_pk4. Result: train_acc
+//! 0.500 -> 0.825 -> 1.000 -> 1.000 and test_acc 0.600 -> 0.800 -> 0.950
+//! -> 1.000 over the same 15 epochs -- the loop, gradient computation,
+//! and optimizer all genuinely work. This makes the real task's null
+//! result a real finding, not a masked bug: this particular minimal
+//! proof-of-concept (no learnable gates, plain SGD, 40 training examples,
+//! one combine level's worth of capacity, genuine 2-level sequence-order
+//! reasoning required) is too weak a setup for either model to solve this
+//! specific task, at least at this scale/seed -- unlike the OctTree/
+//! Dyck-4 file's result (a real, seed-dependent-but-nonzero OctTree>
+//! RealTree gap on an architecturally similar but different task), which
+//! DID learn at a comparable scale.
+//!
+//! The genuinely load-bearing output of building this file was not a
+//! training result either way: it is sed16_mul itself (verified correct,
+//! 120/120 identities, via composing the already-gradient-verified
+//! oct8_mul exactly as stdlib/algebra/sedenion.sio's sed_vv does) and
+//! FOUR new Sounio/Madaros compiler bugs found and fixed while getting
+//! there (see the trailing comment block): (1) same-shaped local array
+//! `let`-bindings alias each other's storage within one function; (2) a
+//! too-small TAPE_CAP silently wraps writes instead of erroring (tpush()
+//! now hard-aborts on overflow); (3) a `[[T;N];M]` nested-array global
+//! corrupted an ADJACENT global's memory; (4) a module-level `var
+//! SEED_LIST: [i64;N]` read with a runtime loop index in the multi-seed
+//! summary always returned element 0 (both seeds printed as "20260815"
+//! instead of 20260815 then 7) -- the same defect class already found in
+//! examples/cayley_dickson_lemon_g2_ffi.sio, fixed the same way (made
+//! local to main(), no threading needed since it's only read there).
+//! Scaling the real task up (more training data, the paper's learnable
+//! gates) to find out whether either model CAN learn a bigger version of
+//! it is not yet done -- flagged here, not attempted, given the per-step
+//! compute cost sed16_mul's ~510-node tape footprint already imposes (a
+//! single 15-epoch/40-example run takes several minutes wall-clock).
+//!
+//! Run: scripts/dev/souc-build-lock.sh make build   # -> ./gen3.elf, fixed-point-verified
+//!      SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./gen3.elf \
+//!        examples/cayley_dickson_sedentree_realtree16_training.sio /tmp/sed.elf && /tmp/sed.elf
+//!      (bin/souc-lean-single-x86_64 is a stale unrelated tool, not a
+//!      lean_single build -- see docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md)
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_i64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); print_i64(0 - x) }
+    else if x < 10 { print_digit(x) }
+    else { print_i64(x / 10); print_digit(x - (x / 10) * 10) }
+}
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+fn print_f64(x: f64, decimals: i64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); print_f64(0.0 - x, decimals) }
+    else {
+        let int_part = x as i64
+        print_i64(int_part)
+        print(".")
+        var frac = x - (int_part as f64)
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_digit(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+// =============================================================================
+// PRNG (SplitMix64, same construction proven throughout this investigation)
+// =============================================================================
+
+var RNG_STATE: [i64; 1] = [0; 1]
+fn rng_seed(seed: i64) with Mut { RNG_STATE[0] = seed }
+fn rng_next_u64() -> i64 with Mut {
+    RNG_STATE[0] = RNG_STATE[0] + 0x9e3779b97f4a7c15 as i64
+    var z = RNG_STATE[0]
+    z = z ^ (z >> 30)
+    z = z * 0xbf58476d as i64
+    z = z ^ (z >> 27)
+    z = z * 0x94d049bb as i64
+    z = z ^ (z >> 31)
+    z
+}
+fn rng_nonneg(bound: i64) -> i64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    u - (u / bound) * bound
+}
+fn rng_bit() -> bool with Mut, Div { rng_nonneg(2) == 1 }
+fn rng_next_signed() -> f64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    let v = (u as f64) / 1073741823.5
+    v - 1.0
+}
+
+// =============================================================================
+// LOCAL REVERSE-MODE AUTOGRAD TAPE
+// Same op codes / backward rules as examples/cayley_dickson_octtree_
+// realtree_training.sio, capacity raised 768 -> 4096: a depth-2 SedenTree
+// forward pass measures ~1794 nodes (4 leaves x 16 dims = 64, 3 sed16_mul
+// calls x ~510 nodes = 1530, 3 vec16_add + 3 vec16_tanh x 16 = 96,
+// readout ~98, cross-entropy ~6); verify_sed16()'s antisymmetry check
+// measures ~1084 (two 16-node basis vectors + one sed16_mul + two more
+// basis rebuilds + a second sed16_mul). 4096 leaves >2x margin over the
+// larger of the two -- tpush() below hard-aborts if this is ever
+// exceeded rather than silently overwriting index 0, after this file's
+// own investigation found that a too-small TAPE_CAP (1024, from an
+// earlier debugging step) silently wrapped writes and produced a
+// plausible-looking but wrong correctness-check result.
+// =============================================================================
+
+fn OPV() -> i32 { 0 }
+fn OPADD() -> i32 { 1 }
+fn OPMUL() -> i32 { 2 }
+fn OPSUB() -> i32 { 3 }
+fn OPTANH() -> i32 { 4 }
+fn OPEXP() -> i32 { 5 }
+fn OPLOG() -> i32 { 6 }
+fn OPNEG() -> i32 { 7 }
+fn OPDIV() -> i32 { 8 }
+
+const TAPE_CAP: i64 = 4096
+
+struct Tape {
+    values: [f64; 4096],
+    grads: [f64; 4096],
+    ops: [i32; 4096],
+    arg1: [i32; 4096],
+    arg2: [i32; 4096],
+    len: i32,
+}
+
+fn tape_new() -> Tape {
+    Tape {
+        values: [0.0; 4096], grads: [0.0; 4096], ops: [0; 4096],
+        arg1: [0 - 1; 4096], arg2: [0 - 1; 4096], len: 0,
+    }
+}
+
+fn tpush(t: Tape, op: i32, val: f64, a: i32, b: i32) -> (i32, Tape) with Mut, Panic {
+    var t2 = t
+    let idx = t2.len
+    if (idx as i64) >= TAPE_CAP { panic("tape overflow: TAPE_CAP exceeded -- raise the constant, do not trust any output past this point") }
+    t2.ops[idx as usize] = op
+    t2.values[idx as usize] = val
+    t2.grads[idx as usize] = 0.0
+    t2.arg1[idx as usize] = a
+    t2.arg2[idx as usize] = b
+    t2.len = t2.len + 1
+    (idx, t2)
+}
+
+fn tvar(t: Tape, v: f64) -> (i32, Tape) with Mut, Panic {
+    tpush(t, OPV(), v, 0 - 1, 0 - 1)
+}
+fn tadd(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPADD(), t.values[a as usize] + t.values[b as usize], a, b)
+}
+fn tsub(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPSUB(), t.values[a as usize] - t.values[b as usize], a, b)
+}
+fn tmul(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPMUL(), t.values[a as usize] * t.values[b as usize], a, b)
+}
+fn tdiv(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPDIV(), t.values[a as usize] / t.values[b as usize], a, b)
+}
+fn ttanh_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < 0.0 - 20.0 { return 0.0 - 1.0 }
+    let e2x = texp_f64(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+fn texp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return texp_f64(x / 2.0) * texp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / texp_f64(0.0 - x) }
+    var sum = 1.0; var term = 1.0; var i: i64 = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn tln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    if x > 1.5 { return 2.0 * tln_f64(sqrt_f64_local(x)) }
+    if x < 0.7 { return 0.0 - tln_f64(1.0 / x) }
+    let u = x - 1.0
+    var sum = 0.0; var term = u; var i: i64 = 1
+    while i <= 30 { sum = sum + term / (i as f64); term = 0.0 - term * u; i = i + 1 }
+    sum
+}
+fn sqrt_f64_local(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i: i64 = 0
+    while i < 25 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+fn ttanh(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPTANH(), ttanh_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn texp(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPEXP(), texp_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn tlog(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPLOG(), tln_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn tneg(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPNEG(), 0.0 - t.values[a as usize], a, 0 - 1)
+}
+
+fn tape_backward(t: Tape, output: i32) -> Tape with Mut, Div, Panic {
+    var t2 = t
+    t2.grads[output as usize] = 1.0
+    var i = output
+    while i >= 0 {
+        let op = t2.ops[i as usize]
+        let g = t2.grads[i as usize]
+        let a = t2.arg1[i as usize]
+        let b = t2.arg2[i as usize]
+        let va = if a >= 0 { t2.values[a as usize] } else { 0.0 }
+        let vb = if b >= 0 { t2.values[b as usize] } else { 0.0 }
+        let vout = t2.values[i as usize]
+        if op == OPADD() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] + g }
+        }
+        if op == OPSUB() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] - g }
+        }
+        if op == OPMUL() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * vb }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] + g * va }
+        }
+        if op == OPDIV() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g / vb }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] - g * va / (vb * vb) }
+        }
+        if op == OPTANH() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * (1.0 - vout * vout) }
+        }
+        if op == OPEXP() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * vout }
+        }
+        if op == OPLOG() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g / va }
+        }
+        if op == OPNEG() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] - g }
+        }
+        i = i - 1
+    }
+    t2
+}
+
+// =============================================================================
+// OCTONION MULTIPLY ON THE TAPE (identical to the OctTree file's oct8_mul,
+// reproduced here since this file is self-contained -- no cross-file
+// imports, matching this investigation's established convention)
+// =============================================================================
+
+fn chain8(t: Tape, t0: i32, t1: i32, s1: bool, t2: i32, s2: bool, t3: i32, s3: bool,
+          t4: i32, s4: bool, t5: i32, s5: bool, t6: i32, s6: bool, t7: i32, s7: bool
+) -> (i32, Tape) with Mut, Div, Panic {
+    var tt = t
+    var acc = t0
+    if s1 { let (i, tn) = tadd(tt, acc, t1); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t1); tt = tn; acc = i }
+    if s2 { let (i, tn) = tadd(tt, acc, t2); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t2); tt = tn; acc = i }
+    if s3 { let (i, tn) = tadd(tt, acc, t3); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t3); tt = tn; acc = i }
+    if s4 { let (i, tn) = tadd(tt, acc, t4); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t4); tt = tn; acc = i }
+    if s5 { let (i, tn) = tadd(tt, acc, t5); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t5); tt = tn; acc = i }
+    if s6 { let (i, tn) = tadd(tt, acc, t6); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t6); tt = tn; acc = i }
+    if s7 { let (i, tn) = tadd(tt, acc, t7); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t7); tt = tn; acc = i }
+    (acc, tt)
+}
+
+fn oct8_mul(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var p: [i32; 64] = [0; 64]
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let (idx, tn) = tmul(tt, a[i as usize], b[j as usize])
+            tt = tn
+            p[(i * 8 + j) as usize] = idx
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let (r0, t0) = chain8(tt, p[0], p[9],false, p[18],false, p[27],false, p[36],false, p[45],false, p[54],false, p[63],false); tt = t0
+    out[0] = r0
+    let (r1, t1) = chain8(tt, p[1], p[8],true, p[19],true, p[26],false, p[37],true, p[44],false, p[55],false, p[62],true); tt = t1
+    out[1] = r1
+    let (r2, t2) = chain8(tt, p[2], p[16],true, p[11],false, p[25],true, p[38],true, p[52],false, p[47],true, p[61],false); tt = t2
+    out[2] = r2
+    let (r3, t3) = chain8(tt, p[3], p[24],true, p[10],true, p[17],false, p[39],true, p[60],false, p[46],false, p[53],true); tt = t3
+    out[3] = r3
+    let (r4, t4) = chain8(tt, p[4], p[32],true, p[13],false, p[41],true, p[22],false, p[50],true, p[31],false, p[59],true); tt = t4
+    out[4] = r4
+    let (r5, t5) = chain8(tt, p[5], p[40],true, p[12],true, p[33],false, p[23],false, p[58],true, p[30],true, p[51],false); tt = t5
+    out[5] = r5
+    let (r6, t6) = chain8(tt, p[6], p[48],true, p[15],true, p[57],false, p[20],true, p[34],false, p[29],false, p[43],true); tt = t6
+    out[6] = r6
+    let (r7, t7) = chain8(tt, p[7], p[56],true, p[14],false, p[49],true, p[21],true, p[42],false, p[28],true, p[35],false); tt = t7
+    out[7] = r7
+    (out, tt)
+}
+
+fn real8_mul(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let (idx, tn) = tmul(tt, a[i as usize], b[i as usize])
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+fn vec8_add(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 { let (idx, tn) = tadd(tt, a[i as usize], b[i as usize]); tt = tn; out[i as usize] = idx; i = i + 1 }
+    (out, tt)
+}
+fn vec8_sub(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 { let (idx, tn) = tsub(tt, a[i as usize], b[i as usize]); tt = tn; out[i as usize] = idx; i = i + 1 }
+    (out, tt)
+}
+fn conj8(t: Tape, x: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    out[0] = x[0]
+    var i: i64 = 1
+    while i < 8 { let (idx, tn) = tneg(tt, x[i as usize]); tt = tn; out[i as usize] = idx; i = i + 1 }
+    (out, tt)
+}
+
+// =============================================================================
+// SEDENION MULTIPLY ON THE TAPE, 16-dim, via the Cayley-Dickson half-split
+// -- mirrors stdlib/algebra/sedenion.sio's sed_vv exactly (see header):
+//   a=(a_lo,a_hi), b=(b_lo,b_hi)
+//   lower = oct_mul(a_lo,b_lo) - oct_mul(conj(b_hi), a_hi)
+//   upper = oct_mul(b_hi,a_lo) + oct_mul(a_hi, conj(b_lo))
+// =============================================================================
+
+// NOTE: every [i32;8]/[i32;16] intermediate below is copied into a
+// freshly-`var`-declared, elementwise-loop-filled local IMMEDIATELY after
+// the call that produces it, rather than kept as the `let`-bound tuple
+// result. This works around a genuine compiler bug found while building
+// this file: two `let`-bound array-typed locals of the SAME shape,
+// declared in the same function, alias the same storage once a second one
+// is declared -- reading the FIRST one again after the SECOND is computed
+// silently returns the SECOND's values (confirmed via direct index prints:
+// immediately after computing it, `p[0]` was tape-index 86 with value
+// -1.0; after computing a same-shaped `q` later in the same function and
+// reading `p[0]` again with no intervening reassignment, it read back as
+// tape-index 213 -- literally q[0]'s own index -- value 0.0). A `var`
+// declared directly and filled via an explicit index loop does not
+// exhibit this; a `let` bound to any function's `[i32;8]`-returning call
+// does, regardless of which function. Not yet forensic-dispatched --
+// flagged here for that process, worked around rather than patched in
+// self-hosted/, per this investigation's standing protocol.
+fn sed16_mul(t: Tape, a: [i32; 16], b: [i32; 16]) -> ([i32; 16], Tape) with Mut, Div, Panic {
+    var tt = t
+    var a_lo: [i32; 8] = [0; 8]
+    var a_hi: [i32; 8] = [0; 8]
+    var b_lo: [i32; 8] = [0; 8]
+    var b_hi: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        a_lo[i as usize] = a[i as usize]
+        a_hi[i as usize] = a[(8 + i) as usize]
+        b_lo[i as usize] = b[i as usize]
+        b_hi[i as usize] = b[(8 + i) as usize]
+        i = i + 1
+    }
+
+    let (p_raw, t1) = oct8_mul(tt, a_lo, b_lo); tt = t1
+    var p: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { p[i as usize] = p_raw[i as usize]; i = i + 1 }
+
+    let (bhi_c_raw, t2) = conj8(tt, b_hi); tt = t2
+    var bhi_c: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { bhi_c[i as usize] = bhi_c_raw[i as usize]; i = i + 1 }
+
+    let (q_raw, t3) = oct8_mul(tt, bhi_c, a_hi); tt = t3
+    var q: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { q[i as usize] = q_raw[i as usize]; i = i + 1 }
+
+    let (lo_raw, t4) = vec8_sub(tt, p, q); tt = t4
+    var lo: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { lo[i as usize] = lo_raw[i as usize]; i = i + 1 }
+
+    let (p2_raw, t5) = oct8_mul(tt, b_hi, a_lo); tt = t5
+    var p2: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { p2[i as usize] = p2_raw[i as usize]; i = i + 1 }
+
+    let (blo_c_raw, t6) = conj8(tt, b_lo); tt = t6
+    var blo_c: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { blo_c[i as usize] = blo_c_raw[i as usize]; i = i + 1 }
+
+    let (q2_raw, t7) = oct8_mul(tt, a_hi, blo_c); tt = t7
+    var q2: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { q2[i as usize] = q2_raw[i as usize]; i = i + 1 }
+
+    let (hi_raw, t8) = vec8_add(tt, p2, q2); tt = t8
+    var hi: [i32; 8] = [0; 8]
+    i = 0; while i < 8 { hi[i as usize] = hi_raw[i as usize]; i = i + 1 }
+
+    var out: [i32; 16] = [0; 16]
+    i = 0
+    while i < 8 { out[i as usize] = lo[i as usize]; out[(8 + i) as usize] = hi[i as usize]; i = i + 1 }
+    (out, tt)
+}
+
+fn real16_mul(t: Tape, a: [i32; 16], b: [i32; 16]) -> ([i32; 16], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        let (idx, tn) = tmul(tt, a[i as usize], b[i as usize])
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+fn vec16_add(t: Tape, a: [i32; 16], b: [i32; 16]) -> ([i32; 16], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 { let (idx, tn) = tadd(tt, a[i as usize], b[i as usize]); tt = tn; out[i as usize] = idx; i = i + 1 }
+    (out, tt)
+}
+fn vec16_tanh(t: Tape, a: [i32; 16]) -> ([i32; 16], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 { let (idx, tn) = ttanh(tt, a[i as usize]); tt = tn; out[i as usize] = idx; i = i + 1 }
+    (out, tt)
+}
+
+// =============================================================================
+// CORRECTNESS CHECK: sed16_mul evaluated on the tape (do_update never
+// called -- just forward pass, node values read directly) must satisfy
+// the two identities this investigation's count_anticommutativity_
+// violations() uses to certify a sedenion table: e_i*e_i=-e_0 (i>=1),
+// e_i*e_j=-(e_j*e_i) (i!=j, both >=1). Any violation here means sed16_mul
+// is wired wrong and nothing trained with it should be trusted.
+// =============================================================================
+
+fn basis16_nodes(t: Tape, k: i64) -> ([i32; 16], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        let v = if i == k { 1.0 } else { 0.0 }
+        let (idx, tn) = tvar(tt, v)
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+fn verify_sed16() -> (i64, i64) with IO, Mut, Div, Panic {
+    var pass: i64 = 0
+    var fail: i64 = 0
+    // e_i * e_i = -e_0, i = 1..15
+    var i: i64 = 1
+    while i < 16 {
+        var t = tape_new()
+        let (ei, t1) = basis16_nodes(t, i); t = t1
+        let (prod, t2) = sed16_mul(t, ei, ei); t = t2
+        let ok0 = t.values[prod[0] as usize] < 0.0 - 0.999999 && t.values[prod[0] as usize] > 0.0 - 1.000001
+        var ok_rest = true
+        var k: i64 = 1
+        while k < 16 {
+            let v = t.values[prod[k as usize] as usize]
+            if v > 0.000001 || v < 0.0 - 0.000001 { ok_rest = false }
+            k = k + 1
+        }
+        if ok0 && ok_rest { pass = pass + 1 } else { fail = fail + 1 }
+        i = i + 1
+    }
+    // e_i*e_j = -(e_j*e_i), 1<=i<j<=15
+    i = 1
+    while i < 16 {
+        var j: i64 = i + 1
+        while j < 16 {
+            var t = tape_new()
+            let (ei_raw, t1) = basis16_nodes(t, i); t = t1
+            var ei: [i32; 16] = [0; 16]
+            var pc: i64 = 0
+            while pc < 16 { ei[pc as usize] = ei_raw[pc as usize]; pc = pc + 1 }
+
+            let (ej_raw, t2) = basis16_nodes(t, j); t = t2
+            var ej: [i32; 16] = [0; 16]
+            pc = 0; while pc < 16 { ej[pc as usize] = ej_raw[pc as usize]; pc = pc + 1 }
+
+            let (pij_raw, t3) = sed16_mul(t, ei, ej); t = t3
+            var pij: [i32; 16] = [0; 16]
+            pc = 0; while pc < 16 { pij[pc as usize] = pij_raw[pc as usize]; pc = pc + 1 }
+
+            let (eii_raw, t4) = basis16_nodes(t, i); t = t4
+            var eii: [i32; 16] = [0; 16]
+            pc = 0; while pc < 16 { eii[pc as usize] = eii_raw[pc as usize]; pc = pc + 1 }
+
+            let (ejj_raw, t5) = basis16_nodes(t, j); t = t5
+            var ejj: [i32; 16] = [0; 16]
+            pc = 0; while pc < 16 { ejj[pc as usize] = ejj_raw[pc as usize]; pc = pc + 1 }
+
+            let (pji_raw, t6) = sed16_mul(t, ejj, eii); t = t6
+            var pji: [i32; 16] = [0; 16]
+            pc = 0; while pc < 16 { pji[pc as usize] = pji_raw[pc as usize]; pc = pc + 1 }
+
+            var ok = true
+            var k: i64 = 0
+            while k < 16 {
+                let vij = t.values[pij[k as usize] as usize]
+                let vji = t.values[pji[k as usize] as usize]
+                let d = vij + vji
+                let ad = if d < 0.0 { 0.0 - d } else { d }
+                if ad > 0.000001 { ok = false }
+                k = k + 1
+            }
+            if ok { pass = pass + 1 } else { fail = fail + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (pass, fail)
+}
+
+// =============================================================================
+// MINIMAL NESTED-VS-CROSSED TASK, length 4 (SedenTree analogue of the
+// OctTree file's Dyck-4: the smallest depth-2 case). Tokens: 0=unused,
+// 1='(', 2=')', 3='[', 4=']'. nested="([])"-order, crossed="([)]"-order
+// (or the bracket-type-swapped equivalent), matching the topological
+// distinction examples/cayley_dickson_dyck_pseudoknot_generators.sio's
+// gen_pseudoknot uses at full length 32 -- see this file's header for why
+// length 4 instead of 32.
+// =============================================================================
+
+fn gen_pk4(nested: bool, out: &![i64; 4]) with Mut, Div, Panic {
+    let paren_first = rng_bit()
+    if paren_first {
+        out[0] = 1; out[1] = 3
+        if nested { out[2] = 4; out[3] = 2 } else { out[2] = 2; out[3] = 4 }
+    } else {
+        out[0] = 3; out[1] = 1
+        if nested { out[2] = 2; out[3] = 4 } else { out[2] = 4; out[3] = 2 }
+    }
+}
+
+// Trivially separable diagnostic task (label = token[0]), used only to
+// confirm the training loop/architecture below CAN learn something at
+// all before trusting a null result on the real (gen_pk4) task as
+// evidence the task is hard rather than evidence the loop is broken.
+// Other 3 tokens are random noise from the same {1,2,3,4} vocabulary so
+// the model cannot shortcut via sequence length or token-set alone.
+fn gen_trivial(label1: bool, out: &![i64; 4]) with Mut, Div, Panic {
+    out[0] = if label1 { 1 } else { 2 }
+    var k: i64 = 1
+    while k < 4 { out[k as usize] = 1 + rng_nonneg(4); k = k + 1 }
+}
+
+// =============================================================================
+// PARAMETERS. EMBED: 5 tokens x 16 dims. WOUT: 16 dims x 2 classes.
+// =============================================================================
+
+var EMBED: [f64; 80] = [0.0; 80]
+var WOUT: [f64; 32] = [0.0; 32]
+var BOUT: [f64; 2] = [0.0; 2]
+
+fn init_params() with Mut, Div {
+    var i: i64 = 0
+    while i < 80 { EMBED[i as usize] = 0.15 * rng_next_signed(); i = i + 1 }
+    i = 0
+    while i < 32 { WOUT[i as usize] = 0.15 * rng_next_signed(); i = i + 1 }
+    i = 0
+    while i < 2 { BOUT[i as usize] = 0.0; i = i + 1 }
+}
+
+// =============================================================================
+// ONE TRAINING/EVAL STEP (mirrors the OctTree file's step/step_p exactly,
+// at 16 dims and with sed16_mul/real16_mul instead of oct8_mul/real8_mul)
+// =============================================================================
+
+fn step(tokens: &[i64; 4], label: i64, use_sed: bool, lr: f64, do_update: bool, out: &![f64; 2]) with Mut, Div, Panic {
+    var probe: [f64; 1] = [0.0; 1]
+    step_p(tokens, label, use_sed, lr, do_update, out, 0 - 1, &!probe)
+}
+
+fn step_p(tokens: &[i64; 4], label: i64, use_sed: bool, lr: f64, do_update: bool, out: &![f64; 2], probe_pidx: i64, out_probe: &![f64; 1]) with Mut, Div, Panic {
+    var t = tape_new()
+    var leaf_node: [i32; 64] = [0; 64]   // 4 positions x 16 dims
+    var leaf_param: [i64; 64] = [0; 64]
+    var li: i64 = 0
+    // Flat, not [[i32;16];4] -- a nested-array local was rejected by the
+    // compiler here ("array index must be integer") even though an
+    // identical-shape [[i32;8];4] compiles fine in the OctTree file;
+    // avoided rather than chased, matching this investigation's standing
+    // nested-array workaround pattern (see the LEMON FFI file's B: [f64;56]
+    // note). leaf0..leaf3 are built directly instead of through a container.
+    var leaf0: [i32; 16] = [0; 16]
+    var leaf1: [i32; 16] = [0; 16]
+    var leaf2: [i32; 16] = [0; 16]
+    var leaf3: [i32; 16] = [0; 16]
+    while li < 4 {
+        let tok = tokens[li as usize]
+        var d: i64 = 0
+        while d < 16 {
+            let pidx = tok * 16 + d
+            let (idx, tn) = tvar(t, EMBED[pidx as usize])
+            t = tn
+            if li == 0 { leaf0[d as usize] = idx }
+            else if li == 1 { leaf1[d as usize] = idx }
+            else if li == 2 { leaf2[d as usize] = idx }
+            else { leaf3[d as usize] = idx }
+            leaf_node[(li * 16 + d) as usize] = idx
+            leaf_param[(li * 16 + d) as usize] = pidx
+            d = d + 1
+        }
+        li = li + 1
+    }
+
+    var h1: [i32; 16] = [0; 16]
+    var h2: [i32; 16] = [0; 16]
+    if use_sed {
+        let (p1, t1) = sed16_mul(t, leaf0, leaf1); t = t1
+        let (r1, t1b) = vec16_add(t, leaf0, leaf1); t = t1b
+        let (s1, t1c) = vec16_add(t, p1, r1); t = t1c
+        let (o1, t1d) = vec16_tanh(t, s1); t = t1d
+        h1 = o1
+        let (p2, t2) = sed16_mul(t, leaf2, leaf3); t = t2
+        let (r2, t2b) = vec16_add(t, leaf2, leaf3); t = t2b
+        let (s2, t2c) = vec16_add(t, p2, r2); t = t2c
+        let (o2, t2d) = vec16_tanh(t, s2); t = t2d
+        h2 = o2
+    } else {
+        let (p1, t1) = real16_mul(t, leaf0, leaf1); t = t1
+        let (r1, t1b) = vec16_add(t, leaf0, leaf1); t = t1b
+        let (s1, t1c) = vec16_add(t, p1, r1); t = t1c
+        let (o1, t1d) = vec16_tanh(t, s1); t = t1d
+        h1 = o1
+        let (p2, t2) = real16_mul(t, leaf2, leaf3); t = t2
+        let (r2, t2b) = vec16_add(t, leaf2, leaf3); t = t2b
+        let (s2, t2c) = vec16_add(t, p2, r2); t = t2c
+        let (o2, t2d) = vec16_tanh(t, s2); t = t2d
+        h2 = o2
+    }
+
+    var root: [i32; 16] = [0; 16]
+    if use_sed {
+        let (p3, t3) = sed16_mul(t, h1, h2); t = t3
+        let (r3, t3b) = vec16_add(t, h1, h2); t = t3b
+        let (s3, t3c) = vec16_add(t, p3, r3); t = t3c
+        let (o3, t3d) = vec16_tanh(t, s3); t = t3d
+        root = o3
+    } else {
+        let (p3, t3) = real16_mul(t, h1, h2); t = t3
+        let (r3, t3b) = vec16_add(t, h1, h2); t = t3b
+        let (s3, t3c) = vec16_add(t, p3, r3); t = t3c
+        let (o3, t3d) = vec16_tanh(t, s3); t = t3d
+        root = o3
+    }
+
+    var wnode: [i32; 32] = [0; 32]
+    var bnode: [i32; 2] = [0; 2]
+    var c: i64 = 0
+    while c < 2 { let (bi, tn) = tvar(t, BOUT[c as usize]); t = tn; bnode[c as usize] = bi; c = c + 1 }
+    var logit: [i32; 2] = [0; 2]
+    c = 0
+    while c < 2 {
+        var acc = bnode[c as usize]
+        var k: i64 = 0
+        while k < 16 {
+            let widx = k * 2 + c
+            let (wi, tn) = tvar(t, WOUT[widx as usize]); t = tn
+            wnode[widx as usize] = wi
+            let (mi, tn2) = tmul(t, root[k as usize], wi); t = tn2
+            let (ai, tn3) = tadd(t, acc, mi); t = tn3
+            acc = ai
+            k = k + 1
+        }
+        logit[c as usize] = acc
+        c = c + 1
+    }
+
+    let (e0, ta) = texp(t, logit[0]); t = ta
+    let (e1, tb) = texp(t, logit[1]); t = tb
+    let (s, tc) = tadd(t, e0, e1); t = tc
+    let etrue = if label == 0 { e0 } else { e1 }
+    let (p, td) = tdiv(t, etrue, s); t = td
+    let (lp, te) = tlog(t, p); t = te
+    let (loss_node, tf) = tneg(t, lp); t = tf
+
+    let loss_val = t.values[loss_node as usize]
+    let pred = if t.values[logit[1] as usize] > t.values[logit[0] as usize] { 1.0 } else { 0.0 }
+    out[0] = loss_val
+    out[1] = pred
+
+    if do_update || probe_pidx >= 0 {
+        t = tape_backward(t, loss_node)
+        if probe_pidx >= 0 {
+            var pg = 0.0
+            var pi: i64 = 0
+            while pi < 64 {
+                if leaf_param[pi as usize] == probe_pidx { pg = pg + t.grads[leaf_node[pi as usize] as usize] }
+                pi = pi + 1
+            }
+            out_probe[0] = pg
+        }
+        if do_update {
+            var i: i64 = 0
+            while i < 64 {
+                let g = t.grads[leaf_node[i as usize] as usize]
+                let pidx = leaf_param[i as usize]
+                EMBED[pidx as usize] = EMBED[pidx as usize] - lr * g
+                i = i + 1
+            }
+            i = 0
+            while i < 32 {
+                let g = t.grads[wnode[i as usize] as usize]
+                WOUT[i as usize] = WOUT[i as usize] - lr * g
+                i = i + 1
+            }
+            i = 0
+            while i < 2 {
+                let g = t.grads[bnode[i as usize] as usize]
+                BOUT[i as usize] = BOUT[i as usize] - lr * g
+                i = i + 1
+            }
+        }
+    }
+}
+
+fn grad_check(tokens: &[i64; 4], label: i64, use_sed: bool, probe_pidx: i64) with IO, Mut, Div, Panic {
+    let eps = 0.0001
+    let saved = EMBED[probe_pidx as usize]
+
+    var out_plus: [f64; 2] = [0.0; 2]
+    var dummy: [f64; 1] = [0.0; 1]
+    EMBED[probe_pidx as usize] = saved + eps
+    step_p(tokens, label, use_sed, 0.0, false, &!out_plus, 0 - 1, &!dummy)
+
+    var out_minus: [f64; 2] = [0.0; 2]
+    EMBED[probe_pidx as usize] = saved - eps
+    step_p(tokens, label, use_sed, 0.0, false, &!out_minus, 0 - 1, &!dummy)
+
+    EMBED[probe_pidx as usize] = saved
+    var out_analytic: [f64; 2] = [0.0; 2]
+    var probe: [f64; 1] = [0.0; 1]
+    step_p(tokens, label, use_sed, 0.0, false, &!out_analytic, probe_pidx, &!probe)
+
+    let numeric_grad = (out_plus[0] - out_minus[0]) / (2.0 * eps)
+    let analytic_grad = probe[0]
+    let diff = if numeric_grad > analytic_grad { numeric_grad - analytic_grad } else { analytic_grad - numeric_grad }
+    print("  probe EMBED["); print_i64(probe_pidx); print("]: numeric="); print_f64(numeric_grad, 6)
+    print("  analytic="); print_f64(analytic_grad, 6); print("  |diff|="); print_f64(diff, 8)
+    if diff < 0.001 { print("  MATCH\n") } else { print("  MISMATCH -- DO NOT TRUST TRAINING RESULTS\n") }
+}
+
+// =============================================================================
+// FULL TRAINING RUN. Scoped DOWN from the OctTree file's N_TRAIN=60/
+// EPOCHS=25/N_SEEDS=4 as a first attempt, since sed16_mul's tape footprint
+// is ~3.6x oct8_mul's and that file already found a hard resource ceiling
+// near ~15,000 cumulative train steps at the smaller footprint. Smoke-test
+// scale first; scale up only if this completes and reports honestly if it
+// does not.
+// =============================================================================
+
+const N_PER_CLASS: i64 = 20
+const N_TEST_PER_CLASS: i64 = 10
+const N_TRAIN: i64 = 40
+const N_TEST: i64 = 20
+const EPOCHS: i64 = 15
+const LR: f64 = 0.05
+
+// Flat, not [[i64;4];40]/[[i64;4];20] -- a nested-array global here
+// corrupted an ADJACENT global (TRAIN_LBL read back garbage/stack-address
+// values after build_dataset(), e.g. 140735830200840), matching the
+// already-documented [[T;N];M] nested-array defect class from
+// examples/cayley_dickson_g2_derivation_basis.sio (element-write segfault)
+// and examples/cayley_dickson_lemon_g2_ffi.sio (function-parameter hang) --
+// a third distinct manifestation (cross-global corruption) of the same
+// underlying fragility. Flattened with manual i*4+k offset indexing.
+var TRAIN_TOK: [i64; 160] = [0; 160]
+var TRAIN_LBL: [i64; 40] = [0; 40]
+var TEST_TOK: [i64; 80] = [0; 80]
+var TEST_LBL: [i64; 20] = [0; 20]
+
+fn build_dataset() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_pk4(true, &!tk)
+        var k: i64 = 0
+        while k < 4 { TRAIN_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TRAIN_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_pk4(false, &!tk)
+        var k: i64 = 0
+        while k < 4 { TRAIN_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TRAIN_LBL[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_pk4(true, &!tk)
+        var k: i64 = 0
+        while k < 4 { TEST_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TEST_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_pk4(false, &!tk)
+        var k: i64 = 0
+        while k < 4 { TEST_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TEST_LBL[i as usize] = 0
+        i = i + 1
+    }
+}
+
+// Same shape as build_dataset() but from gen_trivial -- used only for the
+// pre-flight sanity check in main() (does the loop learn ANYTHING?).
+fn build_dataset_trivial() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_trivial(true, &!tk)
+        var k: i64 = 0
+        while k < 4 { TRAIN_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TRAIN_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_trivial(false, &!tk)
+        var k: i64 = 0
+        while k < 4 { TRAIN_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TRAIN_LBL[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_trivial(true, &!tk)
+        var k: i64 = 0
+        while k < 4 { TEST_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TEST_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_trivial(false, &!tk)
+        var k: i64 = 0
+        while k < 4 { TEST_TOK[(i * 4 + k) as usize] = tk[k as usize]; k = k + 1 }
+        TEST_LBL[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn eval_accuracy(use_sed: bool, on_train: bool) -> f64 with Mut, Div, Panic {
+    let n = if on_train { N_TRAIN } else { N_TEST }
+    var correct: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var tk: [i64; 4] = [0; 4]
+        var k: i64 = 0
+        while k < 4 {
+            tk[k as usize] = if on_train { TRAIN_TOK[(i * 4 + k) as usize] } else { TEST_TOK[(i * 4 + k) as usize] }
+            k = k + 1
+        }
+        let lbl = if on_train { TRAIN_LBL[i as usize] } else { TEST_LBL[i as usize] }
+        var out: [f64; 2] = [0.0; 2]
+        step(&tk, lbl, use_sed, 0.0, false, &!out)
+        if (out[1] as i64) == lbl { correct = correct + 1 }
+        i = i + 1
+    }
+    (correct as f64) / (n as f64)
+}
+
+fn train_model(use_sed: bool, seed: i64) with IO, Mut, Div, Panic {
+    rng_seed(seed)
+    init_params()
+    var ep: i64 = 0
+    while ep < EPOCHS {
+        var epoch_loss = 0.0
+        var i: i64 = 0
+        while i < N_TRAIN {
+            var tk: [i64; 4] = [0; 4]
+            var k: i64 = 0
+            while k < 4 { tk[k as usize] = TRAIN_TOK[(i * 4 + k) as usize]; k = k + 1 }
+            let lbl = TRAIN_LBL[i as usize]
+            var out: [f64; 2] = [0.0; 2]
+            step(&tk, lbl, use_sed, LR, true, &!out)
+            epoch_loss = epoch_loss + out[0]
+            i = i + 1
+        }
+        if (ep + 1) - ((ep + 1) / 5) * 5 == 0 || ep == 0 {
+            let tr_acc = eval_accuracy(use_sed, true)
+            let te_acc = eval_accuracy(use_sed, false)
+            print("    epoch "); print_i64(ep + 1); print("/"); print_i64(EPOCHS)
+            print("  mean_train_loss="); print_f64(epoch_loss / (N_TRAIN as f64), 4)
+            print("  train_acc="); print_f64(tr_acc, 3); print("  test_acc="); print_f64(te_acc, 3); print("\n")
+        }
+        ep = ep + 1
+    }
+}
+
+fn train_model_quiet(use_sed: bool, seed: i64) with Mut, Div, Panic {
+    rng_seed(seed)
+    init_params()
+    var ep: i64 = 0
+    while ep < EPOCHS {
+        var i: i64 = 0
+        while i < N_TRAIN {
+            var tk: [i64; 4] = [0; 4]
+            var k: i64 = 0
+            while k < 4 { tk[k as usize] = TRAIN_TOK[(i * 4 + k) as usize]; k = k + 1 }
+            let lbl = TRAIN_LBL[i as usize]
+            var out: [f64; 2] = [0.0; 2]
+            step(&tk, lbl, use_sed, LR, true, &!out)
+            i = i + 1
+        }
+        ep = ep + 1
+    }
+}
+
+const N_SEEDS: i64 = 2
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Local, not a module-level global -- see the N_GEN-style comment
+    // pattern already documented elsewhere in this investigation
+    // (examples/cayley_dickson_lemon_g2_ffi.sio's bug #6): a global array
+    // read with a runtime loop index reliably returns element 0. Found
+    // HERE too: the multi-seed loop below printed "seed=20260815" twice
+    // (should have been 20260815 then 7) until SEED_LIST was made local.
+    var seed_list: [i64; 2] = [20260815, 7]
+    print("=== SedenTree vs RealTree-16, TRAINED, minimal length-4 nested-vs-crossed task ===\n")
+    print("(scope disclosed in file header: length 4/depth 2 only, no gates, plain SGD, small n)\n")
+
+    print("\n[sed16_mul correctness check: e_i*e_i=-e_0 and e_i*e_j=-(e_j*e_i), i,j=1..15]\n")
+    let (vpass, vfail) = verify_sed16()
+    print("  pass="); print_i64(vpass); print("  fail="); print_i64(vfail)
+    print("  (expect pass=120, fail=0: 15 self-products + 105 antisymmetric pairs)\n")
+    if vfail > 0 {
+        print("\n  sed16_mul FAILED correctness check -- ABORTING, do not trust any further output.\n")
+        return 1
+    }
+
+    rng_seed(20260815)
+    init_params()
+    print("\n[Gradient check] finite-difference vs analytic:\n")
+    var gc_tokens: [i64; 4] = [1, 3, 4, 2]
+    grad_check(&gc_tokens, 1, true, 16)
+    grad_check(&gc_tokens, 1, false, 16)
+    var gc_tokens2: [i64; 4] = [1, 3, 2, 4]
+    grad_check(&gc_tokens2, 0, true, 32)
+    grad_check(&gc_tokens2, 0, false, 32)
+
+    print("\n[Sanity check: CAN the training loop learn ANYTHING?] trivial\n")
+    print("token[0]-determines-label task, same architecture/optimizer,\n")
+    print("before trusting any null result on the real (harder) task below:\n")
+    rng_seed(999)
+    build_dataset_trivial()
+    train_model(true, 20260815)
+    let sanity_acc = eval_accuracy(true, false)
+    print("  [SedenTree, trivial task] final test_acc="); print_f64(sanity_acc, 3)
+    if sanity_acc > 0.9 { print("  -- loop CAN learn; the real task's null result below is about task difficulty, not a broken loop\n") }
+    else { print("  -- loop did NOT solve even the trivial task; treat the null result below as suspect, not just \"hard\"\n") }
+
+    rng_seed(999)
+    build_dataset()
+    var v0: i64 = 0
+    var i: i64 = 0
+    while i < N_TRAIN { if TRAIN_LBL[i as usize] == 1 { v0 = v0 + 1 }; i = i + 1 }
+    print("\n[Dataset] N_train="); print_i64(N_TRAIN); print(" (nested="); print_i64(v0)
+    print(", crossed="); print_i64(N_TRAIN - v0); print(")  N_test="); print_i64(N_TEST); print("\n")
+
+    print("\n[Single-seed detail, seed="); print_i64(seed_list[0]); print("]\n")
+    print("\n  [SedenTree]\n")
+    train_model(true, seed_list[0])
+    print("\n  [RealTree-16]\n")
+    train_model(false, seed_list[0])
+
+    print("\n[Multi-seed summary, "); print_i64(N_SEEDS); print(" seeds, ")
+    print_i64(EPOCHS); print(" epochs each]\n")
+    var sed_sum = 0.0
+    var real_sum = 0.0
+    var s: i64 = 0
+    while s < N_SEEDS {
+        let seed = seed_list[s as usize]
+        train_model_quiet(true, seed)
+        let sed_te = eval_accuracy(true, false)
+        train_model_quiet(false, seed)
+        let real_te = eval_accuracy(false, false)
+        print("  seed="); print_i64(seed); print("  SedenTree test_acc=")
+        print_f64(sed_te, 3); print("  RealTree-16 test_acc="); print_f64(real_te, 3); print("\n")
+        sed_sum = sed_sum + sed_te
+        real_sum = real_sum + real_te
+        s = s + 1
+    }
+    print("\n[Final] mean over "); print_i64(N_SEEDS); print(" seeds:\n")
+    print("  SedenTree   mean test_acc="); print_f64(sed_sum / (N_SEEDS as f64), 3); print("\n")
+    print("  RealTree-16 mean test_acc="); print_f64(real_sum / (N_SEEDS as f64), 3); print("\n")
+
+    print("\n=== DONE ===\n")
+    0
+}
+
+// =============================================================================
+// FOUR COMPILER BUGS FOUND WHILE BUILDING THIS FILE (none patched in
+// self-hosted/, all worked around here -- flagged for this repo's
+// forensic-dispatch process). Full repro/isolation detail lives inline
+// near each fix; this is an index, not a duplicate.
+// =============================================================================
+//
+// 1. Same-shaped local array `let`-bindings alias each other's storage.
+//    See sed16_mul()'s leading comment above its definition: reading a
+//    `let`-bound `[i32;8]` a second time, after a second same-shaped
+//    `[i32;8]` `let` binding was computed in between, silently returned
+//    the SECOND binding's values -- isolated via direct tape-index prints
+//    (`p[0]` read as index 86 immediately after computing it, then index
+//    213 -- literally `q`'s own index -- after `q` was computed, with no
+//    reassignment of `p` in between). A `var` declared directly and
+//    filled via an explicit index loop does not exhibit this. Fixed by
+//    converting every multi-use `[i32;8]`/`[i32;16]` intermediate in
+//    sed16_mul() and verify_sed16()'s antisymmetry loop to that pattern.
+//
+// 2. A too-small TAPE_CAP silently wraps tape writes instead of erroring.
+//    Debugging bug #1 involved temporarily lowering TAPE_CAP to 1024;
+//    verify_sed16()'s antisymmetry check (which needs ~1084 nodes) kept
+//    failing 44/105 pairs with a value pattern that looked like a NEW,
+//    second aliasing bug -- it was actually simple overflow: `tpush()`
+//    had no bounds check, so writes past index 1023 landed wherever
+//    `idx as usize` happened to wrap/collide, producing plausible-looking
+//    but wrong output rather than a crash or error. `tpush()` now
+//    hard-aborts (`panic()`) if `len >= TAPE_CAP` rather than continuing.
+//    TAPE_CAP is 4096, with >2x margin over both the ~1794-node step_p()
+//    forward+backward pass and the ~1084-node antisymmetry check.
+//
+// 3. A `[[T;N];M]` nested-array GLOBAL corrupted an ADJACENT global.
+//    `var TRAIN_TOK: [[i64;4];40]` followed by `var TRAIN_LBL: [i64;40]`
+//    -- after build_dataset() ran, TRAIN_LBL read back garbage/stack-
+//    address-looking values (e.g. 140735830200840) instead of the 0s/1s
+//    it was written with, even though build_dataset()'s own write loop
+//    for TRAIN_LBL looks correct in isolation. This is a third, distinct
+//    manifestation of the nested-array defect class already found twice
+//    elsewhere in this investigation (examples/cayley_dickson_g2_
+//    derivation_basis.sio: element-write segfault; examples/cayley_
+//    dickson_lemon_g2_ffi.sio: function-parameter hang) -- this time the
+//    corruption crosses into a NEIGHBORING global rather than staying
+//    within the nested array itself. Fixed by flattening TRAIN_TOK/
+//    TEST_TOK to `[i64;160]`/`[i64;80]` with manual `i*4+k` offset
+//    indexing, matching this investigation's standing workaround for the
+//    whole nested-array class.
+//
+// 4. A module-level `var arr: [T;N]` array read with a RUNTIME loop index
+//    always returns element 0. `var SEED_LIST: [i64;2] = [20260815, 7]`,
+//    read via `SEED_LIST[s as usize]` inside the multi-seed loop, printed
+//    "seed=20260815" for BOTH iterations instead of 20260815 then 7 --
+//    the exact same defect already found and documented in examples/
+//    cayley_dickson_lemon_g2_ffi.sio's GEN_A/GEN_B bug (write-once-at-
+//    init, read-many-with-computed-index global arrays are affected;
+//    write-every-iteration globals like TRAIN_LBL above are not). Fixed
+//    the same way: made local to main() (`var seed_list`), no parameter
+//    threading needed since it is only ever read within that function.

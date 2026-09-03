@@ -1,0 +1,182 @@
+// stdlib/viz/coord.sio — 2D coordinate system for scientific charts
+//
+// Maps data-space coordinates to screen-space pixels and draws
+// axes + grid labels using the 8×8 bitmap font.
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_line}
+use display::canvas_ext::{canvas_draw_line_aa}
+use display::font::{font_draw_string}
+
+// ============================================================
+// CoordSystem
+// ============================================================
+
+pub struct CoordSystem {
+    pub data_x_min: f64,
+    pub data_x_max: f64,
+    pub data_y_min: f64,
+    pub data_y_max: f64,
+    // Screen region this coord system occupies (pixels)
+    pub screen_x: i64,
+    pub screen_y: i64,
+    pub screen_w: i64,
+    pub screen_h: i64,
+    // Axis unit labels (short string, e.g. "s", "mg/L")
+    pub unit_x: [i8; 32],
+    pub unit_x_len: i64,
+    pub unit_y: [i8; 32],
+    pub unit_y_len: i64,
+}
+
+pub fn coord_new(
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    sx: i64, sy: i64, sw: i64, sh: i64,
+) -> CoordSystem {
+    CoordSystem {
+        data_x_min: x_min, data_x_max: x_max,
+        data_y_min: y_min, data_y_max: y_max,
+        screen_x: sx, screen_y: sy,
+        screen_w: sw, screen_h: sh,
+        unit_x: [0; 32], unit_x_len: 0,
+        unit_y: [0; 32], unit_y_len: 0,
+    }
+}
+
+// ============================================================
+// Coordinate mapping (data → screen pixels)
+// ============================================================
+
+fn cs_range_x(cs: &CoordSystem) -> f64 {
+    cs.data_x_max - cs.data_x_min
+}
+
+fn cs_range_y(cs: &CoordSystem) -> f64 {
+    cs.data_y_max - cs.data_y_min
+}
+
+pub fn coord_map_x(cs: &CoordSystem, data_x: f64) -> i64 with Div {
+    let rx = cs_range_x(cs)
+    if rx == 0.0 { return cs.screen_x }
+    let frac = (data_x - cs.data_x_min) / rx
+    cs.screen_x + (frac * (cs.screen_w as f64)) as i64
+}
+
+pub fn coord_map_y(cs: &CoordSystem, data_y: f64) -> i64 with Div {
+    let ry = cs_range_y(cs)
+    if ry == 0.0 { return cs.screen_y }
+    // Y axis: data grows up, screen grows down → invert
+    let frac = (data_y - cs.data_y_min) / ry
+    cs.screen_y + cs.screen_h - (frac * (cs.screen_h as f64)) as i64
+}
+
+// ============================================================
+// Axis and grid drawing
+// ============================================================
+
+// Draws the bounding box of the plot area (thin frame).
+pub fn coord_draw_frame(cs: &CoordSystem, c: &!Canvas) with Mut {
+    let x0 = cs.screen_x
+    let y0 = cs.screen_y
+    let x1 = cs.screen_x + cs.screen_w - 1
+    let y1 = cs.screen_y + cs.screen_h - 1
+    // top
+    canvas_fill_rect(c, x0, y0, cs.screen_w, 1, 180, 180, 180)
+    // bottom
+    canvas_fill_rect(c, x0, y1, cs.screen_w, 1, 180, 180, 180)
+    // left
+    canvas_fill_rect(c, x0, y0, 1, cs.screen_h, 180, 180, 180)
+    // right
+    canvas_fill_rect(c, x1, y0, 1, cs.screen_h, 180, 180, 180)
+}
+
+// Draw N_TICKS evenly-spaced dashed grid lines on X axis.
+pub fn coord_draw_grid(cs: &CoordSystem, c: &!Canvas, n_ticks: i64) with Mut, Div {
+    if n_ticks <= 0 { return }
+    let step_data = (cs.data_x_max - cs.data_x_min) / (n_ticks as f64)
+    var i: i64 = 0
+    while i <= n_ticks {
+        let dx = cs.data_x_min + step_data * (i as f64)
+        let sx = coord_map_x(cs, dx)
+        // Dashed vertical line (every 4 pixels on, 4 off)
+        var py = cs.screen_y
+        while py < cs.screen_y + cs.screen_h {
+            let seg = (py - cs.screen_y) / 4
+            if seg % 2 == 0 {
+                canvas_fill_rect(c, sx, py, 1, 1, 60, 60, 80)
+            }
+            py = py + 1
+        }
+        i = i + 1
+    }
+    // Horizontal grid lines on Y axis
+    let step_dy = (cs.data_y_max - cs.data_y_min) / (n_ticks as f64)
+    var j: i64 = 0
+    while j <= n_ticks {
+        let dy = cs.data_y_min + step_dy * (j as f64)
+        let sy = coord_map_y(cs, dy)
+        var px = cs.screen_x
+        while px < cs.screen_x + cs.screen_w {
+            let seg = (px - cs.screen_x) / 4
+            if seg % 2 == 0 {
+                canvas_fill_rect(c, px, sy, 1, 1, 60, 60, 80)
+            }
+            px = px + 1
+        }
+        j = j + 1
+    }
+}
+
+// Draw X and Y axis lines (data zero lines, or border if zero out of range).
+pub fn coord_draw_axes(cs: &CoordSystem, c: &!Canvas) with Mut, Div {
+    // X-axis (y=0 in data space, clamped to visible area)
+    let y_zero = if 0.0 >= cs.data_y_min && 0.0 <= cs.data_y_max {
+        coord_map_y(cs, 0.0)
+    } else {
+        cs.screen_y + cs.screen_h - 1
+    }
+    canvas_fill_rect(c, cs.screen_x, y_zero, cs.screen_w, 1, 220, 220, 220)
+
+    // Y-axis (x=0 in data space, clamped)
+    let x_zero = if 0.0 >= cs.data_x_min && 0.0 <= cs.data_x_max {
+        coord_map_x(cs, 0.0)
+    } else {
+        cs.screen_x
+    }
+    canvas_fill_rect(c, x_zero, cs.screen_y, 1, cs.screen_h, 220, 220, 220)
+
+    coord_draw_frame(cs, c)
+
+    // Unit labels (bottom-right for X, top-left for Y)
+    // font_draw_string expects &[i8; 256] — copy short label into a padded buffer.
+    if cs.unit_x_len > 0 {
+        var ux_buf: [i8; 256] = [0; 256]
+        var ki: i64 = 0
+        while ki < cs.unit_x_len {
+            ux_buf[ki as usize] = cs.unit_x[ki as usize]
+            ki = ki + 1
+        }
+        font_draw_string(
+            c.pixels, c.width, c.height,
+            &ux_buf, cs.unit_x_len,
+            cs.screen_x + cs.screen_w - cs.unit_x_len * 8 - 2,
+            cs.screen_y + cs.screen_h + 2,
+            180, 180, 120,
+        )
+    }
+    if cs.unit_y_len > 0 {
+        var uy_buf: [i8; 256] = [0; 256]
+        var kj: i64 = 0
+        while kj < cs.unit_y_len {
+            uy_buf[kj as usize] = cs.unit_y[kj as usize]
+            kj = kj + 1
+        }
+        font_draw_string(
+            c.pixels, c.width, c.height,
+            &uy_buf, cs.unit_y_len,
+            cs.screen_x + 2,
+            cs.screen_y - 10,
+            180, 180, 120,
+        )
+    }
+}

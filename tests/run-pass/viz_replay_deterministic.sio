@@ -1,0 +1,82 @@
+// tests/run-pass/viz_replay_deterministic.sio - deterministic replay proof
+//
+// Expected output:
+//   VIZ_REPLAY_DETERMINISTIC_PASS
+
+use display::canvas::{Canvas}
+use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, EV_MOUSE_RELEASE, EV_MOTION, KEY_TAB, KEY_SPACE, KEY_RIGHT, MOUSE_LEFT}
+use viz::ir::{
+    VizScene, viz_scene_new, viz_layout_rect, viz_style_rgb,
+    viz_add_line_chart, viz_add_slider, viz_add_tabs, viz_add_toggle,
+    viz_scene_set_tag,
+}
+use viz::viz_app::{viz_app_new}
+use viz::viz_replay::{viz_replay_events, viz_replay_dump}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn build_scene() -> VizScene with Mut {
+    var scene = viz_scene_new()
+    var xs: [f64; 1024] = [0.0; 1024]
+    var ys: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < 8 {
+        xs[i as usize] = i as f64
+        ys[i as usize] = 2.0 + (i as f64) * 0.5
+        i = i + 1
+    }
+    let plot = viz_add_line_chart(&!scene, &xs, &ys, 8, viz_layout_rect(8, 8, 96, 54), viz_style_rgb(255, 150, 80))
+    let slider = viz_add_slider(&!scene, viz_layout_rect(112, 12, 96, 18), 0.0, 0.0, 10.0, viz_style_rgb(90, 190, 255))
+    let tabs = viz_add_tabs(&!scene, viz_layout_rect(112, 38, 96, 18), 0, 0, 3, viz_style_rgb(180, 130, 250))
+    let toggle = viz_add_toggle(&!scene, viz_layout_rect(216, 14, 26, 18), false, viz_style_rgb(120, 220, 150))
+    viz_scene_set_tag(&!scene, plot, 3101)
+    viz_scene_set_tag(&!scene, slider, 3102)
+    viz_scene_set_tag(&!scene, tabs, 3103)
+    viz_scene_set_tag(&!scene, toggle, 3104)
+    scene
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var events: [Event; 32] = [ev(0, 0, 0, 0); 32]
+    events[0] = ev(EV_MOUSE_PRESS, MOUSE_LEFT, 112, 20)
+    events[1] = ev(EV_MOTION, 0, 160, 20)
+    events[2] = ev(EV_MOUSE_RELEASE, MOUSE_LEFT, 160, 20)
+    events[3] = ev(EV_MOUSE_PRESS, MOUSE_LEFT, 204, 46)
+    events[4] = ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0)
+    events[5] = ev(EV_MOUSE_RELEASE, MOUSE_LEFT, 204, 46)
+    events[6] = ev(EV_KEY_PRESS, KEY_TAB, 0, 0)
+    events[7] = ev(EV_MOTION, 0, 228, 20)
+    events[8] = ev(EV_KEY_PRESS, KEY_SPACE, 0, 0)
+
+    var scene_a = build_scene()
+    var scene_b = build_scene()
+    var app_a = viz_app_new(8, 12, 18)
+    var app_b = viz_app_new(8, 12, 18)
+    var canvas_a = make_canvas(260, 90)
+    var canvas_b = make_canvas(260, 90)
+
+    let hash_a = viz_replay_events(&!app_a, &!scene_a, &!canvas_a, &events, 9)
+    let hash_b = viz_replay_events(&!app_b, &!scene_b, &!canvas_b, &events, 9)
+
+    viz_replay_dump(&scene_a)
+
+    assert(hash_a == hash_b)
+    assert(hash_a != 0)
+    assert(app_a.frame == app_b.frame)
+    assert(scene_a.time == scene_b.time)
+    assert(scene_a.active_tab == scene_b.active_tab)
+    assert(scene_a.focused_node == scene_b.focused_node)
+    assert(scene_a.nodes[3].value == 1.0)
+    assert(scene_b.nodes[3].value == 1.0)
+
+    heap_free(canvas_a.pixels as *mut i8)
+    heap_free(canvas_b.pixels as *mut i8)
+    println("VIZ_REPLAY_DETERMINISTIC_PASS")
+}

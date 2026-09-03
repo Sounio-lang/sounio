@@ -264,20 +264,20 @@ Current safe production mode:
 ```bash
 cd /home/devsounio/beagle/k8s/hpc-sota
 source ops/lab-ops.sh
-PERSIST_MODE=orangefs \
-  lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-abide-campaign-gpu.sh
+lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-abide-campaign-gpu.sh
 
-/home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_from_orangefs.sh \
+/home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_auto.sh \
   --run-id <RUN_ID> \
   --dest-dir /home/devsounio/sounio/artifacts/research/abide/<RUN_ID>
 ```
 
-If the run used `PERSIST_MODE=worker_local`, use instead:
+Explicit OrangeFS publication lane:
 
 ```bash
-/home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_by_run_id.sh \
-  --run-id <RUN_ID> \
-  --dest-dir /home/devsounio/sounio/artifacts/research/abide/<RUN_ID>
+cd /home/devsounio/beagle/k8s/hpc-sota
+source ops/lab-ops.sh
+PERSIST_MODE=orangefs \
+  lab_copy_and_run /home/devsounio/sounio/slurm-jobs/brain-ossm/submit-abide-campaign-gpu.sh
 ```
 
 Experimental payload lane with `sbcast`:
@@ -308,15 +308,22 @@ PROFILE=missing TEMPORAL_PROFILE=v5 DROP_CHANNEL_FRAC=0.25 \
 ## Results
 
 Output goes to:
-- Run staging + logs: `/orangefs/training/sounio/brain-ossm-runs/<RUN_ID>/`
-- Stable result copies: `/orangefs/training/sounio/ossm-results/`
+- Default safe mode:
+  - `submit-fractal-g2-gpu.sh` writes an authoritative worker-local bundle:
+    - `/tmp/sounio-brain-ossm-runs/<RUN_ID>/result_bundle.tgz`
+  - ABIDE campaign wrappers write a worker-local bundle on the admitted Slurm
+    worker and fetch back with `fetch_abide_campaign_auto.sh`
+- Explicit `PERSIST_MODE=orangefs` mode:
+  - run staging + logs: `/orangefs/training/sounio/brain-ossm-runs/<RUN_ID>/`
+  - stable result copies: `/orangefs/training/sounio/ossm-results/`
 
 Specialized wrappers can override `ORANGEFS_RESULTS_DIR` to write into subfolders
 such as `/orangefs/training/sounio/ossm-results/fractal20/`.
 
-The submit wrapper stages a minimal Sounio snapshot into OrangeFS before
-calling `sbatch`, so the worker does not depend on `/home/devsounio/sounio`
-being mounted.
+`submit-fractal-g2-gpu.sh` does not use OrangeFS as payload transport by
+default. It compiles benchmark ELFs on the control plane, embeds a compressed
+ELF bundle into the Slurm script, decodes that bundle on worker-local `/tmp`,
+and skips OrangeFS publication unless `PUBLISH_ORANGEFS=1` is set.
 
 The ABIDE wrappers also materialize a run-local `abide_roi_manifest.tsv` inside
 the staged snapshot. When `MAX_SITES` or `LIMIT_SUBJECTS` is set, both the
@@ -374,14 +381,18 @@ Current cluster note:
 - `r770-proxmox` is admitted in that pool
 - `r740-proxmox` is currently quarantined again after later worker churn
   invalidated one of the full-train reruns
-- `orangefs` is the current default again after the cleanup / validation pass
-- `worker_local + fetch` remains available as the safe fallback if OrangeFS
-  degrades again
+- `worker_local + fetch` is now the default for ABIDE campaign runs
+- `orangefs` remains available as an explicit publication lane when you want a
+  shared durable copy despite the current PVFS2 text-integrity risk
 - the persisted `abide_campaign_bundle.tgz` archive remains the canonical
-  shared artifact for run recovery
+  recovery artifact
 - use
-  [`fetch_abide_campaign_from_orangefs.sh`](/home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_from_orangefs.sh)
-  to pull and extract that bundle locally by `RUN_ID`
+  [`fetch_abide_campaign_auto.sh`](/home/devsounio/sounio/scripts/gpu/fetch_abide_campaign_auto.sh)
+  to pull by `RUN_ID`; it tries the safer worker-local path first and then
+  falls back to OrangeFS
+- the worker now also consumes a staged local manifest snapshot when the submit
+  side can read the source manifest, which reduces live PVFS2 text reads during
+  the actual batch run
 - `PAYLOAD_TRANSFER_MODE=sbcast` is available as an experimental lane for
   payload distribution inside the Slurm allocation
   - the previous Slurm-side `stepmgr` rendering bug was fixed via the patched

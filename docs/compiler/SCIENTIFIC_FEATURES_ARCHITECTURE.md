@@ -17,8 +17,8 @@ Committed gate artifacts currently show:
 
 - stdlib science pipeline: `2/2` required lanes passing (`fmri`, `darwin_pbpk`)
 - stdlib hyper execution: `7/7` required lanes passing (`nn`, `onn`, `qnn`, `snn`, `spnn`, `quantnn`, `math`)
-- stdlib reliability totals: `81 pass / 0 fail / 1 skip / 82 total`
-- science runtime regressions are still tracked separately and currently show `4` failures under soft local enforcement
+- stdlib reliability totals: `251 pass / 0 fail / 0 skip / 251 total`
+- science runtime regressions are still tracked separately and currently show `0` failures under soft local enforcement
 
 The strongest public science proof points are therefore the passing fixtures and committed artifacts, not the mere presence of an ambitious source tree.
 

@@ -30,6 +30,7 @@ Useful existing briefings:
 
 - `artifacts/kimi-briefing/BUG3_IMPL_DISPATCH_FIX.md`
 - `artifacts/kimi-briefing/PHASE1_MODULE_RESOLVER.md`
+- `docs/MADAROS_STATUS.md` — fleet coordination note (current: Madaros is green on origin/main; valid proof gate `make madaros-full-gate`)
 
 When returning work, include changed files, checks run, unresolved blockers, and
 whether any assumptions came from old VM paths or current `/workspace/sounio`.

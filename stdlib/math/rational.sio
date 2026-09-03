@@ -1,0 +1,188 @@
+//! stdlib/math/rational.sio — Exact rational arithmetic over Q.
+//!
+//! Rational { num: i64, den: i64 }, always normalized: den > 0, gcd(|num|,den)=1.
+//!
+//! OVERFLOW / INVALID is represented in-band by den == 0 (the "invalid" rational).
+//! Every operation propagates an invalid input and produces an invalid result on
+//! i64 overflow instead of silently wrapping — callers MUST check rat_valid() and
+//! STOP on invalid (matching the project rule: on overflow, STOP and report).
+//!
+//! NOTE: the spec asked for i128 fields, but the self-hosted souc compiler does
+//! not support i128 (var x: i128 → type error). This module therefore uses i64
+//! with explicit checked add/mul. For the SWOW lazy-walk W1 the denominators are
+//! 2*deg(x)*deg(y) (hub degrees ~10^3 → ~10^7 ≪ 9.2e18), so i64 is exact there.
+
+// ============================================================================
+// TYPE
+// ============================================================================
+
+pub struct Rational { num: i64, den: i64 }
+
+// ============================================================================
+// CHECKED i64 PRIMITIVES
+// ============================================================================
+
+fn rat_iabs(a: i64) -> i64 { if a < 0 { return 0 - a; } return a; }
+
+// Euclidean gcd; gcd(0,0)=0, result >= 0.
+fn rat_gcd(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = rat_iabs(a);
+    var y = rat_iabs(b);
+    while y > 0 {
+        let t = y;
+        y = x - (x / y) * y;
+        x = t;
+    }
+    return x;
+}
+
+// true if a*b overflows i64.
+fn rat_mul_ovf(a: i64, b: i64) -> bool with Div, Panic {
+    if a == 0 { return false; }
+    let c = a * b;
+    if c / a != b { return true; }
+    return false;
+}
+
+// true if a+b overflows i64 (same-sign operands producing wrong-sign result).
+fn rat_add_ovf(a: i64, b: i64) -> bool {
+    let c = a + b;
+    if a > 0 { if b > 0 { if c < 0 { return true; } } }
+    if a < 0 { if b < 0 { if c >= 0 { return true; } } }
+    return false;
+}
+
+// ============================================================================
+// CONSTRUCTORS / PREDICATES
+// ============================================================================
+
+pub fn rat_invalid() -> Rational { return Rational { num: 0, den: 0 }; }
+pub fn rat_valid(a: Rational) -> bool { return a.den != 0; }
+
+// Normalize n/d into lowest terms with den > 0. d == 0 → invalid.
+pub fn rat_make(n: i64, d: i64) -> Rational with Mut, Div, Panic {
+    if d == 0 { return Rational { num: 0, den: 0 }; }
+    var nn = n;
+    var dd = d;
+    if dd < 0 { nn = 0 - nn; dd = 0 - dd; }
+    let g = rat_gcd(nn, dd);
+    if g > 0 { nn = nn / g; dd = dd / g; }
+    return Rational { num: nn, den: dd };
+}
+
+pub fn rat_from_int(n: i64) -> Rational { return Rational { num: n, den: 1 }; }
+pub fn rat_zero() -> Rational { return Rational { num: 0, den: 1 }; }
+pub fn rat_one() -> Rational { return Rational { num: 1, den: 1 }; }
+pub fn rat_is_zero(a: Rational) -> bool { return a.num == 0 && a.den != 0; }
+
+// ============================================================================
+// ARITHMETIC (checked)
+// ============================================================================
+
+pub fn rat_neg(a: Rational) -> Rational { return Rational { num: 0 - a.num, den: a.den }; }
+
+pub fn rat_add(a: Rational, b: Rational) -> Rational with Mut, Div, Panic {
+    if a.den == 0 { return a; }
+    if b.den == 0 { return b; }
+    if rat_mul_ovf(a.num, b.den) { return rat_invalid(); }
+    if rat_mul_ovf(b.num, a.den) { return rat_invalid(); }
+    let p = a.num * b.den;
+    let q = b.num * a.den;
+    if rat_add_ovf(p, q) { return rat_invalid(); }
+    if rat_mul_ovf(a.den, b.den) { return rat_invalid(); }
+    return rat_make(p + q, a.den * b.den);
+}
+
+pub fn rat_sub(a: Rational, b: Rational) -> Rational with Mut, Div, Panic {
+    return rat_add(a, rat_neg(b));
+}
+
+pub fn rat_mul(a: Rational, b: Rational) -> Rational with Mut, Div, Panic {
+    if a.den == 0 { return a; }
+    if b.den == 0 { return b; }
+    if rat_mul_ovf(a.num, b.num) { return rat_invalid(); }
+    if rat_mul_ovf(a.den, b.den) { return rat_invalid(); }
+    return rat_make(a.num * b.num, a.den * b.den);
+}
+
+pub fn rat_div(a: Rational, b: Rational) -> Rational with Mut, Div, Panic {
+    if a.den == 0 { return a; }
+    if b.den == 0 { return b; }
+    if b.num == 0 { return rat_invalid(); }
+    if rat_mul_ovf(a.num, b.den) { return rat_invalid(); }
+    if rat_mul_ovf(a.den, b.num) { return rat_invalid(); }
+    return rat_make(a.num * b.den, a.den * b.num);
+}
+
+// ============================================================================
+// COMPARISON
+// ============================================================================
+
+// sign of (a - b): -1, 0, +1. Both inputs normalized (den > 0).
+pub fn rat_cmp(a: Rational, b: Rational) -> i64 with Mut, Div, Panic {
+    if rat_mul_ovf(a.num, b.den) || rat_mul_ovf(b.num, a.den) {
+        let d = rat_sub(a, b);
+        if d.num > 0 { return 1; }
+        if d.num < 0 { return 0 - 1; }
+        return 0;
+    }
+    let l = a.num * b.den;
+    let r = b.num * a.den;
+    if l < r { return 0 - 1; }
+    if l > r { return 1; }
+    return 0;
+}
+
+pub fn rat_lt(a: Rational, b: Rational) -> bool with Mut, Div, Panic { return rat_cmp(a, b) < 0; }
+pub fn rat_le(a: Rational, b: Rational) -> bool with Mut, Div, Panic { return rat_cmp(a, b) <= 0; }
+pub fn rat_eq(a: Rational, b: Rational) -> bool { return a.num == b.num && a.den == b.den; }
+
+// ============================================================================
+// CONVERSION / PARSE
+// ============================================================================
+
+// Display ONLY — lossy. Never used in a certification path.
+pub fn rat_to_f64(a: Rational) -> f64 { return (a.num as f64) / (a.den as f64); }
+
+// Parse "p" or "p/q" (optional leading '-' on each part). Invalid input → invalid.
+pub fn rat_parse(s: string) -> Rational with Mut, Div, Panic {
+    let n = str_len(s) as i64;
+    var i: i64 = 0;
+    var nsign: i64 = 1;
+    if n > 0 { if str_char_at(s, 0) == 45 { nsign = 0 - 1; i = 1; } }
+    var num: i64 = 0;
+    var ndig: i64 = 0;
+    var slash: i64 = 0;
+    while i < n {
+        let c = str_char_at(s, i);
+        if c == 47 { slash = 1; i = i + 1; i = n + n; }
+        else {
+            if c < 48 { return rat_invalid(); }
+            if c > 57 { return rat_invalid(); }
+            num = num * 10 + (c - 48);
+            ndig = ndig + 1;
+            i = i + 1;
+        }
+    }
+    if ndig == 0 { return rat_invalid(); }
+    if slash == 0 { return rat_make(num * nsign, 1); }
+    // i was bumped to n+n to exit the loop; recover the position after '/'.
+    var j: i64 = 0;
+    var k: i64 = 0;
+    // find slash index
+    while j < n { if str_char_at(s, j) == 47 { k = j + 1; j = n; } else { j = j + 1; } }
+    var dsign: i64 = 1;
+    if k < n { if str_char_at(s, k) == 45 { dsign = 0 - 1; k = k + 1; } }
+    var den: i64 = 0;
+    var ddig: i64 = 0;
+    while k < n {
+        let c = str_char_at(s, k);
+        if c < 48 { return rat_invalid(); }
+        if c > 57 { return rat_invalid(); }
+        den = den * 10 + (c - 48);
+        ddig = ddig + 1;
+        k = k + 1;
+    }
+    if ddig == 0 { return rat_invalid(); }
+    return rat_make(num * nsign, den * dsign);
+}

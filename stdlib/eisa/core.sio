@@ -1,0 +1,216 @@
+// stdlib/eisa/core.sio — EISA v0 runtime reference semantics
+//
+// Runtime split:
+// - err lane follows Dekker/Knuth EFT arithmetic with dd64 accumulation.
+// - u lane follows first-order GUM uncertainty propagation (JCGM 100:2008).
+// - value lane stores the runtime f64 result.
+// - origin lane is a per-measurement integer id (R7, 2026-08-20).
+//
+// Invariant: ereg_true(z) equals exact_op(ereg_true(x), ereg_true(y)) up to
+// second-order err terms; for eadd/esub it is exact to dd64 precision.
+//
+// Origin fusion (decided form; write this in the PR too):
+// - Legitimate ids start at 1. 0 is mixed/unknown — a sentinel no legitimate
+//   origin may occupy (contrast SOUNIO-NO-VERSUS-UNKNOWN and the colliding
+//   -1 effect payload).
+// - origin(op(a,b)) = origin(a) if origin(a) == origin(b) and both != 0;
+//   otherwise 0.
+// - Correlation fires only when both operands have the same non-zero origin.
+// - Consequence: this never reports false correlation, and fails silent on
+//   mixed. (a+b)+a does not see the shared a, because a+b is already 0.
+//   Conservative on purpose.
+//
+// The textual .eisa syntax specification lives under docs/research/.
+module eisa::core
+
+use math::dd64::*
+
+pub struct EReg {
+    pub val: f64,
+    pub err: Dd64,
+    pub u: f64,
+    pub origin: i64,
+}
+
+fn eisa_sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x * 0.5 } else { g = 1.0 }
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// Fusion rule. Exported so tests can pin the sentinel without going through
+// arithmetic.
+pub fn eisa_fuse_origin(a: i64, b: i64) -> i64 {
+    if a != 0 {
+        if a == b {
+            return a
+        }
+    }
+    0
+}
+
+// Fire condition for rho=1. POSITIVE-CONTROL HOOK: the force-equal experiment
+// patches this body to `return 1` so the independent 3-4-5 case starts failing.
+// That is how we prove this comparison is reached.
+pub fn eisa_origins_correlated(a: i64, b: i64) -> i64 {
+    if a != 0 {
+        if a == b {
+            return 1
+        }
+    }
+    0
+}
+
+fn eisa_u_add_sub(x: EReg, y: EReg) -> f64 with Mut, Div {
+    if eisa_origins_correlated(x.origin, y.origin) != 0 {
+        x.u + y.u
+    } else {
+        eisa_sqrt_f64(x.u * x.u + y.u * y.u)
+    }
+}
+
+// Constant / exact: u = 0, so the value cannot correlate with anything.
+// Origin 0 (unknown) is the only honest id — a constant is not a measurement.
+// Even if a caller forged a non-zero origin on a u=0 register, eadd would
+// yield u' = 0 + u_other = u_other, which equals the independent RSS of
+// {0, u_other}. The sentinel still matters for fusion: constant + measured
+// must become 0 so a later add with the same measured register does not
+// false-fire ((c+x)+x would otherwise look like x+x).
+pub fn ereg_exact(v: f64) -> EReg {
+    EReg { val: v, err: dd_zero(), u: 0.0, origin: 0 }
+}
+
+// Legacy constructor. Origin 0 = unknown. Two ereg_measured values therefore
+// never fire correlation, including x+x of a register built this way.
+// That is conservative (no false fire) and is the residual until callers
+// migrate to ereg_origin. Non-regression of W2 depends on this.
+pub fn ereg_measured(v: f64, sigma: f64) -> EReg {
+    EReg { val: v, err: dd_zero(), u: sigma, origin: 0 }
+}
+
+// Measurement constructor. origin must be >= 1; anything else is stored as 0
+// so the -1 collision cannot become a legitimate id.
+pub fn ereg_origin(v: f64, sigma: f64, origin: i64) -> EReg {
+    let o = if origin < 1 { 0 } else { origin }
+    EReg { val: v, err: dd_zero(), u: sigma, origin: o }
+}
+
+pub fn ereg_true(x: EReg) -> Dd64 {
+    dd_add_f64(x.err, x.val)
+}
+
+pub fn eadd(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let s = two_sum(x.val, y.val)
+    EReg {
+        val: s.hi,
+        err: dd_add(dd_add(x.err, y.err), dd_from_f64(s.lo)),
+        u: eisa_u_add_sub(x, y),
+        origin: eisa_fuse_origin(x.origin, y.origin),
+    }
+}
+
+pub fn esub(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let s = two_sum(x.val, 0.0 - y.val)
+    // Same-origin fire uses u' = u_a + u_b, not |u_a - u_b|.
+    // Signed rho=+1 on f=x-y would cancel; the founder form is the linear
+    // bound |c1|u1+|c2|u2 (JCGM 100:2008 §5.1.2 envelope), which never
+    // underestimates. x-x therefore reports 2u, not 0. Conservative.
+    EReg {
+        val: s.hi,
+        err: dd_add(dd_sub(x.err, y.err), dd_from_f64(s.lo)),
+        u: eisa_u_add_sub(x, y),
+        origin: eisa_fuse_origin(x.origin, y.origin),
+    }
+}
+
+pub fn emul(x: EReg, y: EReg) -> EReg with Mut, Div {
+    let p = two_prod(x.val, y.val)
+    let t1 = y.val * x.u
+    let t2 = x.val * y.u
+    // Product correlation is not the same correction as a sum.
+    // Independent FO (kept): u' = sqrt((y ux)^2 + (x uy)^2).
+    // Derived, not applied — DUE:
+    //   JCGM 100:2008 §5.2.2, f=xy, rho=1
+    //   => u' = |y ux + x uy|
+    //   linear bound (matches eadd/esub envelope) = |y| ux + |x| uy
+    //   which for x*x is 2|x|u, the derivative of x^2.
+    // I am not shipping that formula in this lane. Acceptance is eadd/esub.
+    // Fusion still runs: mixed product becomes origin 0.
+    EReg {
+        val: p.hi,
+        err: dd_add(
+            dd_add(dd_mul_f64(x.err, y.val), dd_mul_f64(y.err, x.val)),
+            dd_from_f64(p.lo)
+        ),
+        u: eisa_sqrt_f64(t1 * t1 + t2 * t2),
+        origin: eisa_fuse_origin(x.origin, y.origin),
+    }
+}
+
+pub fn ediv(x: EReg, y: EReg) -> EReg with Div, Mut {
+    let q = x.val / y.val
+    let p = two_prod(q, y.val)
+    let residual_dd = dd_sub(dd_from_f64(x.val), p)
+    let res = dd_to_f64(residual_dd) / y.val
+    let ay = if y.val < 0.0 { 0.0 - y.val } else { y.val }
+    let inner = x.u * x.u + (q * y.u) * (q * y.u)
+    // Quotient correlation DUE, same reason as emul. Independent FO kept:
+    //   u' = sqrt(ux^2 + (q uy)^2) / |y|
+    // Derived rho=1 (not applied): uc^2 = (ux^2 + (q uy)^2 - 2 q ux uy)/y^2
+    // so the signed form is |ux - q uy|/|y| when q>0; the linear bound is
+    // (ux + |q| uy)/|y|. Signs make this easy to get wrong; I am not
+    // shipping a formula I have not tested against an integer oracle.
+    EReg {
+        val: q,
+        err: dd_add(
+            dd_sub(dd_mul_f64(x.err, 1.0 / y.val), dd_mul_f64(y.err, q / y.val)),
+            dd_from_f64(res)
+        ),
+        u: (1.0 / ay) * eisa_sqrt_f64(inner),
+        origin: eisa_fuse_origin(x.origin, y.origin),
+    }
+}
+
+pub fn esqrt(x: EReg) -> EReg with Mut, Div {
+    if x.val <= 0.0 { return ereg_exact(0.0) }
+    let z = eisa_sqrt_f64(x.val)
+    let p = two_prod(z, z)
+    let r_dd = dd_sub(dd_from_f64(x.val), p)
+    let res = dd_to_f64(r_dd) / (2.0 * z)
+    // Unary: same measurement. FO derivative u/(2z) already accounts for
+    // dependence on x; there is no second operand to correlate with.
+    EReg {
+        val: z,
+        err: dd_add(dd_mul_f64(x.err, 1.0 / (2.0 * z)), dd_from_f64(res)),
+        u: x.u / (2.0 * z),
+        origin: x.origin,
+    }
+}
+
+pub fn egate(x: EReg, k: i64) -> i64 with Mut, Div {
+    let roundoff = dd_to_f64(dd_abs(x.err))
+    let budget = x.u
+    if budget <= 0.0 {
+        if roundoff == 0.0 { return 0 } else { return 2 }
+    }
+    if roundoff * 10.0 >= budget { return 2 }
+    if roundoff * 100.0 >= budget { return 1 }
+    let _keep_k = k
+    0
+}
+
+pub fn egate_names(code: i64) -> string {
+    if code == 0 { "ok" }
+    else {
+        if code == 1 { "marginal" }
+        else {
+            if code == 2 { "reject" } else { "unknown" }
+        }
+    }
+}

@@ -1,0 +1,223 @@
+// self-hosted/gpu/kaxi_opt.sio — K-AXI peephole optimizer
+//
+// Operates on KaxiTxnStream to fold constants and eliminate dead code.
+
+use gpu::kaxi_backend::*
+
+pub fn kaxi_optimize(stream: KaxiTxnStream) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    var s1 = kaxi_opt_fold_constants(stream)
+    var s2 = kaxi_opt_dead_code_elim(s1)
+    s2
+}
+
+// ============================================================================
+// Pass 1: Constant folding
+// ============================================================================
+
+fn kaxi_opt_fold_constants(stream: KaxiTxnStream) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    var out: KaxiTxnStream = kaxi_txn_stream_new()
+    var const_val: [i64; 64] = [0; 64]
+    var is_const: [bool; 64] = [false; 64]
+
+    var i: i64 = 0
+    while i < stream.count {
+        let raw_flags = stream.flags[i as usize]
+        let opc = kaxi_flags_unpack_op_kind(raw_flags)
+        let value = stream.value_bits[i as usize]
+        let dst = (value >> 32) & 0xFFFF
+        let src_a = (value >> 16) & 0xFFFF
+        let src_b = value & 0xFFFF
+
+        var new_value = value
+        var new_flags = raw_flags
+        var folded = false
+
+        if opc == KAXI_OP_LOAD_IMM {
+            is_const[dst as usize] = true
+            const_val[dst as usize] = src_a
+        }
+        else if opc == KAXI_OP_ADD && is_const[src_a as usize] && is_const[src_b as usize] {
+            let result = const_val[src_a as usize] + const_val[src_b as usize]
+            is_const[dst as usize] = true
+            const_val[dst as usize] = result
+            new_value = (dst << 32) | ((result & 0xFFFF) << 16) | 0
+            new_flags = kaxi_flags_pack(KAXI_OP_LOAD_IMM, 1, 0, 16)
+            folded = true
+        }
+        else if opc == KAXI_OP_SUB && is_const[src_a as usize] && is_const[src_b as usize] {
+            let result = const_val[src_a as usize] - const_val[src_b as usize]
+            is_const[dst as usize] = true
+            const_val[dst as usize] = result
+            new_value = (dst << 32) | ((result & 0xFFFF) << 16) | 0
+            new_flags = kaxi_flags_pack(KAXI_OP_LOAD_IMM, 1, 0, 16)
+            folded = true
+        }
+        else if opc == KAXI_OP_MUL && is_const[src_a as usize] && is_const[src_b as usize] {
+            let result = const_val[src_a as usize] * const_val[src_b as usize]
+            is_const[dst as usize] = true
+            const_val[dst as usize] = result
+            new_value = (dst << 32) | ((result & 0xFFFF) << 16) | 0
+            new_flags = kaxi_flags_pack(KAXI_OP_LOAD_IMM, 1, 0, 16)
+            folded = true
+        }
+        else if opc == KAXI_OP_DIV && is_const[src_a as usize] && is_const[src_b as usize] && const_val[src_b as usize] != 0 {
+            let result = const_val[src_a as usize] / const_val[src_b as usize]
+            is_const[dst as usize] = true
+            const_val[dst as usize] = result
+            new_value = (dst << 32) | ((result & 0xFFFF) << 16) | 0
+            new_flags = kaxi_flags_pack(KAXI_OP_LOAD_IMM, 1, 0, 16)
+            folded = true
+        }
+        else if opc == KAXI_OP_FMA && is_const[src_a as usize] && is_const[src_b as usize] {
+            let a = const_val[src_a as usize]
+            let b = const_val[src_b as usize]
+            let result = a * b + a
+            is_const[dst as usize] = true
+            const_val[dst as usize] = result
+            new_value = (dst << 32) | ((result & 0xFFFF) << 16) | 0
+            new_flags = kaxi_flags_pack(KAXI_OP_LOAD_IMM, 1, 0, 16)
+            folded = true
+        }
+        else {
+            // Any instruction that writes a register and isn't foldable invalidates const
+            if opc != KAXI_OP_STORE_GLOBAL && opc != KAXI_OP_STORE_SHARED
+               && opc != KAXI_OP_BARRIER && opc != KAXI_OP_RET
+               && opc != KAXI_OP_BRANCH && opc != KAXI_OP_RECONVERGE
+               && opc != KAXI_OP_NOP {
+                is_const[dst as usize] = false
+            }
+        }
+
+        // Append instruction (folded or original)
+        if out.count < 256 {
+            let idx = out.count
+            out.value_bits[idx as usize] = new_value
+            out.flags[idx as usize] = new_flags
+            out.seq[idx as usize] = stream.seq[i as usize]
+            out.count = out.count + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Pass 2: Dead code elimination
+// ============================================================================
+
+fn kaxi_opt_dead_code_elim(stream: KaxiTxnStream) -> KaxiTxnStream with Mut, Panic, Div, Alloc {
+    // Track which registers are read by any live instruction
+    var read: [bool; 64] = [false; 64]
+    // Also track predicate registers that are read
+    var pred_read: [bool; 8] = [false; 8]
+
+    // First pass: scan backwards to compute liveness
+    var i: i64 = stream.count - 1
+    while i >= 0 {
+        let raw_flags = stream.flags[i as usize]
+        let opc = kaxi_flags_unpack_op_kind(raw_flags)
+        let value = stream.value_bits[i as usize]
+        let dst = (value >> 32) & 0xFFFF
+        let src_a = (value >> 16) & 0xFFFF
+        let src_b = value & 0xFFFF
+        let pred_idx = (value >> 48) & 0xFF
+
+        // Determine if this instruction is live based on whether its dst is read
+        var live = true
+        if opc == KAXI_OP_LOAD_IMM || opc == KAXI_OP_ADD || opc == KAXI_OP_SUB
+           || opc == KAXI_OP_MUL || opc == KAXI_OP_DIV || opc == KAXI_OP_FMA
+           || opc == KAXI_OP_PASS || opc == KAXI_OP_GET_BID || opc == KAXI_OP_GET_NTID
+           || opc == KAXI_OP_LOAD_PARAM {
+            live = read[dst as usize]
+        }
+        else if opc == KAXI_OP_SETP_LT || opc == KAXI_OP_SETP_LE || opc == KAXI_OP_SETP_EQ
+             || opc == KAXI_OP_SETP_GE || opc == KAXI_OP_SETP_GT || opc == KAXI_OP_SETP_NE {
+            live = pred_read[dst as usize]
+        }
+        else if opc == KAXI_OP_SELP {
+            live = read[dst as usize]
+            pred_read[pred_idx as usize] = true
+        }
+        else if opc == KAXI_OP_VOTE_BALLOT {
+            live = read[dst as usize]
+            pred_read[src_a as usize] = true
+        }
+        else if opc == KAXI_OP_SHUFFLE_XOR || opc == KAXI_OP_WARP_REDUCE_ADD {
+            live = read[dst as usize]
+        }
+
+        if live {
+            // Mark sources as read
+            if opc != KAXI_OP_LOAD_IMM && opc != KAXI_OP_NOP && opc != KAXI_OP_BARRIER
+               && opc != KAXI_OP_RET && opc != KAXI_OP_RECONVERGE && opc != KAXI_OP_BRANCH {
+                if opc == KAXI_OP_SETP_LT || opc == KAXI_OP_SETP_LE || opc == KAXI_OP_SETP_EQ
+                   || opc == KAXI_OP_SETP_GE || opc == KAXI_OP_SETP_GT || opc == KAXI_OP_SETP_NE {
+                    read[src_a as usize] = true
+                    read[src_b as usize] = true
+                }
+                else if opc == KAXI_OP_SELP {
+                    read[src_a as usize] = true
+                    read[src_b as usize] = true
+                }
+                else if opc == KAXI_OP_STORE_GLOBAL || opc == KAXI_OP_STORE_SHARED {
+                    read[dst as usize] = true
+                    read[src_a as usize] = true
+                }
+                else if opc == KAXI_OP_VOTE_BALLOT {
+                    pred_read[src_a as usize] = true
+                }
+                else if opc == KAXI_OP_SHUFFLE_XOR || opc == KAXI_OP_WARP_REDUCE_ADD {
+                    read[src_a as usize] = true
+                }
+                else {
+                    read[src_a as usize] = true
+                    read[src_b as usize] = true
+                }
+            }
+        }
+        i = i - 1
+    }
+
+    // Second pass: build output with only live instructions
+    var out: KaxiTxnStream = kaxi_txn_stream_new()
+    i = 0
+    while i < stream.count {
+        let raw_flags = stream.flags[i as usize]
+        let opc = kaxi_flags_unpack_op_kind(raw_flags)
+        let value = stream.value_bits[i as usize]
+        let dst = (value >> 32) & 0xFFFF
+        let src_a = (value >> 16) & 0xFFFF
+        let src_b = value & 0xFFFF
+        let pred_idx = (value >> 48) & 0xFF
+
+        var keep = true
+        if opc == KAXI_OP_LOAD_IMM || opc == KAXI_OP_ADD || opc == KAXI_OP_SUB
+           || opc == KAXI_OP_MUL || opc == KAXI_OP_DIV || opc == KAXI_OP_FMA
+           || opc == KAXI_OP_PASS || opc == KAXI_OP_GET_BID || opc == KAXI_OP_GET_NTID
+           || opc == KAXI_OP_LOAD_PARAM || opc == KAXI_OP_SHUFFLE_XOR || opc == KAXI_OP_WARP_REDUCE_ADD {
+            keep = read[dst as usize]
+        }
+        else if opc == KAXI_OP_SETP_LT || opc == KAXI_OP_SETP_LE || opc == KAXI_OP_SETP_EQ
+             || opc == KAXI_OP_SETP_GE || opc == KAXI_OP_SETP_GT || opc == KAXI_OP_SETP_NE {
+            keep = pred_read[dst as usize]
+        }
+        else if opc == KAXI_OP_SELP {
+            keep = read[dst as usize]
+        }
+        else if opc == KAXI_OP_VOTE_BALLOT {
+            keep = read[dst as usize]
+        }
+
+        if keep {
+            if out.count < 256 {
+                let idx = out.count
+                out.value_bits[idx as usize] = value
+                out.flags[idx as usize] = raw_flags
+                out.seq[idx as usize] = stream.seq[i as usize]
+                out.count = out.count + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}

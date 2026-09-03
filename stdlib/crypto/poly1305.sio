@@ -1,0 +1,362 @@
+//! stdlib/crypto/poly1305.sio — Poly1305 one-time MAC (RFC 8439).
+//!
+//! Reference: RFC 8439, "ChaCha20 and Poly1305 for IETF Protocols",
+//! June 2018. https://www.rfc-editor.org/rfc/rfc8439.txt
+//! Section 2.5 defines the Poly1305 algorithm: a 256-bit one-time key is
+//! split into a 128-bit `r` (which must be "clamped" -- certain bits
+//! forced to zero, see `clamp_r` below) and a 128-bit `s`. The message is
+//! processed in 16-byte blocks; each block, with a single terminating
+//! 0x01 byte appended (NOT zero-padded first -- see the block loop
+//! below), is accumulated into a running total mod the prime
+//! `2^130 - 5`, multiplying by `r` at each step (Horner's-rule style:
+//! acc = ((acc + block) * r) mod (2^130-5)). The final tag is
+//! `(acc + s) mod 2^128`, truncated to 16 bytes.
+//! Section 2.5.2's standalone test vector (key starting 85:d6:be:78...,
+//! message "Cryptographic Forum Research Group", tag
+//! a8:06:1d:c1:30:51:36:c6:c2:2b:8b:af:0c:01:27:a9) was independently
+//! re-fetched from the primary RFC text on 2026-08-25 and confirmed
+//! byte-for-byte against this file's test, tests/run-pass/poly1305_mac.sio
+//! -- and that test builds its 34-byte message by iterating the literal
+//! ASCII string with the builtin `str_len`/`str_char_at` (see
+//! tests/run-pass/hash_sha256_vectors.sio's `write_str` for precedent),
+//! not by hand-typing 34 integer literals, specifically to eliminate
+//! transcription risk in a 34-character string-to-bytes conversion.
+//!
+//! WIDE-ARITHMETIC REPRESENTATION CHOICE (explicit, not a silent
+//! default): Poly1305's field is exactly 130 bits wide (modulus
+//! `2^130 - 5`), a near-Mersenne prime with a specific cheap reduction
+//! (`2^130 ≡ 5 (mod 2^130-5)`, so any bit at or above position 130 can be
+//! folded back in by multiplying by 5). `stdlib/bignum/bigint.sio`'s
+//! `BigInt` (4096-bit, 512 limbs of 16 bits, generic add/mul/cmp) was
+//! considered and REJECTED for this file:
+//!   1. Every BigInt operation pays for up to 512 limbs of bookkeeping
+//!      (normalizing `len`, looping to `BIGINT_MAX_LIMBS`) to represent a
+//!      value that only ever needs ~9 sixteen-bit limbs here -- Poly1305
+//!      runs its multiply-and-reduce step once per 16-byte message block,
+//!      so this overhead is paid per block, not once.
+//!   2. BigInt's `bigint_mul` produces a full-width generic product with
+//!      no awareness of the `2^130-5` modulus; using it would require a
+//!      separate generic-division-based reduction after every multiply,
+//!      which BigInt does not provide (no `bigint_mod` in its API) and
+//!      which would be far more expensive than the near-Mersenne fold.
+//!   3. BigInt's own header comment records it was built specifically
+//!      for "RSA public-key operations" (4096-bit modulus scale); 130
+//!      bits is a different problem size by more than an order of
+//!      magnitude, and forcing it through BigInt's fixed 512-limb shape
+//!      buys no correctness benefit here, only overhead.
+//! Chosen instead: a small purpose-built radix-2^26, 5-limb accumulator
+//! (`h0..h4`, each held below 2^26 between steps), which is the
+//! well-known reference-implementation approach for this exact field
+//! (see e.g. Andrew Moon's public-domain poly1305-donna, and the
+//! informative pseudocode in RFC 8439 section 2.5.1's C reference is
+//! compatible with this decomposition). Every intermediate value's
+//! overflow margin against Finding 11 (docs/audit/
+//! TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md -- native i64/u64
+//! right-shift/divide/modulo break whenever bit 63 is set) is reasoned
+//! about at each step below, mirroring bigint.sio's own comment
+//! discipline:
+//!   - Each limb (`h0..h4`, `r0..r4`) is masked to `MASK26` (2^26-1)
+//!     after every reduction step, so each stays strictly below 2^26.
+//!   - `s1..s4 = r1..r4 * 5` are therefore below `5 * 2^26 < 2^29`.
+//!   - Each cross-multiply term (`h_i * r_j` or `h_i * s_j`) is below
+//!     `2^26 * 2^29 = 2^55` in the worst case (before a block is folded
+//!     in, `h_i` can transiently reach just under `2^27` -- one unreduced
+//!     block addition -- so the true worst case is `2^27 * 2^29 = 2^56`).
+//!   - Each `d0..d4` accumulator sums five such terms:
+//!     `5 * 2^56 = 2^58.3`, still 4.7 bits below the 2^63 danger
+//!     threshold -- comfortable margin, no value here ever has bit 63
+//!     set, so plain `>>`, `&`, `+`, `*` on i64 are safe throughout this
+//!     file with no risk of tripping Finding 11.
+//!   - The final packing step shifts `h4 << 8` (h4 < 2^26, result
+//!     < 2^34) and sums two 32-bit words with a carry-in (< 2^33) --
+//!     both far below 2^63 as well.
+//! This is NOT a constant-time implementation (no constant-time
+//! requirement is stated for this task, matching bigint.sio's own stated
+//! policy of no constant-time requirement for its RSA use case); the
+//! final "is h >= 2^130-5" reduction below uses an ordinary conditional
+//! select rather than a branchless mask trick.
+
+use net::socket::*
+
+pub const POLY1305_KEY_LEN: i64 = 32
+pub const POLY1305_TAG_LEN: i64 = 16
+
+const MASK26: i64 = 0x3ffffff // 2^26 - 1
+
+// clamp_r: RFC 8439 section 2.5.1's "clamp(r)" step. Given the first 16
+// bytes of the one-time key, force specific bits to zero per the RFC's
+// mask `0x0ffffffc0ffffffc0ffffffc0fffffff` (little-endian byte layout):
+// bytes 3, 7, 11, 15 are masked with 0x0f (top 4 bits cleared) and bytes
+// 4, 8, 12 are masked with 0xfc (bottom 2 bits cleared). Verified against
+// the RFC 8439 text directly (section 2.5.1, "clamp" pseudocode).
+//
+// Takes `key16` by value (already a fresh [u8;16], see caller) so no
+// aliasing concern applies here -- but note the known Task 2 compiler
+// defect for future editors: `var x = *ref` on a `&[u8;N]` reference
+// ALIASES the caller's array rather than copying it; this function never
+// does that (its parameter is already an owned array, not dereferenced
+// from a reference here).
+fn clamp_r(key16: [u8;16]) -> [u8;16] {
+    var r = key16
+    r[3] = r[3] & 15
+    r[7] = r[7] & 15
+    r[11] = r[11] & 15
+    r[15] = r[15] & 15
+    r[4] = r[4] & 252
+    r[8] = r[8] & 252
+    r[12] = r[12] & 252
+    r
+}
+
+// unpack16_to_limbs5: read 16 little-endian bytes as a (up to) 130-bit
+// unsigned integer, split into 5 limbs of 26 bits each (h0 = bits 0-25,
+// h1 = bits 26-51, h2 = bits 52-77, h3 = bits 78-103, h4 = bits 104-129).
+// `hi_bit` (0 or 1) sets an additional bit at position 128 (i.e. adds
+// 2^24 to limb 4, since limb 4's base is bit 104 and 128-104=24) -- used
+// for the RFC 8439 message-block padding rule (see caller).
+//
+// Overflow margin: each of t0..t3 is a 32-bit LE word (< 2^32); shifts
+// like `t1 << 6` reach at most `2^32 * 2^6 = 2^38`, ORed with `t0 >> 26`
+// (< 2^6) -- both far below 2^63.
+fn unpack16_to_limbs5(b: [u8;16], hi_bit: i64) -> [i64;5] {
+    let t0 = (b[0] as i64) | ((b[1] as i64) << 8) | ((b[2] as i64) << 16) | ((b[3] as i64) << 24)
+    let t1 = (b[4] as i64) | ((b[5] as i64) << 8) | ((b[6] as i64) << 16) | ((b[7] as i64) << 24)
+    let t2 = (b[8] as i64) | ((b[9] as i64) << 8) | ((b[10] as i64) << 16) | ((b[11] as i64) << 24)
+    let t3 = (b[12] as i64) | ((b[13] as i64) << 8) | ((b[14] as i64) << 16) | ((b[15] as i64) << 24)
+
+    var out: [i64;5] = [0;5]
+    out[0] = t0 & MASK26
+    out[1] = ((t0 >> 26) | (t1 << 6)) & MASK26
+    out[2] = ((t1 >> 20) | (t2 << 12)) & MASK26
+    out[3] = ((t2 >> 14) | (t3 << 18)) & MASK26
+    out[4] = ((t3 >> 8) & MASK26) + (hi_bit << 24)
+    out
+}
+
+pub fn poly1305_mac(key: &[u8;32], msg: &RawBuf, msg_len: i64) -> [u8;16] with IO {
+    // Copy key[0..16] into r_bytes and key[16..32] into s_bytes
+    // element-by-element (never `var x = *key` -- key is a &[u8;32]
+    // reference and Task 2's aliasing defect means a bare dereference
+    // copy of a fixed-array reference aliases the caller's storage
+    // rather than copying it).
+    var r_bytes: [u8;16] = [0;16]
+    var s_bytes: [u8;16] = [0;16]
+    var i: i64 = 0
+    while i < 16 {
+        r_bytes[i as usize] = key[i as usize]
+        s_bytes[i as usize] = key[(i + 16) as usize]
+        i = i + 1
+    }
+
+    let clamped = clamp_r(r_bytes)
+    let rlimbs = unpack16_to_limbs5(clamped, 0)
+    let r0 = rlimbs[0]
+    let r1 = rlimbs[1]
+    let r2 = rlimbs[2]
+    let r3 = rlimbs[3]
+    let r4 = rlimbs[4]
+
+    // s1..s4 = r1..r4 * 5, used to fold the "wrap past 2^130" terms back
+    // in during the schoolbook multiply below (2^130 ≡ 5 mod 2^130-5).
+    // r1..r4 < 2^26, so s1..s4 < 5 * 2^26 < 2^29 -- see file header.
+    let s1 = r1 * 5
+    let s2 = r2 * 5
+    let s3 = r3 * 5
+    let s4 = r4 * 5
+
+    var h0: i64 = 0
+    var h1: i64 = 0
+    var h2: i64 = 0
+    var h3: i64 = 0
+    var h4: i64 = 0
+
+    var pos: i64 = 0
+    while pos < msg_len {
+        var remaining = msg_len - pos
+        var blen = remaining
+        if blen > 16 {
+            blen = 16
+        }
+
+        // RFC 8439 section 2.5.1 padding rule: the block is read as a
+        // little-endian number with a SINGLE 0x01 byte appended right
+        // after the last message byte of the block -- a full 16-byte
+        // block therefore becomes a 17-byte (up to 2^136, but capped by
+        // the field at 2^130) number with bit 128 set; a partial
+        // n-byte (n<16) block becomes an (n+1)-byte number with a 0x01
+        // byte at position n and nothing beyond it (i.e. NOT zero-padded
+        // to 16 bytes first and then bit-128-flagged -- the terminating
+        // 1 sits at position n, not position 16).
+        var block: [u8;16] = [0;16]
+        var k: i64 = 0
+        while k < blen {
+            block[k as usize] = (rawbuf_get(msg, pos + k) & 255) as u8
+            k = k + 1
+        }
+        var hi_bit: i64 = 0
+        if blen == 16 {
+            hi_bit = 1
+        } else {
+            block[blen as usize] = 1
+        }
+
+        let blimbs = unpack16_to_limbs5(block, hi_bit)
+        h0 = h0 + blimbs[0]
+        h1 = h1 + blimbs[1]
+        h2 = h2 + blimbs[2]
+        h3 = h3 + blimbs[3]
+        h4 = h4 + blimbs[4]
+
+        // h = (h * r) mod (2^130 - 5), schoolbook multiply with the
+        // s1..s4 = 5*r1..r4 substitution folding the high-order
+        // (>= 2^130) partial products back into the low limbs.
+        // Overflow margin: h0..h4 are each < 2^27 here (a limb below
+        // 2^26 from the previous round's full reduction, plus a block
+        // limb below 2^26 = at most just under 2^27). Each product term
+        // is then at most 2^27 * 2^29 = 2^56; d0..d4 sum five such terms,
+        // so each is below 5 * 2^56 = 2^58.3 -- 4.7 bits of margin below
+        // the 2^63 danger zone (Finding 11). Never close to bit 63.
+        let d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1
+        let d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2
+        let d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3
+        let d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4
+        let d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0
+
+        var c = d0 >> 26
+        h0 = d0 & MASK26
+        var acc1 = d1 + c
+        c = acc1 >> 26
+        h1 = acc1 & MASK26
+        var acc2 = d2 + c
+        c = acc2 >> 26
+        h2 = acc2 & MASK26
+        var acc3 = d3 + c
+        c = acc3 >> 26
+        h3 = acc3 & MASK26
+        var acc4 = d4 + c
+        c = acc4 >> 26
+        h4 = acc4 & MASK26
+        h0 = h0 + c * 5
+        c = h0 >> 26
+        h0 = h0 & MASK26
+        h1 = h1 + c
+
+        pos = pos + 16
+    }
+
+    // Full carry-propagation pass (poly1305-donna style) before the
+    // final reduction/packing below. The block-accumulation loop above
+    // ends each iteration with `h1 = h1 + c` (the carry folded out of
+    // h0 after the `* 5` wrap) and NO subsequent re-mask/re-carry of
+    // h1 -- so after the LAST iteration, h1 can be as large as
+    // `(2^26-1) + 1 = 2^26`, one past MASK26, while h2..h4 remain
+    // strictly < 2^26 from their own masked assignments inside the
+    // loop. This is not yet a problem for the numeric value of h (it
+    // is still correct as an unreduced sum), but the final packing
+    // step below merges adjacent limbs with bitwise OR (`h1 << 26`,
+    // `h1 >> 6`, etc.), which is only safe when every limb is truly
+    // confined to its 26-bit field -- an unmasked h1 == 2^26 has its
+    // bit 26 set, which collides with (and can be silently swallowed
+    // by, depending on h2's low bit) the OR against h2's shifted-in
+    // bits. Propagate any such carry all the way through before
+    // packing, exactly as poly1305-donna reference implementations do:
+    var carry26 = h1 >> 26
+    h1 = h1 & MASK26
+    h2 = h2 + carry26
+    carry26 = h2 >> 26
+    h2 = h2 & MASK26
+    h3 = h3 + carry26
+    carry26 = h3 >> 26
+    h3 = h3 & MASK26
+    h4 = h4 + carry26
+    carry26 = h4 >> 26
+    h4 = h4 & MASK26
+    h0 = h0 + carry26 * 5
+    carry26 = h0 >> 26
+    h0 = h0 & MASK26
+    h1 = h1 + carry26
+    // After this chain every limb h0..h4 is guaranteed < 2^26, so the
+    // OR-based bit-merging in the packing step below is safe.
+
+    // Final full reduction mod 2^130-5: h is already < 2^130 (every
+    // limb was masked to < 2^26 above), but may still be >= 2^130-5.
+    // Compute g = h + 5 with carry propagation through all 5 limbs; if
+    // that carries out of limb 4 (i.e. h + 5 >= 2^130, equivalently
+    // h >= 2^130-5), the canonical reduced value is g mod 2^130 (the
+    // masked g limbs); otherwise h itself is already canonical.
+    // Not constant-time -- see file header.
+    var g0 = h0 + 5
+    var c = g0 >> 26
+    g0 = g0 & MASK26
+    var g1 = h1 + c
+    c = g1 >> 26
+    g1 = g1 & MASK26
+    var g2 = h2 + c
+    c = g2 >> 26
+    g2 = g2 & MASK26
+    var g3 = h3 + c
+    c = g3 >> 26
+    g3 = g3 & MASK26
+    let h4_plus_c = h4 + c
+    var g4 = h4_plus_c & MASK26
+    let overflow = h4_plus_c >> 26 // 0 or 1: 1 means h >= 2^130-5
+
+    if overflow == 1 {
+        h0 = g0
+        h1 = g1
+        h2 = g2
+        h3 = g3
+        h4 = g4
+    }
+
+    // Pack the low 128 bits of h (bits 130-131, i.e. h4's top 2 bits,
+    // are dropped -- they cannot survive the later "mod 2^128" step
+    // regardless of their value) into 4 32-bit little-endian words.
+    // h1 << 26 < 2^26 * 2^26 = 2^52, h4 << 8 < 2^26 * 2^8 = 2^34 --
+    // both far below 2^63.
+    let hw0 = (h0 | (h1 << 26)) & 0xffffffff
+    let hw1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffff
+    let hw2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffff
+    let hw3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffff
+
+    // s = key[16..32] read as 4 32-bit little-endian words.
+    let sw0 = (s_bytes[0] as i64) | ((s_bytes[1] as i64) << 8) | ((s_bytes[2] as i64) << 16) | ((s_bytes[3] as i64) << 24)
+    let sw1 = (s_bytes[4] as i64) | ((s_bytes[5] as i64) << 8) | ((s_bytes[6] as i64) << 16) | ((s_bytes[7] as i64) << 24)
+    let sw2 = (s_bytes[8] as i64) | ((s_bytes[9] as i64) << 8) | ((s_bytes[10] as i64) << 16) | ((s_bytes[11] as i64) << 24)
+    let sw3 = (s_bytes[12] as i64) | ((s_bytes[13] as i64) << 8) | ((s_bytes[14] as i64) << 16) | ((s_bytes[15] as i64) << 24)
+
+    // tag = (h + s) mod 2^128: 32-bit-word addition with carry, the
+    // final carry out of word 3 is discarded (that IS the mod 2^128
+    // truncation). Each sum (word + word + carry-in) is < 2^33, no
+    // overflow risk.
+    let f0 = hw0 + sw0
+    let ow0 = f0 & 0xffffffff
+    var carry = f0 >> 32
+    let f1 = hw1 + sw1 + carry
+    let ow1 = f1 & 0xffffffff
+    carry = f1 >> 32
+    let f2 = hw2 + sw2 + carry
+    let ow2 = f2 & 0xffffffff
+    carry = f2 >> 32
+    let f3 = hw3 + sw3 + carry
+    let ow3 = f3 & 0xffffffff
+
+    var tag: [u8;16] = [0;16]
+    tag[0] = (ow0 & 255) as u8
+    tag[1] = ((ow0 >> 8) & 255) as u8
+    tag[2] = ((ow0 >> 16) & 255) as u8
+    tag[3] = ((ow0 >> 24) & 255) as u8
+    tag[4] = (ow1 & 255) as u8
+    tag[5] = ((ow1 >> 8) & 255) as u8
+    tag[6] = ((ow1 >> 16) & 255) as u8
+    tag[7] = ((ow1 >> 24) & 255) as u8
+    tag[8] = (ow2 & 255) as u8
+    tag[9] = ((ow2 >> 8) & 255) as u8
+    tag[10] = ((ow2 >> 16) & 255) as u8
+    tag[11] = ((ow2 >> 24) & 255) as u8
+    tag[12] = (ow3 & 255) as u8
+    tag[13] = ((ow3 >> 8) & 255) as u8
+    tag[14] = ((ow3 >> 16) & 255) as u8
+    tag[15] = ((ow3 >> 24) & 255) as u8
+    tag
+}

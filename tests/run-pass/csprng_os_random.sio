@@ -1,0 +1,87 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::csprng::*
+use net::socket::*
+
+fn main() -> i64 with IO {
+    let (buf1, ok1) = crypto_os_random_bytes(32)
+    if !ok1 {
+        print_int(1)
+        return 1
+    }
+
+    let (buf2, ok2) = crypto_os_random_bytes(32)
+    if !ok2 {
+        print_int(2)
+        return 1
+    }
+
+    // Two independent reads of real OS entropy must not be identical --
+    // this is not a proof of randomness, but a trivial sanity floor (a
+    // constant-output bug would fail this immediately).
+    var all_same: bool = true
+    var i: i64 = 0
+    while i < 32 {
+        if rawbuf_get(&buf1, i) != rawbuf_get(&buf2, i) {
+            all_same = false
+        }
+        i = i + 1
+    }
+    if all_same {
+        print_int(3)
+        return 1
+    }
+
+    // Sanity floor: 32 real random bytes being all-zero is astronomically
+    // unlikely (probability 2^-256) -- if this ever fires, something is
+    // deeply broken (e.g. crypto_os_random_bytes silently returning a
+    // zeroed buffer instead of real entropy), not bad luck.
+    var all_zero: bool = true
+    var j: i64 = 0
+    while j < 32 {
+        if rawbuf_get(&buf1, j) != 0 {
+            all_zero = false
+        }
+        j = j + 1
+    }
+    if all_zero {
+        print_int(4)
+        return 1
+    }
+
+    // Entropy-bias regression (2026-08-25 final-review fix): the pre-fix
+    // `crypto_os_random_bytes` structurally could NEVER return a 0x00 byte
+    // (it copied only the bytes strictly before str_len's NUL-scan
+    // terminator -- a conditioning-on-a-stopping-rule bias, not a proof of
+    // health). Measured directly: drawing 8192 bytes via the pre-fix
+    // function produced ZERO 0x00 bytes, versus ~32 expected from a
+    // genuinely uniform source. Draw a few thousand bytes across multiple
+    // calls here and confirm at least one 0x00 byte shows up somewhere --
+    // a weak but real sanity check that the fix (copying the genuine
+    // terminating zero byte too) actually restored zero-byte production.
+    var saw_zero_byte: bool = false
+    var call: i64 = 0
+    while call < 8 {
+        let (buf3, ok3) = crypto_os_random_bytes(512)
+        if !ok3 {
+            print_int(5)
+            return 1
+        }
+        var k: i64 = 0
+        while k < 512 {
+            if rawbuf_get(&buf3, k) == 0 {
+                saw_zero_byte = true
+            }
+            k = k + 1
+        }
+        call = call + 1
+    }
+    if !saw_zero_byte {
+        print_int(6)
+        return 1
+    }
+
+    println("csprng_os_random: two independent 32-byte reads succeed, differ, and are not all-zero")
+    println("csprng_os_random: 4096-byte sample across 8 calls contains at least one 0x00 byte (entropy-bias fix verified)")
+    return 0
+}

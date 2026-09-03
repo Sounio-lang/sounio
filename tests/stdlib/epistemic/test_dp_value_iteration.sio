@@ -1,0 +1,278 @@
+//@ run-pass
+//@ expect-stdout: DP_VALUE_ITERATION_PASS
+//
+// Precise DP solvers — closed-form MDPs with known analytic solutions.
+//
+// Cases (all inlined into main to keep the stack frame simple):
+//   1. 2-state absorbing goal, gamma=0.9           → V(0)=1.0, V(1)=0.
+//   2. 3-state chain to terminal, gamma=0.9        → V(0)=0.9, V(1)=1.0, V(2)=0.
+//   3. Two-action 2-state risky vs safe           → V*(0)=1.0,   policy(0)=1 (safe).
+//   4. Policy iteration on the same 2-action MDP   → matches value_iteration.
+//
+// Numeric expectations are derived from the closed-form Bellman fixed
+// point; tolerances are tight (1e-9) so the test fails if the solver
+// miscounts iterations or the GUM var/conf propagation distorts V.
+//
+// All cases share a single MDP local `m` (reassigned between cases) to
+// keep stack footprint small; the final reassignment to mdp_new(0,0,0.0)
+// is a workaround for a Sounio stack-epilogue bug on tuple returns.
+
+use epistemic::knowledge::{epistemic_new}
+use epistemic::dp::{EpistemicMDP, mdp_new, mdp_set_trans, value_iteration, extract_policy, policy_iteration, dp_abs}
+
+fn dp_near(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    let d = if a > b { a - b } else { b - a }
+    d <= tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var m = mdp_new(2, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V = value_iteration(&m, 1e-9, 100)
+    println("C1_V0")
+    println(V[0].val)
+    println("C1_V1")
+    println(V[1].val)
+    let c1_ok = dp_near(V[0].val, 1.0, 1e-9) && dp_near(V[1].val, 0.0, 1e-9)
+    if !c1_ok { println("C1_FAIL"); return 1 }
+
+    m = mdp_new(3, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 2, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 2, 0, 2, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V2 = value_iteration(&m, 1e-9, 200)
+    println("C2_V0")
+    println(V2[0].val)
+    println("C2_V1")
+    println(V2[1].val)
+    println("C2_V2")
+    println(V2[2].val)
+    let c2_ok = dp_near(V2[0].val, 0.9, 1e-9) && dp_near(V2[1].val, 1.0, 1e-9) && dp_near(V2[2].val, 0.0, 1e-9)
+    if !c2_ok { println("C2_FAIL"); return 1 }
+
+    m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V3 = value_iteration(&m, 1e-9, 200)
+    let pi3 = extract_policy(&m, &V3)
+    println("C3_V0")
+    println(V3[0].val)
+    println("C3_PI0")
+    println(pi3[0])
+    let c3_ok = dp_near(V3[0].val, 1.0, 1e-9) && pi3[0] == 1
+    if !c3_ok { println("C3_FAIL"); return 1 }
+
+    m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let res4 = policy_iteration(&m, 50, 1e-9, 200)
+    let v0_val = res4.0[0].val
+    let pi0    = res4.1[0]
+    println("C4_V0")
+    println(v0_val)
+    println("C4_PI0")
+    println(pi0)
+    let c4_ok = dp_near(v0_val, 1.0, 1e-9) && pi0 == 1
+    if !c4_ok { println("C4_FAIL"); return 1 }
+
+    // Workaround: reassign the large MDP local before exit so the
+    // stack-epilogue does not trip on a tuple-return + large-struct combo.
+    m = mdp_new(0, 0, 0.0)
+    println("DP_VALUE_ITERATION_PASS")
+    return 0
+}
+
+
+fn case1_absorbing_goal() -> bool with IO, Mut, Div, Panic {
+    // State 0 (start) -> state 1 (goal, absorbing) on action 0.
+    // Reward 1.0 on the transition 0->1; reward 0 on the self-loop at 1.
+    // V*(1) = 0 (absorbing, zero per-step reward).
+    // V*(0) = 1.0 + gamma * V*(1) = 1.0.
+    var m = mdp_new(2, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V = value_iteration(&m, 1e-9, 100)
+
+    println("C1_V0")
+    println(V[0].val)
+    println("C1_V1")
+    println(V[1].val)
+
+    let v0_ok = dp_near(V[0].val, 1.0, 1e-9)
+    let v1_ok = dp_near(V[1].val, 0.0, 1e-9)
+    if !v0_ok {
+        println("C1_V0_FAIL")
+    }
+    if !v1_ok {
+        println("C1_V1_FAIL")
+    }
+    v0_ok && v1_ok
+}
+
+fn case2_chain() -> bool with IO, Mut, Div, Panic {
+    // State 0 -> 1 -> 2 (terminal). Reward 0 on 0->1, reward 1.0 on 1->2.
+    // V*(2) = 0 (absorbing, no per-step reward)
+    // V*(1) = 1.0 + gamma * V*(2) = 1.0
+    // V*(0) = 0   + gamma * V*(1) = 0.9
+    var m = mdp_new(3, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 2, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 2, 0, 2, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V = value_iteration(&m, 1e-9, 200)
+
+    println("C2_V0")
+    println(V[0].val)
+    println("C2_V1")
+    println(V[1].val)
+    println("C2_V2")
+    println(V[2].val)
+
+    let v0_ok = dp_near(V[0].val, 0.9,  1e-9)
+    let v1_ok = dp_near(V[1].val, 1.0,  1e-9)
+    let v2_ok = dp_near(V[2].val, 0.0,  1e-9)
+    if !v0_ok { println("C2_V0_FAIL") }
+    if !v1_ok { println("C2_V1_FAIL") }
+    if !v2_ok { println("C2_V2_FAIL") }
+    v0_ok && v1_ok && v2_ok
+}
+
+fn case3_risky_vs_safe() -> bool with IO, Mut, Div, Panic {
+    // 2-state, 2-action.
+    //   s=0, a=0 (risky): p(0->1)=0.5, R=1.0  | p(0->0)=0.5, R=0
+    //   s=0, a=1 (safe):   p(0->1)=1.0, R=1.0
+    //   s=1, any:          absorbing, R=0 (value is just V(1) = gamma*R(1) + ...)
+    //
+    // Risky closed form:
+    //   V(1) = 0  (terminal, R=0 on stay)
+    //   V(0) risky satisfies  V(0) = 0.5 * (1 + gamma*V(1)) + 0.5 * (0 + gamma*V(0))
+    //                       = 0.5 + 0.45*V(0)
+    //   V(0) risky = 0.5 / 0.55 = 0.909090909...
+    // Safe: V(0) safe = 1.0
+    // Optimum: V*(0) = 1.0, pi*(0) = 1 (safe).
+    var m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+
+    let V = value_iteration(&m, 1e-9, 200)
+    let pi = extract_policy(&m, &V)
+
+    println("C3_V0")
+    println(V[0].val)
+    println("C3_PI0")
+    println(pi[0])
+
+    let v0_ok   = dp_near(V[0].val, 1.0, 1e-9)
+    let pi0_ok  = pi[0] == 1
+    if !v0_ok  { println("C3_V0_FAIL") }
+    if !pi0_ok { println("C3_PI0_FAIL") }
+    v0_ok && pi0_ok
+}
+
+fn case4_policy_iteration() -> bool with IO, Mut, Div, Panic {
+    // Same MDP as case 3, but solved via policy_iteration.
+    var m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+
+    // Use a single temp to receive the tuple (avoids the Sounio bug
+    // with `let (a, b) = tuple_return` destructuring on Epistemic-typed
+    // arrays).
+    println("C4_BEFORE_PI")
+    let res = policy_iteration(&m, 50, 1e-9, 200)
+    println("C4_AFTER_PI")
+
+    println("C4_V0")
+    println(res.0[0].val)
+    println("C4_PI0")
+    println(res.1[0])
+
+    let v0_ok  = dp_near(res.0[0].val, 1.0, 1e-9)
+    let pi0_ok = res.1[0] == 1
+    if !v0_ok  { println("C4_V0_FAIL") }
+    if !pi0_ok { println("C4_PI0_FAIL") }
+    v0_ok && pi0_ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Inline all 4 cases to keep the stack frame simple and
+    // avoid the Sounio stack-corruption bug when large MDP locals
+    // are alive across multiple function calls.
+    var m = mdp_new(2, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V = value_iteration(&m, 1e-9, 100)
+    println("C1_V0")
+    println(V[0].val)
+    println("C1_V1")
+    println(V[1].val)
+    let c1_ok = dp_near(V[0].val, 1.0, 1e-9) && dp_near(V[1].val, 0.0, 1e-9)
+    if !c1_ok { println("C1_FAIL"); return 1 }
+
+    // Case 2
+    m = mdp_new(3, 1, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 2, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 2, 0, 2, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V2 = value_iteration(&m, 1e-9, 200)
+    println("C2_V0")
+    println(V2[0].val)
+    println("C2_V1")
+    println(V2[1].val)
+    println("C2_V2")
+    println(V2[2].val)
+    let c2_ok = dp_near(V2[0].val, 0.9, 1e-9) && dp_near(V2[1].val, 1.0, 1e-9) && dp_near(V2[2].val, 0.0, 1e-9)
+    if !c2_ok { println("C2_FAIL"); return 1 }
+
+    // Case 3
+    m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let V3 = value_iteration(&m, 1e-9, 200)
+    let pi3 = extract_policy(&m, &V3)
+    println("C3_V0")
+    println(V3[0].val)
+    println("C3_PI0")
+    println(pi3[0])
+    let c3_ok = dp_near(V3[0].val, 1.0, 1e-9) && pi3[0] == 1
+    if !c3_ok { println("C3_FAIL"); return 1 }
+
+    // Case 4 — inline policy_iteration. Extract needed values into
+    // scalars immediately so the tuple is consumed before main exits.
+    m = mdp_new(2, 2, 0.9)
+    mdp_set_trans(&!m, 0, 0, 1, 0.5, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 0, 0, 0.5, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 0, 1, 1, 1.0, epistemic_new(1.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 0, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    mdp_set_trans(&!m, 1, 1, 1, 1.0, epistemic_new(0.0, 0.0, 1000))
+    let res4 = policy_iteration(&m, 50, 1e-9, 200)
+    let v0_val = res4.0[0].val
+    let pi0    = res4.1[0]
+    println("C4_V0")
+    println(v0_val)
+    println("C4_PI0")
+    println(pi0)
+    let c4_ok = dp_near(v0_val, 1.0, 1e-9) && pi0 == 1
+    if !c4_ok { println("C4_FAIL"); return 1 }
+
+    // Reassign m to a fresh MDP before main exits (workaround for
+    // Sounio stack-epilogue bug on tuple returns + large struct locals).
+    m = mdp_new(0, 0, 0.0)
+    println("DP_VALUE_ITERATION_PASS")
+    return 0
+}

@@ -1,0 +1,95 @@
+//! Sample rows from a DataFrame.
+//!
+//! There is no built-in RNG on this substrate, so sampling is driven by a seeded linear congruential
+//! generator (Numerical Recipes constants) embedded in the module -- the seed makes a sample
+//! reproducible, matching pandas `sample(random_state=...)`. Rows are drawn WITHOUT replacement via a
+//! partial Fisher-Yates shuffle of the row indices; the LCG's high bits are used (the low bits of an
+//! LCG are weakly random). The result rows appear in the sampled (shuffled) order.
+//!
+//! Functional: returns a new DataFrame, the input is unchanged, and column names are preserved.
+//! Self-contained: uses only the public data::dataframe accessors. Caps at 1024 rows (the DataFrame
+//! row capacity).
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_get_col_name, df_set_col_name}
+
+// Advance a 32-bit LCG: state' = (1664525*state + 1013904223) mod 2^32.
+fn lcg_next(state: i64) -> i64 with Div, Panic {
+    (state * 1664525 + 1013904223) % 4294967296
+}
+
+// A uniform index in [0, m) from the LCG state, taken from the high bits.
+fn lcg_index(state: i64, m: i64) -> i64 with Div, Panic {
+    (state / 65536) % m
+}
+
+// Copy df's column names onto out (both have the same column count).
+fn copy_col_names(df: &DataFrame, out: &!DataFrame) with Mut, Panic {
+    let nc = df_ncols(df)
+    var c: i64 = 0
+    while c < nc {
+        df_set_col_name(out, c, df_get_col_name(df, c))
+        c = c + 1
+    }
+}
+
+// Copy row r of df into out (out already has the right column count).
+fn append_row(df: &DataFrame, r: i64, out: &!DataFrame) with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    var row: [f64; 64] = [0.0; 64]
+    var c: i64 = 0
+    while c < nc && c < 64 {
+        row[c as usize] = df_get(df, r, c)
+        c = c + 1
+    }
+    df_add_row(out, &row)
+}
+
+/// Return a new frame with `n` rows drawn without replacement from `df`, selected by a seeded LCG
+/// (so `seed` makes the sample reproducible). If `n >= nrows` the whole frame is returned in shuffled
+/// order; if `n <= 0` the result is empty. Rows appear in sampled order; the input is unchanged and
+/// column names are preserved.
+pub fn df_sample(df: &DataFrame, n: i64, seed: i64) -> DataFrame with Mut, Div, Panic {
+    let nc = df_ncols(df)
+    let nr = df_nrows(df)
+    var out = df_new(nc)
+    copy_col_names(df, &!out)
+    if n <= 0 || nr <= 0 { return out }
+    var take = n
+    if take > nr { take = nr }
+    // idx = [0, 1, ..., nr-1]
+    var idx: [i64; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < nr && i < 1024 {
+        idx[i as usize] = i
+        i = i + 1
+    }
+    // Partial Fisher-Yates: for the first `take` slots, swap with a random slot at or after i.
+    var state = seed % 4294967296
+    if state < 0 { state = state + 4294967296 }
+    var k: i64 = 0
+    while k < take {
+        state = lcg_next(state)
+        let span = nr - k
+        let j = k + lcg_index(state, span)
+        let tmp = idx[k as usize]
+        idx[k as usize] = idx[j as usize]
+        idx[j as usize] = tmp
+        k = k + 1
+    }
+    var t: i64 = 0
+    while t < take {
+        append_row(df, idx[t as usize], &!out)
+        t = t + 1
+    }
+    out
+}
+
+/// Sample a fraction of the rows: draws floor(frac * nrows) rows without replacement (pandas
+/// sample(frac=...)). `frac` is clamped to [0, 1].
+pub fn df_sample_frac(df: &DataFrame, frac: f64, seed: i64) -> DataFrame with Mut, Div, Panic {
+    var f = frac
+    if f < 0.0 { f = 0.0 }
+    if f > 1.0 { f = 1.0 }
+    let n = ((df_nrows(df) as f64) * f) as i64
+    df_sample(df, n, seed)
+}

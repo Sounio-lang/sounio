@@ -171,6 +171,7 @@ emit_status_json() {
     --argjson parity "$parity_json" \
     --argjson native_lanes "$native_lanes_json" \
     --argjson gate_rc "$gate_rc" \
+    --argjson toolchain "$TOOLCHAIN_JSON" \
     '{
       schema: "sounio.omega.gpu_codegen_parity.v1",
       generated_at_utc: $generated_at_utc,
@@ -183,11 +184,19 @@ emit_status_json() {
       parity: $parity,
       native_lane_matrix_artifact: $native_lane_matrix_artifact,
       native_lanes: $native_lanes,
+      toolchain: $toolchain,
       blockers: $blockers,
       gate_rc: $gate_rc,
       log_path: $log_path
     }' >"$OUT_JSON"
 }
+
+# CUDA toolchain provenance of the host that ran ptxas to produce these PTX/CUBIN
+# outputs (output_sha256 is a function of the ptxas version → only comparable across
+# toolkit upgrades with the toolchain recorded). Env override → local capture → not_captured.
+TOOLCHAIN_JSON="${OMEGA_GPU_TOOLCHAIN_JSON:-}"
+[[ -z "$TOOLCHAIN_JSON" ]] && TOOLCHAIN_JSON="$("$ROOT_DIR/scripts/omega/omega_capture_toolchain.sh" 2>/dev/null || true)"
+[[ -z "$TOOLCHAIN_JSON" ]] && TOOLCHAIN_JSON='{"capture_status":"not_captured"}'
 
 if [[ "$MODE" == "off" ]]; then
   emit_status_json "not_run" "gate_disabled" "[]" "[]" '{"status":"not_run","reason":"gate_disabled","checked":false,"rc":0}' "[]" 0

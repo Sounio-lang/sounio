@@ -24,6 +24,8 @@
 // Section 1: Constants
 // ============================================================================
 
+use ir::ir::*
+use ir::normalize::*
 let CP_MAX_REGS: i64 = 4096
 let CP_MAX_WORKLIST: i64 = 4096
 let CP_MAX_INSTRS: i64 = 8192
@@ -126,7 +128,7 @@ struct CpStats {
 }
 
 // Cached instruction info for analysis.
-struct CpInstr {
+pub struct CpInstr {
     idx: i64,
     opcode: i64,
     dst: i64,
@@ -413,7 +415,9 @@ fn cp_classify_opcode(op: IrOpcode) -> i64 {
     if opcodes_equal(op, IrOpcode::IrBinOp) { return CP_OP_BINOP }
     if opcodes_equal(op, IrOpcode::IrUnaryOp) { return CP_OP_UNARYOP }
     if opcodes_equal(op, IrOpcode::IrCall) { return CP_OP_CALL }
+    if opcodes_equal(op, IrOpcode::IrCallSret) { return CP_OP_CALL }
     if opcodes_equal(op, IrOpcode::IrReturn) { return CP_OP_RETURN }
+    if opcodes_equal(op, IrOpcode::IrReturnSret) { return CP_OP_RETURN }
     if opcodes_equal(op, IrOpcode::IrJump) { return CP_OP_JUMP }
     if opcodes_equal(op, IrOpcode::IrBranchTrue) { return CP_OP_BRANCH_TRUE }
     if opcodes_equal(op, IrOpcode::IrBranchFalse) { return CP_OP_BRANCH_FALSE }
@@ -989,7 +993,7 @@ fn cp_extract_instr(instr: IrInstr, idx: i64) -> CpInstr with Mut, Div, Panic {
 fn cp_populate(ctx: &! CpContext, func: &IrFunction) -> i64 with Mut, Div, Panic {
     var i: i64 = 0
     while i < func.instr_count && i < CP_MAX_INSTRS {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         ctx.instrs[i as usize] = cp_extract_instr(instr, i)
         i = i + 1
     }
@@ -1211,11 +1215,11 @@ fn cp_fold_branches(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
                     }
                     if takes_branch {
                         // Replace with unconditional jump
-                        func.instrs[i as usize] = ir_jump(ci.label_id)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_jump(ci.label_id))
                         ctx.instrs[i as usize].opcode = CP_OP_JUMP
                     } else {
                         // Branch not taken: replace with NOP (fall through)
-                        func.instrs[i as usize] = ir_nop()
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_nop())
                         ctx.instrs[i as usize].opcode = CP_OP_NOP
                     }
                     folded = folded + 1
@@ -1227,10 +1231,10 @@ fn cp_fold_branches(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
                         cond_val == false
                     }
                     if takes_branch {
-                        func.instrs[i as usize] = ir_jump(ci.label_id)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_jump(ci.label_id))
                         ctx.instrs[i as usize].opcode = CP_OP_JUMP
                     } else {
-                        func.instrs[i as usize] = ir_nop()
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_nop())
                         ctx.instrs[i as usize].opcode = CP_OP_NOP
                     }
                     folded = folded + 1
@@ -1259,18 +1263,18 @@ fn cp_propagate_copies(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, 
             if src >= 0 && src < CP_MAX_REGS {
                 let src_lat = cp_get_reg(&ctx.state, src)
                 if cp_is_const_int(src_lat) {
-                    func.instrs[i as usize] = ir_load_imm(ci.dst, src_lat.int_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(ci.dst, src_lat.int_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                     ctx.instrs[i as usize].imm_int = src_lat.int_val
                     propagated = propagated + 1
                 } else if cp_is_const_float(src_lat) {
-                    func.instrs[i as usize] = ir_load_float(ci.dst, src_lat.float_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_float(ci.dst, src_lat.float_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_FLOAT
                     ctx.instrs[i as usize].imm_float = src_lat.float_val
                     propagated = propagated + 1
                 } else if cp_is_const_bool(src_lat) {
                     let bval = if src_lat.bool_val { 1 } else { 0 }
-                    func.instrs[i as usize] = ir_load_bool(ci.dst, src_lat.bool_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_bool(ci.dst, src_lat.bool_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_BOOL
                     ctx.instrs[i as usize].imm_bool = src_lat.bool_val
                     propagated = propagated + 1
@@ -1300,17 +1304,17 @@ fn cp_apply_folding(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
             if dst >= 0 && dst < CP_MAX_REGS {
                 let dst_lat = cp_get_reg(&ctx.state, dst)
                 if cp_is_const_int(dst_lat) {
-                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(dst, dst_lat.int_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                     ctx.instrs[i as usize].imm_int = dst_lat.int_val
                     folded = folded + 1
                 } else if cp_is_const_bool(dst_lat) {
-                    func.instrs[i as usize] = ir_load_bool(dst, dst_lat.bool_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_bool(dst, dst_lat.bool_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_BOOL
                     ctx.instrs[i as usize].imm_bool = dst_lat.bool_val
                     folded = folded + 1
                 } else if cp_is_const_float(dst_lat) {
-                    func.instrs[i as usize] = ir_load_float(dst, dst_lat.float_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_float(dst, dst_lat.float_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_FLOAT
                     ctx.instrs[i as usize].imm_float = dst_lat.float_val
                     folded = folded + 1
@@ -1323,7 +1327,7 @@ fn cp_apply_folding(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
             if dst >= 0 && dst < CP_MAX_REGS {
                 let dst_lat = cp_get_reg(&ctx.state, dst)
                 if cp_is_const_int(dst_lat) {
-                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(dst, dst_lat.int_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                     ctx.instrs[i as usize].imm_int = dst_lat.int_val
                     folded = folded + 1
@@ -1337,7 +1341,7 @@ fn cp_apply_folding(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
             if dst >= 0 && dst < CP_MAX_REGS {
                 let dst_lat = cp_get_reg(&ctx.state, dst)
                 if cp_is_const_int(dst_lat) {
-                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(dst, dst_lat.int_val))
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                     ctx.instrs[i as usize].imm_int = dst_lat.int_val
                     folded = folded + 1
@@ -1394,19 +1398,19 @@ fn cp_apply_strength_reduction(ctx: &! CpContext, func: &! IrFunction) -> i64 wi
                 if sr.reduced {
                     if sr.result_kind == 0 {
                         // Load constant
-                        func.instrs[i as usize] = ir_load_imm(dst, sr.result_int)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(dst, sr.result_int))
                         ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                         ctx.instrs[i as usize].imm_int = sr.result_int
                         reduced = reduced + 1
                     } else if sr.result_kind == 1 {
                         // Copy
-                        func.instrs[i as usize] = ir_copy(dst, sr.copy_src)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_copy(dst, sr.copy_src))
                         ctx.instrs[i as usize].opcode = CP_OP_COPY
                         ctx.instrs[i as usize].src1 = sr.copy_src
                         reduced = reduced + 1
                     } else if sr.result_kind == 2 {
                         // Add self (x + x)
-                        func.instrs[i as usize] = ir_binop(dst, sr.copy_src, BinaryOp::OpAdd, sr.copy_src)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_binop(dst, sr.copy_src, BinaryOp::OpAdd, sr.copy_src))
                         ctx.instrs[i as usize].binop_tag = CP_BINOP_ADD
                         ctx.instrs[i as usize].src1 = sr.copy_src
                         ctx.instrs[i as usize].src2 = sr.copy_src
@@ -1438,7 +1442,7 @@ fn cp_eliminate_unreachable(ctx: &! CpContext, func: &! IrFunction) -> i64 with 
                 let idx = start + j
                 if idx >= 0 && idx < ctx.instr_count {
                     if ctx.instrs[idx as usize].opcode != CP_OP_NOP {
-                        func.instrs[idx as usize] = ir_nop()
+                        ir_arena_store(ir_region_slot_w(func.region, (idx)), ir_nop())
                         ctx.instrs[idx as usize].opcode = CP_OP_NOP
                         eliminated = eliminated + 1
                     }
@@ -1607,6 +1611,13 @@ fn cp_sccp_solve(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
 
 // Inner implementation: takes already-borrowed ctx and func.
 fn cp_run_impl(ctx: &! CpContext, func: &! IrFunction) -> CpStats with Mut, Div, Panic {
+    // #1649: IR_MAX_INSTRS is 16384, CpContext holds 8192. cp_populate stops at
+    // CP_MAX_INSTRS, and propagating constants from a PREFIX of a function is
+    // wrong rather than merely incomplete -- a reassignment past the cap is
+    // unseen, so a stale value gets folded in. Refuse the function instead.
+    if (*func).instr_count > CP_MAX_INSTRS {
+        return cp_stats_new()
+    }
     // Phase 1: Populate instruction cache
     let populated = cp_populate(ctx, func)
 
@@ -1655,8 +1666,11 @@ fn cp_run(func: &! IrFunction) -> CpStats with Mut, Div, Panic {
 }
 
 // Convenience: run constant propagation and return the modified function.
-fn cp_optimize_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
-    var result = func
+pub fn cp_optimize_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    // #1649 Sweep 1 residual: the copy is handed to a &! mutator, so the write is
+    // not syntactically local and the first sweep's scan could not see it. Under a
+    // region handle `var result = func` aliases the caller's storage.
+    var result = ir_function_clone(&func)
     let _stats = cp_run(&! result)
     result
 }
@@ -1666,41 +1680,41 @@ fn cp_optimize_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // ============================================================================
 
 // Build a test IrFunction from an instruction array and count.
-fn cp_make_test_func(instrs: [IrInstr; 128], count: i64) -> IrFunction {
-    IrFunction {
-        name: ir_empty_name(),
-        instrs: instrs,
-        instr_count: count,
-        reg_count: count + 10,
-        label_count: 0,
-        param_count: 0,
-        param_regs: [IR_INVALID_REG; 64],
-        compile_strategy: IR_STRATEGY_STANDARD,
-        prof_counter_id: -1,
-        hyper_algebra_kind: -1,
+pub(crate) fn cp_make_test_func(instrs: [IrInstr; 1024], count: i64) -> IrFunction with Mut, Panic, Div {
+    // instrs is [IrInstr; 1024] but IrFunction.instrs is [IrInstr; 4096]; a typed
+    // fixed-size array cannot be assigned across sizes, so build an empty function
+    // (its [2048] instrs come from a size-flexible fill literal) and copy in.
+    var f = ir_empty_function()
+    var i: i64 = 0
+    while i < count {
+        ir_arena_store(ir_region_slot_w(f.region, (i)), instrs[i as usize])
+        i = i + 1
     }
+    f.instr_count = count
+    f.reg_count = count + 10
+    f
 }
 
 // Build an empty instruction array filled with NOPs.
-fn cp_empty_instrs() -> [IrInstr; 128] {
-    [ir_nop(); 128]
+pub(crate) fn cp_empty_instrs() -> [IrInstr; 1024] {
+    [ir_nop(); 1024]
 }
 
 // Check if instruction at position is a specific opcode.
-fn cp_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Div, Panic {
+fn cp_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Mut, Panic, Div {
     if pos < 0 || pos >= func.instr_count {
         return false
     }
-    let instr = func.instrs[pos as usize]
+    let instr = ir_arena_load(ir_region_slot_r(func.region, (pos)))
     opcodes_equal(instr.op, expected)
 }
 
 // Check if instruction at position is IrLoadImm with a specific value.
-fn cp_check_load_imm(func: &IrFunction, pos: i64, expected_val: i64) -> bool with Div, Panic {
+pub(crate) fn cp_check_load_imm(func: &IrFunction, pos: i64, expected_val: i64) -> bool with Mut, Panic, Div {
     if pos < 0 || pos >= func.instr_count {
         return false
     }
-    let instr = func.instrs[pos as usize]
+    let instr = ir_arena_load(ir_region_slot_r(func.region, (pos)))
     if opcodes_equal(instr.op, IrOpcode::IrLoadImm) == false {
         return false
     }
@@ -1708,7 +1722,7 @@ fn cp_check_load_imm(func: &IrFunction, pos: i64, expected_val: i64) -> bool wit
 }
 
 // Check if instruction at position is a NOP.
-fn cp_check_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+fn cp_check_nop(func: &IrFunction, pos: i64) -> bool with Mut, Panic, Div {
     cp_check_opcode(func, pos, IrOpcode::IrNop)
 }
 
@@ -1728,7 +1742,7 @@ fn cp_make_phi(dst: i64, src1: i64, src2: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2704,7 +2718,7 @@ fn test_cp_set_oob_reg() -> bool with Mut, Div, Panic {
 // Section 31: Test Runner
 // ============================================================================
 
-fn test_cp_run_all() -> i32 with Mut, Div, Panic {
+fn test_cp_run_all() -> i32 with Mut, Div, Panic, IO {
     var passed: i64 = 0
     var failed: i64 = 0
 

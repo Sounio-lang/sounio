@@ -1,0 +1,272 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/fisher_f.sio — Fisher-Snedecor F-distribution, first-class
+//
+// Completes the distribution family (with stats::student_t and
+// stats::chi_square): the F-distribution had only an internal exact CDF inside
+// stats::hypothesis (`f_cdf`) and no quantile at all. This module exposes the
+// density, CDF, survival and a general quantile, plus the variance-ratio
+// confidence interval used to compare two sample variances:
+//
+//   f_pdf(x, d1, d2)         — probability density
+//   f_cdf(x, d1, d2)         — cumulative distribution
+//   f_sf(x, d1, d2)          — survival 1 - cdf
+//   f_quantile(p, d1, d2)    — inverse CDF (NEW)
+//   f_var_ratio_ci(...)      — CI for the ratio of two population variances
+//
+// Built on the regularized incomplete beta and its inverse (special::beta):
+//   F_cdf(x)   = I_{d1·x/(d1·x+d2)}(d1/2, d2/2)
+//   F_quantile: y = I^{-1}(d1/2, d2/2, p),  x = d2·y / (d1·(1-y))
+// The quantile therefore inherits special::beta::ibeta_inv's reliable range
+// (roughly d1/2, d2/2 in [1, 250], i.e. df up to ~500); beyond that ibeta_inv is
+// known to break (issue #841) and this routine's accuracy degrades — documented,
+// not silent.
+//
+// References:
+//   Snedecor & Cochran (1989) "Statistical Methods" 8th ed.
+//   Abramowitz & Stegun (1964) §26.6 — F-distribution
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., §6.14
+
+module stats::fisher_f
+
+use special::beta::{ibeta, ibeta_inv}
+use special::gamma::{lgamma}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn ff_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Robust exp: reflect negatives FIRST (a 28-term Taylor of exp(x) for x in
+// roughly [-20,-10] suffers catastrophic cancellation and returns garbage — the
+// mechanism behind much of issue #841), then range-reduce positive x to [0,2]
+// where the series is essentially exact.
+fn ff_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ff_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return ff_exp(x / 2.0) * ff_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    return sum
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/// F-distribution probability density at `x` with (d1, d2) degrees of freedom.
+///
+/// Parâmetros: x — abscissa (>= 0); d1, d2 — numerator/denominator dof (> 0).
+/// Retorno: f(x) using the log-form
+///   ln f = (d1/2)ln(d1/d2) + (d1/2-1)ln x - ((d1+d2)/2)ln(1+d1·x/d2) - lbeta(d1/2,d2/2).
+/// Referências: A&S §26.6.1.
+pub fn f_pdf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || d1 <= 0.0 || d2 <= 0.0 { return 0.0 }
+    let a = d1 / 2.0
+    let b = d2 / 2.0
+    let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b)
+    let log_pdf = a * ff_ln(d1 / d2) + (a - 1.0) * ff_ln(x)
+                  - (a + b) * ff_ln(1.0 + d1 * x / d2) - lbeta_ab
+    return ff_exp(log_pdf)
+}
+
+/// Cumulative distribution F(x) = P(X <= x).
+///
+/// Retorno: I_{d1·x/(d1·x+d2)}(d1/2, d2/2), the regularized incomplete beta.
+/// Referências: A&S §26.6; Press et al. §6.14.
+pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let y = d1 * x / (d1 * x + d2)
+    return ibeta(d1 / 2.0, d2 / 2.0, y)
+}
+
+// Regularized incomplete beta I_w(a,b) for SMALL w, via the log-leading term and
+// the convergent hypergeometric series I_w(a,b) = w^a(1-w)^b/(a·B(a,b))·₂F₁(1,a+b;a+1;w).
+// This avoids special::beta::ibeta's direct-branch continued-fraction divergence
+// at small w (issue #841), which otherwise corrupts the far F tail.
+fn ff_ibeta_smallx(a: f64, b: f64, w: f64) -> f64 with Mut, Div, Panic {
+    if w <= 0.0 { return 0.0 }
+    if w >= 1.0 { return 1.0 }
+    let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b)
+    let log_lead = a * ff_ln(w) + b * ff_ln(1.0 - w) - ff_ln(a) - lbeta_ab
+    var term = 1.0
+    var sum = 1.0
+    var nn = 1
+    while nn < 300 {
+        term = term * (a + b + (nn - 1) as f64) / (a + (nn as f64)) * w
+        sum = sum + term
+        let at = if term < 0.0 { 0.0 - term } else { term }
+        let as_ = if sum < 0.0 { 0.0 - sum } else { sum }
+        if at < 1.0e-16 * as_ { nn = 300 } else { nn = nn + 1 }
+    }
+    return ff_exp(log_lead) * sum
+}
+
+/// Survival function S(x) = 1 - F(x) = P(X > x).
+///
+/// Equals I_w(d2/2, d1/2) with w = d2/(d1·x + d2). For a large F (small w — the
+/// significant tail) it uses the convergent small-w series above, so p-values in
+/// the tail are accurate despite the special::beta breakdown (issue #841).
+pub fn f_sf(x: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    let a = d2 / 2.0
+    let b = d1 / 2.0
+    let w = d2 / (d1 * x + d2)   // survival = I_w(d2/2, d1/2)
+    if w < 0.2 {
+        return ff_ibeta_smallx(a, b, w)
+    }
+    return ibeta(a, b, w)
+}
+
+/// Inverse CDF: the value x with F(x) = p, for p in (0, 1).
+///
+/// Parâmetros: p — probability in (0,1); d1, d2 — dof (> 0, best below ~500).
+/// Retorno: the p-quantile of F(d1, d2).
+/// Complexidade: one `ibeta_inv` (Newton) call.
+/// Referências: inverts the incomplete-beta CDF (A&S §26.6). Accuracy tracks
+///              special::beta::ibeta_inv; see issue #841 for its extreme-dof limit.
+pub fn f_quantile(p: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0e300 }
+    if d1 <= 0.0 || d2 <= 0.0 { return 0.0 }
+    let y = ibeta_inv(d1 / 2.0, d2 / 2.0, p)
+    if y <= 0.0 { return 0.0 }
+    if y >= 1.0 { return 1.0e300 }
+    // y = d1·x/(d1·x+d2)  =>  x = d2·y / (d1·(1-y))
+    return d2 * y / (d1 * (1.0 - y))
+}
+
+pub struct VarRatioCI {
+    pub ratio: f64,  // s1²/s2² (point estimate)
+    pub lo: f64,     // lower confidence bound on σ1²/σ2²
+    pub hi: f64,     // upper confidence bound
+    pub d1: f64,     // numerator dof (n1 - 1)
+    pub d2: f64,     // denominator dof (n2 - 1)
+}
+
+/// Confidence interval for the ratio of two population variances σ1²/σ2².
+///
+/// Parâmetros: s1_2, s2_2 — the two sample variances; n1, n2 — sample sizes
+///             (>= 2); conf — confidence level in (0,1).
+/// Retorno: VarRatioCI. With F1 = F_{(1+conf)/2}(d1,d2), F2 = F_{(1+conf)/2}(d2,d1),
+///          bounds are [ (s1²/s2²)/F1, (s1²/s2²)·F2 ].
+/// Referências: Snedecor & Cochran (1989) §4.15.
+pub fn f_var_ratio_ci(s1_2: f64, n1: i64, s2_2: f64, n2: i64, conf: f64) -> VarRatioCI with Mut, Div, Panic {
+    if n1 < 2 || n2 < 2 {
+        return VarRatioCI { ratio: 0.0, lo: 0.0, hi: 0.0, d1: 0.0, d2: 0.0 }
+    }
+    let d1 = (n1 - 1) as f64
+    let d2 = (n2 - 1) as f64
+    let ratio = s1_2 / s2_2
+    let upper = 0.5 + conf / 2.0
+    let f1 = f_quantile(upper, d1, d2)
+    let f2 = f_quantile(upper, d2, d1)
+    return VarRatioCI { ratio: ratio, lo: ratio / f1, hi: ratio * f2, d1: d1, d2: d2 }
+}
+
+// ============================================================================
+// INLINE TESTS — validated against published F tables
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+fn test_quantile_table() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // upper 0.95 F critical values (classic ANOVA table)
+    ok = check(1, approx(f_quantile(0.95, 5.0, 10.0),  3.3258345, 1.0e-3)) && ok
+    ok = check(2, approx(f_quantile(0.95, 3.0, 20.0),  3.0983911, 1.0e-3)) && ok
+    ok = check(3, approx(f_quantile(0.95, 10.0, 10.0), 2.9782369, 1.0e-3)) && ok
+    ok = check(4, approx(f_quantile(0.95, 1.0, 10.0),  4.9646027, 1.0e-3)) && ok
+    // 0.99 critical value
+    ok = check(5, approx(f_quantile(0.99, 5.0, 10.0),  5.6363144, 1.0e-2)) && ok
+    return ok
+}
+
+fn test_cdf_roundtrip() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    let q = f_quantile(0.95, 5.0, 10.0)
+    ok = check(10, approx(f_cdf(q, 5.0, 10.0), 0.95, 1.0e-5)) && ok
+    let q2 = f_quantile(0.40, 8.0, 12.0)
+    ok = check(11, approx(f_cdf(q2, 8.0, 12.0), 0.40, 1.0e-5)) && ok
+    // F=1 with equal dof is the median-ish; cdf in (0,1)
+    ok = check(12, f_cdf(1.0, 10.0, 10.0) > 0.4 && f_cdf(1.0, 10.0, 10.0) < 0.6) && ok
+    return ok
+}
+
+fn test_pdf() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // pdf integrates to a peak; check symmetry-free positivity and a known point:
+    // f_pdf(1, 10, 10) = exp(-10·ln2 - lbeta(5,5)) = 0.6152142 (analytic)
+    ok = check(20, approx(f_pdf(1.0, 10.0, 10.0), 0.6152142, 1.0e-4)) && ok
+    ok = check(21, f_pdf(0.0, 5.0, 10.0) == 0.0) && ok
+    return ok
+}
+
+fn test_var_ratio_ci() -> bool with IO, Mut, Div, Panic {
+    // s1²=6, n1=13 (d1=12); s2²=3, n2=11 (d2=10); ratio=2
+    // F_0.975(12,10)=3.6209 -> lo=2/3.6209=0.55235
+    // F_0.975(10,12)=3.3736 -> hi=2*3.3736=6.7472
+    var ok = true
+    let ci = f_var_ratio_ci(6.0, 13, 3.0, 11, 0.95)
+    ok = check(30, approx(ci.ratio, 2.0, 1.0e-9)) && ok
+    ok = check(31, approx(ci.lo, 0.552349, 5.0e-3)) && ok
+    ok = check(32, approx(ci.hi, 6.747200, 1.0e-2)) && ok
+    return ok
+}
+
+// Survival in the far tail (large F) must be accurate, not the special::beta
+// garbage. f_sf(2,2,12)=0.177978 (moderate); f_sf(300,2,6)=I_0.0099(3,1)=w^3≈9.7e-7.
+fn test_sf_tail() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(40, approx(f_sf(2.0, 2.0, 12.0), 0.177978, 1.0e-4)) && ok
+    ok = check(41, approx(f_sf(300.0, 2.0, 6.0), 9.70590e-7, 1.0e-9)) && ok
+    ok = check(42, f_sf(300.0, 2.0, 6.0) > 0.0 && f_sf(300.0, 2.0, 6.0) < 0.001) && ok
+    // consistency with the reliable-region CDF: f_cdf + f_sf ≈ 1 at a moderate F
+    ok = check(43, approx(f_cdf(2.0, 5.0, 10.0) + f_sf(2.0, 5.0, 10.0), 1.0, 1.0e-4)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_quantile_table() && ok
+    ok = test_cdf_roundtrip() && ok
+    ok = test_pdf() && ok
+    ok = test_var_ratio_ci() && ok
+    ok = test_sf_tail() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

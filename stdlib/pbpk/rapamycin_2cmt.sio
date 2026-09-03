@@ -1,0 +1,397 @@
+// stdlib/pbpk/rapamycin_2cmt.sio — GUM-state 2-compartment PBPK for rapamycin
+//
+// Novel contribution: analytical GUM variance propagation through Euler
+// integration steps. Unlike finite-difference Jacobian approaches (which run
+// N+1 simulations), here the ODE state IS epistemic — each compartment amount
+// carries (val, variance) that evolves forward in a single simulation pass.
+//
+// Model (whole-blood 2-compartment + stent forcing):
+//
+//   Central (A1):    dA1/dt = −(ke + k12)·A1 + k21·A2 + J_stent(t)
+//   Peripheral (A2): dA2/dt =  k12·A1        − k21·A2
+//   Plasma conc.:    C_plasma = A1 / Vc
+//
+// GUM-Euler step (ISO Guide 98-3 §5.1.2, linear uncertainty propagation):
+//   For state [A1, A2] with Jacobian J:
+//     J = [−(ke+k12),  k21  ]
+//         [ k12,       −k21 ]
+//
+//   Var update (one Euler step, dt):
+//     V1_new = (1 + dt·J11)² · V1 + (dt·J12)² · V2
+//            + dt² · Var_ke · A1²          (parameter uncertainty: ke)
+//            + dt² · Var_k12 · A1²         (parameter uncertainty: k12)
+//            + dt² · Var_k21 · A2²         (parameter uncertainty: k21)
+//            + dt² · Var_J_stent(t)        (stent input uncertainty)
+//     V2_new = (dt·J21)² · V1 + (1 + dt·J22)² · V2
+//            + dt² · Var_k12 · A1²
+//            + dt² · Var_k21 · A2²
+//
+// The system is dissipative (both eigenvalues < 0), so state-variance decays;
+// parameter-variance contributions accumulate but remain bounded at steady state.
+// No overflow risk: verified by monitoring Vmax across 720 steps in the gate.
+//
+// References:
+//   [1] Jusko WJ et al., J Clin Pharmacol 2000 — 2-cmt population PK (k12, k21)
+//   [2] JCGM 100:2008 (GUM) §5.1 — linear uncertainty propagation
+//   [3] Sprint 1: rapamycin_params.sio, stent_release.sio
+
+module pbpk::rapamycin_2cmt
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_params::{
+    rap_ke, rap_k12, rap_k21, rap_vc, rap_stent_dose_mg, rap_krel
+}
+use pbpk::rapamycin_units_bridge::{rap_t_half_q}
+
+// ============================================================================
+// ODE STATE — flat parallel arrays (avoids SRET issues with struct arrays)
+// ============================================================================
+
+// State carried externally as parallel arrays by caller:
+//   state_val:  [A1, A2]   compartment amounts (mg)
+//   state_var:  [V1, V2]   GUM variance (mg²)
+//   state_conf: [C1, C2]   confidence (0-1000)
+
+// ============================================================================
+// PARAMETER CACHE (evaluated once, reused across all steps)
+// ============================================================================
+
+pub struct Rap2CmtParams {
+    ke_val:   f64    // elimination rate constant (1/h)
+    ke_var:   f64    // Var(ke)
+    k12_val:  f64    // central→peripheral (1/h)
+    k12_var:  f64    // Var(k12)
+    k21_val:  f64    // peripheral→central (1/h)
+    k21_var:  f64    // Var(k21)
+    vc_val:   f64    // central volume (L)
+    krel_val: f64    // stent elution rate (1/h)
+    krel_var: f64    // Var(krel)
+    a_poly0:  f64    // initial stent drug load (mg)
+    a_poly0_var: f64 // Var(A_poly0)
+}
+
+pub fn rap2_params() -> Rap2CmtParams with Mut, Div, Panic {
+    let ke   = rap_ke()
+    let k12  = rap_k12()
+    let k21  = rap_k21()
+    let vc   = rap_vc()
+    let dose = rap_stent_dose_mg()
+    let krel = rap_krel()
+    Rap2CmtParams {
+        ke_val:      ke.val()
+        ke_var:      ke.variance()
+        k12_val:     k12.val()
+        k12_var:     k12.variance()
+        k21_val:     k21.val()
+        k21_var:     k21.variance()
+        vc_val:      vc.val()
+        krel_val:    krel.val()
+        krel_var:    krel.variance()
+        a_poly0:     dose.val()
+        a_poly0_var: dose.variance()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// BRIDGE-AWARE PARAMETER LOADER (Phase 4c, 2026-06-02)
+// ----------------------------------------------------------------------------
+//
+// rap2_params_bridged() returns the same Rap2CmtParams struct as
+// rap2_params() but consumes the t_half terminal-elimination half-life
+// (the upstream source of the derived ke) through the
+// stdlib/pbpk/rapamycin_units_bridge.sio Quantity↔Epistemic adapter
+// rather than via the raw Epistemic handle. This exercises the bridge
+// inside clinical-pathway code (not just inside the bridge's own unit
+// tests), with a documented semantic boundary:
+//
+//   BOUNDARY — parameter-input side of rap2_params().
+//   The ke / ke_var fields are derived from a Quantity value+uncertainty
+//   (rap_t_half_q().value, rap_t_half_q().uncertainty) instead of from
+//   an Epistemic handle (rap_t_half().val(), rap_t_half().std()). The
+//   derivation formula is:
+//
+//       ke_val = ln2 / t_half
+//       dke    = (ln2 / t_half^2) * sigma_t_half
+//       ke_var = dke^2
+//
+//   This is **the same GUM §5.1.2 linearization that
+//   stdlib/pbpk/rapamycin_params.sio::rap_ke() uses to build its
+//   `Epistemic` handle internally** (see rapamycin_params.sio
+//   `pub fn rap_ke()` — its body uses `ln2`, `t_half.val()`,
+//   `t_half.std()` with the same first-order formula). The raw
+//   `rap2_params()` path therefore obtains `ke_var` by calling
+//   `rap_ke().variance()`, which is `dke^2` for the SAME dke that
+//   this bridged function derives directly. Provenance: see
+//   `stdlib/pbpk/rapamycin_params.sio` lines ~117-124 (`fn rap_ke`).
+//
+//   The other Rap2CmtParams inputs (k12, k21, vc, a_poly0, krel) are not
+//   covered by the bridge's 8 typed wrappers (which wrap the primary
+//   clinical rap_*_q() handles: ka, F, Vd, fu, BP, CL, fbound, t_half)
+//   and therefore keep their existing direct rapamycin_params.sio call
+//   path. This is consistent with the bridge being a *thin* dim-tag
+//   adapter, not a wholesale parameter re-binding layer.
+//
+//   NUMERICAL EQUIVALENCE — the bridge is dim-only, not a magnitude
+//   rescaler: rap_t_half_q().value == rap_t_half().val() and
+//   rap_t_half_q().uncertainty == rap_t_half().std() to within fp
+//   round-off (the bridge round-trips a t_half Epistemic through a
+//   Quantity with dim_time() and back without loss, see
+//   test_rapamycin_units_bridge.sio test_ka_roundtrip). Therefore
+//   rap2_params_bridged() and rap2_params() produce numerically
+//   identical Rap2CmtParams at the parameter-input boundary; the
+//   downstream Euler integrator (euler_step / simulate) therefore
+//   produces bit-identical trajectories and GUM variance outputs.
+//   Verified to 1e-9 abs tolerance in
+//   tests/stdlib/pbpk/test_rapamycin_2cmt_with_bridge.sio.
+//
+//   CLINICAL UNITS — the bridge's dim is a *kind* tag, not a *magnitude*
+//   tag. rap_t_half_q().value remains in hours (h) — the clinical
+//   rapamycin_params.sio convention — and the ke derivation continues
+//   to use hours throughout. Mixing the bridged value with SI-tagged
+//   quantities (e.g. t in seconds from stdlib/units/lib.sio) would
+//   require explicit rescaling; the rap2 2-compartment model is
+//   internally consistent with t_half in h and does not need that
+//   rescale.
+// ----------------------------------------------------------------------------
+pub fn rap2_params_bridged() -> Rap2CmtParams with Mut, Div, Panic {
+    // t_half sourced through the bridge: a Quantity with dim=dim_time()
+    // (units tag, not magnitude). ke derived from value+uncertainty using
+    // the same GUM linearization (ISO Guide 98-3 §5.1.2) as rap2_params.
+    let t_half_q = rap_t_half_q()
+    let ln2 = 0.6931471805599453
+    let ke_val = ln2 / t_half_q.value
+    let dke    = ln2 / (t_half_q.value * t_half_q.value) * t_half_q.uncertainty
+    let ke_var = dke * dke
+
+    // k12, k21, vc, a_poly0, krel — not covered by the bridge's 8 typed
+    // wrappers; use the raw rapamycin_params.sio source (preserves the
+    // existing call path; bridge does not pretend to cover these).
+    let k12  = rap_k12()
+    let k21  = rap_k21()
+    let vc   = rap_vc()
+    let dose = rap_stent_dose_mg()
+    let krel = rap_krel()
+    Rap2CmtParams {
+        ke_val:      ke_val,
+        ke_var:      ke_var,
+        k12_val:     k12.val(),
+        k12_var:     k12.variance(),
+        k21_val:     k21.val(),
+        k21_var:     k21.variance(),
+        vc_val:      vc.val(),
+        krel_val:    krel.val(),
+        krel_var:    krel.variance(),
+        a_poly0:     dose.val(),
+        a_poly0_var: dose.variance(),
+    }
+}
+
+// ============================================================================
+// STENT FORCING FUNCTION
+// ============================================================================
+
+// Drug flux from stent polymer into systemic circulation at time t (mg/h).
+// Only a fraction f_sys reaches blood (most stays in arterial wall).
+// f_sys ≈ 0.02 (2%): conservative estimate from local tissue uptake data [3].
+fn stent_flux(t_h: f64, p: &Rap2CmtParams) -> f64 with Mut, Div, Panic {
+    let f_sys = 0.02
+    let a_poly = p.a_poly0 * exp_neg(p.krel_val * t_h)
+    f_sys * p.krel_val * a_poly
+}
+
+fn stent_flux_var(t_h: f64, p: &Rap2CmtParams) -> f64 with Mut, Div, Panic {
+    let f_sys = 0.02
+    let exp_t = exp_neg(p.krel_val * t_h)
+    // dJ/dA0 = f_sys * krel * exp(-krel*t)
+    let dj_da0 = f_sys * p.krel_val * exp_t
+    // dJ/dkrel ≈ f_sys * A0 * (1 - krel*t) * exp(-krel*t)  [product rule]
+    let dj_dkrel = f_sys * p.a_poly0 * (1.0 - p.krel_val * t_h) * exp_t
+    dj_da0 * dj_da0 * p.a_poly0_var + dj_dkrel * dj_dkrel * p.krel_var
+}
+
+// ============================================================================
+// EULER STEP WITH GUM VARIANCE PROPAGATION
+// ============================================================================
+
+// Advance state one Euler step of width dt (h).
+// Updates state_val and state_var in-place via ref.
+pub fn euler_step(
+    state_val:  &![f64; 2],
+    state_var:  &![f64; 2],
+    t_h:        f64,
+    dt:         f64,
+    p:          &Rap2CmtParams
+) with Mut, Div, Panic {
+    let a1 = state_val[0]
+    let a2 = state_val[1]
+    let v1 = state_var[0]
+    let v2 = state_var[1]
+
+    // Jacobian elements
+    let j11 = 0.0 - (p.ke_val + p.k12_val)
+    let j12 = p.k21_val
+    let j21 = p.k12_val
+    let j22 = 0.0 - p.k21_val
+
+    // ODE right-hand sides
+    let j_in = stent_flux(t_h, p)
+    let f1 = j11 * a1 + j12 * a2 + j_in
+    let f2 = j21 * a1 + j22 * a2
+
+    // Updated values (Euler)
+    state_val[0] = a1 + dt * f1
+    state_val[1] = a2 + dt * f2
+
+    // GUM variance propagation (linear, one step)
+    let g11 = 1.0 + dt * j11
+    let g12 = dt * j12
+    let g21 = dt * j21
+    let g22 = 1.0 + dt * j22
+
+    // State-variance contribution: V_new = G V G^T (diagonal approx: cross terms small)
+    let v1_state = g11 * g11 * v1 + g12 * g12 * v2
+    let v2_state = g21 * g21 * v1 + g22 * g22 * v2
+
+    // Parameter-variance contributions (sensitivity × Var × A²)
+    let v1_param = dt * dt * (
+        p.ke_var  * a1 * a1 +          // ke uncertainty acting on A1
+        p.k12_var * a1 * a1 +          // k12 uncertainty (removes from central)
+        p.k21_var * a2 * a2            // k21 uncertainty (adds to central)
+    )
+    let v2_param = dt * dt * (
+        p.k12_var * a1 * a1 +          // k12 uncertainty (adds to peripheral)
+        p.k21_var * a2 * a2            // k21 uncertainty (removes from peripheral)
+    )
+
+    // Stent input uncertainty
+    let v1_stent = dt * dt * stent_flux_var(t_h, p)
+
+    state_var[0] = v1_state + v1_param + v1_stent
+    state_var[1] = v2_state + v2_param
+}
+
+// ============================================================================
+// SIMULATION: 2-COMPARTMENT TRAJECTORY
+// ============================================================================
+
+// Run Euler integration from t=0 to t_end (h) with step dt.
+// Records C_plasma (mg/L) and its GUM std at n_out evenly spaced timepoints.
+//
+// Output arrays (caller provides, length n_out):
+//   out_t:    timepoints (h)
+//   out_c:    plasma concentration C_plasma = A1/Vc (mg/L)
+//   out_std:  GUM std = sqrt(Var(A1)) / Vc
+//   out_conf: confidence (integer 0-1000, decays 0.1/1000 per step)
+pub fn simulate(
+    t_end:    f64,
+    dt:       f64,
+    a1_init:  f64,
+    a2_init:  f64,
+    p:        &Rap2CmtParams,
+    n_out:    i64,
+    out_t:    &![f64; 50],
+    out_c:    &![f64; 50],
+    out_std:  &![f64; 50]
+) with Mut, Div, Panic {
+    var state_val = [0.0, 0.0]
+    var state_var = [0.0, 0.0]
+    state_val[0] = a1_init
+    state_val[1] = a2_init
+    // Initial variance from dose uncertainty (if stent-only, A1_init = 0)
+    state_var[0] = 0.0
+    state_var[1] = 0.0
+
+    let n_steps = f64_to_i64(t_end / dt)
+    let record_every = if n_steps > n_out { n_steps / n_out } else { 1 }
+
+    var step = 0
+    var out_idx = 0
+    var t = 0.0
+
+    // Record initial state
+    if out_idx < n_out {
+        out_t[out_idx]   = t
+        out_c[out_idx]   = state_val[0] / p.vc_val
+        out_std[out_idx] = sqrt_f64(state_var[0]) / p.vc_val
+        out_idx = out_idx + 1
+    }
+
+    while step < n_steps {
+        euler_step(&!state_val, &!state_var, t, dt, p)
+        t = t + dt
+        step = step + 1
+        if (step - (step / record_every) * record_every) == 0 {
+            if out_idx < n_out {
+                out_t[out_idx]   = t
+                out_c[out_idx]   = state_val[0] / p.vc_val
+                out_std[out_idx] = sqrt_f64(state_var[0]) / p.vc_val
+                out_idx = out_idx + 1
+            }
+        }
+    }
+    // Fill remaining slots with final value
+    while out_idx < n_out {
+        out_t[out_idx]   = t
+        out_c[out_idx]   = state_val[0] / p.vc_val
+        out_std[out_idx] = sqrt_f64(state_var[0]) / p.vc_val
+        out_idx = out_idx + 1
+    }
+}
+
+// ============================================================================
+// CONFIDENCE GATE (compile-time-tracked uncertainty threshold)
+// ============================================================================
+
+// Therapeutic-window gate: returns PASS(0), WARN(1), or FAIL(2).
+// WARN: relative uncertainty > 30% (σ/C > 0.3)
+// FAIL: relative uncertainty > 80% (C estimated from stent; very wide bounds)
+pub fn c_plasma_gate(c_val: f64, c_std: f64) -> i64 {
+    if c_val <= 0.0 { return 2 }
+    let rel = c_std / c_val
+    if rel > 0.80 { return 2 }
+    if rel > 0.30 { return 1 }
+    0
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn exp_neg(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    // Halve large x: the alternating series 1 - x + x²/2 - ... cancels
+    // catastrophically for x ≳ 8, so keep it to x <= 2 and square up.
+    if x > 2.0 { let h = exp_neg(x / 2.0); return h * h }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = 0.0 - term * x / i64_to_f64(i)
+        sum = sum + term
+        i = i + 1
+    }
+    if sum < 0.0 { return 0.0 }
+    sum
+}
+
+fn i64_to_f64(n: i64) -> f64 with Div, Panic {
+    var r = 0.0
+    var k = n
+    while k > 0 { r = r + 1.0; k = k - 1 }
+    r
+}
+
+fn f64_to_i64(x: f64) -> i64 {
+    var r = 0
+    var rem = x
+    while rem >= 1.0 { rem = rem - 1.0; r = r + 1 }
+    r
+}

@@ -1,0 +1,2014 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_OPS_GATE_OK
+// Run-proof for stdlib/data/bigframe_ops.sio — scale verbs over the heap-backed
+// columnar BigFrame. Builds a 1,000,000-row frame via a LOOP, then exercises
+// bf_filter_gt and bf_groupby_sum against oracle-exact answers.
+//
+//   col0[i] = i           (0 .. 999999)
+//   col1[i] = i % 10      (group key, each of 0..9 appears 100000 times)
+//   col2[i] = 1.0         (unit value, so sum per group == count)
+//
+// NATIVE + lean_single only (heap). Compile with:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < 0.0000001
+}
+
+// naive per-window median (sort a copy each window) -- reference for bf_rolling_median.
+fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n); out.n_rows = n; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(window * 8) as *mut f64
+    let half = window / 2; let odd = window - 2 * (window / 2)
+    var i: i64 = 0
+    while i < n {
+        if i >= window - 1 {
+            var t: i64 = 0
+            while t < window { write_f64(buf, t, read_f64(sp, i - window + 1 + t)); t = t + 1 }
+            var a: i64 = 1
+            while a < window {                    // insertion sort
+                let key = read_f64(buf, a); var b = a - 1
+                while b >= 0 && read_f64(buf, b) > key { write_f64(buf, b + 1, read_f64(buf, b)); b = b - 1 }
+                write_f64(buf, b + 1, key); a = a + 1
+            }
+            var med = 0.0
+            if odd == 1 { med = read_f64(buf, half) } else { med = (read_f64(buf, half - 1) + read_f64(buf, half)) / 2.0 }
+            write_f64(op, i, med)
+        } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    heap_free(buf as *mut i8)
+    out
+}
+
+// look up col1 for the row whose col0 == key in a [key, value] result (hash-order).
+fn lookup2(t: &BigFrame, key: f64) -> f64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < bf_nrows(t) { if bf_get(t, r, 0) == key { return bf_get(t, r, 1) } r = r + 1 }
+    return 0.0 - 1.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    let n: i64 = 1000000
+
+    // 3 columns; small starting capacity forces heavy heap_realloc growth.
+    var bf = bf_new(3, 16)
+
+    var row: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        let fi = i as f64
+        row[0] = fi
+        row[1] = (i % 10) as f64
+        row[2] = 1.0
+        bf_push_row(&!bf, &row, 3)
+        i = i + 1
+    }
+
+    var pass = 1
+
+    // Sanity: all 1,000,000 rows are present.
+    if bf_nrows(&bf) != n { pass = 0 }
+    if bf_ncols(&bf) != 3 { pass = 0 }
+
+    // (a) FILTER: col0 > 499999.5  -> rows i = 500000 .. 999999 = 500000 rows.
+    var filt = bf_filter_gt(&bf, 0, 499999.5)
+    if bf_nrows(&filt) != 500000 { pass = 0 }
+    if bf_ncols(&filt) != 3 { pass = 0 }
+    // Spot-check: min surviving col0 is 500000, and its key/value survived intact.
+    if !approx_eq(bf_get(&filt, 0, 0), 500000.0) { pass = 0 }
+    if !approx_eq(bf_get(&filt, 0, 2), 1.0) { pass = 0 }
+    // Filtered value column still sums to the row count.
+    if !approx_eq(bf_col_sum(&filt, 2), 500000.0) { pass = 0 }
+
+    // (b) GROUPBY-SUM: group by col1 (key), sum col2 (unit) -> 10 groups, each 100000.
+    var grp = bf_groupby_sum(&bf, 1, 2)
+    if bf_nrows(&grp) != 10 { pass = 0 }
+    if bf_ncols(&grp) != 2 { pass = 0 }
+
+    // Keys emitted ascending 0..9, each with sum == 100000.
+    var g: i64 = 0
+    while g < 10 {
+        if !approx_eq(bf_get(&grp, g, 0), g as f64) { pass = 0 }
+        if !approx_eq(bf_get(&grp, g, 1), 100000.0) { pass = 0 }
+        g = g + 1
+    }
+    // Total summed value across all groups == total rows.
+    if !approx_eq(bf_col_sum(&grp, 1), 1000000.0) { pass = 0 }
+
+    bf_free(&!grp)
+    bf_free(&!filt)
+    bf_free(&!bf)
+
+    print("rows_built=")
+    print_int(n)
+    print("\n")
+    if pass == 1 {
+        var wf = bf_new(10, 16)
+    var wr: i64 = 0
+    while wr < 1000 { var wrow: [f64;64]=[0.0;64]; var wc: i64=0; while wc<10 { wrow[wc]=(wr*10+wc) as f64; wc=wc+1 } bf_push_row(&!wf,&wrow,10); wr=wr+1 }
+    let wfilt = bf_filter_gt(&wf, 0, 4995.0)
+    if bf_nrows(&wfilt) != 500 { print("FAIL wide_filter_n\n"); return 40 }
+    if bf_get(&wfilt, 0, 9) != 5009.0 { print("FAIL wide_filter_v\n"); return 41 }
+    var sf = bf_new(2, 16)
+    var si: i64 = 0
+    while si < 100 { var srow:[f64;64]=[0.0;64]; srow[0]=(si%2) as f64; srow[1]=si as f64; bf_push_row(&!sf,&srow,2); si=si+1 }
+    let sfilt = bf_filter_gt(&sf, 0, 0.5)
+    if bf_nrows(&sfilt) != 50 { print("FAIL scatter_n\n"); return 42 }
+    if bf_get(&sfilt, 0, 1) != 1.0 { print("FAIL scatter_v\n"); return 43 }
+    // SPARSE-key hash groupby: keys 0,1000,..,999000 (all >> the dense cap of 1023, which would drop them)
+    var hg = bf_new(2, 1024)
+    var hi: i64 = 0
+    while hi < 50000 { var hrow:[f64;64]=[0.0;64]; hrow[0]=((hi%1000)*1000) as f64; hrow[1]=1.0; bf_push_row(&!hg,&hrow,2); hi=hi+1 }
+    let hgr = bf_groupby_sum_hash(&hg, 0, 1)
+    if bf_nrows(&hgr) != 1000 { print("FAIL hash_groupby_n\n"); return 44 }   // 1000 distinct sparse keys
+    var htot = bf_col_sum(&hgr, 1)
+    if htot < 49999.5 || htot > 50000.5 { print("FAIL hash_groupby_total\n"); return 45 }  // 50000 rows total
+    // INNER HASH-JOIN at scale: left 100000 rows (key=i, lval=i*10), right 60000 rows
+    // (key=i, rval=i*2). Inner join on key drops left rows with key >= 60000 -> 60000 matches.
+    var jl = bf_new(2, 1024)
+    var jli: i64 = 0
+    while jli < 100000 { var jrow:[f64;64]=[0.0;64]; jrow[0]=jli as f64; jrow[1]=(jli*10) as f64; bf_push_row(&!jl,&jrow,2); jli=jli+1 }
+    var jr = bf_new(2, 1024)
+    var jrx: i64 = 0
+    while jrx < 60000 { var krow:[f64;64]=[0.0;64]; krow[0]=jrx as f64; krow[1]=(jrx*2) as f64; bf_push_row(&!jr,&krow,2); jrx=jrx+1 }
+    let jj = bf_join_inner(&jl, 0, &jr, 0)
+    if bf_nrows(&jj) != 60000 { print("FAIL join_n\n"); return 46 }   // inner join filters 100k -> 60k
+    if bf_ncols(&jj) != 3 { print("FAIL join_c\n"); return 47 }       // left 2 cols + right 1 non-key col
+    // Left probe order preserved: joined row 5000 == left row 5000 joined to right row 5000.
+    if bf_get(&jj, 5000, 0) != 5000.0 { print("FAIL join_key\n"); return 48 }
+    if bf_get(&jj, 5000, 1) != 50000.0 { print("FAIL join_lval\n"); return 49 }  // left  i*10
+    if bf_get(&jj, 5000, 2) != 10000.0 { print("FAIL join_rval\n"); return 50 }  // right i*2
+    // LEFT + OUTER join: left keys 0..99999 (lval=i*10); a NEW right keyed 50000..109999
+    // (rval=key*2). Overlap = keys 50000..99999 (50000 matches); left-only = 0..49999;
+    // right-only = 100000..109999 (10000). fill = -1.0 sentinel for unmatched cells.
+    var lo = bf_new(2, 1024)
+    var loi: i64 = 0
+    while loi < 100000 { var lrow:[f64;64]=[0.0;64]; lrow[0]=loi as f64; lrow[1]=(loi*10) as f64; bf_push_row(&!lo,&lrow,2); loi=loi+1 }
+    var ro = bf_new(2, 1024)
+    var roi: i64 = 0
+    while roi < 60000 { var rrow:[f64;64]=[0.0;64]; let rk=(roi+50000); rrow[0]=rk as f64; rrow[1]=(rk*2) as f64; bf_push_row(&!ro,&rrow,2); roi=roi+1 }
+    // LEFT join: all 100000 left rows kept.
+    let lj = bf_join_left(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&lj) != 100000 { print("FAIL left_n\n"); return 51 }
+    if bf_ncols(&lj) != 3 { print("FAIL left_c\n"); return 52 }
+    if bf_get(&lj, 0, 0) != 0.0 { print("FAIL left_k0\n"); return 53 }         // left row 0, key 0
+    if bf_get(&lj, 0, 2) != (0.0 - 1.0) { print("FAIL left_miss\n"); return 54 }  // no right key 0 -> fill
+    if bf_get(&lj, 60000, 1) != 600000.0 { print("FAIL left_lval\n"); return 55 } // left row 60000, lval
+    if bf_get(&lj, 60000, 2) != 120000.0 { print("FAIL left_rval\n"); return 56 } // matched right rval=key*2
+    // OUTER join: 100000 left + 10000 right-only = 110000.
+    let oj = bf_join_outer(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&oj) != 110000 { print("FAIL outer_n\n"); return 57 }
+    if bf_get(&oj, 0, 2) != (0.0 - 1.0) { print("FAIL outer_leftmiss\n"); return 58 }  // left-only row still filled
+    // right-only rows come after the 100000 left rows, in right-scan order.
+    // right rows 50000..59999 hold keys 100000..109999 -> first right-only = out row 100000.
+    if bf_get(&oj, 100000, 0) != 100000.0 { print("FAIL outer_rkey\n"); return 59 }   // key coalesced
+    if bf_get(&oj, 100000, 1) != (0.0 - 1.0) { print("FAIL outer_rleft\n"); return 60 } // left cols filled
+    if bf_get(&oj, 100000, 2) != 200000.0 { print("FAIL outer_rval\n"); return 61 }    // right rval=key*2
+    // SORT at scale: 1,000,000 rows, col0 = reverse key (n-1-i), col1 = original index i.
+    var sf = bf_new(2, 16)
+    var sfi: i64 = 0
+    while sfi < 1000000 { var srow2:[f64;64]=[0.0;64]; srow2[0]=(1000000-1-sfi) as f64; srow2[1]=sfi as f64; bf_push_row(&!sf,&srow2,2); sfi=sfi+1 }
+    let asc = bf_sort_by(&sf, 0, true)
+    if bf_nrows(&asc) != 1000000 { print("FAIL sort_n\n"); return 62 }
+    // fully ordered: zero inversions over 1M rows.
+    var invc: i64 = 0; var sj: i64 = 1
+    while sj < 1000000 { if bf_get(&asc, sj, 0) < bf_get(&asc, sj-1, 0) { invc = invc + 1 } sj = sj + 1 }
+    if invc != 0 { print("FAIL sort_inversions\n"); return 63 }
+    if bf_get(&asc, 0, 0) != 0.0 { print("FAIL sort_first\n"); return 64 }
+    if bf_get(&asc, 999999, 0) != 999999.0 { print("FAIL sort_last\n"); return 65 }
+    // permutation preserved: row with key 12345 carried original index 999999-12345.
+    if bf_get(&asc, 12345, 1) != 987654.0 { print("FAIL sort_perm\n"); return 66 }
+    let desc = bf_sort_by(&sf, 0, false)
+    if bf_get(&desc, 0, 0) != 999999.0 { print("FAIL sort_desc\n"); return 67 }
+    // STABILITY: 30 rows, key = i%3 (10 each), col1 = i. Stable asc sort keeps input order
+    // within a key -> the ten key==0 rows carry col1 = 0,3,6,...,27 in that order.
+    var stf = bf_new(2, 16)
+    var sti: i64 = 0
+    while sti < 30 { var strow:[f64;64]=[0.0;64]; strow[0]=(sti%3) as f64; strow[1]=sti as f64; bf_push_row(&!stf,&strow,2); sti=sti+1 }
+    let sts = bf_sort_by(&stf, 0, true)
+    if bf_get(&sts, 0, 1) != 0.0 { print("FAIL sort_stable0\n"); return 68 }   // first key==0 row = original 0
+    if bf_get(&sts, 1, 1) != 3.0 { print("FAIL sort_stable1\n"); return 69 }   // second = original 3 (order kept)
+    if bf_get(&sts, 9, 1) != 27.0 { print("FAIL sort_stable9\n"); return 70 }  // tenth key==0 row = original 27
+    if bf_get(&sts, 10, 0) != 1.0 { print("FAIL sort_stableblk\n"); return 71 } // block boundary: key 1 starts
+    // RADIX SORT — differentially verified against the trusted stable mergesort (both
+    // stable, so outputs must be byte-for-byte identical). Two data shapes:
+    //  (1) MIXED-SIGN, no ties: col0 = ((i*48271)%100000 - 50000)*0.5 (perm, range -25000..24999.5)
+    //      -> validates the f64->key transform for NEGATIVES.
+    //  (2) TIES-HEAVY: col0 = i%100 (1000 rows per key), col1 = i -> validates STABILITY
+    //      (equal-key rows must keep input order, exactly like the mergesort).
+    let RN: i64 = 100000
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < RN { var rr:[f64;64]=[0.0;64]; let s=((rfi*48271)%100000 - 50000); rr[0]=(s as f64)*0.5; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rx = bf_sort_radix(&rf, 0, true)
+    let mg = bf_sort_by(&rf, 0, true)
+    var rd: i64 = 0; var rj: i64 = 0
+    while rj < RN { if bf_get(&rx,rj,0) != bf_get(&mg,rj,0) { rd = rd + 1 } if bf_get(&rx,rj,1) != bf_get(&mg,rj,1) { rd = rd + 1 } rj = rj + 1 }
+    if rd != 0 { print("FAIL radix_vs_mergesort_mixedsign\n"); return 72 }
+    // radix output must also be fully ordered incl. across the sign boundary.
+    var rinv: i64 = 0; rj = 1
+    while rj < RN { if bf_get(&rx,rj,0) < bf_get(&rx,rj-1,0) { rinv = rinv + 1 } rj = rj + 1 }
+    if rinv != 0 { print("FAIL radix_inversions\n"); return 73 }
+    var tf = bf_new(2, 16)
+    var tfi: i64 = 0
+    while tfi < RN { var tr:[f64;64]=[0.0;64]; tr[0]=(tfi%100) as f64; tr[1]=tfi as f64; bf_push_row(&!tf,&tr,2); tfi=tfi+1 }
+    let trx = bf_sort_radix(&tf, 0, true)
+    let tmg = bf_sort_by(&tf, 0, true)
+    var td: i64 = 0; var tj: i64 = 0
+    while tj < RN { if bf_get(&trx,tj,0) != bf_get(&tmg,tj,0) { td = td + 1 } if bf_get(&trx,tj,1) != bf_get(&tmg,tj,1) { td = td + 1 } tj = tj + 1 }
+    if td != 0 { print("FAIL radix_stability_ties\n"); return 74 }  // stable tie-order matches mergesort
+    // descending + all-equal edge (diff-mask -> zero passes).
+    let rdesc = bf_sort_radix(&rf, 0, false)
+    if bf_get(&rdesc, 0, 0) < bf_get(&rdesc, RN-1, 0) { print("FAIL radix_desc\n"); return 75 }
+    var eqf = bf_new(1, 16); var eqi: i64 = 0
+    while eqi < 1000 { var er:[f64;64]=[0.0;64]; er[0]=7.0; bf_push_row(&!eqf,&er,1); eqi=eqi+1 }
+    let eqs = bf_sort_radix(&eqf, 0, true)
+    if bf_nrows(&eqs) != 1000 { print("FAIL radix_alleq_n\n"); return 76 }
+    if bf_get(&eqs, 0, 0) != 7.0 { print("FAIL radix_alleq_v\n"); return 77 }
+    // UNIQUE + DROP_DUPLICATES: 1,000,000 rows, col0 = i%1000 (1000 distinct, each 1000x),
+    // col1 = i. Key j first appears at i=j.
+    var uf = bf_new(2, 16)
+    var ufi: i64 = 0
+    while ufi < 1000000 { var ur:[f64;64]=[0.0;64]; ur[0]=(ufi%1000) as f64; ur[1]=ufi as f64; bf_push_row(&!uf,&ur,2); ufi=ufi+1 }
+    let uq = bf_unique(&uf, 0)
+    if bf_nrows(&uq) != 1000 { print("FAIL unique_n\n"); return 78 }
+    if bf_ncols(&uq) != 1 { print("FAIL unique_c\n"); return 79 }
+    if bf_get(&uq, 0, 0) != 0.0 { print("FAIL unique_first\n"); return 80 }    // first-seen order 0..999
+    if bf_get(&uq, 999, 0) != 999.0 { print("FAIL unique_last\n"); return 81 }
+    var usum = bf_col_sum(&uq, 0)
+    if usum < 499499.5 || usum > 499500.5 { print("FAIL unique_sum\n"); return 82 }  // 0+1+..+999
+    // all-distinct edge (table near full, output == input): unique(col1) == 1,000,000.
+    let uad = bf_unique(&uf, 1)
+    if bf_nrows(&uad) != 1000000 { print("FAIL unique_alldistinct\n"); return 83 }
+    let dd = bf_drop_duplicates(&uf, 0)
+    if bf_nrows(&dd) != 1000 { print("FAIL dropdup_n\n"); return 84 }
+    if bf_ncols(&dd) != 2 { print("FAIL dropdup_c\n"); return 85 }
+    // first-occurrence kept: survivors in input order, key j first seen at i=j -> payload j.
+    if bf_get(&dd, 0, 0) != 0.0 { print("FAIL dropdup_k0\n"); return 86 }
+    if bf_get(&dd, 0, 1) != 0.0 { print("FAIL dropdup_p0\n"); return 87 }
+    if bf_get(&dd, 500, 0) != 500.0 { print("FAIL dropdup_k500\n"); return 88 }
+    if bf_get(&dd, 500, 1) != 500.0 { print("FAIL dropdup_p500\n"); return 89 } // first (not last=999500)
+    // VALUE_COUNTS: 1,000,000 rows, SKEWED so values are NOT in count order:
+    //   value 3 x500000, value 1 x300000, value 4 x150000, value 2 x50000.
+    // Result must be sorted by COUNT DESCENDING -> rows [3,500000],[1,300000],[4,150000],[2,50000].
+    var vf = bf_new(1, 16)
+    var vfi: i64 = 0
+    while vfi < 1000000 {
+        var vv = 2.0
+        if vfi < 500000 { vv = 3.0 } else { if vfi < 800000 { vv = 1.0 } else { if vfi < 950000 { vv = 4.0 } else { vv = 2.0 } } }
+        var vr:[f64;64]=[0.0;64]; vr[0]=vv; bf_push_row(&!vf,&vr,1); vfi=vfi+1
+    }
+    let vc = bf_value_counts(&vf, 0)
+    if bf_nrows(&vc) != 4 { print("FAIL vc_n\n"); return 90 }
+    if bf_ncols(&vc) != 2 { print("FAIL vc_c\n"); return 91 }
+    // descending by count, values in count order (3,1,4,2), NOT value order.
+    if bf_get(&vc, 0, 0) != 3.0 || bf_get(&vc, 0, 1) != 500000.0 { print("FAIL vc_row0\n"); return 92 }
+    if bf_get(&vc, 1, 0) != 1.0 || bf_get(&vc, 1, 1) != 300000.0 { print("FAIL vc_row1\n"); return 93 }
+    if bf_get(&vc, 2, 0) != 4.0 || bf_get(&vc, 2, 1) != 150000.0 { print("FAIL vc_row2\n"); return 94 }
+    if bf_get(&vc, 3, 0) != 2.0 || bf_get(&vc, 3, 1) != 50000.0 { print("FAIL vc_row3\n"); return 95 }
+    // counts must be non-increasing and total to the row count.
+    if bf_get(&vc,1,1) > bf_get(&vc,0,1) || bf_get(&vc,2,1) > bf_get(&vc,1,1) || bf_get(&vc,3,1) > bf_get(&vc,2,1) { print("FAIL vc_desc\n"); return 96 }
+    var vtot = bf_col_sum(&vc, 1)
+    if vtot < 999999.5 || vtot > 1000000.5 { print("FAIL vc_total\n"); return 97 }
+    // CUMULATIVE ops: 1,000,000 rows, col0 = i, col1 = i%1000 (key), col2 = 1.0.
+    var cf = bf_new(3, 16)
+    var cfi: i64 = 0
+    while cfi < 1000000 { var cr:[f64;64]=[0.0;64]; cr[0]=cfi as f64; cr[1]=(cfi%1000) as f64; cr[2]=1.0; bf_push_row(&!cf,&cr,3); cfi=cfi+1 }
+    // cumsum(col0=i): out[k] = k*(k+1)/2. Exact in f64 up to n=1e6 (< 2^53).
+    let cs = bf_cumsum(&cf, 0)
+    if bf_nrows(&cs) != 1000000 { print("FAIL cumsum_n\n"); return 98 }
+    if bf_ncols(&cs) != 1 { print("FAIL cumsum_c\n"); return 99 }
+    if bf_get(&cs, 0, 0) != 0.0 { print("FAIL cumsum0\n"); return 100 }
+    if bf_get(&cs, 100, 0) != 5050.0 { print("FAIL cumsum100\n"); return 101 }        // 100*101/2
+    if bf_get(&cs, 999999, 0) != 499999500000.0 { print("FAIL cumsum_last\n"); return 102 } // 999999*1000000/2
+    // cumcount_by(key=col1=i%1000): out[i] = floor(i/1000) (# earlier rows with same key).
+    let cc = bf_cumcount_by(&cf, 1)
+    if bf_nrows(&cc) != 1000000 { print("FAIL cumcount_n\n"); return 103 }
+    if bf_get(&cc, 0, 0) != 0.0 { print("FAIL cumcount0\n"); return 104 }
+    if bf_get(&cc, 1000, 0) != 1.0 { print("FAIL cumcount1000\n"); return 105 }
+    if bf_get(&cc, 500500, 0) != 500.0 { print("FAIL cumcount500500\n"); return 106 }
+    if bf_get(&cc, 999999, 0) != 999.0 { print("FAIL cumcount_last\n"); return 107 }
+    // cumsum_by(key=col1, val=col2=1.0): out[i] = floor(i/1000)+1 (running count as sum of ones).
+    let cb = bf_cumsum_by(&cf, 1, 2)
+    if bf_get(&cb, 0, 0) != 1.0 { print("FAIL cumsumby0\n"); return 108 }
+    if bf_get(&cb, 1000, 0) != 2.0 { print("FAIL cumsumby1000\n"); return 109 }
+    if bf_get(&cb, 999000, 0) != 1000.0 { print("FAIL cumsumby999000\n"); return 110 } // 1000th of key 0
+    if bf_get(&cb, 999999, 0) != 1000.0 { print("FAIL cumsumby_last\n"); return 111 }  // 1000th of key 999
+    // DENSE vs HASH: the general-key _hash variants must match the dense fast path on dense keys.
+    let cch = bf_cumcount_by_hash(&cf, 1)
+    let cbh = bf_cumsum_by_hash(&cf, 1, 2)
+    if bf_get(&cch, 1000, 0) != bf_get(&cc, 1000, 0) { print("FAIL cumcount_hash\n"); return 330 }
+    if bf_get(&cch, 999999, 0) != bf_get(&cc, 999999, 0) { print("FAIL cumcount_hash2\n"); return 331 }
+    if bf_get(&cbh, 999000, 0) != bf_get(&cb, 999000, 0) { print("FAIL cumsum_hash\n"); return 332 }
+    if bf_get(&cbh, 999999, 0) != bf_get(&cb, 999999, 0) { print("FAIL cumsum_hash2\n"); return 333 }
+    // _hash handles SPARSE keys the dense path can't: keys 5000 & 9000 (>1024).
+    var spf = bf_new(2, 16)
+    var spi: i64 = 0
+    while spi < 6 { var spr:[f64;64]=[0.0;64]; spr[0]=(5000 + 4000*(spi%2)) as f64; spr[1]=1.0; bf_push_row(&!spf,&spr,2); spi=spi+1 }
+    let sph = bf_cumsum_by_hash(&spf, 0, 1)   // key 5000: rows 0,2,4 -> 1,2,3 ; key 9000: rows 1,3,5 -> 1,2,3
+    if bf_get(&sph, 4, 0) != 3.0 { print("FAIL cumsum_hash_sparse\n"); return 334 }
+    if bf_get(&sph, 5, 0) != 3.0 { print("FAIL cumsum_hash_sparse2\n"); return 335 }
+    // CUMMAX / CUMMIN: reuse cf (col0=i%100, col1=i%1000 key, col2 unused here, col3=i).
+    // Add a strictly-decreasing column for cummin by rebuilding a small dedicated frame.
+    var xf = bf_new(3, 16)
+    var xfi: i64 = 0
+    while xfi < 1000000 { var xr:[f64;64]=[0.0;64]; xr[0]=(xfi%100) as f64; xr[1]=(1000000-xfi) as f64; xr[2]=xfi as f64; bf_push_row(&!xf,&xr,3); xfi=xfi+1 }
+    // cummax(col0=i%100): rises 0..99 then stays 99.
+    let cmx = bf_cummax(&xf, 0)
+    if bf_nrows(&cmx) != 1000000 { print("FAIL cummax_n\n"); return 112 }
+    if bf_get(&cmx, 50, 0) != 50.0 { print("FAIL cummax50\n"); return 113 }
+    if bf_get(&cmx, 99, 0) != 99.0 { print("FAIL cummax99\n"); return 114 }
+    if bf_get(&cmx, 100, 0) != 99.0 { print("FAIL cummax100\n"); return 115 }
+    if bf_get(&cmx, 999999, 0) != 99.0 { print("FAIL cummax_last\n"); return 116 }
+    // cummin(col1=1000000-i, strictly decreasing): out[i] = 1000000-i (new min each step).
+    let cmn = bf_cummin(&xf, 1)
+    if bf_get(&cmn, 0, 0) != 1000000.0 { print("FAIL cummin0\n"); return 117 }
+    if bf_get(&cmn, 500000, 0) != 500000.0 { print("FAIL cummin500000\n"); return 118 }
+    if bf_get(&cmn, 999999, 0) != 1.0 { print("FAIL cummin_last\n"); return 119 }
+    // grouped cummax/cummin over real groups: key = i%1000, val = i (val increases within each group,
+    // so per group max-so-far = current i, min = first occurrence = key).
+    var gf = bf_new(2, 16)
+    var gfi: i64 = 0
+    while gfi < 1000000 { var gr:[f64;64]=[0.0;64]; gr[0]=(gfi%1000) as f64; gr[1]=gfi as f64; bf_push_row(&!gf,&gr,2); gfi=gfi+1 }
+    let gmn = bf_cummin_by(&gf, 0, 1)   // min val in each key-group = first occurrence = key
+    if bf_nrows(&gmn) != 1000000 { print("FAIL cummin_by_n\n"); return 120 }
+    if bf_get(&gmn, 0, 0) != 0.0 { print("FAIL cummin_by0\n"); return 121 }
+    if bf_get(&gmn, 1500, 0) != 500.0 { print("FAIL cummin_by1500\n"); return 122 }   // key 500, first val 500
+    if bf_get(&gmn, 999999, 0) != 999.0 { print("FAIL cummin_by_last\n"); return 123 }
+    let gmxb = bf_cummax_by(&gf, 0, 1)  // max val in group so far = current i (val increasing in group)
+    if bf_get(&gmxb, 500500, 0) != 500500.0 { print("FAIL cummax_by_grp\n"); return 124 }
+    if bf_get(&gmxb, 999999, 0) != 999999.0 { print("FAIL cummax_by_grp_last\n"); return 125 }
+    // ROLLING WINDOW. fill = -1.0 sentinel for the first window-1 incomplete rows.
+    // (a) sum/mean over col0=1.0 (window 100): sum=100, mean=1.0 once the window fills.
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < 1000000 { var rr:[f64;64]=[0.0;64]; rr[0]=1.0; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rs = bf_rolling_sum(&rf, 0, 100, 0.0 - 1.0)
+    if bf_nrows(&rs) != 1000000 { print("FAIL rsum_n\n"); return 126 }
+    if bf_get(&rs, 98, 0) != (0.0 - 1.0) { print("FAIL rsum_fill\n"); return 127 }   // window not full yet
+    if bf_get(&rs, 99, 0) != 100.0 { print("FAIL rsum_full\n"); return 128 }
+    if bf_get(&rs, 999999, 0) != 100.0 { print("FAIL rsum_last\n"); return 129 }
+    // mean over col1=i (window 3): out[i] = ((i-2)+(i-1)+i)/3 = i-1 for i>=2.
+    let rm = bf_rolling_mean(&rf, 1, 3, 0.0 - 1.0)
+    if bf_get(&rm, 1, 0) != (0.0 - 1.0) { print("FAIL rmean_fill\n"); return 130 }
+    if bf_get(&rm, 2, 0) != 1.0 { print("FAIL rmean2\n"); return 131 }
+    if bf_get(&rm, 100, 0) != 99.0 { print("FAIL rmean100\n"); return 132 }
+    // (b) rolling max/min via monotonic deque, DIFFERENTIALLY verified against a naive
+    // O(n*w) scan over a 5000-row sawtooth (col = i%37, window 50) -> must be identical.
+    var wf2 = bf_new(1, 16)
+    var wfi: i64 = 0
+    while wfi < 5000 { var wr:[f64;64]=[0.0;64]; wr[0]=(wfi%37) as f64; bf_push_row(&!wf2,&wr,1); wfi=wfi+1 }
+    let rmax = bf_rolling_max(&wf2, 0, 50, 0.0 - 1.0)
+    let rmin = bf_rolling_min(&wf2, 0, 50, 0.0 - 1.0)
+    var rd: i64 = 0
+    var rj: i64 = 0
+    while rj < 5000 {
+        // naive window [rj-49, rj]
+        if rj >= 49 {
+            var mx = bf_get(&wf2, rj - 49, 0)
+            var mn = mx
+            var t: i64 = rj - 48
+            while t <= rj { let vv = bf_get(&wf2, t, 0); if vv > mx { mx = vv } if vv < mn { mn = vv } t = t + 1 }
+            if bf_get(&rmax, rj, 0) != mx { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != mn { rd = rd + 1 }
+        } else {
+            if bf_get(&rmax, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+            if bf_get(&rmin, rj, 0) != (0.0 - 1.0) { rd = rd + 1 }
+        }
+        rj = rj + 1
+    }
+    if rd != 0 { print("FAIL rolling_maxmin_vs_naive\n"); return 133 }
+    // SHIFT / DIFF / PCT_CHANGE: col0=i, col1=i*i, col2=i+1. fill = -1.0 sentinel.
+    var df2 = bf_new(3, 16)
+    var dfi: i64 = 0
+    while dfi < 1000000 { var dr:[f64;64]=[0.0;64]; dr[0]=dfi as f64; dr[1]=(dfi*dfi) as f64; dr[2]=(dfi+1) as f64; bf_push_row(&!df2,&dr,3); dfi=dfi+1 }
+    // shift(col0=i, periods=1): out[0]=fill, out[i]=i-1.
+    let sh = bf_shift(&df2, 0, 1, 0.0 - 1.0)
+    if bf_nrows(&sh) != 1000000 { print("FAIL shift_n\n"); return 134 }
+    if bf_get(&sh, 0, 0) != (0.0 - 1.0) { print("FAIL shift_fill\n"); return 135 }
+    if bf_get(&sh, 1, 0) != 0.0 { print("FAIL shift1\n"); return 136 }
+    if bf_get(&sh, 999999, 0) != 999998.0 { print("FAIL shift_last\n"); return 137 }
+    // shift periods=-1: out[i]=i+1, last row = fill.
+    let shn = bf_shift(&df2, 0, 0 - 1, 0.0 - 1.0)
+    if bf_get(&shn, 0, 0) != 1.0 { print("FAIL shiftneg0\n"); return 138 }
+    if bf_get(&shn, 999999, 0) != (0.0 - 1.0) { print("FAIL shiftneg_last\n"); return 139 }
+    // diff(col1=i*i, periods=1): out[0]=fill, out[i]=i^2-(i-1)^2 = 2i-1.
+    let di = bf_diff(&df2, 1, 1, 0.0 - 1.0)
+    if bf_get(&di, 0, 0) != (0.0 - 1.0) { print("FAIL diff_fill\n"); return 140 }
+    if bf_get(&di, 1, 0) != 1.0 { print("FAIL diff1\n"); return 141 }
+    if bf_get(&di, 100, 0) != 199.0 { print("FAIL diff100\n"); return 142 }   // 2*100-1
+    if bf_get(&di, 999999, 0) != 1999997.0 { print("FAIL diff_last\n"); return 143 } // 2*999999-1
+    // pct_change(col2=i+1): out[0]=fill; out[i]=((i+1)-i)/i = 1/i -> exact at powers of 2.
+    let pc = bf_pct_change(&df2, 2, 0.0 - 1.0)
+    if bf_get(&pc, 0, 0) != (0.0 - 1.0) { print("FAIL pct_fill\n"); return 144 }
+    if bf_get(&pc, 1, 0) != 1.0 { print("FAIL pct1\n"); return 145 }      // (2-1)/1
+    if bf_get(&pc, 2, 0) != 0.5 { print("FAIL pct2\n"); return 146 }      // (3-2)/2
+    if bf_get(&pc, 4, 0) != 0.25 { print("FAIL pct4\n"); return 147 }     // (5-4)/4
+    // EWM (exponentially weighted moving mean).
+    // (a) adjust=false, alpha=0.5, impulse x=[0,4,0,0,...] -> y=[0,2,1,0.5,0.25,...] (exact).
+    var ef = bf_new(1, 16)
+    var efi: i64 = 0
+    while efi < 1000 { var er:[f64;64]=[0.0;64]; if efi == 1 { er[0]=4.0 } else { er[0]=0.0 } bf_push_row(&!ef,&er,1); efi=efi+1 }
+    let ew = bf_ewm_mean(&ef, 0, 0.5, false)
+    if bf_nrows(&ew) != 1000 { print("FAIL ewm_n\n"); return 148 }
+    if bf_get(&ew, 0, 0) != 0.0 { print("FAIL ewm0\n"); return 149 }
+    if bf_get(&ew, 1, 0) != 2.0 { print("FAIL ewm1\n"); return 150 }    // 0.5*0 + 0.5*4
+    if bf_get(&ew, 2, 0) != 1.0 { print("FAIL ewm2\n"); return 151 }    // 0.5*2
+    if bf_get(&ew, 3, 0) != 0.5 { print("FAIL ewm3\n"); return 152 }
+    if bf_get(&ew, 4, 0) != 0.25 { print("FAIL ewm4\n"); return 153 }
+    // (b) constant input -> both modes return the constant (weighted mean of equal values).
+    var ec = bf_new(1, 16)
+    var eci: i64 = 0
+    while eci < 1000 { var cr2:[f64;64]=[0.0;64]; cr2[0]=5.0; bf_push_row(&!ec,&cr2,1); eci=eci+1 }
+    let eca = bf_ewm_mean(&ec, 0, 0.3, true)
+    if !approx_eq(bf_get(&eca, 500, 0), 5.0) { print("FAIL ewm_const_adj\n"); return 154 }
+    let ecf = bf_ewm_mean(&ec, 0, 0.3, false)
+    if !approx_eq(bf_get(&ecf, 500, 0), 5.0) { print("FAIL ewm_const_noadj\n"); return 155 }
+    // (c) adjust=true, alpha=0.3, x=(i*7)%13: y[1] = (7 + 0.7*0)/(1+0.7) = 7/1.7 (pandas-verified).
+    var ev = bf_new(1, 16)
+    var evi: i64 = 0
+    while evi < 1000 { var vr2:[f64;64]=[0.0;64]; vr2[0]=((evi*7)%13) as f64; bf_push_row(&!ev,&vr2,1); evi=evi+1 }
+    let eva = bf_ewm_mean(&ev, 0, 0.3, true)
+    if bf_get(&eva, 0, 0) != 0.0 { print("FAIL ewm_adj0\n"); return 156 }
+    if !approx_eq(bf_get(&eva, 1, 0), 4.1176470588) { print("FAIL ewm_adj1\n"); return 157 }  // 7/1.7
+    let evf = bf_ewm_mean(&ev, 0, 0.3, false)
+    if !approx_eq(bf_get(&evf, 1, 0), 2.1) { print("FAIL ewm_noadj1\n"); return 158 }         // 0.3*7
+    // EXPANDING mean / var / std over x=(i*7)%13, validated against pandas-computed values.
+    var xf2 = bf_new(1, 16)
+    var xf2i: i64 = 0
+    while xf2i < 1000 { var xr2:[f64;64]=[0.0;64]; xr2[0]=((xf2i*7)%13) as f64; bf_push_row(&!xf2,&xr2,1); xf2i=xf2i+1 }
+    let em2 = bf_expanding_mean(&xf2, 0)
+    if bf_nrows(&em2) != 1000 { print("FAIL exp_mean_n\n"); return 159 }
+    if bf_get(&em2, 0, 0) != 0.0 { print("FAIL exp_mean0\n"); return 160 }
+    if !approx_eq(bf_get(&em2, 1, 0), 3.5) { print("FAIL exp_mean1\n"); return 161 }     // (0+7)/2
+    if !approx_eq(bf_get(&em2, 999, 0), 6.0) { print("FAIL exp_mean999\n"); return 162 } // pandas-verified
+    let ev2 = bf_expanding_var(&xf2, 0, 0.0 - 1.0)
+    if bf_get(&ev2, 0, 0) != (0.0 - 1.0) { print("FAIL exp_var0\n"); return 163 }        // undefined -> fill
+    if !approx_eq(bf_get(&ev2, 1, 0), 24.5) { print("FAIL exp_var1\n"); return 164 }     // var([0,7], ddof1)
+    if !approx_eq(bf_get(&ev2, 999, 0), 14.02802803) { print("FAIL exp_var999\n"); return 165 } // pandas-verified
+    let es2 = bf_expanding_std(&xf2, 0, 0.0 - 1.0)
+    if bf_get(&es2, 0, 0) != (0.0 - 1.0) { print("FAIL exp_std0\n"); return 166 }
+    if !approx_eq(bf_get(&es2, 1, 0), 4.94974747) { print("FAIL exp_std1\n"); return 167 }      // sqrt(24.5)
+    if !approx_eq(bf_get(&es2, 999, 0), 3.74540090) { print("FAIL exp_std999\n"); return 168 }  // sqrt(14.028)
+    // RANK (ascending, 1-based). x=[30,10,20,10,40] (tie at 10). All 4 methods pandas-verified.
+    var rf2 = bf_new(1, 16)
+    var rvals: [f64;5] = [30.0, 10.0, 20.0, 10.0, 40.0]
+    var rvi: i64 = 0
+    while rvi < 5 { var rrow:[f64;64]=[0.0;64]; rrow[0]=rvals[rvi]; bf_push_row(&!rf2,&rrow,1); rvi=rvi+1 }
+    let rkA = bf_rank(&rf2, 0, 0)   // average -> [4, 1.5, 3, 1.5, 5]
+    if bf_nrows(&rkA) != 5 { print("FAIL rank_n\n"); return 169 }
+    if bf_get(&rkA,0,0) != 4.0 || bf_get(&rkA,1,0) != 1.5 || bf_get(&rkA,2,0) != 3.0 || bf_get(&rkA,3,0) != 1.5 || bf_get(&rkA,4,0) != 5.0 { print("FAIL rank_avg\n"); return 170 }
+    let rkM = bf_rank(&rf2, 0, 1)   // min -> [4, 1, 3, 1, 5]
+    if bf_get(&rkM,1,0) != 1.0 || bf_get(&rkM,3,0) != 1.0 || bf_get(&rkM,0,0) != 4.0 { print("FAIL rank_min\n"); return 171 }
+    let rkX = bf_rank(&rf2, 0, 2)   // max -> [4, 2, 3, 2, 5]
+    if bf_get(&rkX,1,0) != 2.0 || bf_get(&rkX,3,0) != 2.0 { print("FAIL rank_max\n"); return 172 }
+    let rkD = bf_rank(&rf2, 0, 3)   // dense -> [3, 1, 2, 1, 4]
+    if bf_get(&rkD,0,0) != 3.0 || bf_get(&rkD,1,0) != 1.0 || bf_get(&rkD,2,0) != 2.0 || bf_get(&rkD,4,0) != 4.0 { print("FAIL rank_dense\n"); return 173 }
+    // SCALE: average-rank of 1M rows is a permutation-average -> sum == n(n+1)/2 exactly.
+    var rbig = bf_new(1, 16)
+    var rbi: i64 = 0
+    while rbi < 1000000 { var brow:[f64;64]=[0.0;64]; brow[0]=((rbi*7)%1000) as f64; bf_push_row(&!rbig,&brow,1); rbi=rbi+1 }
+    let rkbig = bf_rank(&rbig, 0, 0)
+    if bf_nrows(&rkbig) != 1000000 { print("FAIL rank_big_n\n"); return 174 }
+    var rksum = bf_col_sum(&rkbig, 0)
+    if rksum < 499999999999.0 || rksum > 500001000000.0 { print("FAIL rank_big_sum\n"); return 175 }  // n(n+1)/2 = 500000500000
+    // QUANTILE / MEDIAN (pandas linear interpolation). x=[50,10,40,20,30] -> sorted [10,20,30,40,50].
+    var qf = bf_new(1, 16)
+    var qvals: [f64;5] = [50.0, 10.0, 40.0, 20.0, 30.0]
+    var qvi: i64 = 0
+    while qvi < 5 { var qrow:[f64;64]=[0.0;64]; qrow[0]=qvals[qvi]; bf_push_row(&!qf,&qrow,1); qvi=qvi+1 }
+    if !approx_eq(bf_quantile(&qf,0,0.0), 10.0) { print("FAIL q0\n"); return 176 }
+    if !approx_eq(bf_quantile(&qf,0,0.1), 14.0) { print("FAIL q10\n"); return 177 }    // 10 + 0.4*(20-10)
+    if !approx_eq(bf_quantile(&qf,0,0.25), 20.0) { print("FAIL q25\n"); return 178 }
+    if !approx_eq(bf_median(&qf,0), 30.0) { print("FAIL median\n"); return 179 }
+    if !approx_eq(bf_quantile(&qf,0,0.9), 46.0) { print("FAIL q90\n"); return 180 }    // 40 + 0.6*(50-40)
+    if !approx_eq(bf_quantile(&qf,0,1.0), 50.0) { print("FAIL q100\n"); return 181 }
+    // Constant column (duplicate-heavy quickselect stress -> must stay O(n), correct).
+    var qc = bf_new(1, 16); var qci: i64 = 0
+    while qci < 5000 { var ccr:[f64;64]=[0.0;64]; ccr[0]=7.0; bf_push_row(&!qc,&ccr,1); qci=qci+1 }
+    if !approx_eq(bf_median(&qc,0), 7.0) { print("FAIL const_median\n"); return 182 }
+    // SCALE: col=i over 1M rows -> median = 499999.5 (interp of sorted[499999],sorted[500000]).
+    var qbig = bf_new(1, 16); var qbi: i64 = 0
+    while qbi < 1000000 { var qbr:[f64;64]=[0.0;64]; qbr[0]=qbi as f64; bf_push_row(&!qbig,&qbr,1); qbi=qbi+1 }
+    if !approx_eq(bf_median(&qbig,0), 499999.5) { print("FAIL big_median\n"); return 183 }
+    if !approx_eq(bf_quantile(&qbig,0,0.0), 0.0) { print("FAIL big_q0\n"); return 184 }
+    if !approx_eq(bf_quantile(&qbig,0,1.0), 999999.0) { print("FAIL big_q1\n"); return 185 }
+    // COV / CORR. Small: x=[1,2,3,4,5], y=[2,4,6,8,10] (cov=5, corr=1); y2=[5,4,3,2,1] (corr=-1).
+    var cvf = bf_new(3, 16)
+    var cx:[f64;5]=[1.0,2.0,3.0,4.0,5.0]; var cy:[f64;5]=[2.0,4.0,6.0,8.0,10.0]; var cy2:[f64;5]=[5.0,4.0,3.0,2.0,1.0]
+    var cvi: i64 = 0
+    while cvi < 5 { var cvr:[f64;64]=[0.0;64]; cvr[0]=cx[cvi]; cvr[1]=cy[cvi]; cvr[2]=cy2[cvi]; bf_push_row(&!cvf,&cvr,3); cvi=cvi+1 }
+    if !approx_eq(bf_cov(&cvf,0,1), 5.0) { print("FAIL cov_small\n"); return 186 }
+    if !approx_eq(bf_corr(&cvf,0,1), 1.0) { print("FAIL corr_pos\n"); return 187 }
+    if !approx_eq(bf_corr(&cvf,0,2), 0.0 - 1.0) { print("FAIL corr_neg\n"); return 188 }
+    // LARGE-MAGNITUDE corr: x=1e9+i, y=1e9+2i (perfectly correlated) -> corr MUST be 1.0.
+    // This routes bf_sqrt over cxx*cyy ~ 2.8e28; the BUGGY builtin sqrt returned 6e-9 here.
+    var lmf = bf_new(2, 16)
+    var lmi: i64 = 0
+    while lmi < 100000 { var lmr:[f64;64]=[0.0;64]; lmr[0]=1000000000.0+(lmi as f64); lmr[1]=1000000000.0+(2*lmi) as f64; bf_push_row(&!lmf,&lmr,2); lmi=lmi+1 }
+    if !approx_eq(bf_corr(&lmf,0,1), 1.0) { print("FAIL corr_largemag\n"); return 189 }
+    var lmcov = bf_cov(&lmf,0,1)
+    if lmcov < 1666683000.0 || lmcov > 1666683700.0 { print("FAIL cov_largemag\n"); return 190 }  // 1666683333.33
+    // LARGE-VARIANCE expanding_std (locks the sqrt correctness fix): alternating [0, 2e6] x 1M rows
+    // -> final sample std = 1000000.5. The OLD builtin sqrt(var~1e12) gave ~1279997 (WRONG); the
+    // correct bf_sqrt gives ~1000000.5, so this range would FAIL under the buggy sqrt.
+    var lvf = bf_new(1, 16)
+    var lvi: i64 = 0
+    while lvi < 1000000 { var lvr:[f64;64]=[0.0;64]; if lvi%2==1 { lvr[0]=2000000.0 } else { lvr[0]=0.0 } bf_push_row(&!lvf,&lvr,1); lvi=lvi+1 }
+    let lvstd = bf_expanding_std(&lvf, 0, 0.0 - 1.0)
+    var lvlast = bf_get(&lvstd, 999999, 0)
+    if lvlast < 1000000.0 || lvlast > 1000001.0 { print("FAIL expstd_largevar\n"); return 191 }  // 1000000.5; buggy sqrt ~1279997 excluded
+    // ROLLING VAR / STD. col0=i, col1=i*1000000 (large-var lock). fill=-1.0.
+    var rvf = bf_new(2, 16)
+    var rvfi: i64 = 0
+    while rvfi < 100000 { var rvr:[f64;64]=[0.0;64]; rvr[0]=rvfi as f64; rvr[1]=(rvfi*1000000) as f64; bf_push_row(&!rvf,&rvr,2); rvfi=rvfi+1 }
+    // window 3 over consecutive ints -> var=1, std=1 for i>=2 (devs {-1,0,1}, Σ=2, /2=1).
+    let rvv = bf_rolling_var(&rvf, 0, 3, 0.0 - 1.0)
+    let rvs = bf_rolling_std(&rvf, 0, 3, 0.0 - 1.0)
+    if bf_nrows(&rvv) != 100000 { print("FAIL rvar_n\n"); return 192 }
+    if bf_get(&rvv, 1, 0) != (0.0 - 1.0) { print("FAIL rvar_fill\n"); return 193 }   // window not full
+    if !approx_eq(bf_get(&rvv, 2, 0), 1.0) { print("FAIL rvar2\n"); return 194 }
+    if !approx_eq(bf_get(&rvv, 50000, 0), 1.0) { print("FAIL rvar50k\n"); return 195 }
+    if !approx_eq(bf_get(&rvs, 50000, 0), 1.0) { print("FAIL rstd50k\n"); return 196 }
+    // window 3 over col1=i*1e6 (strongly trending, values up to ~1e11) -> devs {-1e6,0,1e6},
+    // var=1e12 EXACT, std=1e6. Welford stays exact here (a naive S2-S1²/w cancels to ~0.1% off).
+    // std also LOCKS bf_sqrt: the buggy builtin sqrt(1e12) gave ~1279997, outside the range.
+    let rvvL = bf_rolling_var(&rvf, 1, 3, 0.0 - 1.0)
+    let rvsL = bf_rolling_std(&rvf, 1, 3, 0.0 - 1.0)
+    var rvL = bf_get(&rvvL, 99999, 0)
+    if rvL < 999999999.0 || rvL > 1000000000001.0 { print("FAIL rvar_large\n"); return 197 }       // 1e12 (Welford exact)
+    if !approx_eq(rvL / 1000000000000.0, 1.0) { print("FAIL rvar_large_exact\n"); return 198 }      // relative: essentially exact
+    var rsL = bf_get(&rvsL, 99999, 0)
+    if rsL < 999999.0 || rsL > 1000001.0 { print("FAIL rstd_large\n"); return 199 }                 // 1e6; buggy sqrt ~1.28e6 excluded
+    // constant window -> var=0, std=0.
+    var rcf = bf_new(1, 16); var rci: i64 = 0
+    while rci < 1000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=42.0; bf_push_row(&!rcf,&rcr,1); rci=rci+1 }
+    let rcv = bf_rolling_var(&rcf, 0, 100, 0.0 - 1.0)
+    let rcs = bf_rolling_std(&rcf, 0, 100, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rcv, 500, 0), 0.0) { print("FAIL rvar_const\n"); return 201 }
+    if !approx_eq(bf_get(&rcs, 500, 0), 0.0) { print("FAIL rstd_const\n"); return 202 }
+    // ROLLING MEDIAN. Exact small cases (odd + even window) then a differential vs the naive
+    // per-window sort on scrambled + duplicate-heavy data (validates binary-search insert/remove).
+    var rmf = bf_new(1, 16)
+    var rmi: i64 = 0
+    while rmi < 2000 { var rmr:[f64;64]=[0.0;64]; rmr[0]=(rmi%37) as f64; bf_push_row(&!rmf,&rmr,1); rmi=rmi+1 }
+    let rm5 = bf_rolling_median(&rmf, 0, 5, 0.0 - 1.0)   // window 5 over 0..36 sawtooth
+    if bf_get(&rm5, 3, 0) != (0.0 - 1.0) { print("FAIL rmed_fill\n"); return 203 }   // window not full
+    if !approx_eq(bf_get(&rm5, 4, 0), 2.0) { print("FAIL rmed5a\n"); return 204 }    // median[0..4]=median(0,1,2,3,4)=2
+    if !approx_eq(bf_get(&rm5, 9, 0), 7.0) { print("FAIL rmed5b\n"); return 205 }    // median(5,6,7,8,9)=7
+    let rm4 = bf_rolling_median(&rmf, 0, 4, 0.0 - 1.0)
+    if !approx_eq(bf_get(&rm4, 3, 0), 1.5) { print("FAIL rmed4\n"); return 206 }     // even -> (1+2)/2 = 1.5
+    // DIFFERENTIAL vs naive: scrambled + dup-heavy col = (i*2654435761)%100, 3000 rows, window 50.
+    var rdf = bf_new(1, 16)
+    var rdi: i64 = 0
+    while rdi < 3000 { var rdr:[f64;64]=[0.0;64]; rdr[0]=((rdi*2654435761)%100) as f64; bf_push_row(&!rdf,&rdr,1); rdi=rdi+1 }
+    let rda = bf_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    let rdb = naive_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
+    var rdd: i64 = 0; var rdj: i64 = 0
+    while rdj < 3000 { if bf_get(&rda, rdj, 0) != bf_get(&rdb, rdj, 0) { rdd = rdd + 1 } rdj = rdj + 1 }
+    if rdd != 0 { print("FAIL rmed_vs_naive\n"); return 207 }
+    // CUMPROD. col0 = 1.0 except [0]=2,[1]=3,[2]=4 -> cumprod 2,6,24,24,...,24 (stays exact under *1).
+    // col1 = i%1000 (key); col2 = 2.0 if (i/1000) even else 0.5 -> per-group product oscillates 2,1,2,1.
+    var cpf = bf_new(3, 16)
+    var cpi: i64 = 0
+    while cpi < 1000000 {
+        var cpr:[f64;64]=[0.0;64]
+        if cpi==0 { cpr[0]=2.0 } else { if cpi==1 { cpr[0]=3.0 } else { if cpi==2 { cpr[0]=4.0 } else { cpr[0]=1.0 } } }
+        cpr[1]=(cpi%1000) as f64
+        if (cpi/1000)-2*((cpi/1000)/2)==0 { cpr[2]=2.0 } else { cpr[2]=0.5 }
+        bf_push_row(&!cpf,&cpr,3); cpi=cpi+1
+    }
+    let cp = bf_cumprod(&cpf, 0)
+    if bf_nrows(&cp) != 1000000 { print("FAIL cumprod_n\n"); return 208 }
+    if !approx_eq(bf_get(&cp,0,0), 2.0) { print("FAIL cumprod0\n"); return 209 }
+    if !approx_eq(bf_get(&cp,1,0), 6.0) { print("FAIL cumprod1\n"); return 210 }
+    if !approx_eq(bf_get(&cp,2,0), 24.0) { print("FAIL cumprod2\n"); return 211 }
+    if !approx_eq(bf_get(&cp,999999,0), 24.0) { print("FAIL cumprod_last\n"); return 212 }
+    let cpb = bf_cumprod_by(&cpf, 1, 2)
+    if !approx_eq(bf_get(&cpb,0,0), 2.0) { print("FAIL cumprodby0\n"); return 213 }        // group 0, j=0: 2
+    if !approx_eq(bf_get(&cpb,1000,0), 1.0) { print("FAIL cumprodby1000\n"); return 214 }    // j=1: 2*0.5
+    if !approx_eq(bf_get(&cpb,2000,0), 2.0) { print("FAIL cumprodby2000\n"); return 215 }    // j=2: 1*2
+    // NUNIQUE PER GROUP. key=i%1000, val=(i/1000)%5 -> each of 1000 groups sees vals 0..4 -> nunique=5.
+    var nqf = bf_new(2, 16)
+    var nqi: i64 = 0
+    while nqi < 1000000 { var nqr:[f64;64]=[0.0;64]; nqr[0]=(nqi%1000) as f64; nqr[1]=((nqi/1000)-5*((nqi/1000)/5)) as f64; bf_push_row(&!nqf,&nqr,2); nqi=nqi+1 }
+    let nq = bf_nunique_by(&nqf, 0, 1)
+    if bf_nrows(&nq) != 1000 { print("FAIL nunique_ngroups\n"); return 216 }
+    if bf_ncols(&nq) != 2 { print("FAIL nunique_c\n"); return 217 }
+    if !approx_eq(bf_col_sum(&nq, 1), 5000.0) { print("FAIL nunique_total\n"); return 218 }   // 1000 groups x 5
+    // every group's nunique == 5.
+    var nqbad: i64 = 0; var nqj: i64 = 0
+    while nqj < bf_nrows(&nq) { if !approx_eq(bf_get(&nq, nqj, 1), 5.0) { nqbad = nqbad + 1 } nqj = nqj + 1 }
+    if nqbad != 0 { print("FAIL nunique_per_group\n"); return 219 }
+    // varied: key=i%7, val=i%13 (3000 rows) -> gcd(7,13)=1 so each group sees all 13 vals -> nunique=13.
+    var nvf = bf_new(2, 16)
+    var nvi: i64 = 0
+    while nvi < 3000 { var nvr:[f64;64]=[0.0;64]; nvr[0]=(nvi-7*(nvi/7)) as f64; nvr[1]=(nvi-13*(nvi/13)) as f64; bf_push_row(&!nvf,&nvr,2); nvi=nvi+1 }
+    let nv = bf_nunique_by(&nvf, 0, 1)
+    if bf_nrows(&nv) != 7 { print("FAIL nunique_var_ngroups\n"); return 220 }
+    if !approx_eq(bf_col_sum(&nv, 1), 91.0) { print("FAIL nunique_var_total\n"); return 221 }  // 7 groups x 13
+    // IDXMAX / IDXMIN PER GROUP. key=i%1000, val=i -> per group k: max at i=k+999000, min at i=k.
+    var ixf = bf_new(2, 16)
+    var ixi: i64 = 0
+    while ixi < 1000000 { var ixr:[f64;64]=[0.0;64]; ixr[0]=(ixi%1000) as f64; ixr[1]=ixi as f64; bf_push_row(&!ixf,&ixr,2); ixi=ixi+1 }
+    let imx = bf_idxmax_by(&ixf, 0, 1)
+    let imn = bf_idxmin_by(&ixf, 0, 1)
+    if bf_nrows(&imx) != 1000 { print("FAIL idxmax_n\n"); return 222 }
+    if !approx_eq(lookup2(&imx, 0.0), 999000.0) { print("FAIL idxmax_g0\n"); return 223 }     // max of group 0 at row 999000
+    if !approx_eq(lookup2(&imx, 500.0), 999500.0) { print("FAIL idxmax_g500\n"); return 224 }
+    if !approx_eq(lookup2(&imn, 0.0), 0.0) { print("FAIL idxmin_g0\n"); return 225 }           // min of group 0 at row 0
+    if !approx_eq(lookup2(&imn, 500.0), 500.0) { print("FAIL idxmin_g500\n"); return 226 }
+    // TIE: constant val -> both idxmax and idxmin return the FIRST index of the group.
+    var itf = bf_new(2, 16)
+    var iti: i64 = 0
+    while iti < 10000 { var itr:[f64;64]=[0.0;64]; itr[0]=(iti%100) as f64; itr[1]=5.0; bf_push_row(&!itf,&itr,2); iti=iti+1 }
+    let timx = bf_idxmax_by(&itf, 0, 1)
+    let timn = bf_idxmin_by(&itf, 0, 1)
+    if !approx_eq(lookup2(&timx, 7.0), 7.0) { print("FAIL idxmax_tie\n"); return 227 }   // first row of group 7 is index 7
+    if !approx_eq(lookup2(&timn, 7.0), 7.0) { print("FAIL idxmin_tie\n"); return 228 }
+    // MODE PER GROUP. key=i%1000, val = 7 if (i/1000)<500 else (i/1000)%3 -> value 7 appears 500x
+    // per group (others ~166x) -> mode=7 for all 1000 groups.
+    var mof = bf_new(2, 16)
+    var moi: i64 = 0
+    while moi < 1000000 {
+        var mor:[f64;64]=[0.0;64]; mor[0]=(moi%1000) as f64; let mj=moi/1000
+        if mj < 500 { mor[1]=7.0 } else { mor[1]=(mj-3*(mj/3)) as f64 }
+        bf_push_row(&!mof,&mor,2); moi=moi+1
+    }
+    let mo = bf_mode_by(&mof, 0, 1)
+    if bf_nrows(&mo) != 1000 { print("FAIL mode_ngroups\n"); return 229 }
+    if !approx_eq(lookup2(&mo, 0.0), 7.0) { print("FAIL mode_g0\n"); return 230 }
+    if !approx_eq(lookup2(&mo, 500.0), 7.0) { print("FAIL mode_g500\n"); return 231 }
+    if !approx_eq(bf_col_sum(&mo, 1), 7000.0) { print("FAIL mode_total\n"); return 232 }  // 1000 groups x mode 7
+    // TIE: values 2 and 5 each appear 3x (max), 9 twice -> mode = 2 (smaller wins).
+    var mtf = bf_new(2, 16)
+    var mtv:[f64;8] = [2.0,5.0,2.0,5.0,2.0,5.0,9.0,9.0]
+    var mti: i64 = 0
+    while mti < 8 { var mtr:[f64;64]=[0.0;64]; mtr[0]=0.0; mtr[1]=mtv[mti]; bf_push_row(&!mtf,&mtr,2); mti=mti+1 }
+    let mt = bf_mode_by(&mtf, 0, 1)
+    if !approx_eq(lookup2(&mt, 0.0), 2.0) { print("FAIL mode_tie\n"); return 233 }
+    // ROLLING CORR. x=i, y=2i (perfectly correlated) -> rolling corr = 1.0 for every full window;
+    // y2=-i (anti) -> -1.0. window 50 over 5000 rows. fill=-2.0 sentinel.
+    var rcf = bf_new(3, 16)
+    var rcii: i64 = 0
+    while rcii < 5000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=rcii as f64; rcr[1]=(2*rcii) as f64; rcr[2]=(0-rcii) as f64; bf_push_row(&!rcf,&rcr,3); rcii=rcii+1 }
+    let rcp = bf_rolling_corr(&rcf, 0, 1, 50, 0.0 - 2.0)
+    let rcn = bf_rolling_corr(&rcf, 0, 2, 50, 0.0 - 2.0)
+    if bf_nrows(&rcp) != 5000 { print("FAIL rcorr_n\n"); return 234 }
+    if bf_get(&rcp, 48, 0) != (0.0 - 2.0) { print("FAIL rcorr_fill\n"); return 235 }   // window not full
+    if !approx_eq(bf_get(&rcp, 49, 0), 1.0) { print("FAIL rcorr_pos49\n"); return 236 }
+    if !approx_eq(bf_get(&rcp, 2500, 0), 1.0) { print("FAIL rcorr_pos\n"); return 237 }
+    if !approx_eq(bf_get(&rcn, 2500, 0), 0.0 - 1.0) { print("FAIL rcorr_neg\n"); return 238 }
+    // varied (pandas-verified): x=(i*7)%13, y=(i*11)%17, window 100.
+    var rvf2 = bf_new(2, 16)
+    var rvfi2: i64 = 0
+    while rvfi2 < 5000 { var rvr2:[f64;64]=[0.0;64]; rvr2[0]=((rvfi2*7)%13) as f64; rvr2[1]=((rvfi2*11)%17) as f64; bf_push_row(&!rvf2,&rvr2,2); rvfi2=rvfi2+1 }
+    let rvc2 = bf_rolling_corr(&rvf2, 0, 1, 100, 0.0 - 2.0)
+    // references are pandas values rounded to 6 dp -> compare with a 1e-5 tolerance.
+    var rcd1 = bf_get(&rvc2, 100, 0) - 0.008766
+    if rcd1 < 0.0 { rcd1 = 0.0 - rcd1 }
+    if rcd1 > 0.00001 { print("FAIL rcorr_var100\n"); return 239 }
+    var rcd2 = bf_get(&rvc2, 2000, 0) - (0.0 - 0.033538)
+    if rcd2 < 0.0 { rcd2 = 0.0 - rcd2 }
+    if rcd2 > 0.00001 { print("FAIL rcorr_var2000\n"); return 240 }
+    // ROLLING COV. x=i, y=2i, const=5, window 50. cov(x,x)=var, cov(x,2x)=2var, cov(x,const)=0.
+    var kvf = bf_new(3, 16)
+    var kvi: i64 = 0
+    while kvi < 5000 { var kvr:[f64;64]=[0.0;64]; kvr[0]=kvi as f64; kvr[1]=(2*kvi) as f64; kvr[2]=5.0; bf_push_row(&!kvf,&kvr,3); kvi=kvi+1 }
+    let kc1 = bf_rolling_cov(&kvf, 0, 1, 50, 0.0 - 999.0)  // cov(x,2x)
+    let kc2 = bf_rolling_cov(&kvf, 0, 0, 50, 0.0 - 999.0)  // cov(x,x)=var
+    let kc3 = bf_rolling_cov(&kvf, 0, 2, 50, 0.0 - 999.0)  // cov(x,const)=0
+    if bf_nrows(&kc1) != 5000 { print("FAIL rcov_n\n"); return 241 }
+    if !approx_eq(bf_get(&kc1, 2500, 0), 425.0) { print("FAIL rcov_2x\n"); return 242 }   // 2*var(50 consecutive)
+    if !approx_eq(bf_get(&kc2, 2500, 0), 212.5) { print("FAIL rcov_xx\n"); return 243 }
+    if !approx_eq(bf_get(&kc3, 2500, 0), 0.0) { print("FAIL rcov_const\n"); return 244 }
+    // ROLLING SKEW. varied data matches pandas to 6 dp (1e-5 tol). Symmetric window -> ~0.
+    var skf = bf_new(1, 16)
+    var ski: i64 = 0
+    while ski < 5000 { var skr:[f64;64]=[0.0;64]; skr[0]=((ski*7)%13 + (ski%5)) as f64; bf_push_row(&!skf,&skr,1); ski=ski+1 }
+    let sk = bf_rolling_skew(&skf, 0, 100, 0.0 - 999.0)
+    var skd1 = bf_get(&sk, 100, 0) - 0.005080
+    if skd1 < 0.0 { skd1 = 0.0 - skd1 }
+    if skd1 > 0.00001 { print("FAIL rskew_100\n"); return 245 }
+    var skd2 = bf_get(&sk, 2000, 0) - (0.0 - 0.012472)
+    if skd2 < 0.0 { skd2 = 0.0 - skd2 }
+    if skd2 > 0.00001 { print("FAIL rskew_2000\n"); return 246 }
+    // ROLLING KURT. varied data matches pandas to 6 dp (1e-5 tol). window 100.
+    var kuf = bf_new(1, 16)
+    var kui: i64 = 0
+    while kui < 5000 { var kur:[f64;64]=[0.0;64]; kur[0]=((kui*7)%13 + (kui%5)) as f64; bf_push_row(&!kuf,&kur,1); kui=kui+1 }
+    let ku = bf_rolling_kurt(&kuf, 0, 100, 0.0 - 999.0)
+    if bf_nrows(&ku) != 5000 { print("FAIL rkurt_n\n"); return 247 }
+    if bf_get(&ku, 98, 0) != (0.0 - 999.0) { print("FAIL rkurt_fill\n"); return 248 }   // window not full
+    var kud1 = bf_get(&ku, 100, 0) - (0.0 - 0.913665)
+    if kud1 < 0.0 { kud1 = 0.0 - kud1 }
+    if kud1 > 0.00001 { print("FAIL rkurt_100\n"); return 249 }
+    var kud2 = bf_get(&ku, 4999, 0) - (0.0 - 0.990208)
+    if kud2 < 0.0 { kud2 = 0.0 - kud2 }
+    if kud2 > 0.00001 { print("FAIL rkurt_4999\n"); return 250 }
+    // ROLLING QUANTILE. col=i, window 101 -> window [i-100,i] already sorted; q*100 integer for
+    // these q so exact: q0=i-100, q0.25=i-75, q0.5=i-50, q0.9=i-10, q1=i.
+    var rqf = bf_new(1, 16)
+    var rqi: i64 = 0
+    while rqi < 5000 { var rqr:[f64;64]=[0.0;64]; rqr[0]=rqi as f64; bf_push_row(&!rqf,&rqr,1); rqi=rqi+1 }
+    let q0  = bf_rolling_quantile(&rqf, 0, 101, 0.0, 0.0 - 1.0)
+    let q25 = bf_rolling_quantile(&rqf, 0, 101, 0.25, 0.0 - 1.0)
+    let q50 = bf_rolling_quantile(&rqf, 0, 101, 0.5, 0.0 - 1.0)
+    let q90 = bf_rolling_quantile(&rqf, 0, 101, 0.9, 0.0 - 1.0)
+    let q1  = bf_rolling_quantile(&rqf, 0, 101, 1.0, 0.0 - 1.0)
+    if bf_nrows(&q50) != 5000 { print("FAIL rq_n\n"); return 251 }
+    if bf_get(&q50, 99, 0) != (0.0 - 1.0) { print("FAIL rq_fill\n"); return 252 }   // window not full
+    if !approx_eq(bf_get(&q0, 500, 0), 400.0) { print("FAIL rq0\n"); return 253 }
+    if !approx_eq(bf_get(&q25, 500, 0), 425.0) { print("FAIL rq25\n"); return 254 }
+    if !approx_eq(bf_get(&q50, 500, 0), 450.0) { print("FAIL rq50\n"); return 255 }
+    if !approx_eq(bf_get(&q90, 500, 0), 490.0) { print("FAIL rq90\n"); return 256 }
+    if !approx_eq(bf_get(&q1, 500, 0), 500.0) { print("FAIL rq1\n"); return 257 }
+    // DIFFERENTIAL: rolling_quantile(0.5) must equal the shipped rolling_median on scrambled data.
+    var rqs = bf_new(1, 16)
+    var rqsi: i64 = 0
+    while rqsi < 3000 { var rsr:[f64;64]=[0.0;64]; rsr[0]=((rqsi*2654435761)%100) as f64; bf_push_row(&!rqs,&rsr,1); rqsi=rqsi+1 }
+    let rqm = bf_rolling_quantile(&rqs, 0, 51, 0.5, 0.0 - 1.0)   // odd window -> median = win[mid]
+    let rmd = bf_rolling_median(&rqs, 0, 51, 0.0 - 1.0)
+    var rqd: i64 = 0; var rqj: i64 = 0
+    while rqj < 3000 { if bf_get(&rqm, rqj, 0) != bf_get(&rmd, rqj, 0) { rqd = rqd + 1 } rqj = rqj + 1 }
+    if rqd != 0 { print("FAIL rq_vs_median\n"); return 258 }
+    // GROUPED ROLLING SUM. key=i%1000, val=i, window 3. Per group k (rows k, k+1000, ...):
+    // the j-th occurrence sums vals of occurrences j-2..j; occurrence j=i/1000 has val=i.
+    var gsf = bf_new(2, 16)
+    var gsi: i64 = 0
+    while gsi < 100000 { var gsr:[f64;64]=[0.0;64]; gsr[0]=(gsi%1000) as f64; gsr[1]=gsi as f64; bf_push_row(&!gsf,&gsr,2); gsi=gsi+1 }
+    let gs = bf_rolling_sum_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_nrows(&gs) != 100000 { print("FAIL rsumby_n\n"); return 259 }
+    if bf_get(&gs, 1000, 0) != (0.0 - 1.0) { print("FAIL rsumby_fill\n"); return 260 }   // group 0 occ 1, window not full
+    if !approx_eq(bf_get(&gs, 2000, 0), 3000.0) { print("FAIL rsumby_2000\n"); return 261 }  // 0+1000+2000
+    if !approx_eq(bf_get(&gs, 3000, 0), 6000.0) { print("FAIL rsumby_3000\n"); return 262 }  // 1000+2000+3000
+    if !approx_eq(bf_get(&gs, 99500, 0), 295500.0) { print("FAIL rsumby_last\n"); return 263 } // group 500 last window
+    // total: each group contributes sum over its rows minus the first 2 occurrences per group.
+    // spot a second group: row 7 (group 7 occ 0) -> fill; row 2007 (group 7 occ 2) -> 7+1007+2007=3021.
+    if bf_get(&gs, 7, 0) != (0.0 - 1.0) { print("FAIL rsumby_g7fill\n"); return 264 }
+    if !approx_eq(bf_get(&gs, 2007, 0), 3021.0) { print("FAIL rsumby_g7\n"); return 265 }
+    // GROUPED ROLLING MEAN = the grouped rolling sum / window. Same frame, window 3.
+    let gm = bf_rolling_mean_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_get(&gm, 1000, 0) != (0.0 - 1.0) { print("FAIL rmeanby_fill\n"); return 266 }
+    if !approx_eq(bf_get(&gm, 2000, 0), 1000.0) { print("FAIL rmeanby_2000\n"); return 267 }  // mean(0,1000,2000)
+    if !approx_eq(bf_get(&gm, 3000, 0), 2000.0) { print("FAIL rmeanby_3000\n"); return 268 }
+    if !approx_eq(bf_get(&gm, 2007, 0), 1007.0) { print("FAIL rmeanby_g7\n"); return 269 }    // mean(7,1007,2007)
+    // consistency: mean == sum/window for a full window.
+    if !approx_eq(bf_get(&gm, 3000, 0), bf_get(&gs, 3000, 0) / 3.0) { print("FAIL rmeanby_consistency\n"); return 270 }
+    // GROUPED ROLLING MAX/MIN. key=i%1000, val=i (increasing within group), window 3:
+    // max_by = current value = i; min_by[occ jj] = val at occ jj-2 = i-2000.
+    let gmx = bf_rolling_max_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    let gmn = bf_rolling_min_by(&gsf, 0, 1, 3, 0.0 - 1.0)
+    if bf_get(&gmx, 1000, 0) != (0.0 - 1.0) { print("FAIL rmaxby_fill\n"); return 271 }   // occ 1
+    if !approx_eq(bf_get(&gmx, 2000, 0), 2000.0) { print("FAIL rmaxby_2000\n"); return 272 } // max(0,1000,2000)
+    if !approx_eq(bf_get(&gmn, 2000, 0), 0.0) { print("FAIL rminby_2000\n"); return 273 }    // min(0,1000,2000)
+    if !approx_eq(bf_get(&gmn, 3000, 0), 1000.0) { print("FAIL rminby_3000\n"); return 274 } // min(1000,2000,3000)
+    // CROSS-CHECK: a single-group frame -> grouped rolling max == ungrouped bf_rolling_max.
+    var sgf = bf_new(2, 16)
+    var sgi: i64 = 0
+    while sgi < 3000 { var sgr:[f64;64]=[0.0;64]; sgr[0]=0.0; sgr[1]=((sgi*13)%37) as f64; bf_push_row(&!sgf,&sgr,2); sgi=sgi+1 }
+    let gone = bf_rolling_max_by(&sgf, 0, 1, 50, 0.0 - 1.0)   // 1 group
+    let uone = bf_rolling_max(&sgf, 1, 50, 0.0 - 1.0)          // ungrouped, shipped
+    var sgd: i64 = 0; var sgj: i64 = 0
+    while sgj < 3000 { if bf_get(&gone, sgj, 0) != bf_get(&uone, sgj, 0) { sgd = sgd + 1 } sgj = sgj + 1 }
+    if sgd != 0 { print("FAIL rmaxby_vs_ungrouped\n"); return 275 }
+    // GROUPED ROLLING VAR/STD. 2 groups: key=i%2; val = the row index within group *1.0 so each
+    // group sees consecutive integers -> window-3 var of 3 consecutive ints = 1, std = 1.
+    var vbf = bf_new(2, 16)
+    var vbi: i64 = 0
+    while vbi < 6000 { var vbr:[f64;64]=[0.0;64]; vbr[0]=(vbi%2) as f64; vbr[1]=(vbi/2) as f64; bf_push_row(&!vbf,&vbr,2); vbi=vbi+1 }
+    let rvb = bf_rolling_var_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    let rsb = bf_rolling_std_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    if bf_nrows(&rvb) != 6000 { print("FAIL rvarby_n\n"); return 276 }
+    // group 0 (rows 0,2,4,...) has vals 0,1,2,3,...; occurrence 2 (row 4) window {0,1,2} var=1.
+    if bf_get(&rvb, 2, 0) != (0.0 - 999.0) { print("FAIL rvarby_fill\n"); return 277 }   // group 0 occ 1 (row 2)
+    if !approx_eq(bf_get(&rvb, 4, 0), 1.0) { print("FAIL rvarby_val\n"); return 278 }    // var(0,1,2)
+    if !approx_eq(bf_get(&rsb, 4, 0), 1.0) { print("FAIL rstdby_val\n"); return 279 }    // sqrt(1)
+    if !approx_eq(bf_get(&rvb, 100, 0), 1.0) { print("FAIL rvarby_val2\n"); return 280 } // any full window of consec ints
+    // CROSS-CHECK: single-group frame -> grouped rolling std == ungrouped bf_rolling_std.
+    let sgstd = bf_rolling_std_by(&sgf, 0, 1, 50, 0.0 - 999.0)   // sgf = 1-group frame from above
+    let ustd = bf_rolling_std(&sgf, 1, 50, 0.0 - 999.0)
+    var stdd: i64 = 0; var stdj: i64 = 0
+    while stdj < 3000 { if bf_get(&sgstd, stdj, 0) != bf_get(&ustd, stdj, 0) { stdd = stdd + 1 } stdj = stdj + 1 }
+    if stdd != 0 { print("FAIL rstdby_vs_ungrouped\n"); return 281 }
+    // GROUPED ROLLING MEDIAN. reuse vbf: group 0 (rows 0,2,4,...) sees consecutive ints
+    // 0,1,2,3,...; window-3 median at occurrence 2 (row 4) over {0,1,2} = 1.
+    let rmb = bf_rolling_median_by(&vbf, 0, 1, 3, 0.0 - 999.0)
+    if bf_nrows(&rmb) != 6000 { print("FAIL rmedby_n\n"); return 282 }
+    if bf_get(&rmb, 2, 0) != (0.0 - 999.0) { print("FAIL rmedby_fill\n"); return 283 }  // occ 1, not full
+    if !approx_eq(bf_get(&rmb, 4, 0), 1.0) { print("FAIL rmedby_val\n"); return 284 }   // median(0,1,2)
+    if !approx_eq(bf_get(&rmb, 100, 0), 49.0) { print("FAIL rmedby_val2\n"); return 285 } // median(48,49,50)
+    // CROSS-CHECK: single-group frame -> grouped rolling median == ungrouped bf_rolling_median.
+    let sgmed = bf_rolling_median_by(&sgf, 0, 1, 51, 0.0 - 999.0)
+    let umed = bf_rolling_median(&sgf, 1, 51, 0.0 - 999.0)
+    var medd: i64 = 0; var medj: i64 = 0
+    while medj < 3000 { if bf_get(&sgmed, medj, 0) != bf_get(&umed, medj, 0) { medd = medd + 1 } medj = medj + 1 }
+    if medd != 0 { print("FAIL rmedby_vs_ungrouped\n"); return 286 }
+    // GROUPED ROLLING QUANTILE. reuse vbf: group 0 sees consecutive ints 0,1,2,...; window
+    // 5, q=0.5 at occurrence 4 (row 8) over {0,1,2,3,4} -> median 2; q=0.0 -> 0; q=1.0 -> 4.
+    let rqb50 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.5, 0.0 - 999.0)
+    let rqb00 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.0, 0.0 - 999.0)
+    let rqb100 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 1.0, 0.0 - 999.0)
+    if bf_nrows(&rqb50) != 6000 { print("FAIL rqby_n\n"); return 287 }
+    if bf_get(&rqb50, 6, 0) != (0.0 - 999.0) { print("FAIL rqby_fill\n"); return 288 }   // occ 3, not full
+    if !approx_eq(bf_get(&rqb50, 8, 0), 2.0) { print("FAIL rqby_q50\n"); return 289 }    // median(0,1,2,3,4)
+    if !approx_eq(bf_get(&rqb00, 8, 0), 0.0) { print("FAIL rqby_q00\n"); return 290 }    // min
+    if !approx_eq(bf_get(&rqb100, 8, 0), 4.0) { print("FAIL rqby_q100\n"); return 291 }  // max
+    // interpolation: window 5 q=0.25 -> pos=1.0 -> exactly win[1]=1; group 0 occ 4 -> 1.0
+    let rqb25 = bf_rolling_quantile_by(&vbf, 0, 1, 5, 0.25, 0.0 - 999.0)
+    if !approx_eq(bf_get(&rqb25, 8, 0), 1.0) { print("FAIL rqby_q25\n"); return 292 }
+    // CROSS-CHECK: q=0.5 grouped quantile == grouped median at the SAME window (both interp).
+    let rmb5 = bf_rolling_median_by(&vbf, 0, 1, 5, 0.0 - 999.0)
+    var qmd: i64 = 0; var qmj: i64 = 0
+    while qmj < 6000 { if bf_get(&rqb50, qmj, 0) != bf_get(&rmb5, qmj, 0) { qmd = qmd + 1 } qmj = qmj + 1 }
+    if qmd != 0 { print("FAIL rqby_vs_median\n"); return 293 }
+    // GROUPED NLARGEST / NSMALLEST. 3 groups (key=r/10), each vals 0..9 (val=r%10, distinct
+    // per group). nlargest(3) -> vals 9,8,7 at rows 10g+9,10g+8,10g+7; nsmallest(3) -> 0,1,2.
+    var ntf = bf_new(2, 16)
+    var nti: i64 = 0
+    while nti < 30 { var ntr:[f64;64]=[0.0;64]; ntr[0]=(nti/10) as f64; ntr[1]=(nti-10*(nti/10)) as f64; bf_push_row(&!ntf,&ntr,2); nti=nti+1 }
+    let nlg = bf_nlargest_by(&ntf, 0, 1, 3)
+    if bf_nrows(&nlg) != 9 { print("FAIL nlargest_n\n"); return 294 }        // 3 groups * 3
+    if bf_ncols(&nlg) != 3 { print("FAIL nlargest_cols\n"); return 295 }
+    // first row = group 0 top value: key 0, row 9, value 9 (descending)
+    if bf_get(&nlg, 0, 0) != 0.0 || bf_get(&nlg, 0, 1) != 9.0 || bf_get(&nlg, 0, 2) != 9.0 { print("FAIL nlargest_top\n"); return 296 }
+    if bf_get(&nlg, 2, 2) != 7.0 { print("FAIL nlargest_3rd\n"); return 297 }  // 3rd largest val = 7
+    let nsm = bf_nsmallest_by(&ntf, 0, 1, 3)
+    if bf_nrows(&nsm) != 9 { print("FAIL nsmallest_n\n"); return 298 }
+    // first row = group 0 smallest: key 0, row 0, value 0 (ascending)
+    if bf_get(&nsm, 0, 0) != 0.0 || bf_get(&nsm, 0, 1) != 0.0 || bf_get(&nsm, 0, 2) != 0.0 { print("FAIL nsmallest_bot\n"); return 299 }
+    if bf_get(&nsm, 2, 2) != 2.0 { print("FAIL nsmallest_3rd\n"); return 300 } // 3rd smallest val = 2
+    // n >= group size returns the whole group sorted (10 per group -> 30 rows for n=100)
+    let nlgall = bf_nlargest_by(&ntf, 0, 1, 100)
+    if bf_nrows(&nlgall) != 30 { print("FAIL nlargest_all\n"); return 301 }
+    // GROUPED FIRST / LAST / NTH. 4 groups (key=r%4), val=r over 40 rows -> group g has rows
+    // g, g+4, ..., g+36 (10 rows). first=g, last=g+36; nth(2)=g+8; nth(-1)=last=g+36.
+    var flf = bf_new(2, 16)
+    var fli: i64 = 0
+    while fli < 40 { var flr:[f64;64]=[0.0;64]; flr[0]=(fli-4*(fli/4)) as f64; flr[1]=fli as f64; bf_push_row(&!flf,&flr,2); fli=fli+1 }
+    let fb = bf_first_by(&flf, 0, 1)
+    let lb = bf_last_by(&flf, 0, 1)
+    if bf_nrows(&fb) != 4 { print("FAIL first_n\n"); return 302 }
+    if lookup2(&fb, 0.0) != 0.0 || lookup2(&fb, 3.0) != 3.0 { print("FAIL first_val\n"); return 303 }   // first of group g = g
+    if lookup2(&lb, 0.0) != 36.0 || lookup2(&lb, 3.0) != 39.0 { print("FAIL last_val\n"); return 304 }  // last of group g = g+36
+    let n2 = bf_nth_by(&flf, 0, 1, 2)
+    if bf_nrows(&n2) != 4 { print("FAIL nth_n\n"); return 305 }
+    if lookup2(&n2, 0.0) != 8.0 || lookup2(&n2, 3.0) != 11.0 { print("FAIL nth2_val\n"); return 306 }    // nth(2) of group g = g+8
+    let nneg = bf_nth_by(&flf, 0, 1, 0 - 1)
+    if lookup2(&nneg, 0.0) != 36.0 || lookup2(&nneg, 2.0) != 38.0 { print("FAIL nthneg_val\n"); return 307 } // nth(-1)=last
+    // CROSS-CHECK: nth(0) values == first values; nth(-1) values == last values (per key).
+    let n0 = bf_nth_by(&flf, 0, 1, 0)
+    var fcd: i64 = 0; var fck: i64 = 0
+    while fck < 4 { if lookup2(&n0, fck as f64) != lookup2(&fb, fck as f64) { fcd = fcd + 1 }
+                    if lookup2(&nneg, fck as f64) != lookup2(&lb, fck as f64) { fcd = fcd + 1 } fck = fck + 1 }
+    if fcd != 0 { print("FAIL nth_vs_firstlast\n"); return 308 }
+    // nth beyond group size -> group omitted (each group has 10 rows; nth(10) -> 0 rows)
+    let nbig = bf_nth_by(&flf, 0, 1, 10)
+    if bf_nrows(&nbig) != 0 { print("FAIL nth_oob\n"); return 309 }
+    // GROUPBY TRANSFORM (broadcast). reuse flf: 4 groups (key=r%4), val=r, group g = rows
+    // {g,g+4,...,g+36} (10 rows). mean of group g = g+18; sum = 10g+180; min=g; max=g+36;
+    // count=10; std of {g,g+4,...,g+36} = std of {0,4,...,36} = same for all g.
+    let tm = bf_transform_mean_by(&flf, 0, 1)
+    if bf_nrows(&tm) != 40 { print("FAIL tmean_n\n"); return 310 }                 // row-aligned
+    if !approx_eq(bf_get(&tm, 0, 0), 18.0) { print("FAIL tmean_g0\n"); return 311 } // row 0 (group 0) mean = 18
+    if !approx_eq(bf_get(&tm, 3, 0), 21.0) { print("FAIL tmean_g3\n"); return 312 } // row 3 (group 3) mean = 3+18=21
+    if !approx_eq(bf_get(&tm, 4, 0), 18.0) { print("FAIL tmean_g0b\n"); return 313 }// row 4 (group 0 again) = 18
+    let ts = bf_transform_sum_by(&flf, 0, 1)
+    if !approx_eq(bf_get(&ts, 0, 0), 180.0) { print("FAIL tsum\n"); return 314 }    // 10*0+180
+    if !approx_eq(bf_get(&ts, 1, 0), 190.0) { print("FAIL tsum2\n"); return 315 }   // group 1: 10*1+180
+    let tmn = bf_transform_min_by(&flf, 0, 1)
+    let tmx = bf_transform_max_by(&flf, 0, 1)
+    if !approx_eq(bf_get(&tmn, 2, 0), 2.0) { print("FAIL tmin\n"); return 316 }      // group 2 min = 2
+    if !approx_eq(bf_get(&tmx, 2, 0), 38.0) { print("FAIL tmax\n"); return 317 }     // group 2 max = 2+36
+    let tc = bf_transform_count_by(&flf, 0, 1)
+    if !approx_eq(bf_get(&tc, 7, 0), 10.0) { print("FAIL tcount\n"); return 318 }    // each group has 10 rows
+    // std: group values {g,g+4,...,g+36} -> deviations identical across g -> std same for all.
+    // var = Σ(x-mean)²/(n-1); {0,4,...,36}: mean 18, Σdev² = 4²*(9²+7²+5²+3²+1²)*2... compute via cross-check.
+    let tsd = bf_transform_std_by(&flf, 0, 1)
+    if bf_get(&tsd, 0, 0) <= 0.0 { print("FAIL tstd_pos\n"); return 319 }
+    // std of {0,4,8,...,36} = 4 * std of {0,1,2,...,9}; std of 0..9 (ddof=1) = sqrt(9.166...) ~ 3.02765
+    // so group std ~ 12.1106. all rows same.
+    if !approx_eq(bf_get(&tsd, 0, 0), bf_get(&tsd, 4, 0)) { print("FAIL tstd_uniform\n"); return 320 }
+    if bf_get(&tsd, 0, 0) < 12.0 || bf_get(&tsd, 0, 0) > 12.2 { print("FAIL tstd_val\n"); return 321 }
+    // GROUPED CUMULATIVE MIN / MAX. 2 groups (key=r%2). val for group 0 (even rows) descends
+    // 100,99,98,...; group 1 (odd rows) ascends 0,1,2,... -> cummin group0 keeps dropping,
+    // cummax group0 stays 100; cummax group1 keeps rising, cummin group1 stays 0.
+    var cef = bf_new(2, 16)
+    var cei: i64 = 0
+    while cei < 200 { var cer:[f64;64]=[0.0;64]; cer[0]=(cei%2) as f64
+        if cei%2==0 { cer[1]=(100 - cei/2) as f64 } else { cer[1]=(cei/2) as f64 }
+        bf_push_row(&!cef,&cer,2); cei=cei+1 }
+    let cmx = bf_cummax_by(&cef, 0, 1)
+    let cmn = bf_cummin_by(&cef, 0, 1)
+    if bf_nrows(&cmx) != 200 { print("FAIL cumext_n\n"); return 322 }               // row-aligned
+    // group 0 rows are even indices; occurrence j (row 2j) has val 100-j.
+    if bf_get(&cmx, 0, 0) != 100.0 { print("FAIL cmx_g0_first\n"); return 323 }      // max so far = 100
+    if bf_get(&cmx, 20, 0) != 100.0 { print("FAIL cmx_g0_stay\n"); return 324 }      // still 100 (descending vals)
+    if bf_get(&cmn, 0, 0) != 100.0 { print("FAIL cmn_g0_first\n"); return 325 }      // min so far = 100
+    if bf_get(&cmn, 20, 0) != 90.0 { print("FAIL cmn_g0_drop\n"); return 326 }       // row 20 = occ 10 -> val 90, min so far 90
+    // group 1 rows are odd indices; occurrence j (row 2j+1) has val j.
+    if bf_get(&cmn, 1, 0) != 0.0 { print("FAIL cmn_g1_first\n"); return 327 }        // min = 0
+    if bf_get(&cmn, 21, 0) != 0.0 { print("FAIL cmn_g1_stay\n"); return 328 }        // still 0 (ascending)
+    if bf_get(&cmx, 21, 0) != 10.0 { print("FAIL cmx_g1_rise\n"); return 329 }       // row 21 = occ 10 -> val 10, max 10
+    // GROUPED RANK. 2 groups (key=r%2). group 0 rows {0,2,4} vals {10,30,20} -> ranks
+    // 10->1,20->2,30->3 (row0=1,row4=2,row2=3). group 1 rows {1,3,5} vals {5,5,8}: tie at 5.
+    var rkf = bf_new(2, 16)
+    var rkr0:[f64;64]=[0.0;64]; rkr0[0]=0.0; rkr0[1]=10.0; bf_push_row(&!rkf,&rkr0,2)
+    var rkr1:[f64;64]=[0.0;64]; rkr1[0]=1.0; rkr1[1]=5.0;  bf_push_row(&!rkf,&rkr1,2)
+    var rkr2:[f64;64]=[0.0;64]; rkr2[0]=0.0; rkr2[1]=30.0; bf_push_row(&!rkf,&rkr2,2)
+    var rkr3:[f64;64]=[0.0;64]; rkr3[0]=1.0; rkr3[1]=5.0;  bf_push_row(&!rkf,&rkr3,2)
+    var rkr4:[f64;64]=[0.0;64]; rkr4[0]=0.0; rkr4[1]=20.0; bf_push_row(&!rkf,&rkr4,2)
+    var rkr5:[f64;64]=[0.0;64]; rkr5[0]=1.0; rkr5[1]=8.0;  bf_push_row(&!rkf,&rkr5,2)
+    let rav = bf_rank_by(&rkf, 0, 1, 0)   // average
+    if bf_nrows(&rav) != 6 { print("FAIL rank_n\n"); return 330 }
+    if bf_get(&rav, 0, 0) != 1.0 || bf_get(&rav, 4, 0) != 2.0 || bf_get(&rav, 2, 0) != 3.0 { print("FAIL rank_g0\n"); return 331 }
+    if !approx_eq(bf_get(&rav, 1, 0), 1.5) || !approx_eq(bf_get(&rav, 3, 0), 1.5) { print("FAIL rank_avg_tie\n"); return 332 } // two 5s
+    if bf_get(&rav, 5, 0) != 3.0 { print("FAIL rank_avg_top\n"); return 333 }
+    let rmin = bf_rank_by(&rkf, 0, 1, 1)  // min: tie 5 -> 1
+    if bf_get(&rmin, 1, 0) != 1.0 || bf_get(&rmin, 3, 0) != 1.0 || bf_get(&rmin, 5, 0) != 3.0 { print("FAIL rank_min\n"); return 334 }
+    let rmax = bf_rank_by(&rkf, 0, 1, 2)  // max: tie 5 -> 2
+    if bf_get(&rmax, 1, 0) != 2.0 || bf_get(&rmax, 3, 0) != 2.0 || bf_get(&rmax, 5, 0) != 3.0 { print("FAIL rank_max\n"); return 335 }
+    let rden = bf_rank_by(&rkf, 0, 1, 3)  // dense: 5->1, 8->2
+    if bf_get(&rden, 1, 0) != 1.0 || bf_get(&rden, 5, 0) != 2.0 { print("FAIL rank_dense\n"); return 336 }
+    // CROSS-CHECK: single-group rank_by == ungrouped bf_rank (all methods), value-by-value.
+    var sgr = bf_new(2, 16)
+    var sgk: i64 = 0
+    while sgk < 400 { var sr:[f64;64]=[0.0;64]; sr[0]=0.0; sr[1]=((sgk*29)%53) as f64; bf_push_row(&!sgr,&sr,2); sgk=sgk+1 }
+    var rmm: i64 = 0
+    while rmm < 4 {
+        let a = bf_rank_by(&sgr, 0, 1, rmm)
+        let b = bf_rank(&sgr, 1, rmm)
+        var d: i64 = 0; var jx: i64 = 0
+        while jx < 400 { if bf_get(&a, jx, 0) != bf_get(&b, jx, 0) { d = d + 1 } jx = jx + 1 }
+        if d != 0 { print("FAIL rank_vs_ungrouped\n"); return 337 }
+        rmm = rmm + 1
+    }
+    // NGROUP / DESCENDING CUMCOUNT. sparse keys {0,10,20} (compacted -> groups 0,1,2).
+    var ngf = bf_new(2, 16)
+    var ngi: i64 = 0
+    while ngi < 30 { var ngr:[f64;64]=[0.0;64]; ngr[0]=(10*(ngi%3)) as f64; ngr[1]=ngi as f64; bf_push_row(&!ngf,&ngr,2); ngi=ngi+1 }
+    let ng = bf_ngroup_by(&ngf, 0)
+    if bf_nrows(&ng) != 30 { print("FAIL ngroup_n\n"); return 338 }
+    // rows: key cycles 0,10,20,0,10,20,... -> ngroup 0,1,2,0,1,2,... (sorted-key compacted)
+    if bf_get(&ng, 0, 0) != 0.0 || bf_get(&ng, 1, 0) != 1.0 || bf_get(&ng, 2, 0) != 2.0 { print("FAIL ngroup_first\n"); return 339 }
+    if bf_get(&ng, 3, 0) != 0.0 || bf_get(&ng, 29, 0) != 2.0 { print("FAIL ngroup_cycle\n"); return 340 }
+    // each of the 3 groups has 10 rows. descending cumcount: group's rows get 9,8,...,0.
+    let cd = bf_cumcount_desc_by(&ngf, 0)
+    if bf_get(&cd, 0, 0) != 9.0 { print("FAIL ccdesc_first\n"); return 341 }   // key0 occ 0 -> 9 later
+    if bf_get(&cd, 3, 0) != 8.0 { print("FAIL ccdesc_second\n"); return 342 }  // key0 occ 1 -> 8 later
+    if bf_get(&cd, 27, 0) != 0.0 { print("FAIL ccdesc_last\n"); return 343 }   // key0 occ 9 (last) -> 0 later
+    // CROSS-CHECK: forward cumcount + descending cumcount == size-1 for every row.
+    let fc = bf_cumcount_by(&ngf, 0)
+    var ccd: i64 = 0; var ccj: i64 = 0
+    while ccj < 30 { if bf_get(&fc, ccj, 0) + bf_get(&cd, ccj, 0) != 9.0 { ccd = ccd + 1 } ccj = ccj + 1 }
+    if ccd != 0 { print("FAIL ccdesc_sum\n"); return 344 }
+    // GROUPED PCT_CHANGE. 2 groups (key=r%2): group 0 (even rows) vals 10,20,40,...(doubling
+    // per group step), group 1 (odd rows) vals 5,10,20,... -> pct_change within group = 1.0
+    // (each is 2x prior); first-in-group -> fill.
+    var pcf = bf_new(2, 16)
+    var pci: i64 = 0
+    while pci < 20 { var pcr:[f64;64]=[0.0;64]; pcr[0]=(pci%2) as f64
+        var occ2 = pci/2
+        var vv = 10.0; var e2: i64 = 0; while e2 < occ2 { vv = vv*2.0; e2 = e2+1 }   // 10,20,40,... for group 0
+        if pci%2==1 { vv = vv/2.0 }                                                   // 5,10,20,... for group 1
+        pcr[1]=vv; bf_push_row(&!pcf,&pcr,2); pci=pci+1 }
+    let pc = bf_pct_change_by(&pcf, 0, 1, 0.0 - 999.0)
+    if bf_nrows(&pc) != 20 { print("FAIL pctchg_n\n"); return 345 }
+    if bf_get(&pc, 0, 0) != (0.0 - 999.0) { print("FAIL pctchg_fill0\n"); return 346 }  // group 0 first
+    if bf_get(&pc, 1, 0) != (0.0 - 999.0) { print("FAIL pctchg_fill1\n"); return 347 }  // group 1 first
+    if !approx_eq(bf_get(&pc, 2, 0), 1.0) { print("FAIL pctchg_g0\n"); return 348 }      // 20/10 - 1 = 1
+    if !approx_eq(bf_get(&pc, 3, 0), 1.0) { print("FAIL pctchg_g1\n"); return 349 }      // 10/5 - 1 = 1
+    if !approx_eq(bf_get(&pc, 18, 0), 1.0) { print("FAIL pctchg_g0_last\n"); return 350 }// still 2x prior
+    // CROSS-CHECK: single-group pct_change_by == ungrouped bf_pct_change.
+    var pgf = bf_new(2, 16)
+    var pgk: i64 = 0
+    while pgk < 300 { var pr:[f64;64]=[0.0;64]; pr[0]=0.0; pr[1]=((pgk*13)%89 + 1) as f64; bf_push_row(&!pgf,&pr,2); pgk=pgk+1 }
+    let pgb = bf_pct_change_by(&pgf, 0, 1, 0.0 - 999.0)
+    let pgu = bf_pct_change(&pgf, 1, 0.0 - 999.0)
+    var pgd: i64 = 0; var pgj: i64 = 0
+    while pgj < 300 { if !approx_eq(bf_get(&pgb, pgj, 0), bf_get(&pgu, pgj, 0)) { pgd = pgd + 1 } pgj = pgj + 1 }
+    if pgd != 0 { print("FAIL pctchg_vs_ungrouped\n"); return 351 }
+    // GROUPED DIFF. 2 groups (key=r%2), val=r -> within group consecutive members differ by
+    // 2 (rows g, g+2, g+4,...). periods=1 -> diff 2 (first-in-group fill); periods=2 -> diff 4.
+    var dff = bf_new(2, 16)
+    var dfi: i64 = 0
+    while dfi < 20 { var dfr:[f64;64]=[0.0;64]; dfr[0]=(dfi%2) as f64; dfr[1]=dfi as f64; bf_push_row(&!dff,&dfr,2); dfi=dfi+1 }
+    let d1 = bf_diff_by(&dff, 0, 1, 1, 0.0 - 999.0)
+    if bf_nrows(&d1) != 20 { print("FAIL diff_n\n"); return 352 }
+    if bf_get(&d1, 0, 0) != (0.0 - 999.0) || bf_get(&d1, 1, 0) != (0.0 - 999.0) { print("FAIL diff_fill\n"); return 353 } // first of each group
+    if bf_get(&d1, 2, 0) != 2.0 || bf_get(&d1, 3, 0) != 2.0 { print("FAIL diff_p1\n"); return 354 }  // g0: 2-0=2, g1: 3-1=2
+    if bf_get(&d1, 18, 0) != 2.0 { print("FAIL diff_p1_last\n"); return 355 }
+    let d2 = bf_diff_by(&dff, 0, 1, 2, 0.0 - 999.0)   // periods 2 (ring path)
+    if bf_get(&d2, 2, 0) != (0.0 - 999.0) { print("FAIL diff_p2_fill\n"); return 356 }   // group 0 occ 1 < 2 -> fill
+    if bf_get(&d2, 4, 0) != 4.0 { print("FAIL diff_p2\n"); return 357 }                   // g0 occ2: row4(val4)-row0(val0)=4
+    if bf_get(&d2, 6, 0) != 4.0 { print("FAIL diff_p2b\n"); return 358 }                  // g0 occ3: val6-val2=4
+    // CROSS-CHECK: single-group diff_by(periods=1) == ungrouped bf_diff(periods=1).
+    var dgf = bf_new(2, 16)
+    var dgk: i64 = 0
+    while dgk < 300 { var dr:[f64;64]=[0.0;64]; dr[0]=0.0; dr[1]=((dgk*17)%71) as f64; bf_push_row(&!dgf,&dr,2); dgk=dgk+1 }
+    let dgb = bf_diff_by(&dgf, 0, 1, 1, 0.0 - 999.0)
+    let dgu = bf_diff(&dgf, 1, 1, 0.0 - 999.0)
+    var dgd: i64 = 0; var dgj: i64 = 0
+    while dgj < 300 { if bf_get(&dgb, dgj, 0) != bf_get(&dgu, dgj, 0) { dgd = dgd + 1 } dgj = dgj + 1 }
+    if dgd != 0 { print("FAIL diff_vs_ungrouped\n"); return 359 }
+    // GROUPED SHIFT. 2 groups (key=r%2), val=r -> group members are g,g+2,g+4,... .
+    // shift(1) lag: out = previous group member (first-in-group fill). shift(-1) lead:
+    // out = next group member (last-in-group fill).
+    var shf = bf_new(2, 16)
+    var shi: i64 = 0
+    while shi < 20 { var shr:[f64;64]=[0.0;64]; shr[0]=(shi%2) as f64; shr[1]=shi as f64; bf_push_row(&!shf,&shr,2); shi=shi+1 }
+    let sl = bf_shift_by(&shf, 0, 1, 1, 0.0 - 999.0)      // lag 1
+    if bf_nrows(&sl) != 20 { print("FAIL shift_n\n"); return 360 }
+    if bf_get(&sl, 0, 0) != (0.0 - 999.0) { print("FAIL shift_lag_fill\n"); return 361 }  // group 0 first
+    if bf_get(&sl, 2, 0) != 0.0 { print("FAIL shift_lag\n"); return 362 }                  // row2(val2) prev = val0
+    if bf_get(&sl, 4, 0) != 2.0 { print("FAIL shift_lag2\n"); return 363 }                 // row4(val4) prev = val2
+    let sd = bf_shift_by(&shf, 0, 1, 0 - 1, 0.0 - 999.0)  // lead 1
+    if bf_get(&sd, 18, 0) != (0.0 - 999.0) { print("FAIL shift_lead_fill\n"); return 364 } // group 0 last (row18)
+    if bf_get(&sd, 0, 0) != 2.0 { print("FAIL shift_lead\n"); return 365 }                  // row0(val0) next = val2
+    if bf_get(&sd, 2, 0) != 4.0 { print("FAIL shift_lead2\n"); return 366 }                 // row2 next = val4
+    let s2 = bf_shift_by(&shf, 0, 1, 2, 0.0 - 999.0)      // lag 2 (ring path)
+    if bf_get(&s2, 2, 0) != (0.0 - 999.0) { print("FAIL shift_lag2_fill\n"); return 367 }  // group 0 occ1 < 2 -> fill
+    if bf_get(&s2, 4, 0) != 0.0 { print("FAIL shift_lag2_ring\n"); return 368 }             // row4 occ2 -> val0 (2 back)
+    let s0 = bf_shift_by(&shf, 0, 1, 0, 0.0 - 999.0)      // identity
+    if bf_get(&s0, 7, 0) != 7.0 { print("FAIL shift_identity\n"); return 369 }
+    // CROSS-CHECK: single-group shift_by(1) == ungrouped bf_shift(1).
+    var sgf2 = bf_new(2, 16)
+    var sgk2: i64 = 0
+    while sgk2 < 300 { var sr2:[f64;64]=[0.0;64]; sr2[0]=0.0; sr2[1]=((sgk2*19)%67) as f64; bf_push_row(&!sgf2,&sr2,2); sgk2=sgk2+1 }
+    let sgb = bf_shift_by(&sgf2, 0, 1, 1, 0.0 - 999.0)
+    let sgu = bf_shift(&sgf2, 1, 1, 0.0 - 999.0)
+    var sgd2: i64 = 0; var sgj2: i64 = 0
+    while sgj2 < 300 { if bf_get(&sgb, sgj2, 0) != bf_get(&sgu, sgj2, 0) { sgd2 = sgd2 + 1 } sgj2 = sgj2 + 1 }
+    if sgd2 != 0 { print("FAIL shift_vs_ungrouped\n"); return 370 }
+    // GROUPED FFILL / BFILL. 2 groups (key=r%2), na=-7. Build a pattern per group with
+    // leading/interior/trailing missing to exercise both fill directions.
+    // rows (r,key,val): use val = r unless marked missing. Mark rows 0,2 (group 0 first two)
+    // and rows 16,18 (group 0 last two) missing; group 1 all valid.
+    var flf = bf_new(2, 16)
+    var fli: i64 = 0
+    while fli < 20 { var flr:[f64;64]=[0.0;64]; flr[0]=(fli%2) as f64
+        if fli==0 || fli==2 || fli==16 || fli==18 { flr[1]=0.0-7.0 } else { flr[1]=fli as f64 }
+        bf_push_row(&!flf,&flr,2); fli=fli+1 }
+    let ff = bf_ffill_by(&flf, 0, 1, 0.0 - 7.0)
+    if bf_nrows(&ff) != 20 { print("FAIL ffill_n\n"); return 371 }
+    // group 0 rows: 0(na),2(na),4,6,8,10,12,14,16(na),18(na). ffill: 0,2 leading na stay na;
+    // 4->4; 16,18 -> last valid = 14.
+    if bf_get(&ff, 0, 0) != (0.0 - 7.0) || bf_get(&ff, 2, 0) != (0.0 - 7.0) { print("FAIL ffill_lead\n"); return 372 }
+    if bf_get(&ff, 4, 0) != 4.0 { print("FAIL ffill_valid\n"); return 373 }
+    if bf_get(&ff, 16, 0) != 14.0 || bf_get(&ff, 18, 0) != 14.0 { print("FAIL ffill_trail\n"); return 374 } // carried 14
+    let bf2 = bf_bfill_by(&flf, 0, 1, 0.0 - 7.0)
+    // bfill: 0,2 -> next valid = 4; 16,18 trailing na stay na.
+    if bf_get(&bf2, 0, 0) != 4.0 || bf_get(&bf2, 2, 0) != 4.0 { print("FAIL bfill_lead\n"); return 375 }
+    if bf_get(&bf2, 16, 0) != (0.0 - 7.0) || bf_get(&bf2, 18, 0) != (0.0 - 7.0) { print("FAIL bfill_trail\n"); return 376 }
+    if bf_get(&bf2, 4, 0) != 4.0 { print("FAIL bfill_valid\n"); return 377 }
+    // group 1 (all valid) is untouched by either fill.
+    if bf_get(&ff, 5, 0) != 5.0 || bf_get(&bf2, 5, 0) != 5.0 { print("FAIL fill_g1\n"); return 378 }
+    // GROUPED WINSORIZE. 2 groups (key=r%2), 100 rows each: group 0 occ j (row 2j) -> val j
+    // (0..99); group 1 occ j (row 2j+1) -> val 100+j (100..199). q=[0.1,0.9] over 0..99 ->
+    // lo = 9 + 0.9 = 9.9, hi = 89 + 0.1 = 89.1 (linear interp at pos 9.9 / 89.1).
+    var wzf = bf_new(2, 16)
+    var wzi: i64 = 0
+    while wzi < 200 { var wzr:[f64;64]=[0.0;64]; wzr[0]=(wzi%2) as f64
+        var occ3 = wzi/2
+        if wzi%2==0 { wzr[1]=occ3 as f64 } else { wzr[1]=(100 + occ3) as f64 }
+        bf_push_row(&!wzf,&wzr,2); wzi=wzi+1 }
+    let wz = bf_winsorize_by(&wzf, 0, 1, 0.1, 0.9)
+    if bf_nrows(&wz) != 200 { print("FAIL wz_n\n"); return 379 }
+    // group 0: row 0 (val 0) clamped up to lo=9.9; row 100 (val 50) unchanged; row 198 (val 99) down to hi=89.1
+    if !approx_eq(bf_get(&wz, 0, 0), 9.9) { print("FAIL wz_lo\n"); return 380 }
+    if !approx_eq(bf_get(&wz, 100, 0), 50.0) { print("FAIL wz_mid\n"); return 381 }
+    if !approx_eq(bf_get(&wz, 198, 0), 89.1) { print("FAIL wz_hi\n"); return 382 }
+    // group 1 (vals 100..199): lo=109.9, hi=189.1
+    if !approx_eq(bf_get(&wz, 1, 0), 109.9) { print("FAIL wz_g1_lo\n"); return 383 }   // row1 val100 -> 109.9
+    if !approx_eq(bf_get(&wz, 199, 0), 189.1) { print("FAIL wz_g1_hi\n"); return 384 } // row199 val199 -> 189.1
+    // GROUPED SAMPLE. 50 groups (key=r%50) of 100 rows each; sample 10 per group, seed 123.
+    var spf = bf_new(1, 16)
+    var spi: i64 = 0
+    while spi < 5000 { var spr:[f64;64]=[0.0;64]; spr[0]=(spi-50*(spi/50)) as f64; bf_push_row(&!spf,&spr,1); spi=spi+1 }
+    let smA = bf_sample_n_by(&spf, 0, 10, 123)
+    if bf_nrows(&smA) != 5000 { print("FAIL sample_n\n"); return 385 }
+    // exactly 10 selected per group, total 500; count per group via a 50-slot tally.
+    var tally: [i64; 64] = [0; 64]
+    var total: i64 = 0
+    var si: i64 = 0
+    while si < 5000 {
+        let v = bf_get(&smA, si, 0)
+        if v == 1.0 { let k = si - 50 * (si / 50); tally[k] = tally[k] + 1; total = total + 1 }
+        else { if v != 0.0 { print("FAIL sample_mask_val\n"); return 386 } }   // mask is strictly 0/1
+        si = si + 1
+    }
+    if total != 500 { print("FAIL sample_total\n"); return 387 }
+    var tk: i64 = 0
+    while tk < 50 { if tally[tk] != 10 { print("FAIL sample_percount\n"); return 388 } tk = tk + 1 }
+    // DETERMINISM: same seed -> identical mask.
+    let smB = bf_sample_n_by(&spf, 0, 10, 123)
+    var dd: i64 = 0; var dj: i64 = 0
+    while dj < 5000 { if bf_get(&smA, dj, 0) != bf_get(&smB, dj, 0) { dd = dd + 1 } dj = dj + 1 }
+    if dd != 0 { print("FAIL sample_determinism\n"); return 389 }
+    // SEED-SENSITIVITY: a different seed changes the selection.
+    let smC = bf_sample_n_by(&spf, 0, 10, 999)
+    var sc2: i64 = 0; var scj: i64 = 0
+    while scj < 5000 { if bf_get(&smA, scj, 0) != bf_get(&smC, scj, 0) { sc2 = sc2 + 1 } scj = scj + 1 }
+    if sc2 == 0 { print("FAIL sample_seed_insensitive\n"); return 390 }
+    // n >= group size -> whole group selected (n=1000 over 100-row groups -> all 5000).
+    let smAll = bf_sample_n_by(&spf, 0, 1000, 5)
+    var allsel: i64 = 0; var ai: i64 = 0
+    while ai < 5000 { if bf_get(&smAll, ai, 0) == 1.0 { allsel = allsel + 1 } ai = ai + 1 }
+    if allsel != 5000 { print("FAIL sample_all\n"); return 391 }
+    // GROUPED REVERSE CUMSUM. 2 groups (key=r%2), val=1.0 -> within a 10-row group the
+    // suffix sums are 10,9,8,...,1 (first row = total 10, last = 1).
+    var rcf = bf_new(2, 16)
+    var rci: i64 = 0
+    while rci < 20 { var rcr:[f64;64]=[0.0;64]; rcr[0]=(rci%2) as f64; rcr[1]=1.0; bf_push_row(&!rcf,&rcr,2); rci=rci+1 }
+    let rc = bf_cumsum_rev_by(&rcf, 0, 1)
+    if bf_nrows(&rc) != 20 { print("FAIL revcs_n\n"); return 392 }
+    if bf_get(&rc, 0, 0) != 10.0 { print("FAIL revcs_first\n"); return 393 }   // group 0 first row = total 10
+    if bf_get(&rc, 2, 0) != 9.0 { print("FAIL revcs_second\n"); return 394 }   // next -> 9 remaining
+    if bf_get(&rc, 18, 0) != 1.0 { print("FAIL revcs_last\n"); return 395 }    // group 0 last row = 1
+    if bf_get(&rc, 1, 0) != 10.0 { print("FAIL revcs_g1\n"); return 396 }      // group 1 first = 10
+    // CROSS-CHECK: reverse cumsum + forward cumsum == group_total + val (each row counted
+    // once forward, once reverse, with row i shared) -> revcs[i] + cumsum[i] = total + val[i].
+    // Simpler check: for a constant-1 group of size 10, forward cumsum is 1..10 and reverse
+    // is 10..1, so their sum is always 11.
+    let fcs = bf_cumsum_by(&rcf, 0, 1)
+    var rcd: i64 = 0; var rcj: i64 = 0
+    while rcj < 20 { if bf_get(&rc, rcj, 0) + bf_get(&fcs, rcj, 0) != 11.0 { rcd = rcd + 1 } rcj = rcj + 1 }
+    if rcd != 0 { print("FAIL revcs_sum\n"); return 397 }
+    // GROUPED EXPANDING sum/mean/var/std. 2 groups (key=r%2), group members see consecutive
+    // integers (val = occurrence within group). expanding of 0,1,2,3,...: at occurrence 3
+    // (4 values 0,1,2,3) sum=6, mean=1.5, var(0,1,2,3)=1.6667, std=1.2910.
+    var exf = bf_new(2, 16)
+    var exi: i64 = 0
+    while exi < 40 { var exr:[f64;64]=[0.0;64]; exr[0]=(exi%2) as f64; exr[1]=(exi/2) as f64; bf_push_row(&!exf,&exr,2); exi=exi+1 }
+    let es = bf_expanding_sum_by(&exf, 0, 1)
+    let em = bf_expanding_mean_by(&exf, 0, 1)
+    let ev = bf_expanding_var_by(&exf, 0, 1)
+    let ed = bf_expanding_std_by(&exf, 0, 1)
+    if bf_nrows(&em) != 40 { print("FAIL exp_n\n"); return 398 }
+    // group 0 rows are even indices; occurrence 3 = row 6, values 0,1,2,3.
+    if bf_get(&es, 6, 0) != 6.0 { print("FAIL exp_sum\n"); return 399 }             // 0+1+2+3
+    if !approx_eq(bf_get(&em, 6, 0), 1.5) { print("FAIL exp_mean\n"); return 400 }   // mean 0..3
+    if !approx_eq(bf_get(&ev, 6, 0), 1.6666666667) { print("FAIL exp_var\n"); return 401 }  // var ddof1
+    if bf_get(&ed, 6, 0) < 1.29 || bf_get(&ed, 6, 0) > 1.292 { print("FAIL exp_std\n"); return 402 }  // ~1.2910
+    // first-in-group: mean = the value, var/std = 0.
+    if bf_get(&em, 0, 0) != 0.0 { print("FAIL exp_mean_first\n"); return 403 }
+    if bf_get(&ev, 0, 0) != 0.0 || bf_get(&ed, 0, 0) != 0.0 { print("FAIL exp_var_first\n"); return 404 }
+    // CROSS-CHECK: expanding_sum_by == cumsum_by (they are the same operation).
+    let ecs = bf_cumsum_by(&exf, 0, 1)
+    var exd: i64 = 0; var exj: i64 = 0
+    while exj < 40 { if bf_get(&es, exj, 0) != bf_get(&ecs, exj, 0) { exd = exd + 1 } exj = exj + 1 }
+    if exd != 0 { print("FAIL exp_sum_vs_cumsum\n"); return 405 }
+    // ===== GROUPED ANALYTICS BATCH (10 verbs) =====
+    // expanding max/min aliases == cummax_by/cummin_by (use exf: consecutive ints per group).
+    let emx = bf_expanding_max_by(&exf, 0, 1); let cmx2 = bf_cummax_by(&exf, 0, 1)
+    let emn = bf_expanding_min_by(&exf, 0, 1); let cmn2 = bf_cummin_by(&exf, 0, 1)
+    var ba: i64 = 0; var bj: i64 = 0
+    while bj < 40 { if bf_get(&emx,bj,0)!=bf_get(&cmx2,bj,0) || bf_get(&emn,bj,0)!=bf_get(&cmn2,bj,0) { ba=ba+1 } bj=bj+1 }
+    if ba != 0 { print("FAIL expmaxmin_alias\n"); return 406 }
+    // cumprod: exf group members 0,1,2,3,... -> cumprod = 0 (first elem 0). Use a 2nd frame with vals 1,2,3.
+    var cpf = bf_new(2, 16)
+    var cpi: i64 = 0
+    while cpi < 12 { var cpr:[f64;64]=[0.0;64]; cpr[0]=(cpi%2) as f64; cpr[1]=(cpi/2 + 1) as f64; bf_push_row(&!cpf,&cpr,2); cpi=cpi+1 }
+    let cp = bf_cumprod_by(&cpf, 0, 1)   // group 0 vals 1,2,3,4,5,6 -> cumprod 1,2,6,24,120,720
+    if bf_get(&cp,0,0)!=1.0 || bf_get(&cp,2,0)!=2.0 || bf_get(&cp,4,0)!=6.0 || bf_get(&cp,10,0)!=720.0 { print("FAIL cumprod\n"); return 407 }
+    // zscore/demean/minmax/range on a known group: use a frame where group 0 = {2,4,6,8,10}.
+    var stf = bf_new(2, 16)
+    var sti: i64 = 0
+    while sti < 10 { var str2:[f64;64]=[0.0;64]; str2[0]=(sti%2) as f64; str2[1]=(2*(sti/2)+2) as f64; bf_push_row(&!stf,&str2,2); sti=sti+1 }
+    // group 0 rows (even idx) vals 2,4,6,8,10: mean=6, std(ddof1)=sqrt(10)=3.1623, min2 max10 range8.
+    let dm2 = bf_demean_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&dm2, 0, 0), 0.0 - 4.0) { print("FAIL demean\n"); return 408 }   // 2-6=-4
+    if !approx_eq(bf_get(&dm2, 8, 0), 4.0) { print("FAIL demean2\n"); return 409 }         // 10-6=4
+    let rg2 = bf_range_by(&stf, 0, 1)
+    if bf_get(&rg2, 0, 0) != 8.0 { print("FAIL range\n"); return 410 }                      // 10-2
+    let mm2 = bf_minmax_scale_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&mm2, 0, 0), 0.0) { print("FAIL minmax_lo\n"); return 411 }        // (2-2)/8=0
+    if !approx_eq(bf_get(&mm2, 8, 0), 1.0) { print("FAIL minmax_hi\n"); return 412 }        // (10-2)/8=1
+    if !approx_eq(bf_get(&mm2, 4, 0), 0.5) { print("FAIL minmax_mid\n"); return 413 }       // (6-2)/8=0.5
+    let zs2 = bf_zscore_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&zs2, 4, 0), 0.0) { print("FAIL zscore_mid\n"); return 414 }       // (6-6)/std=0
+    if bf_get(&zs2, 8, 0) < 1.264 || bf_get(&zs2, 8, 0) > 1.266 { print("FAIL zscore_hi\n"); return 415 } // (10-6)/3.1623=1.2649
+    let se2 = bf_sem_by(&stf, 0, 1)   // std/sqrt(5) = 3.1623/2.2361 = 1.4142
+    if bf_get(&se2, 0, 0) < 1.413 || bf_get(&se2, 0, 0) > 1.415 { print("FAIL sem\n"); return 416 }
+    // head/tail mask: 2 groups (key=r%2), 10 rows each; head(3)/tail(3).
+    var htf = bf_new(1, 16)
+    var hti: i64 = 0
+    while hti < 20 { var htr:[f64;64]=[0.0;64]; htr[0]=(hti%2) as f64; bf_push_row(&!htf,&htr,1); hti=hti+1 }
+    let hm = bf_head_mask_by(&htf, 0, 3)
+    let tm = bf_tail_mask_by(&htf, 0, 3)
+    var htot: i64 = 0; var ttot: i64 = 0; var hj: i64 = 0
+    while hj < 20 { if bf_get(&hm,hj,0)==1.0 {htot=htot+1} if bf_get(&tm,hj,0)==1.0 {ttot=ttot+1} hj=hj+1 }
+    if htot != 6 || ttot != 6 { print("FAIL headtail_count\n"); return 417 }   // 3 per group * 2 groups
+    // group 0 (even rows 0..18): head marks rows 0,2,4; tail marks rows 14,16,18.
+    if bf_get(&hm,0,0)!=1.0 || bf_get(&hm,4,0)!=1.0 || bf_get(&hm,6,0)!=0.0 { print("FAIL head_which\n"); return 418 }
+    if bf_get(&tm,18,0)!=1.0 || bf_get(&tm,14,0)!=1.0 || bf_get(&tm,12,0)!=0.0 { print("FAIL tail_which\n"); return 419 }
+    // ===== GROUPED ANALYTICS BATCH-2 (10 verbs) =====
+    // reuse stf (group 0 = {2,4,6,8,10}, mean 6). mad = mean(|d|) = (4+2+0+2+4)/5 = 2.4.
+    let mad = bf_mad_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&mad, 0, 0), 2.4) { print("FAIL mad\n"); return 420 }
+    // symmetric group {2,4,6,8,10} -> skew 0.
+    let skb = bf_skew_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&skb, 0, 0), 0.0) { print("FAIL skew\n"); return 421 }
+    // kurt of {2,4,6,8,10} (uniform-ish) is negative; just check it's < 0 and uniform per group.
+    let kub = bf_kurt_by(&stf, 0, 1)
+    if bf_get(&kub, 0, 0) >= 0.0 { print("FAIL kurt_sign\n"); return 422 }
+    if bf_get(&kub, 0, 0) != bf_get(&kub, 2, 0) { print("FAIL kurt_uniform\n"); return 423 }
+    // prod of {2,4,6,8,10} = 3840; first=2, last=10.
+    let pdb = bf_group_prod_by(&stf, 0, 1)
+    if bf_get(&pdb, 0, 0) != 3840.0 { print("FAIL prod\n"); return 424 }
+    let gfb = bf_group_first_by(&stf, 0, 1)
+    let glb = bf_group_last_by(&stf, 0, 1)
+    if bf_get(&gfb, 8, 0) != 2.0 { print("FAIL gfirst\n"); return 425 }   // last row also gets group first
+    if bf_get(&glb, 0, 0) != 10.0 { print("FAIL glast\n"); return 426 }   // first row also gets group last
+    // any/all: group 0 all-nonzero -> any=1 all=1. Build a frame with a zero in group 1.
+    var anf = bf_new(2, 16)
+    var ani: i64 = 0
+    while ani < 8 { var anr:[f64;64]=[0.0;64]; anr[0]=(ani%2) as f64
+        if ani==3 { anr[1]=0.0 } else { anr[1]=(ani+1) as f64 }   // group 1 (odd) has a zero at row 3
+        bf_push_row(&!anf,&anr,2); ani=ani+1 }
+    let anyb = bf_any_by(&anf, 0, 1); let allb = bf_all_by(&anf, 0, 1)
+    if bf_get(&anyb, 0, 0) != 1.0 || bf_get(&allb, 0, 0) != 1.0 { print("FAIL any_g0\n"); return 427 }  // group 0 all nonzero
+    if bf_get(&anyb, 1, 0) != 1.0 || bf_get(&allb, 1, 0) != 0.0 { print("FAIL all_g1\n"); return 428 }  // group 1 has a zero -> all=0, any=1
+    // cumany/cumall: group 1 (rows 1,3,5,7) vals 2,0,6,8. cumany=1,1,1,1 (row1 already nonzero);
+    // cumall=1,0,0,0 (turns 0 at the zero, row 3).
+    let cany = bf_cumany_by(&anf, 0, 1); let call = bf_cumall_by(&anf, 0, 1)
+    if bf_get(&cany, 1, 0) != 1.0 || bf_get(&cany, 3, 0) != 1.0 { print("FAIL cumany\n"); return 429 }
+    if bf_get(&call, 1, 0) != 1.0 || bf_get(&call, 3, 0) != 0.0 || bf_get(&call, 5, 0) != 0.0 { print("FAIL cumall\n"); return 430 }
+    // ===== GROUPED ANALYTICS BATCH-3 (10 verbs) =====
+    // reverse cummax/min/prod: reuse cpf (group 0 vals 1,2,3,4,5,6). suffix max = 6 everywhere
+    // in group 0's first rows, suffix min = the value onward, suffix prod row0 = 720.
+    let rmx = bf_cummax_rev_by(&cpf, 0, 1); let rmn = bf_cummin_rev_by(&cpf, 0, 1); let rpr = bf_cumprod_rev_by(&cpf, 0, 1)
+    if bf_get(&rmx, 0, 0) != 6.0 { print("FAIL rcmax\n"); return 431 }          // suffix max of 1..6 = 6
+    if bf_get(&rmn, 0, 0) != 1.0 { print("FAIL rcmin\n"); return 432 }          // suffix min of 1..6 = 1
+    if bf_get(&rpr, 0, 0) != 720.0 { print("FAIL rcprod\n"); return 433 }       // 1*2*3*4*5*6
+    if bf_get(&rpr, 10, 0) != 6.0 { print("FAIL rcprod_last\n"); return 434 }   // group 0 last (val 6) -> 6
+    // share / cumsum_pct / l2norm / count_nonzero on stf (group 0 = {2,4,6,8,10}, sum 30).
+    let shb = bf_share_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&shb, 0, 0), 2.0/30.0) { print("FAIL share\n"); return 435 }   // 2/30
+    if !approx_eq(bf_get(&shb, 8, 0), 10.0/30.0) { print("FAIL share2\n"); return 436 } // 10/30
+    let cpt = bf_cumsum_pct_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&cpt, 8, 0), 1.0) { print("FAIL cumpct_last\n"); return 437 }  // running sum = total at last
+    let l2b = bf_l2norm_by(&stf, 0, 1)   // sqrt(4+16+36+64+100)=sqrt(220)=14.832; 2/14.832=0.1348
+    if bf_get(&l2b, 0, 0) < 0.134 || bf_get(&l2b, 0, 0) > 0.136 { print("FAIL l2norm\n"); return 438 }
+    let nzb = bf_count_nonzero_by(&stf, 0, 1)
+    if bf_get(&nzb, 0, 0) != 5.0 { print("FAIL countnz\n"); return 439 }   // all 5 nonzero
+    // corr/cov: build 3-col frame, group 0 x={1,2,3,4}, y=2x -> corr 1.0, cov = 2*var(x).
+    var ccf = bf_new(3, 16)
+    var cci: i64 = 0
+    while cci < 8 { var ccr:[f64;64]=[0.0;64]; ccr[0]=(cci%2) as f64; let xv=(cci/2 + 1); ccr[1]=xv as f64; ccr[2]=(2*xv) as f64; bf_push_row(&!ccf,&ccr,3); cci=cci+1 }
+    let cob = bf_corr_by(&ccf, 0, 1, 2); let cvb = bf_cov_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&cob, 0, 0), 1.0) { print("FAIL corr\n"); return 440 }   // y=2x perfectly correlated
+    // group 0 x={1,2,3,4} var(ddof1)=1.6667, cov(x,2x)=2*1.6667=3.3333
+    if !approx_eq(bf_get(&cvb, 0, 0), 3.3333333333) { print("FAIL cov\n"); return 441 }
+    // fill-with-mean: group with a sentinel-missing cell -> replaced by group mean of the rest.
+    var fmf = bf_new(2, 16)
+    var fmi: i64 = 0
+    while fmi < 8 { var fmr:[f64;64]=[0.0;64]; fmr[0]=(fmi%2) as f64
+        if fmi==2 { fmr[1]=0.0-500.0 } else { fmr[1]=(fmi+2) as f64 }   // group 0 (even) rows 0,2,4,6 -> vals 2,MISSING,6,8; mean of {2,6,8}=5.333
+        bf_push_row(&!fmf,&fmr,2); fmi=fmi+1 }
+    let fmb = bf_fillmean_by(&fmf, 0, 1, 0.0-500.0)
+    if !approx_eq(bf_get(&fmb, 2, 0), 5.3333333333) { print("FAIL fillmean\n"); return 442 }  // (2+6+8)/3
+    if bf_get(&fmb, 0, 0) != 2.0 { print("FAIL fillmean_keep\n"); return 443 }   // non-missing untouched
+    // ===== GROUPED ANALYTICS BATCH-4 (10 verbs) =====
+    // reuse stf (group 0 = {2,4,6,8,10}, mean 6, std sqrt(10)=3.16228, sumabs 30, sumsq 220).
+    let l1 = bf_normalize_l1_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&l1, 0, 0), 2.0/30.0) { print("FAIL l1\n"); return 444 }        // 2/30
+    let ad = bf_absdev_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&ad, 0, 0), 4.0) { print("FAIL absdev\n"); return 445 }          // |2-6|=4
+    if !approx_eq(bf_get(&ad, 4, 0), 0.0) { print("FAIL absdev_mid\n"); return 446 }      // |6-6|=0
+    let hm = bf_harmean_by(&stf, 0, 1)   // 5/(1/2+1/4+1/6+1/8+1/10) = 5/1.1417 = 4.3796
+    if bf_get(&hm, 0, 0) < 4.37 || bf_get(&hm, 0, 0) > 4.39 { print("FAIL harmean\n"); return 447 }
+    let rm = bf_rms_by(&stf, 0, 1)   // sqrt(220/5)=sqrt(44)=6.6332
+    if bf_get(&rm, 0, 0) < 6.63 || bf_get(&rm, 0, 0) > 6.634 { print("FAIL rms\n"); return 448 }
+    let cv = bf_coefvar_by(&stf, 0, 1)   // 3.16228/6 = 0.52705
+    if bf_get(&cv, 0, 0) < 0.526 || bf_get(&cv, 0, 0) > 0.528 { print("FAIL coefvar\n"); return 449 }
+    let cs = bf_clip_std_by(&stf, 0, 1, 0.5)   // clip to [6-0.5*3.162, 6+0.5*3.162]=[4.419,7.581]
+    if !approx_eq(bf_get(&cs, 4, 0), 6.0) { print("FAIL clipstd_mid\n"); return 450 }     // 6 in range
+    if bf_get(&cs, 0, 0) < 4.418 || bf_get(&cs, 0, 0) > 4.42 { print("FAIL clipstd_lo\n"); return 451 } // 2 clamped up to ~4.419
+    let ap = bf_argmax_pos_by(&stf, 0, 1)   // max 10 at occurrence 4 (last)
+    if bf_get(&ap, 0, 0) != 4.0 { print("FAIL argmaxpos\n"); return 452 }
+    let im = bf_is_max_mask_by(&stf, 0, 1)   // only val 10 (row 8) is max
+    if bf_get(&im, 8, 0) != 1.0 || bf_get(&im, 0, 0) != 0.0 { print("FAIL ismax\n"); return 453 }
+    let cf = bf_cumcount_frac_by(&stf, 0, 1)   // occurrence 5/5 = 1.0 at last (row 8), 1/5 at first
+    if !approx_eq(bf_get(&cf, 0, 0), 0.2) { print("FAIL cumcountfrac\n"); return 454 }    // 1/5
+    if !approx_eq(bf_get(&cf, 8, 0), 1.0) { print("FAIL cumcountfrac_last\n"); return 455 }
+    let sa = bf_sumabs_by(&stf, 0, 1)
+    if bf_get(&sa, 0, 0) != 30.0 { print("FAIL sumabs\n"); return 456 }                   // 2+4+6+8+10
+    // ===== GROUPED ANALYTICS BATCH-5 (10 verbs) =====
+    // reuse stf (group 0 = {2,4,6,8,10}, mean 6, min 2, sumsq 220).
+    let imn = bf_is_min_mask_by(&stf, 0, 1)
+    if bf_get(&imn, 0, 0) != 1.0 || bf_get(&imn, 2, 0) != 0.0 { print("FAIL ismin\n"); return 457 }   // only val 2 (row0) is min
+    let amp = bf_argmin_pos_by(&stf, 0, 1)
+    if bf_get(&amp, 0, 0) != 0.0 { print("FAIL argminpos\n"); return 458 }   // min at occurrence 0
+    let msq = bf_meansq_by(&stf, 0, 1)
+    if bf_get(&msq, 0, 0) != 44.0 { print("FAIL meansq\n"); return 459 }     // 220/5
+    let vpo = bf_var_pop_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&vpo, 0, 0), 8.0) { print("FAIL varpop\n"); return 460 }   // ddof0 = 40/5
+    let spo = bf_std_pop_by(&stf, 0, 1)
+    if bf_get(&spo, 0, 0) < 2.828 || bf_get(&spo, 0, 0) > 2.829 { print("FAIL stdpop\n"); return 461 }  // sqrt(8)
+    let fd = bf_first_diff_by(&stf, 0, 1)
+    if bf_get(&fd, 0, 0) != 0.0 || bf_get(&fd, 8, 0) != 8.0 { print("FAIL firstdiff\n"); return 462 }   // 2-2=0, 10-2=8
+    let pf = bf_pct_of_first_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&pf, 0, 0), 1.0) || !approx_eq(bf_get(&pf, 8, 0), 5.0) { print("FAIL pctfirst\n"); return 463 } // 2/2=1, 10/2=5
+    let cmr = bf_cummean_rev_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&cmr, 0, 0), 6.0) { print("FAIL cmeanrev_first\n"); return 464 }   // suffix mean of all 5 = 6
+    if !approx_eq(bf_get(&cmr, 8, 0), 10.0) { print("FAIL cmeanrev_last\n"); return 465 }   // last row = own value 10
+    // weighted mean/sum: reuse ccf (group 0 x={1,2,3,4}, y={2,4,6,8}). wmean(x,w=y)=60/20=3, wsum=60.
+    let wmn = bf_weighted_mean_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&wmn, 0, 0), 3.0) { print("FAIL wmean\n"); return 466 }
+    let wsm = bf_weighted_sum_by(&ccf, 0, 1, 2)
+    if bf_get(&wsm, 0, 0) != 60.0 { print("FAIL wsum\n"); return 467 }
+    // ===== GROUPED ANALYTICS BATCH-6 (10 verbs) =====
+    // regression: reuse ccf (group 0 x={1,2,3,4}, y=2x={2,4,6,8}). slope 2, intercept 0,
+    // r2 1, predict=2x, residual 0, cov_pop = Sxy/n = 10/4 = 2.5.
+    let slp = bf_slope_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&slp, 0, 0), 2.0) { print("FAIL slope\n"); return 468 }
+    let ict = bf_intercept_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&ict, 0, 0), 0.0) { print("FAIL intercept\n"); return 469 }
+    let r2b = bf_r2_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&r2b, 0, 0), 1.0) { print("FAIL r2\n"); return 470 }          // perfect fit
+    let prd = bf_predict_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&prd, 0, 0), 2.0) { print("FAIL predict\n"); return 471 }      // x=1 -> 2
+    if !approx_eq(bf_get(&prd, 6, 0), 8.0) { print("FAIL predict2\n"); return 472 }     // group 0 occ3 x=4 -> 8
+    let res = bf_residual_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&res, 0, 0), 0.0) { print("FAIL residual\n"); return 473 }     // perfect fit -> 0
+    let cvpp = bf_cov_pop_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&cvpp, 0, 0), 2.5) { print("FAIL covpop\n"); return 474 }      // 10/4
+    // cumulatives on stf (group 0 = {2,4,6,8,10}).
+    let css = bf_cumsum_sq_by(&stf, 0, 1)
+    if bf_get(&css, 0, 0) != 4.0 || bf_get(&css, 8, 0) != 220.0 { print("FAIL cumsumsq\n"); return 475 }  // 2² ; 4+16+36+64+100
+    let caa = bf_cumsum_abs_by(&stf, 0, 1)
+    if bf_get(&caa, 0, 0) != 2.0 || bf_get(&caa, 8, 0) != 30.0 { print("FAIL cumsumabs\n"); return 476 }
+    let cma = bf_cummax_abs_by(&stf, 0, 1)
+    if bf_get(&cma, 0, 0) != 2.0 || bf_get(&cma, 8, 0) != 10.0 { print("FAIL cummaxabs\n"); return 477 }
+    let zpp = bf_zscore_pop_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&zpp, 4, 0), 0.0) { print("FAIL zpop_mid\n"); return 478 }     // (6-6)/std=0
+    if bf_get(&zpp, 8, 0) < 1.413 || bf_get(&zpp, 8, 0) > 1.415 { print("FAIL zpop_hi\n"); return 479 } // (10-6)/2.8284
+    // ===== GROUPED ANALYTICS BATCH-7 (10 verbs) =====
+    // weighted var/std: reuse ccf (group 0 x={1,2,3,4} weighted by y={2,4,6,8}). wmean=3,
+    // wvar = Σy·x²/Σy - 9 = 200/20 - 9 = 1, wstd = 1.
+    let wvr = bf_weighted_var_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&wvr, 0, 0), 1.0) { print("FAIL wvar\n"); return 480 }
+    let wsd = bf_weighted_std_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&wsd, 0, 0), 1.0) { print("FAIL wstd\n"); return 481 }
+    // rss/rmse: ccf y=2x perfect fit -> rss 0, rmse 0.
+    let rssb = bf_rss_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&rssb, 0, 0), 0.0) { print("FAIL rss\n"); return 482 }
+    let rmseb = bf_rmse_by(&ccf, 0, 1, 2)
+    if !approx_eq(bf_get(&rmseb, 0, 0), 0.0) { print("FAIL rmse\n"); return 483 }
+    // pop skew/kurt on stf ({2,4,6,8,10}): skew 0, kurt_pop = m4/m2²-3 = 108.8/64-3 = -1.3.
+    let skp = bf_skew_pop_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&skp, 0, 0), 0.0) { print("FAIL skewpop\n"); return 484 }
+    let kup = bf_kurt_pop_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&kup, 0, 0), 0.0 - 1.3) { print("FAIL kurtpop\n"); return 485 }
+    // midrange (10+2)/2 = 6; running_range 0 (first) .. 8 (last); ewm(0.3) first=2; last/first=5.
+    let mrg = bf_midrange_by(&stf, 0, 1)
+    if bf_get(&mrg, 0, 0) != 6.0 { print("FAIL midrange\n"); return 486 }
+    let rrg = bf_running_range_by(&stf, 0, 1)
+    if bf_get(&rrg, 0, 0) != 0.0 || bf_get(&rrg, 8, 0) != 8.0 { print("FAIL runrange\n"); return 487 }
+    let ewb = bf_ewm_by(&stf, 0, 1, 0.3)
+    if bf_get(&ewb, 0, 0) != 2.0 { print("FAIL ewm_first\n"); return 488 }        // first = own value
+    if !approx_eq(bf_get(&ewb, 2, 0), 2.6) { print("FAIL ewm2\n"); return 489 }    // 0.3*4+0.7*2
+    let lof = bf_last_over_first_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&lof, 0, 0), 5.0) { print("FAIL lastoverfirst\n"); return 490 }  // 10/2
+    // ===== GROUPED ANALYTICS BATCH-8 (10 verbs) =====
+    // mixed-sign frame: group 0 (even rows) vals -3,5,-2,4 (mean 1). group 1 filler.
+    var sgb = bf_new(2, 16)
+    var sg0:[f64;64]=[0.0;64]; sg0[0]=0.0; sg0[1]=0.0-3.0; bf_push_row(&!sgb,&sg0,2)
+    var sg1:[f64;64]=[0.0;64]; sg1[0]=1.0; sg1[1]=1.0; bf_push_row(&!sgb,&sg1,2)
+    var sg2:[f64;64]=[0.0;64]; sg2[0]=0.0; sg2[1]=5.0; bf_push_row(&!sgb,&sg2,2)
+    var sg3:[f64;64]=[0.0;64]; sg3[0]=1.0; sg3[1]=1.0; bf_push_row(&!sgb,&sg3,2)
+    var sg4:[f64;64]=[0.0;64]; sg4[0]=0.0; sg4[1]=0.0-2.0; bf_push_row(&!sgb,&sg4,2)
+    var sg5:[f64;64]=[0.0;64]; sg5[0]=1.0; sg5[1]=1.0; bf_push_row(&!sgb,&sg5,2)
+    var sg6:[f64;64]=[0.0;64]; sg6[0]=0.0; sg6[1]=4.0; bf_push_row(&!sgb,&sg6,2)
+    var sg7:[f64;64]=[0.0;64]; sg7[0]=1.0; sg7[1]=1.0; bf_push_row(&!sgb,&sg7,2)
+    let cia = bf_cummin_abs_by(&sgb, 0, 1)
+    if bf_get(&cia, 0, 0) != 3.0 || bf_get(&cia, 6, 0) != 2.0 { print("FAIL cumminabs\n"); return 491 }   // |−3|=3 ; min(3,5,2)=2
+    let cma2 = bf_cummean_abs_by(&sgb, 0, 1)
+    if bf_get(&cma2, 0, 0) != 3.0 || !approx_eq(bf_get(&cma2, 6, 0), 3.5) { print("FAIL cummeanabs\n"); return 492 } // (3+5+2+4)/4
+    let cps = bf_cumsum_pos_by(&sgb, 0, 1)
+    if bf_get(&cps, 0, 0) != 0.0 || bf_get(&cps, 6, 0) != 9.0 { print("FAIL cumsumpos\n"); return 493 }  // 0 ; 5+4
+    let ccn = bf_cumsum_centered_by(&sgb, 0, 1)
+    if !approx_eq(bf_get(&ccn, 0, 0), 0.0 - 4.0) { print("FAIL cumcentered\n"); return 494 }   // -3-1=-4
+    if !approx_eq(bf_get(&ccn, 6, 0), 0.0) { print("FAIL cumcentered_last\n"); return 495 }    // sum of devs = 0
+    let cpo = bf_count_positive_by(&sgb, 0, 1)
+    if bf_get(&cpo, 0, 0) != 2.0 { print("FAIL countpos\n"); return 496 }        // 5,4 > 0
+    let fpo = bf_frac_positive_by(&sgb, 0, 1)
+    if !approx_eq(bf_get(&fpo, 0, 0), 0.5) { print("FAIL fracpos\n"); return 497 }
+    let sss = bf_sign_sum_by(&sgb, 0, 1)
+    if bf_get(&sss, 0, 0) != 0.0 { print("FAIL signsum\n"); return 498 }         // -1+1-1+1
+    let mab = bf_max_abs_by(&sgb, 0, 1)
+    if bf_get(&mab, 0, 0) != 5.0 { print("FAIL maxabs\n"); return 499 }
+    let rrt = bf_range_ratio_by(&sgb, 0, 1)
+    if !approx_eq(bf_get(&rrt, 0, 0), 5.0 / (0.0 - 3.0)) { print("FAIL rangeratio\n"); return 500 }  // 5/-3
+    let cam = bf_count_above_mean_by(&sgb, 0, 1)
+    if bf_get(&cam, 0, 0) != 2.0 { print("FAIL countabovemean\n"); return 501 }  // 5,4 > mean 1
+    // ===== GROUPED ANALYTICS BATCH-9 (10 verbs) =====
+    // dispersion on stf ({2,4,6,8,10}, mean 6, var(ddof1) 10): fano 10/6=1.6667, snr 6/sqrt(10)=1.8974, cv2 10/36=0.2778.
+    let fan = bf_fano_factor_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&fan, 0, 0), 10.0/6.0) { print("FAIL fano\n"); return 502 }
+    let snr = bf_snr_by(&stf, 0, 1)
+    if bf_get(&snr, 0, 0) < 1.896 || bf_get(&snr, 0, 0) > 1.899 { print("FAIL snr\n"); return 503 }
+    let cv2 = bf_cv2_by(&stf, 0, 1)
+    if !approx_eq(bf_get(&cv2, 0, 0), 10.0/36.0) { print("FAIL cv2\n"); return 504 }
+    // drawdown/runup/argmax on sgb (group 0 = {-3,5,-2,4} at rows 0,2,4,6).
+    let ddb = bf_drawdown_by(&sgb, 0, 1)
+    if bf_get(&ddb, 0, 0) != 0.0 || bf_get(&ddb, 4, 0) != (0.0 - 7.0) || bf_get(&ddb, 6, 0) != (0.0 - 1.0) { print("FAIL drawdown\n"); return 505 } // -2-5=-7, 4-5=-1
+    let dpb = bf_drawdown_pct_by(&sgb, 0, 1)
+    if !approx_eq(bf_get(&dpb, 4, 0), 0.0 - 1.4) { print("FAIL drawdownpct\n"); return 506 }   // -7/5
+    let rub = bf_runup_by(&sgb, 0, 1)
+    if bf_get(&rub, 2, 0) != 8.0 || bf_get(&rub, 6, 0) != 7.0 { print("FAIL runup\n"); return 507 }   // 5-(-3)=8, 4-(-3)=7
+    let ram = bf_running_argmax_by(&sgb, 0, 1)
+    if bf_get(&ram, 0, 0) != 0.0 || bf_get(&ram, 2, 0) != 1.0 || bf_get(&ram, 6, 0) != 1.0 { print("FAIL runargmax\n"); return 508 } // max 5 at occ 1
+    let cup = bf_cumcount_positive_by(&sgb, 0, 1)
+    if bf_get(&cup, 0, 0) != 0.0 || bf_get(&cup, 6, 0) != 2.0 { print("FAIL cumcountpos\n"); return 509 } // 5,4 positive
+    let csn = bf_cumsum_neg_by(&sgb, 0, 1)
+    if bf_get(&csn, 0, 0) != (0.0 - 3.0) || bf_get(&csn, 6, 0) != (0.0 - 5.0) { print("FAIL cumsumneg\n"); return 510 } // -3 ; -3-2
+    let cng = bf_count_negative_by(&sgb, 0, 1)
+    if bf_get(&cng, 0, 0) != 2.0 { print("FAIL countneg\n"); return 511 }   // -3,-2
+    // ===== GROUPED ANALYTICS BATCH-10 (20 verbs) =====
+    // reductions on stf ({2,4,6,8,10}: sum 30, mean 6, Σsq 220, Σcube 1800).
+    let ssq2 = bf_sum_sq_by(&stf,0,1)
+    if bf_get(&ssq2,0,0) != 220.0 { print("FAIL sumsq\n"); return 512 }
+    let scb = bf_sum_cube_by(&stf,0,1)
+    if bf_get(&scb,0,0) != 1800.0 { print("FAIL sumcube\n"); return 513 }
+    let czr = bf_count_zero_by(&stf,0,1)
+    if bf_get(&czr,0,0) != 0.0 { print("FAIL countzero\n"); return 514 }
+    let spz = bf_sum_positive_by(&stf,0,1)
+    if bf_get(&spz,0,0) != 30.0 { print("FAIL sumpos\n"); return 515 }
+    let snz = bf_sum_negative_by(&sgb,0,1)
+    if bf_get(&snz,0,0) != (0.0-5.0) { print("FAIL sumneg\n"); return 516 }   // -3-2
+    let pkr = bf_peak_ratio_by(&stf,0,1)
+    if !approx_eq(bf_get(&pkr,0,0), 10.0/6.0) { print("FAIL peakratio\n"); return 517 }
+    let tgr = bf_trough_ratio_by(&stf,0,1)
+    if !approx_eq(bf_get(&tgr,0,0), 2.0/6.0) { print("FAIL troughratio\n"); return 518 }
+    let nmn = bf_normalize_mean_by(&stf,0,1)
+    if !approx_eq(bf_get(&nmn,0,0), 2.0/6.0) || !approx_eq(bf_get(&nmn,8,0), 10.0/6.0) { print("FAIL normmean\n"); return 519 }
+    // running counts on stf / sgb.
+    let rn = bf_row_number_by(&stf,0,1)
+    if bf_get(&rn,0,0) != 1.0 || bf_get(&rn,8,0) != 5.0 { print("FAIL rownum\n"); return 520 }
+    let rrn = bf_reverse_row_number_by(&stf,0,1)
+    if bf_get(&rrn,0,0) != 5.0 || bf_get(&rrn,8,0) != 1.0 { print("FAIL revrownum\n"); return 521 }
+    let ccn = bf_cumcount_negative_by(&sgb,0,1)
+    if bf_get(&ccn,0,0) != 1.0 || bf_get(&ccn,6,0) != 2.0 { print("FAIL cumcountneg\n"); return 522 }
+    let ccz = bf_cumcount_nonzero_by(&stf,0,1)
+    if bf_get(&ccz,0,0) != 1.0 || bf_get(&ccz,8,0) != 5.0 { print("FAIL cumcountnz\n"); return 523 }
+    // range_over_std / cumcount_above_mean / cumsum_centered_sq on stf.
+    let ros = bf_range_over_std_by(&stf,0,1)   // 8/sqrt(10)=2.5298
+    if bf_get(&ros,0,0) < 2.529 || bf_get(&ros,0,0) > 2.531 { print("FAIL rangeoverstd\n"); return 524 }
+    let cam2 = bf_cumcount_above_mean_by(&stf,0,1)   // >6: row6(8)->1, row8(10)->2
+    if bf_get(&cam2,4,0) != 0.0 || bf_get(&cam2,8,0) != 2.0 { print("FAIL cumcountabove\n"); return 525 }
+    let ccs = bf_cumsum_centered_sq_by(&stf,0,1)   // Σ(v-6)²: row0 16, row8 40
+    if bf_get(&ccs,0,0) != 16.0 || bf_get(&ccs,8,0) != 40.0 { print("FAIL cumsumcentsq\n"); return 526 }
+    // 2-col distances on ccf (x={1,2,3,4}, y=2x).
+    let cosb = bf_cosine_sim_by(&ccf,0,1,2)
+    if !approx_eq(bf_get(&cosb,0,0), 1.0) { print("FAIL cosine\n"); return 527 }   // y=2x aligned
+    let eud = bf_euclidean_dist_by(&ccf,0,1,2)   // sqrt(30)=5.477
+    if bf_get(&eud,0,0) < 5.477 || bf_get(&eud,0,0) > 5.478 { print("FAIL euclid\n"); return 528 }
+    let mhd = bf_manhattan_dist_by(&ccf,0,1,2)
+    if bf_get(&mhd,0,0) != 10.0 { print("FAIL manhattan\n"); return 529 }
+    let chd = bf_chebyshev_dist_by(&ccf,0,1,2)
+    if bf_get(&chd,0,0) != 4.0 { print("FAIL chebyshev\n"); return 530 }
+    let xmn = bf_cross_mean_by(&ccf,0,1,2)
+    if bf_get(&xmn,0,0) != 15.0 { print("FAIL crossmean\n"); return 531 }
+    // ===== GROUPED ANALYTICS BATCH-11 (10 verbs, set 3) =====
+    // change/monotonicity on sgb (group 0 = {-3,5,-2,4}: diffs 8,-7,6).
+    let nib = bf_num_increases_by(&sgb,0,1)
+    if bf_get(&nib,0,0) != 2.0 { print("FAIL numinc\n"); return 532 }        // +8,+6
+    let ndb = bf_num_decreases_by(&sgb,0,1)
+    if bf_get(&ndb,0,0) != 1.0 { print("FAIL numdec\n"); return 533 }        // -7
+    let tvb = bf_total_variation_by(&sgb,0,1)
+    if bf_get(&tvb,0,0) != 21.0 { print("FAIL totvar\n"); return 534 }       // 8+7+6
+    let mcb = bf_mean_abs_change_by(&sgb,0,1)
+    if !approx_eq(bf_get(&mcb,0,0), 7.0) { print("FAIL meanabschange\n"); return 535 }  // 21/3
+    let acb = bf_autocorr1_by(&sgb,0,1)
+    if bf_get(&acb,0,0) < (0.0-1.001) || bf_get(&acb,0,0) > 1.001 { print("FAIL autocorr\n"); return 536 }  // in [-1,1]
+    let imb = bf_is_running_max_by(&sgb,0,1)
+    if bf_get(&imb,0,0) != 1.0 || bf_get(&imb,2,0) != 1.0 || bf_get(&imb,4,0) != 0.0 { print("FAIL isrunmax\n"); return 537 }
+    let inb = bf_is_running_min_by(&sgb,0,1)
+    if bf_get(&inb,0,0) != 1.0 || bf_get(&inb,2,0) != 0.0 { print("FAIL isrunmin\n"); return 538 }
+    let mdb = bf_max_drawdown_by(&sgb,0,1)
+    if bf_get(&mdb,0,0) != (0.0-7.0) { print("FAIL maxdrawdown\n"); return 539 }   // -2-5=-7 worst
+    let mub = bf_max_runup_by(&sgb,0,1)
+    if bf_get(&mub,0,0) != 8.0 { print("FAIL maxrunup\n"); return 540 }            // 5-(-3)=8 best
+    let cgm = bf_count_ge_mean_by(&stf,0,1)
+    if bf_get(&cgm,0,0) != 3.0 { print("FAIL countgemean\n"); return 541 }         // 6,8,10 >= mean 6
+    // ===== GROUPED ANALYTICS BATCH-12 (10 verbs, set 4) on stf ({2,4,6,8,10}, mean 6, std 3.1623) =====
+    let clm = bf_count_le_mean_by(&stf,0,1)
+    if bf_get(&clm,0,0) != 3.0 { print("FAIL countlemean\n"); return 542 }   // 2,4,6 <= 6
+    let cw1 = bf_count_within_1std_by(&stf,0,1)
+    if bf_get(&cw1,0,0) != 3.0 { print("FAIL within1std\n"); return 543 }    // 4,6,8
+    let fw1 = bf_frac_within_1std_by(&stf,0,1)
+    if !approx_eq(bf_get(&fw1,0,0), 0.6) { print("FAIL fracwithin\n"); return 544 }
+    let co2 = bf_count_outlier_2std_by(&stf,0,1)
+    if bf_get(&co2,0,0) != 0.0 { print("FAIL outlier2std\n"); return 545 }
+    let cmxp = bf_cummax_pct_by(&stf,0,1)
+    if !approx_eq(bf_get(&cmxp,0,0), 0.2) || !approx_eq(bf_get(&cmxp,8,0), 1.0) { print("FAIL cummaxpct\n"); return 546 }
+    let cmnp = bf_cummin_pct_by(&stf,0,1)
+    if !approx_eq(bf_get(&cmnp,0,0), 1.0) || !approx_eq(bf_get(&cmnp,8,0), 1.0) { print("FAIL cumminpct\n"); return 547 }  // min stays 2
+    let srp = bf_sum_recip_by(&stf,0,1)
+    if bf_get(&srp,0,0) < 1.141 || bf_get(&srp,0,0) > 1.142 { print("FAIL sumrecip\n"); return 548 }  // 1.1417
+    let csr = bf_cumsum_recip_by(&stf,0,1)
+    if !approx_eq(bf_get(&csr,0,0), 0.5) { print("FAIL cumsumrecip\n"); return 549 }  // 1/2
+    let cssg = bf_cumsum_sign_by(&stf,0,1)
+    if bf_get(&cssg,0,0) != 1.0 || bf_get(&cssg,8,0) != 5.0 { print("FAIL cumsumsign\n"); return 550 }
+    let cgp = bf_cumcount_ge_prev_by(&stf,0,1)
+    if bf_get(&cgp,0,0) != 0.0 || bf_get(&cgp,8,0) != 4.0 { print("FAIL cumcountgeprev\n"); return 551 }  // monotone up
+    // ===== GROUPED ANALYTICS BATCH-13 (10 verbs, set 5) =====
+    // sign/change on sgb ({-3,5,-2,4}: sum 4, gross 14, Σpos 9/#2, Σneg -5/#2, 3 changes).
+    let nog = bf_net_over_gross_by(&sgb,0,1)
+    if !approx_eq(bf_get(&nog,0,0), 4.0/14.0) { print("FAIL netovergross\n"); return 552 }
+    let spf = bf_sum_pos_frac_by(&sgb,0,1)
+    if !approx_eq(bf_get(&spf,0,0), 9.0/14.0) { print("FAIL sumposfrac\n"); return 553 }
+    let mpb = bf_mean_pos_by(&sgb,0,1)
+    if !approx_eq(bf_get(&mpb,0,0), 4.5) { print("FAIL meanpos\n"); return 554 }   // 9/2
+    let mnb = bf_mean_neg_by(&sgb,0,1)
+    if !approx_eq(bf_get(&mnb,0,0), 0.0-2.5) { print("FAIL meanneg\n"); return 555 }  // -5/2
+    let cch = bf_count_changes_by(&sgb,0,1)
+    if bf_get(&cch,0,0) != 3.0 { print("FAIL countchanges\n"); return 556 }        // all distinct
+    // deviation on stf ({2,4,6,8,10}, mean 6).
+    let mad2 = bf_max_abs_dev_by(&stf,0,1)
+    if bf_get(&mad2,0,0) != 4.0 { print("FAIL maxabsdev\n"); return 557 }          // |2-6|=|10-6|=4
+    let ssd = bf_sum_sq_dev_by(&stf,0,1)
+    if bf_get(&ssd,0,0) != 40.0 { print("FAIL sumsqdev\n"); return 558 }           // 16+4+0+4+16
+    let cda = bf_cumsum_dev_abs_by(&stf,0,1)
+    if bf_get(&cda,0,0) != 4.0 || bf_get(&cda,8,0) != 12.0 { print("FAIL cumsumdevabs\n"); return 559 }
+    let clp = bf_cumcount_le_prev_by(&stf,0,1)
+    if bf_get(&clp,0,0) != 0.0 || bf_get(&clp,8,0) != 0.0 { print("FAIL cumcountleprev\n"); return 560 }  // monotone up
+    let cpf = bf_cumcount_positive_frac_by(&stf,0,1)
+    if !approx_eq(bf_get(&cpf,0,0), 1.0) || !approx_eq(bf_get(&cpf,8,0), 1.0) { print("FAIL cumcountposfrac\n"); return 561 }
+    // ===== CURATED BATCH (10 verbs) =====
+    // weighted skew/kurt on ccf (x={1,2,3,4} weighted by y={2,4,6,8}, wmean 3): wskew -0.6, wkurt -0.8.
+    let wsk = bf_weighted_skew_by(&ccf,0,1,2)
+    if !approx_eq(bf_get(&wsk,0,0), 0.0-0.6) { print("FAIL wskew\n"); return 562 }
+    let wku = bf_weighted_kurt_by(&ccf,0,1,2)
+    if !approx_eq(bf_get(&wku,0,0), 0.0-0.8) { print("FAIL wkurt\n"); return 563 }
+    // ratio mean/sum on ccf: x/y all 0.5 -> mean 0.5, sum 2.0.
+    let rmn = bf_ratio_mean_by(&ccf,0,1,2)
+    if !approx_eq(bf_get(&rmn,0,0), 0.5) { print("FAIL ratiomean\n"); return 564 }
+    let rsm = bf_ratio_sum_by(&ccf,0,1,2)
+    if !approx_eq(bf_get(&rsm,0,0), 2.0) { print("FAIL ratiosum\n"); return 565 }
+    // lag-2 autocorr on stf ({2,4,6,8,10} linear -> pairs perfectly correlated -> 1.0).
+    let lk = bf_lagk_autocorr_by(&stf,0,1,2)
+    if !approx_eq(bf_get(&lk,0,0), 1.0) { print("FAIL lagk\n"); return 566 }
+    // quantile family on stf: median 6, q1 4, q3 8, iqr 4, mad_median 2.
+    let med = bf_median_by(&stf,0,1)
+    if bf_get(&med,0,0) != 6.0 { print("FAIL median\n"); return 567 }
+    let q1b = bf_q1_by(&stf,0,1)
+    if bf_get(&q1b,0,0) != 4.0 { print("FAIL q1\n"); return 568 }
+    let q3b = bf_q3_by(&stf,0,1)
+    if bf_get(&q3b,0,0) != 8.0 { print("FAIL q3\n"); return 569 }
+    let iqb = bf_iqr_by(&stf,0,1)
+    if bf_get(&iqb,0,0) != 4.0 { print("FAIL iqr\n"); return 570 }
+    let mmb = bf_mad_median_by(&stf,0,1)
+    if bf_get(&mmb,0,0) != 2.0 { print("FAIL madmedian\n"); return 571 }
+    // ===== DENSE-BUCKET QUANTILE (median_dense/q1/q3/iqr, no quickselect) on stf ({2,4,6,8,10}) =====
+    let mdd = bf_median_dense_by(&stf,0,1,10)
+    if bf_get(&mdd,0,0) != 6.0 { print("FAIL median_dense\n"); return 572 }
+    let q1d = bf_q1_dense_by(&stf,0,1,10)
+    if bf_get(&q1d,0,0) != 4.0 { print("FAIL q1_dense\n"); return 573 }
+    let q3d = bf_q3_dense_by(&stf,0,1,10)
+    if bf_get(&q3d,0,0) != 8.0 { print("FAIL q3_dense\n"); return 574 }
+    let iqd = bf_iqr_dense_by(&stf,0,1,10)
+    if bf_get(&iqd,0,0) != 4.0 { print("FAIL iqr_dense\n"); return 575 }
+    // CROSS-CHECK: dense-bucket == general quickselect median on integer data (same result).
+    var qcd: i64 = 0; var qcj: i64 = 0
+    while qcj < 10 { if bf_get(&mdd,qcj,0) != bf_get(&med,qcj,0) { qcd = qcd + 1 }
+                     if bf_get(&q1d,qcj,0) != bf_get(&q1b,qcj,0) { qcd = qcd + 1 } qcj = qcj + 1 }
+    if qcd != 0 { print("FAIL dense_vs_quickselect\n"); return 576 }
+    // ===== BATCH 11: distributional (dense histogram) + boolean positivity =====
+    // dist frame: g0 vals {2,2,3,0}, g1 vals {5,5,5,5}. vmax=5.
+    var dbf = bf_new(2, 8)
+    var dr0:[f64;64]=[0.0;64]; dr0[0]=0.0; dr0[1]=2.0; bf_push_row(&!dbf,&dr0,2)
+    var dr1:[f64;64]=[0.0;64]; dr1[0]=0.0; dr1[1]=2.0; bf_push_row(&!dbf,&dr1,2)
+    var dr2:[f64;64]=[0.0;64]; dr2[0]=0.0; dr2[1]=3.0; bf_push_row(&!dbf,&dr2,2)
+    var dr3:[f64;64]=[0.0;64]; dr3[0]=0.0; dr3[1]=0.0; bf_push_row(&!dbf,&dr3,2)
+    var dr4:[f64;64]=[0.0;64]; dr4[0]=1.0; dr4[1]=5.0; bf_push_row(&!dbf,&dr4,2)
+    var dr5:[f64;64]=[0.0;64]; dr5[0]=1.0; dr5[1]=5.0; bf_push_row(&!dbf,&dr5,2)
+    var dr6:[f64;64]=[0.0;64]; dr6[0]=1.0; dr6[1]=5.0; bf_push_row(&!dbf,&dr6,2)
+    var dr7:[f64;64]=[0.0;64]; dr7[0]=1.0; dr7[1]=5.0; bf_push_row(&!dbf,&dr7,2)
+    let nud = bf_nunique_dense_by(&dbf,0,1,5)
+    if bf_get(&nud,0,0) != 3.0 { print("FAIL nunique_g0\n"); return 577 }   // {0,2,3}
+    if bf_get(&nud,4,0) != 1.0 { print("FAIL nunique_g1\n"); return 578 }   // {5}
+    let mod1 = bf_mode_dense_by(&dbf,0,1,5)
+    if bf_get(&mod1,0,0) != 2.0 { print("FAIL mode_g0\n"); return 579 }     // 2 appears twice
+    if bf_get(&mod1,4,0) != 5.0 { print("FAIL mode_g1\n"); return 580 }
+    let mcd = bf_mode_count_dense_by(&dbf,0,1,5)
+    if bf_get(&mcd,0,0) != 2.0 { print("FAIL modecount_g0\n"); return 581 }
+    if bf_get(&mcd,4,0) != 4.0 { print("FAIL modecount_g1\n"); return 582 }
+    let mfd = bf_mode_frac_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&mfd,0,0), 0.5) { print("FAIL modefrac_g0\n"); return 583 }   // 2/4
+    if !approx_eq(bf_get(&mfd,4,0), 1.0) { print("FAIL modefrac_g1\n"); return 584 }
+    let gid = bf_gini_impurity_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&gid,0,0), 0.625) { print("FAIL gini_g0\n"); return 585 }     // 1-(1+4+1)/16
+    if !approx_eq(bf_get(&gid,4,0), 0.0) { print("FAIL gini_g1\n"); return 586 }        // pure
+    let sid = bf_simpson_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&sid,0,0), 0.375) { print("FAIL simpson_g0\n"); return 587 }
+    if !approx_eq(bf_get(&sid,4,0), 1.0) { print("FAIL simpson_g1\n"); return 588 }
+    // boolean positivity frame: g0={-1,2,-3}, g1={4,5,6}, g2={-1,-2}. row order per group preserved.
+    var bpf = bf_new(2, 8)
+    var br0:[f64;64]=[0.0;64]; br0[0]=0.0; br0[1]=0.0-1.0; bf_push_row(&!bpf,&br0,2)  // idx0 g0
+    var br1:[f64;64]=[0.0;64]; br1[0]=1.0; br1[1]=4.0;     bf_push_row(&!bpf,&br1,2)  // idx1 g1
+    var br2:[f64;64]=[0.0;64]; br2[0]=0.0; br2[1]=2.0;     bf_push_row(&!bpf,&br2,2)  // idx2 g0
+    var br3:[f64;64]=[0.0;64]; br3[0]=1.0; br3[1]=5.0;     bf_push_row(&!bpf,&br3,2)  // idx3 g1
+    var br4:[f64;64]=[0.0;64]; br4[0]=0.0; br4[1]=0.0-3.0; bf_push_row(&!bpf,&br4,2)  // idx4 g0
+    var br5:[f64;64]=[0.0;64]; br5[0]=1.0; br5[1]=6.0;     bf_push_row(&!bpf,&br5,2)  // idx5 g1
+    var br6:[f64;64]=[0.0;64]; br6[0]=2.0; br6[1]=0.0-1.0; bf_push_row(&!bpf,&br6,2)  // idx6 g2
+    var br7:[f64;64]=[0.0;64]; br7[0]=2.0; br7[1]=0.0-2.0; bf_push_row(&!bpf,&br7,2)  // idx7 g2
+    let anyp = bf_any_positive_by(&bpf,0,1)
+    if bf_get(&anyp,0,0) != 1.0 { print("FAIL anypos_g0\n"); return 589 }
+    if bf_get(&anyp,6,0) != 0.0 { print("FAIL anypos_g2\n"); return 590 }
+    let allp = bf_all_positive_by(&bpf,0,1)
+    if bf_get(&allp,0,0) != 0.0 { print("FAIL allpos_g0\n"); return 591 }
+    if bf_get(&allp,1,0) != 1.0 { print("FAIL allpos_g1\n"); return 592 }
+    let cany = bf_cumany_positive_by(&bpf,0,1)
+    if bf_get(&cany,0,0) != 0.0 { print("FAIL cumany_g0r0\n"); return 593 }   // -1
+    if bf_get(&cany,2,0) != 1.0 { print("FAIL cumany_g0r1\n"); return 594 }   // 2 seen
+    if bf_get(&cany,4,0) != 1.0 { print("FAIL cumany_g0r2\n"); return 595 }   // stays 1
+    let call = bf_cumall_positive_by(&bpf,0,1)
+    if bf_get(&call,1,0) != 1.0 { print("FAIL cumall_g1r0\n"); return 596 }   // 4>0
+    if bf_get(&call,0,0) != 0.0 { print("FAIL cumall_g0r0\n"); return 597 }   // -1
+    if bf_get(&call,6,0) != 0.0 { print("FAIL cumall_g2r0\n"); return 598 }   // -1
+    // ===== BATCH 12: entropy (dense histogram, uses bf_ln) + log-value reductions =====
+    // reuse dbf: g0 {2,2,3,0} p=[1/4,2/4,1/4], g1 {5,5,5,5} pure. vmax=5.
+    let ent = bf_entropy_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&ent,0,0), 1.0397207708) { print("FAIL entropy_g0\n"); return 599 }  // -(.25ln.25+.5ln.5+.25ln.25)
+    if !approx_eq(bf_get(&ent,4,0), 0.0) { print("FAIL entropy_g1\n"); return 600 }
+    let ebt = bf_entropy_bits_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&ebt,0,0), 1.5) { print("FAIL entropy_bits_g0\n"); return 601 }       // 1.0397/ln2
+    let nen = bf_norm_entropy_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&nen,0,0), 0.9463946304) { print("FAIL norm_entropy_g0\n"); return 602 }  // H/ln3
+    if !approx_eq(bf_get(&nen,4,0), 0.0) { print("FAIL norm_entropy_g1\n"); return 603 }        // k=1 -> 0
+    let rn2 = bf_renyi2_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&rn2,0,0), 0.9808292531) { print("FAIL renyi2_g0\n"); return 604 }     // -ln(0.375)
+    let ivs = bf_inv_simpson_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&ivs,0,0), 2.6666666667) { print("FAIL invsimpson_g0\n"); return 605 } // 1/0.375
+    if !approx_eq(bf_get(&ivs,4,0), 1.0) { print("FAIL invsimpson_g1\n"); return 606 }
+    // log-value frame: g0 {2,4,8} (geomean 4). sum_ln=ln64, mean_ln=ln4, log_range=ln4, var_ln=0.4805 (ddof1), std_ln=ln2.
+    var lgf = bf_new(2, 8)
+    var lr0:[f64;64]=[0.0;64]; lr0[0]=0.0; lr0[1]=2.0; bf_push_row(&!lgf,&lr0,2)
+    var lr1:[f64;64]=[0.0;64]; lr1[0]=0.0; lr1[1]=4.0; bf_push_row(&!lgf,&lr1,2)
+    var lr2:[f64;64]=[0.0;64]; lr2[0]=0.0; lr2[1]=8.0; bf_push_row(&!lgf,&lr2,2)
+    let sln = bf_sum_ln_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&sln,0,0), 4.1588830834) { print("FAIL sum_ln\n"); return 607 }        // ln64
+    let mln = bf_mean_ln_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&mln,0,0), 1.3862943611) { print("FAIL mean_ln\n"); return 608 }       // ln4
+    let lrg = bf_log_range_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&lrg,0,0), 1.3862943611) { print("FAIL log_range\n"); return 609 }     // ln8-ln2=ln4
+    let vln = bf_var_ln_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&vln,0,0), 0.4804530139) { print("FAIL var_ln\n"); return 610 }        // var([ln2,ln4,ln8],ddof1)
+    let stln = bf_std_ln_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&stln,0,0), 0.6931471806) { print("FAIL std_ln\n"); return 611 }       // sqrt(0.4805)=ln2
+    // ===== BATCH 13: exp/softmax/logsumexp + geometric + inequality (uses bf_exp) =====
+    // softmax frame g0 = {0,1,2}, rows 0,1,2. vmax=2.
+    var sxf = bf_new(2, 4)
+    var sx0:[f64;64]=[0.0;64]; sx0[0]=0.0; sx0[1]=0.0; bf_push_row(&!sxf,&sx0,2)
+    var sx1:[f64;64]=[0.0;64]; sx1[0]=0.0; sx1[1]=1.0; bf_push_row(&!sxf,&sx1,2)
+    var sx2:[f64;64]=[0.0;64]; sx2[0]=0.0; sx2[1]=2.0; bf_push_row(&!sxf,&sx2,2)
+    let sm = bf_softmax_dense_by(&sxf,0,1,2)
+    if !approx_eq(bf_get(&sm,0,0), 0.0900305732) { print("FAIL softmax0\n"); return 612 }
+    if !approx_eq(bf_get(&sm,1,0), 0.2447284711) { print("FAIL softmax1\n"); return 613 }
+    if !approx_eq(bf_get(&sm,2,0), 0.6652409558) { print("FAIL softmax2\n"); return 614 }
+    let lse = bf_logsumexp_dense_by(&sxf,0,1,2)
+    if !approx_eq(bf_get(&lse,0,0), 2.4076059644) { print("FAIL logsumexp\n"); return 615 }
+    let lme = bf_logmeanexp_dense_by(&sxf,0,1,2)
+    if !approx_eq(bf_get(&lme,0,0), 1.3089936758) { print("FAIL logmeanexp\n"); return 616 }
+    let smp = bf_softmax_max_prob_dense_by(&sxf,0,1,2)
+    if !approx_eq(bf_get(&smp,0,0), 0.6652409558) { print("FAIL softmax_max_prob\n"); return 617 }
+    // geometric on lgf {2,4,8}: geomean 4, geostd exp(ln2)=2.
+    let gme = bf_geomean_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&gme,0,0), 4.0) { print("FAIL geomean\n"); return 618 }
+    let gsd = bf_geostd_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&gsd,0,0), 2.0) { print("FAIL geostd\n"); return 619 }
+    // inequality frame g0 = {1,3}, vmax=3.
+    var iqf = bf_new(2, 4)
+    var iq0:[f64;64]=[0.0;64]; iq0[0]=0.0; iq0[1]=1.0; bf_push_row(&!iqf,&iq0,2)
+    var iq1:[f64;64]=[0.0;64]; iq1[0]=0.0; iq1[1]=3.0; bf_push_row(&!iqf,&iq1,2)
+    let gic = bf_gini_coef_dense_by(&iqf,0,1,3)
+    if !approx_eq(bf_get(&gic,0,0), 0.25) { print("FAIL gini_coef\n"); return 620 }
+    let thl = bf_theil_dense_by(&iqf,0,1,3)
+    if !approx_eq(bf_get(&thl,0,0), 0.1308120359) { print("FAIL theil\n"); return 621 }
+    let atk = bf_atkinson1_dense_by(&iqf,0,1,3)
+    if !approx_eq(bf_get(&atk,0,0), 0.1339745962) { print("FAIL atkinson1\n"); return 622 }
+    let hov = bf_hoover_dense_by(&iqf,0,1,3)
+    if !approx_eq(bf_get(&hov,0,0), 0.25) { print("FAIL hoover\n"); return 623 }
+    // ===== BATCH 14: power means + Hill/Renyi/Tsallis diversity + quantile-ratio (uses bf_pow) =====
+    // power/lehmer on lgf {2,4,8}
+    let pm2 = bf_power_mean_dense_by(&lgf,0,1,8,2.0)
+    if !approx_eq(bf_get(&pm2,0,0), 5.2915026221) { print("FAIL power_mean2\n"); return 624 }  // RMS
+    let pm1 = bf_power_mean_dense_by(&lgf,0,1,8,1.0)
+    if !approx_eq(bf_get(&pm1,0,0), 4.6666666667) { print("FAIL power_mean1\n"); return 625 }  // arithmetic
+    let lh2 = bf_lehmer_mean_dense_by(&lgf,0,1,8,2.0)
+    if !approx_eq(bf_get(&lh2,0,0), 6.0) { print("FAIL lehmer2\n"); return 626 }
+    let cha = bf_contraharmonic_mean_dense_by(&lgf,0,1,8)
+    if !approx_eq(bf_get(&cha,0,0), 6.0) { print("FAIL contraharmonic\n"); return 627 }
+    // diversity on dbf {2,2,3,0}
+    let h2 = bf_hill_number_dense_by(&dbf,0,1,5,2.0)
+    if !approx_eq(bf_get(&h2,0,0), 2.6666666667) { print("FAIL hill2\n"); return 628 }
+    let h0 = bf_hill_number_dense_by(&dbf,0,1,5,0.0)
+    if !approx_eq(bf_get(&h0,0,0), 3.0) { print("FAIL hill0\n"); return 629 }               // richness
+    let re2 = bf_renyi_dense_by(&dbf,0,1,5,2.0)
+    if !approx_eq(bf_get(&re2,0,0), 0.9808292530) { print("FAIL renyi_alpha2\n"); return 630 }
+    let ts2 = bf_tsallis_dense_by(&dbf,0,1,5,2.0)
+    if !approx_eq(bf_get(&ts2,0,0), 0.625) { print("FAIL tsallis2\n"); return 631 }
+    let ppx = bf_perplexity_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&ppx,0,0), 2.8284271247) { print("FAIL perplexity\n"); return 632 } // exp(Shannon)=2sqrt2
+    let klu = bf_kl_uniform_dense_by(&dbf,0,1,5)
+    if !approx_eq(bf_get(&klu,0,0), 0.0588915178) { print("FAIL kl_uniform\n"); return 633 } // ln3-H
+    // quantile-ratio frame g0 = {10,20,30,40,50}, vmax=50.
+    var qrf = bf_new(2, 8)
+    var qr0:[f64;64]=[0.0;64]; qr0[0]=0.0; qr0[1]=10.0; bf_push_row(&!qrf,&qr0,2)
+    var qr1:[f64;64]=[0.0;64]; qr1[0]=0.0; qr1[1]=20.0; bf_push_row(&!qrf,&qr1,2)
+    var qr2:[f64;64]=[0.0;64]; qr2[0]=0.0; qr2[1]=30.0; bf_push_row(&!qrf,&qr2,2)
+    var qr3:[f64;64]=[0.0;64]; qr3[0]=0.0; qr3[1]=40.0; bf_push_row(&!qrf,&qr3,2)
+    var qr4:[f64;64]=[0.0;64]; qr4[0]=0.0; qr4[1]=50.0; bf_push_row(&!qrf,&qr4,2)
+    let pr = bf_p90p10_ratio_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&pr,0,0), 3.2857142857) { print("FAIL p90p10\n"); return 634 }       // 46/14
+    let qd = bf_quartile_dispersion_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&qd,0,0), 0.3333333333) { print("FAIL quartile_disp\n"); return 635 } // (40-20)/(40+20)
+    // ===== BATCH 15: robust location/shape + trimmed/winsorized (histogram percentiles) =====
+    // reuse qrf {10,20,30,40,50}.
+    let pctl = bf_percentile_dense_by(&qrf,0,1,50,0.5)
+    if !approx_eq(bf_get(&pctl,0,0), 30.0) { print("FAIL percentile\n"); return 636 }
+    let trm = bf_trimean_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&trm,0,0), 30.0) { print("FAIL trimean\n"); return 637 }
+    let mh = bf_midhinge_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&mh,0,0), 30.0) { print("FAIL midhinge\n"); return 638 }
+    let p95 = bf_p95p05_ratio_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&p95,0,0), 4.0) { print("FAIL p95p05\n"); return 639 }              // 48/12
+    let bws = bf_bowley_skew_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&bws,0,0), 0.0) { print("FAIL bowley\n"); return 640 }               // symmetric
+    let mrk = bf_moors_kurt_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&mrk,0,0), 1.0) { print("FAIL moors\n"); return 641 }
+    let rcv = bf_robust_cv_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&rcv,0,0), 0.6666666667) { print("FAIL robust_cv\n"); return 642 }   // 20/30
+    let dcr = bf_decile_range_dense_by(&qrf,0,1,50)
+    if !approx_eq(bf_get(&dcr,0,0), 32.0) { print("FAIL decile_range\n"); return 643 }        // 46-14
+    // trimmed/winsorized on a frame with an outlier: g0 = {1,2,3,4,100}, vmax=100.
+    var trf = bf_new(2, 8)
+    var tf0:[f64;64]=[0.0;64]; tf0[0]=0.0; tf0[1]=1.0;   bf_push_row(&!trf,&tf0,2)
+    var tf1:[f64;64]=[0.0;64]; tf1[0]=0.0; tf1[1]=2.0;   bf_push_row(&!trf,&tf1,2)
+    var tf2:[f64;64]=[0.0;64]; tf2[0]=0.0; tf2[1]=3.0;   bf_push_row(&!trf,&tf2,2)
+    var tf3:[f64;64]=[0.0;64]; tf3[0]=0.0; tf3[1]=4.0;   bf_push_row(&!trf,&tf3,2)
+    var tf4:[f64;64]=[0.0;64]; tf4[0]=0.0; tf4[1]=100.0; bf_push_row(&!trf,&tf4,2)
+    let tmn = bf_trimmed_mean_dense_by(&trf,0,1,100,0.2)
+    if !approx_eq(bf_get(&tmn,0,0), 3.0) { print("FAIL trimmed_mean\n"); return 644 }         // mean{2,3,4}
+    let wmn = bf_winsorized_mean_dense_by(&trf,0,1,100,0.2)
+    if !approx_eq(bf_get(&wmn,0,0), 3.0) { print("FAIL winsorized_mean\n"); return 645 }      // mean{2,2,3,4,4}
+    // ===== BATCH 16: fixed-precision FLOAT quantiles via scaled histogram (2-decimal) =====
+    // g0 = {1.25, 2.50, 3.75, 5.00, 6.25}, scale=100, scaled_max=700.
+    var fpf = bf_new(2, 8)
+    var fp0:[f64;64]=[0.0;64]; fp0[0]=0.0; fp0[1]=1.25; bf_push_row(&!fpf,&fp0,2)
+    var fp1:[f64;64]=[0.0;64]; fp1[0]=0.0; fp1[1]=2.50; bf_push_row(&!fpf,&fp1,2)
+    var fp2:[f64;64]=[0.0;64]; fp2[0]=0.0; fp2[1]=3.75; bf_push_row(&!fpf,&fp2,2)
+    var fp3:[f64;64]=[0.0;64]; fp3[0]=0.0; fp3[1]=5.00; bf_push_row(&!fpf,&fp3,2)
+    var fp4:[f64;64]=[0.0;64]; fp4[0]=0.0; fp4[1]=6.25; bf_push_row(&!fpf,&fp4,2)
+    let sme = bf_median_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sme,0,0), 3.75) { print("FAIL median_scaled\n"); return 646 }
+    let sq1 = bf_q1_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sq1,0,0), 2.50) { print("FAIL q1_scaled\n"); return 647 }
+    let sq3 = bf_q3_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sq3,0,0), 5.00) { print("FAIL q3_scaled\n"); return 648 }
+    let siq = bf_iqr_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&siq,0,0), 2.50) { print("FAIL iqr_scaled\n"); return 649 }  // 5.00-2.50
+    let spc = bf_percentile_scaled_by(&fpf,0,1,700,100.0,0.5)
+    if !approx_eq(bf_get(&spc,0,0), 3.75) { print("FAIL percentile_scaled\n"); return 650 }
+    // ===== BATCH 17: robust location/shape + trimmed/winsorized for FIXED-PRECISION floats =====
+    // reuse fpf {1.25,2.50,3.75,5.00,6.25}, scale=100, scaled_max=700.
+    let strm = bf_trimean_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&strm,0,0), 3.75) { print("FAIL trimean_scaled\n"); return 651 }
+    let smh = bf_midhinge_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&smh,0,0), 3.75) { print("FAIL midhinge_scaled\n"); return 652 }
+    let s95 = bf_p95p05_ratio_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&s95,0,0), 4.0) { print("FAIL p95p05_scaled\n"); return 653 }      // scale-free
+    let sbw = bf_bowley_skew_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sbw,0,0), 0.0) { print("FAIL bowley_scaled\n"); return 654 }
+    let smk = bf_moors_kurt_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&smk,0,0), 1.0) { print("FAIL moors_scaled\n"); return 655 }
+    let srcv = bf_robust_cv_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&srcv,0,0), 0.6666666667) { print("FAIL robust_cv_scaled\n"); return 656 }
+    let sdr = bf_decile_range_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sdr,0,0), 4.0) { print("FAIL decile_range_scaled\n"); return 657 } // 5.75-1.75... check
+    // trimmed/winsorized on a float outlier frame: g0 = {1.0,2.0,3.0,4.0,50.0}, scale=100, scaled_max=5000.
+    var tff = bf_new(2, 8)
+    var tg0:[f64;64]=[0.0;64]; tg0[0]=0.0; tg0[1]=1.0;  bf_push_row(&!tff,&tg0,2)
+    var tg1:[f64;64]=[0.0;64]; tg1[0]=0.0; tg1[1]=2.0;  bf_push_row(&!tff,&tg1,2)
+    var tg2:[f64;64]=[0.0;64]; tg2[0]=0.0; tg2[1]=3.0;  bf_push_row(&!tff,&tg2,2)
+    var tg3:[f64;64]=[0.0;64]; tg3[0]=0.0; tg3[1]=4.0;  bf_push_row(&!tff,&tg3,2)
+    var tg4:[f64;64]=[0.0;64]; tg4[0]=0.0; tg4[1]=50.0; bf_push_row(&!tff,&tg4,2)
+    let stm = bf_trimmed_mean_scaled_by(&tff,0,1,5000,100.0,0.2)
+    if !approx_eq(bf_get(&stm,0,0), 3.0) { print("FAIL trimmed_scaled\n"); return 658 }
+    let swm = bf_winsorized_mean_scaled_by(&tff,0,1,5000,100.0,0.2)
+    if !approx_eq(bf_get(&swm,0,0), 3.0) { print("FAIL winsorized_scaled\n"); return 659 }
+    // ===== BATCH 18: geometric + inequality + diversity for FIXED-PRECISION floats =====
+    // reuse fpf {1.25,2.50,3.75,5.00,6.25}, scale=100, scaled_max=700.
+    let sgm = bf_geomean_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sgm,0,0), 3.25646386) { print("FAIL geomean_scaled\n"); return 660 }
+    let sgs = bf_geostd_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sgs,0,0), 1.88798371) { print("FAIL geostd_scaled\n"); return 661 }
+    let sgc = bf_gini_coef_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sgc,0,0), 0.26666667) { print("FAIL gini_coef_scaled\n"); return 662 }
+    let sth = bf_theil_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sth,0,0), 0.11968759) { print("FAIL theil_scaled\n"); return 663 }
+    let sat = bf_atkinson1_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sat,0,0), 0.13160964) { print("FAIL atkinson_scaled\n"); return 664 }
+    let sho = bf_hoover_scaled_by(&fpf,0,1,700,100.0)
+    if !approx_eq(bf_get(&sho,0,0), 0.2) { print("FAIL hoover_scaled\n"); return 665 }
+    // diversity frame dvf = {1.00,1.00,2.00,3.00}, scale=100, scaled_max=400. p=[1/2,1/4,1/4].
+    var dvf = bf_new(2, 8)
+    var dv0:[f64;64]=[0.0;64]; dv0[0]=0.0; dv0[1]=1.00; bf_push_row(&!dvf,&dv0,2)
+    var dv1:[f64;64]=[0.0;64]; dv1[0]=0.0; dv1[1]=1.00; bf_push_row(&!dvf,&dv1,2)
+    var dv2:[f64;64]=[0.0;64]; dv2[0]=0.0; dv2[1]=2.00; bf_push_row(&!dvf,&dv2,2)
+    var dv3:[f64;64]=[0.0;64]; dv3[0]=0.0; dv3[1]=3.00; bf_push_row(&!dvf,&dv3,2)
+    let sen2 = bf_entropy_scaled_by(&dvf,0,1,400,100.0)
+    if !approx_eq(bf_get(&sen2,0,0), 1.03972077) { print("FAIL entropy_scaled\n"); return 666 }
+    let spx = bf_perplexity_scaled_by(&dvf,0,1,400,100.0)
+    if !approx_eq(bf_get(&spx,0,0), 2.82842712) { print("FAIL perplexity_scaled\n"); return 667 }
+    let sis = bf_inv_simpson_scaled_by(&dvf,0,1,400,100.0)
+    if !approx_eq(bf_get(&sis,0,0), 2.66666667) { print("FAIL inv_simpson_scaled\n"); return 668 }
+    let sgi = bf_gini_impurity_scaled_by(&dvf,0,1,400,100.0)
+    if !approx_eq(bf_get(&sgi,0,0), 0.625) { print("FAIL gini_impurity_scaled\n"); return 669 }
+    // ===== BATCH 19: robust scale (MAD/MADN, Gini mean diff) + scaled power means =====
+    // MAD frame: g0 = {1,2,3,4,5} (integer), vmax=5. mad=1, madn=1.4826.
+    var mdf = bf_new(2, 8)
+    var md0:[f64;64]=[0.0;64]; md0[0]=0.0; md0[1]=1.0; bf_push_row(&!mdf,&md0,2)
+    var md1:[f64;64]=[0.0;64]; md1[0]=0.0; md1[1]=2.0; bf_push_row(&!mdf,&md1,2)
+    var md2:[f64;64]=[0.0;64]; md2[0]=0.0; md2[1]=3.0; bf_push_row(&!mdf,&md2,2)
+    var md3:[f64;64]=[0.0;64]; md3[0]=0.0; md3[1]=4.0; bf_push_row(&!mdf,&md3,2)
+    var md4:[f64;64]=[0.0;64]; md4[0]=0.0; md4[1]=5.0; bf_push_row(&!mdf,&md4,2)
+    let madd = bf_mad_median_dense_by(&mdf,0,1,5)
+    if !approx_eq(bf_get(&madd,0,0), 1.0) { print("FAIL mad_dense\n"); return 670 }
+    let madnd = bf_madn_dense_by(&mdf,0,1,5)
+    if !approx_eq(bf_get(&madnd,0,0), 1.4826) { print("FAIL madn_dense\n"); return 671 }
+    let madsc = bf_mad_median_scaled_by(&mdf,0,1,500,100.0)   // same values as fixed-precision floats
+    if !approx_eq(bf_get(&madsc,0,0), 1.0) { print("FAIL mad_scaled\n"); return 672 }
+    let madnsc = bf_madn_scaled_by(&mdf,0,1,500,100.0)
+    if !approx_eq(bf_get(&madnsc,0,0), 1.4826) { print("FAIL madn_scaled\n"); return 673 }
+    // Gini mean difference: reuse ccf x-col? use a {2,4,6,8} frame.
+    var gmf = bf_new(2, 8)
+    var gm0:[f64;64]=[0.0;64]; gm0[0]=0.0; gm0[1]=2.0; bf_push_row(&!gmf,&gm0,2)
+    var gm1:[f64;64]=[0.0;64]; gm1[0]=0.0; gm1[1]=4.0; bf_push_row(&!gmf,&gm1,2)
+    var gm2:[f64;64]=[0.0;64]; gm2[0]=0.0; gm2[1]=6.0; bf_push_row(&!gmf,&gm2,2)
+    var gm3:[f64;64]=[0.0;64]; gm3[0]=0.0; gm3[1]=8.0; bf_push_row(&!gmf,&gm3,2)
+    let gmdd = bf_gini_mean_diff_dense_by(&gmf,0,1,8)
+    if !approx_eq(bf_get(&gmdd,0,0), 2.5) { print("FAIL gmd_dense\n"); return 674 }
+    let gmdsc = bf_gini_mean_diff_scaled_by(&gmf,0,1,800,100.0)
+    if !approx_eq(bf_get(&gmdsc,0,0), 2.5) { print("FAIL gmd_scaled\n"); return 675 }
+    // scaled power means on lgf {2,4,8} (scale=100, scaled_max=800)
+    let hms = bf_harmonic_mean_scaled_by(&lgf,0,1,800,100.0)
+    if !approx_eq(bf_get(&hms,0,0), 3.4285714286) { print("FAIL harmonic_scaled\n"); return 676 }
+    let rmss = bf_rms_scaled_by(&lgf,0,1,800,100.0)
+    if !approx_eq(bf_get(&rmss,0,0), 5.2915026221) { print("FAIL rms_scaled\n"); return 677 }
+    let chs = bf_contraharmonic_mean_scaled_by(&lgf,0,1,800,100.0)
+    if !approx_eq(bf_get(&chs,0,0), 6.0) { print("FAIL contraharmonic_scaled\n"); return 678 }
+    let pms = bf_power_mean_scaled_by(&lgf,0,1,800,100.0,3.0)
+    if !approx_eq(bf_get(&pms,0,0), 5.7955839023) { print("FAIL power_mean_scaled\n"); return 679 }
+    // ===== BATCH 20: two-column WEIGHTED statistics (value + weight) =====
+    // wtf: 3-col, g0 value {1,2,3,4} weights {4,3,2,1}. W=10.
+    var wtf = bf_new(3, 8)
+    var wt0:[f64;64]=[0.0;64]; wt0[0]=0.0; wt0[1]=1.0; wt0[2]=4.0; bf_push_row(&!wtf,&wt0,3)
+    var wt1:[f64;64]=[0.0;64]; wt1[0]=0.0; wt1[1]=2.0; wt1[2]=3.0; bf_push_row(&!wtf,&wt1,3)
+    var wt2:[f64;64]=[0.0;64]; wt2[0]=0.0; wt2[1]=3.0; wt2[2]=2.0; bf_push_row(&!wtf,&wt2,3)
+    var wt3:[f64;64]=[0.0;64]; wt3[0]=0.0; wt3[1]=4.0; wt3[2]=1.0; bf_push_row(&!wtf,&wt3,3)
+    let wmed = bf_weighted_median_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wmed,0,0), 2.0) { print("FAIL wmedian\n"); return 680 }        // cum weight >= 5 at value 2
+    let wq1b = bf_weighted_q1_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wq1b,0,0), 1.0) { print("FAIL wq1\n"); return 681 }
+    let wq3b = bf_weighted_q3_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wq3b,0,0), 3.0) { print("FAIL wq3\n"); return 682 }
+    let wiqrb = bf_weighted_iqr_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wiqrb,0,0), 2.0) { print("FAIL wiqr\n"); return 683 }            // 3-1
+    let wpct = bf_weighted_percentile_dense_by(&wtf,0,1,2,4,0.5)
+    if !approx_eq(bf_get(&wpct,0,0), 2.0) { print("FAIL wpercentile\n"); return 684 }
+    let wmeds = bf_weighted_median_scaled_by(&wtf,0,1,2,400,100.0) // values as fixed-precision
+    if !approx_eq(bf_get(&wmeds,0,0), 2.0) { print("FAIL wmedian_scaled\n"); return 685 }
+    let wpcts = bf_weighted_percentile_scaled_by(&wtf,0,1,2,400,100.0,0.75)
+    if !approx_eq(bf_get(&wpcts,0,0), 3.0) { print("FAIL wpercentile_scaled\n"); return 686 }
+    let wgm = bf_weighted_geomean_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wgm,0,0), 1.76172959) { print("FAIL wgeomean\n"); return 687 }   // (1^4 2^3 3^2 4^1)^(1/10)
+    let wgms = bf_weighted_geomean_scaled_by(&wtf,0,1,2,400,100.0)
+    if !approx_eq(bf_get(&wgms,0,0), 1.76172959) { print("FAIL wgeomean_scaled\n"); return 688 }
+    let went = bf_weighted_entropy_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&went,0,0), 1.27985423) { print("FAIL wentropy\n"); return 689 }  // H of {0.4,0.3,0.2,0.1}
+    // ===== BATCH 21: categorical association (2D joint histogram) x=col1, y=col2 =====
+    // jtf: pairs (0,0),(0,0),(0,1),(1,1) in g0. xmax=1, ymax=1.
+    var jtf = bf_new(3, 8)
+    var jr0:[f64;64]=[0.0;64]; jr0[0]=0.0; jr0[1]=0.0; jr0[2]=0.0; bf_push_row(&!jtf,&jr0,3)
+    var jr1:[f64;64]=[0.0;64]; jr1[0]=0.0; jr1[1]=0.0; jr1[2]=0.0; bf_push_row(&!jtf,&jr1,3)
+    var jr2:[f64;64]=[0.0;64]; jr2[0]=0.0; jr2[1]=0.0; jr2[2]=1.0; bf_push_row(&!jtf,&jr2,3)
+    var jr3:[f64;64]=[0.0;64]; jr3[0]=0.0; jr3[1]=1.0; jr3[2]=1.0; bf_push_row(&!jtf,&jr3,3)
+    let mi = bf_mutual_info_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&mi,0,0), 0.21576155) { print("FAIL mutual_info\n"); return 690 }
+    let je = bf_joint_entropy_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&je,0,0), 1.03972077) { print("FAIL joint_entropy\n"); return 691 }
+    let ce = bf_conditional_entropy_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&ce,0,0), 0.47738563) { print("FAIL cond_entropy\n"); return 692 }
+    let nmi = bf_normalized_mi_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&nmi,0,0), 0.34559203) { print("FAIL normalized_mi\n"); return 693 }
+    let uc = bf_uncertainty_coeff_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&uc,0,0), 0.31127812) { print("FAIL uncertainty_coeff\n"); return 694 }
+    let vi = bf_variation_of_info_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&vi,0,0), 0.82395922) { print("FAIL variation_of_info\n"); return 695 }
+    let su = bf_symmetric_uncertainty_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&su,0,0), 0.34371102) { print("FAIL symmetric_uncertainty\n"); return 696 }
+    let c2 = bf_chi2_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&c2,0,0), 1.33333333) { print("FAIL chi2\n"); return 697 }
+    let cv = bf_cramers_v_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&cv,0,0), 0.57735027) { print("FAIL cramers_v\n"); return 698 }
+    let ph = bf_phi2_dense_by(&jtf,0,1,2,1,1)
+    if !approx_eq(bf_get(&ph,0,0), 0.33333333) { print("FAIL phi2\n"); return 699 }
+    // ===== BATCH 21: weighted inequality + weighted diversity + weighted means =====
+    // reuse wtf: value {1,2,3,4} weights {4,3,2,1}, W=10.
+    let wperp = bf_weighted_perplexity_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wperp,0,0), 3.59611547) { print("FAIL wperplexity\n"); return 690 }
+    let wivs = bf_weighted_inv_simpson_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wivs,0,0), 3.33333333) { print("FAIL winv_simpson\n"); return 691 }
+    let wgimp = bf_weighted_gini_impurity_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wgimp,0,0), 0.7) { print("FAIL wgini_impurity\n"); return 692 }
+    let wgstd = bf_weighted_geostd_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wgstd,0,0), 1.66024826) { print("FAIL wgeostd\n"); return 693 }
+    let wgin = bf_weighted_gini_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wgin,0,0), 0.27) { print("FAIL wgini\n"); return 694 }
+    let whov = bf_weighted_hoover_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&whov,0,0), 0.2) { print("FAIL whoover\n"); return 695 }
+    let wthl = bf_weighted_theil_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wthl,0,0), 0.12163953) { print("FAIL wtheil\n"); return 696 }
+    let wgins = bf_weighted_gini_scaled_by(&wtf,0,1,2,400,100.0)
+    if !approx_eq(bf_get(&wgins,0,0), 0.27) { print("FAIL wgini_scaled\n"); return 697 }
+    let wharm = bf_weighted_harmonic_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wharm,0,0), 1.55844156) { print("FAIL wharmonic\n"); return 698 }
+    let wrms = bf_weighted_rms_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wrms,0,0), 2.23606798) { print("FAIL wrms\n"); return 699 }
+    // ===== BATCH 22: weighted robust order-statistics + weighted MAD =====
+    // reuse wtf: value {1,2,3,4} weights {4,3,2,1}. Inverse-CDF weighted quantiles: wq25=1,wq50=2,wq75=3.
+    let wtrm = bf_weighted_trimean_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wtrm,0,0), 2.0) { print("FAIL wtrimean\n"); return 700 }        // (1+4+3)/4
+    let wmh = bf_weighted_midhinge_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wmh,0,0), 2.0) { print("FAIL wmidhinge\n"); return 701 }
+    let wbw = bf_weighted_bowley_skew_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wbw,0,0), 0.0) { print("FAIL wbowley\n"); return 702 }
+    let wmk = bf_weighted_moors_kurt_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wmk,0,0), 0.5) { print("FAIL wmoors\n"); return 703 }
+    let wrcv = bf_weighted_robust_cv_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wrcv,0,0), 1.0) { print("FAIL wrobust_cv\n"); return 704 }        // (3-1)/2
+    let wpr = bf_weighted_p90p10_ratio_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wpr,0,0), 3.0) { print("FAIL wp90p10\n"); return 705 }
+    let wdr = bf_weighted_decile_range_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wdr,0,0), 2.0) { print("FAIL wdecile_range\n"); return 706 }
+    let wtrms = bf_weighted_trimean_scaled_by(&wtf,0,1,2,400,100.0)
+    if !approx_eq(bf_get(&wtrms,0,0), 2.0) { print("FAIL wtrimean_scaled\n"); return 707 }
+    let wmad = bf_weighted_mad_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wmad,0,0), 1.0) { print("FAIL wmad\n"); return 708 }              // wmedian of |v-2|
+    let wmadn = bf_weighted_madn_dense_by(&wtf,0,1,2,4)
+    if !approx_eq(bf_get(&wmadn,0,0), 1.4826) { print("FAIL wmadn\n"); return 709 }
+    // ===== BATCH 23: two-sample statistical tests (key, group, value) =====
+    // K0 rows 0-6: group0={1,2,3}, group1={4,5,6,7}; K1 rows 7-12: group0={2,2,4}, group1={2,4,4}.
+    var stt = bf_new(3, 16)
+    var st_a:[f64;64]=[0.0;64]; st_a[0]=0.0; st_a[1]=0.0; st_a[2]=1.0; bf_push_row(&!stt,&st_a,3)
+    var st_b:[f64;64]=[0.0;64]; st_b[0]=0.0; st_b[1]=0.0; st_b[2]=2.0; bf_push_row(&!stt,&st_b,3)
+    var st_c:[f64;64]=[0.0;64]; st_c[0]=0.0; st_c[1]=0.0; st_c[2]=3.0; bf_push_row(&!stt,&st_c,3)
+    var st_d:[f64;64]=[0.0;64]; st_d[0]=0.0; st_d[1]=1.0; st_d[2]=4.0; bf_push_row(&!stt,&st_d,3)
+    var st_e:[f64;64]=[0.0;64]; st_e[0]=0.0; st_e[1]=1.0; st_e[2]=5.0; bf_push_row(&!stt,&st_e,3)
+    var st_f:[f64;64]=[0.0;64]; st_f[0]=0.0; st_f[1]=1.0; st_f[2]=6.0; bf_push_row(&!stt,&st_f,3)
+    var st_g:[f64;64]=[0.0;64]; st_g[0]=0.0; st_g[1]=1.0; st_g[2]=7.0; bf_push_row(&!stt,&st_g,3)
+    var st_h:[f64;64]=[0.0;64]; st_h[0]=1.0; st_h[1]=0.0; st_h[2]=2.0; bf_push_row(&!stt,&st_h,3)
+    var st_i:[f64;64]=[0.0;64]; st_i[0]=1.0; st_i[1]=0.0; st_i[2]=2.0; bf_push_row(&!stt,&st_i,3)
+    var st_j:[f64;64]=[0.0;64]; st_j[0]=1.0; st_j[1]=0.0; st_j[2]=4.0; bf_push_row(&!stt,&st_j,3)
+    var st_k:[f64;64]=[0.0;64]; st_k[0]=1.0; st_k[1]=1.0; st_k[2]=2.0; bf_push_row(&!stt,&st_k,3)
+    var st_l:[f64;64]=[0.0;64]; st_l[0]=1.0; st_l[1]=1.0; st_l[2]=4.0; bf_push_row(&!stt,&st_l,3)
+    var st_m:[f64;64]=[0.0;64]; st_m[0]=1.0; st_m[1]=1.0; st_m[2]=4.0; bf_push_row(&!stt,&st_m,3)
+    let mdf2 = bf_mean_diff_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&mdf2,0,0), 3.5) { print("FAIL mean_diff\n"); return 710 }
+    let twe = bf_ttest_welch_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&twe,0,0), 4.04145188) { print("FAIL welch\n"); return 711 }
+    let tcd = bf_cohens_d_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&tcd,0,0), 2.95803989) { print("FAIL cohens_d\n"); return 712 }
+    let tgd = bf_glass_delta_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&tgd,0,0), 3.5) { print("FAIL glass\n"); return 713 }
+    let tps = bf_pooled_sd_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&tps,0,0), 1.18321596) { print("FAIL pooled_sd\n"); return 714 }
+    let tpb = bf_point_biserial_by(&stt,0,1,2)
+    if !approx_eq(bf_get(&tpb,0,0), 0.86602540) { print("FAIL point_biserial\n"); return 715 }
+    let tmu = bf_mannwhitney_u_by(&stt,0,1,2,7)
+    if !approx_eq(bf_get(&tmu,0,0), 12.0) { print("FAIL mwu_k0\n"); return 716 }
+    if !approx_eq(bf_get(&tmu,7,0), 6.0) { print("FAIL mwu_k1\n"); return 717 }        // ties
+    let tcl = bf_cles_by(&stt,0,1,2,7)
+    if !approx_eq(bf_get(&tcl,7,0), 0.66666667) { print("FAIL cles_k1\n"); return 718 }
+    let trb = bf_rank_biserial_by(&stt,0,1,2,7)
+    if !approx_eq(bf_get(&trb,7,0), 0.33333333) { print("FAIL rankbis_k1\n"); return 719 }
+    let tks = bf_ks_stat_by(&stt,0,1,2,7)
+    if !approx_eq(bf_get(&tks,0,0), 1.0) { print("FAIL ks_k0\n"); return 720 }
+    if !approx_eq(bf_get(&tks,7,0), 0.33333333) { print("FAIL ks_k1\n"); return 721 }
+    print("BIGFRAME_OPS_GATE_OK\n")
+    } else {
+        print("BIGFRAME_OPS_FAIL\n")
+    }
+    return 0
+}

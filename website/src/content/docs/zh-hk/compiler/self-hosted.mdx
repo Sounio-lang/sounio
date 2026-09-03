@@ -1,0 +1,98 @@
+---
+title: "本地自宿式编译器"
+description: "Sounio 本地自宿式原生编译器的架构和流水线。"
+weight: 25
+category: "编译器"
+topic_id: "website.docs.compiler.self-hosted"
+authority: "website_only"
+audience: "贡献者"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.self-hosted"
+---
+
+# 本地自宿式编译器
+
+Sounio 包括一个完全由 `.sio` 文件编写的本地自宿式编译器。该编译器可以解析、类型检查、下传至中间表示、优化，并生成原生 x86-64 ELF 二进制文件，而无需依赖 LLVM、Cranelift 或任何外部代码生成器。
+
+## 流水线
+
+```
+.sio 源码 → 词法分析器 → 解析器 → AST
+    → ir/lower.sio → IrModule (自定义 IR)
+    → 优化通过
+    → native/codegen.sio → x86-64 机器码
+    → native/elf.sio → ELF 二进制
+```
+
+此流水线是 **通过 bin/souc 的默认公共编译器路径**。它直接生成原生 ELF/Mach-O 二进制文件，没有中间对象文件。可选的 LLVM 和 Cranelift JIT 配置存在于单独的 omega 工件中 —— 它们不是主要的入门故事。
+
+## 关键模块
+
+| 模块 | 文件 | 目的 |
+|--------|------|---------|
+| 词法分析器 | `self-hosted/lexer/` | 令牌化 |
+| 解析器 | `self-hosted/parser/` | AST 构建 |
+| IR 下传 | `self-hosted/ir/lower.sio` | AST 到 IR 转换，策略计算 |
+| IR 类型 | `self-hosted/ir/ir.sio` | IrFunction、IrModule、IrInstr 定义 |
+| 优化器 | `self-hosted/ir/opt_cleanup.sio` | 常量折叠、DCE、强度减少 |
+| 配置文件 | `self-hosted/ir/profile.sio` | .sprof 配置文件，策略提升 |
+| 内联器 | `self-hosted/ir/inline.sio` | 配置文件引导的函数内联 |
+| 布局 | `self-hosted/ir/layout.sio` | 配置文件引导的函数排序 |
+| E-图 | `self-hosted/ir/egraph.sio` | 代数规则的等式饱和 |
+| 代码生成器 | `self-hosted/native/codegen.sio` | x86-64 指令发射 |
+| 帧 | `self-hosted/native/frame.sio` | 堆栈帧布局，寄存器分配 |
+| ELF | `self-hosted/native/elf.sio` | ELF 二进制格式发射 |
+| 重定位 | `self-hosted/native/reloc.sio` | 符号和节重定位 |
+| 入口 | `self-hosted/compiler/main.sio` | CLI 驱动程序和编译编排 |
+
+## 优化通过
+
+本地优化器包括超过 20 个通过，跨 51-110 次冲刺增量构建：
+
+- **常量折叠**：在编译时评估已知常量算术。
+- **死代码消除**：标记清除以删除未使用的指令。
+- **强度减少**：将 `x * 2^n` 替换为 `x << n`，`x / 2^n` 替换为 `x >> n`，`x % 2^n` 替换为 `x & (2^n - 1)`。
+- **复制传播**：跟踪 `IrCopy` 链以启用进一步折叠。
+- **Peephole**：`IrCopy(r,r)` 到 `IrNop`，消除重复的 `IrLoadImm`。
+- **代数规范化**：`x - x` 到 0，`x ^ x` 到 0，常量链折叠 `(x + 3) + 5` 到 `x + 8`。
+- **E-图饱和**：交换律标准化，位运算恒等式，乘消去。
+- **CSE**：128 项哈希表，具有规范化的操作数顺序。
+- **LICM**：将循环不变 `IrLoadImm` 提升过回边。
+- **GVN**：全局值编号，128 项表。
+- **布尔简化**：`(x == 0) == 0` 到 `IrCopy(x)`，`bool != 0` 到 `IrCopy(bool)`。
+- **条件分支折叠**：`BranchTrue(known_const)` 到 `IrJump` 或 `IrNop`。
+- **跳转至返回**：`IrJump(L)` 其中 `L+1 = IrReturn` 折叠为 `IrReturn`。
+
+## 寄存器分配
+
+原生后端使用 4-寄存器线性扫描分配器，针对 `r12`、`r13`、`r14`、`r15`（调用者保存）。堆栈溢出使用自适应 `disp8`/`disp32` 编码，以最小化代码大小。
+
+## 配置文件引导的优化
+
+本地编译器实现了完整的 PGO 流水线：
+
+1. **仪器化**：`IrProfCounter` 操作码在函数入口处注入 `INC [RIP+disp32]`。
+2. **配置文件转储**：`__prof_dump` 在退出时写入 `.sprof` 文件，每个函数的执行计数。
+3. **策略提升**：热函数（计数 > 1000）提升为 `AGGRESSIVE`，暖函数（> 100）提升为 `PRECISION`。
+4. **配置文件引导的内联**：内联得分包含策略奖金。
+5. **配置文件引导的布局**：热函数按顺序排列在二进制的前面，以提高缓存局部性。
+
+## 运行本地自宿式编译器
+
+```bash
+SOUC=./bin/souc
+
+# 自测试（运行所有内部测试用例）
+$SOUC run self-hosted/compiler/main.sio -- --self-test
+
+# 仅检查（不生成代码）
+$SOUC run self-hosted/compiler/main.sio -- --check
+
+# 特定函数的 IR 转储
+$SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
+```
+
+## 验证
+
+本地编译器通过 347+ 自测试验证自身，涵盖每个优化通过。门脚本（例如，`scripts/sprint52_regalloc_gate.sh`）运行完整的测试矩阵，并报告 PASS/FAIL/NOT_RUN 计数。

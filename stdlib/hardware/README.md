@@ -1,0 +1,3 @@
+# stdlib/hardware
+
+Hardware interface.

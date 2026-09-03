@@ -1,0 +1,143 @@
+//! Pivot (long -> wide) reshaping for DataFrames.
+//!
+//! `df_pivot` turns a long-format table with (index, column, value) columns into a wide table:
+//! one row per distinct index value, one column per distinct `column_col` value, and cells holding
+//! the SUM of `value_col` for that (index, column) pair (0 where a pair is absent). Each output
+//! column records its source `column_col` key as its column name (via df_set_col_name), so the wide
+//! table is self-describing. Keys are matched by exact f64 equality (integer-encoded categories).
+//! Self-contained: uses only the public data::dataframe accessors.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_set_col_name}
+
+// distinct values of column `col` into out[0..); returns the count (<= 1024).
+fn pv_distinct(df: &DataFrame, col: i64, out: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        let k = df_get(df, r, col)
+        var found: i64 = 0
+        var i: i64 = 0
+        while i < n { if out[i as usize] == k { found = 1 } i = i + 1 }
+        if found == 0 && n < 1024 { out[n as usize] = k; n = n + 1 }
+        r = r + 1
+    }
+    n
+}
+
+// ascending insertion sort of a[0..n)
+fn pv_sort(a: &![f64; 1024], n: i64) with Mut {
+    var i: i64 = 1
+    while i < n && i < 1024 {
+        let cur = a[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 && a[j as usize] > cur { a[(j + 1) as usize] = a[j as usize]; j = j - 1 }
+        a[(j + 1) as usize] = cur
+        i = i + 1
+    }
+}
+
+/// Pivot a long table into wide form. Rows = distinct `index_col` values (first-seen order);
+/// columns = distinct `column_col` values (sorted ascending); cell = sum of `value_col` for that
+/// (index, column). Output column 0 is the index value; output column j+1 carries the j-th column
+/// key both as its values and as its column name. Result has 1 + (distinct columns) columns
+/// (capped by the DataFrame's 64-column limit).
+pub fn df_pivot(df: &DataFrame, index_col: i64, column_col: i64, value_col: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    var idx: [f64; 1024] = [0.0; 1024]
+    let nidx = pv_distinct(df, index_col, &!idx)
+    var cols: [f64; 1024] = [0.0; 1024]
+    var nck = pv_distinct(df, column_col, &!cols)
+    pv_sort(&!cols, nck)
+    if nck > 63 { nck = 63 }   // leave room for the index column within 64
+    var out = df_new(1 + nck)
+    var i: i64 = 0
+    while i < nidx {
+        let iv = idx[i as usize]
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = iv
+        var c: i64 = 0
+        while c < nck {
+            let ck = cols[c as usize]
+            var s: f64 = 0.0
+            var r: i64 = 0
+            while r < df_nrows(df) {
+                if df_get(df, r, index_col) == iv && df_get(df, r, column_col) == ck {
+                    s = s + df_get(df, r, value_col)
+                }
+                r = r + 1
+            }
+            row[(1 + c) as usize] = s
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    // record each pivot column's source key as its column name
+    var c2: i64 = 0
+    while c2 < nck {
+        df_set_col_name(&!out, 1 + c2, cols[c2 as usize] as i64)
+        c2 = c2 + 1
+    }
+    out
+}
+
+/// Pivot with a chosen cell aggregator over `value_col`:
+///   agg 0 = sum, 1 = mean, 2 = count, 3 = min, 4 = max (default: sum).
+/// Same wide layout and self-describing column names as df_pivot; an absent (index, column) pair
+/// yields 0.
+pub fn df_pivot_agg(df: &DataFrame, index_col: i64, column_col: i64, value_col: i64, agg: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    var idx: [f64; 1024] = [0.0; 1024]
+    let nidx = pv_distinct(df, index_col, &!idx)
+    var cols: [f64; 1024] = [0.0; 1024]
+    var nck = pv_distinct(df, column_col, &!cols)
+    pv_sort(&!cols, nck)
+    if nck > 63 { nck = 63 }
+    var out = df_new(1 + nck)
+    var i: i64 = 0
+    while i < nidx {
+        let iv = idx[i as usize]
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = iv
+        var c: i64 = 0
+        while c < nck {
+            let ck = cols[c as usize]
+            var cnt: i64 = 0
+            var sum: f64 = 0.0
+            var mn: f64 = 0.0
+            var mx: f64 = 0.0
+            var r: i64 = 0
+            while r < df_nrows(df) {
+                if df_get(df, r, index_col) == iv && df_get(df, r, column_col) == ck {
+                    let v = df_get(df, r, value_col)
+                    if cnt == 0 { mn = v; mx = v } else { if v < mn { mn = v } if v > mx { mx = v } }
+                    sum = sum + v
+                    cnt = cnt + 1
+                }
+                r = r + 1
+            }
+            var cell: f64 = 0.0
+            if agg == 1 { if cnt > 0 { cell = sum / (cnt as f64) } }
+            else if agg == 2 { cell = cnt as f64 }
+            else if agg == 3 { cell = mn }
+            else if agg == 4 { cell = mx }
+            else { cell = sum }
+            row[(1 + c) as usize] = cell
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    var c2: i64 = 0
+    while c2 < nck { df_set_col_name(&!out, 1 + c2, cols[c2 as usize] as i64); c2 = c2 + 1 }
+    out
+}
+
+/// Pivot taking the MEAN of `value_col` per (index, column) cell (convenience over df_pivot_agg).
+pub fn df_pivot_mean(df: &DataFrame, index_col: i64, column_col: i64, value_col: i64) -> DataFrame
+    with Mut, Div, Panic
+{
+    df_pivot_agg(df, index_col, column_col, value_col, 1)
+}

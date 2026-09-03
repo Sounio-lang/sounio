@@ -56,6 +56,7 @@ emit_status_json() {
     --argjson hash_chain "$hash_chain_json" \
     --argjson provenance "$provenance_json" \
     --argjson native_lanes "$native_lanes_json" \
+    --argjson toolchain "$TOOLCHAIN_JSON" \
     '{
       schema: "sounio.omega.gpu_binary_attestation.v1",
       generated_at_utc: $generated_at_utc,
@@ -67,10 +68,19 @@ emit_status_json() {
       hash_chain: $hash_chain,
       target_provenance: $provenance,
       native_lanes: $native_lanes,
+      toolchain: $toolchain,
       blockers: $blockers,
       log_path: $log_path
     }' >"$OUT_JSON"
 }
+
+# CUDA toolchain provenance of the host that assembled/hashed these binaries
+# (ptxas determines CUBIN bytes → the hash_chain is only comparable across toolkit
+# versions with the toolchain recorded). Honors a pre-set env (orchestrator may pass
+# a remote capture); else captures locally; else not_captured. Never fails the gate.
+TOOLCHAIN_JSON="${OMEGA_GPU_TOOLCHAIN_JSON:-}"
+[[ -z "$TOOLCHAIN_JSON" ]] && TOOLCHAIN_JSON="$("$ROOT_DIR/scripts/omega/omega_capture_toolchain.sh" 2>/dev/null || true)"
+[[ -z "$TOOLCHAIN_JSON" ]] && TOOLCHAIN_JSON='{"capture_status":"not_captured"}'
 
 if [[ "$MODE" == "off" ]]; then
   emit_status_json "not_run" "gate_disabled" "[]" "[]" '{"algorithm":"sha256-chain-v1","entries":[],"head":""}' '[]' '[]'

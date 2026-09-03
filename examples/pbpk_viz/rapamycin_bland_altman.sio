@@ -1,0 +1,107 @@
+// examples/pbpk_viz/rapamycin_bland_altman.sio
+// Bland-Altman method-agreement: does the simple 1-compartment steady-state
+// trough agree with the 2-compartment assay model? 20 virtual subjects span the
+// CYP3A5 metabolic range (ke 0.006 .. 0.018) at a fixed 5 mg daily dose.
+// Difference (2cpt - 1cpt) vs mean, with bias, 95% limits of agreement, and the
+// Student-t confidence band on the limits (stats::bland_altman).
+//   souc run examples/pbpk_viz/rapamycin_bland_altman.sio -> rapamycin_bland_altman.png
+use image::pure::types::{Image, image_new}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_hband, plot_hline, plot_point, plot_axes, plot_text_sc}
+use image::pure::png::{png_write}
+use pbpk::rapamycin_params::{rap_bioavailability}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use stats::bland_altman::{bland_altman, BAResult}
+
+// Method B: 1-compartment steady-state trough — the assay Euler integrator with
+// the peripheral compartment removed (k12 = k21 = 0). Same ka, ke, F, Vc, dt.
+fn trough_1cpt(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64) -> f64 with Mut, Div, Panic {
+    let ka_val = 0.62; let vc = 75.0
+    var a_gut = d_oral
+    var a1 = 0.0
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 { a_gut = a_gut + d_oral }
+        var step = 0
+        while step < 48 {
+            let flux = f_val * ka_val * a_gut
+            let new_ag = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1 = a1 + 0.5 * (0.0 - ke_val * a1 + flux)
+            a_gut = new_ag
+            a1 = new_a1
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    a1 / vc
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let f = rap_bioavailability().val()
+    let n_doses = 14
+    let dose = 5.0
+    let nsub = 20
+
+    var ma: [f64; 256] = [0.0; 256]   // method A: 2-cpt assay model (ng/mL)
+    var mb: [f64; 256] = [0.0; 256]   // method B: 1-cpt model       (ng/mL)
+    var i = 0
+    while i < nsub {
+        let ke = 0.006 + (i as f64) * (0.018 - 0.006) / ((nsub - 1) as f64)
+        ma[i as usize] = as_trough_mg_l(dose, n_doses, ke, f) * 1000.0
+        mb[i as usize] = trough_1cpt(dose, n_doses, ke, f) * 1000.0
+        i = i + 1
+    }
+
+    let r = bland_altman(&ma, &mb, nsub as i32, 0.95)
+
+    // data-driven plot ranges: x = mean of the two methods, y = difference
+    var xmin = 1.0e18; var xmax = 0.0 - 1.0e18
+    var ymin = 1.0e18; var ymax = 0.0 - 1.0e18
+    var k = 0
+    while k < nsub {
+        let mx = (ma[k as usize] + mb[k as usize]) * 0.5
+        let dy = ma[k as usize] - mb[k as usize]
+        if mx < xmin { xmin = mx }
+        if mx > xmax { xmax = mx }
+        if dy < ymin { ymin = dy }
+        if dy > ymax { ymax = dy }
+        k = k + 1
+    }
+    if r.loa_lo < ymin { ymin = r.loa_lo }
+    if r.loa_hi > ymax { ymax = r.loa_hi }
+    let xpad = (xmax - xmin) * 0.08 + 0.5
+    let ypad = (ymax - ymin) * 0.18 + 0.2
+    let x_lo = xmin - xpad; let x_hi = xmax + xpad
+    let y_lo = ymin - ypad; let y_hi = ymax + ypad
+
+    let w = 1200; let h = 760
+    var img = image_new(w as i32, h as i32)
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, x_lo, x_hi, y_lo, y_hi)
+    plot_grid(&!img, &a, 10, 8, 0xEEEEEE)
+    // shaded 95% limits-of-agreement band, then zero / bias / LoA lines
+    plot_hband(&!img, &a, r.loa_lo, r.loa_hi, 0xEAF1FB)
+    plot_hline(&!img, &a, 0.0, 0xCFCFCF)         // perfect-agreement reference
+    plot_hline(&!img, &a, r.bias, 0x1F5FA8)      // bias (blue)
+    plot_hline(&!img, &a, r.loa_hi, 0xC0392B)    // +1.96 SD (red)
+    plot_hline(&!img, &a, r.loa_lo, 0xC0392B)    // -1.96 SD (red)
+    plot_axes(&!img, &a, 10, 8, 0x555555, 3)
+
+    var p = 0
+    while p < nsub {
+        let mx = (ma[p as usize] + mb[p as usize]) * 0.5
+        let dy = ma[p as usize] - mb[p as usize]
+        plot_point(&!img, &a, mx, dy, 0x2E5E8C, 5)
+        p = p + 1
+    }
+
+    let _t1 = plot_text_sc(&!img, "1-cpt vs 2-cpt trough: Bland-Altman", 150, 40, 0x111111, 4)
+    let _t2 = plot_text_sc(&!img, "mean of two methods (ng/mL)", 470, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "difference 2cpt - 1cpt (ng/mL)", 150, 78, 0x333333, 3)
+    let _t4 = plot_text_sc(&!img, "bias (blue) + 95% LoA (red), n=20 subjects", 620, 80, 0x777777, 2)
+
+    let ok = png_write("rapamycin_bland_altman.png", &img)
+    print("bias="); print(r.bias); print(" sd="); print(r.sd_diff)
+    print(" LoA=["); print(r.loa_lo); print(", "); print(r.loa_hi); print("]")
+    print(" bias_CI=["); print(r.bias_ci_lo); print(", "); print(r.bias_ci_hi); print("]")
+    print(" outside="); print(r.n_outside); print(" wrote="); print(ok); print("\n")
+}

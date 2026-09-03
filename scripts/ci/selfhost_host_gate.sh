@@ -33,8 +33,8 @@ expected_file_kind() {
   case "$1" in
     x86_64-linux) printf '%s\n' "ELF 64-bit LSB executable, x86-64" ;;
     aarch64-linux) printf '%s\n' "ELF 64-bit LSB executable, ARM aarch64" ;;
-    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable" ;;
-    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable" ;;
+    aarch64-macos) printf '%s\n' "Mach-O 64-bit arm64 executable|Mach-O 64-bit executable arm64" ;;
+    x86_64-macos) printf '%s\n' "Mach-O 64-bit x86_64 executable|Mach-O 64-bit executable x86_64" ;;
     *)
       echo "error: unsupported target triple: $1" >&2
       return 1
@@ -71,14 +71,20 @@ assert_file_kind() {
   local path="$1"
   local expected="$2"
   local actual
+  local variant
 
   actual="$(file "$path" 2>/dev/null || true)"
-  if [[ "$actual" != *"$expected"* ]]; then
-    echo "error: unexpected artifact kind for $path" >&2
-    echo "expected fragment: $expected" >&2
-    echo "actual: $actual" >&2
-    exit 1
-  fi
+  IFS='|' read -r -a expected_variants <<<"$expected"
+  for variant in "${expected_variants[@]}"; do
+    if [[ "$actual" == *"$variant"* ]]; then
+      return 0
+    fi
+  done
+
+  echo "error: unexpected artifact kind for $path" >&2
+  echo "expected fragment: $expected" >&2
+  echo "actual: $actual" >&2
+  exit 1
 }
 
 assert_output_equals() {
@@ -155,7 +161,27 @@ CROSS_SMOKE_BIN="$ARTIFACT_DIR/cross-smoke"
 echo "SELFHOST_HOST_GATE_START host_platform=$HOST_PLATFORM host_target=$HOST_TARGET work_dir=$WORK_DIR"
 
 bash "$ROOT_DIR/scripts/ci/build_native_souc.sh" "$NATIVE_BIN" >"$LOG_DIR/build-native.log" 2>&1
+chmod +x "$NATIVE_BIN" 2>/dev/null || true
+maybe_codesign "$NATIVE_BIN"
 assert_file_kind "$NATIVE_BIN" "$HOST_FILE_KIND"
+
+if [[ "$HOST_PLATFORM" == Darwin:* && "${SOUNIO_DARWIN_SELFHOST_EXEC_MODE:-full}" == "attest" ]]; then
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify "$NATIVE_BIN" >"$LOG_DIR/native-codesign-verify.log" 2>&1 || true
+  fi
+  cat >"$SUMMARY_PATH" <<EOF
+host_platform=$HOST_PLATFORM
+host_target=$HOST_TARGET
+mode=attest
+reason=darwin_host_execution_blocked
+native_bin=$NATIVE_BIN
+native_bin_sha256=$(portable_sha256 "$NATIVE_BIN")
+native_bin_bytes=$(portable_size "$NATIVE_BIN")
+EOF
+  echo "SELFHOST_HOST_GATE_ATTEST host_platform=$HOST_PLATFORM host_target=$HOST_TARGET native_sha256=$(portable_sha256 "$NATIVE_BIN") reason=darwin_host_execution_blocked"
+  echo "SELFHOST_HOST_GATE_ARTIFACT_DIR=$WORK_DIR"
+  exit 0
+fi
 
 "$NATIVE_BIN" self-hosted/compiler/lean_single.sio "$STAGE2_BIN" --target "$HOST_TARGET" >"$LOG_DIR/stage2.log" 2>&1
 chmod +x "$STAGE2_BIN" 2>/dev/null || true
@@ -167,7 +193,7 @@ chmod +x "$STAGE3_BIN" 2>/dev/null || true
 maybe_codesign "$STAGE3_BIN"
 assert_file_kind "$STAGE3_BIN" "$HOST_FILE_KIND"
 
-if ! cmp -s "$STAGE2_BIN" "$STAGE3_BIN"; then
+if ! bash "$ROOT_DIR/scripts/lib/compare_executable_payloads.sh" "$STAGE2_BIN" "$STAGE3_BIN"; then
   echo "error: self-host fixed-point mismatch for $HOST_TARGET" >&2
   exit 1
 fi
@@ -184,13 +210,8 @@ assert_file_kind "$PRINT_SMOKE_BIN" "$HOST_FILE_KIND"
 PRINT_OUTPUT="$("$PRINT_SMOKE_BIN" 2>&1)"
 assert_output_equals $'3.141590\n-0.500000\n2.000000' "$PRINT_OUTPUT" "native_print_f64_smoke"
 
-python3 - "$READ_DATA_BIN" <<'PY'
-import struct
-import sys
-
-with open(sys.argv[1], "wb") as f:
-    f.write(struct.pack("<ddq", 3.14159, -0.5, 42))
-PY
+# Write test binary: little-endian f64(3.14159) f64(-0.5) i64(42)
+printf '\x6e\x86\x1b\xf0\xf9\x21\x09\x40\x00\x00\x00\x00\x00\x00\xe0\xbf\x2a\x00\x00\x00\x00\x00\x00\x00' > "$READ_DATA_BIN"
 
 "$STAGE2_BIN" self-hosted/compiler/native_read64_smoke.sio "$READ_SMOKE_BIN" --target "$HOST_TARGET" >"$LOG_DIR/read64.log" 2>&1
 chmod +x "$READ_SMOKE_BIN" 2>/dev/null || true

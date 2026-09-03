@@ -44,18 +44,13 @@ resolve_bootstrap_seed_trusted_key() {
     return 0
   fi
 
-  if [[ -f "$BOOTSTRAP_MANIFEST_METADATA_PATH" ]] && command -v python3 >/dev/null 2>&1; then
+  if [[ -f "$BOOTSTRAP_MANIFEST_METADATA_PATH" ]]; then
+    # Pure-Sounio key extraction (replaces python json.load["key_id"] heredoc).
+    # ROOT_DIR in scripts/selfhost/*.sh resolves to scripts/, not repo root —
+    # use ../bin/kretikos. --print-or-empty matches python's `payload.get(key, "")`.
     local manifest_key
-    manifest_key="$(
-      python3 - "$BOOTSTRAP_MANIFEST_METADATA_PATH" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    payload = json.load(f)
-print(payload.get("key_id", ""))
-PY
-    )"
+    manifest_key="$("$ROOT_DIR/../bin/kretikos" kaxi-validate-evidence \
+        "$BOOTSTRAP_MANIFEST_METADATA_PATH" --print-or-empty "key_id" 2>/dev/null || true)"
     if [[ -n "$manifest_key" ]]; then
       echo "$manifest_key"
       return 0
@@ -84,20 +79,13 @@ run_with_timeout() {
     return $?
   fi
 
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$seconds" "$@" <<'PY'
-import subprocess
-import sys
-
-seconds = int(sys.argv[1])
-command = sys.argv[2:]
-try:
-    completed = subprocess.run(command, timeout=seconds)
-    sys.exit(completed.returncode)
-except subprocess.TimeoutExpired:
-    sys.exit(124)
-PY
-    return $?
+  # Pure-perl timeout fallback (replaces python3 subprocess.run heredoc).
+  # See selfhost_zero_fallback_gate.sh for rationale.
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm $ARGV[0]; shift @ARGV; exec @ARGV; exit 127' "$seconds" "$@"
+    local rc=$?
+    [[ $rc -eq 142 ]] && rc=124
+    return $rc
   fi
 
   "$@"
@@ -128,15 +116,9 @@ echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
 echo "independence_contract=$INDEPENDENCE_CONTRACT_PATH"
 
 if [ -f "$INDEPENDENCE_CONTRACT_PATH" ]; then
-  python3 - "$INDEPENDENCE_CONTRACT_PATH" <<'PY'
-import json
-import pathlib
-import sys
-
-obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
-if obj.get("schema") != "sounio.independence.contract.v1":
-    raise SystemExit(f"invalid independence contract schema: {obj.get('schema')}")
-PY
+  # Validate schema via pure-Sounio kaxi-validate-evidence (replaces python json.loads).
+  "$ROOT_DIR/../bin/kretikos" kaxi-validate-evidence "$INDEPENDENCE_CONTRACT_PATH" \
+    --expect "schema=sounio.independence.contract.v1"
 fi
 
 if [ "$SKIP_BUILD" = "1" ]; then
@@ -155,29 +137,37 @@ fi
 
 extract_cycle_digest() {
   local report_path="$1"
-  python3 - "$report_path" <<'PY'
-import json
-import sys
+  # Pure-bash cycle digest extractor (replaces python json.load heredoc).
+  # Reads stage1_digest, stage2_digest, deterministic, artifacts_checked
+  # via kaxi-validate-evidence --print-or-empty. Asserts both digests
+  # nonempty AND equal; emits 3 KEY=VALUE lines on success.
+  local kretikos="$ROOT_DIR/../bin/kretikos"
+  local stage1 stage2 det art
+  stage1="$("$kretikos" kaxi-validate-evidence "$report_path" --print-or-empty "stage1_digest" 2>/dev/null || true)"
+  stage2="$("$kretikos" kaxi-validate-evidence "$report_path" --print-or-empty "stage2_digest" 2>/dev/null || true)"
+  det="$("$kretikos" kaxi-validate-evidence "$report_path" --print-or-empty "deterministic" 2>/dev/null || true)"
+  art="$("$kretikos" kaxi-validate-evidence "$report_path" --print-or-empty "artifacts_checked" 2>/dev/null || true)"
 
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    payload = json.load(f)
+  if [[ -z "$stage1" || -z "$stage2" ]]; then
+    echo "missing cycle digest fields in $report_path" >&2
+    return 1
+  fi
+  if [[ "$stage1" != "$stage2" ]]; then
+    echo "non-deterministic cycle report $report_path stage1=$stage1 stage2=$stage2" >&2
+    return 1
+  fi
+  # Match python's "1 if deterministic else 0" — JSON true -> "1", anything else -> "0".
+  if [[ "$det" == "true" ]]; then
+    det="1"
+  else
+    det="0"
+  fi
+  # Default missing artifacts_checked to 0 (matches python's payload.get("artifacts_checked", 0)).
+  [[ -z "$art" ]] && art="0"
 
-stage1 = payload.get("stage1_digest", "")
-stage2 = payload.get("stage2_digest", "")
-deterministic = payload.get("deterministic", False)
-artifacts_checked = payload.get("artifacts_checked", 0)
-
-if not stage1 or not stage2:
-    raise SystemExit(f"missing cycle digest fields in {sys.argv[1]}")
-if stage1 != stage2:
-    raise SystemExit(
-        f"non-deterministic cycle report {sys.argv[1]} stage1={stage1} stage2={stage2}"
-    )
-
-print(f"cycle_digest={stage1}")
-print(f"deterministic={'1' if deterministic else '0'}")
-print(f"artifacts_checked={artifacts_checked}")
-PY
+  echo "cycle_digest=$stage1"
+  echo "deterministic=$det"
+  echo "artifacts_checked=$art"
 }
 
 run_cycle_stage() {

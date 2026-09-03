@@ -1,0 +1,235 @@
+//@ run-pass
+//@ requires: madaros
+
+// TLS 1.3 record-layer encrypt/decrypt against a real handshake record
+// from RFC 8448 ("Example Handshake Traces for TLS 1.3"), fetched fresh
+// from https://www.rfc-editor.org/rfc/rfc8448.txt on 2026-08-25.
+//
+// SOURCE / METHOD (see task-4-report.md for the full transcript):
+//   The RFC's "Simple 1-RTT Handshake" trace (Section 3) publishes, in
+//   order: the "tls13 c hs traffic" client_handshake_traffic_secret
+//   (Section 3, "{server} derive secret \"tls13 c hs traffic\"",
+//   `expanded (32 octets)`), the client's write traffic key/IV for
+//   handshake data (Section 3, "{server} derive read traffic keys for
+//   handshake data" -- the server's *read* keys are, by construction,
+//   the client's *write* keys for the same traffic secret, and the RFC
+//   explicitly notes the client-side derivation "(same as server
+//   handshake data read traffic keys)" rather than reprinting it), and
+//   the client's first encrypted handshake record -- its Finished
+//   message -- as both a `payload (36 octets)` (the real plaintext
+//   handshake content, real content type = handshake = 0x16) and a
+//   `complete record (58 octets)` (the full wire TLSCiphertext: 5-byte
+//   header `17 03 03 00 35` + 53-byte encrypted_record).
+//
+//   This is the client's FIRST record sent under its handshake traffic
+//   key (RFC 8446 SS5.3: sequence number resets to 0 at every rekey),
+//   so sequence number 0 applies -- confirmed by the trace ordering:
+//   "{client} calculate finished" is the client's only action after
+//   "{client} derive write traffic keys for handshake data" (echoing the
+//   server's already-derived keys) and before this send.
+//
+//   Every value below was extracted from the fetched RFC text
+//   PROGRAMMATICALLY (a small Python script matched each named field --
+//   "expanded (32 octets)", "key expanded (16 octets)", "iv expanded (12
+//   octets)", "payload (36 octets)", "complete record (58 octets)" --
+//   and asserted the parsed byte count against the RFC's own stated
+//   count), not retyped by hand, specifically to rule out the
+//   transcription-error failure mode this project has hit before with
+//   secondhand RFC values.
+//
+//   The key/IV were independently re-derived (not just copied from the
+//   RFC's own printed "key expanded"/"iv expanded" values) via this
+//   project's own `tls13_traffic_key_and_iv` (HKDF-Expand-Label, RFC
+//   8446 SS7.3) from the client_handshake_traffic_secret, confirmed to
+//   match the RFC's printed key/IV bytewise with Python's `hmac`/
+//   `hashlib` (an independent, non-Sounio implementation) before this
+//   test was written, and are re-confirmed by this file's own asserts.
+//
+//   The full record-encrypt/decrypt round trip (AES-128-GCM, since the
+//   derived key is 16 bytes) was also independently verified against
+//   Python's `cryptography` library (`AESGCM`) in both directions
+//   (decrypt-then-compare-to-plaintext, and encrypt-the-plaintext-then-
+//   compare-to-the-RFC's-own-ciphertext) before transcribing the vector
+//   here.
+
+use tls::record::*
+use crypto::aead::*
+use crypto::hkdf::*
+use net::socket::*
+
+fn write_bytes(buf: &RawBuf, values: [i64; 64], n: i64) with IO {
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, values[i as usize])
+        i = i + 1
+    }
+}
+
+// client_handshake_traffic_secret ("tls13 c hs traffic", expanded (32
+// octets)) -- RFC 8448 Section 3, "{server} derive secret \"tls13 c hs
+// traffic\"".
+fn client_hs_traffic_secret() -> RawBuf with IO {
+    let buf = rawbuf_new(32)
+    let vals: [i64; 64] = [
+        0xb3, 0xed, 0xdb, 0x12, 0x6e, 0x06, 0x7f, 0x35, 0xa7, 0x80, 0xb3, 0xab, 0xf4, 0x5e, 0x2d, 0x8f,
+        0x3b, 0x1a, 0x95, 0x07, 0x38, 0xf5, 0x2e, 0x96, 0x00, 0x74, 0x6a, 0x0e, 0x27, 0xa5, 0x5a, 0x21,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 32)
+    buf
+}
+
+// RFC's own printed "key expanded (16 octets)"/"iv expanded (12
+// octets)" for these same client handshake-traffic keys, used only to
+// cross-check this file's independent HKDF re-derivation below.
+fn rfc_printed_key() -> RawBuf with IO {
+    let buf = rawbuf_new(16)
+    let vals: [i64; 64] = [
+        0xdb, 0xfa, 0xa6, 0x93, 0xd1, 0x76, 0x2c, 0x5b, 0x66, 0x6a, 0xf5, 0xd9, 0x50, 0x25, 0x8d, 0x01,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 16)
+    buf
+}
+
+fn rfc_printed_iv() -> RawBuf with IO {
+    let buf = rawbuf_new(12)
+    let vals: [i64; 64] = [
+        0x5b, 0xd3, 0xc7, 0x1b, 0x83, 0x6e, 0x0b, 0x76, 0xbb, 0x73, 0x26, 0x5f,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 12)
+    buf
+}
+
+// The client's first encrypted handshake record's real plaintext content
+// (Finished handshake message, 36 octets) -- RFC 8448 Section 3,
+// "{client} send handshake record", `payload (36 octets)`.
+fn rfc_finished_plaintext() -> RawBuf with IO {
+    let buf = rawbuf_new(36)
+    let vals: [i64; 64] = [
+        0x14, 0x00, 0x00, 0x20, 0xa8, 0xec, 0x43, 0x6d, 0x67, 0x76, 0x34, 0xae, 0x52, 0x5a, 0xc1, 0xfc,
+        0xeb, 0xe1, 0x1a, 0x03, 0x9e, 0xc1, 0x76, 0x94, 0xfa, 0xc6, 0xe9, 0x85, 0x27, 0xb6, 0x42, 0xf2,
+        0xed, 0xd5, 0xce, 0x61,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 36)
+    buf
+}
+
+// The same record's `encrypted_record` payload (53 octets: 37-byte
+// TLSInnerPlaintext + 16-byte tag), i.e. the RFC's `complete record (58
+// octets)` with its 5-byte outer header (`17 03 03 00 35`) stripped off.
+fn rfc_finished_ciphertext() -> RawBuf with IO {
+    let buf = rawbuf_new(53)
+    let vals: [i64; 64] = [
+        0x75, 0xec, 0x4d, 0xc2, 0x38, 0xcc, 0xe6, 0x0b, 0x29, 0x80, 0x44, 0xa7, 0x1e, 0x21, 0x9c, 0x56,
+        0xcc, 0x77, 0xb0, 0x51, 0x7f, 0xe9, 0xb9, 0x3c, 0x7a, 0x4b, 0xfc, 0x44, 0xd8, 0x7f, 0x38, 0xf8,
+        0x03, 0x38, 0xac, 0x98, 0xfc, 0x46, 0xde, 0xb3, 0x84, 0xbd, 0x1c, 0xae, 0xac, 0xab, 0x68, 0x67,
+        0xd7, 0x26, 0xc4, 0x05, 0x46,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    // Note: 53 real bytes + 11 zero-padding entries = 64 total.
+    write_bytes(&buf, vals, 53)
+    buf
+}
+
+fn rawbuf_eq(a: &RawBuf, b: &RawBuf, len: i64) -> bool with IO {
+    var i: i64 = 0
+    var ok = true
+    while i < len {
+        if rawbuf_get(a, i) != rawbuf_get(b, i) {
+            ok = false
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn main() -> i64 with IO, Mut {
+    let secret = client_hs_traffic_secret()
+
+    // Independent re-derivation (Step 1): HKDF-Expand-Label the traffic
+    // secret into key+IV via this project's own tls13_traffic_key_and_iv,
+    // and confirm it matches the RFC's own printed key/IV bytewise before
+    // trusting either for the record-layer test below.
+    let (derived_key, derived_iv) = tls13_traffic_key_and_iv(HKDF_HASH_SHA256, &secret, 32, 16, 12)
+    let expected_key = rfc_printed_key()
+    let expected_iv = rfc_printed_iv()
+    assert(rawbuf_eq(&derived_key, &expected_key, 16))
+    assert(rawbuf_eq(&derived_iv, &expected_iv, 12))
+
+    // Build a RecordLayerState with these as BOTH read and write keys
+    // (the RFC trace only exercises one direction at this point; using
+    // the same real key material for both lets us decrypt then
+    // re-encrypt the same real record through one state).
+    var state = record_layer_new(AEAD_AES_128_GCM, 16, 12)
+    record_layer_rekey(&!state, &derived_key, &derived_iv, &derived_key, &derived_iv)
+
+    let ciphertext = rfc_finished_ciphertext()
+    let (content_type, plaintext, plaintext_len, ok) = record_decrypt(&!state, &ciphertext, 53)
+    assert(ok)
+    assert(content_type == TLS_CONTENT_TYPE_HANDSHAKE)
+    assert(plaintext_len == 36)
+    let expected_plaintext = rfc_finished_plaintext()
+    assert(rawbuf_eq(&plaintext, &expected_plaintext, 36))
+
+    // Re-encrypt the same real plaintext at write_seq == 0 (rekey reset
+    // it) and confirm the output matches the RFC's own published
+    // ciphertext bytes exactly.
+    let reencrypted = record_encrypt(&!state, TLS_CONTENT_TYPE_HANDSHAKE, &expected_plaintext, 36)
+    assert(rawbuf_eq(&reencrypted, &ciphertext, 53))
+
+    println("tls_record_rfc8448: record encrypt/decrypt match RFC 8448's real wire bytes")
+
+    // ------------------------------------------------------------------
+    // Round-trip test independent of RFC 8448: encrypt then decrypt an
+    // arbitrary plaintext at sequence numbers 0, 1, 254 (0xfe), 255
+    // (0xff, the low-byte saturation point), and 256 (the genuine
+    // 255->256 multi-byte carry, where the second-to-last byte of the
+    // 8-byte big-endian sequence number increments for the first time),
+    // confirming the 8-byte sequence-number-to-nonce encoding handles a
+    // multi-byte sequence number correctly (RFC 8448's own trace only
+    // ever exercises sequence number 0).
+    // ------------------------------------------------------------------
+    var rt_state = record_layer_new(AEAD_AES_128_GCM, 16, 12)
+    record_layer_rekey(&!rt_state, &derived_key, &derived_iv, &derived_key, &derived_iv)
+
+    let msg = rawbuf_new(5)
+    rawbuf_set(&msg, 0, 0x68) // 'h'
+    rawbuf_set(&msg, 1, 0x65) // 'e'
+    rawbuf_set(&msg, 2, 0x6c) // 'l'
+    rawbuf_set(&msg, 3, 0x6c) // 'l'
+    rawbuf_set(&msg, 4, 0x6f) // 'o'
+
+    var seq_target: i64 = 0
+    while seq_target <= 256 {
+        // Drive write_seq/read_seq up to `seq_target` by round-tripping
+        // dummy records, then do the real assertion at that sequence
+        // number. seq_target takes the values 0, 1, ..., 256 so the
+        // single-digit case, the low-byte saturation point (seq == 255,
+        // i.e. 0xff, the last value the low byte of the 8-byte
+        // big-endian sequence number can hold), and the genuine
+        // multi-byte carry (seq == 256, where the second-to-last byte of
+        // that 8-byte encoding increments for the first time) are all
+        // actually exercised at those exact sequence numbers -- not just
+        // approached by a loop bound that stopped one short.
+        if seq_target == 0 || seq_target == 1 || seq_target == 254 || seq_target == 255 || seq_target == 256 {
+            let ct = record_encrypt(&!rt_state, TLS_CONTENT_TYPE_APPLICATION_DATA, &msg, 5)
+            let (rt_content_type, rt_plain, rt_plain_len, rt_ok) = record_decrypt(&!rt_state, &ct, 22)
+            assert(rt_ok)
+            assert(rt_content_type == TLS_CONTENT_TYPE_APPLICATION_DATA)
+            assert(rt_plain_len == 5)
+            assert(rawbuf_eq(&rt_plain, &msg, 5))
+        } else {
+            let ct = record_encrypt(&!rt_state, TLS_CONTENT_TYPE_APPLICATION_DATA, &msg, 5)
+            let (_ct2, _p2, _pl2, skip_ok) = record_decrypt(&!rt_state, &ct, 22)
+            assert(skip_ok)
+        }
+        seq_target = seq_target + 1
+    }
+
+    println("tls_record_rfc8448: round-trip OK at seq 0, 1, 254 (0xfe), 255 (0xff low-byte saturation), and 256 (genuine multi-byte carry)")
+    return 0
+}

@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.bootstrap-seed-policy
 -->
 
-
 # Bootstrap Seed Policy (R1)
 
 This document defines the transition seed artifact used to bootstrap the

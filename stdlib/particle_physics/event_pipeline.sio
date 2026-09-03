@@ -1,0 +1,362 @@
+// ============================================================================
+// EVENT PIPELINE — End-to-end collider event simulation
+// ============================================================================
+//
+// Combines hard scattering, parton shower, hadronization, and detector
+// simulation into a single event record. Provides observable computation
+// for common HEP analyses.
+
+module particle_physics::event_pipeline
+
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_zero, lorentz_add, lorentz_sub, lorentz_dot, lorentz_mass, lorentz_scale, pt, rapidity, pseudorapidity, azimuth}
+use particle_physics::parton_shower::{seed_shower_rng, rand_shower_uniform, generate_emission, cluster_decay_two_body, Hadron, hadron_pion_plus, hadron_pion_minus, hadron_kaon_plus, hadron_proton}
+use particle_physics::detector::{Material, material_si, bethe_bloch, highland_scattering_angle, calorimeter_resolution, track_curvature, helix_position, Position3}
+use particle_physics::cross_section::{mandelstam_s}
+use particle_physics::jet::{jet_cluster_kt, Jet}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// Event Record
+// ============================================================================
+
+/// A particle in the event record.
+pub struct EventParticle {
+    pub pdg: i64,
+    pub status: i64,
+    pub p: LorentzVector,
+    pub charge: f64,
+    pub mass: f64,
+}
+
+/// Event record with up to 256 particles.
+pub struct EventRecord {
+    pub n_particles: i64,
+    pub weight: f64,
+    pub particles: [EventParticle; 256],
+}
+
+/// Helper: zero-initialized event particle.
+fn event_particle_zero() -> EventParticle {
+    return EventParticle { pdg: 0, status: 0, p: lorentz_zero(), charge: 0.0, mass: 0.0 }
+}
+
+/// Initialize an empty event record.
+pub fn event_record_new() -> EventRecord {
+    var particles: [EventParticle; 256] = [event_particle_zero(); 256]
+    return EventRecord { n_particles: 0, weight: 1.0, particles: particles }
+}
+
+/// Add a particle to the event record.
+pub fn event_add_particle(ev: &!EventRecord, pdg: i64, status: i64, p: LorentzVector, charge: f64, mass: f64) with Mut {
+    let idx = ev.n_particles
+    if idx < 256 {
+        ev.particles[idx as usize] = EventParticle { pdg: pdg, status: status, p: p, charge: charge, mass: mass }
+        ev.n_particles = idx + 1
+    }
+}
+
+// ============================================================================
+// Observable Computation
+// ============================================================================
+
+/// Missing transverse energy (MET) from all invisible particles.
+pub fn compute_met(ev: &!EventRecord) -> f64 with Mut, Div, Panic {
+    var sum_px: f64 = 0.0
+    var sum_py: f64 = 0.0
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let p = ev.particles[i as usize]
+        if p.status == 1 && (p.pdg == 12 || p.pdg == 14 || p.pdg == 16 || p.pdg == 1000022) {
+            sum_px = sum_px + p.p.x
+            sum_py = sum_py + p.p.y
+        }
+        i = i + 1
+    }
+    return sqrt(sum_px * sum_px + sum_py * sum_py)
+}
+
+/// Scalar sum of jet pT (HT).
+pub fn compute_ht(ev: &!EventRecord, jet_pt_min: f64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let p = ev.particles[i as usize]
+        if p.status == 1 && p.pdg != 12 && p.pdg != 14 && p.pdg != 16 {
+            let pT = pt(p.p)
+            if pT >= jet_pt_min {
+                sum = sum + pT
+            }
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+/// Invariant mass of the two leading particles.
+pub fn invariant_mass_leading_two(ev: &!EventRecord) -> f64 with Mut, Div, Panic {
+    if ev.n_particles < 2 { return 0.0 }
+    let p1 = ev.particles[0 as usize].p
+    let p2 = ev.particles[1 as usize].p
+    let psum = lorentz_add(p1, p2)
+    let m = lorentz_mass(psum)
+    if m < 0.0 { return 0.0 }
+    return m
+}
+
+/// Number of particles with pT > threshold.
+pub fn count_particles_above_pt(ev: &!EventRecord, pt_min: f64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let p = ev.particles[i as usize]
+        if p.status == 1 && pt(p.p) >= pt_min {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+/// Transverse sphericity (measure of event isotropy).
+pub fn transverse_sphericity(ev: &!EventRecord) -> f64 {
+    var sxx: f64 = 0.0
+    var sxy: f64 = 0.0
+    var syy: f64 = 0.0
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let p = ev.particles[i as usize]
+        if p.status == 1 {
+            let px = p.p.x
+            let py = p.p.y
+            sxx = sxx + px * px
+            sxy = sxy + px * py
+            syy = syy + py * py
+        }
+        i = i + 1
+    }
+    let trace = sxx + syy
+    if trace == 0.0 { return 0.0 }
+    let det = sxx * syy - sxy * sxy
+    var st = 4.0 * det / (trace * trace)
+    if st < 0.0 { st = 0.0 }
+    if st > 1.0 { st = 1.0 }
+    return st
+}
+
+/// Azimuthal angle difference between two leading particles.
+pub fn delta_phi_leading(ev: &!EventRecord) -> f64 with Mut, Div, Panic {
+    if ev.n_particles < 2 { return 0.0 }
+    let phi1 = azimuth(ev.particles[0 as usize].p)
+    let phi2 = azimuth(ev.particles[1 as usize].p)
+    var dphi = phi1 - phi2
+    if dphi < 0.0 { dphi = 0.0 - dphi }
+    if dphi > 3.141592653589793 {
+        dphi = 2.0 * 3.141592653589793 - dphi
+    }
+    return dphi
+}
+
+/// Rapidity gap between most forward and most backward particles.
+pub fn rapidity_gap(ev: &!EventRecord) -> f64 with Mut, Div, Panic {
+    var y_max: f64 = -1000.0
+    var y_min: f64 = 1000.0
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let p = ev.particles[i as usize]
+        if p.status == 1 {
+            let y = rapidity(p.p)
+            if y > y_max { y_max = y }
+            if y < y_min { y_min = y }
+        }
+        i = i + 1
+    }
+    if y_max < -999.0 { return 0.0 }
+    return y_max - y_min
+}
+
+// ============================================================================
+// Event Selection
+// ============================================================================
+
+/// Simple event selection mask.
+pub fn event_passes_vbs_selection(ev: &!EventRecord, met_min: f64, mjj_min: f64) -> i64 with Mut, Div, Panic {
+    let met = compute_met(ev)
+    if met < met_min { return 0 }
+    let mjj = invariant_mass_leading_two(ev)
+    if mjj < mjj_min { return 0 }
+    return 1
+}
+
+/// SUSY-like selection: HT > threshold + MET > threshold.
+pub fn event_passes_susy_selection(ev: &!EventRecord, ht_min: f64, met_min: f64) -> i64 with Mut, Div, Panic {
+    let ht = compute_ht(ev, 40.0)
+    let met = compute_met(ev)
+    if ht < ht_min { return 0 }
+    if met < met_min { return 0 }
+    return 1
+}
+
+// ============================================================================
+// Simplified Event Generation
+// ============================================================================
+
+/// Generate a toy QCD dijet event: two back-to-back partons with pT ~ scale.
+pub fn generate_dijet_event(pT: f64) -> EventRecord with Mut, Div, Panic {
+    var ev = event_record_new()
+    let pi = 3.141592653589793
+    let phi = 2.0 * pi * rand_shower_uniform()
+    let eta = 2.0 * rand_shower_uniform() - 1.0
+    let px = pT * cos_f64(phi)
+    let py = pT * sin_f64(phi)
+    let pz = pT * sinh_f64(eta)
+    let e = sqrt(pT * pT + pz * pz)
+    let p1 = lorentz_new(e, px, py, pz)
+    let p2 = lorentz_new(e, 0.0 - px, 0.0 - py, 0.0 - pz)
+    event_add_particle(&!ev, 1, 1, p1, 0.666, 0.0)
+    event_add_particle(&!ev, -1, 1, p2, -0.666, 0.0)
+    return ev
+}
+
+/// Generate a toy mono-jet event: one jet + missing energy.
+pub fn generate_monojet_event(pT_jet: f64, met: f64) -> EventRecord with Mut, Div, Panic {
+    var ev = event_record_new()
+    let pi = 3.141592653589793
+    let phi_jet = 2.0 * pi * rand_shower_uniform()
+    var phi_met = phi_jet + pi
+    if phi_met > 2.0 * pi { phi_met = phi_met - 2.0 * pi }
+    let px_j = pT_jet * cos_f64(phi_jet)
+    let py_j = pT_jet * sin_f64(phi_jet)
+    let px_m = met * cos_f64(phi_met)
+    let py_m = met * sin_f64(phi_met)
+    let p_jet = lorentz_new(pT_jet * 1.2, px_j, py_j, pT_jet * 0.5)
+    let p_dm = lorentz_new(met, px_m, py_m, 0.0)
+    event_add_particle(&!ev, 1, 1, p_jet, 0.666, 0.0)
+    event_add_particle(&!ev, 1000022, 1, p_dm, 0.0, 100.0)
+    return ev
+}
+
+// ============================================================================
+// Helper trig functions
+// ============================================================================
+
+fn cos_f64(x: f64) -> f64 {
+    var term: f64 = 1.0
+    var sum: f64 = 1.0
+    let x2 = x * x
+    var sign: f64 = -1.0
+    var n: i64 = 1
+    while n <= 6 {
+        term = term * x2 / ((2.0 * n as f64 - 1.0) * (2.0 * n as f64))
+        sum = sum + sign * term
+        sign = 0.0 - sign
+        n = n + 1
+    }
+    return sum
+}
+
+fn sin_f64(x: f64) -> f64 {
+    var term: f64 = x
+    var sum: f64 = x
+    let x2 = x * x
+    var sign: f64 = -1.0
+    var n: i64 = 1
+    while n <= 6 {
+        term = term * x2 / ((2.0 * n as f64) * (2.0 * n as f64 + 1.0))
+        sum = sum + sign * term
+        sign = 0.0 - sign
+        n = n + 1
+    }
+    return sum
+}
+
+fn sinh_f64(x: f64) -> f64 {
+    let ex = exp(x)
+    let emx = exp(0.0 - x)
+    return 0.5 * (ex - emx)
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_event_record() -> bool with Mut {
+    var ev = event_record_new()
+    if ev.n_particles != 0 { return false }
+    let p = lorentz_new(10.0, 1.0, 2.0, 3.0)
+    event_add_particle(&!ev, 11, 1, p, -1.0, 0.511e-3)
+    if ev.n_particles != 1 { return false }
+    if ev.particles[0 as usize].pdg != 11 { return false }
+    return true
+}
+
+pub fn test_compute_met() -> bool with Mut, Div, Panic {
+    var ev = event_record_new()
+    let p1 = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let p2 = lorentz_new(100.0, 0.0, 50.0, 0.0)
+    event_add_particle(&!ev, 12, 1, p1, 0.0, 0.0)
+    event_add_particle(&!ev, 14, 1, p2, 0.0, 0.0)
+    let met = compute_met(&!ev)
+    let expected = sqrt(50.0 * 50.0 + 50.0 * 50.0)
+    if met != expected { return false }
+    return true
+}
+
+pub fn test_compute_ht() -> bool with Mut, Div, Panic {
+    var ev = event_record_new()
+    let p1 = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let p2 = lorentz_new(80.0, 0.0, 40.0, 0.0)
+    event_add_particle(&!ev, 1, 1, p1, 0.666, 0.0)
+    event_add_particle(&!ev, -1, 1, p2, -0.666, 0.0)
+    let ht = compute_ht(&!ev, 30.0)
+    if ht != 90.0 { return false }
+    return true
+}
+
+pub fn test_transverse_sphericity() -> bool with Mut {
+    var ev = event_record_new()
+    let p1 = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let p2 = lorentz_new(100.0, -50.0, 0.0, 0.0)
+    event_add_particle(&!ev, 1, 1, p1, 0.666, 0.0)
+    event_add_particle(&!ev, -1, 1, p2, -0.666, 0.0)
+    let st = transverse_sphericity(&!ev)
+    if st < 0.0 || st > 1.0 { return false }
+    return true
+}
+
+pub fn test_event_selection() -> bool with Mut, Div, Panic {
+    var ev = event_record_new()
+    let p1 = lorentz_new(500.0, 300.0, 0.0, 0.0)
+    let p2 = lorentz_new(500.0, -300.0, 0.0, 0.0)
+    event_add_particle(&!ev, 1, 1, p1, 0.666, 0.0)
+    event_add_particle(&!ev, -1, 1, p2, -0.666, 0.0)
+    let fail = event_passes_vbs_selection(&!ev, 100.0, 500.0)
+    if fail != 0 { return false }
+    let p_nu = lorentz_new(200.0, 150.0, 0.0, 0.0)
+    event_add_particle(&!ev, 12, 1, p_nu, 0.0, 0.0)
+    let pass = event_passes_vbs_selection(&!ev, 100.0, 500.0)
+    if pass != 1 { return false }
+    return true
+}
+
+pub fn test_dijet_event_generation() -> bool with Mut, Div, Panic {
+    seed_shower_rng(123)
+    var ev = generate_dijet_event(100.0)
+    if ev.n_particles != 2 { return false }
+    let m = invariant_mass_leading_two(&!ev)
+    if m < 0.0 { return false }
+    return true
+}
+
+pub fn test_monojet_event_generation() -> bool with Mut, Div, Panic {
+    seed_shower_rng(456)
+    var ev = generate_monojet_event(200.0, 150.0)
+    if ev.n_particles != 2 { return false }
+    let met = compute_met(&!ev)
+    if met < 0.0 { return false }
+    return true
+}

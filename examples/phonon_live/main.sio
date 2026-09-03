@@ -1,0 +1,179 @@
+// examples/phonon_live/main.sio — Live hepatic phonon lattice simulation
+//
+// Runs the rapamycin sinusoidal phonon lattice in real time and renders:
+//   Top panel:    Heatmap of drug concentration across 64 hepatic zones (live)
+//   Bottom panel: Outflow concentration vs simulation time (growing trace)
+//
+// Uses stdlib/physics/phonon_quantity.sio (Quantity-typed RK4 integrator).
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open_titled, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear, canvas_fill_rect,
+                       canvas_draw_rect}
+use display::font::{font_draw_string}
+use display::event::{EV_CLOSE, EV_KEY_PRESS, KEY_ESCAPE}
+use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_grid}
+use viz::chart::{chart_line}
+use viz::sci::{sci_lattice_heatmap}
+use physics::phonon_quantity::{Lattice64, PhononParams,
+                                lattice64_zero, rapamycin_phonon_params_q,
+                                cfl_dt_q, phonon_rk4_step_q,
+                                lattice64_outflow_concentration,
+                                lattice64_spatial_average}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+fn ph_min_f(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn ph_max_f(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    let W: i64 = 800
+    let H: i64 = 600
+
+    var title: [i8; 128] = [0; 128]
+    title[0]  = 83    // S
+    title[1]  = 111   // o
+    title[2]  = 117   // u
+    title[3]  = 110   // n
+    title[4]  = 105   // i
+    title[5]  = 111   // o
+    title[6]  = 32    //
+    title[7]  = 80    // P
+    title[8]  = 104   // h
+    title[9]  = 111   // o
+    title[10] = 110   // n
+    title[11] = 111   // o
+    title[12] = 110   // n
+    let title_len: i64 = 13
+
+    var win = window_open_titled(&title, title_len, W, H)
+
+    // Initialise lattice: uniform 10 ng/mL = 1e-5 kg/m³
+    var state = lattice64_zero()
+    var si: i64 = 0
+    while si < 64 {
+        state.values[si as usize]    = 1.0e-5
+        state.variances[si as usize] = 1.0e-12
+        si = si + 1
+    }
+    state.n = 64
+
+    let params = rapamycin_phonon_params_q()
+    let dt     = cfl_dt_q(&params)      // CFL-stable timestep (s)
+
+    var sim_t: f64 = 0.0
+
+    // Outflow history (ng/mL × 1e5 for display in [0,2] range)
+    var hist_t: [f64; 1024] = [0.0; 1024]
+    var hist_y: [f64; 1024] = [0.0; 1024]
+    var hist_n: i64 = 0
+
+    // Maximum outflow seen (for auto-scaling bottom panel Y-axis)
+    var max_outflow: f64 = 1.0e-4
+
+    // Top panel: lattice heatmap
+    let HM_X: i64 = 40
+    let HM_Y: i64 = 60
+    let HM_W: i64 = W - 60
+    let HM_H: i64 = 220
+    let cs_hm = coord_new(0.0, 1.0, 0.0, 1.0, HM_X, HM_Y, HM_W, HM_H)
+
+    // Bottom panel: outflow trace — X = time (s), Y = outflow concentration
+    let TR_X: i64 = 40
+    let TR_Y: i64 = 340
+    let TR_W: i64 = W - 60
+    let TR_H: i64 = 200
+    // X axis: 0 to ~200 s (one minute of sim); Y axis starts at 0, auto-scales
+    var cs_tr = coord_new(0.0, 200.0, 0.0, 2.0e-4, TR_X, TR_Y, TR_W, TR_H)
+
+    // HUD string
+    var hud: [i8; 256] = [0; 256]
+    hud[0]  = 82   // R
+    hud[1]  = 97   // a
+    hud[2]  = 112  // p
+    hud[3]  = 97   // a
+    hud[4]  = 109  // m
+    hud[5]  = 121  // y
+    hud[6]  = 99   // c
+    hud[7]  = 105  // i
+    hud[8]  = 110  // n
+    hud[9]  = 32   //
+    hud[10] = 104  // h
+    hud[11] = 101  // e
+    hud[12] = 112  // p
+    hud[13] = 97   // a
+    hud[14] = 116  // t
+    hud[15] = 105  // i
+    hud[16] = 99   // c
+    hud[17] = 32   //
+    hud[18] = 108  // l
+    hud[19] = 97   // a
+    hud[20] = 116  // t
+    hud[21] = 116  // t
+    hud[22] = 105  // i
+    hud[23] = 99   // c
+    hud[24] = 101  // e
+    let hud_len: i64 = 25
+
+    // Steps per frame: advance ~0.1 s of simulation per frame
+    let STEPS_PER_FRAME: i64 = if dt > 0.0 { (0.1 / dt) as i64 + 1 } else { 10 }
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == KEY_ESCAPE { running = false }
+        }
+
+        // Advance simulation
+        var step: i64 = 0
+        while step < STEPS_PER_FRAME {
+            phonon_rk4_step_q(sim_t, &!state, &params, dt)
+            sim_t = sim_t + dt
+            step = step + 1
+        }
+
+        // Record outflow
+        let outflow = lattice64_outflow_concentration(&state)
+        if outflow > max_outflow { max_outflow = outflow }
+        if hist_n < 1024 {
+            hist_t[hist_n as usize] = sim_t
+            hist_y[hist_n as usize] = outflow
+            hist_n = hist_n + 1
+        }
+
+        // Render
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 12, 14, 22)
+
+        font_draw_string(c.pixels, c.width, c.height, &hud, hud_len, 16, 18, 100, 200, 255)
+
+        // Top: lattice heatmap
+        canvas_fill_rect(&!c, HM_X, HM_Y, HM_W, HM_H, 18, 20, 32)
+        canvas_draw_rect(&!c, HM_X, HM_Y, HM_W, HM_H, 50, 60, 90)
+        sci_lattice_heatmap(&cs_hm, &state, &!c)
+
+        // Bottom: outflow trace — auto-scale Y axis
+        let y_max = max_outflow * 1.2
+        cs_tr = coord_new(0.0, sim_t + 1.0, 0.0, y_max, TR_X, TR_Y, TR_W, TR_H)
+        canvas_fill_rect(&!c, TR_X, TR_Y, TR_W, TR_H, 18, 20, 32)
+        canvas_draw_rect(&!c, TR_X, TR_Y, TR_W, TR_H, 50, 60, 90)
+        coord_draw_grid(&cs_tr, &!c, 4)
+        coord_draw_axes(&cs_tr, &!c)
+        if hist_n > 1 {
+            chart_line(&cs_tr, &hist_t, &hist_y, hist_n, &!c, 80, 200, 120)
+        }
+
+        window_present(&!win)
+    }
+
+    window_close(&!win)
+}

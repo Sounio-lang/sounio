@@ -1,65 +1,29 @@
-//! stdlib/epistemic/knowledge.d
-//!
-//! Knowledge<T> - The core epistemic type for Sounio
-//!
-//! Every value knows its uncertainty. Every computation propagates variance.
-//! Every result carries its provenance.
-//!
-//! This is not a wrapper around T with metadata. This is a fundamental
-//! epistemic primitive that changes how we compute.
-//!
-//! # Philosophy
-//!
-//! Traditional: `let mass = 3.14`
-//! Epistemic:   `let mass: Knowledge<f64> = 3.14 ± 0.01 from "scale_A"`
-//!
-//! The ± is not syntax sugar. It's an assertion about reality.
-//! The variance tells us HOW CERTAIN we are about the value.
-//! The provenance tells us WHERE the certainty came from.
-//!
-//! # Example
-//!
-//! ```sounio
-//! use epistemic::{Knowledge, BetaConfidence}
-//! use units::{mg, mL}
-//!
-//! let dose: Knowledge<mg> = measure(500.0_mg, variance: 25.0)
-//! let volume: Knowledge<mL> = measure(10.0_mL, variance: 0.1)
-//! let concentration = dose / volume  // Variance auto-propagates
-//!
-//! // P(concentration > 45 mg/mL) computed from posterior
-//! if concentration.prob_gt(45.0) > 0.95 {
-//!     println("Therapeutic range achieved with 95% confidence")
-//! }
-//! ```
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/epistemic/knowledge.sio — Epistemic value type with GUM variance propagation
+//
+// Epistemic wraps a scalar value with:
+//   - val:        point estimate (f64)
+//   - variance:   GUM variance (f64, σ²)
+//   - confidence: integer 0-1000 (mirrors compiler Knowledge<T> scale)
+//
+// Arithmetic propagates variance via the delta method.
+// Confidence decays multiplicatively through operations.
+// No heap, no strings, no generics — pure flat-struct arithmetic.
+//
+// MADAROS D3 (2026-07-19): free-function surface is the native-import-safe API.
+// Method-call form (`Epistemic::measured`, `e.val()`) still trips Madaros Root 2
+// (null-deref on method call lowering — MADAROS_SRET_ROOT_SYNTHESIS). Thin `impl`
+// wrappers remain for lean_single / source-compat; selftests and Madaros E2E use
+// free functions only. Do not name a free function `measure` — collides with the
+// language Knowledge<T> builtin.
 
 // ============================================================================
-// BETA DISTRIBUTION (inlined — prob::beta module currently disabled)
+// SQRT HELPER
 // ============================================================================
 
-pub struct Beta {
-    alpha: f64,
-    beta: f64,
-}
-
-fn beta_new(alpha: f64, b: f64) -> Beta {
-    var sa = alpha
-    var sb = b
-    if sa < 0.0001 { sa = 0.0001 }
-    if sb < 0.0001 { sb = 0.0001 }
-    Beta { alpha: sa, beta: sb }
-}
-
-fn beta_mean(b: Beta) -> f64 {
-    b.alpha / (b.alpha + b.beta)
-}
-
-fn beta_variance(b: Beta) -> f64 {
-    let n = b.alpha + b.beta
-    (b.alpha * b.beta) / (n * n * (n + 1.0))
-}
-
-fn beta_sqrt_f64(x: f64) -> f64 {
+pub fn ep_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
     var y = x
     y = 0.5 * (y + x / y)
@@ -72,666 +36,356 @@ fn beta_sqrt_f64(x: f64) -> f64 {
     y = 0.5 * (y + x / y)
     y = 0.5 * (y + x / y)
     y = 0.5 * (y + x / y)
-    return y
+    y
 }
 
-fn beta_std(b: Beta) -> f64 {
-    beta_sqrt_f64(beta_variance(b))
+fn ep_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
 }
 
-fn beta_posterior(prior: Beta, successes: i64, failures: i64) -> Beta {
-    var sf = 0.0
-    var count = 0
-    while count < successes {
-        sf = sf + 1.0
-        count = count + 1
-    }
-    var ff = 0.0
-    count = 0
-    while count < failures {
-        ff = ff + 1.0
-        count = count + 1
-    }
-    Beta { alpha: prior.alpha + sf, beta: prior.beta + ff }
+// Madaros multi-module (2026-07-20): E175 hard-errors on non-pub imports.
+// propagate / monte_carlo name these; lean_single only warned historically.
+pub fn ep_min_conf(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+pub fn ep_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    c
 }
 
 // ============================================================================
-// PROVENANCE TYPES
+// EPISTEMIC STRUCT + FREE API (Madaros-import-safe)
 // ============================================================================
 
-// Source of knowledge - where did this value come from?
-pub enum Source {
-    /// Direct measurement from instrument
-    Measurement { instrument: string, timestamp: i64 },
-
-    /// Computed from other values
-    Computed { operation: string },
-
-    /// User assertion (not independently verified)
-    Assertion { author: string },
-
-    /// External data source
-    External { source: string, url: string },
-
-    /// Unknown origin
-    Unknown,
-}
-
-// Single step in the provenance chain
-pub struct ProvenanceStep {
-    /// What operation was performed
-    operation: string,
-
-    /// When (unix timestamp)
-    timestamp: i64,
-
-    /// Confidence decay from this operation
-    decay_factor: f64,
-}
-
-// Complete provenance chain
-pub struct Provenance {
-    /// Original source (display string: instrument name, operation, author, etc.)
-    source: string,
-
-    /// Chain of transformations
-    steps: Vec<ProvenanceStep>,
-}
-
-// ============================================================================
-// BETA CONFIDENCE
-// ============================================================================
-
-// BetaConfidence wraps Beta distribution for epistemic use
-//
-// Provides the semantic layer on top of raw Beta parameters:
-// - `concentration()` = how much evidence we have
-// - `uncertainty()` = how much we don't know
-// - `needs_exploration()` = should we acquire more data?
-pub struct BetaConfidence {
-    /// Underlying Beta distribution
-    dist: Beta,
-}
-
-impl BetaConfidence {
-    /// Create from raw alpha, beta parameters
-    pub fn new(alpha: f64, b: f64) -> BetaConfidence {
-        BetaConfidence { dist: beta_new(alpha, b) }
-    }
-
-    /// Uniform prior (maximum ignorance)
-    pub fn uniform() -> BetaConfidence {
-        BetaConfidence { dist: Beta { alpha: 1.0, beta: 1.0 } }
-    }
-
-    /// Jeffreys prior (uninformative)
-    pub fn jeffreys() -> BetaConfidence {
-        BetaConfidence { dist: Beta { alpha: 0.5, beta: 0.5 } }
-    }
-
-    /// From success rate and sample size
-    /// e.g., observed 8 successes in 10 trials → from_rate(0.8, 10)
-    pub fn from_rate(rate: f64, n: f64) -> BetaConfidence {
-        let alpha = rate * n + 1.0
-        let b = (1.0 - rate) * n + 1.0
-        BetaConfidence { dist: beta_new(alpha, b) }
-    }
-
-    /// From observations
-    pub fn from_observations(successes: i64, failures: i64) -> BetaConfidence {
-        let prior = Beta { alpha: 1.0, beta: 1.0 }
-        BetaConfidence { dist: beta_posterior(prior, successes, failures) }
-    }
-
-    /// Strong confidence centered at value
-    pub fn strong(center: f64, strength: f64) -> BetaConfidence {
-        let alpha = center * strength + 1.0
-        let b = (1.0 - center) * strength + 1.0
-        BetaConfidence { dist: beta_new(alpha, b) }
-    }
-
-    // Accessors
-
-    /// Mean confidence (point estimate)
-    pub fn mean(self: &BetaConfidence) -> f64 {
-        beta_mean(self.dist)
-    }
-
-    /// Variance (measure of uncertainty about the confidence)
-    pub fn variance(self: &BetaConfidence) -> f64 {
-        beta_variance(self.dist)
-    }
-
-    /// Standard deviation
-    pub fn std(self: &BetaConfidence) -> f64 {
-        beta_std(self.dist)
-    }
-
-    /// Concentration (effective sample size)
-    /// Higher = more evidence backing this confidence
-    pub fn concentration(self: &BetaConfidence) -> f64 {
-        self.dist.alpha + self.dist.beta
-    }
-
-    /// Uncertainty score: inverse of concentration
-    /// Higher = we should explore more
-    pub fn uncertainty(self: &BetaConfidence) -> f64 {
-        1.0 / self.concentration()
-    }
-
-    /// Should we acquire more data?
-    /// Returns true if variance is high (we don't know much)
-    pub fn needs_exploration(self: &BetaConfidence, threshold: f64) -> bool {
-        self.variance() > threshold
-    }
-
-    /// Update with new evidence
-    pub fn update(self: &BetaConfidence, successes: i64, failures: i64) -> BetaConfidence {
-        BetaConfidence { dist: beta_posterior(self.dist, successes, failures) }
-    }
-
-    /// Combine two confidences (independent evidence)
-    /// Result has combined evidence: α_new = α1 + α2 - 1, β_new = β1 + β2 - 1
-    pub fn combine(self: &BetaConfidence, other: &BetaConfidence) -> BetaConfidence {
-        let alpha = self.dist.alpha + other.dist.alpha - 1.0
-        let b = self.dist.beta + other.dist.beta - 1.0
-        BetaConfidence { dist: beta_new(alpha, b) }
-    }
-
-    /// Decay confidence (for propagation through transformations)
-    pub fn decay(self: &BetaConfidence, factor: f64) -> BetaConfidence {
-        // Reduce effective sample size while preserving mean
-        let m = self.mean()
-        let n = self.concentration() * factor
-        BetaConfidence::from_rate(m, n)
-    }
-
-    /// Raw access to alpha
-    pub fn alpha(self: &BetaConfidence) -> f64 {
-        self.dist.alpha
-    }
-
-    /// Raw access to beta
-    pub fn beta_param(self: &BetaConfidence) -> f64 {
-        self.dist.beta
-    }
-}
-
-// ============================================================================
-// EPISTEMIC - THE CORE EPISTEMIC TYPE
-// ============================================================================
-
-// Epistemic wraps a value with epistemic metadata
-//
-// This is THE fundamental type for scientific computing in Sounio.
-// Every Epistemic value knows:
-// - Its point estimate (value)
-// - Its uncertainty (variance)
-// - Its credibility (confidence as Beta posterior)
-// - Its history (provenance chain)
-//
-// Arithmetic operations propagate variance using the delta method.
-// Confidence decays through transformations.
-// Provenance accumulates through the computation graph.
-//
-// Note: named Epistemic (not Knowledge) to avoid checker conflict with the
-// built-in Knowledge<T> type in souc v1.0.0-beta.4 and earlier.
 pub struct Epistemic {
-    /// The point estimate
-    value: f64,
-
-    /// Variance (uncertainty in the value)
+    val: f64,
     variance: f64,
-
-    /// Confidence as Beta posterior
-    confidence: BetaConfidence,
-
-    /// Where this knowledge came from
-    provenance: Provenance,
+    confidence: i64,
 }
 
-/// Type alias: Knowledge<f64> = Epistemic (for documentation purposes)
-// type Knowledge = Epistemic
+pub fn ep_new(val: f64, variance: f64, confidence: i64) -> Epistemic {
+    Epistemic { val: val, variance: variance, confidence: ep_clamp_conf(confidence) }
+}
+
+pub fn ep_certain(val: f64) -> Epistemic {
+    Epistemic { val: val, variance: 0.0, confidence: 1000 }
+}
+
+pub fn ep_measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
+    Epistemic { val: val, variance: std_dev * std_dev, confidence: 900 }
+}
+
+pub fn ep_val(e: &Epistemic) -> f64 { e.val }
+pub fn ep_variance(e: &Epistemic) -> f64 { e.variance }
+pub fn ep_confidence(e: &Epistemic) -> i64 { e.confidence }
+
+pub fn ep_std(e: &Epistemic) -> f64 with Mut, Div, Panic {
+    ep_sqrt(e.variance)
+}
+
+pub fn ep_is_credible(e: &Epistemic, min_conf: i64) -> bool {
+    // Direct field compare is correct after #1511 (Knowledge.confidence is_float=3).
+    e.confidence >= min_conf
+}
+
+// GUM: Var(X+Y) = Var(X) + Var(Y); conf = min scaled
+pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val + b.val,
+        variance: a.variance + b.variance,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// GUM: Var(X-Y) = Var(X) + Var(Y)
+pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val - b.val,
+        variance: a.variance + b.variance,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    let new_var = b.val * b.val * a.variance + a.val * a.val * b.variance
+    Epistemic {
+        val: a.val * b.val,
+        variance: new_var,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
+pub fn ep_div(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
+    let y2 = b.val * b.val
+    let y4 = y2 * y2
+    let new_var = a.variance / y2 + a.val * a.val * b.variance / y4
+    Epistemic {
+        val: a.val / b.val,
+        variance: new_var,
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 97 / 100),
+    }
+}
+
+// Var(c·X) = c²·Var(X)
+pub fn ep_scale(a: &Epistemic, c: f64) -> Epistemic {
+    Epistemic {
+        val: a.val * c,
+        variance: a.variance * c * c,
+        confidence: a.confidence,
+    }
+}
+
+// Var(X+c) = Var(X)
+pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
+    Epistemic {
+        val: a.val + c,
+        variance: a.variance,
+        confidence: a.confidence,
+    }
+}
+
+// Var(X²) ≈ 4X²·Var(X)
+pub fn ep_square(a: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val * a.val,
+        variance: 4.0 * a.val * a.val * a.variance,
+        confidence: ep_clamp_conf(a.confidence * 98 / 100),
+    }
+}
+
+// Var(√X) ≈ Var(X)/(4X)
+pub fn ep_sqrt_ep(a: &Epistemic) -> Epistemic with Mut, Div, Panic {
+    let new_val = ep_sqrt(a.val)
+    let new_var = if a.val > 0.0 { a.variance / (4.0 * a.val) } else { 0.0 }
+    Epistemic {
+        val: new_val,
+        variance: new_var,
+        confidence: ep_clamp_conf(a.confidence * 98 / 100),
+    }
+}
+
+pub fn ep_rel_uncertainty(a: &Epistemic) -> f64 with Mut, Div, Panic {
+    let abs_val = ep_abs(a.val)
+    if abs_val < 1e-15 { return 0.0 }
+    ep_sqrt(a.variance) / abs_val
+}
+
+// ============================================================================
+// GATE / MERGE / CONFIDENCE
+// ============================================================================
+
+/// Soft gate: returns 1 if confidence ≥ min_conf, 0 otherwise.
+pub fn ep_gate(e: &Epistemic, min_conf: i64) -> i64 {
+    if e.confidence >= min_conf { 1 } else { 0 }
+}
+
+/// Hard gate: GATE_FAIL sentinel when below threshold (confidence=0).
+pub fn ep_require_conf(e: Epistemic, min_conf: i64) -> Epistemic {
+    if e.confidence >= min_conf {
+        e
+    } else {
+        Epistemic { val: e.val, variance: e.variance, confidence: 0 }
+    }
+}
+
+/// Budget report: (rel_unc_ppm, confidence) where rel_unc_ppm = (σ/|μ|) × 10⁶.
+pub fn ep_budget(e: &Epistemic) -> (f64, i64) with Mut, Div, Panic {
+    let abs_val = if e.val < 0.0 { 0.0 - e.val } else { e.val }
+    let std = ep_sqrt(e.variance)
+    let rel_ppm = if abs_val > 1e-15 { std / abs_val * 1e6 } else { 0.0 }
+    (rel_ppm, e.confidence)
+}
+
+// Inverse-variance weighted merge
+pub fn ep_merge(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
+    let w_a = if a.variance > 0.0 { 1.0 / a.variance } else { 1e15 }
+    let w_b = if b.variance > 0.0 { 1.0 / b.variance } else { 1e15 }
+    let w_total = w_a + w_b
+    let combined_val = (w_a * a.val + w_b * b.val) / w_total
+    let combined_var = 1.0 / w_total
+    let combined_conf = ep_clamp_conf((a.confidence + b.confidence) / 2)
+    Epistemic { val: combined_val, variance: combined_var, confidence: combined_conf }
+}
+
+pub fn ep_decay(confidence: i64, factor: f64) -> i64 {
+    let scaled = (confidence as f64) * factor
+    ep_clamp_conf(scaled as i64)
+}
+
+pub fn ep_combine(c1: i64, c2: i64) -> i64 {
+    ep_clamp_conf((c1 + c2) / 2)
+}
+
+// ============================================================================
+// THIN IMPL WRAPPERS — free-function bodies + method call sites
+// Free functions remain the preferred portable surface. Method form
+// (Epistemic::measured / e.val() / e.add) is TRUSTWORTHY under default Madaros
+// multi-module after Root 2 multi-module method landing (Wave9 residual closeout).
+// Parity gate: scripts/madaros_knowledge_method_residual_gate.sh
+// ============================================================================
 
 impl Epistemic {
-    /// Create new epistemic value with full specification
-    pub fn new(
-        value: f64,
-        variance: f64,
-        confidence: BetaConfidence,
-        source: string,
-    ) -> Epistemic {
-        Epistemic {
-            value: value,
-            variance: variance,
-            confidence: confidence,
-            provenance: Provenance { source: source, steps: Vec::new() },
-        }
+    pub fn new(val: f64, variance: f64, confidence: i64) -> Epistemic {
+        ep_new(val, variance, confidence)
     }
-
-    /// Create from measurement (typical lab scenario)
-    pub fn measured(value: f64, variance: f64, instrument: string) -> Epistemic {
-        Epistemic {
-            value: value,
-            variance: variance,
-            confidence: BetaConfidence::uniform(),
-            provenance: Provenance {
-                source: instrument,
-                steps: Vec::new(),
-            },
-        }
+    pub fn certain(val: f64) -> Epistemic {
+        ep_certain(val)
     }
-
-    /// Create constant (zero variance, maximum confidence)
-    pub fn constant(value: f64) -> Epistemic {
-        Epistemic {
-            value: value,
-            variance: 0.0,
-            confidence: BetaConfidence::strong(0.99, 1000.0),
-            provenance: Provenance {
-                source: "constant",
-                steps: Vec::new(),
-            },
-        }
+    pub fn measured(val: f64, std_dev: f64) -> Epistemic with Mut, Div, Panic {
+        ep_measured(val, std_dev)
     }
-
-    /// Create from assertion (user says this is true)
-    pub fn asserted(value: f64, variance: f64, author: string) -> Epistemic {
-        Epistemic {
-            value: value,
-            variance: variance,
-            confidence: BetaConfidence::uniform(),
-            provenance: Provenance {
-                source: author,
-                steps: Vec::new(),
-            },
-        }
+    pub fn val(self: &Epistemic) -> f64 { ep_val(self) }
+    pub fn variance(self: &Epistemic) -> f64 { ep_variance(self) }
+    pub fn confidence(self: &Epistemic) -> i64 { ep_confidence(self) }
+    pub fn std(self: &Epistemic) -> f64 with Mut, Div, Panic { ep_std(self) }
+    pub fn is_credible(self: &Epistemic, min_conf: i64) -> bool {
+        ep_is_credible(self, min_conf)
     }
-
-    // Accessors
-
-    /// Get the point estimate
-    pub fn get(self: &Epistemic) -> f64 {
-        self.value
+    pub fn add(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_add(self, other) }
+    pub fn sub(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_sub(self, other) }
+    pub fn mul(self: &Epistemic, other: &Epistemic) -> Epistemic { ep_mul(self, other) }
+    pub fn div(self: &Epistemic, other: &Epistemic) -> Epistemic with Div, Panic {
+        ep_div(self, other)
     }
-
-    /// Get variance
-    pub fn var(self: &Epistemic) -> f64 {
-        self.variance
-    }
-
-    /// Get standard deviation
-    pub fn std(self: &Epistemic) -> f64 {
-        sqrt_f64(self.variance)
-    }
-
-    /// Get confidence
-    pub fn conf(self: &Epistemic) -> &BetaConfidence {
-        &self.confidence
-    }
-
-    /// Get provenance
-    pub fn prov(self: &Epistemic) -> &Provenance {
-        &self.provenance
-    }
-
-    /// Map the inner value while preserving epistemic metadata
-    pub fn map(self: Epistemic, f: fn(f64) -> f64, operation: string) -> Epistemic {
-        let new_value = f(self.value)
-        let step = ProvenanceStep {
-            operation: operation,
-            timestamp: 0,
-            decay_factor: 0.95,
-        }
-        var new_steps = self.provenance.steps.clone()
-        new_steps.push(step)
-
-        Epistemic {
-            value: new_value,
-            variance: self.variance,  // Note: may need adjustment based on f
-            confidence: self.confidence.decay(0.95),
-            provenance: Provenance {
-                source: self.provenance.source,
-                steps: new_steps,
-            },
-        }
-    }
-
-    /// Add provenance step without changing value
-    pub fn with_provenance(self: Epistemic, operation: string) -> Epistemic {
-        let step = ProvenanceStep {
-            operation: operation,
-            timestamp: 0,
-            decay_factor: 1.0,
-        }
-        var new_steps = self.provenance.steps.clone()
-        new_steps.push(step)
-
-        Epistemic {
-            value: self.value,
-            variance: self.variance,
-            confidence: self.confidence,
-            provenance: Provenance {
-                source: self.provenance.source,
-                steps: new_steps,
-            },
-        }
+    pub fn scale(self: &Epistemic, c: f64) -> Epistemic { ep_scale(self, c) }
+    pub fn shift(self: &Epistemic, c: f64) -> Epistemic { ep_shift(self, c) }
+    pub fn square(self: &Epistemic) -> Epistemic { ep_square(self) }
+    pub fn sqrt(self: &Epistemic) -> Epistemic with Mut, Div, Panic { ep_sqrt_ep(self) }
+    pub fn rel_uncertainty(self: &Epistemic) -> f64 with Mut, Div, Panic {
+        ep_rel_uncertainty(self)
     }
 }
 
 // ============================================================================
-// EPISTEMIC - ARITHMETIC WITH VARIANCE PROPAGATION
+// SELFTEST — free-function only (Madaros-safe call sites)
 // ============================================================================
 
-impl Epistemic {
-    /// Standard deviation
-    pub fn std_dev(self: &Epistemic) -> f64 {
-        sqrt_f64(self.variance)
-    }
+var CNT: [i64; 2] = [0; 2]
 
-    /// 95% confidence interval (normal approximation)
-    pub fn ci95(self: &Epistemic) -> (f64, f64) {
-        let z = 1.96
-        let lo = self.value - z * self.std_dev()
-        let hi = self.value + z * self.std_dev()
-        (lo, hi)
+// Avoid print(i64) under Madaros (can SIGSEGV); tally only, labels in comments at call sites.
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL chk\n")
+        CNT[1] = CNT[1] + 1
     }
-
-    /// P(X > threshold) using normal approximation
-    pub fn prob_gt(self: &Epistemic, threshold: f64) -> f64 {
-        if self.variance <= 0.0000001 {
-            if self.value > threshold { return 1.0 }
-            return 0.0
-        }
-        let z = (self.value - threshold) / self.std_dev()
-        // Approximation of Φ(z) using erf
-        0.5 * (1.0 + erf_approx(z / 1.4142135623730951))
-    }
-
-    /// P(X < threshold)
-    pub fn prob_lt(self: &Epistemic, threshold: f64) -> f64 {
-        1.0 - self.prob_gt(threshold)
-    }
-
-    /// P(lo < X < hi)
-    pub fn prob_between(self: &Epistemic, lo: f64, hi: f64) -> f64 {
-        self.prob_lt(hi) - self.prob_lt(lo)
-    }
+    let _keep = label
 }
 
-// Arithmetic operators with variance propagation
-
-impl Add for Epistemic {
-    /// X + Y: Var(X + Y) = Var(X) + Var(Y) for independent X, Y
-    fn add(self: Epistemic, other: Epistemic) -> Epistemic {
-        let new_value = self.value + other.value
-        let new_variance = self.variance + other.variance
-        let new_confidence = self.confidence.combine(&other.confidence)
-
-        let step = ProvenanceStep {
-            operation: "add",
-            timestamp: 0,
-            decay_factor: 0.99,
-        }
-        var new_steps = self.provenance.steps.clone()
-        new_steps.extend(other.provenance.steps.clone())
-        new_steps.push(step)
-
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: new_confidence.decay(0.99),
-            provenance: Provenance {
-                source: "add",
-                steps: new_steps,
-            },
-        }
-    }
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
 }
 
-impl Sub for Epistemic {
-    /// X - Y: Var(X - Y) = Var(X) + Var(Y) for independent X, Y
-    fn sub(self: Epistemic, other: Epistemic) -> Epistemic {
-        let new_value = self.value - other.value
-        let new_variance = self.variance + other.variance
-        let new_confidence = self.confidence.combine(&other.confidence)
+fn test_basic() with IO, Mut, Div, Panic {
+    let x = ep_new(3.0, 0.01, 900)
+    let y = ep_new(4.0, 0.04, 800)
 
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: new_confidence.decay(0.99),
-            provenance: Provenance {
-                source: "sub",
-                steps: Vec::new(),
-            },
-        }
-    }
+    chk(1, near(ep_val(&x), 3.0, 1e-12))
+    chk(2, near(ep_variance(&x), 0.01, 1e-12))
+    chk(3, if ep_confidence(&x) == 900 { 1 } else { 0 })
+    chk(4, near(ep_std(&x), 0.1, 1e-9))
+
+    let s = ep_add(&x, &y)
+    chk(5, near(ep_val(&s), 7.0, 1e-12))
+    chk(6, near(ep_variance(&s), 0.05, 1e-12))
+    chk(7, if ep_confidence(&s) <= 800 { 1 } else { 0 })
+
+    let d = ep_sub(&x, &y)
+    chk(8, near(ep_val(&d), 0.0 - 1.0, 1e-12))
+    chk(9, near(ep_variance(&d), 0.05, 1e-12))
 }
 
-impl Mul for Epistemic {
-    /// X * Y: Var(XY) ≈ Y²Var(X) + X²Var(Y) (delta method)
-    fn mul(self: Epistemic, other: Epistemic) -> Epistemic {
-        let new_value = self.value * other.value
-        // Delta method for product
-        let new_variance = other.value * other.value * self.variance
-                         + self.value * self.value * other.variance
-        let new_confidence = self.confidence.combine(&other.confidence)
+fn test_mul_div() with IO, Mut, Div, Panic {
+    let x = ep_new(3.0, 0.01, 900)
+    let y = ep_new(4.0, 0.04, 800)
 
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: new_confidence.decay(0.98),
-            provenance: Provenance {
-                source: "mul",
-                steps: Vec::new(),
-            },
-        }
-    }
+    let p = ep_mul(&x, &y)
+    chk(10, near(ep_val(&p), 12.0, 1e-12))
+    chk(11, near(ep_variance(&p), 0.52, 1e-10))
+
+    let q = ep_div(&x, &y)
+    chk(12, near(ep_val(&q), 0.75, 1e-12))
+    chk(13, near(ep_variance(&q), 0.00203125, 1e-10))
 }
 
-impl Div for Epistemic {
-    /// X / Y: Var(X/Y) ≈ (1/Y²)Var(X) + (X²/Y⁴)Var(Y) (delta method)
-    fn div(self: Epistemic, other: Epistemic) -> Epistemic {
-        let new_value = self.value / other.value
-        // Delta method for quotient
-        let y2 = other.value * other.value
-        let y4 = y2 * y2
-        let new_variance = self.variance / y2
-                         + self.value * self.value * other.variance / y4
-        let new_confidence = self.confidence.combine(&other.confidence)
+fn test_scale_shift() with IO, Mut, Div, Panic {
+    let x = ep_new(2.0, 0.04, 850)
 
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: new_confidence.decay(0.97),
-            provenance: Provenance {
-                source: "div",
-                steps: Vec::new(),
-            },
-        }
-    }
+    let s = ep_scale(&x, 3.0)
+    chk(14, near(ep_val(&s), 6.0, 1e-12))
+    chk(15, near(ep_variance(&s), 0.36, 1e-12))
+    chk(16, if ep_confidence(&s) == 850 { 1 } else { 0 })
+
+    let sh = ep_shift(&s, 10.0)
+    chk(17, near(ep_val(&sh), 16.0, 1e-12))
+    chk(18, near(ep_variance(&sh), 0.36, 1e-12))
 }
 
-// Scalar operations
+fn test_sqrt_square() with IO, Mut, Div, Panic {
+    let x = ep_new(4.0, 0.16, 900)
 
-impl Epistemic {
-    /// Multiply by scalar constant
-    pub fn scale(self: Epistemic, c: f64) -> Epistemic {
-        Epistemic {
-            value: self.value * c,
-            variance: self.variance * c * c,  // Var(cX) = c²Var(X)
-            confidence: self.confidence,
-            provenance: self.provenance.with_step("scale"),
-        }
-    }
+    let sq_val = ep_sqrt(ep_val(&x))
+    chk(19, near(sq_val, 2.0, 1e-9))
 
-    /// Add scalar constant
-    pub fn shift(self: Epistemic, c: f64) -> Epistemic {
-        Epistemic {
-            value: self.value + c,
-            variance: self.variance,  // Var(X + c) = Var(X)
-            confidence: self.confidence,
-            provenance: self.provenance.with_step("shift"),
-        }
-    }
+    let sq_var = ep_variance(&x) / (4.0 * ep_val(&x))
+    chk(20, near(sq_var, 0.01, 1e-10))
 
-    /// Square: Var(X²) ≈ 4X²Var(X)
-    pub fn square(self: Epistemic) -> Epistemic {
-        Epistemic {
-            value: self.value * self.value,
-            variance: 4.0 * self.value * self.value * self.variance,
-            confidence: self.confidence.decay(0.98),
-            provenance: self.provenance.with_step("square"),
-        }
-    }
-
-    /// Square root: Var(√X) ≈ Var(X)/(4X)
-    pub fn sqrt(self: Epistemic) -> Epistemic {
-        let new_value = sqrt_f64(self.value)
-        let new_variance = self.variance / (4.0 * self.value)
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: self.confidence.decay(0.98),
-            provenance: self.provenance.with_step("sqrt"),
-        }
-    }
-
-    /// Exponential: Var(e^X) ≈ e^(2X) Var(X)
-    pub fn exp(self: Epistemic) -> Epistemic {
-        let new_value = exp_f64(self.value)
-        let new_variance = exp_f64(2.0 * self.value) * self.variance
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: self.confidence.decay(0.95),
-            provenance: self.provenance.with_step("exp"),
-        }
-    }
-
-    /// Natural log: Var(ln X) ≈ Var(X)/X²
-    pub fn ln(self: Epistemic) -> Epistemic {
-        let new_value = ln_f64(self.value)
-        let new_variance = self.variance / (self.value * self.value)
-        Epistemic {
-            value: new_value,
-            variance: new_variance,
-            confidence: self.confidence.decay(0.95),
-            provenance: self.provenance.with_step("ln"),
-        }
-    }
+    let sq2 = ep_square(&x)
+    chk(21, near(ep_val(&sq2), 16.0, 1e-12))
+    chk(22, near(ep_variance(&sq2), 10.24, 1e-10))
 }
 
-// ============================================================================
-// PROVENANCE HELPERS
-// ============================================================================
+fn test_credibility() with IO, Mut, Div, Panic {
+    let x = ep_new(1.0, 0.001, 800)
+    chk(23, if ep_is_credible(&x, 700) { 1 } else { 0 })
+    chk(24, if ep_is_credible(&x, 900) { 0 } else { 1 })
+    chk(25, if ep_gate(&x, 700) == 1 { 1 } else { 0 })
+    chk(26, if ep_gate(&x, 900) == 0 { 1 } else { 0 })
+}
 
-impl Provenance {
-    /// Add a step to provenance
-    pub fn with_step(self: Provenance, operation: string) -> Provenance {
-        let step = ProvenanceStep {
-            operation: operation,
-            timestamp: 0,
-            decay_factor: 1.0,
+fn test_combine() with IO, Mut, Div, Panic {
+    let a = ep_new(1.0, 0.01, 900)
+    let b = ep_new(1.0, 0.04, 800)
+    let c = ep_merge(&a, &b)
+    chk(27, near(ep_val(&c), 1.0, 1e-10))
+    chk(28, near(ep_variance(&c), 0.008, 1e-10))
+}
+
+fn test_certain() with IO, Mut, Div, Panic {
+    let c = ep_certain(42.0)
+    chk(29, near(ep_val(&c), 42.0, 1e-12))
+    chk(30, near(ep_variance(&c), 0.0, 1e-12))
+    chk(31, if ep_confidence(&c) == 1000 { 1 } else { 0 })
+    chk(32, if ep_is_credible(&c, 1000) { 1 } else { 0 })
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/epistemic/knowledge tests ───\n")
+    test_basic()
+    test_mul_div()
+    test_scale_shift()
+    test_sqrt_square()
+    test_credibility()
+    test_combine()
+    test_certain()
+    // Avoid print(i64); report only via sentinel + exit code.
+    if CNT[1] == 0 {
+        if CNT[0] == 32 {
+            print("─── 32/32 PASS ───\n")
+            print("ALL PASS\n")
+            return 0
         }
-        var new_steps = self.steps.clone()
-        new_steps.push(step)
-        Provenance {
-            source: self.source,
-            steps: new_steps,
-        }
+        print("─── PASS count mismatch ───\n")
+        return 2
     }
-
-    /// Format provenance as string (simplified: returns source + step count)
-    pub fn to_string(self: &Provenance) -> string {
-        self.source.clone()
-    }
-
-    /// Count transformation depth
-    pub fn depth(self: &Provenance) -> i64 {
-        self.steps.len() as i64
-    }
-}
-
-// ============================================================================
-// NUMERIC HELPERS (copied from beta.d for standalone compilation)
-// ============================================================================
-
-fn sqrt_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    return y
-}
-
-fn exp_f64(x: f64) -> f64 {
-    // Taylor series approximation for small x
-    if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
-    if x < -10.0 { return 0.00004539992976248485 * exp_f64(x + 10.0) }
-
-    var result = 1.0
-    var term = 1.0
-    var i = 1
-    while i < 20 {
-        term = term * x / (i as f64)
-        result = result + term
-        i = i + 1
-    }
-    return result
-}
-
-fn ln_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 - 999999.0 }  // -inf approximation
-    if x == 1.0 { return 0.0 }
-
-    // ln(x) = 2 * arctanh((x-1)/(x+1)) for x > 0
-    let y = (x - 1.0) / (x + 1.0)
-    var result = 0.0
-    var term = y
-    var i = 1
-    while i < 30 {
-        result = result + term / (i as f64)
-        term = term * y * y
-        i = i + 2
-    }
-    return 2.0 * result
-}
-
-fn erf_approx(x: f64) -> f64 {
-    // Abramowitz and Stegun approximation
-    let a1 = 0.254829592
-    let a2 = 0.0 - 0.284496736
-    let a3 = 1.421413741
-    let a4 = 0.0 - 1.453152027
-    let a5 = 1.061405429
-    let p = 0.3275911
-
-    let sign = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
-    let x_abs = if x < 0.0 { 0.0 - x } else { x }
-
-    let t = 1.0 / (1.0 + p * x_abs)
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp_f64(0.0 - x_abs * x_abs)
-
-    return sign * y
-}
-
-// ============================================================================
-// DISPLAY / DEBUG
-// ============================================================================
-
-// Debug impl deferred: requires Formatter/FmtError which resolve differently
-// in stdlib context vs standalone. Use Epistemic::to_display_string() instead.
-impl Epistemic {
-    pub fn to_display_string(self: &Epistemic) -> string {
-        "Epistemic { value: ... }"
-    }
+    print("─── HAS FAILS ───\n")
+    return 1
 }

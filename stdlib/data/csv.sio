@@ -1,0 +1,150 @@
+// data::csv — byte-exact CSV writer to stdout (Data & Science I/O, Trilha A).
+//
+// Streaming, column-threaded writer. The caller carries the current column index
+// and passes it into each field call; the writer emits a separator before every
+// field except the first in a row, then the field's own bytes, and returns the
+// next column index. csv_end_row emits the record terminator and resets to 0.
+//
+// stdout sink only. This module deliberately avoids read_file / write_file /
+// str_from_bytes: on Madaros v0.80.0 all three mis-lower the base pointer of a
+// local `&buf` passed to a compiler builtin (SIGSEGV / garbage bytes), see
+// docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md. Only print/print_int
+// to stdout are trusted here; redirect with `> out.csv`. When write_file is
+// repaired (Trilha B) these same emit rules re-target a file buffer unchanged.
+//
+// Line terminator is LF ("\n"), matching RFC 4180 §2.1 as commonly relaxed on
+// POSIX. String fields are quoted per RFC 4180 §2.5–2.7 (see csv_field_str).
+
+// True iff a field must be quoted per RFC 4180 §2.6: it contains a comma (44),
+// a double quote (34), CR (13) or LF (10). Bytes are read as signed i8; the four
+// special characters are all positive ASCII, so high UTF-8 bytes never match.
+fn csv_needs_quote(s: string) -> bool with Mut, Div, Panic {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let b = str_char_at(s, i) as i64
+        if b == 44 { return true }
+        if b == 34 { return true }
+        if b == 13 { return true }
+        if b == 10 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Emit a string field, quoted per RFC 4180 §2.5–2.7 when it contains a comma,
+// double quote, CR or LF: the field is wrapped in double quotes and every
+// embedded double quote is doubled. Plain fields are emitted verbatim. Returns
+// the next column index.
+pub fn csv_field_str(col: i64, s: string) -> i64 with IO, Mut, Div, Panic {
+    if col > 0 { print(",") }
+    if csv_needs_quote(s) {
+        print("\"")
+        let n = str_len(s)
+        var i: i64 = 0
+        while i < n {
+            var b: i64 = str_char_at(s, i) as i64
+            if b < 0 { b = b + 256 }
+            if b == 34 { print("\"\"") } else { print_char(b) }
+            i = i + 1
+        }
+        print("\"")
+    } else {
+        print(s)
+    }
+    return col + 1
+}
+
+// Emit an integer field. Returns the next column index.
+pub fn csv_field_int(col: i64, v: i64) -> i64 with IO, Mut, Div, Panic {
+    if col > 0 { print(",") }
+    print_int(v)
+    return col + 1
+}
+
+// Emit a fixed-point decimal field from a scaled integer.
+//
+// The value is `scaled / 10^decimals`; the fractional part is zero-padded to
+// exactly `decimals` digits. All arithmetic is integer (no print_f64):
+//   csv_field_fixed(c, 12340, 3) -> "12.340"
+//   csv_field_fixed(c,     0, 3) -> "0.000"
+//   csv_field_fixed(c,  8005, 3) -> "8.005"
+//   csv_field_fixed(c,   500, 0) -> "500"
+// Negative scaled values print a leading '-'. Returns the next column index.
+pub fn csv_field_fixed(col: i64, scaled: i64, decimals: i64) -> i64 with IO, Mut, Div, Panic {
+    if col > 0 { print(",") }
+
+    var v: i64 = scaled
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+
+    // pow = 10^decimals
+    var pow: i64 = 1
+    var k: i64 = 0
+    while k < decimals {
+        pow = pow * 10
+        k = k + 1
+    }
+
+    let int_part = v / pow
+    let frac_part = v - int_part * pow
+
+    print_int(int_part)
+
+    if decimals > 0 {
+        print(".")
+        // Emit exactly `decimals` fractional digits, most significant first,
+        // so leading zeros are preserved (frac_part=5, decimals=3 -> "005").
+        var place: i64 = pow / 10
+        while place >= 1 {
+            let digit = (frac_part / place) - ((frac_part / (place * 10)) * 10)
+            print_int(digit)
+            place = place / 10
+        }
+    }
+
+    return col + 1
+}
+
+// Emit an f64 field, rounded to `decimals` places (round-half-up), zero-padded,
+// sign preserved. Scaling is done in f64 (no print_f64 exists on Madaros
+// v0.80.0); the scaled magnitude is cast to i64 and handed to csv_field_fixed so
+// the digit-emission logic stays in one place.
+//
+// Rounding caveat (math-review, grok-4.3, 2026-07-14): the `+0.5` method is
+// round-half-away-from-zero, exact for |value| < 1e6 and decimals <= 6, EXCEPT
+// where the true value sits exactly on a `*.5` tie whose nearest f64 falls 0.5
+// ulp below it — that tie may round down. Choose `decimals` so reported figures
+// avoid tie boundaries (as the PK/GUM columns here do).
+//   csv_field_f64(c, 12.34,     4) -> "12.3400"
+//   csv_field_f64(c, 0.290402,  4) -> "0.2904"
+//   csv_field_f64(c, 0.0 - 1.5, 4) -> "-1.5000"
+pub fn csv_field_f64(col: i64, value: f64, decimals: i64) -> i64 with IO, Mut, Div, Panic {
+    // pow = 10^decimals as f64
+    var powf: f64 = 1.0
+    var k: i64 = 0
+    while k < decimals {
+        powf = powf * 10.0
+        k = k + 1
+    }
+
+    var neg: bool = false
+    var mag: f64 = value
+    if mag < 0.0 {
+        neg = true
+        mag = 0.0 - mag
+    }
+
+    var scaled: i64 = (mag * powf + 0.5) as i64
+    if neg { scaled = 0 - scaled }
+
+    return csv_field_fixed(col, scaled, decimals)
+}
+
+// Terminate the current record. Returns the reset column index (0).
+pub fn csv_end_row(col: i64) -> i64 with IO, Mut, Div, Panic {
+    print("\n")
+    return 0
+}

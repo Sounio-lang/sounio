@@ -73,6 +73,15 @@ fn hg_lgamma(x: f64) -> f64 with Mut, Div, Panic {
 }
 
 fn hg_gamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 {
+        let xi = x as i32
+        if hg_abs(x - (xi as f64)) < 1.0e-12 { return 1.0e30 }
+        // Reflection formula for non-integer x <= 0: Gamma(x) = pi / (sin(pi*x) * Gamma(1-x)).
+        // hg_lgamma/hg_exp only valid for x > 0, so negative non-integer args must not
+        // fall through to hg_exp(hg_lgamma(x)) (that path silently saturates to 1e200
+        // for ALL x <= 0, making distinct negative gammas indistinguishable).
+        return hg_pi() / (hg_sin(hg_pi() * x) * hg_gamma(1.0 - x))
+    }
     hg_exp(hg_lgamma(x))
 }
 
@@ -98,7 +107,7 @@ fn hg_pi() -> f64 { 3.14159265358979323846 }
 
 // 0F1(; b; z) = sum_{k=0}^{inf} z^k / ((b)_k * k!)
 // Related to Bessel: J_v(z) = (z/2)^v / Gamma(v+1) * 0F1(;v+1;-z^2/4)
-fn hyperg_0f1(b: f64, z: f64) -> f64 with Mut, Div, Panic {
+pub fn hyperg_0f1(b: f64, z: f64) -> f64 with Mut, Div, Panic {
     if b <= 0.0 {
         // Check if b is a non-positive integer
         let bi = b as i32
@@ -123,7 +132,7 @@ fn hyperg_0f1(b: f64, z: f64) -> f64 with Mut, Div, Panic {
 
 // 1F1(a; b; z) = sum_{k=0}^{inf} (a)_k * z^k / ((b)_k * k!)
 // Converges for all finite z.
-fn hyperg_1f1(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
+pub fn hyperg_1f1(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
     // Special cases
     if a == 0.0 { return 1.0 }
     if z == 0.0 { return 1.0 }
@@ -206,7 +215,7 @@ fn hyperg_1f1(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
 // U(a, b, z) for z > 0.
 // Connection formula: U = Gamma(1-b)/Gamma(a-b+1)*M(a,b,z)
 //                       + Gamma(b-1)/Gamma(a)*z^{1-b}*M(a-b+1,2-b,z)
-fn hyperg_u(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
+pub fn hyperg_u(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
     if z <= 0.0 { return 1.0e30 }
 
     // For large z, asymptotic: U(a,b,z) ~ z^{-a} * sum (-1)^k (a)_k (a-b+1)_k / (k! z^k)
@@ -228,12 +237,16 @@ fn hyperg_u(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
     let b_int = b as i32
     let b_is_int = hg_abs(b - (b_int as f64)) < 1.0e-12
 
-    if b_is_int && b_int == 1 {
-        // Special case b=1: U(a,1,z) needs special handling
-        // Use numerical differentiation of the connection formula
+    if b_is_int {
+        // Integer b (not just b=1): the connection formula's two terms both
+        // have removable poles (Gamma(1-b) and Gamma(b-1) diverge whenever
+        // b is any integer, not only b=1), so the naive sum is 0/0 in the
+        // limit. Numerical differentiation across the removable singularity
+        // (average U at b+db and b-db) recovers the correct limiting value
+        // for all integer b, not only the b=1 case.
         let db = 0.001
-        let u_plus = hyperg_u(a, 1.0 + db, z)
-        let u_minus = hyperg_u(a, 1.0 - db, z)
+        let u_plus = hyperg_u(a, b + db, z)
+        let u_minus = hyperg_u(a, b - db, z)
         return 0.5 * (u_plus + u_minus)
     }
 
@@ -253,7 +266,7 @@ fn hyperg_u(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
 
 // 2F1(a, b; c; z) = sum_{k=0}^{inf} (a)_k * (b)_k * z^k / ((c)_k * k!)
 // Converges for |z| < 1. Extended to |z| <= 1 via transformations.
-fn hyperg_2f1(a: f64, b: f64, c: f64, z: f64) -> f64 with Mut, Div, Panic {
+pub fn hyperg_2f1(a: f64, b: f64, c: f64, z: f64) -> f64 with Mut, Div, Panic {
     // Special cases
     if z == 0.0 { return 1.0 }
     if a == 0.0 || b == 0.0 { return 1.0 }

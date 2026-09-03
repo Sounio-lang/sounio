@@ -1,167 +1,378 @@
-//! stdlib/algebra/sedenion.sio
-//!
-//! Sedenion algebra 𝕊₁₆ as the Cayley-Dickson doubling of the octonions.
-//!
-//! Port of `scripts/research/ossm_168_dryrun/sedenion.py`. The algebra
-//! is stored as a raw `[f64; 16]` coefficient vector so that the
-//! public API never crosses a module boundary with a large struct
-//! return — see DEVIATIONS comment at the bottom of this file.
-//!
-//! Algebraic facts exercised by the OSSM-168 prereg:
-//!   * non-commutative, non-associative, NON-alternative
-//!   * NOT a division algebra: primitive zero-divisors exist
-//!   * every CD algebra is **flexible**: [x, y, x] = 0 for all x, y,
-//!     hence [c, b, a] = −[a, b, c] throughout the CD tower
-//!     (see DEVIATIONS entry 0004 for why this kills any "parity
-//!     asymmetry" feature)
-//!
-//! Signs follow the universal Cayley-Dickson kernel `cd_sigma`
-//! (`stdlib/algebra/cayley_dickson.sio`, bits = 4 for 𝕊₁₆).
+//@ run-pass
+//@ expect-stdout: ALL PASS
 
-use algebra::cayley_dickson::{cd_sigma}
+//! stdlib/algebra/sedenion.sio — Sedenion algebra 𝕊 (Cayley-Dickson k=4)
+//!
+//! Self-contained canonical implementation.  No imports.
+//!
+//! Algebraic facts:
+//!   Non-commutative, non-associative, NOT a division algebra.
+//!   Primitive zero-divisors exist: (e3+e10)*(e6-e15) = 0 exactly.
+//!
+//! API surface:
+//!   sed_zero / sed_basis / sed_zd_z / sed_zd_w — constructors
+//!   sed_add / sed_sub / sed_scale               — linear ops
+//!   sed_norm_sq / sed_norm / sed_dot            — metric
+//!   sed_mul(a, b, out)                          — sedenion product
+//!   sed_associator(a, b, c, out)                — non-associativity probe
+//!
+//! The sedenion product is implemented via the recursive Cayley-Dickson
+//! half-split: 𝕊 = (𝕆, 𝕆), so (a,b)*(c,d) = (ac - d*b̄, d̄a + bc̄).
+//! Internal scratch buffers (module-level arrays) avoid heap use.
 
-// ============================================================================
-// Algebra declaration (routing for the Fano-selective reassociation pass)
-// ----------------------------------------------------------------------------
-// Previously in `sedenion_decl.sio` (now folded in). Keeps the
-// Cayley-Dickson sigma-based sign kernel as the semantic backend for
-// the reassociation predicate, matching `octonion.sio` at the octonion
-// rung.
-// ============================================================================
+// ─── Scratch buffers ─────────────────────────────────────────────────────────
+var SED_P:   [f64; 8]  = [0.0; 8]
+var SED_Q:   [f64; 8]  = [0.0; 8]
+var SED_OUT: [f64; 16] = [0.0; 16]
 
-algebra Sedenion over f64 {
-    add: commutative, associative
-    mul: non_commutative
-    reassociate: fano_selective
+// ─── CNT[0]=pass CNT[1]=fail (array avoids JIT scalar-global offset bug) ─────
+var CNT: [i64; 2] = [0; 2]
+
+// =============================================================================
+// Octonion product helpers (Cayley-Dickson k=3, used by sedenion product)
+// =============================================================================
+// native-v2 cannot emit functions with huge scalar f64 param lists (oct_p/oct_q
+// had 16 params; sed_vv had 32). Array-ref form matches octonion.sio / science
+// leaves and keeps the public sed_mul(&[f64;16], ...) API unchanged.
+
+fn oct_p(a: &[f64; 8], b: &[f64; 8]) with Mut {
+    let a0 = (*a)[0]; let a1 = (*a)[1]; let a2 = (*a)[2]; let a3 = (*a)[3]
+    let a4 = (*a)[4]; let a5 = (*a)[5]; let a6 = (*a)[6]; let a7 = (*a)[7]
+    let b0 = (*b)[0]; let b1 = (*b)[1]; let b2 = (*b)[2]; let b3 = (*b)[3]
+    let b4 = (*b)[4]; let b5 = (*b)[5]; let b6 = (*b)[6]; let b7 = (*b)[7]
+    SED_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    SED_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    SED_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    SED_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    SED_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    SED_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    SED_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    SED_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
 }
 
-// ============================================================================
-// Basic constructors
-// ============================================================================
-
-pub fn sed_zero(out: &![f64; 16]) with Mut {
-    var i: i64 = 0
-    while i < 16 { out[i as usize] = 0.0; i = i + 1 }
+fn oct_q(a: &[f64; 8], b: &[f64; 8]) with Mut {
+    let a0 = (*a)[0]; let a1 = (*a)[1]; let a2 = (*a)[2]; let a3 = (*a)[3]
+    let a4 = (*a)[4]; let a5 = (*a)[5]; let a6 = (*a)[6]; let a7 = (*a)[7]
+    let b0 = (*b)[0]; let b1 = (*b)[1]; let b2 = (*b)[2]; let b3 = (*b)[3]
+    let b4 = (*b)[4]; let b5 = (*b)[5]; let b6 = (*b)[6]; let b7 = (*b)[7]
+    SED_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    SED_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    SED_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    SED_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    SED_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    SED_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    SED_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    SED_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
 }
 
-// Unit basis element e_i for i in 0..15 (0 is the real unit).
-pub fn sed_basis(i: i64, out: &![f64; 16]) with Mut {
-    var z: i64 = 0
-    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
-    if i >= 0 && i < 16 { out[i as usize] = 1.0 }
-}
-
-// Construct (a, b) in the CD doubling: out[0..8] = a, out[8..16] = b.
-pub fn sed_from_pair(a: &[f64; 8], b: &[f64; 8], out: &![f64; 16]) with Mut {
-    var i: i64 = 0
+fn sed_fill_conj(src: &[f64; 8], dst: &![f64; 8]) with Mut {
+    (*dst)[0] = (*src)[0]
+    var i = 1
     while i < 8 {
-        out[i as usize] = a[i as usize]
-        out[(i + 8) as usize] = b[i as usize]
+        (*dst)[i] = 0.0 - (*src)[i]
         i = i + 1
     }
 }
 
-// ============================================================================
-// Multiplication via the universal CD sign kernel (bits = 4)
-// ----------------------------------------------------------------------------
-// (a * b)[idx] = Σ_{i XOR j = idx} cd_sigma(i, j, 4) * a[i] * b[j].
-// Matches the explicit formula used by `sed_mul` in the Python port
-// and the `algebra Sedenion` declaration at the top of this file.
-// ============================================================================
-
-pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut, Div, Panic {
-    var z: i64 = 0
-    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
-    var i: i32 = 0
-    while i < 16 {
-        let ai = a[i as usize]
-        if ai != 0.0 {
-            var j: i32 = 0
-            while j < 16 {
-                let bj = b[j as usize]
-                if bj != 0.0 {
-                    let idx = i ^ j
-                    let sign = cd_sigma(i, j, 4)
-                    out[idx as usize] = out[idx as usize] + (sign as f64) * ai * bj
-                }
-                j = j + 1
-            }
-        }
+// Private: sedenion product a*h → SED_OUT via CD half-split
+fn sed_vv(a: &[f64; 16], h: &[f64; 16]) with Mut {
+    var a_lo: [f64; 8] = [0.0; 8]
+    var a_hi: [f64; 8] = [0.0; 8]
+    var h_lo: [f64; 8] = [0.0; 8]
+    var h_hi: [f64; 8] = [0.0; 8]
+    var conj: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 {
+        a_lo[i] = (*a)[i]
+        a_hi[i] = (*a)[8 + i]
+        h_lo[i] = (*h)[i]
+        h_hi[i] = (*h)[8 + i]
+        i = i + 1
+    }
+    // Lower 8: o1a*o1b − conj(o2b)*o2a
+    oct_p(&a_lo, &h_lo)
+    sed_fill_conj(&h_hi, &!conj)
+    oct_q(&conj, &a_hi)
+    i = 0
+    while i < 8 {
+        SED_OUT[i] = SED_P[i] - SED_Q[i]
+        i = i + 1
+    }
+    // Upper 8: o2b*o1a + o2a*conj(o1b)
+    oct_p(&h_hi, &a_lo)
+    sed_fill_conj(&h_lo, &!conj)
+    oct_q(&a_hi, &conj)
+    i = 0
+    while i < 8 {
+        SED_OUT[8 + i] = SED_P[i] + SED_Q[i]
         i = i + 1
     }
 }
 
-// ============================================================================
-// Associator, norms
-// ============================================================================
+// =============================================================================
+// Public API
+// =============================================================================
 
-pub fn sed_associator(
-    a: &[f64; 16], b: &[f64; 16], c: &[f64; 16],
-    out: &![f64; 16]
-) with Mut, Div, Panic {
-    var ab: [f64; 16] = [0.0; 16]
-    var bc: [f64; 16] = [0.0; 16]
+/// Zero vector.
+pub fn sed_zero(out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+}
+
+/// Basis element e_k, k in 0..15.
+pub fn sed_basis(k: i64, out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+    if k >= 0 && k < 16 { (*out)[k as usize] = 1.0 }
+}
+
+/// Canonical zero-divisor left: z = e3 + e10.
+pub fn sed_zd_z(out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+    (*out)[3] = 1.0; (*out)[10] = 1.0
+}
+
+/// Canonical zero-divisor right: w = e6 − e15.  z*w = 0 exactly.
+pub fn sed_zd_w(out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=0.0; i=i+1 }
+    (*out)[6] = 1.0; (*out)[15] = 0.0 - 1.0
+}
+
+/// Alias for sed_zd_z (canonical zero-divisor left).
+pub fn sed_canonical_zd_z(out: &![f64; 16]) with Mut { sed_zd_z(out) }
+
+/// Alias for sed_zd_w (canonical zero-divisor right).
+pub fn sed_canonical_zd_w(out: &![f64; 16]) with Mut { sed_zd_w(out) }
+
+/// Construct sedenion from two octonion halves: out = (h0, h1).
+pub fn sed_from_pair(h0: &[f64; 8], h1: &[f64; 8], out: &![f64; 16]) with Mut {
+    var i=0; while i<8 { (*out)[i]=(*h0)[i]; i=i+1 }
+    i=0; while i<8 { (*out)[8+i]=(*h1)[i]; i=i+1 }
+}
+
+/// L¹ norm: sum of absolute component values.
+pub fn sed_l1_norm(a: &[f64; 16]) -> f64 with Mut {
+    var s=0.0; var i=0
+    while i<16 {
+        let v = (*a)[i]
+        if v < 0.0 { s = s + (0.0 - v) } else { s = s + v }
+        i=i+1
+    }
+    s
+}
+
+/// Component-wise addition: out = a + b.
+pub fn sed_add(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=(*a)[i]+(*b)[i]; i=i+1 }
+}
+
+/// Component-wise subtraction: out = a − b.
+pub fn sed_sub(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=(*a)[i]-(*b)[i]; i=i+1 }
+}
+
+/// Scalar scaling: out = s * a.
+pub fn sed_scale(a: &[f64; 16], s: f64, out: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*out)[i]=(*a)[i]*s; i=i+1 }
+}
+
+/// Squared Euclidean norm: ‖a‖².
+pub fn sed_norm_sq(a: &[f64; 16]) -> f64 with Mut {
+    var s=0.0; var i=0
+    while i<16 { s=s+(*a)[i]*(*a)[i]; i=i+1 }
+    s
+}
+
+/// Euclidean norm (Newton-Raphson sqrt, 30 iterations).
+pub fn sed_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {
+    let sq = sed_norm_sq(a)
+    if sq <= 0.0 { return 0.0 }
+    var g = sq; var i=0
+    while i<30 { g = (g + sq/g) / 2.0; i=i+1 }
+    g
+}
+
+/// Inner product: a · b.
+pub fn sed_dot(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {
+    var s=0.0; var i=0
+    while i<16 { s=s+(*a)[i]*(*b)[i]; i=i+1 }
+    s
+}
+
+/// Sedenion product: out = a * b  (Cayley-Dickson k=4, left-multiplication).
+pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
+    sed_vv(a, b)
+    var i=0; while i<16 { (*out)[i]=SED_OUT[i]; i=i+1 }
+}
+
+/// Associator: out = (a*b)*c − a*(b*c).
+pub fn sed_associator(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], out: &![f64; 16]) with Mut {
+    var ab:   [f64; 16] = [0.0; 16]
+    var bc:   [f64; 16] = [0.0; 16]
     var left: [f64; 16] = [0.0; 16]
-    var right: [f64; 16] = [0.0; 16]
+    var right:[f64; 16] = [0.0; 16]
     sed_mul(a, b, &!ab)
     sed_mul(b, c, &!bc)
     sed_mul(&ab, c, &!left)
     sed_mul(a, &bc, &!right)
-    var i: i64 = 0
-    while i < 16 {
-        out[i as usize] = left[i as usize] - right[i as usize]
-        i = i + 1
+    var i=0; while i<16 { (*out)[i]=left[i]-right[i]; i=i+1 }
+}
+
+// =============================================================================
+// Inline tests
+// =============================================================================
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn check(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
     }
 }
 
-pub fn sed_norm_sq(a: &[f64; 16]) -> f64 with Mut {
-    var s: f64 = 0.0
-    var i: i64 = 0
-    while i < 16 { s = s + a[i as usize] * a[i as usize]; i = i + 1 }
-    s
+fn test_identity() with IO, Mut, Div, Panic {
+    // e0 * e3 = e3
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    a[0] = 1.0; b[3] = 1.0
+    sed_mul(&a, &b, &!out)
+    check(1, near(out[3], 1.0, 1.0e-12))
+    check(2, near(sed_norm_sq(&out), 1.0, 1.0e-12))
 }
 
-// Componentwise L¹ norm — used by v3 F_3.
-pub fn sed_l1_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {
-    var s: f64 = 0.0
-    var i: i64 = 0
+fn test_anticommutativity() with IO, Mut, Div, Panic {
+    // e1 * e2 = -e2 * e1  in the imaginary subspace
+    var e1: [f64; 16] = [0.0; 16]
+    var e2: [f64; 16] = [0.0; 16]
+    var ab: [f64; 16] = [0.0; 16]
+    var ba: [f64; 16] = [0.0; 16]
+    e1[1] = 1.0; e2[2] = 1.0
+    sed_mul(&e1, &e2, &!ab)
+    sed_mul(&e2, &e1, &!ba)
+    // ab + ba = 0 for imaginary basis elements
+    var i=0; var ok=1
     while i < 16 {
-        let v = a[i as usize]
-        s = s + if v < 0.0 { 0.0 - v } else { v }
+        if near(ab[i] + ba[i], 0.0, 1.0e-12) == 0 { ok = 0 }
         i = i + 1
     }
-    s
+    check(3, ok)
 }
 
-// ============================================================================
-// Canonical primitive zero-divisor pair (de Marrais 2000)
-// ----------------------------------------------------------------------------
-// z = e_3 + e_10,  w = e_6 − e_15.  Satisfies sed_mul(z, w) = 0.
-// Referenced by H2's feature F_2 (prereg §2).
-// ============================================================================
-
-pub fn sed_canonical_zd_z(out: &![f64; 16]) with Mut {
-    var z: i64 = 0
-    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
-    out[3] = 1.0
-    out[10] = 1.0
+fn test_zd_annihilates() with IO, Mut, Div, Panic {
+    // (e3+e10) * (e6-e15) = 0 exactly  — core ZD theorem
+    var z: [f64; 16] = [0.0; 16]
+    var w: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    sed_zd_z(&!z)
+    sed_zd_w(&!w)
+    sed_mul(&z, &w, &!out)
+    let n = sed_norm_sq(&out)
+    check(4, near(n, 0.0, 1.0e-24))
 }
 
-pub fn sed_canonical_zd_w(out: &![f64; 16]) with Mut {
-    var z: i64 = 0
-    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
-    out[6] = 1.0
-    out[15] = 0.0 - 1.0
+fn test_zd_w_not_zero() with IO, Mut, Div, Panic {
+    // w itself is non-zero
+    var w: [f64; 16] = [0.0; 16]
+    sed_zd_w(&!w)
+    check(5, near(sed_norm_sq(&w), 2.0, 1.0e-12))
 }
 
-// ============================================================================
-// Design note on aggregate returns
-// ----------------------------------------------------------------------------
-// Public routines take `&![f64; 16]` out-params rather than returning a
-// 16-float struct. This is intentional: the mini-native codegen
-// currently miscompiles cross-module calls that return structs carrying
-// fixed arrays of size ≥ 100 (see the note in
-// `stdlib/stats/epistemic/bootstrap.sio::bootstrap_ci_bca_mean` where
-// `ResampleResult { sample: [f64; 100], … }` was inlined for the same
-// reason). Keeping APIs on small types + out-params matches the style
-// in `octonion.sio::oct_mul` and avoids future segfault regressions.
+fn test_norm_sq_basis() with IO, Mut, Div, Panic {
+    // Each basis vector has norm_sq = 1
+    var e: [f64; 16] = [0.0; 16]
+    var ok = 1
+    var k = 0
+    while k < 16 {
+        sed_basis(k as i64, &!e)
+        if near(sed_norm_sq(&e), 1.0, 1.0e-12) == 0 { ok = 0 }
+        k = k + 1
+    }
+    check(6, ok)
+}
+
+fn test_associator_nonzero() with IO, Mut, Div, Panic {
+    // [e1, e2, e8] should be nonzero in 𝕊 (non-alternative)
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    a[1] = 1.0; b[2] = 1.0; c[8] = 1.0
+    sed_associator(&a, &b, &c, &!out)
+    let n = sed_norm_sq(&out)
+    check(7, if n > 0.5 { 1 } else { 0 })
+}
+
+fn test_add_sub() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var s: [f64; 16] = [0.0; 16]
+    var d: [f64; 16] = [0.0; 16]
+    a[1] = 3.0; b[1] = 5.0
+    sed_add(&a, &b, &!s)
+    sed_sub(&a, &b, &!d)
+    check(8, near(s[1], 8.0, 1.0e-12))
+    check(9, near(d[1], 0.0 - 2.0, 1.0e-12))
+}
+
+fn test_scale() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    a[5] = 2.0
+    sed_scale(&a, 3.5, &!out)
+    check(10, near(out[5], 7.0, 1.0e-12))
+}
+
+fn test_dot() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    a[0] = 1.0; a[1] = 2.0; b[0] = 3.0; b[1] = 4.0
+    check(11, near(sed_dot(&a, &b), 11.0, 1.0e-12))
+}
+
+fn test_norm() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    a[3] = 3.0; a[4] = 4.0
+    check(12, near(sed_norm(&a), 5.0, 1.0e-8))
+}
+
+fn test_real_unit_multiplicative_identity() with IO, Mut, Div, Panic {
+    // e0 * e_k = e_k  for all k
+    var e0: [f64; 16] = [0.0; 16]
+    var ek: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    e0[0] = 1.0
+    var ok = 1
+    var k = 0
+    while k < 16 {
+        sed_basis(k as i64, &!ek)
+        sed_mul(&e0, &ek, &!out)
+        if near(out[k], 1.0, 1.0e-12) == 0 { ok = 0 }
+        k = k + 1
+    }
+    check(13, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/algebra/sedenion tests ───\n")
+    test_identity()
+    test_anticommutativity()
+    test_zd_annihilates()
+    test_zd_w_not_zero()
+    test_norm_sq_basis()
+    test_associator_nonzero()
+    test_add_sub()
+    test_scale()
+    test_dot()
+    test_norm()
+    test_real_unit_multiplicative_identity()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
+}

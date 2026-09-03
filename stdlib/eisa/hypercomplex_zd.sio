@@ -1,0 +1,412 @@
+// stdlib/eisa/hypercomplex_zd.sio
+//
+// Bounded EISA-H software reference for exact sedenion zero-divisor evidence.
+// This is not an EISA opcode, compiler intrinsic, ABI, or hardware contract.
+//
+// V0 accepts sedenions with at most two nonzero coefficients, each exactly
+// +1 or -1. Multiplication uses the repository's public Cayley-Dickson sign
+// primitive. Inputs outside that proven no-overflow envelope fail closed.
+module eisa::hypercomplex_zd
+
+use algebra::cayley_dickson_exact_i64::{cd_sigma_exact_i64}
+
+pub struct SedExact16V0 {
+    coeffs: [i64; 16],
+    identity: i64,
+    element_status: i64,
+}
+
+pub struct ZDExactTokenV0 {
+    left_coeffs: [i64; 16],
+    right_coeffs: [i64; 16],
+    left_identity: i64,
+    right_identity: i64,
+    convention_tag: i64,
+    domain_tag: i64,
+    detector_tag: i64,
+    orientation_tag: i64,
+    valid: bool,
+    integrity_tag: i64,
+}
+
+pub struct ZDExactAttemptV0 {
+    status: i64,
+    token: ZDExactTokenV0,
+}
+
+pub struct ZDMeasuredReceiptV0 {
+    left_identity: i64,
+    right_identity: i64,
+    left_norm_sq: f64,
+    right_norm_sq: f64,
+    product_norm_sq: f64,
+    resolution: f64,
+    domain_tag: i64,
+    detector_tag: i64,
+    near_zero: bool,
+    status: i64,
+}
+
+pub fn zd_status_proved() -> i64 { 0 }
+pub fn zd_status_not_zd() -> i64 { 1 }
+pub fn zd_status_zero_operand() -> i64 { 2 }
+pub fn zd_status_unsupported() -> i64 { 3 }
+pub fn zd_status_overflow_risk() -> i64 { 4 }
+pub fn zd_status_identity_invalid() -> i64 { 5 }
+pub fn zd_status_measured_near_zero() -> i64 { 6 }
+
+pub fn zd_convention_cd_sigma_v0() -> i64 { 41001 }
+pub fn zd_domain_sed16_sparse_pm1_i64_v0() -> i64 { 41002 }
+pub fn zd_detector_exact_product_v0() -> i64 { 41003 }
+pub fn zd_orientation_ordered() -> i64 { 41004 }
+pub fn zd_detector_measured_norm_f64_v0() -> i64 { 41005 }
+pub fn zd_domain_measured_norm_f64_v0() -> i64 { 41006 }
+
+fn sed_element_ok() -> i64 { 0 }
+fn sed_element_unsupported() -> i64 { 1 }
+fn sed_element_overflow_risk() -> i64 { 2 }
+
+fn zd_zero_coeffs() -> [i64; 16] {
+    [0; 16]
+}
+
+fn zd_unsupported_coeffs() -> [i64; 16] with Mut {
+    var coeffs: [i64; 16] = [0; 16]
+    coeffs[0] = 1
+    coeffs[1] = 1
+    coeffs[2] = 1
+    coeffs
+}
+
+pub fn sed16_v0_zero(identity: i64) -> SedExact16V0 {
+    SedExact16V0 {
+        coeffs: zd_zero_coeffs(),
+        identity: identity,
+        element_status: sed_element_ok(),
+    }
+}
+
+pub fn sed16_v0_basis(identity: i64, index: i64, coefficient: i64) -> SedExact16V0 with Mut {
+    var coeffs = zd_zero_coeffs()
+    if index < 0 || index >= 16 {
+        return SedExact16V0 {
+            coeffs: zd_unsupported_coeffs(),
+            identity: identity,
+            element_status: sed_element_unsupported(),
+        }
+    }
+    if coefficient < -1 || coefficient > 1 {
+        coeffs[index as usize] = coefficient
+        let advisory_status = if coefficient > 1518500249 || coefficient < -1518500249 {
+            sed_element_overflow_risk()
+        } else {
+            sed_element_unsupported()
+        }
+        return SedExact16V0 {
+            coeffs: coeffs,
+            identity: identity,
+            element_status: advisory_status,
+        }
+    }
+    coeffs[index as usize] = coefficient
+    SedExact16V0 {
+        coeffs: coeffs,
+        identity: identity,
+        element_status: sed_element_ok(),
+    }
+}
+
+pub fn sed16_v0_two_support(
+    identity: i64,
+    index_a: i64,
+    coefficient_a: i64,
+    index_b: i64,
+    coefficient_b: i64
+) -> SedExact16V0 with Mut {
+    var coeffs = zd_zero_coeffs()
+    if index_a < 0 || index_a >= 16 || index_b < 0 || index_b >= 16 || index_a == index_b {
+        return SedExact16V0 {
+            coeffs: zd_unsupported_coeffs(),
+            identity: identity,
+            element_status: sed_element_unsupported(),
+        }
+    }
+    if coefficient_a < -1 || coefficient_a > 1 || coefficient_b < -1 || coefficient_b > 1 {
+        coeffs[index_a as usize] = coefficient_a
+        coeffs[index_b as usize] = coefficient_b
+        let overflow_risk = coefficient_a > 1518500249 || coefficient_a < -1518500249 ||
+                            coefficient_b > 1518500249 || coefficient_b < -1518500249
+        return SedExact16V0 {
+            coeffs: coeffs,
+            identity: identity,
+            element_status: if overflow_risk { sed_element_overflow_risk() } else { sed_element_unsupported() },
+        }
+    }
+    if coefficient_a == 0 || coefficient_b == 0 {
+        return SedExact16V0 {
+            coeffs: zd_unsupported_coeffs(),
+            identity: identity,
+            element_status: sed_element_unsupported(),
+        }
+    }
+    coeffs[index_a as usize] = coefficient_a
+    coeffs[index_b as usize] = coefficient_b
+    SedExact16V0 {
+        coeffs: coeffs,
+        identity: identity,
+        element_status: sed_element_ok(),
+    }
+}
+
+fn sed16_v0_is_zero(x: SedExact16V0) -> bool with Mut {
+    var i = 0
+    while i < 16 {
+        if x.coeffs[i as usize] != 0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Revalidate the received coefficient array. element_status is advisory only:
+// current compiler engines permit external struct literals, so it is never an
+// authority for arithmetic admission.
+fn sed16_v0_array_status(coeffs: [i64; 16]) -> i64 with Mut {
+    var nonzero_count = 0
+    var i = 0
+    while i < 16 {
+        let coefficient = coeffs[i as usize]
+        if coefficient != 0 {
+            // Four products can accumulate in one output component. This is
+            // the largest magnitude c with 4*c*c <= i64::MAX.
+            if coefficient > 1518500249 || coefficient < -1518500249 {
+                return zd_status_overflow_risk()
+            }
+            if coefficient != 1 && coefficient != -1 {
+                return zd_status_unsupported()
+            }
+            nonzero_count = nonzero_count + 1
+        }
+        i = i + 1
+    }
+    if nonzero_count > 2 { return zd_status_unsupported() }
+    zd_status_proved()
+}
+
+fn sed16_v0_product_is_zero(a: SedExact16V0, b: SedExact16V0) -> bool with Mut, Panic, Div {
+    var product: [i64; 16] = [0; 16]
+    var i = 0
+    while i < 16 {
+        if a.coeffs[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if b.coeffs[j as usize] != 0 {
+                    let output_index = i ^ j
+                    let sign = cd_sigma_exact_i64(i as i32, j as i32, 4)
+                    let term = a.coeffs[i as usize] * b.coeffs[j as usize]
+                    if sign > 0 {
+                        product[output_index as usize] = product[output_index as usize] + term
+                    } else {
+                        product[output_index as usize] = product[output_index as usize] - term
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        if product[i as usize] != 0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn zd_token_integrity_raw(
+    left: [i64; 16],
+    right: [i64; 16],
+    left_identity: i64,
+    right_identity: i64
+) -> i64 with Mut {
+    var h = 7919 + (left_identity % 1000003) * 17 + (right_identity % 1000003) * 31
+    var i = 0
+    while i < 16 {
+        h = (h * 131 + (left[i as usize] + 2) * (i + 3)) % 2147483647
+        h = (h * 131 + (right[i as usize] + 2) * (i + 19)) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn zd_invalid_token() -> ZDExactTokenV0 {
+    ZDExactTokenV0 {
+        left_coeffs: [0; 16],
+        right_coeffs: [0; 16],
+        left_identity: 0,
+        right_identity: 0,
+        convention_tag: zd_convention_cd_sigma_v0(),
+        domain_tag: zd_domain_sed16_sparse_pm1_i64_v0(),
+        detector_tag: zd_detector_exact_product_v0(),
+        orientation_tag: zd_orientation_ordered(),
+        valid: false,
+        integrity_tag: 0,
+    }
+}
+
+fn zd_failed_attempt(status: i64) -> ZDExactAttemptV0 {
+    ZDExactAttemptV0 { status: status, token: zd_invalid_token() }
+}
+
+pub fn zd_exact_attempt_v0(left: SedExact16V0, right: SedExact16V0) -> ZDExactAttemptV0 with Mut, Panic, Div {
+    if left.identity <= 0 || right.identity <= 0 {
+        return zd_failed_attempt(zd_status_identity_invalid())
+    }
+    let left_array_status = sed16_v0_array_status(left.coeffs)
+    let right_array_status = sed16_v0_array_status(right.coeffs)
+    if left_array_status == zd_status_overflow_risk() || right_array_status == zd_status_overflow_risk() {
+        return zd_failed_attempt(zd_status_overflow_risk())
+    }
+    if left_array_status != zd_status_proved() || right_array_status != zd_status_proved() {
+        return zd_failed_attempt(zd_status_unsupported())
+    }
+    if sed16_v0_is_zero(left) || sed16_v0_is_zero(right) {
+        return zd_failed_attempt(zd_status_zero_operand())
+    }
+    if !sed16_v0_product_is_zero(left, right) {
+        return zd_failed_attempt(zd_status_not_zd())
+    }
+    let integrity = zd_token_integrity_raw(left.coeffs, right.coeffs, left.identity, right.identity)
+    let token = ZDExactTokenV0 {
+        left_coeffs: left.coeffs,
+        right_coeffs: right.coeffs,
+        left_identity: left.identity,
+        right_identity: right.identity,
+        convention_tag: zd_convention_cd_sigma_v0(),
+        domain_tag: zd_domain_sed16_sparse_pm1_i64_v0(),
+        detector_tag: zd_detector_exact_product_v0(),
+        orientation_tag: zd_orientation_ordered(),
+        valid: true,
+        integrity_tag: integrity,
+    }
+    ZDExactAttemptV0 { status: zd_status_proved(), token: token }
+}
+
+pub fn zd_exact_attempt_status(a: ZDExactAttemptV0) -> i64 { a.status }
+
+pub fn zd_exact_attempt_proved(a: ZDExactAttemptV0) -> bool with Mut, Panic, Div {
+    a.status == zd_status_proved() && zd_exact_token_integrity_ok(a.token)
+}
+
+pub fn zd_exact_token(a: ZDExactAttemptV0) -> ZDExactTokenV0 with Mut, Panic, Div {
+    assert(zd_exact_attempt_proved(a))
+    a.token
+}
+
+pub fn zd_exact_token_integrity_ok(token: ZDExactTokenV0) -> bool with Mut, Panic, Div {
+    if !token.valid { return false }
+    if token.left_identity <= 0 || token.right_identity <= 0 { return false }
+    if token.convention_tag != zd_convention_cd_sigma_v0() { return false }
+    if token.domain_tag != zd_domain_sed16_sparse_pm1_i64_v0() { return false }
+    if token.detector_tag != zd_detector_exact_product_v0() { return false }
+    if token.orientation_tag != zd_orientation_ordered() { return false }
+    if sed16_v0_array_status(token.left_coeffs) != zd_status_proved() { return false }
+    if sed16_v0_array_status(token.right_coeffs) != zd_status_proved() { return false }
+    let left = SedExact16V0 {
+        coeffs: token.left_coeffs,
+        identity: token.left_identity,
+        element_status: sed_element_ok(),
+    }
+    let right = SedExact16V0 {
+        coeffs: token.right_coeffs,
+        identity: token.right_identity,
+        element_status: sed_element_ok(),
+    }
+    if sed16_v0_is_zero(left) || sed16_v0_is_zero(right) { return false }
+    // Recompute the exact ordered product before consulting the checksum.
+    // A matching or cloned checksum never establishes annihilation.
+    if !sed16_v0_product_is_zero(left, right) { return false }
+    token.integrity_tag == zd_token_integrity_raw(
+        token.left_coeffs,
+        token.right_coeffs,
+        token.left_identity,
+        token.right_identity,
+    )
+}
+
+fn zd_coeffs_equal(a: [i64; 16], b: [i64; 16]) -> bool with Mut {
+    var i = 0
+    while i < 16 {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+pub fn zd_exact_token_matches_ordered(
+    token: ZDExactTokenV0,
+    left: SedExact16V0,
+    right: SedExact16V0
+) -> bool with Mut, Panic, Div {
+    zd_exact_token_integrity_ok(token) &&
+    token.left_identity == left.identity &&
+    token.right_identity == right.identity &&
+    zd_coeffs_equal(token.left_coeffs, left.coeffs) &&
+    zd_coeffs_equal(token.right_coeffs, right.coeffs)
+}
+
+pub fn zd_requires_exact(token: ZDExactTokenV0) -> bool with Mut, Panic, Div {
+    zd_exact_token_integrity_ok(token)
+}
+
+fn zd_is_finite_f64(x: f64) -> bool {
+    if x != x { return false }
+    // The measured lean_single NaN path can compare equal to both operands.
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
+}
+
+pub fn zd_measured_norm_f64_v0(
+    left_identity: i64,
+    right_identity: i64,
+    left_norm_sq: f64,
+    right_norm_sq: f64,
+    product_norm_sq: f64,
+    resolution: f64
+) -> ZDMeasuredReceiptV0 with Mut {
+    var status = zd_status_not_zd()
+    var near_zero = false
+    if left_identity <= 0 || right_identity <= 0 {
+        status = zd_status_identity_invalid()
+    } else if !zd_is_finite_f64(left_norm_sq) || !zd_is_finite_f64(right_norm_sq) ||
+              !zd_is_finite_f64(product_norm_sq) || !zd_is_finite_f64(resolution) {
+        status = zd_status_unsupported()
+    } else if left_norm_sq < 0.0 || right_norm_sq < 0.0 ||
+              resolution <= 0.0 || product_norm_sq < 0.0 {
+        status = zd_status_unsupported()
+    } else if left_norm_sq == 0.0 || right_norm_sq == 0.0 {
+        status = zd_status_zero_operand()
+    } else if product_norm_sq < resolution {
+        near_zero = true
+        status = zd_status_measured_near_zero()
+    }
+    ZDMeasuredReceiptV0 {
+        left_identity: left_identity,
+        right_identity: right_identity,
+        left_norm_sq: left_norm_sq,
+        right_norm_sq: right_norm_sq,
+        product_norm_sq: product_norm_sq,
+        resolution: resolution,
+        domain_tag: zd_domain_measured_norm_f64_v0(),
+        detector_tag: zd_detector_measured_norm_f64_v0(),
+        near_zero: near_zero,
+        status: status,
+    }
+}
+
+pub fn zd_measurement_status(r: ZDMeasuredReceiptV0) -> i64 { r.status }
+pub fn zd_measurement_near_zero(r: ZDMeasuredReceiptV0) -> bool { r.near_zero }
+pub fn zd_measurement_is_exact_proof(r: ZDMeasuredReceiptV0) -> bool {
+    let _observed = r
+    false
+}

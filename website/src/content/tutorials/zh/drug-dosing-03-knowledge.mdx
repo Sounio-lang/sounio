@@ -1,0 +1,123 @@
+---
+title: "使用Knowledge<T>处理不确定性测量"
+description: "用跟踪测量不确定性的Epistemic类型替换原始数字"
+series: "drug-dosing"
+order: 3
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-02-pk-model"]
+topic_id: "website.tutorials.zh.drug-dosing-03-knowledge"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh.drug-dosing-03-knowledge"
+---
+# 使用Knowledge&lt;T&gt;处理不确定性测量
+
+在上一个课程中，我们构建了一个带有精确`f64`值的PK模型。现在我们将使用Sounio的`Knowledge<T>`类型来跟踪不确定性。
+
+## 从f64到Knowledge&lt;f64&gt;
+
+每个临床测量都有不确定性。血清肌酐1.2 mg/dL实际上意味着“大约1.2，标准偏差约为0.06”。在Sounio中：
+
+```sio
+// 之前：原始数字，不确定性未知
+let scr: f64 = 1.2
+
+// 之后：值 + 标准不确定性
+let scr: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+`measure()`构造函数创建了一个`Knowledge&lt;f64&gt;`，其中包含：
+- **值**：最佳估计（1.2）
+- **不确定性**：标准不确定性（0.06，代表±5% CV）
+
+## 构建Epistemic PK模型
+
+让我们重新定义我们的PK参数以承载不确定性：
+```sio
+结构体EpistemicPK {
+    清除率：Knowledge<f64>，    // L/h ± 不确定性
+    体积：Knowledge<f64>，       // L ± 不确定性
+    剂量：f64，                    // mg（确切地控制剂量）
+    tau：f64，                     // 小时（确切地设定时间表）
+}
+```
+
+请注意，`dose`和`tau`仍然是普通的`f64` — 这些是我们做出的**决策**，而不是测量。只有测量量带有不确定性。
+
+## 创建患者特定的参数
+
+一个真实的临床场景用于万古霉素给药：
+
+```sio
+fn create_patient_pk() -> EpistemicPK {
+    EpistemicPK {
+        // 清除率：从Cockcroft-Gault估计
+        // 人群平均4.5 L/h，但30%个体间变异性
+        clearance: measure(4.5, uncertainty: 1.35),
+
+        // 体积：从体重估计
+        // 50 L ± 10%（基于体重的估计误差）
+        volume: measure(50.0, uncertainty: 5.0),
+
+        dose: 1000.0,   // 1g万古霉素（确切）
+        tau: 12.0,       // q12h（确切）
+    }
+}
+```清除率的不确定性1.35 L/h（30% CV）反映了真实临床变异性——万古霉素清除率取决于肾功能、年龄、体重和遗传，我们无法精确地为给定患者知道这些。
+
+## 知识值的算术运算
+
+当你对`Knowledge<T>`值进行算术运算时，Sounio将自动使用一阶误差传播（delta方法）来传播不确定性：
+
+```sio
+// 除法从两个操作数中传播不确定性
+fn epistemic_half_life(pk: EpistemicPK) -> Knowledge<f64> {
+    0.693 * pk.volume / pk.clearance
+}
+
+// 结果携带组合不确定性：
+// σ(t½) = t½ × √((σ_V/V)² + (σ_CL/CL)²)
+```
+
+你无需编写传播公式——`Knowledge<T>`类型负责处理它。编译器验证所有操作都是不确定性安全的。
+
+## 提取信息
+
+你可以查询`Knowledge&lt;f64&gt;`值以获取其组件：
+
+```sio
+fn main() with IO {
+    let pk = create_patient_pk()
+    let t_half = epistemic_half_life(pk)
+
+    // 访问最佳估计
+    let value = t_half.value        // ~7.7小时
+``````markdown
+// 访问标准不确定性
+let uncert = t_half.uncertainty // ~2.7小时
+
+// 相对不确定性（变异系数）
+let cv = uncert / value         // ~35%
+
+打印("半衰期：")
+println(value)
+打印(" ± ")
+println(不确定性)
+打印("小时（CV: ")
+println(cv)
+打印(")\n")
+}
+```
+
+35% CV的半衰期意味着我们的剂量预测具有显著的不确定性。这是非常重要的临床信息，而纯浮点数算术将隐藏这些信息。
+
+## 关键要点
+
+- `Knowledge&lt;f64&gt;` 将值与其标准不确定性包装在一起
+- 使用 `measure(value, uncertainty: sigma)` 创建认识论值
+- 算术运算自动传播不确定性
+- 决策（剂量，时间表）保持为纯浮点数 — 只有测量值携带不确定性
+- 编译器确保您永远不会意外地错误地混合确定和不确定值
+```

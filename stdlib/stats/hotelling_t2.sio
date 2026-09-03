@@ -1,0 +1,237 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/hotelling_t2.sio — one-sample Hotelling's T² test (bivariate)
+//
+// The multivariate generalisation of the one-sample t-test: does the 2-D mean
+// vector equal a hypothesised (μ₀ₓ, μ₀ᵧ)?
+//
+//   hotelling_t2(x, y, n, m0x, m0y) -> HotellingResult
+//
+// With sample covariance S (÷(n−1)) and deviation d = (x̄−μ₀),
+//   T² = n·dᵀ S⁻¹ d,
+//   F = (n−p)/(p(n−1))·T²  ~  F(p, n−p),   p = 2.
+//
+// Pure Sounio: closed-form 2×2 inverse; the F tail via inline Lanczos log-gamma
+// + continued-fraction incomplete beta. No nested data-array calls.
+//
+// References:
+//   Hotelling (1931); Johnson & Wichern, "Applied Multivariate Statistical
+//   Analysis" 6e, §5.
+
+module stats::hotelling_t2
+
+fn ht_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ht_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ht_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ht_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * ht_ln(tt) - tt + ht_ln(a)
+}
+
+fn ht_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn ht_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = ht_lgamma(a) + ht_lgamma(b) - ht_lgamma(a + b)
+    let front = ht_exp(a * ht_ln(x) + b * ht_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * ht_betacf(a, b, x) / a }
+    return 1.0 - front * ht_betacf(b, a, 1.0 - x) / b
+}
+
+// upper-tail F: P(F_{d1,d2} > f)
+fn ht_f_sf(f: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if f <= 0.0 { return 1.0 }
+    let x = d2 / (d2 + d1 * f)
+    return ht_ibeta(d2 * 0.5, d1 * 0.5, x)
+}
+
+pub struct HotellingResult {
+    pub t2: f64,     // Hotelling's T²
+    pub f: f64,      // F statistic
+    pub df1: i64,    // p = 2
+    pub df2: i64,    // n - 2
+    pub p: f64,
+}
+
+/// One-sample bivariate Hotelling's T² test.
+///
+/// Parâmetros: x, y — sample coordinates; n — size (>=3); m0x, m0y — hypothesised mean.
+/// Retorno: HotellingResult (t2, f, df1, df2, p).
+/// Referências: Hotelling (1931).
+pub fn hotelling_t2(x: &[f64; 256], y: &[f64; 256], n: i32, m0x: f64, m0y: f64) -> HotellingResult with Mut, Div, Panic {
+    if n < 3 { return HotellingResult { t2: 0.0, f: 0.0, df1: 2, df2: (n - 2) as i64, p: 1.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        sxy = sxy + dx * dy
+        j = j + 1
+    }
+    let dfc = nf - 1.0
+    sxx = sxx / dfc
+    syy = syy / dfc
+    sxy = sxy / dfc
+    let det = sxx * syy - sxy * sxy
+    if det <= 0.0 { return HotellingResult { t2: 0.0, f: 0.0, df1: 2, df2: (n - 2) as i64, p: 1.0 } }
+    let dx = mx - m0x
+    let dy = my - m0y
+    let d2 = (syy * dx * dx - 2.0 * sxy * dx * dy + sxx * dy * dy) / det
+    let t2 = nf * d2
+    let p = 2.0
+    let f = (nf - p) / (p * (nf - 1.0)) * t2
+    let pval = ht_f_sf(f, p, nf - p)
+    return HotellingResult { t2: t2, f: f, df1: 2, df2: (n - 2) as i64, p: pval }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {(0,0),(2,0),(0,2),(2,2),(1,1)}: mean (1,1), sxx=syy=1, sxy=0.
+// test mu0=(0,0): d=(1,1), D²=2, T²=5·2=10. F=(5-2)/(2·4)·10=3.75, df (2,3).
+fn test_hotelling() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=2.0; x[2]=0.0; x[3]=2.0; x[4]=1.0
+    y[0]=0.0; y[1]=0.0; y[2]=2.0; y[3]=2.0; y[4]=1.0
+    let r = hotelling_t2(&x, &y, 5, 0.0, 0.0)
+    var ok = true
+    ok = check(1, approx(r.t2, 10.0, 1.0e-5)) && ok
+    ok = check(2, approx(r.f, 3.75, 1.0e-5)) && ok
+    ok = check(3, r.df1 == 2) && ok
+    ok = check(4, r.df2 == 3) && ok
+    return ok
+}
+
+// testing the true mean -> T²=0, F=0, p=1.
+fn test_at_mean() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=2.0; x[2]=0.0; x[3]=2.0; x[4]=1.0
+    y[0]=0.0; y[1]=0.0; y[2]=2.0; y[3]=2.0; y[4]=1.0
+    let r = hotelling_t2(&x, &y, 5, 1.0, 1.0)
+    var ok = true
+    ok = check(10, approx(r.t2, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_hotelling() && ok
+    ok = test_at_mean() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

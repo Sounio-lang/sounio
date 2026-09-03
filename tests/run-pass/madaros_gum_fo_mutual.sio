@@ -1,0 +1,74 @@
+//@ run-pass
+//@ expect-stdout: MADAROS_GUM_FO_MUTUAL_PASS
+
+// Mutual FO expand — multipass + cycle/miss primary-arg fallback.
+//
+// True mutual recursion with runtime if cannot fully unroll; cycle detection
+// uses FO of the primary state arg, then multipass re-expands callees.
+// Fixed small depth (n=1) matches analytic peel.
+
+// Free mutual pair
+fn even_mag(x: f64, n: f64) -> f64 {
+    if n < 0.5 { x } else { odd_mag(x * 1.1, n - 1.0) }
+}
+fn odd_mag(x: f64, n: f64) -> f64 {
+    if n < 0.5 { x } else { even_mag(x * 1.1, n - 1.0) }
+}
+
+// Method mutual pair
+struct Mag {
+    tag: i64
+}
+impl Mag {
+    fn even_m(self: &Mag, x: f64, n: f64) -> f64 {
+        if n < 0.5 { x } else { self.odd_m(x * 1.1, n - 1.0) }
+    }
+    fn odd_m(self: &Mag, x: f64, n: f64) -> f64 {
+        if n < 0.5 { x } else { self.even_m(x * 1.1, n - 1.0) }
+    }
+}
+
+// DAG still works (regression)
+fn leaf(x: f64) -> f64 { x * 2.0 }
+fn mid(x: f64) -> f64 { leaf(x) + 1.0 }
+fn top(x: f64) -> f64 { mid(x) * mid(x) }
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kx: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let x = kx.value
+    let m = Mag { tag: 0 }
+
+    // depth 1: even_mag(x,1)=odd_mag(1.1x,0)=1.1x → Var = 1.21 * 0.01 = 0.0121
+    let v_even = variance_of(even_mag(x, 1.0))
+    let v_peel = variance_of(x * 1.1)
+    let v_odd = variance_of(odd_mag(x, 1.0))
+    let v_me = variance_of(m.even_m(x, 1.0))
+    let v_mo = variance_of(m.odd_m(x, 1.0))
+
+    // DAG: (2x+1)^2 at x=2 → s=20, Var=4
+    let v_top = variance_of(top(x))
+
+    print("v_even="); print_f64(v_even); print("\n")
+    print("v_peel="); print_f64(v_peel); print("\n")
+    print("v_odd="); print_f64(v_odd); print("\n")
+    print("v_me="); print_f64(v_me); print("\n")
+    print("v_mo="); print_f64(v_mo); print("\n")
+    print("v_top="); print_f64(v_top); print("\n")
+
+    let ok = abs_f(v_even - v_peel) < 1.0e-9
+        && abs_f(v_even - 0.0121) < 1.0e-9
+        && abs_f(v_odd - v_peel) < 1.0e-9
+        && abs_f(v_me - v_peel) < 1.0e-9
+        && abs_f(v_mo - v_peel) < 1.0e-9
+        && abs_f(v_top - 4.0) < 1.0e-9
+    if ok {
+        print("MADAROS_GUM_FO_MUTUAL_PASS\n")
+    } else {
+        print("MADAROS_GUM_FO_MUTUAL_FAIL\n")
+    }
+}

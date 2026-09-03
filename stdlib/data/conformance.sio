@@ -1,0 +1,70 @@
+//! Conformance / conformity decisions on a measured value against specification limits, accounting
+//! for measurement uncertainty — the decision that a float64 engine like pandas gets wrong.
+//!
+//! A raw `value < limit` verdict ignores the measurement's uncertainty and will wrongly accept a part
+//! that is out of tolerance (or reject a good one) whenever the measured value sits within a coverage
+//! interval of the limit. The metrology standards (ISO 14253-1, ILAC-G8, JCGM 106) instead return one
+//! of three outcomes using the expanded uncertainty U as a guard band:
+//!   PASS (conforming) — the whole coverage interval [value−U, value+U] lies inside the spec,
+//!   FAIL (non-conforming) — the whole interval lies outside the spec,
+//!   INDETERMINATE — the interval straddles a limit, so the result cannot decide at that confidence.
+//!
+//! Inputs are `epistemic::gum::GUMResult` values (as produced by the uncertain reductions), so this is
+//! the decision layer on top of the measurement lane. Self-contained on `epistemic::gum`; no compiler
+//! changes.
+
+use epistemic::gum::{GUMResult, gum_value, gum_u95}
+
+/// Decision codes.
+pub fn conf_pass() -> i64 { 2 }
+pub fn conf_indeterminate() -> i64 { 1 }
+pub fn conf_fail() -> i64 { 0 }
+
+pub fn conf_is_pass(code: i64) -> bool { code == 2 }
+pub fn conf_is_indeterminate(code: i64) -> bool { code == 1 }
+pub fn conf_is_fail(code: i64) -> bool { code == 0 }
+
+/// Two-sided conformance against [lower, upper] using the expanded uncertainty U95 as the guard band
+/// (ISO 14253-1 simple acceptance). PASS if [value−U, value+U] ⊆ [lower, upper]; FAIL if that interval
+/// is entirely below `lower` or entirely above `upper`; INDETERMINATE otherwise.
+pub fn conf_two_sided(r: GUMResult, lower: f64, upper: f64) -> i64 with Div, Panic {
+    let v = gum_value(r)
+    let u = gum_u95(r)
+    let lo = v - u
+    let hi = v + u
+    if lo >= lower && hi <= upper { return 2 }        // conforming
+    if hi < lower || lo > upper { return 0 }          // non-conforming
+    1                                                 // straddles a limit
+}
+
+/// One-sided upper-limit conformance (e.g. "contaminant ≤ limit"): PASS if value+U ≤ upper,
+/// FAIL if value−U > upper, else INDETERMINATE.
+pub fn conf_upper(r: GUMResult, upper: f64) -> i64 with Div, Panic {
+    let v = gum_value(r)
+    let u = gum_u95(r)
+    if v + u <= upper { return 2 }
+    if v - u > upper { return 0 }
+    1
+}
+
+/// One-sided lower-limit conformance (e.g. "strength ≥ limit"): PASS if value−U ≥ lower,
+/// FAIL if value+U < lower, else INDETERMINATE.
+pub fn conf_lower(r: GUMResult, lower: f64) -> i64 with Div, Panic {
+    let v = gum_value(r)
+    let u = gum_u95(r)
+    if v - u >= lower { return 2 }
+    if v + u < lower { return 0 }
+    1
+}
+
+/// Guarded acceptance/rejection with an EXPLICIT guard band `g` (ILAC-G8 / JCGM 106 binary guarding),
+/// deciding on the value alone: accept only if value ∈ [lower+g, upper−g] (the acceptance interval);
+/// reject if value ∉ [lower−g, upper+g] (outside the rejection interval); INDETERMINATE in the guard
+/// zones between them. With g = U this reproduces conservative acceptance; g = 0 is shared-risk
+/// (value-only) acceptance.
+pub fn conf_guarded(r: GUMResult, lower: f64, upper: f64, g: f64) -> i64 with Div, Panic {
+    let v = gum_value(r)
+    if v >= lower + g && v <= upper - g { return 2 }  // inside acceptance interval
+    if v < lower - g || v > upper + g { return 0 }    // outside rejection interval
+    1                                                 // guard zone
+}

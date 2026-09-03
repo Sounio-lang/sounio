@@ -1,0 +1,178 @@
+// Compiler-owned raw payload storage for fixed wide numeric formats.
+//
+// This module intentionally does not attach payload IDs to IrInstr or IrModule
+// yet. It establishes the arena and its invariants before any lowering, ABI,
+// arithmetic, or serialization path can depend on them. Inserts are append-only
+// and are not interned: equal bit patterns retain distinct payload identities.
+
+module ir::numeric_payload
+
+use check::numeric_format::{binary_format_descriptor_for_id, numeric_format_int_id_for_storage_bits}
+
+pub let IR_WIDE_NUMERIC_MAX_PAYLOADS: i64 = 256
+pub let IR_WIDE_NUMERIC_MAX_LIMBS: i64 = 1024
+pub let IR_WIDE_NUMERIC_MAX_LIMBS_PER_PAYLOAD: i64 = 8
+
+pub let IR_WIDE_NUMERIC_OK: i64 = 0
+pub let IR_WIDE_NUMERIC_ERR_UNKNOWN_FORMAT: i64 = 1
+pub let IR_WIDE_NUMERIC_ERR_LIMB_COUNT: i64 = 2
+pub let IR_WIDE_NUMERIC_ERR_PAYLOAD_CAPACITY: i64 = 3
+pub let IR_WIDE_NUMERIC_ERR_LIMB_CAPACITY: i64 = 4
+pub let IR_WIDE_NUMERIC_ERR_PAYLOAD_ID: i64 = 5
+pub let IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY: i64 = 6
+pub let IR_WIDE_NUMERIC_ERR_LIMB_INDEX: i64 = 7
+
+pub struct IrWideNumericPayloadEntry {
+    format_id: i64,
+    limb_start: i64,
+    limb_count: i64,
+}
+
+pub struct IrWideNumericPayloadPool {
+    entries: [IrWideNumericPayloadEntry; 256],
+    payload_count: i64,
+    // Raw words only: limb 0 is the least-significant 64-bit word.
+    limbs: [i64; 1024],
+    limb_count: i64,
+}
+
+pub fn ir_empty_wide_numeric_payload_entry() -> IrWideNumericPayloadEntry {
+    IrWideNumericPayloadEntry {
+        format_id: 0,
+        limb_start: 0 - 1,
+        limb_count: 0,
+    }
+}
+
+pub fn ir_empty_wide_numeric_payload_pool() -> IrWideNumericPayloadPool {
+    IrWideNumericPayloadPool {
+        entries: [ir_empty_wide_numeric_payload_entry(); 256],
+        payload_count: 0,
+        limbs: [0; 1024],
+        limb_count: 0,
+    }
+}
+
+pub fn ir_wide_numeric_required_limb_count(format_id: i64) -> i64 with Div {
+    let descriptor = binary_format_descriptor_for_id(format_id)
+    if descriptor.format_id == 0 { return 0 }
+    descriptor.storage_bits / 64
+}
+
+pub fn ir_wide_numeric_payload_pool_add(
+    pool: &! IrWideNumericPayloadPool,
+    format_id: i64,
+    raw_limbs: [i64; 8],
+    raw_limb_count: i64,
+) -> (i64, i64) with Mut, Panic, Div {
+    // Status precedence is stable: existing arena corruption, request format,
+    // request limb count, payload capacity, then the defensive limb capacity.
+    // No write occurs before all five checks pass.
+    let existing_status = ir_wide_numeric_payload_pool_validate(pool)
+    if existing_status != IR_WIDE_NUMERIC_OK {
+        return (0 - 1, existing_status)
+    }
+    let required = ir_wide_numeric_required_limb_count(format_id)
+    if required == 0 || required > IR_WIDE_NUMERIC_MAX_LIMBS_PER_PAYLOAD {
+        return (0 - 1, IR_WIDE_NUMERIC_ERR_UNKNOWN_FORMAT)
+    }
+    if raw_limb_count != required {
+        return (0 - 1, IR_WIDE_NUMERIC_ERR_LIMB_COUNT)
+    }
+    if (*pool).payload_count < 0 || (*pool).payload_count >= IR_WIDE_NUMERIC_MAX_PAYLOADS {
+        return (0 - 1, IR_WIDE_NUMERIC_ERR_PAYLOAD_CAPACITY)
+    }
+    // Unreachable for a valid pool under today's 256 * 4 capacities, but kept
+    // as defense in depth if those capacities diverge in a later slice.
+    if (*pool).limb_count > IR_WIDE_NUMERIC_MAX_LIMBS - required {
+        return (0 - 1, IR_WIDE_NUMERIC_ERR_LIMB_CAPACITY)
+    }
+
+    let payload_id = (*pool).payload_count
+    let limb_start = (*pool).limb_count
+    var i: i64 = 0
+    while i < required {
+        (*pool).limbs[(limb_start + i) as usize] = raw_limbs[i as usize]
+        i = i + 1
+    }
+    (*pool).entries[payload_id as usize] = IrWideNumericPayloadEntry {
+        format_id: format_id,
+        limb_start: limb_start,
+        limb_count: required,
+    }
+    (*pool).payload_count = payload_id + 1
+    (*pool).limb_count = limb_start + required
+    (payload_id, IR_WIDE_NUMERIC_OK)
+}
+
+pub fn ir_wide_numeric_payload_pool_validate(pool: &IrWideNumericPayloadPool) -> i64 with Mut, Panic, Div {
+    if (*pool).payload_count < 0 || (*pool).payload_count > IR_WIDE_NUMERIC_MAX_PAYLOADS {
+        return IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY
+    }
+    if (*pool).limb_count < 0 || (*pool).limb_count > IR_WIDE_NUMERIC_MAX_LIMBS {
+        return IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY
+    }
+
+    var expected_start: i64 = 0
+    var payload_id: i64 = 0
+    while payload_id < (*pool).payload_count {
+        let entry = (*pool).entries[payload_id as usize]
+        let required = ir_wide_numeric_required_limb_count(entry.format_id)
+        if required == 0 { return IR_WIDE_NUMERIC_ERR_UNKNOWN_FORMAT }
+        if entry.limb_count != required { return IR_WIDE_NUMERIC_ERR_LIMB_COUNT }
+        if entry.limb_start != expected_start { return IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY }
+        if entry.limb_start < 0 || entry.limb_start + entry.limb_count > (*pool).limb_count {
+            return IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY
+        }
+        expected_start = entry.limb_start + entry.limb_count
+        payload_id = payload_id + 1
+    }
+    if expected_start != (*pool).limb_count { return IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY }
+    IR_WIDE_NUMERIC_OK
+}
+
+pub fn ir_wide_numeric_payload_entry_checked(
+    pool: &IrWideNumericPayloadPool,
+    payload_id: i64,
+) -> (IrWideNumericPayloadEntry, i64) with Mut, Panic, Div {
+    if payload_id < 0 || payload_id >= (*pool).payload_count {
+        return (ir_empty_wide_numeric_payload_entry(), IR_WIDE_NUMERIC_ERR_PAYLOAD_ID)
+    }
+    let validation = ir_wide_numeric_payload_pool_validate(pool)
+    if validation != IR_WIDE_NUMERIC_OK {
+        return (ir_empty_wide_numeric_payload_entry(), validation)
+    }
+    ((*pool).entries[payload_id as usize], IR_WIDE_NUMERIC_OK)
+}
+
+pub fn ir_wide_numeric_payload_limb_checked(
+    pool: &IrWideNumericPayloadPool,
+    payload_id: i64,
+    limb_index: i64,
+) -> (i64, i64) with Mut, Panic, Div {
+    let (entry, status) = ir_wide_numeric_payload_entry_checked(pool, payload_id)
+    if status != IR_WIDE_NUMERIC_OK { return (0, status) }
+    if limb_index < 0 || limb_index >= entry.limb_count {
+        return (0, IR_WIDE_NUMERIC_ERR_LIMB_INDEX)
+    }
+    ((*pool).limbs[(entry.limb_start + limb_index) as usize], IR_WIDE_NUMERIC_OK)
+}
+
+// Compile-time intern table. Lowering writes wide integer immediates here so
+// the payload pool is on the ordinary path, not a disconnected arena.
+var IR_WIDE_COMPILE_POOL: IrWideNumericPayloadPool = ir_empty_wide_numeric_payload_pool()
+
+pub fn ir_wide_compile_pool_reset() with Mut {
+    IR_WIDE_COMPILE_POOL = ir_empty_wide_numeric_payload_pool()
+}
+
+pub fn ir_wide_compile_pool_intern_low(storage_bits: i64, low_limb: i64) -> i64 with Mut, Panic, Div {
+    let format_id = numeric_format_int_id_for_storage_bits(storage_bits)
+    if format_id == 0 { return 0 - 1 }
+    var raw: [i64; 8] = [0; 8]
+    raw[0] = low_limb
+    let required = ir_wide_numeric_required_limb_count(format_id)
+    if required <= 0 { return 0 - 1 }
+    let pair = ir_wide_numeric_payload_pool_add(&! IR_WIDE_COMPILE_POOL, format_id, raw, required)
+    pair.0
+}

@@ -1,0 +1,202 @@
+// stdlib/pbpk/rapamycin_sprint25_gate.sio — Sprint 25: Expanded Uncertainty Gate
+//
+// 56-assertion certification for ISO GUM expanded uncertainty (U_95 = 2*u_c).
+// Sections A-I cover: u_c absolute values, ordering, rel_std, CI certification,
+// lo/hi bounds, fast-genotype gap, inducer persistence, inhibitor paradox, width order.
+
+module pbpk::rapamycin_sprint25_gate
+
+use pbpk::rapamycin_expanded_u::{
+    eu_u_c, eu_U95, eu_lo, eu_hi,
+    eu_fully_in_range, eu_lo_below_floor, eu_hi_above_ceil,
+    eu_std_ss_fully_in_range, eu_std_n7_fully_in_range, eu_std_n3_lo_below_floor,
+    eu_slow_ss_fully_in_range, eu_fast_ss_lo_below_floor,
+    eu_inh_ss_fully_in_range, eu_inh_n5_lo_below_floor, eu_ind_n26_lo_below_floor
+}
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_v_pred_conc}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn s25_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn s25_chk(b: bool) -> i64 with Mut, Div, Panic {
+    if b { 1 } else { 0 }
+}
+
+pub fn rapamycin_sprint25_gate() -> i64 with Mut, Div, Panic {
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let kev  = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+    let floor  = trough_floor_mg_l()
+    let ceil   = trough_ceil_mg_l()
+
+    // ── Pre-compute u_c for all strata ────────────────────────────────────────
+    let uc_s3   = eu_u_c(5.0,  3, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let uc_s7   = eu_u_c(5.0,  7, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let uc_s14  = eu_u_c(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let uc_sl14 = eu_u_c(5.0, 14, 0.00838, 0.188, ka, fv, kev, k12v, k21v)
+    let uc_f14  = eu_u_c(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v)
+    let uc_inh14 = eu_u_c(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let uc_inh5  = eu_u_c(1.5,  5, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let uc_ind26 = eu_u_c(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    let uc_ind14 = eu_u_c(20.0, 14, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+
+    // ── Pre-compute C (trough) for cross-multiply rel_std comparisons ─────────
+    let c_s3   = as_trough_mg_l(5.0,  3, 0.01118, 0.141)
+    let c_s7   = as_trough_mg_l(5.0,  7, 0.01118, 0.141)
+    let c_s14  = as_trough_mg_l(5.0, 14, 0.01118, 0.141)
+    let c_sl14 = as_trough_mg_l(5.0, 14, 0.00838, 0.188)
+    let c_f14  = as_trough_mg_l(5.0, 14, 0.01677, 0.094)
+    let c_inh14 = as_trough_mg_l(1.5, 14, 0.002236, 0.282)
+    let c_inh5  = as_trough_mg_l(1.5,  5, 0.002236, 0.282)
+    let c_ind26 = as_trough_mg_l(20.0, 26, 0.05590, 0.047)
+    let c_ind14 = as_trough_mg_l(20.0, 14, 0.05590, 0.047)
+
+    // ── Pre-compute lo/hi for key strata ──────────────────────────────────────
+    let lo_s3   = eu_lo(5.0,  3, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let hi_s3   = eu_hi(5.0,  3, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let lo_s14  = eu_lo(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let hi_s14  = eu_hi(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let lo_sl14 = eu_lo(5.0, 14, 0.00838, 0.188, ka, fv, kev, k12v, k21v)
+    let hi_sl14 = eu_hi(5.0, 14, 0.00838, 0.188, ka, fv, kev, k12v, k21v)
+    let lo_f14  = eu_lo(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v)
+    let hi_f14  = eu_hi(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v)
+    let lo_inh14 = eu_lo(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let hi_inh14 = eu_hi(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let lo_ind26 = eu_lo(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    let hi_ind26 = eu_hi(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    let lo_ind14 = eu_lo(20.0, 14, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+
+    var ok = 0
+
+    // ── Section A: u_c absolute bounds (probe-certified) ─────────────────────
+    // A1-A2: standard onset N=3 (uc=0.000836)
+    ok = ok + s25_chk(uc_s3 > 0.0008)
+    ok = ok + s25_chk(uc_s3 < 0.0009)
+    // A3-A4: standard SS N=14 (uc=0.000901)
+    ok = ok + s25_chk(uc_s14 > 0.00089)
+    ok = ok + s25_chk(uc_s14 < 0.00092)
+    // A5-A6: inhibitor SS N=14 (uc=0.000440)
+    ok = ok + s25_chk(uc_inh14 > 0.00043)
+    ok = ok + s25_chk(uc_inh14 < 0.00045)
+    // A7-A8: inducer N=26 (uc=0.001168)
+    ok = ok + s25_chk(uc_ind26 > 0.00116)
+    ok = ok + s25_chk(uc_ind26 < 0.00118)
+    // A9-A10: slow SS N=14 (uc=0.001038)
+    ok = ok + s25_chk(uc_sl14 > 0.001)
+    ok = ok + s25_chk(uc_sl14 < 0.0011)
+
+    // ── Section B: u_c monotonicity and cross-stratum ordering ────────────────
+    // B11: absolute u_c grows with N (more doses → more accumulated variance)
+    ok = ok + s25_chk(uc_s3 < uc_s7)
+    // B12
+    ok = ok + s25_chk(uc_s7 < uc_s14)
+    // B13: strict monotone: N=3 < N=14
+    ok = ok + s25_chk(uc_s3 < uc_s14)
+    // B14: inhibitor narrowest absolute uc (low ke → low V_pred)
+    ok = ok + s25_chk(uc_inh14 < uc_f14)
+    // B15
+    ok = ok + s25_chk(uc_f14 < uc_s14)
+    // B16
+    ok = ok + s25_chk(uc_s14 < uc_sl14)
+    // B17
+    ok = ok + s25_chk(uc_sl14 < uc_ind26)
+    // B18: widest ordering confirmed: inh < fast < std < slow < ind
+    ok = ok + s25_chk(uc_inh14 < uc_ind26)
+
+    // ── Section C: rel_std ordering via cross-multiply (uc/C) ─────────────────
+    // C19: rel_s14 < rel_s3 → uc_s14 * c_s3 < uc_s3 * c_s14
+    ok = ok + s25_chk(uc_s14 * c_s3 < uc_s3 * c_s14)
+    // C20: rel_s14 < rel_s7 → uc_s14 * c_s7 < uc_s7 * c_s14
+    ok = ok + s25_chk(uc_s14 * c_s7 < uc_s7 * c_s14)
+    // C21: rel_inh14 < rel_s14 (inhibitor SS most precise relative)
+    ok = ok + s25_chk(uc_inh14 * c_s14 < uc_s14 * c_inh14)
+    // C22: rel_sl14 < rel_s14 (slow genotype better relative precision at SS)
+    ok = ok + s25_chk(uc_sl14 * c_s14 < uc_s14 * c_sl14)
+    // C23: rel_f14 > rel_s14 (fast genotype worse relative precision)
+    ok = ok + s25_chk(uc_f14 * c_s14 > uc_s14 * c_f14)
+    // C24: rel_ind26 > rel_sl14 (inducer far worse than slow)
+    ok = ok + s25_chk(uc_ind26 * c_sl14 > uc_sl14 * c_ind26)
+    // C25: rel_inh14 < rel_f14 (inhibitor more precise than fast)
+    ok = ok + s25_chk(uc_inh14 * c_f14 < uc_f14 * c_inh14)
+    // C26: rel_ind26 > rel_s3 (inducer even worse than early onset)
+    ok = ok + s25_chk(uc_ind26 * c_s3 > uc_s3 * c_ind26)
+
+    // ── Section D: CI certification gates ─────────────────────────────────────
+    // D27-D30: strata that ARE fully certified
+    ok = ok + s25_chk(eu_std_ss_fully_in_range())
+    ok = ok + s25_chk(eu_slow_ss_fully_in_range())
+    ok = ok + s25_chk(eu_inh_ss_fully_in_range())
+    ok = ok + s25_chk(eu_std_n7_fully_in_range())
+    // D31-D34: strata that are NOT fully certified (CI straddles floor)
+    ok = ok + s25_chk(eu_std_n3_lo_below_floor())
+    ok = ok + s25_chk(eu_fast_ss_lo_below_floor())
+    ok = ok + s25_chk(eu_inh_n5_lo_below_floor())
+    ok = ok + s25_chk(eu_ind_n26_lo_below_floor())
+
+    // ── Section E: lo/hi explicit bound checks ────────────────────────────────
+    // E35-E36: std SS: both bounds confirmed
+    ok = ok + s25_chk(lo_s14 > floor)
+    ok = ok + s25_chk(hi_s14 < ceil)
+    // E37-E38: slow SS: both bounds confirmed
+    ok = ok + s25_chk(lo_sl14 > floor)
+    ok = ok + s25_chk(hi_sl14 < ceil)
+    // E39-E40: inh SS: both bounds confirmed
+    ok = ok + s25_chk(lo_inh14 > floor)
+    ok = ok + s25_chk(hi_inh14 < ceil)
+    // E41: std N=3 lo below floor (straddles)
+    ok = ok + s25_chk(lo_s3 < floor)
+    // E42: std N=3 hi above floor (CI bridges floor, not fully below)
+    ok = ok + s25_chk(hi_s3 > floor)
+
+    // ── Section F: Fast genotype — point-estimate vs CI gap ───────────────────
+    // F43: point estimate THERAPEUTIC (c > floor)
+    ok = ok + s25_chk(c_f14 > floor)
+    // F44: but CI straddles floor (lo < floor) — certification gap
+    ok = ok + s25_chk(lo_f14 < floor)
+    // F45: fast SS CI does not exceed ceiling (only straddles floor)
+    ok = ok + s25_chk(hi_f14 < ceil)
+    // F46: fast lo is within 1 ng/mL = 0.001 mg/L of floor (margin is small)
+    ok = ok + s25_chk(floor - lo_f14 < 0.001)
+
+    // ── Section G: Inducer — N=26 certifies point estimate, not CI ───────────
+    // G47: ind N=14: c below floor (sub-therapeutic)
+    ok = ok + s25_chk(c_ind14 < floor)
+    // G48: ind N=14: lo well below floor
+    ok = ok + s25_chk(lo_ind14 < floor)
+    // G49: ind N=26: c above floor (point estimate therapeutic)
+    ok = ok + s25_chk(c_ind26 > floor)
+    // G50: ind N=26: lo still below floor (N_min=26 insufficient for CI)
+    ok = ok + s25_chk(lo_ind26 < floor)
+    // G51: ind N=26: hi below ceiling (no toxicity risk)
+    ok = ok + s25_chk(hi_ind26 < ceil)
+
+    // ── Section H: Inhibitor paradox — narrowest CI at SS ────────────────────
+    // H52: U95_inh < U95_std (inhibitor more precise than standard)
+    ok = ok + s25_chk(uc_inh14 < uc_s14)
+    // H53: inh SS U95 under 1 ng/mL = 0.001 mg/L
+    ok = ok + s25_chk(2.0 * uc_inh14 < 0.001)
+    // H54: inh onset (N=5) straddles floor despite low ke
+    ok = ok + s25_chk(eu_inh_n5_lo_below_floor())
+
+    // ── Section I: U95 width ordering (global summary) ────────────────────────
+    // I55: width ordering: inh < fast < std (narrowest → moderate)
+    ok = ok + s25_chk(uc_inh14 < uc_f14 && uc_f14 < uc_s14)
+    // I56: width ordering: std < slow < ind (moderate → widest)
+    ok = ok + s25_chk(uc_s14 < uc_sl14 && uc_sl14 < uc_ind26)
+
+    ok
+}

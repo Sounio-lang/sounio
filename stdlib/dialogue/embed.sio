@@ -1,0 +1,233 @@
+// stdlib/dialogue/embed.sio
+//
+// `embed: i64 (utterance hash) -> Octonion` — the unitary embedding the
+// homology functor F: C_dial -> C_O uses to map dialogue utterances into 𝕆.
+//
+// Plan reference: project_octonion_homology_functor.md, M2b (wk 5–6).
+// Preprint reference: ocssm_preprint_skeleton.md §4 (R1–R7), §6.1 (F1
+// Moufang/alternativity test).
+//
+// CONTRACT (the load-bearing properties for F1):
+//
+//   1. Determinism:                     embed(h) = embed(h) bit-exact.
+//   2. Unit norm:                       ||embed(h)||_2 = 1.0 (within ε).
+//   3. R7 / G₂-uniformity by construction:
+//                                       The mapping from h to S^7 factors
+//                                       through Halton-on-cube → Box-Muller
+//                                       → unit-normalisation. Halton is a
+//                                       low-discrepancy sequence; Box-Muller
+//                                       is the Marsaglia method that
+//                                       produces an isotropic Gaussian on
+//                                       R^8; isotropic-on-R^8 + radial
+//                                       projection = uniform on S^7. Any
+//                                       O(8) action — and in particular the
+//                                       discrete G₂ subgroup PSL(2,7) of
+//                                       order 168 — preserves uniformity.
+//                                       The Lean obligation in M4 reduces
+//                                       to a finite check on 14 generators
+//                                       × 1024 rows.
+//
+// IMPLEMENTATION NOTES:
+//
+//   - Algebra is computed inside Sounio. No Python. Per the plan and
+//     `feedback_sounio_first.md`.
+//   - Halton bases for 8 dimensions: [2, 3, 5, 7, 11, 13, 17, 19].
+//   - The 1024-row table is computed on demand from `embed_row(i)`. We do
+//     NOT pre-cache into a global because the native compiler's BSS-zero
+//     initialisation prevents non-zero static data; the compute is cheap
+//     enough (~50 ops/embed) that a per-call recomputation is fine for the
+//     F1/F2 corpus loop.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn embed_table_rows() -> i64 { return 1024 }
+
+fn embed_two_pi() -> f64 { return 6.283185307179586 }
+fn embed_half_pi() -> f64 { return 1.5707963267948966 }
+fn embed_ln2() -> f64 { return 0.6931471805599453 }
+
+fn embed_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var v: f64 = x
+    var s: f64 = 1.0
+    while v < 1.0 {
+        v = v * 4.0
+        s = s * 2.0
+    }
+    var y: f64 = v
+    var i: i64 = 0
+    while i < 20 {
+        y = 0.5 * (y + v / y)
+        i = i + 1
+    }
+    return y / s
+}
+
+fn embed_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    var m: f64 = x
+    var e_val: i64 = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e_val = e_val + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e_val = e_val - 1
+    }
+
+    let t: f64 = (m - 1.0) / (m + 1.0)
+    let t2: f64 = t * t
+    var sum: f64 = t
+    var term: f64 = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        let denom: f64 = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m: f64 = 2.0 * sum
+    return ln_m + (e_val as f64) * embed_ln2()
+}
+
+fn embed_cos(x: f64) -> f64 with Mut, Div, Panic {
+    var a: f64 = x
+    let twopi: f64 = embed_two_pi()
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > 3.141592653589793 { a = a - twopi }
+
+    let a2: f64 = a * a
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i64 = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / (((2 * n - 1) * 2 * n) as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn embed_sin(x: f64) -> f64 with Mut, Div, Panic {
+    return embed_cos(x - embed_half_pi())
+}
+
+// ============================================================================
+// HALTON VAN-DER-CORPUT
+// ============================================================================
+//
+// Returns the i-th term of the Halton sequence for the given prime base.
+// halton(0, b) = 0; halton(i, b) ∈ [0, 1) for all i ≥ 0.
+//
+// Integer-only loop on i; float accumulator on the radix-fraction side.
+
+pub fn halton(i: i64, base: i64) -> f64 with Mut, Div, Panic {
+    if base < 2 { return 0.0 }
+    if i < 0 { return 0.0 }
+    let bf: f64 = base as f64
+    var f: f64 = 1.0
+    var r: f64 = 0.0
+    var n: i64 = i
+    while n > 0 {
+        f = f / bf
+        let digit: i64 = n - (n / base) * base
+        r = r + f * (digit as f64)
+        n = n / base
+    }
+    return r
+}
+
+// Eight Halton bases.
+fn halton_b0() -> i64 { return  2 }
+fn halton_b1() -> i64 { return  3 }
+fn halton_b2() -> i64 { return  5 }
+fn halton_b3() -> i64 { return  7 }
+fn halton_b4() -> i64 { return 11 }
+fn halton_b5() -> i64 { return 13 }
+fn halton_b6() -> i64 { return 17 }
+fn halton_b7() -> i64 { return 19 }
+
+// ============================================================================
+// BOX–MULLER  (uniforms → standard-normal pair)
+// ============================================================================
+//
+// Marsaglia/Bray–Box–Muller direct form:
+//   z1 = sqrt(-2 ln u1) * cos(2π u2)
+//   z2 = sqrt(-2 ln u1) * sin(2π u2)
+//
+// Halton is right-open at 0 for index 0; we clamp u1 away from zero so
+// ln(u1) stays finite. The clamp is bit-deterministic and does not break
+// determinism (point 1) of the contract.
+
+fn bm_clamp(u: f64) -> f64 {
+    if u < 0.000000001 { return 0.000000001 }
+    return u
+}
+
+// ============================================================================
+// EMBED
+// ============================================================================
+//
+// `embed_row_into(i, out)` writes the i-th octonion of the Halton-Box-Muller
+// table into `out: &![f64; 8]`. Writes via a mutable reference avoid the
+// SRET-large-struct codegen quirk for 8-cell f64 arrays.
+
+pub fn embed_row_into(i: i64, out: &![f64; 8]) with Mut, Div, Panic, NaturalityG2 {
+    let u0: f64 = bm_clamp(halton(i, halton_b0()))
+    let u1: f64 = halton(i, halton_b1())
+    let u2: f64 = bm_clamp(halton(i, halton_b2()))
+    let u3: f64 = halton(i, halton_b3())
+    let u4: f64 = bm_clamp(halton(i, halton_b4()))
+    let u5: f64 = halton(i, halton_b5())
+    let u6: f64 = bm_clamp(halton(i, halton_b6()))
+    let u7: f64 = halton(i, halton_b7())
+
+    let r0: f64 = embed_sqrt(0.0 - 2.0 * embed_ln(u0))
+    let a0: f64 = embed_two_pi() * u1
+    let z0: f64 = r0 * embed_cos(a0)
+    let z1: f64 = r0 * embed_sin(a0)
+
+    let r1: f64 = embed_sqrt(0.0 - 2.0 * embed_ln(u2))
+    let a1: f64 = embed_two_pi() * u3
+    let z2: f64 = r1 * embed_cos(a1)
+    let z3: f64 = r1 * embed_sin(a1)
+
+    let r2: f64 = embed_sqrt(0.0 - 2.0 * embed_ln(u4))
+    let a2: f64 = embed_two_pi() * u5
+    let z4: f64 = r2 * embed_cos(a2)
+    let z5: f64 = r2 * embed_sin(a2)
+
+    let r3: f64 = embed_sqrt(0.0 - 2.0 * embed_ln(u6))
+    let a3: f64 = embed_two_pi() * u7
+    let z6: f64 = r3 * embed_cos(a3)
+    let z7: f64 = r3 * embed_sin(a3)
+
+    let norm_sq: f64 = z0*z0 + z1*z1 + z2*z2 + z3*z3 + z4*z4 + z5*z5 + z6*z6 + z7*z7
+    let norm: f64 = embed_sqrt(norm_sq)
+    let inv: f64 = 1.0 / norm
+
+    out[0] = z0 * inv
+    out[1] = z1 * inv
+    out[2] = z2 * inv
+    out[3] = z3 * inv
+    out[4] = z4 * inv
+    out[5] = z5 * inv
+    out[6] = z6 * inv
+    out[7] = z7 * inv
+}
+
+// `embed_into(hash, out)` picks row = hash mod table_rows, writes the
+// embedded octonion. Negative hashes are reflected to non-negative.
+
+pub fn embed_into(hash: i64, out: &![f64; 8]) with Mut, Div, Panic, NaturalityG2 {
+    var h: i64 = hash
+    if h < 0 { h = 0 - h }
+    let row: i64 = h - (h / embed_table_rows()) * embed_table_rows()
+    embed_row_into(row, out)
+}

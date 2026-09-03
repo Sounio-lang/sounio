@@ -50,44 +50,22 @@ STAGE3="$OUT_DIR/stage3"
 
 emit_json() {
   local status="$1" reason="$2" stages_json="$3" checks_json="$4"
-  python3 - "$OUT_JSON" "$status" "$reason" "$stages_json" "$checks_json" <<'PY'
-import json, sys
-from datetime import datetime, timezone
-out, status, reason, stages, checks = sys.argv[1:]
-payload = {
-  "schema": "sounio.epistemic-monotonicity-gate.v1",
-  "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-  "status": status,
-  "reason": reason,
-  "theorem": "u_c_scaled is non-decreasing across bootstrap stages and equal at the fixed point",
-  "u_c_definition": "count of Knowledge<T> token occurrences in compiled source (0 = no epistemic coverage)",
-  "stages": json.loads(stages),
-  "checks": json.loads(checks),
-}
-with open(out, "w") as f:
-  json.dump(payload, f, indent=2, sort_keys=True)
-  f.write("\n")
-PY
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  "$ROOT_DIR/bin/kretikos" json-emit \
+    --string   "schema=sounio.epistemic-monotonicity-gate.v1" \
+    --string   "generated_at_utc=$ts" \
+    --string   "status=$status" \
+    --string   "reason=$reason" \
+    --string   "theorem=u_c_scaled is non-decreasing across bootstrap stages and equal at the fixed point" \
+    --string   "u_c_definition=count of Knowledge<T> token occurrences in compiled source (0 = no epistemic coverage)" \
+    --raw-json "stages=$stages_json" \
+    --raw-json "checks=$checks_json" \
+    > "$OUT_JSON"
 }
 
 parse_siep() {
-  python3 - "$1" <<'PY'
-import struct, sys, os
-path = sys.argv[1]
-if not os.path.exists(path):
-    print("absent:0:0")
-    sys.exit(0)
-data = open(path, 'rb').read()
-idx = data.find(b'SIEP')
-if idx < 0:
-    print("absent:0:0")
-    sys.exit(0)
-chunk = data[idx:idx+24]
-version  = struct.unpack_from('<I', chunk, 4)[0]
-instr    = struct.unpack_from('<Q', chunk, 8)[0]
-u_c      = struct.unpack_from('<Q', chunk, 16)[0]
-print(f"present:{instr}:{u_c}")
-PY
+  "$ROOT_DIR/bin/kretikos" siep-probe "$1"
 }
 
 printf '[epistemic-monotonicity] souc=%s\n' "$SOUC_BIN"
@@ -146,31 +124,12 @@ SIEP_PRESENT=false
 # re-parse stage3 for JSON emission (already have S3_EP)
 S3_INSTR="$(echo "$S3_EP" | cut -d: -f2)"
 
-STAGES_JSON="$(python3 - "$SEED_INSTR" "$SEED_UC" "$S1_INSTR" "$S1_UC" \
-  "$(echo "$S2_EP" | cut -d: -f2)" "$S2_UC" "$S3_INSTR" "$S3_UC" <<'PY'
-import json, sys
-si, su, s1i, s1u, s2i, s2u, s3i, s3u = sys.argv[1:]
-print(json.dumps([
-  {"name": "seed",   "instr_count": int(si),  "u_c_scaled": int(su)},
-  {"name": "stage1", "instr_count": int(s1i), "u_c_scaled": int(s1u)},
-  {"name": "stage2", "instr_count": int(s2i), "u_c_scaled": int(s2u)},
-  {"name": "stage3", "instr_count": int(s3i), "u_c_scaled": int(s3u)},
-]))
-PY
-)"
+S2_INSTR="$(echo "$S2_EP" | cut -d: -f2)"
+STAGES_JSON="$(printf '[{"name":"seed","instr_count":%s,"u_c_scaled":%s},{"name":"stage1","instr_count":%s,"u_c_scaled":%s},{"name":"stage2","instr_count":%s,"u_c_scaled":%s},{"name":"stage3","instr_count":%s,"u_c_scaled":%s}]' \
+  "$SEED_INSTR" "$SEED_UC" "$S1_INSTR" "$S1_UC" "$S2_INSTR" "$S2_UC" "$S3_INSTR" "$S3_UC")"
 
-CHECKS_JSON="$(python3 - "$MONO_S1_GE_SEED" "$MONO_S2_GE_S1" "$FIXED_POINT_EQ" "$SIEP_PRESENT" <<'PY'
-import json, sys
-def b(v): return v == "true"
-m1, m2, fp, sp = sys.argv[1:]
-print(json.dumps({
-  "siep_section_present_in_all_stages": b(sp),
-  "u_c_scaled_monotone_stage1_ge_seed": b(m1),
-  "u_c_scaled_monotone_stage2_ge_stage1": b(m2),
-  "u_c_scaled_fixed_point_stage2_eq_stage3": b(fp),
-}))
-PY
-)"
+CHECKS_JSON="$(printf '{"siep_section_present_in_all_stages":%s,"u_c_scaled_monotone_stage1_ge_seed":%s,"u_c_scaled_monotone_stage2_ge_stage1":%s,"u_c_scaled_fixed_point_stage2_eq_stage3":%s}' \
+  "$SIEP_PRESENT" "$MONO_S1_GE_SEED" "$MONO_S2_GE_S1" "$FIXED_POINT_EQ")"
 
 if [[ "$MONO_S1_GE_SEED" == "true" && "$MONO_S2_GE_S1" == "true" && "$FIXED_POINT_EQ" == "true" ]]; then
   emit_json "pass" "epistemic_monotonicity_verified" "$STAGES_JSON" "$CHECKS_JSON"

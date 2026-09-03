@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 export default function InteractiveRoadmap() {
   const [expandedNodes, setExpandedNodes] = useState<Record<number, boolean>>({});
@@ -9,23 +9,28 @@ export default function InteractiveRoadmap() {
 
   const phases = [
     {
-      title: 'Phase 1',
-      items: ['Core Epistemics', 'MedLang DSL', 'fMRI Pipeline'],
+      title: 'Phase 1 — Language Core',
+      items: ['Core language design', 'Type system foundations', 'Units and effect model'],
       status: 'completed'
     },
     {
-      title: 'Phase 2',
-      items: ['Rustless Bootstrap', 'Poseidon VM', 'SOIR bytecode'],
+      title: 'Phase 2 — Epistemic Semantics',
+      items: ['Knowledge<T>, Validated<T>, Intervention<T>, Counterfactual<T>', 'Uncertainty propagation + causal confidence', 'Confidence-gated control flow'],
       status: 'completed'
     },
     {
-      title: 'Phase 3',
-      items: ['Z3 SMT Verification', 'LLVM Backend', 'QNN-MNIST'],
+      title: 'Phase 3 — Runtime + Backends',
+      items: ['Self-hosted native ELF codegen + bootstrap ceremony (March 2026)', 'GPU / PTX codegen expansion', 'WebAssembly improvements'],
       status: 'in-progress'
     },
     {
-      title: 'Phase 4',
-      items: ['Distributed Compilation', 'GLM-4.7 Optimization'],
+      title: 'Phase 4 — Tooling + Ecosystem',
+      items: ['LSP production surface', 'Package registry (local beta)', 'Documentation + website artifact sync'],
+      status: 'in-progress'
+    },
+    {
+      title: 'Phase 5 — Production Readiness',
+      items: ['Windows pre-built binaries', 'AArch64 native-v2 parity', 'Federated ontology query'],
       status: 'planned'
     }
   ];

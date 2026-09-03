@@ -1,0 +1,81 @@
+// stdlib/gpu/canvas_kernel.sio — GPU kernels for canvas rendering
+//
+// Compiled with the GPU-profile binary:
+//   souc-linux-x86_64-gpu compile stdlib/gpu/canvas_kernel.sio --backend gpu -o canvas_kernel.ptx
+//
+// Each kernel operates on the flat pixel buffer of display::Canvas
+// (format: packed 0x00RRGGBB, i64 per pixel, row-major).
+//
+// Grid conventions (CUDA layout):
+//   gpu_canvas_fill / gpu_canvas_clear:
+//     blockDim = (256, 1, 1),  gridDim = (ceil(n/256), 1, 1)
+//   gpu_canvas_fill_rect:
+//     blockDim = (16, 16, 1),  gridDim = (ceil(w/16), ceil(h/16), 1)
+
+// Fill every pixel with a pre-packed RRGGBB color.
+kernel fn gpu_canvas_fill(pixels: *mut i64, n: i64, color: i64) {
+    let tid = thread_id_x() + block_id_x() * block_dim_x()
+    if tid < n {
+        write_i64(pixels, tid, color)
+    }
+}
+
+// Clear canvas to an RGB triplet (avoids host-side pack).
+kernel fn gpu_canvas_clear(pixels: *mut i64, n: i64, r: i64, g: i64, b: i64) {
+    let tid = thread_id_x() + block_id_x() * block_dim_x()
+    if tid < n {
+        let color = b | (g << 8) | (r << 16)
+        write_i64(pixels, tid, color)
+    }
+}
+
+// Fill a solid rectangle.  stride = canvas width in pixels.
+kernel fn gpu_canvas_fill_rect(
+    pixels: *mut i64,
+    stride: i64,
+    rect_x: i64, rect_y: i64,
+    rect_w: i64, rect_h: i64,
+    color: i64,
+) {
+    let px = thread_id_x() + block_id_x() * block_dim_x()
+    let py = thread_id_y() + block_id_y() * block_dim_y()
+    if px < rect_w && py < rect_h {
+        write_i64(pixels, (rect_y + py) * stride + (rect_x + px), color)
+    }
+}
+
+// Horizontal scan-line AA line (one thread per pixel column in [x0, x1]).
+// Fixed-point coverage — mirrors canvas_ext.sio logic, GPU-parallel.
+kernel fn gpu_canvas_hline_aa(
+    pixels: *mut i64,
+    stride: i64, height: i64,
+    x0: i64, y_fixed0: i64,
+    x1: i64, y_step: i64,
+    r: i64, g: i64, b: i64,
+) {
+    let x = x0 + thread_id_x() + block_id_x() * block_dim_x()
+    if x > x1 { return }
+    let y_fixed = y_fixed0 + (x - x0) * y_step
+    let y_base  = y_fixed / 256
+    let frac    = y_fixed - y_base * 256
+    if y_base >= 0 && y_base < height {
+        let idx0  = y_base * stride + x
+        let px0   = read_i64(pixels, idx0)
+        let er0   = (px0 >> 16) & 0xFF
+        let eg0   = (px0 >>  8) & 0xFF
+        let eb0   = px0 & 0xFF
+        let cov   = 255 - frac
+        let nr0   = (r * cov + er0 * frac) / 255
+        let ng0   = (g * cov + eg0 * frac) / 255
+        let nb0   = (b * cov + eb0 * frac) / 255
+        write_i64(pixels, idx0, nb0 | (ng0 << 8) | (nr0 << 16))
+    }
+}
+
+// Depth-buffer clear: set all entries to bit-pattern of +Inf (0x7FF0000000000000).
+kernel fn gpu_depth_clear(depth: *mut i64, n: i64) {
+    let tid = thread_id_x() + block_id_x() * block_dim_x()
+    if tid < n {
+        write_i64(depth, tid, 0x7FF0000000000000)
+    }
+}

@@ -1,0 +1,110 @@
+// MANUAL -- arena-cost attribution probe (no network).
+//
+// Counts how many iterations of ONE isolated X.509 operation a single
+// Madaros process survives before `madaros: arena full` (exit 181). Run it
+// once per MODE to attribute the per-handshake arena spend measured by
+// tests/interop/tls_arena_multi_handshake_probe.sio.
+//
+//   MODE 1: certificate_zero()          -- the bare zero-value constructor
+//   MODE 2: x509_parse_certificate()    -- parse one real DER certificate
+//   MODE 3: x509_verify_chain()         -- full chain build + verify against
+//                                          the real system trust store
+//
+// Edit MODE below and re-run:
+//   SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
+//     tests/interop/x509_arena_cost_probe.sio
+//
+// The iteration number is printed BEFORE each iteration, so the last number
+// printed is the ceiling for that operation.
+
+use x509::cert::*
+use x509::chain::*
+use x509::trust_store::*
+use x509::pem::*
+use net::socket::*
+
+const MODE: i64 = 3
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    // Take the FIRST certificate out of the real system CA bundle as the
+    // probe's sample DER. Its identity does not matter -- only that it is a
+    // real, parseable certificate of realistic size.
+    let content: string = read_file("/etc/ssl/certs/ca-certificates.crt")
+    let clen: i64 = str_len(content)
+    if clen <= 0 {
+        println("arena_cost_probe: cannot read CA bundle")
+        return 1
+    }
+    let bundle = rawbuf_new(clen + 8)
+    var ci: i64 = 0
+    while ci < clen {
+        rawbuf_set(&bundle, ci, str_char_at(content, ci))
+        ci = ci + 1
+    }
+    let (der_buf, use_len, next_off, perr0) = pem_decode_next(&bundle, clen, 0)
+    if perr0 != 0 {
+        println("arena_cost_probe: pem_decode_next failed")
+        return 1
+    }
+    println("sample DER length:")
+    print_int(use_len)
+
+    if MODE == 1 {
+        var n: i64 = 0
+        while n < 200000 {
+            println("iter")
+            print_int(n + 1)
+            let c = certificate_zero()
+            if c.version == 999999 { println("unreachable") }
+            n = n + 1
+        }
+        println("MODE 1 completed without arena exhaustion")
+        return 0
+    }
+
+    if MODE == 2 {
+        var n2: i64 = 0
+        while n2 < 200000 {
+            println("iter")
+            print_int(n2 + 1)
+            let (c2, e2) = x509_parse_certificate(&der_buf, use_len)
+            if c2.version == 999999 { println("unreachable") }
+            n2 = n2 + 1
+        }
+        println("MODE 2 completed without arena exhaustion")
+        return 0
+    }
+
+    let (store, terr) = trust_store_load()
+    if terr != 0 {
+        println("arena_cost_probe: trust_store_load failed")
+        return 1
+    }
+    println("trust store certs:")
+    print_int(store.count as i64)
+
+    let (leaf, lerr) = x509_parse_certificate(&der_buf, use_len)
+    if lerr != 0 {
+        println("arena_cost_probe: leaf parse failed")
+        return 1
+    }
+    var inters: [Certificate; 8] = [certificate_zero(); 8]
+    var inter_bufs: [RawBuf; 8] = [rawbuf_new(1); 8]
+    let host = rawbuf_new(16)
+    let ocsp = rawbuf_new(8)
+
+    var n3: i64 = 0
+    while n3 < 200000 {
+        println("iter")
+        print_int(n3 + 1)
+        let r = x509_verify_chain(&leaf, &der_buf, &inters, &inter_bufs, 0, &store, &host, 0, now_unix(), &ocsp, 0)
+        if r == 999999 { println("unreachable") }
+        n3 = n3 + 1
+    }
+    println("MODE 3 completed without arena exhaustion")
+    return 0
+}

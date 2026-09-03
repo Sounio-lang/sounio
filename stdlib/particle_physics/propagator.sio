@@ -1,0 +1,198 @@
+// stdlib/particle_physics/propagator.sio — Propagators for SM particles
+//
+// Tree-level propagators in Feynman gauge (ξ = 1).  All functions return
+// the complex propagator factor D(p); the overall factor of i is omitted
+// because it cancels in |M|² calculations.
+//
+// For numerical stability, a small width ε is added to massive poles:
+//   D(p) = 1 / (p² − m² + i m Γ)
+//
+// References:
+//   - Peskin & Schroeder, Ch. 4-5
+//   - PDG 2024, Kinematics
+
+module particle_physics::propagator
+
+use particle_physics::lorentz::{LorentzVector, lorentz_norm_sq, metric_eta}
+use particle_physics::spinor::{DiracMatrix, dirac_matrix_zero, dirac_matrix_identity,
+                               dirac_matrix_scalar, dirac_matrix_add, dirac_matrix_scale,
+                               slash}
+use complex::lib::{Complex, complex_new, complex_zero, complex_one, complex_neg,
+                   complex_add, complex_sub, complex_mul, complex_scale, complex_div,
+                   complex_conj, complex_norm_sq}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// SCALAR PROPAGATOR
+// ============================================================================
+
+/// Scalar propagator: D(p) = 1 / (p² − m² + i m Γ).
+///
+/// # Parameters
+/// - `p`: 4-momentum.
+/// - `mass`: Particle mass.
+/// - `width`: Decay width Γ (set to 0.0 for stable particles).
+///
+/// # Returns
+/// Complex propagator value.
+pub fn scalar_propagator(p: LorentzVector, mass: f64, width: f64) -> Complex with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    let re = p2 - mass * mass
+    let im = mass * width
+    let denom = complex_new(re, im)
+    // 1 / (re + i im) = (re - i im) / (re² + im²)
+    let norm = re * re + im * im
+    if norm == 0.0 { return complex_zero() }
+    complex_new(re / norm, 0.0 - im / norm)
+}
+
+/// Squared scalar propagator: |D(p)|² = 1 / [(p² − m²)² + (m Γ)²].
+pub fn scalar_propagator_sq(p: LorentzVector, mass: f64, width: f64) -> f64 with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    let re = p2 - mass * mass
+    let im = mass * width
+    let norm = re * re + im * im
+    if norm == 0.0 { return 0.0 }
+    1.0 / norm
+}
+
+// ============================================================================
+// FERMION PROPAGATOR
+// ============================================================================
+
+/// Fermion propagator: S(p) = (p̸ + m) / (p² − m² + i m Γ).
+///
+/// Returns a DiracMatrix.  The numerator is p̸ + m (complex matrix),
+/// the denominator is a complex scalar.
+pub fn fermion_propagator(p: LorentzVector, mass: f64, width: f64) -> DiracMatrix with Mut, Div, Panic {
+    let num = dirac_matrix_add(slash(p), dirac_matrix_scalar(complex_new(mass, 0.0)))
+    let denom = scalar_propagator(p, mass, width)
+    dirac_matrix_scale(num, denom)
+}
+
+/// Squared fermion propagator (spin-summed): Tr[(p̸ + m)²] · |D|².
+/// For a free fermion: Tr[(p̸ + m)²] = 4(p² + m²).
+pub fn fermion_propagator_sq(p: LorentzVector, mass: f64, width: f64) -> f64 with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    let trace_val = 4.0 * (p2 + mass * mass)
+    let d2 = scalar_propagator_sq(p, mass, width)
+    trace_val * d2
+}
+
+// ============================================================================
+// PHOTON PROPAGATOR (massless vector)
+// ============================================================================
+
+/// Photon propagator in Feynman gauge: D_μν(p) = −η_μν / p².
+///
+/// # Parameters
+/// - `p`: 4-momentum.
+/// - `mu`, `nu`: Lorentz indices.
+///
+/// # Returns
+/// Complex propagator component D_μν.
+pub fn photon_propagator(p: LorentzVector, mu: i64, nu: i64) -> Complex with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    if p2 == 0.0 { return complex_zero() }
+    let eta = metric_eta(mu, nu)
+    complex_new(0.0 - eta / p2, 0.0)
+}
+
+/// Squared photon propagator (summed over polarizations):
+///   Σ_λ ε_μ(λ) ε_ν*(λ) = −η_μν.
+///   |D|²_sum = η_μν η^μν / (p²)² = 4 / (p²)².
+pub fn photon_propagator_sq(p: LorentzVector) -> f64 with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    if p2 == 0.0 { return 0.0 }
+    4.0 / (p2 * p2)
+}
+
+// ============================================================================
+// GLUON PROPAGATOR (massless vector with color)
+// ============================================================================
+
+/// Gluon propagator in Feynman gauge: D^ab_μν(p) = −η_μν δ^ab / p².
+///
+/// # Parameters
+/// - `p`: 4-momentum.
+/// - `mu`, `nu`: Lorentz indices.
+/// - `a`, `b`: Color indices in adjoint (1…8).
+///
+/// # Returns
+/// Complex propagator component.
+pub fn gluon_propagator(p: LorentzVector, mu: i64, nu: i64, a: i64, b: i64) -> Complex with Mut, Div, Panic {
+    if a != b { return complex_zero() }
+    photon_propagator(p, mu, nu)
+}
+
+/// Squared gluon propagator summed over color and polarization:
+///   Σ_a Σ_λ |D^ab_μν|² = 8 / (p²)².
+pub fn gluon_propagator_sq(p: LorentzVector) -> f64 with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    if p2 == 0.0 { return 0.0 }
+    // Color factor: δ^ab δ^ab = 8, Polarization: 4 / (p²)²
+    8.0 * 4.0 / (p2 * p2)
+}
+
+// ============================================================================
+// MASSIVE VECTOR PROPAGATOR (W / Z)
+// ============================================================================
+
+/// Massive vector propagator in Feynman gauge:
+///   D_μν(p) = −(η_μν − p_μ p_ν / m²) / (p² − m² + i m Γ).
+///
+/// # Parameters
+/// - `p`: 4-momentum.
+/// - `mu`, `nu`: Lorentz indices.
+/// - `mass`: Vector boson mass.
+/// - `width`: Decay width Γ.
+pub fn vector_propagator(p: LorentzVector, mu: i64, nu: i64, mass: f64, width: f64) -> Complex with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    let m2 = mass * mass
+    let eta = metric_eta(mu, nu)
+    // p_μ = η_μν p^ν
+    var p_mu: f64 = 0.0
+    var p_nu: f64 = 0.0
+    if mu == 0 { p_mu = p.t } else if mu == 1 { p_mu = 0.0 - p.x } else if mu == 2 { p_mu = 0.0 - p.y } else if mu == 3 { p_mu = 0.0 - p.z }
+    if nu == 0 { p_nu = p.t } else if nu == 1 { p_nu = 0.0 - p.x } else if nu == 2 { p_nu = 0.0 - p.y } else if nu == 3 { p_nu = 0.0 - p.z }
+    let numerator = 0.0 - (eta - p_mu * p_nu / m2)
+    let re = p2 - m2
+    let im = mass * width
+    let norm = re * re + im * im
+    if norm == 0.0 { return complex_zero() }
+    complex_new(numerator * re / norm, 0.0 - numerator * im / norm)
+}
+
+/// Squared massive vector propagator summed over polarizations.
+/// For a massive vector: Σ_λ ε_μ(λ) ε_ν*(λ) = −η_μν + p_μ p_ν / m².
+/// The contraction gives: (3 + (p²/m²)²) / [(p² − m²)² + (mΓ)²].
+pub fn vector_propagator_sq(p: LorentzVector, mass: f64, width: f64) -> f64 with Mut, Div, Panic {
+    let p2 = lorentz_norm_sq(p)
+    let m2 = mass * mass
+    let re = p2 - m2
+    let im = mass * width
+    let norm = re * re + im * im
+    if norm == 0.0 { return 0.0 }
+    // Polarization sum factor: 3 + (p²/m²)² for massive vector
+    let pol_factor = 3.0 + (p2 / m2) * (p2 / m2)
+    pol_factor / norm
+}
+
+// ============================================================================
+// HIGGS PROPAGATOR (scalar)
+// ============================================================================
+
+/// Higgs propagator: same as scalar with m = M_H, Γ = Γ_H.
+/// For tree-level calculations Γ_H is very small (~4 MeV).
+pub fn higgs_propagator(p: LorentzVector, mass: f64, width: f64) -> Complex with Mut, Div, Panic {
+    scalar_propagator(p, mass, width)
+}
+
+/// Squared Higgs propagator.
+pub fn higgs_propagator_sq(p: LorentzVector, mass: f64, width: f64) -> f64 with Mut, Div, Panic {
+    scalar_propagator_sq(p, mass, width)
+}

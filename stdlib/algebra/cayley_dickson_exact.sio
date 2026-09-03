@@ -1,0 +1,223 @@
+//! stdlib/algebra/cayley_dickson_exact.sio
+//!
+//! EXACT Cayley-Dickson algebra layer — coefficients in an exact ring `F`, not `f64`.
+//!
+//! Companion to `stdlib/algebra/cayley_dickson.sio` (the analytic/flow f64 layer,
+//! UNCHANGED). This layer exists so zero-divisor annihilation can be checked as a
+//! DECIDABLE equality (`ab == 0` in an exact vector) rather than a tolerance-gated
+//! float measurement (`||ab||^2 < eps`).
+//!
+//!     Invariant: exactness is a property of the CONTRACT, not of the number.
+//!
+//! Minimal field (Phase-1 determination, backed by formal/lean4/SounioZeroDivisorBridge.lean):
+//! zero-divisor DETECTION is homogeneous over ℤ (±1 sign algebra; no norms, no division,
+//! no sqrt). So `F = i64` fully proves the n=4 sedenion 168-class census. `F = Rational`
+//! (stdlib/math/rational.sio) is only for norm-bearing observables and is a secondary target.
+//!
+//! ─────────────────────────────────────────────────────────────────────────────
+//! STATUS: COMPILES AND RUNS for scalar F (the four compiler prerequisites —
+//! #1 generic-struct-return, 2a bodyless trait-method sigs, 2b `impl Trait for
+//! Type`, #3 trait-bounded dispatch — landed 2026-07-06 on the fable5 compiler-
+//! generic-F lane, PR #650 / `2adb8f061`, plus the mono-mangle separator fix that
+//! lets this file coexist with the hand-monomorphized `*_i64` sibling).
+//!   * F = i64  → WORKS, byte-identical to cayley_dickson_exact_i64.sio (verified).
+//!   * F = Rational / BigInt (struct F) → blocked, but NOT by generics: the
+//!     [Rational;N] multiply-accumulate loop miscompiles (garbage at N=16, SIGSEGV
+//!     at N=2048). Reproduces with NO generics (a plain concrete [Rational;16] CD
+//!     loop is equally wrong); every sub-op works in isolation — only the full
+//!     nested accumulation loop over array-of-struct temporaries corrupts. A
+//!     [struct;N] aggregate codegen bug (#643/D6 family; distinct from #637).
+//!     Filed as issue #651; repro docs/handoff/repros/d8_generic_struct_F_mul_segv.sio.
+//!     Do NOT use this engine over a struct F until #651 lands — use the common-
+//!     denominator integer path (sedenion_cd_full16_q.sio, [i64;N]) for unbounded-ℚ.
+//! Madaros-engine support is a separate pending track (M1-M3).
+//! ─────────────────────────────────────────────────────────────────────────────
+//! Acceptance evidence (all output-verified, cross-checked vs the concrete engine):
+//!   tests/run-pass/cd_exact_generic_i64.sio          — CDElementExact<i64> proves the
+//!                                                      canonical ZD pair annihilates
+//!                                                      (e3+e10)(e6−e15)=0, 16× COMP 0
+//!   tests/run-pass/cd_exact_generic_vs_concrete.sio  — generic engine reproduces
+//!                                                      cayley_dickson_exact_i64.sio
+//!                                                      component-for-component
+//!   tests/run-pass/turbofish.sio                     — known-failure annotation removed
+//!
+//! Design choices that MINIMIZE the compiler ask:
+//!   * `ExactRing` is METHODS-ONLY — no associated/`Self`-returning fns (those need path-
+//!     qualified `F::zero()` calls, an extra unverified construct). Callers pass `zero`/`one`
+//!     as VALUES instead.
+//!   * The sign is ±1, so we ADD or SUBTRACT the product instead of lifting the sign into F
+//!     (`er_from_int` avoided entirely).
+//!   * `cd_sigma` (i32, field-independent) is REUSED VERBATIM from cayley_dickson.sio.
+
+use algebra::cayley_dickson::{cd_sigma}
+use math::rational::{Rational, rat_add, rat_sub, rat_mul, rat_is_zero, rat_eq, rat_zero, rat_one, rat_from_int}
+
+// ============================================================================
+// THE EXACT-RING CONTRACT (methods-only; zero/one supplied as values by callers)
+// ============================================================================
+
+/// An exact commutative ring `F`: closed addition/subtraction/multiplication with a
+/// decidable equality and zero-test. No division, no norm — annihilation lives here.
+trait ExactRing {
+    fn er_add(self, o: Self) -> Self with Mut, Div, Panic
+    fn er_sub(self, o: Self) -> Self with Mut, Div, Panic
+    fn er_mul(self, o: Self) -> Self with Mut, Div, Panic
+    fn er_is_zero(self) -> bool
+    fn er_eq(self, o: Self) -> bool
+}
+
+// F = i64 — the primary field. Fully proves the n=4 168-census (detection is over ℤ).
+impl ExactRing for i64 {
+    fn er_add(self, o: Self) -> Self with Mut, Div, Panic { self + o }
+    fn er_sub(self, o: Self) -> Self with Mut, Div, Panic { self - o }
+    fn er_mul(self, o: Self) -> Self with Mut, Div, Panic { self * o }
+    fn er_is_zero(self) -> bool { self == 0 }
+    fn er_eq(self, o: Self) -> bool { self == o }
+}
+
+// F = Rational — secondary field (norm-bearing observables), i64-bounded (no i128/bigint).
+// ⚠ WORKS for construction/dispatch, but cd_mul_exact<Rational> miscompiles (issue #651): the
+// [Rational;N] multiply-accumulate loop corrupts (garbage at N=16, SIGSEGV at N=2048). NOT a generics
+// bug — reproduces with plain concrete [Rational;16] too; it's a [struct;N] aggregate codegen defect
+// (#643/D6 family). Not usable end-to-end until #651 lands. The impl is kept so the shape is ready.
+impl ExactRing for Rational {
+    fn er_add(self, o: Self) -> Self with Mut, Div, Panic { rat_add(self, o) }
+    fn er_sub(self, o: Self) -> Self with Mut, Div, Panic { rat_sub(self, o) }
+    fn er_mul(self, o: Self) -> Self with Mut, Div, Panic { rat_mul(self, o) }
+    fn er_is_zero(self) -> bool { rat_is_zero(self) }
+    fn er_eq(self, o: Self) -> bool { rat_eq(self, o) }
+}
+
+// ============================================================================
+// ELEMENT TYPE — layout deliberately mirrors CDElement (f64), coeffs in exact F
+// ============================================================================
+
+/// An exact Cayley-Dickson element with up to 2048 components (tower level k ≤ 11,
+/// dimension 2^k). Unused components hold the ring zero.
+pub struct CDElementExact<F: ExactRing> {
+    c: [F; 2048],   // coefficients in exact F: c[0]=real, c[i]=e_i coefficient
+    bits: i32,      // k: tower level (dimension = 2^k)
+}
+
+/// Zero element. `zero` is the ring's additive identity, supplied by the caller
+/// (methods-only trait → no `F::er_zero()`).
+pub fn cd_zero_exact<F: ExactRing>(k: i32, zero: F) -> CDElementExact<F> with Mut, Panic, Div {
+    CDElementExact { c: [zero; 2048], bits: k }
+}
+
+/// Real unit e_0 = 1.
+pub fn cd_one_exact<F: ExactRing>(k: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {
+    var r = cd_zero_exact::<F>(k, zero)
+    r.c[0] = one
+    r
+}
+
+/// Basis element e_idx.
+pub fn cd_basis_exact<F: ExactRing>(k: i32, idx: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {
+    var r = cd_zero_exact::<F>(k, zero)
+    if idx >= 0 && idx < (1 << k) {
+        r.c[idx as usize] = one
+    }
+    r
+}
+
+// ============================================================================
+// EXACT ARITHMETIC — all derived from cd_sigma, accumulated in F (no f64)
+// ============================================================================
+
+/// Component-wise addition.
+pub fn cd_add_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero_exact::<F>(a.bits, zero)
+    var i: i32 = 0
+    while i < n {
+        r.c[i as usize] = a.c[i as usize].er_add(b.c[i as usize])
+        i = i + 1
+    }
+    r
+}
+
+/// Component-wise subtraction.
+pub fn cd_sub_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero_exact::<F>(a.bits, zero)
+    var i: i32 = 0
+    while i < n {
+        r.c[i as usize] = a.c[i as usize].er_sub(b.c[i as usize])
+        i = i + 1
+    }
+    r
+}
+
+/// EXACT Cayley-Dickson multiplication. Same structure as `cd_mul` (f64), but the
+/// accumulation is in exact F and the ±1 sign selects add vs subtract:
+///
+///   (a * b)[idx] = Σ_{i XOR j = idx} σ(i, j, k) · a[i] · b[j]     (σ ∈ {+1, −1})
+///
+/// The reused `cd_sigma` is field-independent (i32 combinatorics). Because σ is ±1 we
+/// never lift it into F — we add when σ=+1 and subtract when σ=−1.
+pub fn cd_mul_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {
+    let n = 1 << a.bits
+    var r = cd_zero_exact::<F>(a.bits, zero)
+    var i: i32 = 0
+    while i < n {
+        if !a.c[i as usize].er_is_zero() {
+            var j: i32 = 0
+            while j < n {
+                if !b.c[j as usize].er_is_zero() {
+                    let idx = i ^ j
+                    let sign = cd_sigma(i, j, a.bits)                       // ±1, reused verbatim
+                    let prod = a.c[i as usize].er_mul(b.c[j as usize])
+                    if sign > 0 {
+                        r.c[idx as usize] = r.c[idx as usize].er_add(prod)
+                    } else {
+                        r.c[idx as usize] = r.c[idx as usize].er_sub(prod)
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    r
+}
+
+/// Associator [a, b, c] = (a*b)*c − a*(b*c), exactly.
+pub fn cd_associator_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, c: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {
+    let left = cd_mul_exact::<F>(cd_mul_exact::<F>(a, b, zero), c, zero)
+    let right = cd_mul_exact::<F>(a, cd_mul_exact::<F>(b, c, zero), zero)
+    cd_sub_exact::<F>(left, right, zero)
+}
+
+// ============================================================================
+// DECIDABLE ZERO-DIVISOR TEST — the headline: no tolerance, no norm threshold
+// ============================================================================
+
+/// Is this element exactly the zero vector? Componentwise decidable equality.
+pub fn cd_is_zero_exact<F: ExactRing>(x: CDElementExact<F>) -> bool with Mut, Panic {
+    let n = 1 << x.bits
+    var i: i32 = 0
+    while i < n {
+        if !x.c[i as usize].er_is_zero() { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// Componentwise exact equality (for the n=4 acceptance gate vs Lean `primProd`).
+pub fn cd_eq_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>) -> bool with Mut, Panic {
+    if a.bits != b.bits { return false }
+    let n = 1 << a.bits
+    var i: i32 = 0
+    while i < n {
+        if !a.c[i as usize].er_eq(b.c[i as usize]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// zd_exact: is (a·b) == 0 exactly? Returns a DECIDABLE Boolean — the `Proved` witness.
+/// Contrast with the f64 `sed_is_zero_divisor` tolerance gate (||·||²<eps → MeasuredF64).
+pub fn zd_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> bool with Mut, Panic, Div {
+    cd_is_zero_exact::<F>(cd_mul_exact::<F>(a, b, zero))
+}

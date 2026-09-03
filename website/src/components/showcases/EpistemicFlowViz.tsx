@@ -182,7 +182,7 @@ export default function EpistemicFlowViz() {
           aria-label="Sounio epistemic chain visualisation"
         >
           {/* Arrows between steps */}
-          {CHAIN.map((step, i) => {
+          {CHAIN.map((_step, i) => {
             if (i === CHAIN.length - 1) return null;
             const x = PAD_X + i * (STEP_W + ARROW_W) + STEP_W;
             const y = MIDLINE_Y;

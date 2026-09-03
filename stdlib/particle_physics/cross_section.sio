@@ -1,0 +1,158 @@
+// stdlib/particle_physics/cross_section.sio — Numerical cross-section integrators
+//
+// Gauss-Legendre and Simpson integration for differential cross-sections
+// dσ/dΩ over solid angle.  Returns Epistemic results with integration
+// uncertainty estimates.
+//
+// References:
+//   - Press et al., "Numerical Recipes", Ch. 4
+//   - PDG 2024, Cross-section formulae
+
+module particle_physics::cross_section
+
+use epistemic::knowledge::{Epistemic}
+use particle_physics::kinematics::{diff_cross_section, total_cross_section_isotropic}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// GAUSS-LEGENDRE QUADRATURE (4-point)
+// ============================================================================
+
+/// 4-point Gauss-Legendre nodes on [−1, 1].
+fn gl4_nodes() -> [f64; 4] {
+    [0.0 - 0.8611363115940526, 0.0 - 0.3399810435848563, 0.3399810435848563, 0.8611363115940526]
+}
+
+/// 4-point Gauss-Legendre weights.
+fn gl4_weights() -> [f64; 4] {
+    [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538]
+}
+
+/// Integrate f(cosθ) over cosθ ∈ [−1, 1] using 4-point Gauss-Legendre.
+fn integrate_gl4(f0: f64, f1: f64, f2: f64, f3: f64) -> f64 {
+    let w = gl4_weights()
+    w[0] * f0 + w[1] * f1 + w[2] * f2 + w[3] * f3
+}
+
+// ============================================================================
+// AZIMUTHAL INTEGRATION
+// ============================================================================
+
+/// Integrate over azimuthal angle φ ∈ [0, 2π].
+/// For isotropic processes: ∫ dφ = 2π.
+/// For φ-dependent amplitudes: use symmetry or numerical φ-integration.
+pub fn azimuthal_integral(dsigma_dphi: f64) -> f64 {
+    2.0 * PI * dsigma_dphi
+}
+
+// ============================================================================
+// DIFFERENTIAL CROSS-SECTION INTEGRATOR
+// ============================================================================
+
+/// Total cross-section for 2→2 scattering with angular-dependent |M|².
+///
+/// Integrates dσ/dΩ over the full solid angle:
+///   σ = ∫_{-1}^{+1} d(cosθ) ∫_0^{2π} dφ dσ/dΩ.
+///
+/// Uses 4-point Gauss-Legendre in cosθ and assumes φ-independence
+/// (common for unpolarized scattering).
+///
+/// # Parameters
+/// - `s`: CM energy squared.
+/// - `m1`, `m2`: Initial-state masses.
+/// - `m3`, `m4`: Final-state masses.
+/// - `amp_sq_fn`: Function ID for amplitude-squared evaluator.
+///   The evaluator takes `cos_theta` and returns |M|².
+///
+/// # Returns
+/// Total cross-section in GeV⁻².
+pub fn total_cross_section_integrated(
+    s: f64, m1: f64, m2: f64, m3: f64, m4: f64,
+    amp_sq_0: f64, amp_sq_1: f64, amp_sq_2: f64, amp_sq_3: f64
+) -> f64 with Mut, Div, Panic {
+    if s <= 0.0 { return 0.0 }
+
+    // Evaluate dσ/dΩ at GL nodes
+    let nodes = gl4_nodes()
+    let d0 = diff_cross_section(s, m1, m2, m3, m4, amp_sq_0)
+    let d1 = diff_cross_section(s, m1, m2, m3, m4, amp_sq_1)
+    let d2 = diff_cross_section(s, m1, m2, m3, m4, amp_sq_2)
+    let d3 = diff_cross_section(s, m1, m2, m3, m4, amp_sq_3)
+
+    // Integrate over cosθ
+    let int_costheta = integrate_gl4(d0, d1, d2, d3)
+
+    // Multiply by 2π for azimuthal integration
+    2.0 * PI * int_costheta
+}
+
+/// Total cross-section in picobarn.
+pub fn total_cross_section_integrated_pb(
+    s: f64, m1: f64, m2: f64, m3: f64, m4: f64,
+    amp_sq_0: f64, amp_sq_1: f64, amp_sq_2: f64, amp_sq_3: f64
+) -> f64 with Mut, Div, Panic {
+    let sigma = total_cross_section_integrated(s, m1, m2, m3, m4, amp_sq_0, amp_sq_1, amp_sq_2, amp_sq_3)
+    sigma * GEV2_TO_PB
+}
+
+// ============================================================================
+// SIMPSON INTEGRATION (fallback)
+// ============================================================================
+
+/// Simpson's rule for ∫_{a}^{b} f(x) dx with n intervals (n must be even).
+///
+/// # Parameters
+/// - `a`, `b`: Integration limits.
+/// - `n`: Number of subintervals (must be even).
+/// - `f_vals`: Function values at x_i = a + i·h, i = 0..n.
+///
+/// # Returns
+/// Integral estimate.
+pub fn simpson_integral(f_vals: &[f64; 65], n: i64) -> f64 with Mut, Div, Panic {
+    if n <= 0 || n % 2 != 0 { return 0.0 }
+    let h = 1.0  // Caller must scale appropriately
+    var sum = f_vals[0] + f_vals[n]
+    var i: i64 = 1
+    while i < n {
+        if i % 2 == 1 {
+            sum = sum + 4.0 * f_vals[i]
+        } else {
+            sum = sum + 2.0 * f_vals[i]
+        }
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+// ============================================================================
+// EPISTEMIC INTEGRATION (uncertainty propagation)
+// ============================================================================
+
+/// Integrate epistemic values over cosθ using Gauss-Legendre.
+/// Variance propagates via sum of squared weights times input variances.
+pub fn integrate_epistemic_gl4(
+    e0: Epistemic, e1: Epistemic, e2: Epistemic, e3: Epistemic
+) -> Epistemic with Mut {
+    let w = gl4_weights()
+    let val = w[0] * e0.val() + w[1] * e1.val() + w[2] * e2.val() + w[3] * e3.val()
+    let var = w[0] * w[0] * e0.variance() +
+              w[1] * w[1] * e1.variance() +
+              w[2] * w[2] * e2.variance() +
+              w[3] * w[3] * e3.variance()
+    var min_conf = e0.confidence()
+    if e1.confidence() < min_conf { min_conf = e1.confidence() }
+    if e2.confidence() < min_conf { min_conf = e2.confidence() }
+    if e3.confidence() < min_conf { min_conf = e3.confidence() }
+    Epistemic::new(val, var, min_conf)
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let PI: f64 = 3.14159265358979323846
+let GEV2_TO_PB: f64 = 389379000.0

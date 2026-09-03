@@ -1,0 +1,88 @@
+//@ run-pass
+// tests/run-pass/uhs_brine_calcite_selftest.sio
+//
+// Suite coverage for demos/hydrogen/uhs_brine_calcite.sio (UHS H2-brine-
+// calcite network after Ghaedi et al. 2025, DOI 10.1002/ghg.2368): pins
+// the 25 C central trajectory and the native GUM band against an
+// independent Python delta-method replica, plus the k_m corner ordering.
+//
+// Pins (replica, dt = 0.05 yr x 600 steps, mirroring the engine's RK4 +
+// per-step propagator exactly):
+//   H2      = 0.0097749285192   (u: below the engine's sqrt_approx floor,
+//                                pinned only as nonzero and < 1.5e-6)
+//   Calcite = 0.9953557843750    u = 3.33e-6 (engine sqrt_approx value)
+//   CO2     = 0.0359606725915
+// Rate literals are the public PWP/phreeqc.dat constants at 298.15 K
+// (A = 1e-5 cm^2/L, pH 7, k_b = ks3/K4 closure — see the demo header).
+//
+// lean_single engine (Madaros "visibility preflight failed" on any
+// chemistry::kinetics import is a pre-existing blocker on ede0f3219).
+use chemistry::kinetics::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn run25(nu: MatNM, km: f64) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    let ks: [f64; 8] = [km, 1.614063698768e-6, 1.089959067762e-2, 3.766003829446e-5, 4.964559925597, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.5 * km, 1.614063698768e-7, 1.089959067762e-3, 3.766003829446e-6, 4.964559925597e-1, 0.0, 0.0, 0.0]
+    let iv: [f64; 8] = [9.945e-3, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, 600 as i64)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    var nu = matnm_new(6 as i64, 5 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, 0.0 - 1.0)   // R0: H2 + CO2 -> CH4
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0)
+    nu = matnm_set(nu, 5 as i64, 0 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 1 as i64, 0.0 - 1.0)   // R1: acid channel
+    nu = matnm_set(nu, 3 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 2 as i64, 0.0 - 1.0)   // R2: CO2 channel
+    nu = matnm_set(nu, 5 as i64, 2 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 2 as i64, 2.0)
+    nu = matnm_set(nu, 2 as i64, 3 as i64, 0.0 - 1.0)   // R3: water channel
+    nu = matnm_set(nu, 3 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 3 as i64, 4 as i64, 0.0 - 1.0)   // R4: closure
+    nu = matnm_set(nu, 4 as i64, 4 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 4 as i64, 1.0)
+
+    let (ov, ou) = run25(nu, 1.35e-2)
+    // Extract scalars IMMEDIATELY: lean_single aliases simultaneously-
+    // held returned arrays across calls — a second call to run25
+    // overwrites the first call's ov/ou (verified: ov_lo[0] changes
+    // value after the km_hi call; same quirk the flame1d work hit).
+    // Scalar copies are unaffected.
+    let h2 = ov[0]
+    let cal = ov[2]
+    let co2 = ov[5]
+    let uh2 = ou[0]
+    let ucal = ou[2]
+    if absf(h2 - 0.0097749285192) > 1.0e-7 { fails = fails + 1 }   // H2
+    if absf(cal - 0.9953557843750) > 1.0e-7 { fails = fails + 1 }  // Calcite
+    if absf(co2 - 0.0359606725915) > 1.0e-7 { fails = fails + 1 }  // CO2
+    // native GUM band: Calcite sigma at the engine's sqrt_approx value
+    if absf(ucal - 3.3308895287e-6) > 2.0e-8 { fails = fails + 1 }
+    // H2 sigma sits below the sqrt_approx convergence floor: pin the floor
+    // behavior itself (nonzero, small) rather than a fake precise value
+    if uh2 <= 0.0 { fails = fails + 1 }
+    if uh2 > 1.5e-6 { fails = fails + 1 }
+
+    // k_m corner ordering (M1, comparison-arguable for a pure sink):
+    // higher methanation rate -> less H2 left after 30 yr
+    let (ov_lo, ou_lo) = run25(nu, 0.0048)
+    let h2_lo = ov_lo[0]
+    let (ov_hi, ou_hi) = run25(nu, 0.0187)
+    let h2_hi = ov_hi[0]
+    if h2_hi >= h2_lo { fails = fails + 1 }
+
+    if fails == 0 {
+        println("UHS_BRINE_CALCITE_SELFTEST_OK")
+        return 0
+    }
+    print("uhs_brine_calcite failures: ")
+    println(fails)
+    1
+}

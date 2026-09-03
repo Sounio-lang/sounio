@@ -1,0 +1,1793 @@
+// stdlib/x509/cert.sio
+//
+// X.509 Certificate data structures (RFC 5280) and zero-value constructors.
+// The parser functions (der -> Certificate) are added in later tasks; this
+// file starts with just the data model, mirroring how stdlib/bignum/bigint.sio
+// and stdlib/asn1/der.sio each established their own types before their own
+// operations were built on top.
+
+use asn1::der::*
+use bignum::bigint::*
+use crypto::ecdsa_p256::*
+use crypto::ecdsa_p384::ecdsa_p384_verify_sha384
+use crypto::pkcs1::*
+use hash::sha1::*
+use hash::sha256::*
+use hash::sha384::*
+use hash::sha512::*
+use net::socket::*
+use x509::oid::*
+use x509::sct::*
+
+pub const X509_MAX_RDN_ENTRIES: i32 = 16
+pub const X509_MAX_NAME_VALUE_LEN: i64 = 128
+pub const X509_MAX_OID_BYTES: i64 = 20
+pub const X509_MAX_SAN_ENTRIES: i32 = 32
+pub const X509_MAX_GENERAL_NAME_VALUE_LEN: i64 = 253
+pub const X509_MAX_EXTENSIONS: i32 = 32
+pub const X509_MAX_EXTENSION_VALUE_LEN: i64 = 512
+pub const X509_MAX_SCT_ENTRIES: i32 = 8
+pub const X509_MAX_SIGNATURE_LEN: i64 = 512
+
+pub const X509_OK: i64 = 0
+pub const X509_ERR_UNSUPPORTED_ALGORITHM: i64 = 0 - 1
+pub const X509_ERR_TOO_MANY_ENTRIES: i64 = 0 - 2
+pub const X509_ERR_VALUE_TOO_LONG: i64 = 0 - 3
+pub const X509_ERR_SIG_ALG_MISMATCH: i64 = 0 - 4
+pub const X509_ERR_MALFORMED: i64 = 0 - 5
+
+// SubjectPublicKeyInfo algorithm as recognized by this parser -- Task 3
+// (docs of the same task's brief): RSA was the only algorithm this parser
+// could ever produce before this task; EC (P-256/prime256v1) is new.
+// UNKNOWN covers every other algorithm (Ed25519, other named curves, etc.)
+// this task is not chartered to support -- `modulus`/`public_exponent`
+// and `ec_public_key` are both left at their zero values in that case.
+pub const PUBKEY_ALG_RSA: i32 = 0
+pub const PUBKEY_ALG_EC_P256: i32 = 1
+pub const PUBKEY_ALG_UNKNOWN: i32 = 2
+pub const PUBKEY_ALG_EC_P384: i32 = 3
+
+pub struct RdnEntry {
+    oid: [u8; 20],
+    oid_len: i32,
+    value_tag: i32,
+    value: [u8; 128],
+    value_len: i32,
+}
+
+pub struct X509Name {
+    entries: [RdnEntry; 16],
+    count: i32,
+}
+
+pub const GENERAL_NAME_OTHER_NAME: i32 = 0
+pub const GENERAL_NAME_RFC822_NAME: i32 = 1
+pub const GENERAL_NAME_DNS_NAME: i32 = 2
+pub const GENERAL_NAME_X400_ADDRESS: i32 = 3
+pub const GENERAL_NAME_DIRECTORY_NAME: i32 = 4
+pub const GENERAL_NAME_EDI_PARTY_NAME: i32 = 5
+pub const GENERAL_NAME_URI: i32 = 6
+pub const GENERAL_NAME_IP_ADDRESS: i32 = 7
+pub const GENERAL_NAME_REGISTERED_ID: i32 = 8
+
+// ARENA FOOTPRINT (2026-08-26, see
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md):
+// this struct used to carry a `directory_name: X509Name` field for the
+// RFC 5280 directoryName GeneralName choice ([4]). That field was NEVER
+// populated and NEVER read: `x509_parse_general_names` deliberately skips
+// copying it (a Madaros defect corrupts a doubly-indexed struct-in-array
+// write -- see the long comment at that copy loop), and no consumer in
+// stdlib/ or tests/ ever reads it back. It was, however, 2,564 of this
+// struct's ~2,849 bytes, and `Certificate` holds SIXTY-FOUR GeneralNames
+// (`san_entries` + `issuer_alt_names`, 32 each) -- so this one dead field
+// accounted for roughly 87% of every `Certificate` value, and
+// `x509_verify_chain` copies `Certificate` VALUES by the hundred. Removing
+// it shrinks `GeneralName` from ~2,849 B to ~285 B and `Certificate` from
+// ~210 KB to ~46 KB, with no behavioural change whatsoever.
+//
+// If directoryName support is ever genuinely needed, do NOT re-add an
+// inline `X509Name` here: park the decoded name in a side table indexed by
+// GeneralName position, so the cost is paid only by certificates that
+// actually use the [4] choice.
+//
+// Field INDICES 0..4 (tag, value, value_len, oid, oid_len) are unchanged by
+// this removal -- see tests/run-pass/x509_generalname_field_index_ambiguity.sio,
+// which locks exactly those indices against the compiler's name-only
+// field-resolution fallback.
+pub struct GeneralName {
+    tag: i32,
+    value: [u8; 253],
+    value_len: i32,
+    oid: [u8; 20],
+    oid_len: i32,
+}
+
+pub struct ExtensionEntry {
+    oid: [u8; 20],
+    oid_len: i32,
+    critical: bool,
+    value: [u8; 512],
+    value_len: i32,
+}
+
+pub struct SctEntry {
+    version: i32,
+    log_id: [u8; 32],
+    timestamp_ms: i64,
+    extensions_len: i32,
+    sig_algorithm_hash: i32,
+    sig_algorithm_sign: i32,
+    signature: [u8; 128],
+    signature_len: i32,
+}
+
+pub struct Certificate {
+    version: i32,
+    tbs_start: i64,
+    tbs_len: i64,
+    outer_sig_alg_oid: [u8; 20],
+    outer_sig_alg_oid_len: i32,
+    outer_signature: [u8; 512],
+    outer_signature_len: i32,
+
+    serial_number: BigInt,
+    tbs_sig_alg_oid: [u8; 20],
+    tbs_sig_alg_oid_len: i32,
+    issuer: X509Name,
+    not_before_unix: i64,
+    not_after_unix: i64,
+    subject: X509Name,
+    modulus: BigInt,
+    public_exponent: BigInt,
+    public_key_algorithm: i32,
+    ec_public_key: EcPoint,
+
+    extensions: [ExtensionEntry; 32],
+    extension_count: i32,
+    is_ca: bool,
+    path_len_constraint: i32,
+    key_usage_bits: i32,
+    san_entries: [GeneralName; 32],
+    san_count: i32,
+    issuer_alt_names: [GeneralName; 32],
+    issuer_alt_name_count: i32,
+    subject_key_id: [u8; 32],
+    subject_key_id_len: i32,
+    authority_key_id: [u8; 32],
+    authority_key_id_len: i32,
+    sct_entries: [SctEntry; 8],
+    sct_count: i32,
+}
+
+pub fn x509_name_zero() -> X509Name {
+    X509Name {
+        entries: [
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+            RdnEntry { oid: [0; 20], oid_len: 0, value_tag: 0, value: [0; 128], value_len: 0 },
+        ],
+        count: 0,
+    }
+}
+
+pub fn extension_entry_zero() -> ExtensionEntry {
+    ExtensionEntry { oid: [0; 20], oid_len: 0, critical: false, value: [0; 512], value_len: 0 }
+}
+
+pub fn general_name_zero() -> GeneralName {
+    GeneralName {
+        tag: 0,
+        value: [0; 253],
+        value_len: 0,
+        oid: [0; 20],
+        oid_len: 0,
+    }
+}
+
+pub fn sct_entry_zero() -> SctEntry {
+    SctEntry {
+        version: 0,
+        log_id: [0; 32],
+        timestamp_ms: 0,
+        extensions_len: 0,
+        sig_algorithm_hash: 0,
+        sig_algorithm_sign: 0,
+        signature: [0; 128],
+        signature_len: 0,
+    }
+}
+
+pub fn certificate_zero() -> Certificate {
+    var extensions_zero: [ExtensionEntry; 32] = [
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+    ]
+    var san_zero: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var ian_zero: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var scts_zero: [SctEntry; 8] = [
+        sct_entry_zero(), sct_entry_zero(), sct_entry_zero(), sct_entry_zero(),
+        sct_entry_zero(), sct_entry_zero(), sct_entry_zero(), sct_entry_zero(),
+    ]
+
+    Certificate {
+        version: 0,
+        tbs_start: 0,
+        tbs_len: 0,
+        outer_sig_alg_oid: [0; 20],
+        outer_sig_alg_oid_len: 0,
+        outer_signature: [0; 512],
+        outer_signature_len: 0,
+        serial_number: bigint_zero(),
+        tbs_sig_alg_oid: [0; 20],
+        tbs_sig_alg_oid_len: 0,
+        issuer: x509_name_zero(),
+        not_before_unix: 0,
+        not_after_unix: 0,
+        subject: x509_name_zero(),
+        modulus: bigint_zero(),
+        public_exponent: bigint_zero(),
+        public_key_algorithm: PUBKEY_ALG_UNKNOWN,
+        ec_public_key: EcPoint { x: bigint_zero(), y: bigint_zero() },
+        extensions: extensions_zero,
+        extension_count: 0,
+        is_ca: false,
+        path_len_constraint: 0 - 1,
+        key_usage_bits: 0,
+        san_entries: san_zero,
+        san_count: 0,
+        issuer_alt_names: ian_zero,
+        issuer_alt_name_count: 0,
+        subject_key_id: [0; 32],
+        subject_key_id_len: 0,
+        authority_key_id: [0; 32],
+        authority_key_id_len: 0,
+        sct_entries: scts_zero,
+        sct_count: 0,
+    }
+}
+
+// UTCTime (YYMMDDHHMMSSZ) -> Unix timestamp. Per RFC 5280 SS4.1.2.5.1, a
+// two-digit year YY is 20YY if YY < 50, else 19YY -- this project only ever
+// decodes CURRENT/recent certificates, so every real YY it sees is < 50
+// (20xx), but the rule is implemented per the standard regardless. Uses
+// only additions and small-constant multiplications on i64 day/second
+// counts -- no operation here approaches bit 63.
+//
+// KNOWN LIMITATION, documented rather than fixed here (found during the
+// final whole-plan review, 2026-08-24; the design spec's own field comment
+// for Certificate.not_before_unix/not_after_unix says "decoded from
+// UTCTime/GeneralizedTime", which overstates what's shipped): this
+// function only accepts UTCTime's 13-byte YYMMDDHHMMSSZ form. RFC 5280
+// requires GeneralizedTime (15-byte YYYYMMDDHHMMSSZ, four-digit year) for
+// any certificate whose notBefore/notAfter falls in 2050 or later --
+// calling this function with GeneralizedTime bytes falls through the
+// `len != 13` check below and returns the sentinel -1, not a real
+// timestamp. Implementing GeneralizedTime support (four-digit year
+// parsing, a different fixed length) is a real, independent feature, not
+// a one-line fix -- out of scope for this review-response fix round.
+// x509_parse_certificate does not currently detect or report this case
+// specially; a caller relying on not_before_unix/not_after_unix for a
+// certificate with a GeneralizedTime-encoded validity period will see -1
+// and should treat that as "date not decoded", not "date is invalid".
+fn parse_utc_time_to_unix(buf: &RawBuf, start: i64, len: i64) -> i64 with IO {
+    // "YYMMDDHHMMSSZ" is exactly 13 bytes.
+    if len != 13 {
+        return 0 - 1
+    }
+    let yy = ((rawbuf_get(buf, start) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 1) & 255) - 48)
+    let year_full = if yy < 50 { 2000 + yy } else { 1900 + yy }
+    let mm = ((rawbuf_get(buf, start + 2) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 3) & 255) - 48)
+    let dd = ((rawbuf_get(buf, start + 4) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 5) & 255) - 48)
+    let hh = ((rawbuf_get(buf, start + 6) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 7) & 255) - 48)
+    let min = ((rawbuf_get(buf, start + 8) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 9) & 255) - 48)
+    let ss = ((rawbuf_get(buf, start + 10) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 11) & 255) - 48)
+    unix_timestamp_from_ymdhms(year_full, mm, dd, hh, min, ss)
+}
+
+// Days-from-civil algorithm (Howard Hinnant's well-known public-domain
+// civil_from_days inverse), avoiding any library date function this
+// project doesn't have. All intermediate values stay far below 2^32, let
+// alone i64's bit 63.
+fn unix_timestamp_from_ymdhms(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    var y = year
+    if month <= 2 {
+        y = y - 1
+    }
+    let era = if y >= 0 { y } else { y - 399 }
+    let era_div = era / 400
+    let yoe = y - era_div * 400
+    // (month+9)%12 computed via the branch below since this project avoids
+    // relying on '%' with any operand shape not already proven safe. `mp`
+    // starts at month+9; if that's already < 12 (month is 1 or 2), no
+    // adjustment is needed -- the value IS its own mod-12 residue. Only
+    // when it's >= 12 (month 3-12) does it need one subtraction of 12.
+    //
+    // BUG FOUND during the final whole-plan review (2026-08-24), confirmed
+    // by tracing the arithmetic and by measuring real dates against `date
+    // -u`: the previous `else` branch wrongly recomputed `mp = month - 3`
+    // for month 1/2 (giving -2/-1) instead of leaving `mp` at its already-
+    // correct month+9 (10/11). This mis-decoded every January/February
+    // UTCTime validity date by very close to a full year -- a `notAfter`
+    // in Jan/Feb would read as expired a year early (fail-closed), and a
+    // `notBefore` in Jan/Feb would read as already valid a year early
+    // (fail-open for a not-yet-valid certificate). It survived every prior
+    // task review because the one fixture using a January date
+    // (tests/run-pass/x509_parse_tbs_core.sio) only ever asserted
+    // not_before/not_after are nonzero and correctly ordered -- both
+    // invariant under a uniform one-year shift of both dates.
+    var mp: i64 = month + 9
+    if mp >= 12 {
+        mp = mp - 12
+    }
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let yoe_leap_adj = yoe / 4 - yoe / 100
+    let doe = yoe * 365 + yoe_leap_adj + doy
+    let days_since_epoch = era_div * 146097 + doe - 719468
+    days_since_epoch * 86400 + hour * 3600 + minute * 60 + second
+}
+
+// Returns, alongside the parsed Certificate, the DerReader positioned
+// immediately after subjectPublicKeyInfo -- i.e. exactly where an optional
+// [3] extensions field would begin, if present. Task 7's outer-assembly
+// function needs this position to find the extensions block without
+// re-walking the same fields a second time.
+pub fn x509_parse_tbs_core(buf: &RawBuf, tbs_reader: &DerReader) -> (Certificate, DerReader, i64) with IO {
+    var cert = certificate_zero()
+    var cursor = DerReader { buf_ptr: tbs_reader.buf_ptr, pos: tbs_reader.pos, end: tbs_reader.end }
+
+    let (r1, t1, s1) = der_read_tlv(&cursor)
+    if s1 != DER_OK {
+        return (cert, cursor, s1)
+    }
+
+    var version: i32 = 0
+    var after_version = cursor
+    if t1.class == DER_CLASS_CONTEXT && t1.tag_number == 0 {
+        // Explicit [0] version wrapper -- descend, read the inner INTEGER.
+        let (inner, e0) = der_enter(&cursor, &t1)
+        if e0 != DER_OK {
+            return (cert, cursor, e0)
+        }
+        let (inner2, ver_tag, s2) = der_read_tlv(&inner)
+        if s2 != DER_OK {
+            return (cert, cursor, s2)
+        }
+        let (ver_bigint, s3) = der_read_integer(&inner, &ver_tag)
+        if s3 != DER_OK {
+            return (cert, cursor, s3)
+        }
+        version = bigint_to_small_i32(&ver_bigint)
+        let (adv, s4) = der_next(&cursor, &t1)
+        if s4 != DER_OK {
+            return (cert, cursor, s4)
+        }
+        after_version = adv
+        let (r2, t2, s5) = der_read_tlv(&after_version)
+        if s5 != DER_OK {
+            return (cert, cursor, s5)
+        }
+        let (serial, s6) = der_read_integer(&after_version, &t2)
+        if s6 != DER_OK {
+            return (cert, cursor, s6)
+        }
+        cert.serial_number = serial
+        let (after_serial, s7) = der_next(&after_version, &t2)
+        if s7 != DER_OK {
+            return (cert, cursor, s7)
+        }
+        return x509_parse_tbs_after_serial(buf, &after_serial, cert, version)
+    } else {
+        // No [0] wrapper: version defaults to 0 (v1), and t1/r1 IS the
+        // serialNumber INTEGER already read.
+        let (serial, s6) = der_read_integer(&cursor, &t1)
+        if s6 != DER_OK {
+            return (cert, cursor, s6)
+        }
+        cert.serial_number = serial
+        let (after_serial, s7) = der_next(&cursor, &t1)
+        if s7 != DER_OK {
+            return (cert, cursor, s7)
+        }
+        return x509_parse_tbs_after_serial(buf, &after_serial, cert, 0)
+    }
+}
+
+fn bigint_to_small_i32(v: &BigInt) -> i32 {
+    if v.len == 0 {
+        return 0
+    }
+    v.limbs[0] as i32   // version is always 0/1/2 -- fits in the low limb trivially
+}
+
+// `version` is threaded through as a scalar parameter and merged into
+// `cert` only on the final success path (below), rather than being set on
+// `cert_in` immediately on entry -- this is deliberate, on top of Finding
+// 23's struct-field-reorder fix (Certificate.version is now the struct's
+// first field): setting it early and then carrying `cert` through several
+// more nested tuple-returning calls in this same function would put the
+// field-drop risk back in play for every intermediate return, even with
+// the reorder. Threading it as its own scalar parameter/return value
+// avoids relying on the reorder alone to survive this function's own
+// internal call chain.
+// Converts a 32-byte big-endian integer (an uncompressed EC point's X or Y
+// coordinate) into a BigInt. BigInt.limbs is little-endian 16-bit limbs
+// (stdlib/bignum/bigint.sio) -- each limb here is built from one big-endian
+// byte pair, working from the LEAST significant end of the 32-byte input
+// (bytes[30..31]) towards the MOST significant end (bytes[0..1]), so
+// limbs[0] ends up holding the value's least-significant 16 bits, matching
+// bigint_from_u32's own convention. Reads `bytes` element-by-element (never
+// `var x = *ref` on the fixed-array parameter) per the compiler's SSD8
+// aliasing defect (docs/handoff/souc_v0800_defects.md).
+fn bigint_from_be_bytes32(bytes: &[u8; 32]) -> BigInt {
+    var result = bigint_zero()
+    var limb_idx: i64 = 0
+    var byte_pos: i64 = 30
+    while byte_pos >= 0 {
+        let hi = bytes[byte_pos as usize] as u16
+        let lo = bytes[(byte_pos + 1) as usize] as u16
+        result.limbs[limb_idx as usize] = (hi << 8) | lo
+        limb_idx = limb_idx + 1
+        byte_pos = byte_pos - 2
+    }
+    var len: i32 = 16
+    while len > 0 && result.limbs[(len - 1) as usize] == 0 {
+        len = len - 1
+    }
+    result.len = len
+    result
+}
+
+// Same convention as bigint_from_be_bytes32 above, sized for P-384's 48-byte
+// coordinates (24 little-endian 16-bit limbs instead of 16).
+fn bigint_from_be_bytes48(bytes: &[u8; 48]) -> BigInt {
+    var result = bigint_zero()
+    var limb_idx: i64 = 0
+    var byte_pos: i64 = 46
+    while byte_pos >= 0 {
+        let hi = bytes[byte_pos as usize] as u16
+        let lo = bytes[(byte_pos + 1) as usize] as u16
+        result.limbs[limb_idx as usize] = (hi << 8) | lo
+        limb_idx = limb_idx + 1
+        byte_pos = byte_pos - 2
+    }
+    var len: i32 = 24
+    while len > 0 && result.limbs[(len - 1) as usize] == 0 {
+        len = len - 1
+    }
+    result.len = len
+    result
+}
+
+fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate, version: i32) -> (Certificate, DerReader, i64) with IO {
+    var cert = cert_in
+    // Never copy a struct via `*r` (this branch's established discipline) --
+    // rebuild a fresh DerReader by reading r's fields individually whenever
+    // an error return needs "the reader unchanged" as its second tuple slot.
+    let r_copy = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+
+    // signature AlgorithmIdentifier
+    let (r1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (cert, r_copy, s1) }
+    let (alg_inner, e1) = der_enter(r, &t1)
+    if e1 != DER_OK { return (cert, r_copy, e1) }
+    let (alg_inner2, oid_tag, s2) = der_read_tlv(&alg_inner)
+    if s2 != DER_OK { return (cert, r_copy, s2) }
+    if oid_tag.tag_number != DER_TAG_OBJECT_IDENTIFIER { return (cert, r_copy, X509_ERR_MALFORMED) }
+    var oid_buf: [u8; 20] = [0; 20]
+    var oi: i64 = 0
+    // oid_buf is fixed at [u8;20] -- cap the copy loop at its size, matching
+    // every other OID-reading loop in this file (cert.sio:529, 895, 1119).
+    // This site was missing the cap: a malformed/adversarial certificate
+    // with a signature-algorithm OID longer than 20 bytes would otherwise
+    // write past the end of oid_buf. Found during the final whole-plan
+    // review (2026-08-24).
+    while oi < oid_tag.content_len && oi < 20 {
+        oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+        oi = oi + 1
+    }
+    cert.tbs_sig_alg_oid = oid_buf
+    cert.tbs_sig_alg_oid_len = oid_tag.content_len as i32
+    let (after_sig_alg, s3) = der_next(r, &t1)
+    if s3 != DER_OK { return (cert, r_copy, s3) }
+
+    // issuer Name
+    let (r2, t2, s4) = der_read_tlv(&after_sig_alg)
+    if s4 != DER_OK { return (cert, after_sig_alg, s4) }
+    let (issuer, s5) = x509_parse_name(buf, &after_sig_alg, &t2)
+    if s5 != DER_OK { return (cert, after_sig_alg, s5) }
+    cert.issuer = issuer
+    let (after_issuer, s6) = der_next(&after_sig_alg, &t2)
+    if s6 != DER_OK { return (cert, after_sig_alg, s6) }
+
+    // validity SEQUENCE { Time, Time }
+    let (r3, t3, s7) = der_read_tlv(&after_issuer)
+    if s7 != DER_OK { return (cert, after_issuer, s7) }
+    let (validity_inner, e2) = der_enter(&after_issuer, &t3)
+    if e2 != DER_OK { return (cert, after_issuer, e2) }
+    let (v1, nb_tag, s8) = der_read_tlv(&validity_inner)
+    if s8 != DER_OK { return (cert, after_issuer, s8) }
+    cert.not_before_unix = parse_utc_time_to_unix(buf, nb_tag.content_start, nb_tag.content_len)
+    let (after_nb, s9) = der_next(&validity_inner, &nb_tag)
+    if s9 != DER_OK { return (cert, after_issuer, s9) }
+    let (v2, na_tag, s10) = der_read_tlv(&after_nb)
+    if s10 != DER_OK { return (cert, after_issuer, s10) }
+    cert.not_after_unix = parse_utc_time_to_unix(buf, na_tag.content_start, na_tag.content_len)
+    let (after_validity, s11) = der_next(&after_issuer, &t3)
+    if s11 != DER_OK { return (cert, after_issuer, s11) }
+
+    // subject Name
+    let (r4, t4, s12) = der_read_tlv(&after_validity)
+    if s12 != DER_OK { return (cert, after_validity, s12) }
+    let (subject, s13) = x509_parse_name(buf, &after_validity, &t4)
+    if s13 != DER_OK { return (cert, after_validity, s13) }
+    cert.subject = subject
+    let (after_subject, s14) = der_next(&after_validity, &t4)
+    if s14 != DER_OK { return (cert, after_validity, s14) }
+
+    // subjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier, BIT STRING }
+    let (r5, t5, s15) = der_read_tlv(&after_subject)
+    if s15 != DER_OK { return (cert, after_subject, s15) }
+    let (spki_inner, e3) = der_enter(&after_subject, &t5)
+    if e3 != DER_OK { return (cert, after_subject, e3) }
+    let (spki_inner2, spki_alg_tag, s16) = der_read_tlv(&spki_inner)
+    if s16 != DER_OK { return (cert, after_subject, s16) }
+
+    // AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER,
+    // parameters ANY DEFINED BY algorithm OPTIONAL }. Before this task, this
+    // function never looked inside this SEQUENCE at all -- it skipped
+    // straight past it (`der_next`) and unconditionally assumed the BIT
+    // STRING held an RSAPublicKey. Task 3 (docs of this task's own brief):
+    // read `algorithm`'s OID here and branch RSA vs EC (P-256) vs unknown.
+    let (alg_id_inner, e_alg) = der_enter(&spki_inner, &spki_alg_tag)
+    if e_alg != DER_OK { return (cert, after_subject, e_alg) }
+    let (alg_id_inner2, alg_oid_tag, s_alg_oid) = der_read_tlv(&alg_id_inner)
+    if s_alg_oid != DER_OK { return (cert, after_subject, s_alg_oid) }
+    if alg_oid_tag.tag_number != DER_TAG_OBJECT_IDENTIFIER { return (cert, after_subject, X509_ERR_MALFORMED) }
+    var alg_oid_buf: [u8; 20] = [0; 20]
+    var alg_oi: i64 = 0
+    // Capped at 20 (X509_MAX_OID_BYTES) -- same discipline as every other
+    // OID-reading loop in this file (a malformed/adversarial certificate's
+    // OID content_len is attacker-controlled and not otherwise bounded).
+    while alg_oi < alg_oid_tag.content_len && alg_oi < 20 {
+        alg_oid_buf[alg_oi as usize] = (rawbuf_get(buf, alg_oid_tag.content_start + alg_oi) & 255) as u8
+        alg_oi = alg_oi + 1
+    }
+    let alg_oid_len = alg_oid_tag.content_len as i32
+    let rsa_oid = oid_rsa_encryption()
+    let ec_oid = oid_ec_public_key()
+    let is_rsa_alg = oid_eq9(&alg_oid_buf, alg_oid_len, &rsa_oid)
+    let is_ec_alg = oid_eq7(&alg_oid_buf, alg_oid_len, &ec_oid)
+
+    // For id-ecPublicKey, `parameters` is REQUIRED and is itself an OID
+    // naming the curve (RFC 5480 SS2.1.1) -- P-256 is prime256v1, P-384 is
+    // secp384r1. Any other named curve (or no parameters at all) leaves
+    // public_key_algorithm at UNKNOWN.
+    var is_p256_curve = false
+    var is_p384_curve = false
+    if is_ec_alg {
+        let (after_alg_oid, s_after_alg_oid) = der_next(&alg_id_inner, &alg_oid_tag)
+        if s_after_alg_oid != DER_OK { return (cert, after_subject, s_after_alg_oid) }
+        let (curve_r, curve_oid_tag, s_curve) = der_read_tlv(&after_alg_oid)
+        if s_curve != DER_OK { return (cert, after_subject, s_curve) }
+        if curve_oid_tag.tag_number == DER_TAG_OBJECT_IDENTIFIER {
+            var curve_oid_buf: [u8; 20] = [0; 20]
+            var curve_oi: i64 = 0
+            while curve_oi < curve_oid_tag.content_len && curve_oi < 20 {
+                curve_oid_buf[curve_oi as usize] = (rawbuf_get(buf, curve_oid_tag.content_start + curve_oi) & 255) as u8
+                curve_oi = curve_oi + 1
+            }
+            let curve_oid_len = curve_oid_tag.content_len as i32
+            let p256_oid = oid_prime256v1()
+            let p384_oid = oid_secp384r1()
+            is_p256_curve = oid_eq8(&curve_oid_buf, curve_oid_len, &p256_oid)
+            is_p384_curve = oid_eq5(&curve_oid_buf, curve_oid_len, &p384_oid)
+        }
+    }
+
+    let (after_spki_alg, s17) = der_next(&spki_inner, &spki_alg_tag)
+    if s17 != DER_OK { return (cert, after_subject, s17) }
+    let (spki_inner3, bitstr_tag, s18) = der_read_tlv(&after_spki_alg)
+    if s18 != DER_OK { return (cert, after_subject, s18) }
+    if bitstr_tag.tag_number != DER_TAG_BIT_STRING { return (cert, after_subject, X509_ERR_MALFORMED) }
+    // BIT STRING's first content byte is the "unused bits" count (always 0
+    // for both a byte-aligned RSAPublicKey and an uncompressed EC point).
+    let key_start = bitstr_tag.content_start + 1
+    let key_len = bitstr_tag.content_len - 1
+
+    if is_rsa_alg {
+        let rsa_key_reader = DerReader { buf_ptr: after_spki_alg.buf_ptr, pos: key_start, end: key_start + key_len }
+        let (r6, rsa_seq_tag, s19) = der_read_tlv(&rsa_key_reader)
+        if s19 != DER_OK { return (cert, after_subject, s19) }
+        let (rsa_inner, e4) = der_enter(&rsa_key_reader, &rsa_seq_tag)
+        if e4 != DER_OK { return (cert, after_subject, e4) }
+        let (rsa_inner2, mod_tag, s20) = der_read_tlv(&rsa_inner)
+        if s20 != DER_OK { return (cert, after_subject, s20) }
+        let (modulus, s21) = der_read_integer(&rsa_inner, &mod_tag)
+        if s21 != DER_OK { return (cert, after_subject, s21) }
+        cert.modulus = modulus
+        let (after_mod, s22) = der_next(&rsa_inner, &mod_tag)
+        if s22 != DER_OK { return (cert, after_subject, s22) }
+        let (rsa_inner3, exp_tag, s23) = der_read_tlv(&after_mod)
+        if s23 != DER_OK { return (cert, after_subject, s23) }
+        let (exponent, s24) = der_read_integer(&after_mod, &exp_tag)
+        if s24 != DER_OK { return (cert, after_subject, s24) }
+        cert.public_exponent = exponent
+        cert.public_key_algorithm = PUBKEY_ALG_RSA
+    } else if is_ec_alg && is_p256_curve {
+        // Uncompressed point per SEC1 SS2.3.3: 0x04 || X (32 bytes) || Y (32
+        // bytes) -- a compressed point (0x02/0x03 prefix) is a valid DER
+        // encoding this task does not support (per the task brief: not what
+        // OpenSSL or any modern CA/server emits by default). Leave
+        // public_key_algorithm at UNKNOWN rather than guess at decoding it.
+        let point_prefix = rawbuf_get(buf, key_start) & 255
+        if point_prefix == 4 && key_len == 65 {
+            var x_bytes: [u8; 32] = [0; 32]
+            var y_bytes: [u8; 32] = [0; 32]
+            var bi: i64 = 0
+            while bi < 32 {
+                x_bytes[bi as usize] = (rawbuf_get(buf, key_start + 1 + bi) & 255) as u8
+                y_bytes[bi as usize] = (rawbuf_get(buf, key_start + 1 + 32 + bi) & 255) as u8
+                bi = bi + 1
+            }
+            cert.ec_public_key = EcPoint { x: bigint_from_be_bytes32(&x_bytes), y: bigint_from_be_bytes32(&y_bytes) }
+            cert.public_key_algorithm = PUBKEY_ALG_EC_P256
+        }
+    } else if is_ec_alg && is_p384_curve {
+        // Same uncompressed-point shape as the P-256 arm above, sized for
+        // P-384's 48-byte coordinates: 0x04 || X (48 bytes) || Y (48
+        // bytes) = 97 bytes total.
+        let point_prefix2 = rawbuf_get(buf, key_start) & 255
+        if point_prefix2 == 4 && key_len == 97 {
+            var x_bytes2: [u8; 48] = [0; 48]
+            var y_bytes2: [u8; 48] = [0; 48]
+            var bi2: i64 = 0
+            while bi2 < 48 {
+                x_bytes2[bi2 as usize] = (rawbuf_get(buf, key_start + 1 + bi2) & 255) as u8
+                y_bytes2[bi2 as usize] = (rawbuf_get(buf, key_start + 1 + 48 + bi2) & 255) as u8
+                bi2 = bi2 + 1
+            }
+            cert.ec_public_key = EcPoint { x: bigint_from_be_bytes48(&x_bytes2), y: bigint_from_be_bytes48(&y_bytes2) }
+            cert.public_key_algorithm = PUBKEY_ALG_EC_P384
+        }
+    }
+    // else: unrecognized algorithm (or EC with an unsupported curve, or an
+    // unsupported EC point encoding) -- cert.public_key_algorithm stays at
+    // its certificate_zero() default (PUBKEY_ALG_UNKNOWN) and
+    // modulus/public_exponent/ec_public_key all stay at their zero values.
+
+    // The BIT STRING (containing the RSAPublicKey or EC point) was read via
+    // a SEPARATE child reader/direct offsets scoped inside the BIT STRING's
+    // own content -- advancing past the whole subjectPublicKeyInfo field in
+    // the OUTER cursor uses der_skip on after_subject/t5 (the SPKI
+    // SEQUENCE's own tag), not anything derived from that inner reading.
+    let (after_spki, s25) = der_skip(&after_subject, &t5)
+    if s25 != DER_OK { return (cert, after_subject, s25) }
+    cert.version = version
+
+    (cert, after_spki, X509_OK)
+}
+
+// Extensions ::= SEQUENCE SIZE (1..MAX) OF Extension. `r` must already be
+// positioned INSIDE the SEQUENCE OF Extension's own content (i.e. the
+// caller has already entered both the v3 [3]-tagged EXPLICIT wrapper and
+// the inner Extensions SEQUENCE itself) -- this function walks Extension
+// entries directly off `r`'s cursor, matching x509_parse_tbs_core's own
+// convention of returning a reader positioned exactly where the next field
+// would start rather than re-descending through wrappers it doesn't own.
+pub fn x509_parse_extensions(buf: &RawBuf, r: &DerReader) -> ([ExtensionEntry; 32], i32, bool, i32, i32, [u8; 32], i32, [u8; 32], i32, i64) with IO {
+    var extensions: [ExtensionEntry; 32] = [
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+    ]
+    var count: i32 = 0
+    var is_ca = false
+    var path_len_constraint: i32 = 0 - 1
+    var key_usage_bits: i32 = 0
+    var subj_kid: [u8; 32] = [0; 32]
+    var subj_kid_len: i32 = 0
+    var auth_kid: [u8; 32] = [0; 32]
+    var auth_kid_len: i32 = 0
+
+    var cursor = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_EXTENSIONS {
+            return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, ext_seq_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s1) }
+        let (ext_inner, e1) = der_enter(&cursor, &ext_seq_tag)
+        if e1 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, e1) }
+
+        let (oid_reader, oid_tag, s2) = der_read_tlv(&ext_inner)
+        if s2 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s2) }
+        var oid_buf: [u8; 20] = [0; 20]
+        var oi: i64 = 0
+        while oi < oid_tag.content_len && oi < 20 {
+            oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+            oi = oi + 1
+        }
+        let (after_oid, s3) = der_next(&ext_inner, &oid_tag)
+        if s3 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s3) }
+
+        let (c2, next_tag, s4) = der_read_tlv(&after_oid)
+        if s4 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s4) }
+        var critical = false
+        var value_reader = after_oid
+        var value_tag = next_tag
+        if next_tag.tag_number == DER_TAG_BOOLEAN {
+            let (crit_val, s5) = der_read_boolean(&after_oid, &next_tag)
+            if s5 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s5) }
+            critical = crit_val
+            let (after_crit, s6) = der_next(&after_oid, &next_tag)
+            if s6 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s6) }
+            let (c3, val_tag2, s7) = der_read_tlv(&after_crit)
+            if s7 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s7) }
+            value_reader = after_crit
+            value_tag = val_tag2
+        }
+        // value_tag is now the extnValue OCTET STRING's tag.
+        if value_tag.content_len > X509_MAX_EXTENSION_VALUE_LEN {
+            return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_ERR_VALUE_TOO_LONG)
+        }
+        var val_buf: [u8; 512] = [0; 512]
+        var vi: i64 = 0
+        while vi < value_tag.content_len {
+            val_buf[vi as usize] = (rawbuf_get(buf, value_tag.content_start + vi) & 255) as u8
+            vi = vi + 1
+        }
+
+        // Per Finding 24 (a whole-struct copy -- literal OR local var --
+        // into an array-of-struct element silently cross-contaminates
+        // which source array lands in which destination field, once the
+        // struct has two or more [u8;N] fields and the array is large
+        // enough): assign every field individually directly into the
+        // array element, never via a struct literal or an intermediate
+        // local var copy. Findings 24/25's fixes (commits 88f91fae6,
+        // 80be7c083) are independently verified against this exact
+        // pattern via tests/run-pass/x509_parse_tbs_core.sio's two new
+        // OID assertions, so this pattern is now trustworthy, but the
+        // discipline of writing field-by-field is kept regardless.
+        extensions[count as usize].oid = oid_buf
+        extensions[count as usize].oid_len = oid_tag.content_len as i32
+        extensions[count as usize].critical = critical
+        extensions[count as usize].value = val_buf
+        extensions[count as usize].value_len = value_tag.content_len as i32
+        count = count + 1
+
+        // Semantic decode for the extensions this layer specially recognizes.
+        // extnValue's content is itself a DER-encoded structure (a nested
+        // TLV inside the OCTET STRING we just captured raw bytes of) -- open
+        // a fresh DerReader scoped to those bytes to decode it.
+        var ext_value_reader = DerReader { buf_ptr: buf.ptr, pos: value_tag.content_start, end: value_tag.content_start + value_tag.content_len }
+
+        // Per Finding 18: call each OID accessor once into a local `let`
+        // before taking a reference to it -- never reference a would-be
+        // top-level const directly (this file no longer has any).
+        let oid_bc = oid_ext_basic_constraints()
+        let oid_ku = oid_ext_key_usage()
+        let oid_ski = oid_ext_subject_key_identifier()
+        let oid_aki = oid_ext_authority_key_identifier()
+        if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_bc) {
+            let (bc, s8) = x509_decode_basic_constraints(&ext_value_reader)
+            let (bc_is_ca, bc_path_len) = bc
+            is_ca = bc_is_ca
+            path_len_constraint = bc_path_len
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ku) {
+            let (ku, s9) = x509_decode_key_usage(buf, &ext_value_reader)
+            key_usage_bits = ku
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ski) {
+            let (kid, kid_len) = x509_decode_key_identifier(buf, &ext_value_reader)
+            subj_kid = kid
+            subj_kid_len = kid_len
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_aki) {
+            let (kid2, kid_len2) = x509_decode_key_identifier(buf, &ext_value_reader)
+            auth_kid = kid2
+            auth_kid_len = kid_len2
+        }
+        // Every other recognized-but-not-yet-specially-decoded OID (SAN,
+        // issuerAltName, SCT list) is decoded by the CALLER (Task 7's
+        // assembly function), which has access to this function's returned
+        // `extensions` list to find them by OID and re-open a DerReader on
+        // their captured `value`/`value_len` bytes -- this function's job
+        // is the generic list plus the handful of extensions above, not
+        // every extension this whole sub-project cares about.
+
+        let (next_cursor, sk) = der_skip(&cursor, &ext_seq_tag)
+        if sk != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, sk) }
+        cursor = next_cursor
+    }
+
+    (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_OK)
+}
+
+// basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }
+//
+// DEVIATION FROM THE BRIEF'S DRAFTED CODE: the brief's original body read
+// `t1`/`cursor_after_ca` directly off `r`, as if `r` were already
+// positioned INSIDE the BasicConstraints SEQUENCE's own content. That is
+// wrong: `r` here is scoped to extnValue's raw content bytes, i.e. it
+// starts AT the BasicConstraints SEQUENCE's own 0x30 tag byte, not past
+// it. This is unlike x509_decode_key_usage/x509_decode_key_identifier
+// immediately below, which decode PRIMITIVE types (BIT STRING/OCTET
+// STRING) where extnValue's raw content directly IS the field's own
+// encoding -- basicConstraints is a SEQUENCE (constructed container), so
+// it needs one extra der_read_tlv + der_enter step to descend into it
+// before cA/pathLenConstraint can be read. Two prior task-6 attempts
+// caught this as a genuine logic bug in the brief's own draft; fixed here
+// by entering the outer SEQUENCE first, then running the brief's
+// otherwise-unmodified body against the resulting inner reader.
+fn x509_decode_basic_constraints(r: &DerReader) -> ((bool, i32), i64) with IO {
+    let (c0, outer_tag, s0) = der_read_tlv(r)
+    if s0 != DER_OK { return ((false, 0 - 1), s0) }
+    let (inner, e0) = der_enter(r, &outer_tag)
+    if e0 != DER_OK { return ((false, 0 - 1), e0) }
+
+    if der_at_end(&inner) == true {
+        return ((false, 0 - 1), X509_OK)   // empty SEQUENCE: both fields at their defaults
+    }
+    let (c1, t1, s1) = der_read_tlv(&inner)
+    if s1 != DER_OK { return ((false, 0 - 1), s1) }
+    var is_ca = false
+    var cursor_after_ca = c1
+    var have_ca_field = false
+    if t1.tag_number == DER_TAG_BOOLEAN {
+        let (ca_val, s2) = der_read_boolean(&inner, &t1)
+        if s2 != DER_OK { return ((false, 0 - 1), s2) }
+        is_ca = ca_val
+        have_ca_field = true
+        let (after_ca, s3) = der_next(&inner, &t1)
+        if s3 != DER_OK { return ((false, 0 - 1), s3) }
+        cursor_after_ca = after_ca
+    }
+    if der_at_end(&cursor_after_ca) == true {
+        return ((is_ca, 0 - 1), X509_OK)
+    }
+    let (c2, t2, s4) = der_read_tlv(&cursor_after_ca)
+    if s4 != DER_OK { return ((is_ca, 0 - 1), s4) }
+    let (path_len_bigint, s5) = der_read_integer(&cursor_after_ca, &t2)
+    if s5 != DER_OK { return ((is_ca, 0 - 1), s5) }
+    ((is_ca, bigint_to_small_i32(&path_len_bigint)), X509_OK)
+}
+
+// keyUsage ::= BIT STRING. Returns the bits as an i32 bitmask, bit N of the
+// mask == bit N of the DER BIT STRING (per its own bit-numbering, unrelated
+// convention subtleties intentionally not reinterpreted here -- callers
+// checking a specific named bit, e.g. keyCertSign, use the RFC 5280 SS4.2.1.3
+// bit-position table directly against this raw mask).
+fn x509_decode_key_usage(buf: &RawBuf, r: &DerReader) -> (i32, i64) with IO {
+    let (c1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (0, s1) }
+    if t1.tag_number != DER_TAG_BIT_STRING { return (0, X509_ERR_MALFORMED) }
+    if t1.content_len < 1 || t1.content_len > 3 { return (0, X509_ERR_MALFORMED) }
+    // content[0] = unused-bit count; content[1..] = up to 2 bytes of bits,
+    // MSB-first within each byte (bit 0 of the KeyUsage is the MSB of the
+    // first content byte after the unused-bits count).
+    var mask: i32 = 0
+    var i: i64 = 1
+    while i < t1.content_len {
+        let byte_val = (rawbuf_get(buf, t1.content_start + i) & 255) as i32
+        mask = (mask << 8) | byte_val
+        i = i + 1
+    }
+    (mask, X509_OK)
+}
+
+// subjectKeyIdentifier / authorityKeyIdentifier's simple form ::= OCTET STRING.
+// (authorityKeyIdentifier's full form is a SEQUENCE with an OPTIONAL
+// keyIdentifier field among others -- this function assumes the common,
+// simple bare-OCTET-STRING encoding real CAs almost universally use for
+// subjectKeyIdentifier; a caller needing authorityKeyIdentifier's other
+// optional fields, keyid aside, reads them from the raw `extensions` list
+// entry directly.)
+fn x509_decode_key_identifier(buf: &RawBuf, r: &DerReader) -> ([u8; 32], i32) with IO {
+    var out: [u8; 32] = [0; 32]
+    let (c1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (out, 0) }
+    if t1.tag_number != DER_TAG_OCTET_STRING || t1.content_len > 32 { return (out, 0) }
+    var i: i64 = 0
+    while i < t1.content_len {
+        out[i as usize] = (rawbuf_get(buf, t1.content_start + i) & 255) as u8
+        i = i + 1
+    }
+    (out, t1.content_len as i32)
+}
+
+// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+// GeneralName ::= CHOICE { [0] otherName, [1] rfc822Name IA5String, [2]
+//   dNSName IA5String, [3] x400Address, [4] directoryName Name, [5]
+//   ediPartyName, [6] uniformResourceIdentifier IA5String, [7] iPAddress
+//   OCTET STRING, [8] registeredID OBJECT IDENTIFIER } -- every variant is
+//   an implicitly- or explicitly-tagged context-specific value; this parser
+//   reads each GeneralName entry's raw tag/content directly and never
+//   descends via der_enter for ANY variant (see the large comment inside
+//   the loop below for why directoryName -- which per RFC 5280's ASN.1
+//   module is EXPLICIT/constructed and would otherwise get its own
+//   der_enter + x509_parse_name decode -- is instead captured via the same
+//   generic raw-content-bytes path as x400Address/ediPartyName, as a
+//   workaround for a newly discovered compiler defect blocking the richer
+//   decode).
+pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([GeneralName; 32], i32, i64) with IO {
+    var out: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var count: i32 = 0
+
+    let (seq_inner, e0) = der_enter(r, tag)
+    if e0 != DER_OK { return (out, 0, e0) }
+
+    var cursor = seq_inner
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_SAN_ENTRIES {
+            return (out, count, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, gn_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (out, count, s1) }
+
+        // Per Finding 24: a whole-struct copy (literal OR local var, like
+        // an intermediate `entry` this comment used to build and then
+        // assign whole into `out[count]`) silently cross-contaminates
+        // which source array lands in which destination field, once the
+        // struct has two or more [u8;N] fields and the array is large
+        // enough. Every field is therefore assigned individually, directly
+        // into the array element `out[count as usize]` -- never through an
+        // intermediate local `entry` variable or a struct literal.
+        out[count as usize].tag = gn_tag.tag_number   // the raw context-specific [N] number IS the GeneralName choice discriminant
+
+        // DEVIATION FROM THE BRIEF'S DRAFTED CODE, discovered during this
+        // task (not Findings 24/25, which are already fixed and verified):
+        // the brief's directoryName branch assigns a fully-decoded
+        // `X509Name` (itself containing an array-of-structs, `entries:
+        // [RdnEntry;16]`) into `out[count as usize].directory_name` --
+        // i.e. a struct-containing-an-array-of-structs VALUE written into
+        // a FIELD of an array-of-structs ELEMENT. Three independent
+        // minimal repros built during this task (not committed --
+        // discarded scratch files) confirmed this specific shape corrupts
+        // data, byte-for-byte the same symptom class as Finding 22/24
+        // (one field's bytes land in a sibling field), but for a strictly
+        // NEW write shape neither fix commit (88f91fae6, 80be7c083)
+        // covers:
+        //   1. `gn_list[i].directory_name = name` (whole-struct-value
+        //      write into an array element's STRUCT-typed field) --
+        //      corrupted (entries[0].value read back holding entries[0].
+        //      oid's bytes).
+        //   2. `gn_list[i].directory_name.entries[0].oid = ...; ...
+        //      .entries[0].value = ...` (field-by-field writes through a
+        //      DOUBLY array-indexed chain: outer array index -> struct
+        //      field -> inner array index -> field) -- also corrupted
+        //      (oid[0] read back holding value's first byte, i.e. the
+        //      LATER field write clobbered the EARLIER one at the same
+        //      apparent address -- consistent with a stale/reused base-
+        //      address computation for the second array index in the
+        //      chain).
+        //   3. `gn_list[i].directory_name.entries[0] = entry` (whole
+        //      RdnEntry struct-value write at the doubly-indexed target)
+        //      -- also corrupted, identically to (1).
+        // All three were run against the live compiler on this branch,
+        // with `x509_parse_name` temporarily made `pub` to call it from a
+        // standalone repro; that temporary visibility change was reverted
+        // before this file was committed. Per this task's explicit
+        // instruction to STOP and report any unexpected compiler defect
+        // rather than silently working around it, this is reported in
+        // task-6-report-v3.md as a new, unfiled finding (distinct from
+        // Findings 24/25) rather than pursued further here. Following the
+        // brief's OWN anticipated contingency for when directoryName's
+        // dedicated struct path is not usable ("skip directoryName's
+        // dedicated fixture and instead confirm it falls into the generic
+        // raw-bytes path"), directoryName is captured via the SAME
+        // single-array-index raw-bytes path used for x400Address/
+        // ediPartyName below (a shape already proven correct by Finding
+        // 24's own fix) -- `out[count].value`/`value_len` hold the Name
+        // SEQUENCE's raw TLV bytes (tag+length+content) rather than a
+        // decoded `X509Name`; a caller needing decoded RDNs re-parses
+        // those raw bytes via `x509_parse_name` itself once this new
+        // defect is fixed. `GENERAL_NAME_DIRECTORY_NAME` intentionally
+        // gets NO special `if` branch below -- it now falls through to the
+        // generic `else` raw-bytes branch alongside x400Address/
+        // ediPartyName/URI/etc., which does not descend via `der_enter` at
+        // all (it copies gn_tag's OWN content bytes, i.e. the [4] wrapper
+        // TLV's content, into `value`) -- this deliberately captures the
+        // Name SEQUENCE TLV (0x30 ...) as raw bytes, not the [4] wrapper's
+        // un-re-tagged inner encoding, since `der_enter` is never called
+        // for this branch.
+        if gn_tag.tag_number == GENERAL_NAME_OTHER_NAME || gn_tag.tag_number == GENERAL_NAME_REGISTERED_ID {
+            if gn_tag.content_len > 20 {
+                // truncate rather than fail the whole certificate over an
+                // oversized otherName/registeredID OID -- documented, not silent
+                out[count as usize].oid_len = 0
+            } else {
+                var oid_buf: [u8; 20] = [0; 20]
+                var oi: i64 = 0
+                while oi < gn_tag.content_len {
+                    oid_buf[oi as usize] = (rawbuf_get(buf, gn_tag.content_start + oi) & 255) as u8
+                    oi = oi + 1
+                }
+                out[count as usize].oid = oid_buf
+                out[count as usize].oid_len = gn_tag.content_len as i32
+            }
+        } else {
+            // rfc822Name, dNSName, x400Address, directoryName, ediPartyName,
+            // URI, iPAddress -- all captured as raw content bytes. (See the
+            // large comment above the `if` for why directoryName lands
+            // here instead of getting a dedicated `X509Name` decode.)
+            if gn_tag.content_len > X509_MAX_GENERAL_NAME_VALUE_LEN {
+                return (out, count, X509_ERR_VALUE_TOO_LONG)
+            }
+            var val_buf: [u8; 253] = [0; 253]
+            var vi: i64 = 0
+            while vi < gn_tag.content_len {
+                val_buf[vi as usize] = (rawbuf_get(buf, gn_tag.content_start + vi) & 255) as u8
+                vi = vi + 1
+            }
+            out[count as usize].value = val_buf
+            out[count as usize].value_len = gn_tag.content_len as i32
+        }
+
+        count = count + 1
+
+        let (next_cursor, sk) = der_skip(&cursor, &gn_tag)
+        if sk != DER_OK { return (out, count, sk) }
+        cursor = next_cursor
+    }
+
+    (out, count, X509_OK)
+}
+
+// Parses a Name (SEQUENCE OF RelativeDistinguishedName, each RDN a SET OF
+// AttributeTypeAndValue) into an X509Name. Only the first AttributeTypeAndValue
+// of each RDN SET is read (multi-valued RDNs -- more than one attribute in a
+// single SET -- are rare in practice; capturing just the first is a
+// documented, acceptable simplification, not a silent drop, since real CA
+// certificates essentially never issue genuinely multi-valued RDNs).
+pub fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64) with IO {
+    var name = x509_name_zero()
+    let (seq_inner, e0) = der_enter(r, tag)
+    if e0 != DER_OK { return (name, e0) }
+
+    var cursor = seq_inner
+    var count: i32 = 0
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_RDN_ENTRIES {
+            return (name, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, rdn_set_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (name, s1) }
+        let (rdn_inner, e1) = der_enter(&cursor, &rdn_set_tag)
+        if e1 != DER_OK { return (name, e1) }
+        let (atv_inner, atv_tag, s2) = der_read_tlv(&rdn_inner)
+        if s2 != DER_OK { return (name, s2) }
+        let (atv_seq_inner, e2) = der_enter(&rdn_inner, &atv_tag)
+        if e2 != DER_OK { return (name, e2) }
+        let (oid_inner, oid_tag, s3) = der_read_tlv(&atv_seq_inner)
+        if s3 != DER_OK { return (name, s3) }
+        var oid_buf: [u8; 20] = [0; 20]
+        var oi: i64 = 0
+        while oi < oid_tag.content_len && oi < 20 {
+            oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+            oi = oi + 1
+        }
+        let (after_oid, s4) = der_next(&atv_seq_inner, &oid_tag)
+        if s4 != DER_OK { return (name, s4) }
+        let (val_inner, val_tag, s5) = der_read_tlv(&after_oid)
+        if s5 != DER_OK { return (name, s5) }
+        if val_tag.content_len > X509_MAX_NAME_VALUE_LEN {
+            return (name, X509_ERR_VALUE_TOO_LONG)
+        }
+        var val_buf: [u8; 128] = [0; 128]
+        var vi: i64 = 0
+        while vi < val_tag.content_len {
+            val_buf[vi as usize] = (rawbuf_get(buf, val_tag.content_start + vi) & 255) as u8
+            vi = vi + 1
+        }
+
+        // NOTE: a whole-element array-of-struct reassignment
+        // (name.entries[count] = RdnEntry { ... }) was measured on
+        // 2026-08-24 to corrupt the destination -- the `value` field of
+        // the written element ends up holding `oid`'s first byte instead
+        // of `value`'s own content (see task-5-report.md for the full
+        // repro). This contradicts the array-of-nested-struct audit this
+        // struct's own comment cites as having passed. Field-by-field
+        // assignment into the existing array element (below) avoids the
+        // whole-struct-literal write path and was independently verified
+        // correct byte-for-byte.
+        name.entries[count as usize].oid = oid_buf
+        name.entries[count as usize].oid_len = oid_tag.content_len as i32
+        name.entries[count as usize].value_tag = val_tag.tag_number
+        name.entries[count as usize].value = val_buf
+        name.entries[count as usize].value_len = val_tag.content_len as i32
+        count = count + 1
+
+        let (next_cursor, sk) = der_skip(&cursor, &rdn_set_tag)
+        if sk != DER_OK { return (name, sk) }
+        cursor = next_cursor
+    }
+    name.count = count
+    (name, X509_OK)
+}
+
+// Certificate ::= SEQUENCE { tbsCertificate TBSCertificate,
+//   signatureAlgorithm AlgorithmIdentifier, signatureValue BIT STRING }
+// (RFC 5280 SS4.1). This is the outer assembly: it wraps
+// x509_parse_tbs_core (Task 5) and x509_parse_extensions/
+// x509_parse_general_names (Task 6), records the exact byte range the
+// signature is computed over (tbs_start/tbs_len), reads the outer
+// signatureAlgorithm + signatureValue, and cross-checks the outer
+// algorithm OID against the TBS's own inner signature algorithm OID (RFC
+// 5280 SS4.1.1.2 requires these two fields to be identical).
+pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with IO {
+    let top = der_reader_new(buf, 0, len)
+    let (top2, cert_seq_tag, s1) = der_read_tlv(&top)
+    if s1 != DER_OK { return (certificate_zero(), s1) }
+    if cert_seq_tag.constructed == false { return (certificate_zero(), X509_ERR_MALFORMED) }
+
+    let (cert_inner, e0) = der_enter(&top, &cert_seq_tag)
+    if e0 != DER_OK { return (certificate_zero(), e0) }
+
+    // Capture the TBSCertificate's own tag-byte position BEFORE der_read_tlv
+    // advances past it -- this position, together with the TLV's own
+    // content_start+content_len below, IS the exact byte range RFC 5280
+    // SS4.1.1.3 says gets hashed for signature verification.
+    let tbs_start_pos = cert_inner.pos
+    let (tbs_reader, tbs_tag, s2) = der_read_tlv(&cert_inner)
+    if s2 != DER_OK { return (certificate_zero(), s2) }
+
+    // DEVIATION FROM THE BRIEF'S DRAFTED CODE (new finding, discovered
+    // during this task): the brief's own code passed `&cert_inner`
+    // directly to x509_parse_tbs_core below. But `cert_inner` at this
+    // point is still positioned AT the TBSCertificate SEQUENCE's own tag
+    // byte (der_read_tlv above does not mutate its input reader -- it only
+    // returns a NEW reader, `tbs_reader`, already advanced past the
+    // header). x509_parse_tbs_core's own contract (see its doc comment and
+    // tests/run-pass/x509_parse_tbs_core.sio's caller) expects a reader
+    // already `der_enter`-ed INTO the TBSCertificate's content (positioned
+    // at the version/serialNumber field, with `end` bounded to the TBS
+    // content only) -- passing the un-entered `cert_inner` instead made
+    // x509_parse_tbs_core try to read the whole TBSCertificate SEQUENCE
+    // tag itself as if it were the version/serialNumber field, corrupting
+    // every subsequent read and eventually manifesting as a spurious
+    // X509_ERR_TOO_MANY_ENTRIES from the issuer/subject RDN loop.
+    // Confirmed via instrumented debug prints during this task (removed
+    // before commit) that this was the first status/error to go non-OK.
+    // Fixed by `der_enter`-ing into `tbs_tag` first, matching Task 5's own
+    // test's calling convention exactly (`der_enter(&top, &tbs_tag)` before
+    // `x509_parse_tbs_core(&buf, &tbs_inner)`) -- also, unlike
+    // `tbs_reader` (der_read_tlv's own returned reader, whose `end` stays
+    // at the OUTER cert_inner's end, not bounded to the TBS content), only
+    // `der_enter`'s result correctly bounds `end` to the TBS's own content,
+    // which x509_parse_tbs_core's `der_at_end(&after_spki)` extensions
+    // check relies on.
+    let (tbs_content_reader, e_tbs) = der_enter(&cert_inner, &tbs_tag)
+    if e_tbs != DER_OK { return (certificate_zero(), e_tbs) }
+
+    // Per Finding 25 (this task's brief): a tuple-destructured local (`let
+    // (parsed, ...) = x509_parse_tbs_core(...)`) does not propagate
+    // `parsed`'s struct type, which would leave every later
+    // `cert.field`/`cert.extensions[i].field` access in THIS function
+    // exposed to Finding 24's corruption. Work around it the same way
+    // tests/run-pass/x509_parse_tbs_core.sio does: declare `cert` FIRST via
+    // a plain call whose single-struct return type IS resolved correctly
+    // (certificate_zero() -> Certificate), then overwrite its value via
+    // plain assignment (not `let`/`var`) -- assignment doesn't touch the
+    // struct-type binding table, so the correct binding survives.
+    var cert = certificate_zero()
+    // Deferred SAN commit target -- see the long comment at the final
+    // commit site (just before this function's `(cert, X509_OK)` return)
+    // for why the SAN write into `cert.san_entries` must be deferred all
+    // the way to the LAST write this function makes to `cert`, not merely
+    // to the end of the extensions-processing loop.
+    var deferred_san: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var deferred_san_count: i32 = 0 - 1 // -1 = no SAN extension seen
+    let (parsed, after_spki, s3) = x509_parse_tbs_core(buf, &tbs_content_reader)
+    if s3 != DER_OK { return (certificate_zero(), s3) }
+    cert = parsed
+    cert.tbs_start = tbs_start_pos
+    cert.tbs_len = (tbs_tag.content_start + tbs_tag.content_len) - tbs_start_pos
+
+    // Optional [3] extensions -- present iff cert.version == 2 (v3) and
+    // after_spki isn't already at the end of the TBSCertificate's content.
+    if cert.version == 2 && der_at_end(&after_spki) == false {
+        let (ec, ext_wrap_tag, es) = der_read_tlv(&after_spki)
+        if es != DER_OK { return (certificate_zero(), es) }
+        if ext_wrap_tag.class == DER_CLASS_CONTEXT && ext_wrap_tag.tag_number == 3 {
+            let (ext_wrap_inner, ee) = der_enter(&after_spki, &ext_wrap_tag)
+            if ee != DER_OK { return (certificate_zero(), ee) }
+            let (ext_list_inner_pre, ext_seq_tag, ess) = der_read_tlv(&ext_wrap_inner)
+            if ess != DER_OK { return (certificate_zero(), ess) }
+            let (ext_list_inner, eei) = der_enter(&ext_wrap_inner, &ext_seq_tag)
+            if eei != DER_OK { return (certificate_zero(), eei) }
+
+            let (extensions, ext_count, is_ca, path_len, key_usage, subj_kid, subj_kid_len, auth_kid, auth_kid_len, ext_status) = x509_parse_extensions(buf, &ext_list_inner)
+            if ext_status != DER_OK { return (certificate_zero(), ext_status) }
+            cert.extensions = extensions
+            cert.extension_count = ext_count
+            cert.is_ca = is_ca
+            cert.path_len_constraint = path_len
+            cert.key_usage_bits = key_usage
+            cert.subject_key_id = subj_kid
+            cert.subject_key_id_len = subj_kid_len
+            cert.authority_key_id = auth_kid
+            cert.authority_key_id_len = auth_kid_len
+
+            // Find SAN/issuerAltName/SCT among the raw extensions list by
+            // OID, copy each one's captured bytes into a fresh small RawBuf
+            // (der_reader_new needs a RawBuf, and ExtensionEntry.value is a
+            // plain [u8;512] array, not one), and decode it.
+            var xi: i32 = 0
+            while xi < ext_count {
+                let entry = cert.extensions[xi as usize]
+                // DEVIATION FROM THE BRIEF'S DRAFTED CODE (new finding,
+                // discovered during this task): the brief's own code
+                // allocated entry_buf at EXACTLY entry.value_len bytes.
+                // rawbuf_set's documented write-side bug (see
+                // stdlib/crypto/pkcs1.sio's bigint_to_bytes_be comment,
+                // "Finding 20"/write-clobber) means each single-byte write
+                // also clobbers the FOLLOWING 7 bytes -- writing this
+                // buffer's own bytes in ascending order is safe for bytes
+                // strictly inside the buffer (each write's clobber is
+                // corrected by the very next iteration's write), but the
+                // LAST byte's clobber reaches 7 bytes PAST an exactly-sized
+                // buffer's end, corrupting whatever the allocator placed
+                // next (observed: this corrupted enough state to make a
+                // LATER, unrelated der_at_end loop never terminate,
+                // manifesting as X509_ERR_TOO_MANY_ENTRIES). Fixed by
+                // allocating 8 bytes of trailing slack, matching this
+                // whole plan's established buffer-padding discipline (e.g.
+                // tests/run-pass/x509_parse_tbs_core.sio's `total_len + 8`).
+                let entry_buf = rawbuf_new((entry.value_len as i64) + 8)
+                var cbi: i64 = 0
+                while cbi < (entry.value_len as i64) {
+                    rawbuf_set(&entry_buf, cbi, (entry.value[cbi as usize] as i64) & 255)
+                    cbi = cbi + 1
+                }
+                let entry_reader = der_reader_new(&entry_buf, 0, entry.value_len as i64)
+
+                // Per Finding 18: call each OID accessor once into a local
+                // `let` before taking a reference to it.
+                let oid_san = oid_ext_subject_alt_name()
+                let oid_ian = oid_ext_issuer_alt_name()
+                let oid_sct = oid_ext_sct_list()
+                if oid_eq3(&entry.oid, entry.oid_len, &oid_san) {
+                    let (san_c, san_tag, san_s) = der_read_tlv(&entry_reader)
+                    if san_s == DER_OK {
+                        // INLINED x509_parse_general_names, NOT a call to it.
+                        //
+                        // Real, measured Madaros compiler defect (found
+                        // during Task 4, same class as the one documented at
+                        // length in stdlib/x509/chain.sio's
+                        // x509_verify_chain): x509_parse_certificate is a
+                        // `pub fn` reached via a CROSS-MODULE call from a
+                        // test's `main`; when it internally, SAME-MODULE,
+                        // called `x509_parse_general_names` (also in this
+                        // file) -- a function returning a large struct-array
+                        // tuple, `([GeneralName; 32], i32, i64)` -- the
+                        // returned array came back with garbage field values
+                        // (observed: `tag` correct at 2/dNSName, but
+                        // `value_len` reading back as 27721 for a real
+                        // 21-byte "chain-test-t4.example" DNS SAN, even
+                        // after ruling out the SEPARATE whole-array-of-
+                        // struct-assignment bug already documented above,
+                        // by copying field-by-field instead). The identical
+                        // fix applied to x509_verify_chain (inline the
+                        // callee's body instead of calling it) resolves it
+                        // here too; `tests/run-pass/x509_parse_san.sio`
+                        // still passes because it calls
+                        // `x509_parse_general_names` DIRECTLY from its own
+                        // `main` (a cross-module, non-nested call, the
+                        // pattern that is NOT affected) rather than through
+                        // `x509_parse_certificate`.
+                        let (san_cursor0, san_enter_status) = der_enter(&entry_reader, &san_tag)
+                        var san_cursor = san_cursor0
+                        var san_count: i32 = 0
+                        // Accumulate into a LOCAL array first, then copy into
+                        // `cert.san_entries` only once, after the loop. Writing
+                        // directly into `cert.san_entries[san_count as
+                        // usize].value_len` inside the loop (a doubly-indexed
+                        // path: outer struct field -> array index -> inner
+                        // field) was measured to silently lose the write --
+                        // `gn_tag.content_len` read correctly as 21 right
+                        // before the store, but `cert.san_entries[0].value_len`
+                        // read back as 0 afterward, with no error reported.
+                        // This one-more-level-removed local-array-then-copy
+                        // shape (same as x509_parse_general_names' own `out`
+                        // array, proven correct by
+                        // tests/run-pass/x509_parse_san.sio) avoids it.
+                        var local_san: [GeneralName; 32] = [
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                        ]
+                        if san_enter_status == DER_OK {
+                            while der_at_end(&san_cursor) == false && san_count < X509_MAX_SAN_ENTRIES {
+                                let (gnc, gn_tag, gns) = der_read_tlv(&san_cursor)
+                                if gns != DER_OK {
+                                    san_count = X509_MAX_SAN_ENTRIES + 1 // sentinel: stop, do not commit partial/bad data
+                                } else {
+                                    local_san[san_count as usize].tag = gn_tag.tag_number
+                                    if gn_tag.tag_number == GENERAL_NAME_OTHER_NAME || gn_tag.tag_number == GENERAL_NAME_REGISTERED_ID {
+                                        if gn_tag.content_len > 20 {
+                                            local_san[san_count as usize].oid_len = 0
+                                        } else {
+                                            var san_oid_buf: [u8; 20] = [0; 20]
+                                            var san_oi: i64 = 0
+                                            while san_oi < gn_tag.content_len {
+                                                san_oid_buf[san_oi as usize] = (rawbuf_get(&entry_buf, gn_tag.content_start + san_oi) & 255) as u8
+                                                san_oi = san_oi + 1
+                                            }
+                                            local_san[san_count as usize].oid = san_oid_buf
+                                            local_san[san_count as usize].oid_len = gn_tag.content_len as i32
+                                        }
+                                    } else if gn_tag.content_len <= X509_MAX_GENERAL_NAME_VALUE_LEN {
+                                        var san_val_buf: [u8; 253] = [0; 253]
+                                        var san_vi: i64 = 0
+                                        while san_vi < gn_tag.content_len {
+                                            san_val_buf[san_vi as usize] = (rawbuf_get(&entry_buf, gn_tag.content_start + san_vi) & 255) as u8
+                                            san_vi = san_vi + 1
+                                        }
+                                        local_san[san_count as usize].value = san_val_buf
+                                        local_san[san_count as usize].value_len = gn_tag.content_len as i32
+                                    }
+                                    san_count = san_count + 1
+                                    let (san_next, san_sk) = der_skip(&san_cursor, &gn_tag)
+                                    if san_sk == DER_OK { san_cursor = san_next }
+                                }
+                            }
+                            if san_count <= X509_MAX_SAN_ENTRIES {
+                                // Defer the commit into `cert.san_entries`
+                                // until AFTER the whole `while xi < ext_count`
+                                // loop finishes (see the long comment above
+                                // `deferred_san`'s declaration): committing
+                                // here, immediately, read back correctly
+                                // right away (verified: `cert.san_entries[0]`
+                                // held tag=2/value_len=21 immediately after
+                                // this same commit, in-function) but came
+                                // back as value_len=0 once
+                                // `x509_parse_certificate` returned to its
+                                // caller -- but ONLY when this certificate's
+                                // extensions list has entries AFTER
+                                // subjectAltName (subjectKeyIdentifier /
+                                // authorityKeyIdentifier in the real openssl
+                                // fixture used by Task 4's positive test);
+                                // never reproduced with SAN as the last
+                                // extension (e.g.
+                                // tests/run-pass/x509_parse_full_certificate.sio's
+                                // fixture). Consistent with this file's own
+                                // documented pattern of a later field write
+                                // clobbering an earlier one via a stale
+                                // reused base-address computation -- so this
+                                // write is moved to happen LAST, after every
+                                // other per-extension `cert.*` write in this
+                                // loop, eliminating any "later write" that
+                                // could still land after it.
+                                var san_copy_i: i32 = 0
+                                while san_copy_i < san_count {
+                                    deferred_san[san_copy_i as usize].tag = local_san[san_copy_i as usize].tag
+                                    deferred_san[san_copy_i as usize].value_len = local_san[san_copy_i as usize].value_len
+                                    deferred_san[san_copy_i as usize].oid_len = local_san[san_copy_i as usize].oid_len
+                                    deferred_san[san_copy_i as usize].value = local_san[san_copy_i as usize].value
+                                    deferred_san[san_copy_i as usize].oid = local_san[san_copy_i as usize].oid
+                                    san_copy_i = san_copy_i + 1
+                                }
+                                deferred_san_count = san_count
+                            }
+                        }
+                    }
+                } else if oid_eq3(&entry.oid, entry.oid_len, &oid_ian) {
+                    let (ian_c, ian_tag, ian_s) = der_read_tlv(&entry_reader)
+                    if ian_s == DER_OK {
+                        let (ian_list, ian_count, ian_status) = x509_parse_general_names(&entry_buf, &entry_reader, &ian_tag)
+                        if ian_status == DER_OK {
+                            // Same fix as san_entries above -- field-by-field,
+                            // never a whole-array store.
+                            var ii2: i32 = 0
+                            while ii2 < ian_count {
+                                cert.issuer_alt_names[ii2 as usize].tag = ian_list[ii2 as usize].tag
+                                cert.issuer_alt_names[ii2 as usize].value = ian_list[ii2 as usize].value
+                                cert.issuer_alt_names[ii2 as usize].value_len = ian_list[ii2 as usize].value_len
+                                cert.issuer_alt_names[ii2 as usize].oid = ian_list[ii2 as usize].oid
+                                cert.issuer_alt_names[ii2 as usize].oid_len = ian_list[ii2 as usize].oid_len
+                                // `.directory_name` deliberately NOT copied
+                                // -- see the matching comment on the
+                                // san_entries loop above.
+                                ii2 = ii2 + 1
+                            }
+                            cert.issuer_alt_name_count = ian_count
+                        }
+                    }
+                } else if oid_eq10(&entry.oid, entry.oid_len, &oid_sct) {
+                    // extnValue is itself an OCTET STRING wrapping the
+                    // actual RFC 6962 length-prefixed bytes -- one more
+                    // DER unwrap before sct_list_decode sees the real data.
+                    let (sct_c, sct_octet_tag, sct_s) = der_read_tlv(&entry_reader)
+                    if sct_s == DER_OK {
+                        let (scts, sct_count, sct_status) = sct_list_decode(&entry_buf, sct_octet_tag.content_start, sct_octet_tag.content_len)
+                        if sct_status == DER_OK {
+                            // Same fix class as san_entries above -- SctEntry
+                            // also carries multiple [u8;N] fields
+                            // (log_id/signature), so field-by-field per
+                            // element, never a whole-array store.
+                            var ci2: i32 = 0
+                            while ci2 < sct_count {
+                                cert.sct_entries[ci2 as usize].version = scts[ci2 as usize].version
+                                cert.sct_entries[ci2 as usize].log_id = scts[ci2 as usize].log_id
+                                cert.sct_entries[ci2 as usize].timestamp_ms = scts[ci2 as usize].timestamp_ms
+                                cert.sct_entries[ci2 as usize].extensions_len = scts[ci2 as usize].extensions_len
+                                cert.sct_entries[ci2 as usize].sig_algorithm_hash = scts[ci2 as usize].sig_algorithm_hash
+                                cert.sct_entries[ci2 as usize].sig_algorithm_sign = scts[ci2 as usize].sig_algorithm_sign
+                                cert.sct_entries[ci2 as usize].signature = scts[ci2 as usize].signature
+                                cert.sct_entries[ci2 as usize].signature_len = scts[ci2 as usize].signature_len
+                                ci2 = ci2 + 1
+                            }
+                            cert.sct_count = sct_count
+                        }
+                    }
+                }
+                xi = xi + 1
+            }
+        }
+    }
+
+    let (after_tbs, sk1) = der_skip(&cert_inner, &tbs_tag)
+    if sk1 != DER_OK { return (certificate_zero(), sk1) }
+
+    let (c2, outer_alg_tag, s4) = der_read_tlv(&after_tbs)
+    if s4 != DER_OK { return (certificate_zero(), s4) }
+    let (outer_alg_inner, e1) = der_enter(&after_tbs, &outer_alg_tag)
+    if e1 != DER_OK { return (certificate_zero(), e1) }
+    let (outer_oid_reader, outer_oid_tag, s5) = der_read_tlv(&outer_alg_inner)
+    if s5 != DER_OK { return (certificate_zero(), s5) }
+    var outer_oid_buf: [u8; 20] = [0; 20]
+    var ooi: i64 = 0
+    while ooi < outer_oid_tag.content_len && ooi < 20 {
+        outer_oid_buf[ooi as usize] = (rawbuf_get(buf, outer_oid_tag.content_start + ooi) & 255) as u8
+        ooi = ooi + 1
+    }
+    cert.outer_sig_alg_oid = outer_oid_buf
+    cert.outer_sig_alg_oid_len = outer_oid_tag.content_len as i32
+
+    if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len) == false {
+        return (cert, X509_ERR_SIG_ALG_MISMATCH)
+    }
+
+    let (after_outer_alg, sk2) = der_skip(&after_tbs, &outer_alg_tag)
+    if sk2 != DER_OK { return (certificate_zero(), sk2) }
+
+    let (c3, sig_tag, s6) = der_read_tlv(&after_outer_alg)
+    if s6 != DER_OK { return (certificate_zero(), s6) }
+    if sig_tag.tag_number != DER_TAG_BIT_STRING { return (certificate_zero(), X509_ERR_MALFORMED) }
+    // Skip the leading "unused bits" byte, same as the RSAPublicKey BIT
+    // STRING handling in Task 5.
+    let sig_bytes_start = sig_tag.content_start + 1
+    let sig_bytes_len = sig_tag.content_len - 1
+    // An empty BIT STRING (content_len == 0, missing even the "unused
+    // bits" byte) would otherwise silently store outer_signature_len = -1
+    // -- a malformed certificate, not a valid zero-length signature.
+    // Found during the final whole-plan review (2026-08-24).
+    if sig_bytes_len < 0 { return (certificate_zero(), X509_ERR_MALFORMED) }
+    if sig_bytes_len > X509_MAX_SIGNATURE_LEN { return (certificate_zero(), X509_ERR_VALUE_TOO_LONG) }
+    var sig_buf: [u8; 512] = [0; 512]
+    var si: i64 = 0
+    while si < sig_bytes_len {
+        sig_buf[si as usize] = (rawbuf_get(buf, sig_bytes_start + si) & 255) as u8
+        si = si + 1
+    }
+    cert.outer_signature = sig_buf
+    cert.outer_signature_len = sig_bytes_len as i32
+
+    // Deferred SAN commit. The "callers read san_entries[i].value_len back
+    // as 0" defect that this deferral was written to work around was
+    // ROOT-CAUSED and FIXED on 2026-08-25 in self-hosted/ir/lower.sio:2555
+    // (the external-item preseed registered an imported struct's fields with
+    // an EMPTY array-element type name, so `owner.arrayfield[i].name` in a
+    // CONSUMING module fell back to the name-only global field lookup and
+    // resolved `value_len` against RdnEntry/ExtensionEntry's index 4 instead
+    // of GeneralName's index 2). Nothing was ever lost on the WRITE side, and
+    // certificate size -- the correlate the original bisection reported -- was
+    // a red herring: it tracked whether the observing test used the
+    // Finding-25 `var c = certificate_zero(); c = raw` binding, not how many
+    // bytes the certificate had. Full evidence, including the three-file
+    // minimal reproducer now committed as
+    // tests/run-pass/imported_array_struct_field.sio, is in
+    // docs/audit/X509_PARSE_CERTIFICATE_SAN_VALUE_LEN_LOSS_2026-08-25.md.
+    //
+    // The deferral is KEPT: it is correct, costs one extra local array, and
+    // keeps the SAN commit as the last write this function makes to `cert`.
+    //
+    // STILL OPEN (Defect A in that audit): a struct local bound by TUPLE
+    // DESTRUCTURING (`let (cert, st) = x509_parse_certificate(...)`) carries
+    // no struct type, so a DIRECT deep read like
+    // `cert.san_entries[0].value_len` in the caller is still wrong. Callers
+    // must use the documented Finding-25 form:
+    //     var cert = certificate_zero()
+    //     let (cert_raw, st) = x509_parse_certificate(&buf, len)
+    //     cert = cert_raw
+    // Passing `&cert` into a typed parameter (as x509_verify_chain does) is
+    // unaffected either way.
+    if deferred_san_count >= 0 {
+        var san_final_i: i32 = 0
+        while san_final_i < deferred_san_count {
+            cert.san_entries[san_final_i as usize].tag = deferred_san[san_final_i as usize].tag
+            cert.san_entries[san_final_i as usize].value_len = deferred_san[san_final_i as usize].value_len
+            cert.san_entries[san_final_i as usize].oid_len = deferred_san[san_final_i as usize].oid_len
+            cert.san_entries[san_final_i as usize].value = deferred_san[san_final_i as usize].value
+            cert.san_entries[san_final_i as usize].oid = deferred_san[san_final_i as usize].oid
+            san_final_i = san_final_i + 1
+        }
+        cert.san_count = deferred_san_count
+    }
+
+    (cert, X509_OK)
+}
+
+// Verifies cert's outer signature against issuer's public key. `issuer` is
+// the ISSUING certificate's own full, already-parsed Certificate -- not
+// pre-extracted RSA fields -- so this function can branch on
+// `issuer.public_key_algorithm` to dispatch RSA vs ECDSA verification, and
+// enforce the algorithm-confusion cross-check below. The original RSA-only
+// signature (`issuer_modulus: &BigInt, issuer_exponent: &BigInt`) is gone;
+// every call site now passes `&issuer`.
+pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certificate) -> bool with IO {
+    var hash_algorithm: i32 = 0
+    // Per Finding 18: call each OID accessor once into a local `let`
+    // before taking a reference to it.
+    let oid_s1 = oid_sha1_with_rsa()
+    let oid_s256 = oid_sha256_with_rsa()
+    let oid_s384 = oid_sha384_with_rsa()
+    let oid_s512 = oid_sha512_with_rsa()
+    let oid_ecdsa_256 = oid_ecdsa_with_sha256()
+    let oid_ecdsa_384 = oid_ecdsa_with_sha384()
+
+    let is_rsa_sig_alg = oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s384)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512)
+    let is_ecdsa_sha256_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_256)
+    let is_ecdsa_sha384_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_384)
+
+    // Algorithm-confusion cross-check (a real security property, not just
+    // type-safety): the certificate's OWN signature-algorithm OID must
+    // agree with the ISSUER's key algorithm. A cert signed with
+    // ecdsa-with-SHA256 whose alleged issuer's key is RSA (or vice versa)
+    // must never reach either verification path below.
+    if is_rsa_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_RSA {
+        return false
+    }
+    if is_ecdsa_sha256_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+        return false
+    }
+    // Same guard for ecdsa-with-SHA384, extended (2026-08-27) to accept
+    // BOTH curves this implementation verifies: P-256 (D20) and P-384
+    // (this task). An issuer key that is neither is still rejected here,
+    // before reaching either curve's arithmetic. Note this constrains the
+    // ISSUER'S KEY, not the hash: per RFC 5480 SS2 the signature hash and
+    // the key's curve are independent in X.509, so P-256+SHA-384 AND
+    // P-384+SHA-384 are both valid, deployed combinations (D15, and
+    // Cloudflare's own 1.1.1.1 intermediate for the P-384 case).
+    if is_ecdsa_sha384_sig_alg
+        && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256
+        && issuer.public_key_algorithm != PUBKEY_ALG_EC_P384 {
+        return false
+    }
+
+    if is_ecdsa_sha256_sig_alg || is_ecdsa_sha384_sig_alg {
+        // Same tbs_copy pattern as the RSA path below: the TBSCertificate
+        // bytes to hash live at cert.tbs_start > 0 inside a larger buffer,
+        // so copy exactly that byte range into a fresh RawBuf (offset 0)
+        // before hashing/verifying.
+        let tbs_copy = rawbuf_new(cert.tbs_len + 8)
+        var eci: i64 = 0
+        while eci < cert.tbs_len {
+            rawbuf_set(&tbs_copy, eci, rawbuf_get(buf, cert.tbs_start + eci))
+            eci = eci + 1
+        }
+
+        // cert.outer_signature is already the DER-encoded ECDSA-Sig-Value
+        // SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3) -- X.509's own
+        // SignatureValue BIT STRING encoding of an ECDSA signature and
+        // ecdsa_p256_verify's expected `der_signature` wire format are the
+        // same structure, so it is passed through directly with no
+        // re-encoding.
+        let esig_buf = rawbuf_new((cert.outer_signature_len as i64) + 8)
+        var esi: i64 = 0
+        while esi < (cert.outer_signature_len as i64) {
+            rawbuf_set(&esig_buf, esi, (cert.outer_signature[esi as usize] as i64) & 255)
+            esi = esi + 1
+        }
+
+        // The ONLY difference between the two ECDSA paths is which hash
+        // the signature was made over -- the TBS-copy and signature-buffer
+        // handling above is deliberately shared, so the two can never
+        // diverge in how they present the signed bytes. Both verifiers are
+        // the same DER parsing and the same curve arithmetic underneath
+        // (stdlib/crypto/ecdsa_p256.sio's ecdsa_p256_verify_with_e);
+        // ecdsa_p256_verify_sha384 additionally applies FIPS 186-4
+        // SS6.4.1's leftmost-256-bits truncation to SHA-384's 48-byte
+        // digest.
+        if is_ecdsa_sha384_sig_alg {
+            // Both branches checked explicitly (no unconditional P-256
+            // fallthrough default): an upstream guard already restricts
+            // issuer.public_key_algorithm to {EC_P256, EC_P384} by the
+            // time this code runs, but this dispatch is self-defending
+            // against a future third curve being added to that guard
+            // without this dispatch being updated -- such a curve now
+            // fails closed here (returns false) instead of silently
+            // running P-256 math against key material it does not match.
+            if issuer.public_key_algorithm == PUBKEY_ALG_EC_P384 {
+                return ecdsa_p384_verify_sha384(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+            }
+            if issuer.public_key_algorithm == PUBKEY_ALG_EC_P256 {
+                return ecdsa_p256_verify_sha384(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+            }
+            return false
+        }
+        return ecdsa_p256_verify(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+    }
+
+    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1) {
+        hash_algorithm = PKCS1_HASH_SHA1
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256) {
+        hash_algorithm = PKCS1_HASH_SHA256
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s384) {
+        hash_algorithm = PKCS1_HASH_SHA384
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512) {
+        hash_algorithm = PKCS1_HASH_SHA512
+    } else {
+        return false   // unsupported algorithm
+    }
+
+    let issuer_modulus = &issuer.modulus
+    let issuer_exponent = &issuer.public_exponent
+
+    var message_hash: [u8; 64] = [0; 64]
+    var message_hash_len: i64 = 0
+
+    // stdlib/hash/*'s shaN(buf, len) functions always hash starting at
+    // buf's own offset 0 -- they have no "start offset" parameter. Since
+    // the TBSCertificate bytes to hash live at cert.tbs_start > 0 inside a
+    // larger buffer, copy exactly that byte range into a fresh RawBuf
+    // (offset 0) before hashing, rather than extending stdlib/hash/*'s
+    // signatures (which would touch already-reviewed, already-shipped code
+    // outside this plan's scope for no other benefit).
+    // Same trailing-slack fix as entry_buf above (rawbuf_set's write-side
+    // clobber reaches 7 bytes past an exactly-sized buffer's end).
+    let tbs_copy = rawbuf_new(cert.tbs_len + 8)
+    var ci: i64 = 0
+    while ci < cert.tbs_len {
+        rawbuf_set(&tbs_copy, ci, rawbuf_get(buf, cert.tbs_start + ci))
+        ci = ci + 1
+    }
+    if hash_algorithm == PKCS1_HASH_SHA1 {
+        let h = sha1(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 20 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 20
+    } else if hash_algorithm == PKCS1_HASH_SHA256 {
+        let h = sha256(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 32 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 32
+    } else if hash_algorithm == PKCS1_HASH_SHA384 {
+        let h = sha384(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 48 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 48
+    } else {
+        let h = sha512(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 64 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 64
+    }
+
+    // Same trailing-slack fix as entry_buf above.
+    let sig_buf = rawbuf_new((cert.outer_signature_len as i64) + 8)
+    var sbi: i64 = 0
+    while sbi < (cert.outer_signature_len as i64) {
+        rawbuf_set(&sig_buf, sbi, (cert.outer_signature[sbi as usize] as i64) & 255)
+        sbi = sbi + 1
+    }
+    let signature_bigint = bytes_be_to_bigint(&sig_buf, cert.outer_signature_len as i64)
+
+    let modulus_byte_len = bigint_byte_length(issuer_modulus)
+    pkcs1_v15_verify(&signature_bigint, issuer_modulus, issuer_exponent, modulus_byte_len, hash_algorithm, &message_hash, message_hash_len)
+}
+
+// Big-endian bytes -> BigInt. Same byte-by-byte bigint_mul-by-256-then-
+// bigint_add composition stdlib/asn1/der.sio's der_read_integer already
+// uses for the identical conceptual conversion -- reused here rather than
+// re-derived, since it's already proven correct and safe (Finding 11-aware:
+// every intermediate stays within BigInt's own limb-bounded arithmetic).
+fn bytes_be_to_bigint(buf: &RawBuf, len: i64) -> BigInt with IO {
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = rawbuf_get(buf, i) & 255
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    acc
+}
+
+// The minimal big-endian byte length of v's magnitude -- v.len limbs is
+// 2*v.len bytes UNLESS the most-significant limb's own high byte is zero,
+// in which case the true minimal encoding is one byte shorter. This is
+// PKCS#1's `k` parameter: the modulus's own encoded byte length, which
+// must be exact (not merely "wide enough"), since pkcs1_v15_verify pads
+// the recovered EM to exactly this many bytes.
+fn bigint_byte_length(v: &BigInt) -> i64 {
+    if v.len == 0 {
+        return 0
+    }
+    let top_limb = v.limbs[(v.len - 1) as usize]
+    let top_byte = (top_limb as i64) >> 8
+    if top_byte == 0 {
+        (v.len as i64) * 2 - 1
+    } else {
+        (v.len as i64) * 2
+    }
+}
+

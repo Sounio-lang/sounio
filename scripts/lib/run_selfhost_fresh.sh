@@ -6,12 +6,23 @@ if [ "$#" -lt 2 ]; then
   exit 2
 fi
 
-SOUC_BIN="$1"
+ROOT_DIR="$(pwd)"
+
+SOUC_ARG="$1"
 shift
 ENTRY_PATH="$1"
 shift
 
-ROOT_DIR="$(pwd)"
+case "$SOUC_ARG" in
+  /*) SOUC_BIN="$SOUC_ARG" ;;
+  *) SOUC_BIN="$ROOT_DIR/$SOUC_ARG" ;;
+esac
+
+if [ ! -x "$SOUC_BIN" ]; then
+  echo "souc binary not executable: $SOUC_BIN" >&2
+  exit 2
+fi
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-selfhost-fresh.XXXXXX")"
 
 cleanup() {

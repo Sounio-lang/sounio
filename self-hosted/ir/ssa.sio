@@ -53,7 +53,7 @@ fn cfg_block_start(func: IrFunction, block_id: i64) -> i64 with Mut, Panic, Div 
     }
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) && instr.label_id == block_id {
             return i
         }
@@ -70,7 +70,7 @@ fn cfg_block_end(func: IrFunction, block_id: i64) -> i64 with Mut, Panic, Div {
     // Skip past the label instruction itself if block_id > 0
     var i: i64 = if block_id == 0 { start } else { start + 1 }
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             return i
         }
@@ -84,7 +84,7 @@ fn cfg_instr_block(func: IrFunction, idx: i64) -> i64 with Mut, Panic, Div {
     var current_block: i64 = 0
     var i: i64 = 0
     while i < idx && i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             current_block = instr.label_id
         }
@@ -92,7 +92,7 @@ fn cfg_instr_block(func: IrFunction, idx: i64) -> i64 with Mut, Panic, Div {
     }
     // Check if idx itself is a label
     if idx < func.instr_count {
-        let at_instr = func.instrs[idx as usize]
+        let at_instr = ir_arena_load(ir_region_slot_r(func.region, (idx)))
         if opcodes_equal(at_instr.op, IrOpcode::IrLabel) {
             current_block = at_instr.label_id
         }
@@ -135,7 +135,7 @@ fn cfg_build(func: IrFunction) -> CFGInfo with Mut, Panic, Div {
 
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             let lid = instr.label_id
             if lid >= 0 && lid < SSA_MAX_BLOCKS {
@@ -158,7 +158,7 @@ fn cfg_build(func: IrFunction) -> CFGInfo with Mut, Panic, Div {
     var current_block: i64 = 0
     var j: i64 = 0
     while j < func.instr_count {
-        let instr = func.instrs[j as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (j)))
 
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             current_block = instr.label_id
@@ -279,7 +279,7 @@ fn cfg_build(func: IrFunction) -> CFGInfo with Mut, Panic, Div {
 fn cfg_find_fallthrough_block(func: IrFunction, idx: i64) -> i64 with Mut, Panic, Div {
     var k: i64 = idx + 1
     while k < func.instr_count {
-        let instr = func.instrs[k as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (k)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             return instr.label_id
         }
@@ -317,10 +317,22 @@ fn dom_intersect(idom: [i64; 512], b1_in: i64, b2_in: i64) -> i64 with Mut, Pani
     var finger2 = b2_in
     while finger1 != finger2 {
         while finger1 > finger2 {
+            if finger1 < 0 || finger1 >= 512 {
+                return finger2
+            }
             finger1 = idom[finger1 as usize]
+            if finger1 < 0 {
+                return finger2
+            }
         }
         while finger2 > finger1 {
+            if finger2 < 0 || finger2 >= 512 {
+                return finger1
+            }
             finger2 = idom[finger2 as usize]
+            if finger2 < 0 {
+                return finger1
+            }
         }
     }
     finger1
@@ -605,7 +617,7 @@ fn ssa_collect_defs(func: IrFunction, cfg: CFGInfo) -> ([i64; 8192], [i64; 512])
     var current_block: i64 = 0
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             current_block = instr.label_id
         }
@@ -624,31 +636,56 @@ fn ssa_collect_defs(func: IrFunction, cfg: CFGInfo) -> ([i64; 8192], [i64; 512])
 fn ssa_insert_phis(func: IrFunction, dom_info: DomInfo, cfg: CFGInfo) -> PhiTable with Mut, Panic, Div {
     var table = phi_table_new()
 
-    // Collect definitions: for each register, which blocks define it
-    var reg_def_blocks: [i64; 8192] = [SSA_INVALID; 8192]
+    // Collect first definition block per register and count
+    var reg_first_def: [i64; 8192] = [SSA_INVALID; 8192]
     var current_block: i64 = 0
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if opcodes_equal(instr.op, IrOpcode::IrLabel) {
             current_block = instr.label_id
         }
         let dst = instr.dst
         if dst >= 0 && dst < 8192 {
-            reg_def_blocks[dst as usize] = current_block
+            if reg_first_def[dst as usize] == SSA_INVALID {
+                reg_first_def[dst as usize] = current_block
+            }
         }
         i = i + 1
     }
 
-    // For each register that has a definition, place phis
+    // For each register that has a definition, collect ALL def blocks and place phis
     var r: i64 = 0
     while r < func.reg_count && r < 8192 {
-        let def_b = reg_def_blocks[r as usize]
-        if def_b != SSA_INVALID {
-            // Build a single-element def_blocks array
+        if reg_first_def[r as usize] != SSA_INVALID {
+            // Collect all distinct definition blocks for this register
             var defs: [i64; 64] = [SSA_INVALID; 64]
-            defs[0] = def_b
-            let phi_result = ssa_place_phi(r, defs, 1, dom_info, cfg)
+            var def_cnt: i64 = 0
+            var scan_block: i64 = 0
+            var j: i64 = 0
+            while j < func.instr_count && def_cnt < 64 {
+                let jn = ir_arena_load(ir_region_slot_r(func.region, (j)))
+                if opcodes_equal(jn.op, IrOpcode::IrLabel) {
+                    scan_block = jn.label_id
+                }
+                if jn.dst == r {
+                    var already = false
+                    var k: i64 = 0
+                    while k < def_cnt {
+                        if defs[k as usize] == scan_block {
+                            already = true
+                        }
+                        k = k + 1
+                    }
+                    if !already {
+                        defs[def_cnt as usize] = scan_block
+                        def_cnt = def_cnt + 1
+                    }
+                }
+                j = j + 1
+            }
+
+            let phi_result = ssa_place_phi(r, defs, def_cnt, dom_info, cfg)
             let phi_set = phi_result.0
             let phi_cnt = phi_result.1
 
@@ -692,6 +729,7 @@ struct RenameState {
     stacks: [i64; 8192],
     stack_tops: [i64; 512],
     next_version: [i64; 512],
+    next_fresh: i64,
 }
 
 fn rename_state_new() -> RenameState {
@@ -699,6 +737,7 @@ fn rename_state_new() -> RenameState {
         stacks: [SSA_INVALID; 8192],
         stack_tops: [0; 512],
         next_version: [0; 512],
+        next_fresh: 0,
     }
 }
 
@@ -763,27 +802,30 @@ fn ssa_new_version(state: RenameState, var_id: i64) -> (RenameState, i64) with M
 fn ssa_rename_variables(func: IrFunction, phi_table: PhiTable, dom_info: DomInfo, cfg: CFGInfo) -> IrFunction with Mut, Panic, Div {
     var result = func
     var state = rename_state_new()
+    state.next_fresh = func.reg_count
 
-    // Initialize versions for parameters
+    // Initialize: parameters are their own initial definition
     var p: i64 = 0
     while p < func.param_count && p < 64 {
         let preg = func.param_regs[p as usize]
         if preg >= 0 && preg < SSA_MAX_BLOCKS {
-            let ver_result = ssa_new_version(state, preg)
-            state = ver_result.0
+            state = ssa_push_def(state, preg, preg)
         }
         p = p + 1
     }
 
     // Rename block 0 (entry), then recurse through dominator tree children
-    state = ssa_rename_block(result, phi_table, dom_info, cfg, state, 0)
+    let rr = ssa_rename_block(result, phi_table, dom_info, cfg, state, 0)
+    result = rr.0
 
     result
 }
 
 // Rename all uses and defs in a single block, then recurse to dominated children.
-fn ssa_rename_block(func: IrFunction, phi_table: PhiTable, dom_info: DomInfo, cfg: CFGInfo, state_in: RenameState, block: i64) -> RenameState with Mut, Panic, Div {
+fn ssa_rename_block(func: IrFunction, phi_table: PhiTable, dom_info: DomInfo, cfg: CFGInfo, state_in: RenameState, block: i64) -> (IrFunction, RenameState) with Mut, Panic, Div {
+    var result = ir_function_clone(&func)
     var state = state_in
+    var pushed_vars: [i64; 256] = [SSA_INVALID; 256]
     var defs_pushed: i64 = 0
 
     // Process phi nodes for this block: each phi defines a new version
@@ -791,34 +833,51 @@ fn ssa_rename_block(func: IrFunction, phi_table: PhiTable, dom_info: DomInfo, cf
     while pi < phi_table.count {
         let phi = phi_table.phis[pi as usize]
         if phi.block == block {
-            let ver_result = ssa_new_version(state, phi.dest_reg)
-            state = ver_result.0
-            defs_pushed = defs_pushed + 1
+            let new_reg = state.next_fresh
+            state.next_fresh = state.next_fresh + 1
+            state = ssa_push_def(state, phi.dest_reg, new_reg)
+            if defs_pushed < 256 {
+                pushed_vars[defs_pushed as usize] = phi.dest_reg
+                defs_pushed = defs_pushed + 1
+            }
         }
         pi = pi + 1
     }
 
     // Process instructions in this block: rename uses then defs
-    let bstart = cfg_block_start(func, block)
-    let bend = cfg_block_end(func, block)
+    let bstart = cfg_block_start(result, block)
+    let bend = cfg_block_end(result, block)
     var i = bstart
     while i < bend {
-        let instr = func.instrs[i as usize]
+        var instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
         // Rename source operands
         if instr.src1 >= 0 && instr.src1 < SSA_MAX_BLOCKS {
             let cur = ssa_current_def(state, instr.src1)
-            // We would update the instruction here in a full implementation
+            if cur != SSA_INVALID {
+                instr.src1 = cur
+            }
         }
         if instr.src2 >= 0 && instr.src2 < SSA_MAX_BLOCKS {
             let cur = ssa_current_def(state, instr.src2)
+            if cur != SSA_INVALID {
+                instr.src2 = cur
+            }
         }
 
-        // Rename destination: creates a new version
+        // Rename destination: allocate fresh register
         let dst = instr.dst
         if dst >= 0 && dst < SSA_MAX_BLOCKS {
-            let ver_result = ssa_new_version(state, dst)
-            state = ver_result.0
-            defs_pushed = defs_pushed + 1
+            let new_reg = state.next_fresh
+            state.next_fresh = state.next_fresh + 1
+            instr.dst = new_reg
+            ir_arena_store(ir_region_slot_w(result.region, (i)), instr)
+            state = ssa_push_def(state, dst, new_reg)
+            if defs_pushed < 256 {
+                pushed_vars[defs_pushed as usize] = dst
+                defs_pushed = defs_pushed + 1
+            }
+        } else {
+            ir_arena_store(ir_region_slot_w(result.region, (i)), instr)
         }
         i = i + 1
     }
@@ -829,19 +888,23 @@ fn ssa_rename_block(func: IrFunction, phi_table: PhiTable, dom_info: DomInfo, cf
     var ci: i64 = 0
     while ci < ccnt {
         let child = dom_info.dom_tree_children[(coff + ci) as usize]
-        state = ssa_rename_block(func, phi_table, dom_info, cfg, state, child)
+        let cr = ssa_rename_block(result, phi_table, dom_info, cfg, state, child)
+        result = cr.0
+        state = cr.1
         ci = ci + 1
     }
 
-    // Pop definitions pushed in this block
-    var d: i64 = 0
-    while d < defs_pushed {
-        // In a full implementation we'd track which vars to pop
-        // For now this is a structural placeholder
-        d = d + 1
+    // Pop definitions pushed in this block (reverse order)
+    var d: i64 = defs_pushed - 1
+    while d >= 0 {
+        let var_id = pushed_vars[d as usize]
+        if var_id != SSA_INVALID {
+            state = ssa_pop_def(state, var_id)
+        }
+        d = d - 1
     }
 
-    state
+    (result, state)
 }
 
 // ============================================================================
@@ -884,7 +947,7 @@ fn ssa_destroy(func: IrFunction, phi_table: PhiTable, cfg: CFGInfo) -> IrFunctio
 // Insert a copy instruction (dst = src) just before the terminator
 // of the given block.
 fn ssa_insert_copy_before_terminator(func: IrFunction, block: i64, dst: i64, src: i64) -> IrFunction with Mut, Panic, Div {
-    var result = func
+    var result = ir_function_clone(&func)
 
     // Find the terminator of this block
     let bstart = cfg_block_start(func, block)
@@ -893,17 +956,17 @@ fn ssa_insert_copy_before_terminator(func: IrFunction, block: i64, dst: i64, src
     // Scan backwards from bend to find the terminator
     var term_idx: i64 = bend - 1
     while term_idx >= bstart {
-        let instr = func.instrs[term_idx as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (term_idx)))
         if ssa_is_terminator(instr.op) {
             // Insert copy at term_idx, shift terminator forward
             if result.instr_count < 32768 - 1 {
                 // Shift everything from term_idx to instr_count forward by one
                 var k: i64 = result.instr_count
                 while k > term_idx {
-                    result.instrs[k as usize] = result.instrs[(k - 1) as usize]
+                    ir_arena_copy_slot(ir_region_slot_w(result.region, (k)),ir_region_slot_r(result.region, ((k - 1))))
                     k = k - 1
                 }
-                result.instrs[term_idx as usize] = ir_copy(dst, src)
+                ir_arena_store(ir_region_slot_w(result.region, (term_idx)), ir_copy(dst, src))
                 result.instr_count = result.instr_count + 1
             }
             return result
@@ -913,7 +976,7 @@ fn ssa_insert_copy_before_terminator(func: IrFunction, block: i64, dst: i64, src
 
     // No terminator found — append copy at end of block
     if result.instr_count < 32768 {
-        result.instrs[result.instr_count as usize] = ir_copy(dst, src)
+        ir_arena_store(ir_region_slot_w(result.region, (result.instr_count)), ir_copy(dst, src))
         result.instr_count = result.instr_count + 1
     }
 
@@ -1005,8 +1068,15 @@ fn ssa_make_test_func(instrs: [IrInstr; 32768], count: i64, reg_count: i64, labe
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
+        returns_float: 0,
+        return_struct_name: ir_empty_name(),
+        return_fixed_array_len: 0 - 1,
         prof_counter_id: -1,
         hyper_algebra_kind: -1,
+        is_sret: 0,
+        sret_dest_reg: -1,
+        bss_size: 0,
+        first_param_is_ref: 0,
     }
 }
 

@@ -57,10 +57,23 @@ if [[ -z "${LOGIN_POD}" ]]; then
   exit 1
 fi
 
-kubectl -n "${NS}" exec "${LOGIN_POD}" -- cat "${RUN_ROOT}/abide_campaign_bundle.tgz" > "${DEST_DIR}/abide_campaign_bundle.tgz"
 kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc \
   "base64 -w0 '${RUN_ROOT}/${BUNDLE_FILE}'" \
   | base64 -d > "${DEST_DIR}/${BUNDLE_FILE}"
+
+bundle_sha=""
+if kubectl -n "${NS}" exec "${LOGIN_POD}" -- test -f "${RUN_ROOT}/${BUNDLE_FILE}.sha256"; then
+  bundle_sha="$(kubectl -n "${NS}" exec "${LOGIN_POD}" -- cat "${RUN_ROOT}/${BUNDLE_FILE}.sha256" | awk '{print $1}')"
+fi
+
+if [[ -n "${bundle_sha}" ]]; then
+  local_sha="$(sha256sum "${DEST_DIR}/${BUNDLE_FILE}" | awk '{print $1}')"
+  if [[ "${local_sha}" != "${bundle_sha}" ]]; then
+    echo "OrangeFS bundle checksum mismatch for ${RUN_ID}: expected ${bundle_sha}, got ${local_sha}" >&2
+    exit 2
+  fi
+fi
+
 if ! tar -xzf "${DEST_DIR}/${BUNDLE_FILE}" -C "${DEST_DIR}" 2>/dev/null; then
   if ! tar -xf "${DEST_DIR}/${BUNDLE_FILE}" -C "${DEST_DIR}" 2>/dev/null; then
     echo "fetched OrangeFS bundle is not a valid tar archive: ${DEST_DIR}/${BUNDLE_FILE}" >&2

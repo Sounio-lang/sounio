@@ -1,0 +1,122 @@
+//@ run-pass
+//@ expect-stdout: DP_ROBUST_VALUE_ITERATION_PASS
+//
+// Knightian-robust DP solvers — closed-form MDPs with known analytic
+// answers under p-box continuation.
+//
+// Cases:
+//   1. Tight (no Knightian gap), 2-state 2-action risky vs safe.
+//      Robust optimum V*(0)=1.0, pi(0)=1 (safe).
+//   2. Knightian gap on safe's transition: safe's continuation in [0.4, 1.0].
+//      Pessimistic V_lower(0) < 1.0, robust policy switches to risky (pi(0)=0).
+//   3. Full Bellman backup with per-s' Knightian credal set.
+//      Lower fixed point V_lower(0) = 0.5/0.55 = 0.9090909…; upper Fréchet
+//      enclosure is conservative (wider than the true LP upper).
+//
+// All cases share a single KnightianMDP `m` local (reassigned between
+// cases) to keep the stack frame small; the final `m = kmdp_new(0,0,0.0)`
+// is the same Sounio stack-epilogue workaround used in the precise
+// value-iteration test.
+
+use epistemic::knightian::{PBox, pb_new, pb_lo_mean, pb_hi_mean}
+use epistemic::dp::{KnightianMDP, kmdp_new, robust_value_iteration, robust_value_iteration_full, robust_extract_policy}
+
+fn dp_near(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    let d = if a > b { a - b } else { b - a }
+    d <= tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var m = kmdp_new(2, 2, 0.9)
+
+    // ---------- Case 1: tight ----------
+    var cp1: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    cp1[0] = pb_new(0.909090909, 0.909090909, 0.0, 1000)
+    cp1[1] = pb_new(1.0, 1.0, 0.0, 1000)
+    cp1[2] = pb_new(0.0, 0.0, 0.0, 1000)
+    cp1[3] = pb_new(0.0, 0.0, 0.0, 1000)
+    let (VL1, VU1) = robust_value_iteration(&m, &cp1, 1e-9, 100)
+    let pi1 = robust_extract_policy(&m, &VL1, &cp1)
+    println("C1_VL0")
+    println(VL1[0])
+    println("C1_VU0")
+    println(VU1[0])
+    println("C1_PI0")
+    println(pi1[0])
+    let c1_ok = dp_near(VL1[0], 1.0, 1e-9) && dp_near(VU1[0], 1.0, 1e-9) && pi1[0] == 1
+    if !c1_ok { println("C1_FAIL"); return 1 }
+
+    // ---------- Case 2: Knightian gap on safe ----------
+    var cp2: [PBox; 8] = [pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000), pb_new(0.0, 0.0, 0.0, 1000)]
+    cp2[0] = pb_new(0.909090909, 0.909090909, 0.0, 1000)
+    cp2[1] = pb_new(0.4, 1.0, 0.0, 1000)
+    cp2[2] = pb_new(0.0, 0.0, 0.0, 1000)
+    cp2[3] = pb_new(0.0, 0.0, 0.0, 1000)
+    let (VL2, VU2) = robust_value_iteration(&m, &cp2, 1e-9, 100)
+    let pi2 = robust_extract_policy(&m, &VL2, &cp2)
+    println("C2_VL0")
+    println(VL2[0])
+    println("C2_VU0")
+    println(VU2[0])
+    println("C2_PI0")
+    println(pi2[0])
+    // Pessimistic lower bound: safe's lower = 0.4 < 0.909..., so robust
+    // V_lower(0) = 0.909... and the policy switches to risky (pi=0).
+    let c2_ok = dp_near(VL2[0], 0.909090909, 1e-6) && pi2[0] == 0
+    if !c2_ok { println("C2_FAIL"); return 1 }
+
+    // ---------- Case 3: full Bellman backup ----------
+    m = kmdp_new(2, 2, 0.9)
+    var r_arr: [f64; 32] = [0.0; 32]
+    var plo_arr: [f64; 32] = [0.0; 32]
+    var phi_arr: [f64; 32] = [0.0; 32]
+    var rvar_arr: [f64; 32] = [0.0; 32]
+    // s=0, a=0 (risky): p(0->0)=0.5, p(0->1)=0.5, r(0->0)=0, r(0->1)=1
+    plo_arr[0] = 0.5
+    phi_arr[0] = 0.5
+    r_arr[0] = 0.0
+    plo_arr[1] = 0.5
+    phi_arr[1] = 0.5
+    r_arr[1] = 1.0
+    // s=0, a=1 (safe, Knightian): p(0->0) in [0, 0.6], p(0->1) in [0.4, 1.0]
+    plo_arr[2] = 0.0
+    phi_arr[2] = 0.6
+    r_arr[2] = 1.0
+    plo_arr[3] = 0.4
+    phi_arr[3] = 1.0
+    r_arr[3] = 1.0
+    // s=1, a=0 (terminal): p(1->0)=0, p(1->1)=1, r=0
+    plo_arr[4] = 0.0
+    phi_arr[4] = 0.0
+    r_arr[4] = 0.0
+    plo_arr[5] = 1.0
+    phi_arr[5] = 1.0
+    r_arr[5] = 0.0
+    // s=1, a=1 (terminal): p(1->0)=0, p(1->1)=1, r=0
+    plo_arr[6] = 0.0
+    phi_arr[6] = 0.0
+    r_arr[6] = 0.0
+    plo_arr[7] = 1.0
+    phi_arr[7] = 1.0
+    r_arr[7] = 0.0
+    let (VL3, VU3) = robust_value_iteration_full(&m, &r_arr, &plo_arr, &phi_arr, &rvar_arr, 1e-9, 200)
+    // Extract scalars immediately to avoid the Sounio stack-epilogue
+    // bug on tuple returns + large struct locals.
+    let vl0 = VL3[0]
+    let vl1 = VL3[1]
+    let vu0 = VU3[0]
+    println("C3_VL0")
+    println(vl0)
+    println("C3_VU0")
+    println(vu0)
+    println("C3_VL1")
+    println(vl1)
+    let c3_ok = dp_near(vl0, 0.909090909, 1e-6) && dp_near(vl1, 0.0, 1e-9) && vu0 > vl0
+    if !c3_ok { println("C3_FAIL"); return 1 }
+
+    // Workaround: reassign the large MDP local before exit so the
+    // stack-epilogue does not trip on a tuple-return + struct-local combo.
+    m = kmdp_new(0, 0, 0.0)
+    println("DP_ROBUST_VALUE_ITERATION_PASS")
+    return 0
+}

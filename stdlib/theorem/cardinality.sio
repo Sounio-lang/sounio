@@ -1,0 +1,660 @@
+//! stdlib/theorem/cardinality.sio
+//!
+//! Small proof-logged cardinality helpers for SAT encodings.
+//!
+//! The first supported encoding is exactly-one(x_1..x_n):
+//!   clause 1:      x_1 OR ... OR x_n
+//!   clauses 2..m:  pairwise at-most-one clauses (-x_i OR -x_j), in lexicographic
+//!                  pair order (i < j, zero-based slots).
+//!
+//! The second supported checker-side shape is at-most-two(x_1..x_n):
+//!   one ternary clause (-x_i OR -x_j OR -x_k) for every i < j < k,
+//!   again in lexicographic tuple order. This is the first step toward stable
+//!   proof logs for higher cardinality encodings without committing to a
+//!   particular solver-side encoding such as totalizers or sequential counters.
+//!
+//! This module is deliberately an encoding/proof-log layer, not a search solver.
+//! It gives graph-colouring and future PB/Cardinality encoders stable clause IDs
+//! so proof checkers can talk about encoding clauses without depending on ad hoc
+//! clause generation order inside a CDCL engine.
+
+pub fn card_exactly_one_alo_id() -> i64 {
+    return 1
+}
+
+pub fn card_exactly_one_clause_count(n: i64) -> i64 {
+    if n <= 0 { return 0 }
+    return 1 + (n * (n - 1)) / 2
+}
+
+pub fn card_var(slot: i64) -> i64 {
+    return slot + 1
+}
+
+fn card_lit_abs(lit: i64) -> i64 {
+    if lit < 0 { return 0 - lit }
+    return lit
+}
+
+pub fn card_valid_slot(n: i64, slot: i64) -> i64 {
+    if slot < 0 { return 0 }
+    if slot >= n { return 0 }
+    return 1
+}
+
+pub fn card_exactly_one_amo_id(n: i64, a: i64, b: i64) -> i64 with Mut {
+    if card_valid_slot(n, a) == 0 { return 0 - 1 }
+    if card_valid_slot(n, b) == 0 { return 0 - 1 }
+    if a == b { return 0 - 1 }
+
+    var id: i64 = 2
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            if i == a {
+                if j == b { return id }
+            }
+            if i == b {
+                if j == a { return id }
+            }
+            id = id + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+pub fn card_exactly_one_clause_len(n: i64, clause_id: i64) -> i64 {
+    if n <= 0 { return 0 }
+    if clause_id == 1 { return n }
+    if clause_id >= 2 {
+        if clause_id <= card_exactly_one_clause_count(n) { return 2 }
+    }
+    return 0
+}
+
+pub fn card_exactly_one_lit(n: i64, clause_id: i64, pos: i64) -> i64 with Mut {
+    if n <= 0 { return 0 }
+    if clause_id == 1 {
+        if pos < 0 { return 0 }
+        if pos >= n { return 0 }
+        return card_var(pos)
+    }
+
+    if pos < 0 { return 0 }
+    if pos >= 2 { return 0 }
+
+    var id: i64 = 2
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            if id == clause_id {
+                if pos == 0 { return 0 - card_var(i) }
+                return 0 - card_var(j)
+            }
+            id = id + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+pub fn card_verify_amo_conflict(n: i64, clause_id: i64, lit_a: i64, lit_b: i64) -> i64 with Mut {
+    if lit_a <= 0 { return 0 }
+    if lit_b <= 0 { return 0 }
+    let a = lit_a - 1
+    let b = lit_b - 1
+    if card_valid_slot(n, a) == 0 { return 0 }
+    if card_valid_slot(n, b) == 0 { return 0 }
+    if a == b { return 0 }
+    if card_exactly_one_amo_id(n, a, b) != clause_id { return 0 }
+
+    let c0 = card_exactly_one_lit(n, clause_id, 0)
+    let c1 = card_exactly_one_lit(n, clause_id, 1)
+    if c0 + lit_a == 0 {
+        if c1 + lit_b == 0 { return 1 }
+    }
+    if c0 + lit_b == 0 {
+        if c1 + lit_a == 0 { return 1 }
+    }
+    return 0
+}
+
+pub fn card_verify_alo_conflict3(n: i64, lit0: i64, lit1: i64, lit2: i64) -> i64 {
+    if n != 3 { return 0 }
+    if lit0 != (0 - 1) { return 0 }
+    if lit1 != (0 - 2) { return 0 }
+    if lit2 != (0 - 3) { return 0 }
+    return 1
+}
+
+pub fn card_at_most_two_clause_count(n: i64) -> i64 {
+    if n < 3 { return 0 }
+    return (n * (n - 1) * (n - 2)) / 6
+}
+
+pub fn card_at_most_two_clause_id(n: i64, a: i64, b: i64, c: i64) -> i64 with Mut {
+    if card_valid_slot(n, a) == 0 { return 0 - 1 }
+    if card_valid_slot(n, b) == 0 { return 0 - 1 }
+    if card_valid_slot(n, c) == 0 { return 0 - 1 }
+    if a == b { return 0 - 1 }
+    if a == c { return 0 - 1 }
+    if b == c { return 0 - 1 }
+
+    var id: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            var k: i64 = j + 1
+            while k < n {
+                var hit: i64 = 0
+                if i == a {
+                    if j == b {
+                        if k == c { hit = 1 }
+                    }
+                    if j == c {
+                        if k == b { hit = 1 }
+                    }
+                }
+                if i == b {
+                    if j == a {
+                        if k == c { hit = 1 }
+                    }
+                    if j == c {
+                        if k == a { hit = 1 }
+                    }
+                }
+                if i == c {
+                    if j == a {
+                        if k == b { hit = 1 }
+                    }
+                    if j == b {
+                        if k == a { hit = 1 }
+                    }
+                }
+                if hit == 1 { return id }
+                id = id + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+pub fn card_at_most_two_clause_len(n: i64, clause_id: i64) -> i64 {
+    if clause_id < 1 { return 0 }
+    if clause_id <= card_at_most_two_clause_count(n) { return 3 }
+    return 0
+}
+
+pub fn card_at_most_two_lit(n: i64, clause_id: i64, pos: i64) -> i64 with Mut {
+    if pos < 0 { return 0 }
+    if pos >= 3 { return 0 }
+    if card_at_most_two_clause_len(n, clause_id) != 3 { return 0 }
+
+    var id: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            var k: i64 = j + 1
+            while k < n {
+                if id == clause_id {
+                    if pos == 0 { return 0 - card_var(i) }
+                    if pos == 1 { return 0 - card_var(j) }
+                    return 0 - card_var(k)
+                }
+                id = id + 1
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn card_lit_matches_one3(clause_lit: i64, lit_a: i64, lit_b: i64, lit_c: i64) -> i64 {
+    if clause_lit + lit_a == 0 { return 1 }
+    if clause_lit + lit_b == 0 { return 1 }
+    if clause_lit + lit_c == 0 { return 1 }
+    return 0
+}
+
+pub fn card_verify_at_most_two_conflict(n: i64, clause_id: i64, lit_a: i64, lit_b: i64, lit_c: i64) -> i64 with Mut {
+    if lit_a <= 0 { return 0 }
+    if lit_b <= 0 { return 0 }
+    if lit_c <= 0 { return 0 }
+    if lit_a == lit_b { return 0 }
+    if lit_a == lit_c { return 0 }
+    if lit_b == lit_c { return 0 }
+
+    let a = lit_a - 1
+    let b = lit_b - 1
+    let c = lit_c - 1
+    if card_valid_slot(n, a) == 0 { return 0 }
+    if card_valid_slot(n, b) == 0 { return 0 }
+    if card_valid_slot(n, c) == 0 { return 0 }
+    if card_at_most_two_clause_id(n, a, b, c) != clause_id { return 0 }
+
+    let c0 = card_at_most_two_lit(n, clause_id, 0)
+    let c1 = card_at_most_two_lit(n, clause_id, 1)
+    let c2 = card_at_most_two_lit(n, clause_id, 2)
+    if card_lit_matches_one3(c0, lit_a, lit_b, lit_c) == 0 { return 0 }
+    if card_lit_matches_one3(c1, lit_a, lit_b, lit_c) == 0 { return 0 }
+    if card_lit_matches_one3(c2, lit_a, lit_b, lit_c) == 0 { return 0 }
+    return 1
+}
+
+pub fn card_colour_var(vertex: i64, colour_count: i64, colour: i64) -> i64 {
+    if vertex < 0 { return 0 }
+    if colour_count <= 0 { return 0 }
+    if colour < 0 { return 0 }
+    if colour >= colour_count { return 0 }
+    return vertex * colour_count + colour + 1
+}
+
+pub fn card_colour_vertex_clause_count(colour_count: i64) -> i64 {
+    return card_exactly_one_clause_count(colour_count)
+}
+
+pub fn card_colour_vertex_clause_id(vertex: i64, colour_count: i64, local_clause_id: i64) -> i64 {
+    if vertex < 0 { return 0 - 1 }
+    let per_vertex = card_colour_vertex_clause_count(colour_count)
+    if per_vertex <= 0 { return 0 - 1 }
+    if local_clause_id < 1 { return 0 - 1 }
+    if local_clause_id > per_vertex { return 0 - 1 }
+    return vertex * per_vertex + local_clause_id
+}
+
+pub fn card_colour_vertex_clause_len(colour_count: i64, local_clause_id: i64) -> i64 {
+    return card_exactly_one_clause_len(colour_count, local_clause_id)
+}
+
+pub fn card_colour_vertex_lit(vertex: i64, colour_count: i64, local_clause_id: i64, pos: i64) -> i64 with Mut {
+    if vertex < 0 { return 0 }
+    let local = card_exactly_one_lit(colour_count, local_clause_id, pos)
+    if local == 0 { return 0 }
+    let v = card_lit_abs(local)
+    if v <= 0 { return 0 }
+    let colour = v - 1
+    let global = card_colour_var(vertex, colour_count, colour)
+    if global == 0 { return 0 }
+    if local < 0 { return 0 - global }
+    return global
+}
+
+pub fn card_colour_edge_base_id(vertex_count: i64, colour_count: i64) -> i64 {
+    if vertex_count < 0 { return 0 - 1 }
+    let per_vertex = card_colour_vertex_clause_count(colour_count)
+    if per_vertex <= 0 { return 0 - 1 }
+    return vertex_count * per_vertex + 1
+}
+
+pub fn card_colour_vertex_block_count(vertex_count: i64, colour_count: i64) -> i64 {
+    if vertex_count < 0 { return 0 - 1 }
+    let per_vertex = card_colour_vertex_clause_count(colour_count)
+    if per_vertex <= 0 { return 0 - 1 }
+    return vertex_count * per_vertex
+}
+
+pub fn card_colour_edge_clause_count(edge_count: i64, colour_count: i64) -> i64 {
+    if edge_count < 0 { return 0 - 1 }
+    if colour_count <= 0 { return 0 - 1 }
+    return edge_count * colour_count
+}
+
+pub fn card_colour_total_clause_count(vertex_count: i64, edge_count: i64, colour_count: i64) -> i64 {
+    let vertex_block = card_colour_vertex_block_count(vertex_count, colour_count)
+    if vertex_block < 0 { return 0 - 1 }
+    let edge_block = card_colour_edge_clause_count(edge_count, colour_count)
+    if edge_block < 0 { return 0 - 1 }
+    return vertex_block + edge_block
+}
+
+pub fn card_colour_clause_kind(vertex_count: i64, edge_count: i64, colour_count: i64, clause_id: i64) -> i64 {
+    if clause_id < 1 { return 0 }
+    let vertex_block = card_colour_vertex_block_count(vertex_count, colour_count)
+    if vertex_block < 0 { return 0 }
+    if clause_id <= vertex_block { return 1 }
+
+    let total = card_colour_total_clause_count(vertex_count, edge_count, colour_count)
+    if total < 0 { return 0 }
+    if clause_id <= total { return 2 }
+    return 0
+}
+
+pub fn card_colour_vertex_from_clause(vertex_count: i64, colour_count: i64, clause_id: i64) -> i64 with Div {
+    if card_colour_clause_kind(vertex_count, 0, colour_count, clause_id) != 1 { return 0 - 1 }
+    let per_vertex = card_colour_vertex_clause_count(colour_count)
+    if per_vertex <= 0 { return 0 - 1 }
+    return (clause_id - 1) / per_vertex
+}
+
+pub fn card_colour_vertex_local_clause_id(vertex_count: i64, colour_count: i64, clause_id: i64) -> i64 with Div {
+    if card_colour_clause_kind(vertex_count, 0, colour_count, clause_id) != 1 { return 0 - 1 }
+    let per_vertex = card_colour_vertex_clause_count(colour_count)
+    if per_vertex <= 0 { return 0 - 1 }
+    return ((clause_id - 1) % per_vertex) + 1
+}
+
+pub fn card_colour_edge_index_from_clause(vertex_count: i64, edge_count: i64, colour_count: i64, clause_id: i64) -> i64 with Div {
+    if card_colour_clause_kind(vertex_count, edge_count, colour_count, clause_id) != 2 { return 0 - 1 }
+    let base = card_colour_edge_base_id(vertex_count, colour_count)
+    if base < 1 { return 0 - 1 }
+    return (clause_id - base) / colour_count
+}
+
+pub fn card_colour_edge_colour_from_clause(vertex_count: i64, edge_count: i64, colour_count: i64, clause_id: i64) -> i64 with Div {
+    if card_colour_clause_kind(vertex_count, edge_count, colour_count, clause_id) != 2 { return 0 - 1 }
+    let base = card_colour_edge_base_id(vertex_count, colour_count)
+    if base < 1 { return 0 - 1 }
+    return (clause_id - base) % colour_count
+}
+
+pub fn card_colour_var_count(vertex_count: i64, colour_count: i64) -> i64 {
+    if vertex_count < 0 { return 0 - 1 }
+    if colour_count <= 0 { return 0 - 1 }
+    return vertex_count * colour_count
+}
+
+fn card_colour_manifest_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 1315423911) + value + 97) % 1000000007
+}
+
+pub fn card_colour_manifest_fingerprint(vertex_count: i64, edge_count: i64, colour_count: i64) -> i64 {
+    let var_count = card_colour_var_count(vertex_count, colour_count)
+    if var_count < 0 { return 0 - 1 }
+    let vertex_block = card_colour_vertex_block_count(vertex_count, colour_count)
+    if vertex_block < 0 { return 0 - 1 }
+    let edge_base = card_colour_edge_base_id(vertex_count, colour_count)
+    if edge_base < 0 { return 0 - 1 }
+    let edge_block = card_colour_edge_clause_count(edge_count, colour_count)
+    if edge_block < 0 { return 0 - 1 }
+    let total = card_colour_total_clause_count(vertex_count, edge_count, colour_count)
+    if total < 0 { return 0 - 1 }
+
+    var acc: i64 = 17
+    acc = card_colour_manifest_mix(acc, vertex_count)
+    acc = card_colour_manifest_mix(acc, edge_count)
+    acc = card_colour_manifest_mix(acc, colour_count)
+    acc = card_colour_manifest_mix(acc, var_count)
+    acc = card_colour_manifest_mix(acc, vertex_block)
+    acc = card_colour_manifest_mix(acc, edge_base)
+    acc = card_colour_manifest_mix(acc, edge_block)
+    acc = card_colour_manifest_mix(acc, total)
+    return acc
+}
+
+pub fn card_colour_first_derived_clause_id(vertex_count: i64, edge_count: i64, colour_count: i64) -> i64 {
+    let total = card_colour_total_clause_count(vertex_count, edge_count, colour_count)
+    if total < 0 { return 0 - 1 }
+    return total + 1
+}
+
+pub fn card_colour_final_derived_clause_id(vertex_count: i64, edge_count: i64, colour_count: i64, derived_count: i64) -> i64 {
+    if derived_count <= 0 { return 0 - 1 }
+    let first = card_colour_first_derived_clause_id(vertex_count, edge_count, colour_count)
+    if first < 0 { return 0 - 1 }
+    return first + derived_count - 1
+}
+
+pub fn card_colour_lrat_header_valid(vertex_count: i64, edge_count: i64, colour_count: i64,
+                                     manifest_fingerprint: i64, first_derived_id: i64) -> i64 {
+    let expected_fp = card_colour_manifest_fingerprint(vertex_count, edge_count, colour_count)
+    if expected_fp < 0 { return 0 }
+    if manifest_fingerprint != expected_fp { return 0 }
+    if first_derived_id != card_colour_first_derived_clause_id(vertex_count, edge_count, colour_count) { return 0 }
+    return 1
+}
+
+pub fn card_colour_lrat_unsat_bundle_valid(vertex_count: i64, edge_count: i64, colour_count: i64,
+                                           manifest_fingerprint: i64, first_derived_id: i64,
+                                           derived_count: i64, final_derived_id: i64,
+                                           final_clause_len: i64) -> i64 {
+    if card_colour_lrat_header_valid(vertex_count, edge_count, colour_count, manifest_fingerprint, first_derived_id) == 0 { return 0 }
+    if derived_count <= 0 { return 0 }
+    if final_derived_id != card_colour_final_derived_clause_id(vertex_count, edge_count, colour_count, derived_count) { return 0 }
+    if final_clause_len != 0 { return 0 }
+    return 1
+}
+
+fn card_colour_lrat_bundle_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 389) % 1000000007
+}
+
+pub fn card_colour_lrat_unsat_bundle_fingerprint(vertex_count: i64, edge_count: i64, colour_count: i64,
+                                                 manifest_fingerprint: i64, first_derived_id: i64,
+                                                 derived_count: i64, final_derived_id: i64,
+                                                 final_clause_len: i64) -> i64 {
+    if card_colour_lrat_unsat_bundle_valid(vertex_count, edge_count, colour_count,
+                                           manifest_fingerprint, first_derived_id,
+                                           derived_count, final_derived_id,
+                                           final_clause_len) == 0 { return 0 - 1 }
+
+    var acc: i64 = 29
+    acc = card_colour_lrat_bundle_mix(acc, vertex_count)
+    acc = card_colour_lrat_bundle_mix(acc, edge_count)
+    acc = card_colour_lrat_bundle_mix(acc, colour_count)
+    acc = card_colour_lrat_bundle_mix(acc, manifest_fingerprint)
+    acc = card_colour_lrat_bundle_mix(acc, first_derived_id)
+    acc = card_colour_lrat_bundle_mix(acc, derived_count)
+    acc = card_colour_lrat_bundle_mix(acc, final_derived_id)
+    acc = card_colour_lrat_bundle_mix(acc, final_clause_len)
+    acc = card_colour_lrat_bundle_mix(acc, 1)
+    return acc
+}
+
+pub fn card_colour_edge_clause_id(vertex_count: i64, colour_count: i64, edge_index: i64, colour: i64) -> i64 {
+    if edge_index < 0 { return 0 - 1 }
+    if colour < 0 { return 0 - 1 }
+    if colour >= colour_count { return 0 - 1 }
+    let base = card_colour_edge_base_id(vertex_count, colour_count)
+    if base < 1 { return 0 - 1 }
+    return base + edge_index * colour_count + colour
+}
+
+pub fn card_colour_edge_clause_len() -> i64 {
+    return 2
+}
+
+pub fn card_colour_edge_lit(u: i64, v: i64, colour_count: i64, colour: i64, pos: i64) -> i64 {
+    if u < 0 { return 0 }
+    if v < 0 { return 0 }
+    if u == v { return 0 }
+    if pos == 0 {
+        let vu = card_colour_var(u, colour_count, colour)
+        if vu == 0 { return 0 }
+        return 0 - vu
+    }
+    if pos == 1 {
+        let vv = card_colour_var(v, colour_count, colour)
+        if vv == 0 { return 0 }
+        return 0 - vv
+    }
+    return 0
+}
+
+pub fn card_colour_edge_verify_conflict(u: i64, v: i64, colour_count: i64, colour: i64, lit_u: i64, lit_v: i64) -> i64 {
+    if lit_u <= 0 { return 0 }
+    if lit_v <= 0 { return 0 }
+    let c0 = card_colour_edge_lit(u, v, colour_count, colour, 0)
+    let c1 = card_colour_edge_lit(u, v, colour_count, colour, 1)
+    if c0 + lit_u == 0 {
+        if c1 + lit_v == 0 { return 1 }
+    }
+    if c0 + lit_v == 0 {
+        if c1 + lit_u == 0 { return 1 }
+    }
+    return 0
+}
+
+fn card_colour_graph_mix(acc: i64, value: i64, salt: i64) -> i64 {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+pub fn card_colour_edge_valid(vertex_count: i64, u: i64, v: i64) -> i64 {
+    if vertex_count <= 0 { return 0 }
+    if u < 0 { return 0 }
+    if v < 0 { return 0 }
+    if u >= vertex_count { return 0 }
+    if v >= vertex_count { return 0 }
+    if u == v { return 0 }
+    if u > v { return 0 }
+    return 1
+}
+
+pub fn card_colour_graph3_edges_valid(vertex_count: i64,
+                                      e0u: i64, e0v: i64,
+                                      e1u: i64, e1v: i64,
+                                      e2u: i64, e2v: i64) -> i64 {
+    if card_colour_edge_valid(vertex_count, e0u, e0v) == 0 { return 0 }
+    if card_colour_edge_valid(vertex_count, e1u, e1v) == 0 { return 0 }
+    if card_colour_edge_valid(vertex_count, e2u, e2v) == 0 { return 0 }
+
+    if e0u > e1u { return 0 }
+    if e0u == e1u {
+        if e0v >= e1v { return 0 }
+    }
+    if e1u > e2u { return 0 }
+    if e1u == e2u {
+        if e1v >= e2v { return 0 }
+    }
+    return 1
+}
+
+pub fn card_colour_graph3_fingerprint(vertex_count: i64,
+                                      e0u: i64, e0v: i64,
+                                      e1u: i64, e1v: i64,
+                                      e2u: i64, e2v: i64) -> i64 {
+    if card_colour_graph3_edges_valid(vertex_count, e0u, e0v, e1u, e1v, e2u, e2v) == 0 {
+        return 0 - 1
+    }
+
+    var acc: i64 = 37
+    acc = card_colour_graph_mix(acc, vertex_count, 457)
+    acc = card_colour_graph_mix(acc, 3, 457)
+    acc = card_colour_graph_mix(acc, e0u, 457)
+    acc = card_colour_graph_mix(acc, e0v, 457)
+    acc = card_colour_graph_mix(acc, e1u, 457)
+    acc = card_colour_graph_mix(acc, e1v, 457)
+    acc = card_colour_graph_mix(acc, e2u, 457)
+    acc = card_colour_graph_mix(acc, e2v, 457)
+    return acc
+}
+
+pub fn card_colour_graph3_instance_fingerprint(vertex_count: i64, colour_count: i64,
+                                               e0u: i64, e0v: i64,
+                                               e1u: i64, e1v: i64,
+                                               e2u: i64, e2v: i64,
+                                               manifest_fingerprint: i64) -> i64 {
+    let graph_fp = card_colour_graph3_fingerprint(vertex_count, e0u, e0v, e1u, e1v, e2u, e2v)
+    if graph_fp < 0 { return 0 - 1 }
+
+    let expected_manifest = card_colour_manifest_fingerprint(vertex_count, 3, colour_count)
+    if expected_manifest < 0 { return 0 - 1 }
+    if manifest_fingerprint != expected_manifest { return 0 - 1 }
+
+    let var_count = card_colour_var_count(vertex_count, colour_count)
+    if var_count < 0 { return 0 - 1 }
+    let total = card_colour_total_clause_count(vertex_count, 3, colour_count)
+    if total < 0 { return 0 - 1 }
+
+    var acc: i64 = 41
+    acc = card_colour_graph_mix(acc, graph_fp, 463)
+    acc = card_colour_graph_mix(acc, colour_count, 463)
+    acc = card_colour_graph_mix(acc, manifest_fingerprint, 463)
+    acc = card_colour_graph_mix(acc, var_count, 463)
+    acc = card_colour_graph_mix(acc, total, 463)
+    return acc
+}
+
+pub fn card_colour_graph3_unsat_claim_fingerprint(instance_fingerprint: i64,
+                                                  unsat_bundle_fingerprint: i64,
+                                                  replay_anchor: i64,
+                                                  derived_count: i64,
+                                                  final_derived_id: i64,
+                                                  result_code: i64) -> i64 {
+    if instance_fingerprint <= 0 { return 0 - 1 }
+    if unsat_bundle_fingerprint <= 0 { return 0 - 1 }
+    if replay_anchor <= 0 { return 0 - 1 }
+    if derived_count <= 0 { return 0 - 1 }
+    if final_derived_id <= 0 { return 0 - 1 }
+    if result_code != 0 { return 0 - 1 }
+
+    var acc: i64 = 43
+    acc = card_colour_graph_mix(acc, instance_fingerprint, 467)
+    acc = card_colour_graph_mix(acc, unsat_bundle_fingerprint, 467)
+    acc = card_colour_graph_mix(acc, replay_anchor, 467)
+    acc = card_colour_graph_mix(acc, derived_count, 467)
+    acc = card_colour_graph_mix(acc, final_derived_id, 467)
+    acc = card_colour_graph_mix(acc, result_code, 467)
+    return acc
+}
+
+pub fn card_colour_scope_k3_not_2_colourable() -> i64 { return 3202 }
+pub fn card_colour_scope_hadwiger_nelson_chi_ge_6() -> i64 { return 5086 }
+pub fn card_colour_erdos_hadwiger_nelson_id() -> i64 { return 508 }
+pub fn card_colour_erdos_unit_distance_count_id() -> i64 { return 90 }
+
+pub fn card_colour_current_unsat_scope_fingerprint(
+    scope_code: i64,
+    erdos_problem_id: i64,
+    vertex_count: i64,
+    edge_count: i64,
+    colour_count: i64,
+    graph_instance_fingerprint: i64,
+    unsat_claim_fingerprint: i64,
+    unit_distance_graph_flag: i64,
+    independent_replay_mask: i64) -> i64 {
+    if scope_code != card_colour_scope_k3_not_2_colourable() { return 0 - 1 }
+    if erdos_problem_id != 0 { return 0 - 1 }
+    if vertex_count != 3 { return 0 - 1 }
+    if edge_count != 3 { return 0 - 1 }
+    if colour_count != 2 { return 0 - 1 }
+    if graph_instance_fingerprint != 77085393 { return 0 - 1 }
+    if unsat_claim_fingerprint != 848522370 { return 0 - 1 }
+    if unit_distance_graph_flag != 0 { return 0 - 1 }
+    if independent_replay_mask != 15 { return 0 - 1 }
+
+    var acc: i64 = 47
+    acc = card_colour_graph_mix(acc, scope_code, 479)
+    acc = card_colour_graph_mix(acc, erdos_problem_id, 479)
+    acc = card_colour_graph_mix(acc, vertex_count, 479)
+    acc = card_colour_graph_mix(acc, edge_count, 479)
+    acc = card_colour_graph_mix(acc, colour_count, 479)
+    acc = card_colour_graph_mix(acc, graph_instance_fingerprint, 479)
+    acc = card_colour_graph_mix(acc, unsat_claim_fingerprint, 479)
+    acc = card_colour_graph_mix(acc, unit_distance_graph_flag, 479)
+    acc = card_colour_graph_mix(acc, independent_replay_mask, 479)
+    return acc
+}
+
+pub fn card_colour_hadwiger_nelson_chi6_preflight(
+    erdos_problem_id: i64,
+    claimed_lower_bound: i64,
+    vertex_count: i64,
+    edge_count: i64,
+    colour_count_for_unsat: i64,
+    concrete_unit_distance_graph: i64,
+    graph_instance_fingerprint: i64,
+    unsat_claim_fingerprint: i64,
+    independent_replay_mask: i64) -> i64 {
+    if erdos_problem_id != card_colour_erdos_hadwiger_nelson_id() { return 0 }
+    if claimed_lower_bound != 6 { return 0 }
+    if vertex_count <= 0 { return 0 }
+    if edge_count <= 0 { return 0 }
+    if colour_count_for_unsat != 5 { return 0 }
+    if concrete_unit_distance_graph != 1 { return 0 }
+    if graph_instance_fingerprint <= 0 { return 0 }
+    if unsat_claim_fingerprint <= 0 { return 0 }
+    if independent_replay_mask != 31 { return 0 }
+    return 1
+}

@@ -1,0 +1,168 @@
+// stdlib/pbpk/rapamycin_budget_guide.sio — Budget-guided uncertainty improvement
+//
+// Novel dissertation contribution #3 (ISO §E.2 uncertainty budget) made actionable:
+// demonstrates that targeted reduction of the dominant uncertainty source promotes
+// the clinical gate to THERAPEUTIC, while non-targeted reduction does not.
+//
+// ── Standard scenario ────────────────────────────────────────────────────────
+//
+//   1-cmt degenerate (k12_val=k21_val=0) with BOTH ke_var AND k12_var nonzero.
+//   Rapamycin IV bolus: ke=0.05 h⁻¹, Vc=70 L, D=2 mg, assess at t=24h.
+//
+//   Baseline:  ke_var=0.003, k12_var=0.001 → total var ≈ 0.004 → UNCERTAIN (conf=700)
+//   Budget:    ke_frac ≈ 0.75 (dominant), k12_frac ≈ 0.25 (non-dominant)
+//
+//   Targeted:  ke_var→0.00075 (÷4), k12_var unchanged → total ≈ 0.00175 → THERAPEUTIC (conf=820)
+//   Blind:     k12_var→0.00025 (÷4), ke_var unchanged → total ≈ 0.00325 → UNCERTAIN (conf=700)
+//
+// ── Clinical interpretation ───────────────────────────────────────────────────
+//
+//   The budget identifies ke as the dominant uncertainty source (75% of total variance).
+//   Improving the ke measurement assay (more LC-MS/MS calibrators, tighter standards)
+//   promotes the decision from UNCERTAIN to THERAPEUTIC.  Improving k12 (peripheral
+//   sampling, compartmental model fitting) does not — the decision stays UNCERTAIN.
+//   This tells the clinician exactly WHERE to invest measurement improvement effort.
+//
+// Effect annotations:
+//   classify_2cmt_trough: with Epistemic, Mut, Div, Panic
+//   conf_2cmt_trough:     with Mut, Div, Panic
+//   dominant_source_2cmt: with Mut, Div, Panic
+//   budget_improvement_fires: with Epistemic, Mut, Div, Panic
+
+module pbpk::rapamycin_budget_guide
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_validation::{val_1cmt_k12var_params}
+use pbpk::rapamycin_2cmt::{simulate}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant}
+use pbpk::rapamycin_clinical::{
+    assess_trough, conf_from_rel,
+    decision_therapeutic, decision_uncertain
+}
+
+// ── Core 2-cmt trough classification ──────────────────────────────────────────
+//
+// Classify trough using full 2-cmt params including k12_var in variance budget.
+// Unlike classify_iv_trough (1-cmt only), this uses val_1cmt_k12var_params so
+// both ke_var and k12_var contribute to the propagated uncertainty.
+pub fn classify_2cmt_trough(
+    ke_val:  f64,
+    ke_var:  f64,
+    k12_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let p = val_1cmt_k12var_params(ke_val, ke_var, k12_var, vc)
+    var out_t = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_c = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_s = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    let c_val = out_c[idx]
+    let c_std = out_s[idx]
+    let conf  = conf_from_rel(c_val, c_std)
+    let c_ep  = Epistemic::new(c_val, c_std * c_std, conf)
+    assess_trough(&c_ep)
+}
+
+// Return confidence score for 2-cmt trough (no gate, pure metric).
+pub fn conf_2cmt_trough(
+    ke_val:  f64,
+    ke_var:  f64,
+    k12_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Mut, Div, Panic {
+    let p = val_1cmt_k12var_params(ke_val, ke_var, k12_var, vc)
+    var out_t = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_c = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var out_s = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+                 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    let c_val = out_c[idx]
+    let c_std = out_s[idx]
+    conf_from_rel(c_val, c_std)
+}
+
+// Return dominant uncertainty source index (0=ke, 1=k12, 2=k21, 3=krel, 4=a0).
+pub fn dominant_source_2cmt(
+    ke_val:  f64,
+    ke_var:  f64,
+    k12_var: f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64
+) -> i64 with Mut, Div, Panic {
+    let p = val_1cmt_k12var_params(ke_val, ke_var, k12_var, vc)
+    var bt = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bc = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bs = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+              0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
+    var bf   = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var bauc = [0.0, 0.0]
+    var bcmx = [0.0, 0.0, 0.0]
+    simulate_budget(t_end, dt, d_bolus, 0.0, &p, n, &!bt, &!bc, &!bs, &!bf, &!bauc, &!bcmx)
+    budget_dominant(&bf)
+}
+
+// ── Standard-scenario wrappers ────────────────────────────────────────────────
+//
+// Standard 24h scenario: ke=0.05 h⁻¹, Vc=70 L, D=2 mg, dt=1h, n=25, idx=24.
+
+pub fn classify_standard_2cmt(ke_var: f64, k12_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    classify_2cmt_trough(0.05, ke_var, k12_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn conf_standard_2cmt(ke_var: f64, k12_var: f64) -> i64 with Mut, Div, Panic {
+    conf_2cmt_trough(0.05, ke_var, k12_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn dominant_standard_2cmt(ke_var: f64, k12_var: f64) -> i64 with Mut, Div, Panic {
+    dominant_source_2cmt(0.05, ke_var, k12_var, 70.0, 2.0, 24.0, 1.0, 25)
+}
+
+// ── Budget improvement gate ────────────────────────────────────────────────────
+//
+// Returns true iff:
+//   (1) baseline (ke_var, k12_var) → UNCERTAIN
+//   (2) targeted (ke_var÷4, k12_var) → THERAPEUTIC    [reduce dominant source]
+//   (3) blind    (ke_var, k12_var÷4) → UNCERTAIN      [reduce non-dominant source]
+//
+// This is the dissertation proof: knowing the budget lets you identify WHICH
+// measurement to improve to unlock a confident clinical recommendation.
+pub fn budget_improvement_fires(
+    ke_var_base:  f64,
+    k12_var_base: f64
+) -> bool with Epistemic, Mut, Div, Panic {
+    let dec_base = classify_standard_2cmt(ke_var_base, k12_var_base)
+    let dec_targ = classify_standard_2cmt(ke_var_base / 4.0, k12_var_base)
+    let dec_blind = classify_standard_2cmt(ke_var_base, k12_var_base / 4.0)
+    dec_base  == decision_uncertain()    &&
+    dec_targ  == decision_therapeutic()  &&
+    dec_blind == decision_uncertain()
+}

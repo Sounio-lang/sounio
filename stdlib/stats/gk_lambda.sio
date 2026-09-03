@@ -1,0 +1,159 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/gk_lambda.sio — Goodman-Kruskal lambda (nominal association)
+//
+// A proportional-reduction-in-error measure of association for a nominal
+// contingency table: how much better one variable predicts the other than the
+// marginal mode alone:
+//
+//   gk_lambda(table, nr, nc) -> LambdaResult      (row-major nr × nc counts)
+//
+//   λ(R|C) = ( Σ_c maxᵣ n_rc − maxᵣ n_r+ ) / ( N − maxᵣ n_r+ ),
+//   λ(C|R) analogously, and the symmetric λ pools both directions.
+// λ = 0 means the column gives no help predicting the row (the mode is always
+// chosen); λ = 1 means perfect prediction.
+//
+// Pure Sounio: row/column maxima and marginals in nested loops. No external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Goodman & Kruskal (1954) JASA 49:732.
+
+module stats::gk_lambda
+
+pub struct LambdaResult {
+    pub lambda_rc: f64,   // λ(R|C): predict row from column
+    pub lambda_cr: f64,   // λ(C|R): predict column from row
+    pub lambda_sym: f64,  // symmetric λ
+}
+
+/// Goodman-Kruskal lambda for a nominal contingency table.
+///
+/// Parâmetros: table — row-major nr×nc counts; nr — rows (2..16); nc — cols (2..16).
+/// Retorno: LambdaResult (lambda_rc, lambda_cr, lambda_sym).
+/// Referências: Goodman & Kruskal (1954).
+pub fn gk_lambda(table: &[f64; 256], nr: i32, nc: i32) -> LambdaResult with Mut, Div, Panic {
+    if nr < 2 || nr > 16 || nc < 2 || nc > 16 {
+        return LambdaResult { lambda_rc: 0.0, lambda_cr: 0.0, lambda_sym: 0.0 }
+    }
+    var total = 0.0
+    // row marginals and their max
+    var max_row = 0.0
+    var i = 0
+    while i < nr {
+        var rs = 0.0
+        var j = 0
+        while j < nc { let v = table[(i * nc + j) as usize]; rs = rs + v; total = total + v; j = j + 1 }
+        if rs > max_row { max_row = rs }
+        i = i + 1
+    }
+    // column marginals and their max
+    var max_col = 0.0
+    var c = 0
+    while c < nc {
+        var cs = 0.0
+        var t = 0
+        while t < nr { cs = cs + table[(t * nc + c) as usize]; t = t + 1 }
+        if cs > max_col { max_col = cs }
+        c = c + 1
+    }
+    // Σ_c max_r n_rc  (max within each column)
+    var sum_maxrow_incol = 0.0
+    var cc = 0
+    while cc < nc {
+        var m = 0.0
+        var r = 0
+        while r < nr { let v = table[(r * nc + cc) as usize]; if v > m { m = v } r = r + 1 }
+        sum_maxrow_incol = sum_maxrow_incol + m
+        cc = cc + 1
+    }
+    // Σ_r max_c n_rc  (max within each row)
+    var sum_maxcol_inrow = 0.0
+    var rr = 0
+    while rr < nr {
+        var m = 0.0
+        var k = 0
+        while k < nc { let v = table[(rr * nc + k) as usize]; if v > m { m = v } k = k + 1 }
+        sum_maxcol_inrow = sum_maxcol_inrow + m
+        rr = rr + 1
+    }
+    var lrc = 0.0
+    let den_rc = total - max_row
+    if den_rc > 0.0 { lrc = (sum_maxrow_incol - max_row) / den_rc }
+    var lcr = 0.0
+    let den_cr = total - max_col
+    if den_cr > 0.0 { lcr = (sum_maxcol_inrow - max_col) / den_cr }
+    var lsym = 0.0
+    let den_sym = 2.0 * total - max_row - max_col
+    if den_sym > 0.0 {
+        lsym = (sum_maxrow_incol + sum_maxcol_inrow - max_row - max_col) / den_sym
+    }
+    return LambdaResult { lambda_rc: lrc, lambda_cr: lcr, lambda_sym: lsym }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// [[40,10],[5,45]]: row marg (50,50) max 50; col marg (45,55) max 55.
+// Σ_c max_r = max(40,5)+max(10,45)=40+45=85. λ(R|C)=(85-50)/(100-50)=0.7.
+// Σ_r max_c = max(40,10)+max(5,45)=40+45=85. λ(C|R)=(85-55)/(100-55)=30/45=0.666667.
+fn test_lambda() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=40.0; t[1]=10.0
+    t[2]=5.0;  t[3]=45.0
+    let r = gk_lambda(&t, 2, 2)
+    var ok = true
+    ok = check(1, approx(r.lambda_rc, 0.7, 1.0e-6)) && ok
+    ok = check(2, approx(r.lambda_cr, 0.666667, 1.0e-5)) && ok
+    return ok
+}
+
+// no predictive gain (mode always same row): [[10,20],[30,40]] -> λ(R|C)=0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=10.0; t[1]=20.0
+    t[2]=30.0; t[3]=40.0
+    let r = gk_lambda(&t, 2, 2)
+    return check(10, approx(r.lambda_rc, 0.0, 1.0e-9))
+}
+
+// perfect association (diagonal) -> λ = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=50.0; t[1]=0.0
+    t[2]=0.0;  t[3]=50.0
+    let r = gk_lambda(&t, 2, 2)
+    var ok = true
+    ok = check(20, approx(r.lambda_rc, 1.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.lambda_sym, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_lambda() && ok
+    ok = test_null() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

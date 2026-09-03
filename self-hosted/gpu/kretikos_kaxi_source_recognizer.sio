@@ -1,0 +1,1265 @@
+// self-hosted/gpu/kretikos_kaxi_source_recognizer.sio
+//
+// Phase 5.H (python-extermination): pure-Sounio source-lowering recognizer.
+// Replaces the regex-heavy python heredoc inside `kretikos kaxi-lower-source`
+// (bin/kretikos line ~2137, ~300 LoC) with a byte-level matcher that emits
+// the exact recognition.json the downstream shell composition expects.
+//
+// Argv:  driver.elf <source.sio> <source_path_for_payload> <generated_at_utc>
+//   argv[0] = filesystem path to read (e.g. examples/kretikos/lower_*.sio)
+//   argv[1] = the literal "source" string to embed in the JSON payload
+//             (the shell uses the original SRC argument here, repo-relative
+//              when applicable)
+//   argv[2] = ISO-8601 UTC timestamp string (e.g. 2026-05-08T13:00:00Z)
+//
+// Output:  full recognition.json (sorted keys, indent=2) on stdout.
+// Exit:    0 if status=pass, 1 if status=fail (caller should still keep
+//          stdout — the JSON is the canonical record either way).
+//
+// The recognizer mirrors the python heredoc 1:1:
+//   - Strip `//.*` line comments before matching (header hints don't leak).
+//   - 5 common checks: profile_directive_absent, has_gpu_kernel,
+//     has_thread_index, has_bounds_guard, has_mut_f32_output (which is
+//     true if either f32 OR f64 mut output is present — quirk preserved).
+//   - 8 binary arithmetic shapes (f32/f64 × add/sub/mul/div) match
+//     `(*out)[?]=(*a)[?]<op>(*b)[?]`.
+//   - 2 fma shapes (f32, f64) match `(*out)[?]=((*a)[?]*(*b)[?])+(*c)[?]`.
+//   - 1 epistemic dual shape (raw f32 buffers) requires both value
+//     and uncertainty lanes plus ua/ub/out_u inputs; OVERRIDES match list.
+//   - 1 knowledge dual shape (Knowledge<f32> inputs) requires both
+//     knowledge value lane and knowledge epsilon lane plus a/b knowledge
+//     inputs and out_u; OVERRIDES match list (wins even over epistemic
+//     dual when both regex sets fire).
+//
+// Match-list semantics (preserved from python):
+//   1. Append matching f32 binary shapes (loop over 4 in order).
+//   2. Append matching f64 binary shapes (loop over 4 in order).
+//   3. Append fma_f32 if found.
+//   4. Append fma_f64 if found.
+//   5. If dual_value_lane && dual_uncertainty_lane && f32_input_ua/ub
+//      && mut_f32_output_u: REPLACE matches with single epistemic-dual.
+//   6. If knowledge_value_lane && knowledge_epsilon_lane &&
+//      knowledge_input_a/b && mut_f32_output_u: REPLACE matches with
+//      single knowledge-dual.
+// status=pass iff len(matches)==1 && all common_checks true. Failures
+// listed in the same order python emits (common_checks first by name,
+// then unsupported/ambiguous).
+
+use gpu::kaxi_backend::*
+
+const FILE_CAP: i64 = 262144
+
+struct FileBuf {
+    data: [i8; 262144],
+    len: i64,
+}
+
+fn fb_new() -> FileBuf {
+    FileBuf { data: [0; 262144], len: 0 }
+}
+
+fn fb_load(path: string) -> FileBuf with IO, Mut, Panic, Div, Alloc {
+    var buf = fb_new()
+    let size = file_size(path)
+    if size <= 0 { return buf }
+    let bytes = read_file(path)
+    let cap: i64 = if size > FILE_CAP { FILE_CAP } else { size }
+    var i: i64 = 0
+    while i < cap {
+        buf.data[i as usize] = bytes[i as usize] as i8
+        i = i + 1
+    }
+    buf.len = cap
+    buf
+}
+
+// Strip `//<rest of line>` comments by replacing those bytes with space.
+// Mirrors `re.sub(r"//.*", "", raw)` from the python heredoc semantically:
+// after stripping, regex matchers see the same source as python did.
+fn fb_strip_line_comments(buf: FileBuf) -> FileBuf with Mut, Panic, Div {
+    var out = buf
+    var i: i64 = 0
+    var in_comment = false
+    while i < out.len {
+        let c = out.data[i as usize] as i64
+        if !in_comment {
+            if c == 47 && i + 1 < out.len && (out.data[(i + 1) as usize] as i64) == 47 {
+                in_comment = true
+                out.data[i as usize] = 32 as i8
+                out.data[(i + 1) as usize] = 32 as i8
+                i = i + 2
+                continue
+            }
+        } else {
+            if c == 10 {
+                in_comment = false
+            } else {
+                out.data[i as usize] = 32 as i8
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn is_ws(c: i64) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13
+}
+
+fn is_id_byte(c: i64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95
+}
+
+// Substring search in buf — case-sensitive.
+fn fb_find(buf: &FileBuf, start: i64, needle: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n == 0 { return start }
+    if buf.len - start < n { return 0 - 1 }
+    var i = start
+    while i + n <= buf.len {
+        var j: i64 = 0
+        var ok = true
+        while j < n {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn fb_contains(buf: &FileBuf, needle: string) -> bool with Mut, Panic, Div {
+    fb_find(buf, 0, needle) >= 0
+}
+
+// Case-insensitive byte compare (lowercase A-Z to a-z only).
+fn fb_find_ci(buf: &FileBuf, start: i64, needle: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n == 0 { return start }
+    if buf.len - start < n { return 0 - 1 }
+    var i = start
+    while i + n <= buf.len {
+        var j: i64 = 0
+        var ok = true
+        while j < n {
+            var bc = buf.data[(i + j) as usize] as i64
+            var nc = str_char_at(needle, j) as i64
+            if bc >= 65 && bc <= 90 { bc = bc + 32 }
+            if nc >= 65 && nc <= 90 { nc = nc + 32 }
+            if bc != nc { ok = false; break }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Case-insensitive whole-line check that buf has a line beginning with
+// optional whitespace, "//" then more whitespace then "kretikos" then ws*
+// then ":" then ws* then "profile" then ws* then "=". Matches python:
+// re.search(r"//\s*kretikos\s*:\s*profile\s*=", raw, re.IGNORECASE)
+//
+// Operates on the RAW buffer (before comment stripping), since the
+// directive lives inside a comment.
+fn fb_has_profile_directive(raw: &FileBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < raw.len - 1 {
+        if (raw.data[i as usize] as i64) == 47 && (raw.data[(i + 1) as usize] as i64) == 47 {
+            // walk past optional ws
+            var p = i + 2
+            while p < raw.len && is_ws(raw.data[p as usize] as i64) { p = p + 1 }
+            // expect "kretikos" (CI)
+            if check_token_ci(raw, p, "kretikos") {
+                p = p + 8
+                while p < raw.len && is_ws(raw.data[p as usize] as i64) { p = p + 1 }
+                if p < raw.len && (raw.data[p as usize] as i64) == 58 {
+                    p = p + 1
+                    while p < raw.len && is_ws(raw.data[p as usize] as i64) { p = p + 1 }
+                    if check_token_ci(raw, p, "profile") {
+                        p = p + 7
+                        while p < raw.len && is_ws(raw.data[p as usize] as i64) { p = p + 1 }
+                        if p < raw.len && (raw.data[p as usize] as i64) == 61 {
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn check_token_ci(buf: &FileBuf, pos: i64, tok: string) -> bool with Mut, Panic, Div {
+    let n = str_len(tok)
+    if pos + n > buf.len { return false }
+    var j: i64 = 0
+    while j < n {
+        var bc = buf.data[(pos + j) as usize] as i64
+        var nc = str_char_at(tok, j) as i64
+        if bc >= 65 && bc <= 90 { bc = bc + 32 }
+        if nc >= 65 && nc <= 90 { nc = nc + 32 }
+        if bc != nc { return false }
+        j = j + 1
+    }
+    true
+}
+
+// has_gpu_kernel: regex r"\bkernel\s+fn\s+[A-Za-z_][A-Za-z0-9_]*"
+// AND substring "with GPU" present (the latter on RAW buffer per python).
+fn check_has_gpu_kernel(code: &FileBuf, raw: &FileBuf) -> bool with Mut, Panic, Div {
+    if !fb_contains(raw, "with GPU") { return false }
+    var i: i64 = 0
+    while i + 6 < code.len {
+        // word-boundary check: i==0 or prev not id_byte
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, "kernel") {
+            let after = i + 6
+            if after < code.len && !is_id_byte(code.data[after as usize] as i64) {
+                var p = after
+                while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                if p + 1 < code.len && check_token_ci(code, p, "fn") {
+                    let after_fn = p + 2
+                    if after_fn < code.len && !is_id_byte(code.data[after_fn as usize] as i64) {
+                        var q = after_fn
+                        while q < code.len && is_ws(code.data[q as usize] as i64) { q = q + 1 }
+                        if q < code.len {
+                            let c0 = code.data[q as usize] as i64
+                            if (c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 == 95 {
+                                return true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// has_thread_index: substrings "gpu_thread_id_x()", "gpu_block_id_x()",
+// "gpu_block_dim_x()" all present.
+fn check_has_thread_index(code: &FileBuf) -> bool with Mut, Panic, Div {
+    fb_contains(code, "gpu_thread_id_x()") &&
+        fb_contains(code, "gpu_block_id_x()") &&
+        fb_contains(code, "gpu_block_dim_x()")
+}
+
+// has_bounds_guard: regex r"\bif\s+i\s*<\s*n\b"
+fn check_has_bounds_guard(code: &FileBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + 5 < code.len {
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, "if") {
+            let after_if = i + 2
+            if after_if < code.len && !is_id_byte(code.data[after_if as usize] as i64) {
+                var p = after_if
+                while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                // require space (\s+) — at least one ws was consumed
+                if p > after_if && p < code.len && (code.data[p as usize] as i64) == 105 {
+                    let after_i = p + 1
+                    if after_i < code.len && !is_id_byte(code.data[after_i as usize] as i64) {
+                        var q = after_i
+                        while q < code.len && is_ws(code.data[q as usize] as i64) { q = q + 1 }
+                        if q < code.len && (code.data[q as usize] as i64) == 60 {
+                            var r = q + 1
+                            while r < code.len && is_ws(code.data[r as usize] as i64) { r = r + 1 }
+                            if r < code.len && (code.data[r as usize] as i64) == 110 {
+                                let after_n = r + 1
+                                if after_n >= code.len || !is_id_byte(code.data[after_n as usize] as i64) {
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Param check: "<name>: &[<ty>; 32]" with arbitrary whitespace between
+// tokens. Tokens: name, ':', '&', '[', ty, ';', '32', ']'.
+fn check_param_const(code: &FileBuf, name: string, ty: string) -> bool with Mut, Panic, Div {
+    check_param(code, name, ty, false)
+}
+
+fn check_param_mut(code: &FileBuf, name: string, ty: string) -> bool with Mut, Panic, Div {
+    check_param(code, name, ty, true)
+}
+
+fn check_param(code: &FileBuf, name: string, ty: string, mut_ref: bool) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + str_len(name) < code.len {
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, name) {
+            let after = i + str_len(name)
+            if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                var p = after
+                while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                if p < code.len && (code.data[p as usize] as i64) == 58 {
+                    p = p + 1
+                    while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                    if p < code.len && (code.data[p as usize] as i64) == 38 {
+                        p = p + 1
+                        if mut_ref {
+                            // require '!'
+                            if p < code.len && (code.data[p as usize] as i64) == 33 {
+                                p = p + 1
+                            } else {
+                                i = i + 1
+                                continue
+                            }
+                        } else {
+                            // forbid '!'
+                            if p < code.len && (code.data[p as usize] as i64) == 33 {
+                                i = i + 1
+                                continue
+                            }
+                        }
+                        while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                        if p < code.len && (code.data[p as usize] as i64) == 91 {
+                            p = p + 1
+                            while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                            if check_token_ci(code, p, ty) {
+                                p = p + str_len(ty)
+                                if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                                    while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                                    if p < code.len && (code.data[p as usize] as i64) == 59 {
+                                        p = p + 1
+                                        while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                                        if p + 1 < code.len &&
+                                            (code.data[p as usize] as i64) == 51 &&
+                                            (code.data[(p + 1) as usize] as i64) == 50 {
+                                            let after_32 = p + 2
+                                            if after_32 < code.len && !is_id_byte(code.data[after_32 as usize] as i64) {
+                                                var q = after_32
+                                                while q < code.len && is_ws(code.data[q as usize] as i64) { q = q + 1 }
+                                                if q < code.len && (code.data[q as usize] as i64) == 93 {
+                                                    return true
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// "<name>: Knowledge<f32>" with arbitrary whitespace
+fn check_param_knowledge(code: &FileBuf, name: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i + str_len(name) < code.len {
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, name) {
+            let after = i + str_len(name)
+            if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                var p = after
+                while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                if p < code.len && (code.data[p as usize] as i64) == 58 {
+                    p = p + 1
+                    while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                    if check_token_ci(code, p, "Knowledge") {
+                        p = p + 9
+                        if p < code.len && !is_id_byte(code.data[p as usize] as i64) {
+                            while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                            if p < code.len && (code.data[p as usize] as i64) == 60 {
+                                p = p + 1
+                                while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                                if check_token_ci(code, p, "f32") {
+                                    p = p + 3
+                                    if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                                        while p < code.len && is_ws(code.data[p as usize] as i64) { p = p + 1 }
+                                        if p < code.len && (code.data[p as usize] as i64) == 62 {
+                                            return true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Skip a parenthesized index expression: starts with '[' at pos. Walks to
+// matching ']'. Returns position past ']' or -1 on mismatch.
+fn skip_brackets(buf: &FileBuf, pos: i64) -> i64 with Mut, Panic, Div {
+    if pos >= buf.len || (buf.data[pos as usize] as i64) != 91 { return 0 - 1 }
+    var p = pos + 1
+    var depth: i64 = 1
+    while p < buf.len && depth > 0 {
+        let c = buf.data[p as usize] as i64
+        if c == 91 { depth = depth + 1 }
+        else if c == 93 { depth = depth - 1 }
+        p = p + 1
+    }
+    if depth == 0 { p } else { 0 - 1 }
+}
+
+// Skip whitespace at pos; return new pos.
+fn skip_ws(buf: &FileBuf, pos: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    while p < buf.len && is_ws(buf.data[p as usize] as i64) { p = p + 1 }
+    p
+}
+
+// Match literal `(*<name>)[<idx>]` starting at pos; return position past
+// closing ']' or -1.
+fn match_deref_index(buf: &FileBuf, pos: i64, name: string) -> i64 with Mut, Panic, Div {
+    var p = pos
+    if p >= buf.len || (buf.data[p as usize] as i64) != 40 { return 0 - 1 }
+    p = p + 1
+    p = skip_ws(buf, p)
+    if p >= buf.len || (buf.data[p as usize] as i64) != 42 { return 0 - 1 }
+    p = p + 1
+    p = skip_ws(buf, p)
+    if !check_token_ci(buf, p, name) { return 0 - 1 }
+    p = p + str_len(name)
+    if p < buf.len && is_id_byte(buf.data[p as usize] as i64) { return 0 - 1 }
+    p = skip_ws(buf, p)
+    if p >= buf.len || (buf.data[p as usize] as i64) != 41 { return 0 - 1 }
+    p = p + 1
+    p = skip_ws(buf, p)
+    skip_brackets(buf, p)
+}
+
+// Match operator byte at pos (skipping ws). Returns position past op or -1.
+fn match_op(buf: &FileBuf, pos: i64, op: i64) -> i64 with Mut, Panic, Div {
+    let p = skip_ws(buf, pos)
+    if p < buf.len && (buf.data[p as usize] as i64) == op { p + 1 } else { 0 - 1 }
+}
+
+// Find any occurrence of `(*OUT)[?] = (*A)[?] <op> (*B)[?]` in the buffer.
+// `op` is a single byte ('+', '-', '*', '/').
+fn match_binary_shape(code: &FileBuf, out_name: string, a_name: string, b_name: string, op: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        if (code.data[i as usize] as i64) == 40 {
+            let p1 = match_deref_index(code, i, out_name)
+            if p1 > 0 {
+                let p2 = match_op(code, p1, 61)
+                if p2 > 0 {
+                    let p3 = skip_ws(code, p2)
+                    let p4 = match_deref_index(code, p3, a_name)
+                    if p4 > 0 {
+                        let p5 = match_op(code, p4, op)
+                        if p5 > 0 {
+                            let p6 = skip_ws(code, p5)
+                            let p7 = match_deref_index(code, p6, b_name)
+                            if p7 > 0 { return true }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// FMA shape: `(*out)[?] = ((*a)[?] * (*b)[?]) + (*c)[?]`, where the outer
+// parens around the mul are OPTIONAL (matches `\(?...\)?` in python).
+fn match_fma_shape(code: &FileBuf, out_name: string, a_name: string, b_name: string, c_name: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        if (code.data[i as usize] as i64) == 40 {
+            let p1 = match_deref_index(code, i, out_name)
+            if p1 > 0 {
+                let p2 = match_op(code, p1, 61)
+                if p2 > 0 {
+                    var p3 = skip_ws(code, p2)
+                    var had_open = false
+                    if p3 < code.len && (code.data[p3 as usize] as i64) == 40 {
+                        // optional outer paren — peek to see if it's NOT a
+                        // dereference (i.e. next non-ws is not '*')
+                        let q = skip_ws(code, p3 + 1)
+                        if q < code.len && (code.data[q as usize] as i64) == 40 {
+                            // could be either outer-paren (then '(*a)') or
+                            // direct '(*a)'. Attempt outer-open path.
+                            had_open = true
+                            p3 = p3 + 1
+                            p3 = skip_ws(code, p3)
+                        }
+                    }
+                    let p4 = match_deref_index(code, p3, a_name)
+                    if p4 > 0 {
+                        let p5 = match_op(code, p4, 42) // '*'
+                        if p5 > 0 {
+                            let p6 = skip_ws(code, p5)
+                            let p7 = match_deref_index(code, p6, b_name)
+                            if p7 > 0 {
+                                var p8 = skip_ws(code, p7)
+                                if had_open {
+                                    if p8 < code.len && (code.data[p8 as usize] as i64) == 41 {
+                                        p8 = p8 + 1
+                                    } else {
+                                        i = i + 1
+                                        continue
+                                    }
+                                }
+                                let p9 = match_op(code, p8, 43) // '+'
+                                if p9 > 0 {
+                                    let p10 = skip_ws(code, p9)
+                                    let p11 = match_deref_index(code, p10, c_name)
+                                    if p11 > 0 { return true }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Match epistemic uncertainty lane:
+// `(*out_u)[?] = ((*ua)[?] * (*ua)[?]) + ((*ub)[?] * (*ub)[?])`
+// Outer parens around each square optional.
+fn match_dual_uncertainty_lane(code: &FileBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        if (code.data[i as usize] as i64) == 40 {
+            let p1 = match_deref_index(code, i, "out_u")
+            if p1 > 0 {
+                let p2 = match_op(code, p1, 61)
+                if p2 > 0 {
+                    var p3 = skip_ws(code, p2)
+                    if p3 < code.len && (code.data[p3 as usize] as i64) == 40 {
+                        p3 = p3 + 1
+                        p3 = skip_ws(code, p3)
+                    }
+                    let p4 = match_deref_index(code, p3, "ua")
+                    if p4 > 0 {
+                        let p5 = match_op(code, p4, 42)
+                        if p5 > 0 {
+                            let p6 = skip_ws(code, p5)
+                            let p7 = match_deref_index(code, p6, "ua")
+                            if p7 > 0 {
+                                var p8 = skip_ws(code, p7)
+                                if p8 < code.len && (code.data[p8 as usize] as i64) == 41 {
+                                    p8 = p8 + 1
+                                }
+                                let p9 = match_op(code, p8, 43)
+                                if p9 > 0 {
+                                    var p10 = skip_ws(code, p9)
+                                    if p10 < code.len && (code.data[p10 as usize] as i64) == 40 {
+                                        p10 = p10 + 1
+                                        p10 = skip_ws(code, p10)
+                                    }
+                                    let p11 = match_deref_index(code, p10, "ub")
+                                    if p11 > 0 {
+                                        let p12 = match_op(code, p11, 42)
+                                        if p12 > 0 {
+                                            let p13 = skip_ws(code, p12)
+                                            let p14 = match_deref_index(code, p13, "ub")
+                                            if p14 > 0 { return true }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Knowledge value lane: `let av = a.value`, `let bv = b.value`, and
+// `(*out)[?] = av + bv`.
+fn match_knowledge_value_lane(code: &FileBuf) -> bool with Mut, Panic, Div {
+    if !contains_let_field(code, "av", "a", "value") { return false }
+    if !contains_let_field(code, "bv", "b", "value") { return false }
+    contains_assign_var_plus_var(code, "out", "av", "bv", 43)
+}
+
+// Knowledge epsilon lane: `let au = a.epsilon as f32`, same for bu, and
+// `(*out_u)[?] = (au * au) + (bu * bu)` (outer parens optional).
+fn match_knowledge_epsilon_lane(code: &FileBuf) -> bool with Mut, Panic, Div {
+    if !contains_let_field_as_f32(code, "au", "a", "epsilon") { return false }
+    if !contains_let_field_as_f32(code, "bu", "b", "epsilon") { return false }
+    contains_dual_square(code, "out_u", "au", "bu")
+}
+
+// True if buffer contains `let <var> = <obj>.<field>` (whitespace-tolerant).
+fn contains_let_field(code: &FileBuf, var_name: string, obj_name: string, field_name: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, "let") {
+            var p = i + 3
+            if p < code.len && !is_id_byte(code.data[p as usize] as i64) {
+                p = skip_ws(code, p)
+                if check_token_ci(code, p, var_name) {
+                    p = p + str_len(var_name)
+                    if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                        p = skip_ws(code, p)
+                        if p < code.len && (code.data[p as usize] as i64) == 61 {
+                            p = p + 1
+                            p = skip_ws(code, p)
+                            if check_token_ci(code, p, obj_name) {
+                                p = p + str_len(obj_name)
+                                if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                                    p = skip_ws(code, p)
+                                    if p < code.len && (code.data[p as usize] as i64) == 46 {
+                                        p = p + 1
+                                        p = skip_ws(code, p)
+                                        if check_token_ci(code, p, field_name) {
+                                            let after = p + str_len(field_name)
+                                            if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                                                return true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// `let <var> = <obj>.<field> as f32`
+fn contains_let_field_as_f32(code: &FileBuf, var_name: string, obj_name: string, field_name: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        let prev_ok: bool = i == 0 || !is_id_byte(code.data[(i - 1) as usize] as i64)
+        if prev_ok && check_token_ci(code, i, "let") {
+            var p = i + 3
+            if p < code.len && !is_id_byte(code.data[p as usize] as i64) {
+                p = skip_ws(code, p)
+                if check_token_ci(code, p, var_name) {
+                    p = p + str_len(var_name)
+                    if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                        p = skip_ws(code, p)
+                        if p < code.len && (code.data[p as usize] as i64) == 61 {
+                            p = p + 1
+                            p = skip_ws(code, p)
+                            if check_token_ci(code, p, obj_name) {
+                                p = p + str_len(obj_name)
+                                if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                                    p = skip_ws(code, p)
+                                    if p < code.len && (code.data[p as usize] as i64) == 46 {
+                                        p = p + 1
+                                        p = skip_ws(code, p)
+                                        if check_token_ci(code, p, field_name) {
+                                            p = p + str_len(field_name)
+                                            if p >= code.len || !is_id_byte(code.data[p as usize] as i64) {
+                                                p = skip_ws(code, p)
+                                                if check_token_ci(code, p, "as") {
+                                                    p = p + 2
+                                                    if p < code.len && !is_id_byte(code.data[p as usize] as i64) {
+                                                        p = skip_ws(code, p)
+                                                        if check_token_ci(code, p, "f32") {
+                                                            let after = p + 3
+                                                            if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                                                                return true
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// `(*<out>)[?] <op> <var_a> + <var_b>`  (op = '=')
+fn contains_assign_var_plus_var(code: &FileBuf, out_name: string, va: string, vb: string, plus_op: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        if (code.data[i as usize] as i64) == 40 {
+            let p1 = match_deref_index(code, i, out_name)
+            if p1 > 0 {
+                let p2 = match_op(code, p1, 61)
+                if p2 > 0 {
+                    var p3 = skip_ws(code, p2)
+                    if check_token_ci(code, p3, va) {
+                        p3 = p3 + str_len(va)
+                        if p3 >= code.len || !is_id_byte(code.data[p3 as usize] as i64) {
+                            let p4 = match_op(code, p3, plus_op)
+                            if p4 > 0 {
+                                let p5 = skip_ws(code, p4)
+                                if check_token_ci(code, p5, vb) {
+                                    let after = p5 + str_len(vb)
+                                    if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                                        return true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// `(*<out>)[?] = (<va> * <va>) + (<vb> * <vb>)` (outer parens optional)
+fn contains_dual_square(code: &FileBuf, out_name: string, va: string, vb: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len {
+        if (code.data[i as usize] as i64) == 40 {
+            let p1 = match_deref_index(code, i, out_name)
+            if p1 > 0 {
+                let p2 = match_op(code, p1, 61)
+                if p2 > 0 {
+                    var p3 = skip_ws(code, p2)
+                    if p3 < code.len && (code.data[p3 as usize] as i64) == 40 {
+                        p3 = p3 + 1
+                        p3 = skip_ws(code, p3)
+                    }
+                    if check_token_ci(code, p3, va) {
+                        p3 = p3 + str_len(va)
+                        if p3 >= code.len || !is_id_byte(code.data[p3 as usize] as i64) {
+                            let p4 = match_op(code, p3, 42)
+                            if p4 > 0 {
+                                let p5 = skip_ws(code, p4)
+                                if check_token_ci(code, p5, va) {
+                                    var p6 = p5 + str_len(va)
+                                    if p6 >= code.len || !is_id_byte(code.data[p6 as usize] as i64) {
+                                        p6 = skip_ws(code, p6)
+                                        if p6 < code.len && (code.data[p6 as usize] as i64) == 41 {
+                                            p6 = p6 + 1
+                                        }
+                                        let p7 = match_op(code, p6, 43)
+                                        if p7 > 0 {
+                                            var p8 = skip_ws(code, p7)
+                                            if p8 < code.len && (code.data[p8 as usize] as i64) == 40 {
+                                                p8 = p8 + 1
+                                                p8 = skip_ws(code, p8)
+                                            }
+                                            if check_token_ci(code, p8, vb) {
+                                                p8 = p8 + str_len(vb)
+                                                if p8 >= code.len || !is_id_byte(code.data[p8 as usize] as i64) {
+                                                    let p9 = match_op(code, p8, 42)
+                                                    if p9 > 0 {
+                                                        let p10 = skip_ws(code, p9)
+                                                        if check_token_ci(code, p10, vb) {
+                                                            let after = p10 + str_len(vb)
+                                                            if after >= code.len || !is_id_byte(code.data[after as usize] as i64) {
+                                                                return true
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Output-buffer aliases over kaxi_backend's KaxiAsmBuf (64KB, plenty
+// for ~2KB recognition.json).
+type JBuf = KaxiAsmBuf
+
+fn jb_new() -> JBuf with Mut, Panic, Div, Alloc {
+    kaxi_asm_new()
+}
+
+fn jb_push_byte(buf: JBuf, b: i64) -> JBuf with Mut, Panic, Div, Alloc {
+    kaxi_asm_push_byte(buf, b as i8)
+}
+
+fn jb_push_str(buf: JBuf, s: string) -> JBuf with Mut, Panic, Div, Alloc {
+    kaxi_asm_push_str(buf, s)
+}
+
+// Local kaxi_asm_to_string equivalent that handles '^' (byte 94) which
+// the canonical kaxi_backend version maps to '?'. Only handles the
+// printable bytes that actually appear in our recognition.json output.
+fn jb_to_string(buf: JBuf) -> string with Mut, Panic, Div, Alloc {
+    var s = ""
+    var i: i64 = 0
+    while i < buf.len {
+        let ch = buf.data[i as usize] as i64
+        if ch == 94 {
+            s = str_concat(s, "^")
+        } else {
+            // For all other bytes, defer to kaxi_asm_to_string by
+            // pushing this single byte through a fresh buffer.
+            var tmp = kaxi_asm_new()
+            tmp = kaxi_asm_push_byte(tmp, ch as i8)
+            s = str_concat(s, kaxi_asm_to_string(tmp))
+        }
+        i = i + 1
+    }
+    s
+}
+
+fn jb_push_quoted_str(buf: JBuf, s: string) -> JBuf with Mut, Panic, Div, Alloc {
+    var out = jb_push_byte(buf, 34)
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(s, i) as i64
+        if c == 34 || c == 92 {
+            out = jb_push_byte(out, 92)
+            out = jb_push_byte(out, c)
+        } else {
+            out = jb_push_byte(out, c)
+        }
+        i = i + 1
+    }
+    jb_push_byte(out, 34)
+}
+
+fn jb_push_bool(buf: JBuf, v: bool) -> JBuf with Mut, Panic, Div, Alloc {
+    if v { jb_push_str(buf, "true") } else { jb_push_str(buf, "false") }
+}
+
+fn jb_push_int(buf: JBuf, v: i64) -> JBuf with Mut, Panic, Div, Alloc {
+    jb_push_str(buf, kaxi_i64_to_string(v))
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 3 {
+        println("usage: kretikos_kaxi_source_recognizer <src> <source_label> <utc>")
+        return 2
+    }
+    let src_path = get_arg(0)
+    let source_label = get_arg(1)
+    let utc = get_arg(2)
+
+    let raw = fb_load(src_path)
+    if raw.len <= 0 {
+        print("kaxi-source-recognizer: cannot read ")
+        println(src_path)
+        return 1
+    }
+    let code = fb_strip_line_comments(raw)
+
+    // Common checks
+    let profile_directive_present = fb_has_profile_directive(&raw)
+    let profile_directive_absent = !profile_directive_present
+    let has_gpu_kernel = check_has_gpu_kernel(&code, &raw)
+    let has_thread_index = check_has_thread_index(&code)
+    let has_bounds_guard = check_has_bounds_guard(&code)
+
+    // Param presence
+    let has_f32_input_a = check_param_const(&code, "a", "f32")
+    let has_f32_input_b = check_param_const(&code, "b", "f32")
+    let has_f32_input_c = check_param_const(&code, "c", "f32")
+    let has_f64_input_a = check_param_const(&code, "a", "f64")
+    let has_f64_input_b = check_param_const(&code, "b", "f64")
+    let has_f64_input_c = check_param_const(&code, "c", "f64")
+    let has_f32_input_ua = check_param_const(&code, "ua", "f32")
+    let has_f32_input_ub = check_param_const(&code, "ub", "f32")
+    let has_mut_f32_output_only = check_param_mut(&code, "out", "f32")
+    let has_mut_f64_output = check_param_mut(&code, "out", "f64")
+    let has_mut_f32_output_u = check_param_mut(&code, "out_u", "f32")
+    // Python quirk: has_mut_f32_output is true if either is present.
+    let has_mut_f32_output = has_mut_f32_output_only || has_mut_f64_output
+    let has_knowledge_input_a = check_param_knowledge(&code, "a")
+    let has_knowledge_input_b = check_param_knowledge(&code, "b")
+
+    // Lane checks (over stripped code)
+    let dual_value_lane = match_binary_shape(&code, "out", "a", "b", 43)
+    let dual_uncertainty_lane = match_dual_uncertainty_lane(&code)
+    let knowledge_value_lane = match_knowledge_value_lane(&code)
+    let knowledge_epsilon_lane = match_knowledge_epsilon_lane(&code)
+
+    // ------------------------------------------------------------------
+    // Build matches list (preserve python order/replace semantics).
+    // We don't need a literal list; track count + winning shape index.
+    // 0 = none, otherwise an enum:
+    //   1..4   = f32 add/sub/mul/div
+    //   5..8   = f64 add/sub/mul/div
+    //   9      = fma_f32
+    //   10     = fma_f64
+    //   11     = epistemic_dual_f32 (raw)
+    //   12     = knowledge_dual_f32
+    // ------------------------------------------------------------------
+    var match_count: i64 = 0
+    var winner: i64 = 0
+
+    if has_f32_input_a && has_f32_input_b {
+        if match_binary_shape(&code, "out", "a", "b", 43) {
+            match_count = match_count + 1; winner = 1
+        }
+        if match_binary_shape(&code, "out", "a", "b", 45) {
+            match_count = match_count + 1; winner = 2
+        }
+        if match_binary_shape(&code, "out", "a", "b", 42) {
+            match_count = match_count + 1; winner = 3
+        }
+        if match_binary_shape(&code, "out", "a", "b", 47) {
+            match_count = match_count + 1; winner = 4
+        }
+    }
+    if has_f64_input_a && has_f64_input_b && has_mut_f64_output {
+        if match_binary_shape(&code, "out", "a", "b", 43) {
+            match_count = match_count + 1; winner = 5
+        }
+        if match_binary_shape(&code, "out", "a", "b", 45) {
+            match_count = match_count + 1; winner = 6
+        }
+        if match_binary_shape(&code, "out", "a", "b", 42) {
+            match_count = match_count + 1; winner = 7
+        }
+        if match_binary_shape(&code, "out", "a", "b", 47) {
+            match_count = match_count + 1; winner = 8
+        }
+    }
+
+    // FMA f32: requires has_f32_input_c
+    if has_f32_input_c && match_fma_shape(&code, "out", "a", "b", "c") {
+        match_count = match_count + 1; winner = 9
+    }
+    // FMA f64: requires f64 a/b/c + mut f64 output
+    if has_f64_input_a && has_f64_input_b && has_f64_input_c && has_mut_f64_output &&
+        match_fma_shape(&code, "out", "a", "b", "c") {
+        match_count = match_count + 1; winner = 10
+    }
+
+    // Epistemic dual override
+    if dual_value_lane && dual_uncertainty_lane && has_f32_input_ua && has_f32_input_ub && has_mut_f32_output_u {
+        match_count = 1; winner = 11
+    }
+
+    // Knowledge dual override (wins over epistemic dual)
+    if knowledge_value_lane && knowledge_epsilon_lane && has_knowledge_input_a && has_knowledge_input_b && has_mut_f32_output_u {
+        match_count = 1; winner = 12
+    }
+
+    let has_supported_arithmetic_shape = match_count == 1
+    let recognized_shape_count = match_count
+
+    // ------------------------------------------------------------------
+    // Failures: count + flags. Will be emitted inline into the main JSON
+    // output. Order: common_checks (in dict order:
+    // profile_directive_absent, has_gpu_kernel, has_thread_index,
+    // has_bounds_guard, has_mut_f32_output), then unsupported/ambiguous.
+    // ------------------------------------------------------------------
+    let fail_profile = !profile_directive_absent
+    let fail_kernel = !has_gpu_kernel
+    let fail_tid = !has_thread_index
+    let fail_guard = !has_bounds_guard
+    let fail_out = !has_mut_f32_output
+    let fail_unsupported = match_count == 0
+    let fail_ambiguous = match_count > 1
+    let any_fail = fail_profile || fail_kernel || fail_tid || fail_guard || fail_out || fail_unsupported || fail_ambiguous
+    let status_pass = !any_fail
+
+    // ------------------------------------------------------------------
+    // Recognized winner -> derived strings
+    // ------------------------------------------------------------------
+    var recognized_pattern = ""
+    var kaxi_pattern = ""
+    var runtime_rung = ""
+    if status_pass {
+        if winner == 1 { recognized_pattern = "indexed_f32_vector_add"; kaxi_pattern = "source_vec_add_f32"; runtime_rung = "vec_add_f32" }
+        else if winner == 2 { recognized_pattern = "indexed_f32_vector_sub"; kaxi_pattern = "source_vec_sub_f32"; runtime_rung = "vec_sub_f32" }
+        else if winner == 3 { recognized_pattern = "indexed_f32_vector_mul"; kaxi_pattern = "source_vec_mul_f32"; runtime_rung = "vec_mul_f32" }
+        else if winner == 4 { recognized_pattern = "indexed_f32_vector_div"; kaxi_pattern = "source_vec_div_f32"; runtime_rung = "vec_div_f32" }
+        else if winner == 5 { recognized_pattern = "indexed_f64_vector_add"; kaxi_pattern = "source_vec_add_f64"; runtime_rung = "vec_add_f64" }
+        else if winner == 6 { recognized_pattern = "indexed_f64_vector_sub"; kaxi_pattern = "source_vec_sub_f64"; runtime_rung = "vec_sub_f64" }
+        else if winner == 7 { recognized_pattern = "indexed_f64_vector_mul"; kaxi_pattern = "source_vec_mul_f64"; runtime_rung = "vec_mul_f64" }
+        else if winner == 8 { recognized_pattern = "indexed_f64_vector_div"; kaxi_pattern = "source_vec_div_f64"; runtime_rung = "vec_div_f64" }
+        else if winner == 9 { recognized_pattern = "indexed_f32_affine_mad"; kaxi_pattern = "source_fma_f32"; runtime_rung = "fma_f32" }
+        else if winner == 10 { recognized_pattern = "indexed_f64_affine_mad"; kaxi_pattern = "source_fma_f64"; runtime_rung = "fma_f64" }
+        else if winner == 11 { recognized_pattern = "indexed_f32_epistemic_dual_output"; kaxi_pattern = "source_epistemic_dual_output_f32"; runtime_rung = "epistemic_dual_output_f32" }
+        else if winner == 12 { recognized_pattern = "indexed_f32_knowledge_dual_output"; kaxi_pattern = "source_epistemic_dual_output_f32"; runtime_rung = "epistemic_dual_output_f32" }
+    }
+
+    // ------------------------------------------------------------------
+    // Emit JSON (sorted keys, indent=2, json.dumps style)
+    // ------------------------------------------------------------------
+    var out = jb_new()
+    out = jb_push_str(out, "{\n  \"boundaries\": [\n")
+    out = jb_push_str(out, "    \"recognizer_rejects_profile_directives\",\n")
+    out = jb_push_str(out, "    \"recognizer_is_shape_limited_to_indexed_arithmetic\",\n")
+    out = jb_push_str(out, "    \"recognizer_does_not_parse_arbitrary_sounio_gpu_programs\"\n")
+    out = jb_push_str(out, "  ],\n")
+
+    // checks dict (sorted keys)
+    out = jb_push_str(out, "  \"checks\": {\n")
+    out = emit_check(out, "has_bounds_guard", has_bounds_guard, true)
+    out = emit_check(out, "has_epistemic_dual_uncertainty_lane", dual_uncertainty_lane, true)
+    out = emit_check(out, "has_epistemic_dual_value_lane", dual_value_lane, true)
+    out = emit_check(out, "has_f32_input_a", has_f32_input_a, true)
+    out = emit_check(out, "has_f32_input_b", has_f32_input_b, true)
+    out = emit_check(out, "has_f32_input_c", has_f32_input_c, true)
+    out = emit_check(out, "has_f32_input_ua", has_f32_input_ua, true)
+    out = emit_check(out, "has_f32_input_ub", has_f32_input_ub, true)
+    out = emit_check(out, "has_f64_input_a", has_f64_input_a, true)
+    out = emit_check(out, "has_f64_input_b", has_f64_input_b, true)
+    out = emit_check(out, "has_gpu_kernel", has_gpu_kernel, true)
+    out = emit_check(out, "has_knowledge_epsilon_lane", knowledge_epsilon_lane, true)
+    out = emit_check(out, "has_knowledge_input_a", has_knowledge_input_a, true)
+    out = emit_check(out, "has_knowledge_input_b", has_knowledge_input_b, true)
+    out = emit_check(out, "has_knowledge_value_lane", knowledge_value_lane, true)
+    out = emit_check(out, "has_mut_f32_output", has_mut_f32_output, true)
+    out = emit_check(out, "has_mut_f32_output_u", has_mut_f32_output_u, true)
+    out = emit_check(out, "has_mut_f64_output", has_mut_f64_output, true)
+    out = emit_check(out, "has_supported_arithmetic_shape", has_supported_arithmetic_shape, true)
+    out = emit_check(out, "has_thread_index", has_thread_index, true)
+    out = emit_check(out, "profile_directive_absent", profile_directive_absent, true)
+    // recognized_shape_count is an int
+    out = jb_push_str(out, "    \"recognized_shape_count\": ")
+    out = jb_push_int(out, recognized_shape_count)
+    out = jb_push_str(out, "\n  },\n")
+
+    // failures (emitted inline; mirrors python's json.dumps([{...}, ...]))
+    out = jb_push_str(out, "  \"failures\": [")
+    var first_f = true
+    if fail_profile {
+        out = jb_push_str(out, "{\"kind\": \"profile_directive_absent\"}")
+        first_f = false
+    }
+    if fail_kernel {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"has_gpu_kernel\"}")
+        first_f = false
+    }
+    if fail_tid {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"has_thread_index\"}")
+        first_f = false
+    }
+    if fail_guard {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"has_bounds_guard\"}")
+        first_f = false
+    }
+    if fail_out {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"has_mut_f32_output\"}")
+        first_f = false
+    }
+    if fail_unsupported {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"unsupported_source_arithmetic_shape\"}")
+        first_f = false
+    }
+    if fail_ambiguous {
+        if !first_f { out = jb_push_str(out, ", ") }
+        out = jb_push_str(out, "{\"kind\": \"ambiguous_source_arithmetic_shape\", \"count\": ")
+        out = jb_push_int(out, match_count)
+        out = jb_push_byte(out, 125)
+        first_f = false
+    }
+    out = jb_push_str(out, "],\n")
+
+    // fallback_path: "none"
+    out = jb_push_str(out, "  \"fallback_path\": \"none\",\n")
+
+    // generated_at_utc
+    out = jb_push_str(out, "  \"generated_at_utc\": ")
+    out = jb_push_quoted_str(out, utc)
+    out = jb_push_str(out, ",\n")
+
+    // kaxi_pattern
+    out = jb_push_str(out, "  \"kaxi_pattern\": ")
+    if status_pass {
+        out = jb_push_quoted_str(out, kaxi_pattern)
+    } else {
+        out = jb_push_str(out, "null")
+    }
+    out = jb_push_str(out, ",\n")
+
+    // profile_directive_present
+    out = jb_push_str(out, "  \"profile_directive_present\": ")
+    out = jb_push_bool(out, profile_directive_present)
+    out = jb_push_str(out, ",\n")
+
+    // profile_hint
+    out = jb_push_str(out, "  \"profile_hint\": ")
+    if profile_directive_absent {
+        out = jb_push_str(out, "\"none\"")
+    } else {
+        out = jb_push_str(out, "\"present\"")
+    }
+    out = jb_push_str(out, ",\n")
+
+    // recognized_pattern
+    out = jb_push_str(out, "  \"recognized_pattern\": ")
+    if status_pass {
+        out = jb_push_quoted_str(out, recognized_pattern)
+    } else {
+        out = jb_push_str(out, "null")
+    }
+    out = jb_push_str(out, ",\n")
+
+    // runtime_rung
+    out = jb_push_str(out, "  \"runtime_rung\": ")
+    if status_pass {
+        out = jb_push_quoted_str(out, runtime_rung)
+    } else {
+        out = jb_push_str(out, "null")
+    }
+    out = jb_push_str(out, ",\n")
+
+    // schema
+    out = jb_push_str(out, "  \"schema\": \"sounio.kretikos.source-lowering-recognition.v1\",\n")
+
+    // semantic_ops
+    out = jb_push_str(out, "  \"semantic_ops\": ")
+    out = emit_semantic_ops(out, winner, status_pass)
+    out = jb_push_str(out, ",\n")
+
+    // source
+    out = jb_push_str(out, "  \"source\": ")
+    out = jb_push_quoted_str(out, source_label)
+    out = jb_push_str(out, ",\n")
+
+    // source_lowered_to_kaxi
+    out = jb_push_str(out, "  \"source_lowered_to_kaxi\": ")
+    out = jb_push_bool(out, status_pass)
+    out = jb_push_str(out, ",\n")
+
+    // status
+    out = jb_push_str(out, "  \"status\": ")
+    if status_pass {
+        out = jb_push_str(out, "\"pass\"")
+    } else {
+        out = jb_push_str(out, "\"fail\"")
+    }
+    out = jb_push_str(out, "\n}")
+
+    print(jb_to_string(out))
+    println("")
+
+    if status_pass { 0 } else { 1 }
+}
+
+fn emit_check(buf: JBuf, key: string, value: bool, trailing_comma: bool) -> JBuf with Mut, Panic, Div, Alloc {
+    var out = jb_push_str(buf, "    \"")
+    out = jb_push_str(out, key)
+    out = jb_push_str(out, "\": ")
+    out = jb_push_bool(out, value)
+    if trailing_comma { out = jb_push_str(out, ",") }
+    jb_push_byte(out, 10)
+}
+
+fn emit_semantic_ops(buf: JBuf, winner: i64, pass: bool) -> JBuf with Mut, Panic, Div, Alloc {
+    if !pass {
+        return jb_push_str(buf, "[]")
+    }
+    // Common preamble for every shape
+    var out = jb_push_str(buf, "[\n")
+    if winner >= 1 && winner <= 8 {
+        // Binary shapes
+        out = jb_push_str(out, "    \"thread_index:i=block_id_x*block_dim_x+thread_id_x\",\n")
+        out = jb_push_str(out, "    \"guard:i<n\",\n")
+        out = jb_push_str(out, "    \"load_global:a[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:b[i]\",\n")
+        var op = ""
+        var ty = ""
+        if winner == 1 { op = "add"; ty = "f32" }
+        else if winner == 2 { op = "sub"; ty = "f32" }
+        else if winner == 3 { op = "mul"; ty = "f32" }
+        else if winner == 4 { op = "div"; ty = "f32" }
+        else if winner == 5 { op = "add"; ty = "f64" }
+        else if winner == 6 { op = "sub"; ty = "f64" }
+        else if winner == 7 { op = "mul"; ty = "f64" }
+        else if winner == 8 { op = "div"; ty = "f64" }
+        out = jb_push_str(out, "    \"")
+        out = jb_push_str(out, op)
+        out = jb_push_str(out, ":")
+        out = jb_push_str(out, ty)
+        out = jb_push_str(out, "\",\n")
+        out = jb_push_str(out, "    \"store_global:out[i]\"\n  ]")
+        return out
+    }
+    if winner == 9 || winner == 10 {
+        let ty: string = if winner == 9 { "f32" } else { "f64" }
+        out = jb_push_str(out, "    \"thread_index:i=block_id_x*block_dim_x+thread_id_x\",\n")
+        out = jb_push_str(out, "    \"guard:i<n\",\n")
+        out = jb_push_str(out, "    \"load_global:a[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:b[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:c[i]\",\n")
+        out = jb_push_str(out, "    \"mul:")
+        out = jb_push_str(out, ty)
+        out = jb_push_str(out, "\",\n    \"add:")
+        out = jb_push_str(out, ty)
+        out = jb_push_str(out, "\",\n")
+        out = jb_push_str(out, "    \"store_global:out[i]\"\n  ]")
+        return out
+    }
+    if winner == 11 {
+        out = jb_push_str(out, "    \"thread_index:i=block_id_x*block_dim_x+thread_id_x\",\n")
+        out = jb_push_str(out, "    \"guard:i<n\",\n")
+        out = jb_push_str(out, "    \"load_global:a[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:b[i]\",\n")
+        out = jb_push_str(out, "    \"add:f32:value\",\n")
+        out = jb_push_str(out, "    \"store_global:out[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:ua[i]\",\n")
+        out = jb_push_str(out, "    \"load_global:ub[i]\",\n")
+        out = jb_push_str(out, "    \"mul:f32:ua^2\",\n")
+        out = jb_push_str(out, "    \"mul:f32:ub^2\",\n")
+        out = jb_push_str(out, "    \"add:f32:uncertainty\",\n")
+        out = jb_push_str(out, "    \"store_global:out_u[i]\"\n  ]")
+        return out
+    }
+    if winner == 12 {
+        out = jb_push_str(out, "    \"thread_index:i=block_id_x*block_dim_x+thread_id_x\",\n")
+        out = jb_push_str(out, "    \"guard:i<n\",\n")
+        out = jb_push_str(out, "    \"field:a.value\",\n")
+        out = jb_push_str(out, "    \"field:b.value\",\n")
+        out = jb_push_str(out, "    \"add:f32:value\",\n")
+        out = jb_push_str(out, "    \"store_global:out[i]\",\n")
+        out = jb_push_str(out, "    \"field:a.epsilon\",\n")
+        out = jb_push_str(out, "    \"field:b.epsilon\",\n")
+        out = jb_push_str(out, "    \"cast:f64_to_f32:epsilon\",\n")
+        out = jb_push_str(out, "    \"mul:f32:epsilon_a^2\",\n")
+        out = jb_push_str(out, "    \"mul:f32:epsilon_b^2\",\n")
+        out = jb_push_str(out, "    \"add:f32:epsilon\",\n")
+        out = jb_push_str(out, "    \"store_global:out_u[i]\"\n  ]")
+        return out
+    }
+    jb_push_str(out, "  ]")
+}

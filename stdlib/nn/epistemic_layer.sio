@@ -97,28 +97,33 @@ pub fn emat4_zeros() -> EpistemicMat4x4 {
     }
 }
 
-pub fn emat4_identity() -> EpistemicMat4x4 with Mut, Panic {
-    var m = emat4_zeros()
-    m.values[0] = 1.0
-    m.values[5] = 1.0
-    m.values[10] = 1.0
-    m.values[15] = 1.0
-    m
+pub fn emat4_identity(out: &!EpistemicMat4x4) with Mut, Panic {
+    var i = 0
+    while i < 16 {
+        out.values[i] = 0.0
+        out.uncertainties[i] = 0.0
+        out.confidences[i] = 1.0
+        i = i + 1
+    }
+    out.values[0] = 1.0
+    out.values[5] = 1.0
+    out.values[10] = 1.0
+    out.values[15] = 1.0
 }
 
-pub fn emat4_get_val(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+pub fn emat4_get_val(m: &EpistemicMat4x4, row: i64, col: i64) -> f64 {
     m.values[(row * 4 + col) as usize]
 }
 
-pub fn emat4_get_unc(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+pub fn emat4_get_unc(m: &EpistemicMat4x4, row: i64, col: i64) -> f64 {
     m.uncertainties[(row * 4 + col) as usize]
 }
 
-pub fn emat4_get_conf(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+pub fn emat4_get_conf(m: &EpistemicMat4x4, row: i64, col: i64) -> f64 {
     m.confidences[(row * 4 + col) as usize]
 }
 
-pub fn emat4_set(m: &!EpistemicMat4x4, row: i32, col: i32, val: f64, unc: f64, conf: f64) with Mut, Panic {
+pub fn emat4_set(m: &!EpistemicMat4x4, row: i64, col: i64, val: f64, unc: f64, conf: f64) with Mut, Panic {
     let idx = (row * 4 + col) as usize
     m.values[idx] = val
     m.uncertainties[idx] = unc
@@ -209,20 +214,59 @@ pub fn epistemic_dense_4x4(
     }
 }
 
-pub fn epistemic_dense_identity() -> EpistemicDenseLayer4 with Mut, Panic {
-    EpistemicDenseLayer4 {
-        weights: emat4_identity(),
-        bias: evec4_zeros(),
-        activation: ACT_IDENTITY(),
+pub fn epistemic_dense_identity(out: &!EpistemicDenseLayer4) with Mut, Panic {
+    emat4_identity(&!out.weights)
+    var i = 0
+    while i < 4 {
+        out.bias.values[i] = 0.0
+        out.bias.uncertainties[i] = 0.0
+        out.bias.confidences[i] = 1.0
+        i = i + 1
+    }
+    out.activation = ACT_IDENTITY()
+}
+
+fn epistemic_apply_activation_inplace(act: i32, v: &!EpistemicVec4) with Mut, Div, Panic {
+    if act == ACT_RELU() {
+        var i = 0
+        while i < 4 {
+            if v.values[i] <= 0.0 {
+                v.values[i] = 0.0
+                v.uncertainties[i] = 0.0
+            }
+            i = i + 1
+        }
+    } else if act == ACT_SIGMOID() {
+        var i = 0
+        while i < 4 {
+            let x = v.values[i]
+            let sig = 1.0 / (1.0 + exp_el(0.0 - x))
+            let deriv = sig * (1.0 - sig)
+            v.values[i] = sig
+            v.uncertainties[i] = abs_el(deriv) * v.uncertainties[i]
+            v.confidences[i] = v.confidences[i] * 0.98
+            i = i + 1
+        }
+    } else if act == ACT_TANH() {
+        var i = 0
+        while i < 4 {
+            let x = v.values[i]
+            let e2x = exp_el(2.0 * x)
+            let th = (e2x - 1.0) / (e2x + 1.0)
+            let deriv = 1.0 - th * th
+            v.values[i] = th
+            v.uncertainties[i] = abs_el(deriv) * v.uncertainties[i]
+            v.confidences[i] = v.confidences[i] * 0.98
+            i = i + 1
+        }
     }
 }
 
 pub fn epistemic_dense_forward(
+    out: &!EpistemicVec4,
     layer: &EpistemicDenseLayer4,
     input: &EpistemicVec4,
-) -> EpistemicVec4 with Mut, Div, Panic {
-    var z = evec4_zeros()
-    
+) with Mut, Div, Panic {
     var i = 0
     while i < 4 {
         var sum_val: f64 = 0.0
@@ -251,22 +295,14 @@ pub fn epistemic_dense_forward(
         sum_unc_sq = sum_unc_sq + b_unc * b_unc
         min_conf = min_el(min_conf, b_conf)
         
-        z.values[i] = sum_val
-        z.uncertainties[i] = sqrt_el(sum_unc_sq)
-        z.confidences[i] = min_conf
+        out.values[i] = sum_val
+        out.uncertainties[i] = sqrt_el(sum_unc_sq)
+        out.confidences[i] = min_conf
         
         i = i + 1
     }
     
-    if layer.activation == ACT_RELU() {
-        epistemic_relu(z)
-    } else if layer.activation == ACT_SIGMOID() {
-        epistemic_sigmoid(z)
-    } else if layer.activation == ACT_TANH() {
-        epistemic_tanh(z)
-    } else {
-        epistemic_identity(z)
-    }
+    epistemic_apply_activation_inplace(layer.activation, out)
 }
 
 // =============================================================================
@@ -289,12 +325,13 @@ pub fn epistemic_mlp_4_4_4(
 }
 
 pub fn epistemic_mlp_forward(
+    out: &!EpistemicVec4,
     model: &EpistemicMLP_4_4_4,
     input: &EpistemicVec4,
-) -> EpistemicVec4 with Mut, Div, Panic {
-    let hidden = epistemic_dense_forward(&model.layer1, input)
-    let output = epistemic_dense_forward(&model.layer2, &hidden)
-    output
+) with Mut, Div, Panic {
+    var hidden = evec4_zeros()
+    epistemic_dense_forward(&!hidden, &model.layer1, input)
+    epistemic_dense_forward(out, &model.layer2, &hidden)
 }
 
 pub struct LayerConfidenceSummary {
@@ -338,7 +375,8 @@ pub fn epivec4_confidence_summary(v: &EpistemicVec4) -> LayerConfidenceSummary w
 // =============================================================================
 
 fn test_epistemic_dense_forward() with Mut, Div, Panic {
-    let layer = epistemic_dense_identity()
+    var layer: EpistemicDenseLayer4
+    epistemic_dense_identity(&!layer)
     
     let input = evec4_from_epistemic(
         1.0, 0.1, 0.95,
@@ -347,7 +385,8 @@ fn test_epistemic_dense_forward() with Mut, Div, Panic {
         0.0, 0.0, 1.0,
     )
     
-    let output = epistemic_dense_forward(&layer, &input)
+    var output = evec4_zeros()
+    epistemic_dense_forward(&!output, &layer, &input)
     
     assert(output.values[0] > 0.99 && output.values[0] < 1.01)
     assert(output.uncertainties[0] > 0.09 && output.uncertainties[0] < 0.11)
@@ -355,9 +394,11 @@ fn test_epistemic_dense_forward() with Mut, Div, Panic {
 }
 
 fn test_epistemic_mlp_degradation() with Mut, Div, Panic {
-    let layer1 = epistemic_dense_identity()
-    let layer2 = epistemic_dense_identity()
-    let mlp = epistemic_mlp_4_4_4(layer1, layer2)
+    var layer1: EpistemicDenseLayer4
+    epistemic_dense_identity(&!layer1)
+    var layer2: EpistemicDenseLayer4
+    epistemic_dense_identity(&!layer2)
+    let mlp = epistemic_mlp_4x4(layer1, layer2)
     
     let input = evec4_from_epistemic(
         1.0, 0.1, 0.95,
@@ -366,7 +407,8 @@ fn test_epistemic_mlp_degradation() with Mut, Div, Panic {
         0.0, 0.0, 1.0,
     )
     
-    let output = epistemic_mlp_forward(&mlp, &input)
+    var output = evec4_zeros()
+    epistemic_mlp_forward(&!output, &mlp, &input)
     let summary = epivec4_confidence_summary(&output)
     
     assert(summary.min_confidence > 0.94)
@@ -380,7 +422,8 @@ fn test_epistemic_relu() with Mut, Div, Panic {
         -0.5, 0.05, 0.95,
     )
     
-    let r = epistemic_relu(v)
+    var r = v
+    epistemic_apply_activation_inplace(ACT_RELU(), &!r)
     
     assert(r.values[0] > 0.99 && r.values[0] < 1.01)
     assert(r.uncertainties[0] > 0.09 && r.uncertainties[0] < 0.11)
@@ -388,8 +431,9 @@ fn test_epistemic_relu() with Mut, Div, Panic {
     assert(r.uncertainties[1] == 0.0)
 }
 
-pub fn main() {
+pub fn epistemic_layer_unit_tests_main() with IO, Mut, Div, Panic {
     test_epistemic_dense_forward()
     test_epistemic_mlp_degradation()
     test_epistemic_relu()
+    println("PASS: epistemic layer unit tests")
 }

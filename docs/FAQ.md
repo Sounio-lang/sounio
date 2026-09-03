@@ -108,10 +108,13 @@ fn fetch_data(url: string) -> Result<Data> with Async {
 
 ### Does Sounio have a package manager?
 
-Planned (`siopkg`), currently in design phase. For now:
-- Use Git submodules
-- Copy modules into your project
-- Path-based imports
+Partially. Local package support is checked: `tools/sounio-pkg/sounio-pkg`
+can create, build, check, and test local packages, and the compiler has a
+gated local package-import path for packages under `packages/*`.
+
+There is no launched public package registry yet. Publishing, login, hosted
+search, and broad dependency-resolution workflows remain design/prototype
+surfaces.
 
 ---
 

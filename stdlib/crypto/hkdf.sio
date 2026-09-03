@@ -1,0 +1,450 @@
+// stdlib/crypto/hkdf.sio
+//
+// RawBuf-based HMAC-SHA256 / HMAC-SHA384 (FIPS 198-1 / RFC 2104), built on
+// top of stdlib/hash/sha256.sio and stdlib/hash/sha384.sio.
+//
+// This is a fresh, RawBuf-based implementation, deliberately separate from
+// stdlib/crypto/hmac.sio (which is a fixed-array, file-private HMAC-SHA256
+// with its own inlined SHA-256 internals). Tasks 2 (HKDF-Extract/Expand)
+// and 3 (TLS 1.3 key schedule) build on the two `pub fn` below and must not
+// need to touch hmac.sio.
+//
+// HMAC(K, m) = H((K' xor opad) || H((K' xor ipad) || m))
+// where K' is the key, hashed down to the output length if longer than the
+// hash function's BLOCK size, then zero-padded up to the block size if
+// shorter. ipad = 0x36 repeated, opad = 0x5c repeated, for the block size.
+//
+// Block size note (independently verified -- see task-1-report.md):
+//   - SHA-256 block size: 64 bytes.
+//   - SHA-384 block size: 128 bytes. SHA-384 is a SHA-512-family member
+//     (1024-bit / 128-byte blocks per FIPS 180-4), NOT 64 like SHA-256.
+//     Confirmed against Python's `hashlib.sha384().block_size` (== 128)
+//     in addition to the standard's own text.
+
+use net::socket::*
+use hash::sha256::*
+use hash::sha384::*
+
+const SHA256_BLOCK_LEN: i64 = 64
+const SHA384_BLOCK_LEN: i64 = 128
+
+const HMAC_IPAD: i64 = 0x36
+const HMAC_OPAD: i64 = 0x5c
+
+// Build the block-size-length key block K0 for HMAC-SHA256: if key_len
+// exceeds the block size, hash the key down to 32 bytes first (zero-padded
+// out to 64); otherwise copy the key bytes directly (zero-padded out to
+// 64).
+fn hmac_sha256_k0(key: &RawBuf, key_len: i64) -> RawBuf with IO {
+    let k0 = rawbuf_new(SHA256_BLOCK_LEN)
+    var i: i64 = 0
+    if key_len > SHA256_BLOCK_LEN {
+        let hashed = sha256(key, key_len)
+        while i < 32 {
+            rawbuf_set(&k0, i, hashed[i as usize] as i64)
+            i = i + 1
+        }
+    } else {
+        while i < key_len {
+            rawbuf_set(&k0, i, rawbuf_get(key, i))
+            i = i + 1
+        }
+    }
+    while i < SHA256_BLOCK_LEN {
+        rawbuf_set(&k0, i, 0)
+        i = i + 1
+    }
+    k0
+}
+
+// Build the block-size-length key block K0 for HMAC-SHA384 (block size
+// 128 bytes, hash-shortening via sha384 producing 48 bytes when
+// key_len > 128).
+fn hmac_sha384_k0(key: &RawBuf, key_len: i64) -> RawBuf with IO {
+    let k0 = rawbuf_new(SHA384_BLOCK_LEN)
+    var i: i64 = 0
+    if key_len > SHA384_BLOCK_LEN {
+        let hashed = sha384(key, key_len)
+        while i < 48 {
+            rawbuf_set(&k0, i, hashed[i as usize] as i64)
+            i = i + 1
+        }
+    } else {
+        while i < key_len {
+            rawbuf_set(&k0, i, rawbuf_get(key, i))
+            i = i + 1
+        }
+    }
+    while i < SHA384_BLOCK_LEN {
+        rawbuf_set(&k0, i, 0)
+        i = i + 1
+    }
+    k0
+}
+
+pub fn hmac_sha256_rawbuf(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8; 32] with IO {
+    let k0 = hmac_sha256_k0(key, key_len)
+
+    let inner_buf = rawbuf_new(SHA256_BLOCK_LEN + msg_len)
+    var i: i64 = 0
+    while i < SHA256_BLOCK_LEN {
+        rawbuf_set(&inner_buf, i, rawbuf_get(&k0, i) ^ HMAC_IPAD)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < msg_len {
+        rawbuf_set(&inner_buf, SHA256_BLOCK_LEN + j, rawbuf_get(msg, j))
+        j = j + 1
+    }
+    let inner_hash = sha256(&inner_buf, SHA256_BLOCK_LEN + msg_len)
+
+    let outer_buf = rawbuf_new(SHA256_BLOCK_LEN + 32)
+    var m: i64 = 0
+    while m < SHA256_BLOCK_LEN {
+        rawbuf_set(&outer_buf, m, rawbuf_get(&k0, m) ^ HMAC_OPAD)
+        m = m + 1
+    }
+    var n: i64 = 0
+    while n < 32 {
+        rawbuf_set(&outer_buf, SHA256_BLOCK_LEN + n, inner_hash[n as usize] as i64)
+        n = n + 1
+    }
+
+    sha256(&outer_buf, SHA256_BLOCK_LEN + 32)
+}
+
+pub fn hmac_sha384_rawbuf(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8; 48] with IO {
+    let k0 = hmac_sha384_k0(key, key_len)
+
+    let inner_buf = rawbuf_new(SHA384_BLOCK_LEN + msg_len)
+    var i: i64 = 0
+    while i < SHA384_BLOCK_LEN {
+        rawbuf_set(&inner_buf, i, rawbuf_get(&k0, i) ^ HMAC_IPAD)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < msg_len {
+        rawbuf_set(&inner_buf, SHA384_BLOCK_LEN + j, rawbuf_get(msg, j))
+        j = j + 1
+    }
+    let inner_hash = sha384(&inner_buf, SHA384_BLOCK_LEN + msg_len)
+
+    let outer_buf = rawbuf_new(SHA384_BLOCK_LEN + 48)
+    var m: i64 = 0
+    while m < SHA384_BLOCK_LEN {
+        rawbuf_set(&outer_buf, m, rawbuf_get(&k0, m) ^ HMAC_OPAD)
+        m = m + 1
+    }
+    var n: i64 = 0
+    while n < 48 {
+        rawbuf_set(&outer_buf, SHA384_BLOCK_LEN + n, inner_hash[n as usize] as i64)
+        n = n + 1
+    }
+
+    sha384(&outer_buf, SHA384_BLOCK_LEN + 48)
+}
+
+// -- HKDF-Extract / HKDF-Expand (RFC 5869) --------------------------------
+
+pub const HKDF_HASH_SHA256: i32 = 0
+pub const HKDF_HASH_SHA384: i32 = 1
+
+fn hkdf_hash_len(hash_algo: i32) -> i64 {
+    if hash_algo == HKDF_HASH_SHA256 { 32 } else { 48 }
+}
+
+// Dispatches to hmac_sha256_rawbuf/hmac_sha384_rawbuf, copying the fixed-size result
+// into a fresh RawBuf element-by-element (never `var x = *ref` on a
+// fixed-array reference -- see docs/handoff/souc_v0800_defects.md D8).
+fn hkdf_hmac(hash_algo: i32, key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> RawBuf with IO {
+    if hash_algo == HKDF_HASH_SHA256 {
+        let mac = hmac_sha256_rawbuf(key, key_len, msg, msg_len)
+        let out = rawbuf_new(32)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    } else {
+        let mac = hmac_sha384_rawbuf(key, key_len, msg, msg_len)
+        let out = rawbuf_new(48)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    }
+}
+
+pub fn hkdf_extract(hash_algo: i32, salt: &RawBuf, salt_len: i64, ikm: &RawBuf, ikm_len: i64) -> RawBuf with IO {
+    // RFC 5869 2.2: PRK = HMAC-Hash(salt, IKM). Per the RFC, if salt is
+    // not provided, it is set to a string of HashLen zeros -- this
+    // plan's callers (Task 3) always provide an explicit salt (even if
+    // it's a zero-filled buffer), so this function does not synthesize
+    // a default salt itself.
+    hkdf_hmac(hash_algo, salt, salt_len, ikm, ikm_len)
+}
+
+pub fn hkdf_expand(hash_algo: i32, prk: &RawBuf, prk_len: i64, info: &RawBuf, info_len: i64, out_len: i64) -> RawBuf with IO {
+    // RFC 5869 2.3: T(0) = empty string
+    //   T(i) = HMAC-Hash(PRK, T(i-1) | info | i)   for i = 1 .. N
+    //   N = ceil(out_len / HashLen)
+    //   OKM = T(1) | T(2) | ... | T(N), truncated to out_len bytes.
+    // The iteration counter i is a SINGLE byte (values 1..255), per the
+    // RFC -- this caps out_len at 255 * HashLen, which the RFC states
+    // explicitly and which this function does not otherwise enforce
+    // (callers in this plan never request more than a handful of bytes).
+    let hash_len = hkdf_hash_len(hash_algo)
+    let out = rawbuf_new(out_len)
+
+    var t_len: i64 = 0
+    let t_prev = rawbuf_new(hash_len)
+    var written: i64 = 0
+    var counter: i64 = 1
+
+    while written < out_len {
+        // Build this iteration's HMAC input: T(i-1) ++ info ++ counter-byte.
+        let block_in = rawbuf_new(t_len + info_len + 1)
+        var a: i64 = 0
+        while a < t_len {
+            rawbuf_set(&block_in, a, rawbuf_get(&t_prev, a))
+            a = a + 1
+        }
+        var b: i64 = 0
+        while b < info_len {
+            rawbuf_set(&block_in, t_len + b, rawbuf_get(info, b))
+            b = b + 1
+        }
+        rawbuf_set(&block_in, t_len + info_len, counter)
+
+        let t_cur = hkdf_hmac(hash_algo, prk, prk_len, &block_in, t_len + info_len + 1)
+
+        // Copy this block into the output, truncating the final block if
+        // it would overrun out_len.
+        var c: i64 = 0
+        while c < hash_len {
+            if written < out_len {
+                rawbuf_set(&out, written, rawbuf_get(&t_cur, c))
+                written = written + 1
+            }
+            c = c + 1
+        }
+
+        // t_prev <- t_cur, for the next iteration's input.
+        var d: i64 = 0
+        while d < hash_len {
+            rawbuf_set(&t_prev, d, rawbuf_get(&t_cur, d))
+            d = d + 1
+        }
+        t_len = hash_len
+        counter = counter + 1
+    }
+
+    out
+}
+
+// -- TLS 1.3 key schedule (RFC 8446 section 7.1 / 7.3) --------------------
+//
+// `rawbuf_new`'s zero-initialization was independently verified with a
+// throwaway probe (64 allocations x 64 bytes, all bytes read back as 0)
+// before being relied on below for the Early Secret's zero salt/IKM, the
+// Master Secret's zero IKM, and the empty-context buffer in
+// tls13_traffic_key_and_iv.
+//
+// This TLS 1.3-specific implementation and its RFC 8448 test vector were
+// verified against the actual RFC 8448 text (fetched fresh from
+// https://www.rfc-editor.org/rfc/rfc8448.txt), section 3 "Simple 1-RTT
+// Handshake" -- confirmed to be the X25519 + AES-128-GCM-SHA256 trace by
+// its ServerHello's cipher suite byte pair `00 13 01` (TLS_AES_128_GCM_
+// SHA256) and key_share group `00 1d` (x25519). See task-3-report.md for
+// the full extraction record.
+
+// RFC 8446 section 7.1:
+//   struct { uint16 length; opaque label<7..255> = "tls13 " + Label;
+//             opaque context<0..255> = Context; } HkdfLabel;
+//
+// Precondition (NOT checked at runtime): `label_len <= 249` (so that
+// `6 + label_len <= 255`, satisfying the RFC's `opaque label<7..255>`
+// vector-length limit once the 6-byte "tls13 " prefix is added) and
+// `context_len <= 255` (satisfying `opaque context<0..255>` directly).
+// Violating either bound is NOT detected or rejected here: the
+// single-byte length-prefix fields at `info[2]` (the full "tls13 "+label
+// length) and `info[3+full_label_len]` (the context length) are written
+// via plain truncating byte stores, so a length that doesn't fit in a
+// byte silently wraps modulo 256 -- e.g. label_len=250 makes
+// full_label_len=256, which wraps the length-prefix byte to 0 -- producing
+// a malformed `HkdfLabel` (wrong length-prefix, but still all the label
+// and context bytes actually present in `info`) rather than a compile-
+// or run-time error. Every current caller in this module is far under
+// both limits: label literals are TLS 1.3 constants at most ~14 bytes
+// ("c ap traffic", "s hs traffic", "derived", "key", "iv", ...), and
+// contexts are transcript-hash outputs of 32 (SHA-256) or 48 (SHA-384)
+// bytes. See the final-review ledger (Finding 2) for the ruling that
+// keeps this a documented, tested, but unenforced precondition rather
+// than a signature-widening fix, since no reachable caller today or in
+// the planned handshake sub-project ever approaches either bound.
+pub fn hkdf_expand_label(
+    hash_algo: i32,
+    secret: &RawBuf,
+    secret_len: i64,
+    label: &RawBuf,
+    label_len: i64,
+    context: &RawBuf,
+    context_len: i64,
+    out_len: i64,
+) -> RawBuf with IO {
+    let full_label_len = 6 + label_len
+    let info_len = 2 + 1 + full_label_len + 1 + context_len
+    let info = rawbuf_new(info_len)
+
+    // uint16 length, big-endian.
+    rawbuf_set(&info, 0, (out_len / 256) & 255)
+    rawbuf_set(&info, 1, out_len & 255)
+
+    // 1-byte vector-length prefix for ("tls13 " + label).
+    rawbuf_set(&info, 2, full_label_len)
+
+    // "tls13 " literal prefix (6 ASCII bytes).
+    let prefix = "tls13 "
+    var i: i64 = 0
+    while i < 6 {
+        rawbuf_set(&info, 3 + i, str_char_at(prefix, i))
+        i = i + 1
+    }
+
+    // The caller-supplied label bytes.
+    var j: i64 = 0
+    while j < label_len {
+        rawbuf_set(&info, 3 + 6 + j, rawbuf_get(label, j))
+        j = j + 1
+    }
+
+    // 1-byte vector-length prefix for context.
+    rawbuf_set(&info, 3 + full_label_len, context_len)
+
+    // The context bytes.
+    var k: i64 = 0
+    while k < context_len {
+        rawbuf_set(&info, 3 + full_label_len + 1 + k, rawbuf_get(context, k))
+        k = k + 1
+    }
+
+    hkdf_expand(hash_algo, secret, secret_len, &info, info_len, out_len)
+}
+
+// Derive-Secret(Secret, Label, Messages) =
+//   HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
+// `transcript_hash` is an already-computed input -- transcript hashing
+// itself is out of this module's scope.
+pub fn derive_secret(
+    hash_algo: i32,
+    secret: &RawBuf,
+    secret_len: i64,
+    label: &RawBuf,
+    label_len: i64,
+    transcript_hash: &RawBuf,
+    transcript_hash_len: i64,
+) -> RawBuf with IO {
+    hkdf_expand_label(hash_algo, secret, secret_len, label, label_len, transcript_hash, transcript_hash_len, hkdf_hash_len(hash_algo))
+}
+
+// RFC 8446 section 7.1: Early Secret = HKDF-Extract(salt=0, IKM=0), both
+// zero-filled to Hash.length bytes -- HKDF's own "no salt/IKM provided"
+// convention.
+pub fn tls13_early_secret(hash_algo: i32) -> RawBuf with IO {
+    let hash_len = hkdf_hash_len(hash_algo)
+    let zero_salt = rawbuf_new(hash_len)
+    let zero_ikm = rawbuf_new(hash_len)
+    hkdf_extract(hash_algo, &zero_salt, hash_len, &zero_ikm, hash_len)
+}
+
+fn derived_label_buf() -> RawBuf with IO {
+    let s = "derived"
+    let buf = rawbuf_new(7)
+    var i: i64 = 0
+    while i < 7 {
+        rawbuf_set(&buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    buf
+}
+
+// Hash(""): the hash of a zero-length input, computed directly (never
+// hard-coded) so this stays correct regardless of hash_algo. Independently
+// verified against the well-known SHA-256("") =
+// e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 during
+// implementation.
+fn empty_string_hash(hash_algo: i32) -> RawBuf with IO {
+    let empty = rawbuf_new(0)
+    let hash_len = hkdf_hash_len(hash_algo)
+    let out = rawbuf_new(hash_len)
+    if hash_algo == HKDF_HASH_SHA256 {
+        let h = sha256(&empty, 0)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, h[i as usize] as i64)
+            i = i + 1
+        }
+    } else {
+        let h = sha384(&empty, 0)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, h[i as usize] as i64)
+            i = i + 1
+        }
+    }
+    out
+}
+
+// RFC 8446 section 7.1: Handshake Secret = HKDF-Extract(salt=derived,
+// IKM=ECDHE shared secret), where `derived` =
+// Derive-Secret(early_secret, "derived", "").
+pub fn tls13_handshake_secret(hash_algo: i32, early_secret: &RawBuf, early_secret_len: i64, ecdhe_shared_secret: &RawBuf, ecdhe_len: i64) -> RawBuf with IO {
+    let empty_hash = empty_string_hash(hash_algo)
+    let hash_len = hkdf_hash_len(hash_algo)
+    let label = derived_label_buf()
+    let derived = derive_secret(hash_algo, early_secret, early_secret_len, &label, 7, &empty_hash, hash_len)
+    hkdf_extract(hash_algo, &derived, hash_len, ecdhe_shared_secret, ecdhe_len)
+}
+
+// RFC 8446 section 7.1: Master Secret = HKDF-Extract(salt=derived, IKM=0),
+// where `derived` = Derive-Secret(handshake_secret, "derived", ""). Per
+// the RFC's own key-schedule diagram, this stage's IKM is an all-zero
+// buffer -- NOT the handshake secret itself -- distinct from the Early
+// Secret stage, which also zero-fills BOTH salt and IKM.
+pub fn tls13_master_secret(hash_algo: i32, handshake_secret: &RawBuf, handshake_secret_len: i64) -> RawBuf with IO {
+    let empty_hash = empty_string_hash(hash_algo)
+    let hash_len = hkdf_hash_len(hash_algo)
+    let label = derived_label_buf()
+    let derived = derive_secret(hash_algo, handshake_secret, handshake_secret_len, &label, 7, &empty_hash, hash_len)
+    let zero_ikm = rawbuf_new(hash_len)
+    hkdf_extract(hash_algo, &derived, hash_len, &zero_ikm, hash_len)
+}
+
+// RFC 8446 section 7.3: per-direction AEAD write key and IV, derived from
+// a traffic secret via HKDF-Expand-Label with an empty context.
+pub fn tls13_traffic_key_and_iv(hash_algo: i32, traffic_secret: &RawBuf, traffic_secret_len: i64, key_len: i64, iv_len: i64) -> (RawBuf, RawBuf) with IO {
+    let key_label_str = "key"
+    let key_label = rawbuf_new(3)
+    var i: i64 = 0
+    while i < 3 {
+        rawbuf_set(&key_label, i, str_char_at(key_label_str, i))
+        i = i + 1
+    }
+
+    let iv_label_str = "iv"
+    let iv_label = rawbuf_new(2)
+    var j: i64 = 0
+    while j < 2 {
+        rawbuf_set(&iv_label, j, str_char_at(iv_label_str, j))
+        j = j + 1
+    }
+
+    let empty_context = rawbuf_new(0)
+
+    let key = hkdf_expand_label(hash_algo, traffic_secret, traffic_secret_len, &key_label, 3, &empty_context, 0, key_len)
+    let iv = hkdf_expand_label(hash_algo, traffic_secret, traffic_secret_len, &iv_label, 2, &empty_context, 0, iv_len)
+    (key, iv)
+}

@@ -1,0 +1,138 @@
+name: Madaros Prebuilt Refresh
+
+# Keeps the checked-in Madaros default (bin/madaros-linux-x86_64) current with
+# self-hosted/compiler/main.sio. The binary is ~86 MB and git has no LFS, so this
+# runs on a WEEKLY schedule (and on-demand) rather than per push — bounded history
+# growth, ~one 86 MB blob per week at most, and only when the binary actually
+# changed. Triggers are schedule + manual dispatch only, so the commit-back never
+# re-triggers this workflow; the commit also carries [skip ci] so the binary bump
+# does not spin up the full CI suite.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build Madaros from (default: main). Non-main refs are for verifying codegen fixes via the uploaded artifact before merge.'
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: madaros-prebuilt-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Rebuild and commit bin/madaros-linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || 'main' }}
+
+      - name: Build Madaros (seed-decoupled)
+        run: |
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          # Seeds from the committed lean_single ELF (not the bin/souc wrapper).
+          # A build/infra failure here is a real problem -> fail the job (red).
+          make build-madaros
+          test -s artifacts/self-hosted/madaros
+
+      # Always upload the freshly-built binary (even when the gate later fails and
+      # the prebuilt is not refreshed) so the build can be inspected/reproduced
+      # off-CI — the lean_single seed cannot compile main.sio in every workspace.
+      - name: Upload built Madaros for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-built
+          path: artifacts/self-hosted/madaros
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Gate the built Madaros
+        id: gate
+        run: |
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          # A GATE failure means current main's Madaros is not shippable (often
+          # because main itself is broken) -> do NOT fail the job and do NOT
+          # commit; keep the last-good prebuilt. Only a green gate refreshes.
+          # The full gate is the broad contract; the enum + loop gates additionally
+          # build+run enum-variant USE and for/while + break/continue (which the full
+          # gate never exercised). The multimodule witness covers import-aware
+          # bin/madaros check|run|build, which the full suite can miss when
+          # source and the checked-in prebuilt drift. The source-to-ELF gate
+          # covers the raw --native-v2-compile bridge, so a prebuilt that
+          # regresses the direct source -> native-v2 -> ELF path is not shipped.
+          # The self-parse gate is here because none of the five gates above ever
+          # asked the compiler to read its own source tree. On 2026-08-03 a
+          # Madaros that could not parse self-hosted/resolve/scope.sio would have
+          # passed every one of them and been committed as the shipped prebuilt.
+          # It reuses the ELF just built; it adds no build.
+          if bash scripts/ci/madaros_full_gate.sh \
+             && bash scripts/ci/madaros_enum_gate.sh \
+             && bash scripts/ci/madaros_loop_gate.sh \
+             && bash scripts/ci/madaros_multimodule_witness.sh \
+             && SOUNIO_MADAROS_SELF_PARSE_BIN=artifacts/self-hosted/madaros bash scripts/ci/madaros_self_parse_gate.sh \
+             && bash scripts/ci/madaros_source_to_elf_gate.sh; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::A Madaros gate (full / enum / loop / multimodule witness / source-to-ELF) did not pass — keeping the existing prebuilt bin/madaros-linux-x86_64 (no refresh)."
+          fi
+
+      - name: Install built Madaros as the checked-in prebuilt
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
+        run: |
+          cp artifacts/self-hosted/madaros bin/madaros-linux-x86_64
+          chmod +x bin/madaros-linux-x86_64
+          # Emit the provenance receipt for the binary actually being shipped.
+          # The receipt was previously hand-written, had no producer and no
+          # consumer, and drifted until it described a file that no longer
+          # existed. madaros_receipt_gate.sh verifies what this writes.
+          bash scripts/ci/madaros_write_receipt.sh bin/madaros-linux-x86_64 \
+            madaros_full_gate.sh \
+            "full,enum,loop,multimodule_witness,self_parse,source_to_elf"
+
+      - name: Commit and push if the prebuilt changed
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
+        run: |
+          if git diff --quiet -- bin/madaros-linux-x86_64; then
+            echo "bin/madaros-linux-x86_64 is unchanged — nothing to commit."
+            exit 0
+          fi
+
+          SRC_REF="$(git rev-parse --short HEAD)"
+          BYTES="$(wc -c < bin/madaros-linux-x86_64)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The receipt goes with the binary it describes, in the same commit.
+          # Committing one without the other is how they drifted apart before.
+          git add bin/madaros-linux-x86_64 artifacts/self-hosted/madaros.gate-receipt
+          git commit -m "build(madaros): refresh prebuilt bin/madaros-linux-x86_64 [skip ci]
+
+          Auto-rebuilt from ${SRC_REF} (make build-madaros) and passed the
+          Madaros full, enum, loop, multimodule witness, and source-to-ELF gates. Keeps the
+          out-of-box Madaros default current with self-hosted/compiler/main.sio.
+          Binary size: ${BYTES} bytes."
+
+          # Land on the latest main (it may have advanced during the build).
+          # The binary is a generated artifact, so a rebase is normally clean.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main && git push origin HEAD:main; then
+              echo "Refreshed prebuilt pushed to main (attempt ${attempt})."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "push attempt ${attempt} failed; retrying after fetch…" >&2
+            sleep 5
+          done
+          echo "ERROR: could not push refreshed prebuilt after 3 attempts." >&2
+          exit 1

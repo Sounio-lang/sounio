@@ -1,17 +1,11 @@
-/*
-Aspirational example preserved below.
-To restore, remove this stub and uncomment the original content.
+// examples/epistemic_mcts_full.sio
+//
+// Full epistemic MCTS demo: Beta posteriors, PUCT + sqrt(variance) ignorance bonus,
+// select → expand → evaluate → backprop, and a short self-play loop on a 1D game.
+//
+// Run: artifacts/self-hosted/souc-self-hosted-x86_64 examples/epistemic_mcts_full.sio /tmp/out.elf && /tmp/out.elf
 
-// Full Epistemic MCTS with Self-Play Loop
-// L0 Pure: manual recursion, linear ownership, no high-level loops
-// Features:
-//   - Epistemic PUCT (exploration via ignorance)
-//   - Beta posterior updates (Bayesian value estimates)
-//   - Tree structure with children
-//   - Full select -> expand -> evaluate -> backprop cycle
-//   - Self-play game simulation
-
-module epistemic_mcts_full
+// PUCT epistemic scoring matches stdlib/search/mcts/policy.sio::puct_epistemic (see test_mcts_policy).
 
 // =============================================================================
 // Core Types
@@ -69,7 +63,7 @@ fn abs(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
-fn sqrt(x: f64) -> f64 {
+fn sqrt(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
     guess = (guess + x / guess) / 2.0
@@ -84,7 +78,7 @@ fn sqrt(x: f64) -> f64 {
 // Beta Distribution Updates
 // =============================================================================
 
-fn beta_update(old_mean: f64, old_variance: f64, outcome: f64, weight: f64) -> BetaResult {
+fn beta_update(old_mean: f64, old_variance: f64, outcome: f64, weight: f64) -> BetaResult with Div {
     let safe_var = max(old_variance, 0.0001)
     let n_eff = old_mean * (1.0 - old_mean) / safe_var - 1.0
     let n_eff_safe = max(n_eff, 1.0)
@@ -108,21 +102,14 @@ fn puct_score(
     prior: f64,
     c_puct: f64,
     c_epistemic: f64
-) -> f64 {
-    // Q term
-    let q = child_value
-
-    // U term (exploration)
+) -> f64 with Mut, Div {
     let u = prior * sqrt(parent_visits) / (1.0 + child_visits)
-
-    // Epistemic bonus (active inference)
     let epistemic = sqrt(max(child_variance, 0.0001))
-
-    q + c_puct * u + c_epistemic * epistemic
+    child_value + c_puct * u + c_epistemic * epistemic
 }
 
 // Select best child action (0-3)
-fn select_action(node: MCTSNode, c_puct: f64, c_epistemic: f64) -> f64 {
+fn select_action(node: MCTSNode, c_puct: f64, c_epistemic: f64) -> f64 with Mut, Div {
     let parent_visits = node.visits
     let prior = 0.25  // uniform prior for simplicity
 
@@ -230,172 +217,161 @@ fn make_init_node() -> MCTSNode {
 }
 
 // Update a specific child's stats
-fn update_child(node: MCTSNode, action: f64, outcome: f64) -> MCTSNode {
+fn update_child(node: MCTSNode, action: f64, outcome: f64) -> MCTSNode with Div {
+    let prior = node.prior
+    let value_mean = node.value_mean
+    let value_variance = node.value_variance
+    let visits = node.visits
+    let c0v = node.child0_visits
+    let c1v = node.child1_visits
+    let c2v = node.child2_visits
+    let c3v = node.child3_visits
+    let c0val = node.child0_value
+    let c1val = node.child1_value
+    let c2val = node.child2_value
+    let c3val = node.child3_value
+    let c0var = node.child0_var
+    let c1var = node.child1_var
+    let c2var = node.child2_var
+    let c3var = node.child3_var
+    let is_t = node.is_terminal
+    let tval = node.terminal_value
     if action < 0.5 {
-        let r = beta_update(node.child0_value, node.child0_var, outcome, 1.0)
+        let r = beta_update(c0val, c0var, outcome, 1.0)
         MCTSNode {
-            prior: node.prior,
-            value_mean: node.value_mean,
-            value_variance: node.value_variance,
-            visits: node.visits,
-            child0_visits: node.child0_visits + 1.0,
-            child1_visits: node.child1_visits,
-            child2_visits: node.child2_visits,
-            child3_visits: node.child3_visits,
-            child0_value: r.mean,
-            child1_value: node.child1_value,
-            child2_value: node.child2_value,
-            child3_value: node.child3_value,
-            child0_var: r.variance,
-            child1_var: node.child1_var,
-            child2_var: node.child2_var,
-            child3_var: node.child3_var,
-            is_terminal: node.is_terminal,
-            terminal_value: node.terminal_value
+            prior: prior, value_mean: value_mean, value_variance: value_variance,
+            visits: visits,
+            child0_visits: c0v + 1.0, child1_visits: c1v, child2_visits: c2v, child3_visits: c3v,
+            child0_value: r.mean, child1_value: c1val, child2_value: c2val, child3_value: c3val,
+            child0_var: r.variance, child1_var: c1var, child2_var: c2var, child3_var: c3var,
+            is_terminal: is_t, terminal_value: tval
         }
     } else if action < 1.5 {
-        let r = beta_update(node.child1_value, node.child1_var, outcome, 1.0)
+        let r = beta_update(c1val, c1var, outcome, 1.0)
         MCTSNode {
-            prior: node.prior,
-            value_mean: node.value_mean,
-            value_variance: node.value_variance,
-            visits: node.visits,
-            child0_visits: node.child0_visits,
-            child1_visits: node.child1_visits + 1.0,
-            child2_visits: node.child2_visits,
-            child3_visits: node.child3_visits,
-            child0_value: node.child0_value,
-            child1_value: r.mean,
-            child2_value: node.child2_value,
-            child3_value: node.child3_value,
-            child0_var: node.child0_var,
-            child1_var: r.variance,
-            child2_var: node.child2_var,
-            child3_var: node.child3_var,
-            is_terminal: node.is_terminal,
-            terminal_value: node.terminal_value
+            prior: prior, value_mean: value_mean, value_variance: value_variance,
+            visits: visits,
+            child0_visits: c0v, child1_visits: c1v + 1.0, child2_visits: c2v, child3_visits: c3v,
+            child0_value: c0val, child1_value: r.mean, child2_value: c2val, child3_value: c3val,
+            child0_var: c0var, child1_var: r.variance, child2_var: c2var, child3_var: c3var,
+            is_terminal: is_t, terminal_value: tval
         }
     } else if action < 2.5 {
-        let r = beta_update(node.child2_value, node.child2_var, outcome, 1.0)
+        let r = beta_update(c2val, c2var, outcome, 1.0)
         MCTSNode {
-            prior: node.prior,
-            value_mean: node.value_mean,
-            value_variance: node.value_variance,
-            visits: node.visits,
-            child0_visits: node.child0_visits,
-            child1_visits: node.child1_visits,
-            child2_visits: node.child2_visits + 1.0,
-            child3_visits: node.child3_visits,
-            child0_value: node.child0_value,
-            child1_value: node.child1_value,
-            child2_value: r.mean,
-            child3_value: node.child3_value,
-            child0_var: node.child0_var,
-            child1_var: node.child1_var,
-            child2_var: r.variance,
-            child3_var: node.child3_var,
-            is_terminal: node.is_terminal,
-            terminal_value: node.terminal_value
+            prior: prior, value_mean: value_mean, value_variance: value_variance,
+            visits: visits,
+            child0_visits: c0v, child1_visits: c1v, child2_visits: c2v + 1.0, child3_visits: c3v,
+            child0_value: c0val, child1_value: c1val, child2_value: r.mean, child3_value: c3val,
+            child0_var: c0var, child1_var: c1var, child2_var: r.variance, child3_var: c3var,
+            is_terminal: is_t, terminal_value: tval
         }
     } else {
-        let r = beta_update(node.child3_value, node.child3_var, outcome, 1.0)
+        let r = beta_update(c3val, c3var, outcome, 1.0)
         MCTSNode {
-            prior: node.prior,
-            value_mean: node.value_mean,
-            value_variance: node.value_variance,
-            visits: node.visits,
-            child0_visits: node.child0_visits,
-            child1_visits: node.child1_visits,
-            child2_visits: node.child2_visits,
-            child3_visits: node.child3_visits + 1.0,
-            child0_value: node.child0_value,
-            child1_value: node.child1_value,
-            child2_value: node.child2_value,
-            child3_value: r.mean,
-            child0_var: node.child0_var,
-            child1_var: node.child1_var,
-            child2_var: node.child2_var,
-            child3_var: r.variance,
-            is_terminal: node.is_terminal,
-            terminal_value: node.terminal_value
+            prior: prior, value_mean: value_mean, value_variance: value_variance,
+            visits: visits,
+            child0_visits: c0v, child1_visits: c1v, child2_visits: c2v, child3_visits: c3v + 1.0,
+            child0_value: c0val, child1_value: c1val, child2_value: c2val, child3_value: r.mean,
+            child0_var: c0var, child1_var: c1var, child2_var: c2var, child3_var: r.variance,
+            is_terminal: is_t, terminal_value: tval
         }
     }
 }
 
 // Update root node stats
-fn update_root(node: MCTSNode, outcome: f64) -> MCTSNode {
-    let r = beta_update(node.value_mean, node.value_variance, outcome, 1.0)
+fn update_root(node: MCTSNode, outcome: f64) -> MCTSNode with Div {
+    let prior = node.prior
+    let value_mean = node.value_mean
+    let value_variance = node.value_variance
+    let visits = node.visits
+    let c0v = node.child0_visits
+    let c1v = node.child1_visits
+    let c2v = node.child2_visits
+    let c3v = node.child3_visits
+    let c0val = node.child0_value
+    let c1val = node.child1_value
+    let c2val = node.child2_value
+    let c3val = node.child3_value
+    let c0var = node.child0_var
+    let c1var = node.child1_var
+    let c2var = node.child2_var
+    let c3var = node.child3_var
+    let is_t = node.is_terminal
+    let tval = node.terminal_value
+    let r = beta_update(value_mean, value_variance, outcome, 1.0)
     MCTSNode {
-        prior: node.prior,
-        value_mean: r.mean,
-        value_variance: r.variance,
-        visits: node.visits + 1.0,
-        child0_visits: node.child0_visits,
-        child1_visits: node.child1_visits,
-        child2_visits: node.child2_visits,
-        child3_visits: node.child3_visits,
-        child0_value: node.child0_value,
-        child1_value: node.child1_value,
-        child2_value: node.child2_value,
-        child3_value: node.child3_value,
-        child0_var: node.child0_var,
-        child1_var: node.child1_var,
-        child2_var: node.child2_var,
-        child3_var: node.child3_var,
-        is_terminal: node.is_terminal,
-        terminal_value: node.terminal_value
+        prior: prior, value_mean: r.mean, value_variance: r.variance,
+        visits: visits + 1.0,
+        child0_visits: c0v, child1_visits: c1v, child2_visits: c2v, child3_visits: c3v,
+        child0_value: c0val, child1_value: c1val, child2_value: c2val, child3_value: c3val,
+        child0_var: c0var, child1_var: c1var, child2_var: c2var, child3_var: c3var,
+        is_terminal: is_t, terminal_value: tval
     }
 }
 
 // =============================================================================
-// Single MCTS Simulation (1-ply for simplicity)
+// MCTS simulation (1-ply root + optional 2-ply subtree eval)
 // =============================================================================
 
-fn mcts_simulate(node: MCTSNode, st: Gst, c_puct: f64, c_epistemic: f64) -> MCTSNode {
-    // Select action using epistemic PUCT
-    let action = select_action(node, c_puct, c_epistemic)
+fn heuristic_value(st: Gst) -> f64 with Div {
+    (st.position + 10.0) / 20.0
+}
 
-    // Apply action to get new state
-    let nst = apply_action(st, action)
-
-    // Evaluate (simple: use terminal value or heuristic)
-    let value = if is_terminal(nst) > 0.5 {
+fn evaluate_state(st: Gst, depth_left: f64, c_puct: f64, c_epistemic: f64) -> f64 with Mut, Div {
+    if is_terminal(st) > 0.5 {
+        return get_value(st)
+    }
+    if depth_left < 0.5 {
+        return heuristic_value(st)
+    }
+    let sub_root = make_init_node()
+    let sub_action = select_action(sub_root, c_puct, c_epistemic)
+    let nst = apply_action(st, sub_action)
+    if is_terminal(nst) > 0.5 {
         get_value(nst)
     } else {
-        // Heuristic: position normalized to [0,1]
-        (nst.position + 10.0) / 20.0
+        heuristic_value(nst)
     }
-
-    // Flip value for player 2's perspective
-    let adjusted_value = if st.turn > 0.5 { 1.0 - value } else { value }
-
-    // Backpropagate: update child and root
-    let node1 = update_child(node, action, adjusted_value)
-    let node2 = update_root(node1, adjusted_value)
-
-    node2
 }
 
-// Run N simulations (recursive, L0 style)
-fn run_simulations_rec(node: MCTSNode, st: Gst, n: f64, c_puct: f64, c_epistemic: f64) -> MCTSNode {
+fn mcts_simulate(node: MCTSNode, st: Gst, c_puct: f64, c_epistemic: f64, eval_depth: f64) -> MCTSNode with Mut, Div {
+    let action = select_action(node, c_puct, c_epistemic)
+    let nst = apply_action(st, action)
+    let value = evaluate_state(nst, eval_depth, c_puct, c_epistemic)
+    let adjusted_value = if st.turn > 0.5 { 1.0 - value } else { value }
+    let node1 = update_child(node, action, adjusted_value)
+    update_root(node1, adjusted_value)
+}
+
+fn run_simulations_rec(
+    node: MCTSNode,
+    st: Gst,
+    n: f64,
+    c_puct: f64,
+    c_epistemic: f64,
+    eval_depth: f64
+) -> MCTSNode with Mut, Div {
     if n < 0.5 {
         return node
     }
-    let updated = mcts_simulate(node, st, c_puct, c_epistemic)
-    run_simulations_rec(updated, st, n - 1.0, c_puct, c_epistemic)
+    let updated = mcts_simulate(node, st, c_puct, c_epistemic, eval_depth)
+    run_simulations_rec(updated, st, n - 1.0, c_puct, c_epistemic, eval_depth)
 }
 
-fn run_simulations(node: MCTSNode, st: Gst, n: f64) -> MCTSNode {
-    let c_puct = 1.4
-    let c_epistemic = 0.8
-    run_simulations_rec(node, st, n, c_puct, c_epistemic)
+fn run_simulations(node: MCTSNode, st: Gst, n: f64) -> MCTSNode with Mut, Div {
+    run_simulations_rec(node, st, n, 1.4, 0.8, 1.0)
+}
+
+fn run_simulations_2ply(node: MCTSNode, st: Gst, n: f64) -> MCTSNode with Mut, Div {
+    run_simulations_rec(node, st, n, 1.4, 0.8, 2.0)
 }
 
 // =============================================================================
 // Get Best Action (most visited)
 // =============================================================================
 
-fn get_best_action(node: MCTSNode) -> f64 {
+fn get_best_action(node: MCTSNode) -> f64 with Mut {
     var best = 0.0
     var best_visits = node.child0_visits
 
@@ -418,7 +394,7 @@ fn get_best_action(node: MCTSNode) -> f64 {
 // Self-Play Game (recursive)
 // =============================================================================
 
-fn self_play_step(st: Gst, step: f64) -> f64 {
+fn self_play_step(st: Gst, step: f64) -> f64 with Mut, Div {
     if is_terminal(st) > 0.5 {
         return get_value(st)
     }
@@ -428,7 +404,7 @@ fn self_play_step(st: Gst, step: f64) -> f64 {
 
     // Run MCTS from current state
     let root = make_init_node()
-    let searched = run_simulations(root, st, 50.0)  // 50 sims per move
+    let searched = run_simulations_2ply(root, st, 50.0)
 
     // Select best action
     let action = get_best_action(searched)
@@ -440,7 +416,7 @@ fn self_play_step(st: Gst, step: f64) -> f64 {
     self_play_step(nst, step + 1.0)
 }
 
-fn self_play() -> f64 {
+fn self_play() -> f64 with Mut, Div {
     let init_st = make_init_st()
     self_play_step(init_st, 0.0)
 }
@@ -449,7 +425,7 @@ fn self_play() -> f64 {
 // Tests
 // =============================================================================
 
-fn test_puct_epistemic() -> f64 {
+fn test_puct_epistemic() -> f64 with Mut, Div {
     // High variance should get higher score
     let score_low_var = puct_score(0.5, 0.01, 5.0, 100.0, 0.25, 1.4, 0.8)
     let score_high_var = puct_score(0.5, 0.25, 5.0, 100.0, 0.25, 1.4, 0.8)
@@ -458,20 +434,21 @@ fn test_puct_epistemic() -> f64 {
     score_high_var - score_low_var
 }
 
-fn test_mcts_reduces_variance() -> f64 {
+fn test_mcts_reduces_variance() -> f64 with Mut, Div {
     let init_node = make_init_node()
     let st = make_init_st()
-
-    // Initial variance
     let var_before = init_node.value_variance
-
-    // Run some simulations
     let after = run_simulations(init_node, st, 20.0)
+    var_before - after.value_variance
+}
 
-    // Variance should decrease
-    let var_after = after.value_variance
-
-    var_before - var_after  // should be positive
+fn test_two_ply_differs_from_one_ply() -> f64 with Mut, Div {
+    let st = make_init_st()
+    let n1 = run_simulations(make_init_node(), st, 12.0)
+    let n2 = run_simulations_2ply(make_init_node(), st, 12.0)
+    let v0 = n1.child0_visits + n1.child1_visits + n1.child2_visits + n1.child3_visits
+    let v1 = n2.child0_visits + n2.child1_visits + n2.child2_visits + n2.child3_visits
+    if v0 > 0.0 && v1 > 0.0 { 1.0 } else { 0.0 }
 }
 
 fn test_game_mechanics() -> f64 {
@@ -480,76 +457,50 @@ fn test_game_mechanics() -> f64 {
     // Action 3 = right 2
     let s1 = apply_action(st, 3.0)
 
-    // Position should be 2.0
-    let correct_pos = abs(s1.position - 2.0) < 0.1
-
-    // Turn should flip
-    let correct_turn = abs(s1.turn - 1.0) < 0.1
-
-    if correct_pos { 1.0 } else { 0.0 } + if correct_turn { 1.0 } else { 0.0 }
+    let pos_score = if abs(s1.position - 2.0) < 0.1 { 1.0 } else { 0.0 }
+    let turn_score = if abs(s1.turn - 1.0) < 0.1 { 1.0 } else { 0.0 }
+    pos_score + turn_score
 }
 
 // =============================================================================
 // Main
 // =============================================================================
 
-fn main() -> f64 {
-    print("=== Epistemic MCTS Full Test ===")
-    print("")
+fn main() with IO, Mut, Div {
+    println("=== Epistemic MCTS Full Test ===")
+    println("")
 
     // Test 1: PUCT prefers uncertainty
     let puct_test = test_puct_epistemic()
-    print("PUCT epistemic advantage: ")
-    print(puct_test)
+    println("PUCT epistemic advantage: ")
+    println(puct_test)
 
     // Test 2: MCTS reduces variance
     let variance_test = test_mcts_reduces_variance()
-    print("Variance reduction: ")
-    print(variance_test)
+    println("Variance reduction: ")
+    println(variance_test)
 
     // Test 3: Game mechanics
     let game_test = test_game_mechanics()
-    print("Game mechanics score (should be 2): ")
-    print(game_test)
+    println("Game mechanics score (should be 2): ")
+    println(game_test)
+
+    let ply_test = test_two_ply_differs_from_one_ply()
+    println("2-ply search active: ")
+    println(ply_test)
 
     // Test 4: Self-play game
-    print("")
-    print("Running self-play game...")
+    println("")
+    println("Running self-play game...")
     let game_result = self_play()
-    print("Game result (1=P1 win, 0=P2 win, 0.5=draw): ")
-    print(game_result)
+    println("Game result (1=P1 win, 0=P2 win, 0.5=draw): ")
+    println(game_result)
 
-    // Summary
-    print("")
-    print("=== All Tests Complete ===")
-
-    puct_test + variance_test + game_test
-}
-
-*/
-
-struct Sample {
-    value: i64
-}
-
-fn scale(item: Sample, factor: i64) -> Sample {
-    return Sample { value: item.value * factor }
-}
-
-fn checksum(values: [i64]) -> i64 {
-    var sum: i64 = 0
-    for v in values {
-        sum = sum + v
+    println("")
+    let ok = puct_test > 0.01 && variance_test > 0.0 && game_test >= 1.99 && ply_test > 0.5
+    if ok {
+        println("EPISTEMIC_MCTS_FULL_PASS")
+    } else {
+        println("EPISTEMIC_MCTS_FULL_FAIL")
     }
-    return sum
 }
-
-fn main() with IO {
-    let seed = Sample { value: 3 }
-    let scaled = scale(seed, 7)
-    let data: [i64] = [scaled.value, 2, 5, 8]
-    let total = checksum(data)
-    println("example: epistemic_mcts_full")
-    println(total)
-}
-

@@ -1,0 +1,188 @@
+// stdlib/pbpk/rapamycin_precision.sio — Precision-threshold clinical utility analysis
+//
+// Novel dissertation contribution #2 (compile-time confidence gates) answers
+// the examiner question: "Would a clinician get a different answer without
+// your uncertainty quantification?"
+//
+// This module demonstrates the answer is YES: in an IV bolus rapamycin scenario
+// where the point estimate sits inside the therapeutic window, varying only the
+// measurement precision of ke (the elimination rate constant) causes the compile-
+// time gate to flip from THERAPEUTIC to UNCERTAIN.
+//
+// ── Standard clinical scenario ─────────────────────────────────────────────────
+//
+//   IV bolus rapamycin: D = 2 mg, ke = 0.05 h⁻¹, Vc = 70 L.
+//   Assess trough at t = 24 h (recording index 24, dt = 1 h).
+//
+//   Point-estimate trajectory (Euler, 1-cmt degenerate):
+//     C(24h) = (D/Vc) · (1 − ke·dt)²⁴ = (2/70) · (0.95)²⁴ ≈ 0.00834 mg/L
+//   → Inside therapeutic window [0.004, 0.020] mg/L.
+//
+//   GUM variance at t = 24 h (ISO §5.1.2 closed-form, k-step recursion):
+//     V(24) = 24 · dt² · ke_var · (D/Vc)² · (1−ke·dt)²⁽²³⁾
+//   → std_c(24) ≈ 0.0430 · √ke_var   [mg/L, for these parameter values]
+//
+//   Threshold for UNCERTAIN (via conf_from_rel < 25% → 820 ≥ 800):
+//     ke_var < ~0.0023  → THERAPEUTIC
+//     ke_var > ~0.0023  → UNCERTAIN   (relative std > 25%, conf = 700 < 800)
+//
+// ── Why this matters ──────────────────────────────────────────────────────────
+//
+//   A point-estimate TDM tool (no GUM, no gate) always reports THERAPEUTIC when
+//   C(24h) ≈ 0.00834 mg/L, regardless of measurement quality.
+//   This module proves the epistemic compiler prevents that: at ke_var = 0.01
+//   (≈63% relative uncertainty on ke), the confidence gate fires and forces
+//   UNCERTAIN. The clinician is told to improve their assay, not act on a
+//   nominally-in-window concentration.
+//
+// Effect annotations:
+//   classify_iv_trough:  with Epistemic, Mut, Div, Panic  (calls assess_trough)
+//   conf_iv_trough:      with Mut, Div, Panic              (calls simulate only)
+//   gate_fires:          with Epistemic, Mut, Div, Panic  (calls classify_iv_trough)
+//   classify_standard_iv: with Epistemic, Mut, Div, Panic (wraps classify_iv_trough)
+//   conf_standard_iv:    with Mut, Div, Panic             (wraps conf_iv_trough)
+
+module pbpk::rapamycin_precision
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, simulate}
+use pbpk::rapamycin_clinical::{
+    assess_trough, conf_from_rel,
+    decision_therapeutic, decision_uncertain,
+    conf_clinical_min
+}
+
+// ── Parameter constructor ──────────────────────────────────────────────────────
+
+// 1-cmt IV bolus params: ke only, no distribution, no stent.
+// Represents a systemic IV rapamycin dose (transplant immunosuppression).
+pub fn iv_bolus_params(ke_val: f64, ke_var: f64, vc: f64) -> Rap2CmtParams {
+    Rap2CmtParams {
+        ke_val:      ke_val
+        ke_var:      ke_var
+        k12_val:     0.0
+        k12_var:     0.0
+        k21_val:     0.0
+        k21_var:     0.0
+        vc_val:      vc
+        krel_val:    0.0
+        krel_var:    0.0
+        a_poly0:     0.0
+        a_poly0_var: 0.0
+    }
+}
+
+// ── Core precision-threshold functions ───────────────────────────────────────
+
+// Classify plasma trough at recording index idx from an IV bolus simulation.
+//
+// Runs the GUM-Euler ODE for t_end hours at step dt, recording n time points.
+// Classifies the concentration at index idx using the compile-time confidence gate.
+//
+// The 'with Epistemic' annotation is required by the compiler because assess_trough
+// is called here: this function cannot be called from any context that does not
+// declare 'with Epistemic', making uncertainty propagation mandatory.
+pub fn classify_iv_trough(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let p = iv_bolus_params(ke_val, ke_var, vc)
+    var out_t = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    let c_val = out_c[idx]
+    let c_std = out_s[idx]
+    let conf  = conf_from_rel(c_val, c_std)
+    let c_ep  = Epistemic::new(c_val, c_std * c_std, conf)
+    assess_trough(&c_ep)
+}
+
+// Return the confidence score at recording index idx (no gate, pure metric).
+// Used to sweep ke_var and observe how the confidence score degrades.
+pub fn conf_iv_trough(
+    ke_val:  f64,
+    ke_var:  f64,
+    vc:      f64,
+    d_bolus: f64,
+    t_end:   f64,
+    dt:      f64,
+    n:       i64,
+    idx:     i64
+) -> i64 with Mut, Div, Panic {
+    let p = iv_bolus_params(ke_val, ke_var, vc)
+    var out_t = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_c = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate(t_end, dt, d_bolus, 0.0, &p, n, &!out_t, &!out_c, &!out_s)
+    let c_val = out_c[idx]
+    let c_std = out_s[idx]
+    conf_from_rel(c_val, c_std)
+}
+
+// Returns true iff tight precision → THERAPEUTIC and loose precision → UNCERTAIN.
+//
+// This is the core clinical utility demonstration: the same patient scenario,
+// the same point-estimate concentration (inside the therapeutic window), but two
+// different ke measurement qualities produce qualitatively different recommendations.
+// A naive point-estimate tool would always say THERAPEUTIC; the epistemic compiler
+// forces the UNCERTAIN answer when precision is insufficient.
+pub fn gate_fires(
+    ke_val:       f64,
+    ke_var_tight: f64,
+    ke_var_loose: f64,
+    vc:           f64,
+    d_bolus:      f64,
+    t_end:        f64,
+    dt:           f64,
+    n:            i64,
+    idx:          i64
+) -> bool with Epistemic, Mut, Div, Panic {
+    let d_tight = classify_iv_trough(ke_val, ke_var_tight, vc, d_bolus, t_end, dt, n, idx)
+    let d_loose = classify_iv_trough(ke_val, ke_var_loose, vc, d_bolus, t_end, dt, n, idx)
+    d_tight == decision_therapeutic() && d_loose == decision_uncertain()
+}
+
+// ── Standard-scenario wrappers ────────────────────────────────────────────────
+//
+// Standard 24h IV bolus scenario:
+//   ke_val = 0.05 h⁻¹, Vc = 70 L, D = 2 mg, dt = 1 h, n = 25, idx = 24.
+//   C(24h) ≈ 0.00834 mg/L — inside [0.004, 0.020] mg/L (therapeutic).
+
+pub fn classify_standard_iv(ke_var: f64) -> i64 with Epistemic, Mut, Div, Panic {
+    classify_iv_trough(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}
+
+pub fn conf_standard_iv(ke_var: f64) -> i64 with Mut, Div, Panic {
+    conf_iv_trough(0.05, ke_var, 70.0, 2.0, 24.0, 1.0, 25, 24)
+}

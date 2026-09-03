@@ -31,18 +31,20 @@ compute cost (~2 hours on a single A100).
 ## Pipeline Overview
 
 ```
-1. Collect corpus     training/finetune/prepare_corpus.sh
-                      -> training/finetune/sounio_corpus.txt
+1. Collect corpus     docs/training/finetune/prepare_corpus.sh
+                      -> docs/training/finetune/sounio_corpus.txt
 
-2. Prepare instructions  training/instructions/sounio_instruct.jsonl
+2. Prepare instructions  docs/training/instructions/sounio_instruct.jsonl
                          (instruction-completion pairs, already provided)
 
-3. Fine-tune          python training/finetune/lora_finetune.py \
-                        --corpus training/finetune/sounio_corpus.txt \
-                        --instructions training/instructions/sounio_instruct.jsonl \
+3. Validate assets    bash scripts/ci/lora_assets_gate.sh
+
+4. Fine-tune          python docs/training/finetune/lora_finetune.py \
+                        --corpus docs/training/finetune/sounio_corpus.txt \
+                        --instructions docs/training/instructions/sounio_instruct.jsonl \
                         --output models/sounio-coder-lora
 
-4. Evaluate           python benchmarks/multipl_e/eval_sounio.py \
+5. Evaluate           python benchmarks/multipl_e/eval_sounio.py \
                         --dir generated/ --k 1,10,100
 ```
 
@@ -58,29 +60,44 @@ pip install transformers>=4.38 peft>=0.9 datasets>=2.17 \
 ### 2. Prepare the Corpus
 
 ```bash
-bash training/finetune/prepare_corpus.sh
+bash docs/training/finetune/prepare_corpus.sh
 ```
 
 This collects all `.sio` files from `stdlib/`, `tests/`, `examples/`, and
 `benchmarks/` into a single `sounio_corpus.txt`.
 
-### 3. Run Fine-Tuning
+By default, the corpus builder excludes `stdlib/ontology/**` so active ontology
+work can proceed in the main checkout without being accidentally absorbed into a
+training artifact. Set `LORA_CORPUS_INCLUDE_ONTOLOGY=1` only when that lane is
+stable and intended for the training corpus.
+
+### 3. Validate Dataset Assets
 
 ```bash
-python training/finetune/lora_finetune.py \
-    --corpus training/finetune/sounio_corpus.txt \
-    --instructions training/instructions/sounio_instruct.jsonl \
+bash scripts/ci/lora_assets_gate.sh
+```
+
+This is a CPU-only, dependency-light gate. It checks the corpus markers,
+instruction dataset provenance, JSONL shape, and contrastive syntax-fix
+examples before any model download or GPU job.
+
+### 4. Run Fine-Tuning
+
+```bash
+python docs/training/finetune/lora_finetune.py \
+    --corpus docs/training/finetune/sounio_corpus.txt \
+    --instructions docs/training/instructions/sounio_instruct.jsonl \
     --output models/sounio-coder-lora \
     --epochs 3 \
     --lr 2e-4 \
     --rank 16
 ```
 
-### 4. Validate
+### 5. Validate Model Setup
 
 ```bash
-python training/finetune/lora_finetune.py \
-    --corpus training/finetune/sounio_corpus.txt \
+python docs/training/finetune/lora_finetune.py \
+    --corpus docs/training/finetune/sounio_corpus.txt \
     --output models/sounio-coder-lora \
     --validate --dry-run
 ```

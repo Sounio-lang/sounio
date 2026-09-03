@@ -1,0 +1,237 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/anova.sio — one-way analysis of variance (any number of groups)
+//
+// The headline group-comparison test, and the first real consumer of
+// stats::fisher_f. It partitions the total variation of a response into a
+// between-groups and a within-groups component, and tests H0 "all group means
+// equal" with the variance ratio F = MS_between / MS_within:
+//
+//   anova_oneway(data, sizes, k) -> AnovaResult
+//
+// `data` holds the groups concatenated end to end; `sizes[j]` is the size of
+// group j; `k` is the number of groups (2 <= k <= 16, total N <= 256). Returns
+// the full ANOVA table plus the p-value (F survival, stats::fisher_f) and the
+// eta-squared effect size SS_between / SS_total.
+//
+// The p-value uses f_sf; for a significant result (large F) the F CDF evaluates
+// in the reliable branch of the incomplete beta, so the decision at any usual
+// alpha is sound. Very small p-values are clamped to >= 0 and may lose absolute
+// precision far in the tail (issue #841); the reject/retain decision is not
+// affected.
+//
+// Pure Sounio; the only dependency is the F survival function (stats::fisher_f).
+//
+// References:
+//   Fisher (1925) "Statistical Methods for Research Workers"
+//   Snedecor & Cochran (1989) "Statistical Methods" 8th ed., Ch. 12
+//   Cohen (1988) "Statistical Power Analysis" — eta-squared
+
+module stats::anova
+
+use stats::fisher_f::{f_sf}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct AnovaResult {
+    pub k: i64,            // number of groups
+    pub n_total: i64,      // total observations
+    pub ss_between: f64,   // between-groups sum of squares
+    pub ss_within: f64,    // within-groups sum of squares
+    pub ss_total: f64,     // total sum of squares
+    pub df_between: f64,   // k - 1
+    pub df_within: f64,    // N - k
+    pub ms_between: f64,   // SS_between / df_between
+    pub ms_within: f64,    // SS_within / df_within
+    pub f_stat: f64,       // MS_between / MS_within
+    pub p_value: f64,      // P(F > f_stat | df_between, df_within)
+    pub eta_squared: f64,  // SS_between / SS_total
+}
+
+// ============================================================================
+// ANALYSIS
+// ============================================================================
+
+/// One-way ANOVA over `k` groups laid out consecutively in `data`.
+///
+/// Parâmetros: data — the groups concatenated; sizes — sizes[j] = n_j
+///             (j = 0..k); k — number of groups (2 <= k <= 16); total N <= 256.
+/// Retorno: AnovaResult (full table, F, p-value, eta-squared).
+/// Complexidade: O(N).
+/// Referências: Fisher (1925); Snedecor & Cochran (1989) Ch. 12.
+pub fn anova_oneway(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> AnovaResult with Mut, Div, Panic {
+    if k < 2 {
+        return AnovaResult {
+            k: k as i64, n_total: 0, ss_between: 0.0, ss_within: 0.0, ss_total: 0.0,
+            df_between: 0.0, df_within: 0.0, ms_between: 0.0, ms_within: 0.0,
+            f_stat: 0.0, p_value: 1.0, eta_squared: 0.0,
+        }
+    }
+
+    // Total N and grand sum.
+    var n_total = 0
+    var grand_sum = 0.0
+    var g = 0
+    while g < k {
+        n_total = n_total + sizes[g as usize]
+        g = g + 1
+    }
+    var i = 0
+    while i < n_total {
+        grand_sum = grand_sum + data[i as usize]
+        i = i + 1
+    }
+    let nf = n_total as f64
+    let grand_mean = grand_sum / nf
+
+    // Between- and within-group sums of squares, walking the flat layout.
+    var ss_between = 0.0
+    var ss_within = 0.0
+    var offset = 0
+    var j = 0
+    while j < k {
+        let nj = sizes[j as usize]
+        var gsum = 0.0
+        var t = 0
+        while t < nj {
+            gsum = gsum + data[(offset + t) as usize]
+            t = t + 1
+        }
+        let njf = nj as f64
+        let gmean = gsum / njf
+        let dm = gmean - grand_mean
+        ss_between = ss_between + njf * dm * dm
+        var u = 0
+        while u < nj {
+            let dev = data[(offset + u) as usize] - gmean
+            ss_within = ss_within + dev * dev
+            u = u + 1
+        }
+        offset = offset + nj
+        j = j + 1
+    }
+
+    let ss_total = ss_between + ss_within
+    let df_between = (k - 1) as f64
+    let df_within = nf - (k as f64)
+
+    var ms_between = 0.0
+    if df_between > 0.0 { ms_between = ss_between / df_between }
+    var ms_within = 0.0
+    if df_within > 0.0 { ms_within = ss_within / df_within }
+
+    var f_stat = 0.0
+    var p_value = 1.0
+    if ms_within > 1.0e-300 {
+        f_stat = ms_between / ms_within
+        p_value = f_sf(f_stat, df_between, df_within)
+        if p_value < 0.0 { p_value = 0.0 }
+        if p_value > 1.0 { p_value = 1.0 }
+    }
+
+    var eta_squared = 0.0
+    if ss_total > 1.0e-300 { eta_squared = ss_between / ss_total }
+
+    return AnovaResult {
+        k: k as i64, n_total: n_total as i64,
+        ss_between: ss_between, ss_within: ss_within, ss_total: ss_total,
+        df_between: df_between, df_within: df_within,
+        ms_between: ms_between, ms_within: ms_within,
+        f_stat: f_stat, p_value: p_value, eta_squared: eta_squared,
+    }
+}
+
+// ============================================================================
+// INLINE TESTS — validated against a hand-computed worked example
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Three groups of 5, means 3/4/5, each SS_within = 10.
+//   G1 = 1,2,3,4,5 ; G2 = 2,3,4,5,6 ; G3 = 3,4,5,6,7
+// SS_between = 5(3-4)²+5(4-4)²+5(5-4)² = 10 ; SS_within = 30 ; SS_total = 40.
+// df = 2, 12 ; MS = 5, 2.5 ; F = 2.0 ; eta² = 0.25 ; p = 1-I_0.25(1,6) = 0.17798.
+fn test_worked() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=1.0; data[1]=2.0; data[2]=3.0; data[3]=4.0; data[4]=5.0
+    data[5]=2.0; data[6]=3.0; data[7]=4.0; data[8]=5.0; data[9]=6.0
+    data[10]=3.0; data[11]=4.0; data[12]=5.0; data[13]=6.0; data[14]=7.0
+    sizes[0]=5; sizes[1]=5; sizes[2]=5
+    let r = anova_oneway(&data, &sizes, 3)
+    var ok = true
+    ok = check(1, r.n_total == 15) && ok
+    ok = check(2, approx(r.ss_between, 10.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.ss_within, 30.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.df_between, 2.0, 1.0e-9)) && ok
+    ok = check(5, approx(r.df_within, 12.0, 1.0e-9)) && ok
+    ok = check(6, approx(r.ms_between, 5.0, 1.0e-9)) && ok
+    ok = check(7, approx(r.ms_within, 2.5, 1.0e-9)) && ok
+    ok = check(8, approx(r.f_stat, 2.0, 1.0e-9)) && ok
+    ok = check(9, approx(r.eta_squared, 0.25, 1.0e-9)) && ok
+    ok = check(10, approx(r.p_value, 0.177978, 1.0e-4)) && ok
+    return ok
+}
+
+// Well-separated groups -> large F, tiny p, eta² near 1.
+//   G1 = 1,2,3 ; G2 = 11,12,13 ; G3 = 21,22,23
+fn test_separated() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=1.0; data[1]=2.0; data[2]=3.0
+    data[3]=11.0; data[4]=12.0; data[5]=13.0
+    data[6]=21.0; data[7]=22.0; data[8]=23.0
+    sizes[0]=3; sizes[1]=3; sizes[2]=3
+    let r = anova_oneway(&data, &sizes, 3)
+    var ok = true
+    // SS_within = 3 groups * (1+0+1) = 6 ; SS_between = 3*(2-12)²+3*0+3*(22-12)² = 600
+    ok = check(20, approx(r.ss_within, 6.0, 1.0e-9)) && ok
+    ok = check(21, approx(r.ss_between, 600.0, 1.0e-9)) && ok
+    ok = check(22, r.f_stat > 100.0) && ok
+    ok = check(23, r.p_value < 0.001) && ok
+    ok = check(24, r.eta_squared > 0.98) && ok
+    return ok
+}
+
+// Identical groups -> F = 0, p = 1, eta² = 0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var sizes: [i64; 16] = [0; 16]
+    data[0]=5.0; data[1]=6.0; data[2]=7.0
+    data[3]=5.0; data[4]=6.0; data[5]=7.0
+    sizes[0]=3; sizes[1]=3
+    let r = anova_oneway(&data, &sizes, 2)
+    var ok = true
+    ok = check(30, approx(r.ss_between, 0.0, 1.0e-9)) && ok
+    ok = check(31, approx(r.f_stat, 0.0, 1.0e-9)) && ok
+    ok = check(32, approx(r.p_value, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_worked() && ok
+    ok = test_separated() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

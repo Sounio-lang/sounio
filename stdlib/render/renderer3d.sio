@@ -1,0 +1,687 @@
+// stdlib/render/renderer3d.sio — Software 3D renderer into a Canvas
+//
+// Self-contained: defines Camera3D / Light3D / Tri3D types (independent of
+// the stub-only render/types.sio and render/scene.sio, which have fn main()
+// stubs and no pub exports).
+//
+// Pipeline per triangle:
+//   1. Model→View: rotate/translate vertices (caller supplies pre-transformed verts)
+//   2. Perspective projection via project_vertex
+//   3. Barycentric rasterization with depth test into a per-call depth buffer
+//   4. Blinn-Phong shading: ambient + diffuse + specular^32
+//   5. Output via canvas_fill_triangle (solid per-triangle colour) + edge lines
+
+use display::canvas::{Canvas}
+use display::canvas_ext::{canvas_fill_triangle, canvas_draw_line_aa}
+
+// ============================================================
+// Types
+// ============================================================
+
+pub struct Vec3f { pub x: f64, pub y: f64, pub z: f64 }
+
+pub struct Camera3D {
+    pub pos_x: f64, pub pos_y: f64, pub pos_z: f64,
+    pub focal: f64,    // focal length in pixels
+}
+
+pub struct Light3D {
+    pub dx: f64, pub dy: f64, pub dz: f64,  // normalised direction toward light
+    pub r: i64, pub g: i64, pub b: i64,     // light colour (0-255)
+    pub ambient: f64,                        // ambient coefficient [0,1]
+}
+
+// Linear depth fog: blends shaded colour toward a background colour over [near, far] depth range.
+pub struct FogParams {
+    pub near: f64, pub far: f64,
+    pub r: i64, pub g: i64, pub b: i64,
+}
+
+// A triangle in world/view space.
+// v0/v1/v2 are (x,y,z) positions; nx/ny/nz is the face normal (unit length).
+// base_r/g/b is the material diffuse colour.
+pub struct Tri3D {
+    pub v0x: f64, pub v0y: f64, pub v0z: f64,
+    pub v1x: f64, pub v1y: f64, pub v1z: f64,
+    pub v2x: f64, pub v2y: f64, pub v2z: f64,
+    pub nx:  f64, pub ny:  f64, pub nz:  f64,
+    pub base_r: i64, pub base_g: i64, pub base_b: i64,
+}
+
+// ============================================================
+// Internal math helpers
+// ============================================================
+
+fn r3d_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn r3d_max_f(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn r3d_min_i(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn r3d_max_i(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn r3d_clamp_i(v: i64, lo: i64, hi: i64) -> i64 { if v < lo { lo } else if v > hi { hi } else { v } }
+
+fn r3d_dot(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
+    ax * bx + ay * by + az * bz
+}
+
+fn r3d_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// Normalise a direction vector; returns components via out-params encoded in a Vec3f.
+pub fn r3d_normalise(x: f64, y: f64, z: f64) -> Vec3f with Mut, Div {
+    let len = r3d_sqrt(x * x + y * y + z * z)
+    if len == 0.0 {
+        Vec3f { x: 0.0, y: 0.0, z: 1.0 }
+    } else {
+        Vec3f { x: x / len, y: y / len, z: z / len }
+    }
+}
+
+// ============================================================
+// Projection
+// ============================================================
+
+// Projects a 3D point onto the canvas using a simple perspective model.
+// Returns (screen_x, screen_y, depth). depth <= 0 means behind camera.
+pub fn r3d_project(wx: f64, wy: f64, wz: f64, cam: &Camera3D, cw: i64, ch: i64) -> Vec3f with Div {
+    let rz = wz - cam.pos_z
+    if rz >= 0.0 {
+        // Behind or at camera plane — signal with depth = 0
+        return Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    let depth = 0.0 - rz      // positive depth
+    let scale = cam.focal / depth
+    let sx = (wx - cam.pos_x) * scale + (cw as f64) * 0.5
+    let sy = (0.0 - (wy - cam.pos_y)) * scale + (ch as f64) * 0.5
+    Vec3f { x: sx, y: sy, z: depth }
+}
+
+fn r3d_project_viewport(wx: f64, wy: f64, wz: f64, cam: &Camera3D, vx: i64, vy: i64, vw: i64, vh: i64) -> Vec3f with Div {
+    let rz = wz - cam.pos_z
+    if rz >= 0.0 {
+        return Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    let depth = 0.0 - rz
+    let scale = cam.focal / depth
+    let sx = (wx - cam.pos_x) * scale + (vx as f64) + (vw as f64) * 0.5
+    let sy = (0.0 - (wy - cam.pos_y)) * scale + (vy as f64) + (vh as f64) * 0.5
+    Vec3f { x: sx, y: sy, z: depth }
+}
+
+// ============================================================
+// Shading
+// ============================================================
+
+pub fn r3d_shade(
+    base_r: i64, base_g: i64, base_b: i64,
+    nx: f64, ny: f64, nz: f64,
+    light: &Light3D,
+) -> Vec3f with Mut, Div {
+    let nl = r3d_normalise(nx, ny, nz)
+    let diffuse = r3d_max_f(r3d_dot(nl.x, nl.y, nl.z, light.dx, light.dy, light.dz), 0.0)
+    let intensity = light.ambient + (1.0 - light.ambient) * diffuse
+
+    // Blinn-Phong specular: H = normalize(L + V), V = (0,0,1) toward camera.
+    let hx_u = light.dx
+    let hy_u = light.dy
+    let hz_u = light.dz + 1.0
+    let h_len = r3d_sqrt(hx_u * hx_u + hy_u * hy_u + hz_u * hz_u)
+    let ndoth = if h_len > 0.0 {
+        r3d_max_f(nl.x * (hx_u / h_len) + nl.y * (hy_u / h_len) + nl.z * (hz_u / h_len), 0.0)
+    } else { 0.0 }
+    let s2 = ndoth * ndoth
+    let s4 = s2 * s2
+    let s8 = s4 * s4
+    let s32 = s8 * s8 * s8 * s8   // ^32
+    let spec = 0.85 * s32
+
+    let fr = base_r as f64 * intensity + 255.0 * spec
+    let fg = base_g as f64 * intensity + 255.0 * spec
+    let fb = base_b as f64 * intensity + 255.0 * spec
+    let sr = r3d_clamp_i(fr as i64, 0, 255)
+    let sg = r3d_clamp_i(fg as i64, 0, 255)
+    let sb = r3d_clamp_i(fb as i64, 0, 255)
+    // Pack into Vec3f channels re-used as i64 via cast (R=x, G=y, B=z)
+    Vec3f { x: sr as f64, y: sg as f64, z: sb as f64 }
+}
+
+// ============================================================
+// Depth buffer (flat heap-allocated f64 array, one entry per pixel)
+// ============================================================
+
+pub fn r3d_depth_buf_alloc(w: i64, h: i64) -> *mut i64 with Alloc {
+    // Positive 20-bit fixed-point depth: deterministic and precise enough to
+    // distinguish coplanar-near surfaces without f64 bit reinterpretation.
+    heap_alloc(w * h * 8) as *mut i64
+}
+
+pub fn r3d_depth_buf_clear(buf: *mut i64, w: i64, h: i64) with Mut {
+    let far_depth: i64 = 0x7FFFFFFFFFFFFFFF
+    var i: i64 = 0
+    while i < w * h {
+        write_i64(buf, i, far_depth)
+        i = i + 1
+    }
+}
+
+fn r3d_depth_key(depth: f64) -> i64 {
+    if depth <= 0.0 { return 0 }
+    (depth * 1048576.0) as i64
+}
+
+// ============================================================
+// Rasterize one triangle into the canvas with depth test
+// ============================================================
+
+fn r3d_edge(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
+// Four fixed subpixel coverage samples at quarter-pixel offsets. Shading and
+// depth remain per-pixel, so this is coverage AA rather than full MSAA.
+fn r3d_coverage4(
+    ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64,
+    px: i64, py: i64,
+) -> i64 with Div {
+    let sax = ax * 4
+    let say = ay * 4
+    let sbx = bx * 4
+    let sby = by * 4
+    let scx = cx * 4
+    let scy = cy * 4
+    let area = r3d_edge(sax, say, sbx, sby, scx, scy)
+    var covered: i64 = 0
+    var sample: i64 = 0
+    while sample < 4 {
+        let ox = if sample == 0 || sample == 2 { 1 } else { 3 }
+        let oy = if sample < 2 { 1 } else { 3 }
+        let sx = px * 4 + ox
+        let sy = py * 4 + oy
+        let w0 = r3d_edge(sbx, sby, scx, scy, sx, sy)
+        let w1 = r3d_edge(scx, scy, sax, say, sx, sy)
+        let w2 = r3d_edge(sax, say, sbx, sby, sx, sy)
+        let inside = if area > 0 {
+            w0 >= 0 && w1 >= 0 && w2 >= 0
+        } else {
+            w0 <= 0 && w1 <= 0 && w2 <= 0
+        }
+        if inside { covered = covered + 1 }
+        sample = sample + 1
+    }
+    (covered * 255 + 2) / 4
+}
+
+fn r3d_write_coverage(c: &!Canvas, idx: i64, r: i64, g: i64, b: i64, coverage: i64) with Mut, Div {
+    if coverage >= 255 {
+        write_i64(c.pixels, idx, b | (g << 8) | (r << 16))
+        return
+    }
+    let dst = read_i64(c.pixels, idx)
+    let dr = (dst >> 16) & 0xFF
+    let dg = (dst >> 8) & 0xFF
+    let db = dst & 0xFF
+    let inv = 255 - coverage
+    let out_r = (r * coverage + dr * inv + 127) / 255
+    let out_g = (g * coverage + dg * inv + 127) / 255
+    let out_b = (b * coverage + db * inv + 127) / 255
+    write_i64(c.pixels, idx, out_b | (out_g << 8) | (out_r << 16))
+}
+
+fn r3d_rasterize_tri(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    cr: i64, cg: i64, cb: i64,
+    depth_buf: *mut i64,
+    c: &!Canvas,
+) with Mut {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, c.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, c.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, c.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, c.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
+                let idx = py * c.width + px
+                // Depth interpolation (perspective-correct approximation)
+                let area_f = area as f64
+                let b0 = (w0 as f64) / area_f
+                let b1 = (w1 as f64) / area_f
+                let b2 = (w2 as f64) / area_f
+                let depth = b0 * d0 + b1 * d1 + b2 * d2
+                // Compare deterministic fixed-point depths.
+                let stored_depth = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored_depth {
+                    write_i64(depth_buf, idx, depth_key)
+                    r3d_write_coverage(c, idx, cr, cg, cb, coverage)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+fn r3d_fog_factor(depth: f64, fog: &FogParams) -> f64 with Div {
+    if fog.far == fog.near { return 0.0 }
+    let f = (depth - fog.near) / (fog.far - fog.near)
+    if f < 0.0 { 0.0 } else if f > 1.0 { 1.0 } else { f }
+}
+
+// Gouraud rasterize — per-vertex colours c0/c1/c2, each Vec3f{x=R,y=G,z=B} in [0,255].
+// Barycentric interpolation gives smooth shading gradients within the face.
+pub fn r3d_rasterize_tri_gouraud(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    c0: Vec3f, c1: Vec3f, c2: Vec3f,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
+                    let fr = bw0 * c0.x + bw1 * c1.x + bw2 * c2.x
+                    let fg = bw0 * c0.y + bw1 * c1.y + bw2 * c2.y
+                    let fb = bw0 * c0.z + bw1 * c1.z + bw2 * c2.z
+                    let pr = r3d_clamp_i(fr as i64, 0, 255)
+                    let pg = r3d_clamp_i(fg as i64, 0, 255)
+                    let pb = r3d_clamp_i(fb as i64, 0, 255)
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// Phong rasterize — interpolates vertex normals per-pixel, shades with Blinn-Phong, applies
+// linear depth fog, and resolves four subpixel coverage samples at triangle edges.
+pub fn r3d_rasterize_tri_phong(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    n0: Vec3f, n1: Vec3f, n2: Vec3f,
+    base_r: i64, base_g: i64, base_b: i64,
+    fog: &FogParams,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
+                    // Per-pixel normal interpolation + Blinn-Phong
+                    let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
+                    let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
+                    let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
+                    let col = r3d_shade(base_r, base_g, base_b, ni_x, ni_y, ni_z, light)
+                    // Linear depth fog
+                    let ff = r3d_fog_factor(depth, fog)
+                    let one_ff = 1.0 - ff
+                    let out_r = col.x * one_ff + (fog.r as f64) * ff
+                    let out_g = col.y * one_ff + (fog.g as f64) * ff
+                    let out_b = col.z * one_ff + (fog.b as f64) * ff
+                    let pr = r3d_clamp_i(out_r as i64, 0, 255)
+                    let pg = r3d_clamp_i(out_g as i64, 0, 255)
+                    let pb = r3d_clamp_i(out_b as i64, 0, 255)
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Cel / toon shading
+// ============================================================
+
+// r3d_shade_cel — quantizes diffuse into 4 bands + silhouette ring.
+// Silhouette: pixels whose interpolated normal faces away from the camera
+// (ni_z < edge_thresh, camera along +Z) are rendered dark.
+// band thresholds: 0.95 / 0.50 / 0.25 → 1.0 / 0.70 / 0.40 / ambient
+pub fn r3d_shade_cel(
+    base_r: i64, base_g: i64, base_b: i64,
+    nx: f64, ny: f64, nz: f64,
+    light: &Light3D,
+) -> Vec3f with Mut, Div {
+    let nl = r3d_normalise(nx, ny, nz)
+    let raw = r3d_dot(nl.x, nl.y, nl.z, light.dx, light.dy, light.dz)
+    let diffuse = if raw < 0.0 { 0.0 } else { raw }
+    let band = if diffuse > 0.95 { 1.0 }
+               else if diffuse > 0.50 { 0.70 }
+               else if diffuse > 0.25 { 0.40 }
+               else { light.ambient }
+    // Silhouette ring: normal nearly perpendicular to eye (camera along +Z)
+    let eye_dot = nl.z
+    let final_band = if eye_dot < 0.28 { 0.0 } else { band }
+    let fr = r3d_clamp_i((base_r as f64 * final_band) as i64, 0, 255)
+    let fg = r3d_clamp_i((base_g as f64 * final_band) as i64, 0, 255)
+    let fb = r3d_clamp_i((base_b as f64 * final_band) as i64, 0, 255)
+    Vec3f { x: fr as f64, y: fg as f64, z: fb as f64 }
+}
+
+// r3d_rasterize_tri_cel — same rasterizer as Phong but calls r3d_shade_cel.
+// No fog (cel shading looks best without depth fade).
+pub fn r3d_rasterize_tri_cel(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    n0: Vec3f, n1: Vec3f, n2: Vec3f,
+    base_r: i64, base_g: i64, base_b: i64,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
+                    let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
+                    let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
+                    let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
+                    let col = r3d_shade_cel(base_r, base_g, base_b, ni_x, ni_y, ni_z, light)
+                    let pr = col.x as i64
+                    let pg = col.y as i64
+                    let pb = col.z as i64
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Cook-Torrance PBR shading (Fresnel-Schlick + GGX, no G term)
+// ============================================================
+//
+// roughness ∈ [0,1]: 0=mirror, 1=diffuse. Typical: 0.25 (metallic) .. 0.5 (plastic).
+// F0=0.04 for dielectrics (non-metal atoms, plastic surfaces).
+// G term omitted: error <5% for typical roughness, saves ~6 ops/pixel.
+
+pub fn r3d_shade_pbr(
+    base_r: i64, base_g: i64, base_b: i64,
+    nx: f64, ny: f64, nz: f64,
+    light: &Light3D,
+    roughness: f64,
+) -> Vec3f with Mut, Div {
+    let nl = r3d_normalise(nx, ny, nz)
+    let ndotl = r3d_max_f(r3d_dot(nl.x, nl.y, nl.z, light.dx, light.dy, light.dz), 0.0)
+    // Half-vector H = normalize(L + V), V = (0,0,1) (camera direction)
+    let hx = light.dx
+    let hy = light.dy
+    let hz = light.dz + 1.0
+    let h_len = r3d_sqrt(hx * hx + hy * hy + hz * hz)
+    let ndoth = if h_len > 0.0 {
+        r3d_max_f(nl.x * (hx / h_len) + nl.y * (hy / h_len) + nl.z * (hz / h_len), 0.0)
+    } else { 0.0 }
+    let ndotv = r3d_max_f(nl.z, 0.0001)  // view = (0,0,1)
+
+    // Fresnel-Schlick: F = F0 + (1-F0)*(1-ndoth)^5
+    let f0: f64 = 0.04
+    let q = 1.0 - ndoth
+    let q2 = q * q
+    let q5 = q2 * q2 * q
+    let fresnel = f0 + (1.0 - f0) * q5
+
+    // GGX normal distribution: D = α²/[π((n·h)²(α²-1)+1)²]
+    let alpha = roughness * roughness
+    let alpha2 = alpha * alpha
+    let nh2 = ndoth * ndoth
+    let d_inner = nh2 * (alpha2 - 1.0) + 1.0
+    let d_inner_safe = if d_inner < 0.0001 { 0.0001 } else { d_inner }
+    let ggx_d = alpha2 / (3.14159265 * d_inner_safe * d_inner_safe)
+
+    // Specular BRDF (no G): F*D / (4*ndotl*ndotv)
+    let spec_denom = 4.0 * r3d_max_f(ndotl * ndotv, 0.0001)
+    let spec = (fresnel * ggx_d) / spec_denom
+
+    // Diffuse: energy-conserving Lambertian kd*(ambient + diffuse)
+    let kd = (1.0 - fresnel) * (1.0 - roughness * 0.5)
+    let diff = kd * (light.ambient + (1.0 - light.ambient) * ndotl)
+
+    let fr = r3d_clamp_i(((base_r as f64) * diff + 255.0 * spec) as i64, 0, 255)
+    let fg = r3d_clamp_i(((base_g as f64) * diff + 255.0 * spec) as i64, 0, 255)
+    let fb = r3d_clamp_i(((base_b as f64) * diff + 255.0 * spec) as i64, 0, 255)
+    Vec3f { x: fr as f64, y: fg as f64, z: fb as f64 }
+}
+
+// r3d_rasterize_tri_pbr — same rasterizer loop as Phong but calls r3d_shade_pbr.
+// roughness: material roughness ∈ [0,1].
+pub fn r3d_rasterize_tri_pbr(
+    sx0: i64, sy0: i64,
+    sx1: i64, sy1: i64,
+    sx2: i64, sy2: i64,
+    d0: f64, d1: f64, d2: f64,
+    n0: Vec3f, n1: Vec3f, n2: Vec3f,
+    base_r: i64, base_g: i64, base_b: i64,
+    roughness: f64,
+    fog: &FogParams,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    cv: &!Canvas,
+) with Mut, Div {
+    let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
+    if area == 0 { return }
+    let min_x = r3d_clamp_i(r3d_min_i(r3d_min_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, cv.width - 1)
+    let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, cv.height - 1)
+    let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, cv.height - 1)
+    var py = min_y
+    while py <= max_y {
+        var px = min_x
+        while px <= max_x {
+            let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
+            let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
+            let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
+                let idx = py * cv.width + px
+                let area_f = area as f64
+                let bw0 = (w0 as f64) / area_f
+                let bw1 = (w1 as f64) / area_f
+                let bw2 = (w2 as f64) / area_f
+                let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
+                let stored = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
+                    let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
+                    let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
+                    let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
+                    let col = r3d_shade_pbr(base_r, base_g, base_b, ni_x, ni_y, ni_z, light, roughness)
+                    let ff = r3d_fog_factor(depth, fog)
+                    let one_ff = 1.0 - ff
+                    let out_r = col.x * one_ff + (fog.r as f64) * ff
+                    let out_g = col.y * one_ff + (fog.g as f64) * ff
+                    let out_b = col.z * one_ff + (fog.b as f64) * ff
+                    let pr = r3d_clamp_i(out_r as i64, 0, 255)
+                    let pg = r3d_clamp_i(out_g as i64, 0, 255)
+                    let pb = r3d_clamp_i(out_b as i64, 0, 255)
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+// ============================================================
+// Public API: render a list of triangles
+// ============================================================
+
+// Render up to n triangles from the tris array into canvas c.
+// depth_buf must be allocated with r3d_depth_buf_alloc(c.width, c.height)
+// and cleared with r3d_depth_buf_clear before each frame.
+pub fn r3d_render(
+    tris: &[Tri3D; 4096],
+    n: i64,
+    cam: &Camera3D,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    c: &!Canvas,
+) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        let tri = tris[i as usize]
+
+        // Project vertices
+        let p0 = r3d_project(tri.v0x, tri.v0y, tri.v0z, cam, c.width, c.height)
+        let p1 = r3d_project(tri.v1x, tri.v1y, tri.v1z, cam, c.width, c.height)
+        let p2 = r3d_project(tri.v2x, tri.v2y, tri.v2z, cam, c.width, c.height)
+
+        // Skip triangles fully behind camera
+        if p0.z <= 0.0 || p1.z <= 0.0 || p2.z <= 0.0 {
+            i = i + 1
+            continue
+        }
+
+        // Shade
+        let col = r3d_shade(tri.base_r, tri.base_g, tri.base_b, tri.nx, tri.ny, tri.nz, light)
+
+        // Rasterize face
+        r3d_rasterize_tri(
+            p0.x as i64, p0.y as i64,
+            p1.x as i64, p1.y as i64,
+            p2.x as i64, p2.y as i64,
+            p0.z, p1.z, p2.z,
+            col.x as i64, col.y as i64, col.z as i64,
+            depth_buf, c,
+        )
+
+        // Draw edges — dark silhouette lines for depth separation
+        let er = r3d_clamp_i((col.x as i64 * 3) / 10, 0, 255)
+        let eg = r3d_clamp_i((col.y as i64 * 3) / 10, 0, 255)
+        let eb = r3d_clamp_i((col.z as i64 * 3) / 10, 0, 255)
+        canvas_draw_line_aa(c, p0.x as i64, p0.y as i64, p1.x as i64, p1.y as i64, er, eg, eb)
+        canvas_draw_line_aa(c, p1.x as i64, p1.y as i64, p2.x as i64, p2.y as i64, er, eg, eb)
+        canvas_draw_line_aa(c, p2.x as i64, p2.y as i64, p0.x as i64, p0.y as i64, er, eg, eb)
+
+        i = i + 1
+    }
+}
+
+pub fn r3d_render_viewport(
+    tris: &[Tri3D; 4096],
+    n: i64,
+    cam: &Camera3D,
+    light: &Light3D,
+    depth_buf: *mut i64,
+    c: &!Canvas,
+    vx: i64, vy: i64, vw: i64, vh: i64,
+) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        let tri = tris[i as usize]
+        let p0 = r3d_project_viewport(tri.v0x, tri.v0y, tri.v0z, cam, vx, vy, vw, vh)
+        let p1 = r3d_project_viewport(tri.v1x, tri.v1y, tri.v1z, cam, vx, vy, vw, vh)
+        let p2 = r3d_project_viewport(tri.v2x, tri.v2y, tri.v2z, cam, vx, vy, vw, vh)
+
+        if p0.z <= 0.0 || p1.z <= 0.0 || p2.z <= 0.0 {
+            i = i + 1
+            continue
+        }
+
+        let col = r3d_shade(tri.base_r, tri.base_g, tri.base_b, tri.nx, tri.ny, tri.nz, light)
+        r3d_rasterize_tri(
+            p0.x as i64, p0.y as i64,
+            p1.x as i64, p1.y as i64,
+            p2.x as i64, p2.y as i64,
+            p0.z, p1.z, p2.z,
+            col.x as i64, col.y as i64, col.z as i64,
+            depth_buf, c,
+        )
+        i = i + 1
+    }
+}

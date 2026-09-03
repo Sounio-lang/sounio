@@ -1,0 +1,191 @@
+// darwin_pbpk/aggregate_confidence.sio — Multi-drug confidence aggregation
+//
+// Dissertation contribution #2 extension: Phase J's compile-time
+// confidence gate enforces a minimum on a single per-kernel confidence.
+// A study-wide attestation across N drugs (rapamycin + haloperidol +
+// DES sirolimus, in our case) needs an aggregation rule that combines
+// the per-drug confidences into one number a single --min-conf threshold
+// can act on.
+//
+// Three rules are exposed; the dissertation argues each one corresponds
+// to a different stance on inter-drug correlation:
+//
+//   1. worst_case        — min over drugs.  Most conservative; correct
+//                          when correlations are unknown and the gate is
+//                          a go/no-go decision (a single weak link sinks
+//                          the study).
+//
+//   2. rss               — root-sum-square of the *complements*:
+//                              c_agg = 1 - sqrt( Σ (1 - c_i)² )
+//                          Equivalent to ISO GUM's combination of
+//                          *uncorrelated* relative variances.  Tighter
+//                          than worst_case but assumes independence.
+//
+//   3. cov_weighted      — covariance-aware:
+//                              c_agg = 1 - sqrt( eᵀ Σ e )
+//                          where eᵢ = (1 - cᵢ) and Σ is the inter-drug
+//                          correlation matrix (1 on diagonal, off-
+//                          diagonal user-supplied).  When Σ = I this
+//                          collapses to rss; positive correlations push
+//                          the aggregate down (toward worst_case),
+//                          negative correlations push it up.
+//
+// Confidences are f64 in [0, 1] (matching darwin_pbpk::bbb::bbb_gate
+// convention). The struct fixes N=8 to keep arrays compile-time sized.
+
+use math::pure::*
+
+pub struct MultiDrugInput {
+    n_drugs:    i32,        // active count, 1..=8
+    confidence: [f64; 8],   // per-drug confidences in [0,1]
+    // covariance/correlation matrix (only consulted by cov_weighted).
+    // Diagonal must be 1.0; off-diagonal in (-1, 1).  Symmetric.
+    rho: [f64; 64],         // 8×8, row-major: rho[i*8+j]
+}
+
+pub struct MultiDrugVerdict {
+    rule:       i32,        // 0=worst_case, 1=rss, 2=cov_weighted
+    n_drugs:    i32,
+    aggregate:  f64,        // aggregated confidence in [0,1]
+    admitted:   bool,       // aggregate >= min_conf at evaluation time
+    min_conf:   f64,        // threshold the verdict was checked against
+    weakest:    i32,        // index of the lowest-confidence drug
+    weakest_c:  f64,        // its confidence
+}
+
+pub fn multi_drug_input_zero() -> MultiDrugInput {
+    MultiDrugInput {
+        n_drugs: 0,
+        confidence: [0.0; 8],
+        rho: [0.0; 64],
+    }
+}
+
+// Identity correlation matrix — convenience constructor for the
+// independence assumption that makes cov_weighted equal rss.
+pub fn rho_identity() -> [f64; 64] with Mut, Div, Panic {
+    var m: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < 8 {
+        let row = i as usize
+        m[row * 8 + row] = 1.0
+        i = i + 1
+    }
+    m
+}
+
+fn weakest_drug(inp: MultiDrugInput) -> i32 with Mut, Div, Panic {
+    var w: i32 = 0
+    var wc: f64 = 2.0
+    var i: i32 = 0
+    while i < inp.n_drugs {
+        let idx = i as usize
+        if inp.confidence[idx] < wc {
+            wc = inp.confidence[idx]
+            w  = i
+        }
+        i = i + 1
+    }
+    w
+}
+
+// Rule 1: worst_case.  Bit-deterministic, no sqrt, no rounding.
+pub fn aggregate_worst_case(inp: MultiDrugInput) -> f64 with Mut, Div, Panic {
+    if inp.n_drugs == 0 { return 1.0 }
+    var w: f64 = 1.0
+    var i: i32 = 0
+    while i < inp.n_drugs {
+        let idx = i as usize
+        if inp.confidence[idx] < w {
+            w = inp.confidence[idx]
+        }
+        i = i + 1
+    }
+    w
+}
+
+// Rule 2: rss on complements.  Equivalent to GUM combination of
+// uncorrelated relative-variance components.
+pub fn aggregate_rss(inp: MultiDrugInput) -> f64 with Mut, Div, Panic {
+    if inp.n_drugs == 0 { return 1.0 }
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < inp.n_drugs {
+        let idx = i as usize
+        let e = 1.0 - inp.confidence[idx]
+        s = s + e * e
+        i = i + 1
+    }
+    let r = sqrt(s)
+    if r >= 1.0 { return 0.0 }
+    1.0 - r
+}
+
+// Rule 3: cov_weighted.  Same as rss when rho = I.
+pub fn aggregate_cov_weighted(inp: MultiDrugInput) -> f64 with Mut, Div, Panic {
+    if inp.n_drugs == 0 { return 1.0 }
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < inp.n_drugs {
+        var j: i32 = 0
+        while j < inp.n_drugs {
+            let ii = i as usize
+            let jj = j as usize
+            let ei = 1.0 - inp.confidence[ii]
+            let ej = 1.0 - inp.confidence[jj]
+            s = s + ei * ej * inp.rho[ii * 8 + jj]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if s <= 0.0 { return 1.0 }
+    let r = sqrt(s)
+    if r >= 1.0 { return 0.0 }
+    1.0 - r
+}
+
+pub fn aggregate_evaluate(
+    inp:  MultiDrugInput,
+    rule: i32,
+    min_conf: f64
+) -> MultiDrugVerdict with Mut, Div, Panic {
+    var agg: f64 = 0.0
+    if rule == 0 { agg = aggregate_worst_case(inp) }
+    else if rule == 1 { agg = aggregate_rss(inp) }
+    else { agg = aggregate_cov_weighted(inp) }
+
+    let w = weakest_drug(inp)
+    let widx = w as usize
+
+    MultiDrugVerdict {
+        rule:      rule,
+        n_drugs:   inp.n_drugs,
+        aggregate: agg,
+        admitted:  agg >= min_conf,
+        min_conf:  min_conf,
+        weakest:   w,
+        weakest_c: inp.confidence[widx],
+    }
+}
+
+fn rule_name(r: i32) -> string {
+    if r == 0 { return "worst_case" }
+    if r == 1 { return "rss" }
+    if r == 2 { return "cov_weighted" }
+    "unknown"
+}
+
+pub fn aggregate_print_verdict(v: MultiDrugVerdict) with IO, Mut, Panic, Div {
+    print("multi-drug aggregate rule="); print(rule_name(v.rule))
+    print(" n="); print_f64(v.n_drugs as f64)
+    print(" agg="); print_f64(v.aggregate)
+    print(" min_conf="); print_f64(v.min_conf)
+    print(" weakest_idx="); print_f64(v.weakest as f64)
+    print(" weakest_c="); print_f64(v.weakest_c)
+    if v.admitted {
+        print(" verdict=ADMIT")
+    } else {
+        print(" verdict=REFUSE")
+    }
+    println("")
+}

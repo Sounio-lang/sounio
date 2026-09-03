@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.test-triage-report
 -->
 
-
 # Test Triage Report - Phase C.1
 
 **Date:** 2026-02-26  

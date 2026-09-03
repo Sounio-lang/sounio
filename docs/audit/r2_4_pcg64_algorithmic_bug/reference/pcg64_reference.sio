@@ -1,0 +1,187 @@
+// R.2.4 — TRUE PCG64-XSL-RR-128/64-LCG reference oracle.
+//
+// Per Melissa O'Neill 2014 "PCG: A Family of Simple Fast Space-Efficient
+// Statistically Good Algorithms for Random Number Generation", §4.4.
+//
+// Algorithm:
+//   state: u128
+//   inc:   u128 (must be odd; PCG_DEFAULT_INCREMENT_128 ends in odd low byte)
+//   step:  state = state * MULT_128 + inc                     (mod 2^128)
+//          output = rotr64(state_hi_old XOR state_lo_old,
+//                          (state_hi_old >> 58) & 63)
+//
+// Constants (Melissa O'Neill, pcg-cpp/include/pcg_extras.hpp):
+//   PCG_DEFAULT_MULTIPLIER_HIGH_64 = 2549297995355413924  (0x2360ED051FC65DA4)
+//   PCG_DEFAULT_MULTIPLIER_LOW_64  = 4865540595714422341  (0x4385DF649FCCF645)
+//   PCG_DEFAULT_INCREMENT_HIGH_64  = 6364136223846793005  (0x5851F42D4C957F2D)
+//   PCG_DEFAULT_INCREMENT_LOW_64   = 1442695040888963407  (0x14057B7EF767814F)
+//
+// Init pattern (single-seed convenience, matching pcg-cpp pcg64(seed)):
+//   state = 0
+//   inc   = PCG_DEFAULT_INCREMENT_128  (odd; ok)
+//   step  (discard output, mix initial state)
+//   state += (0, seed)                 (128-bit add: seed into low half)
+//   step  (discard output, mix in seed)
+//
+// 128-bit arithmetic on Sounio i64:
+//   - We treat each i64 field as a u64 value via bit pattern only.
+//   - Signed comparison `<` is replaced with `u_lt` for unsigned semantics.
+//   - Right shifts use `lshr` to strip Sounio's arithmetic sign extension.
+//   - Multiplication wraps mod 2^64 deterministically in Sounio i64;
+//     128-bit multiply built from u64×u64→u128 partial products via
+//     `umul64_high`.
+
+extern "C" {
+    fn print_i64(x: i64) -> i64;
+}
+
+struct DstPcg64 {
+    state_hi: i64,
+    state_lo: i64,
+    inc_hi: i64,
+    inc_lo: i64,
+}
+
+struct U128 {
+    hi: i64,
+    lo: i64,
+}
+
+// ─── Unsigned helpers on i64 ────────────────────────────────────────────────
+
+// Unsigned less-than: flip the top bit, then signed compare.
+// Convert (a, b) from u64 semantics to a comparable signed pair where
+// the unsigned ordering matches the signed ordering.
+fn u_lt(a: i64, b: i64) -> bool with Div {
+    let top: i64 = 1
+    let mask = top << 63
+    (a ^ mask) < (b ^ mask)
+}
+
+// Logical right shift on signed i64 via mask. Valid for 0 <= n <= 64.
+fn lshr(x: i64, n: i64) -> i64 with Mut, Div, Panic {
+    if n <= 0 { return x }
+    if n >= 64 { return 0 }
+    let raw = x >> n
+    let one: i64 = 1
+    let mask = (one << (64 - n)) - 1
+    raw & mask
+}
+
+// High 64 bits of u64 * u64.
+// Decomposes each into 32-bit halves and reassembles partial products.
+fn umul64_high(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    let mask32: i64 = 4294967295
+    let al = a & mask32
+    let ah = lshr(a, 32)
+    let bl = b & mask32
+    let bh = lshr(b, 32)
+
+    let ll = al * bl
+    let lh = al * bh
+    let hl = ah * bl
+    let hh = ah * bh
+
+    // Combine partial products to extract the high 64 bits.
+    let t = lshr(ll, 32) + (lh & mask32) + (hl & mask32)
+    lshr(t, 32) + lshr(lh, 32) + lshr(hl, 32) + hh
+}
+
+// 128-bit addition: (a_hi, a_lo) + (b_hi, b_lo) → (res_hi, res_lo) mod 2^128.
+fn u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> U128
+    with Mut, Div, Panic
+{
+    let res_lo = a_lo + b_lo
+    var carry: i64 = 0
+    if u_lt(res_lo, a_lo) { carry = 1 }
+    let res_hi = a_hi + b_hi + carry
+    U128 { hi: res_hi, lo: res_lo }
+}
+
+// 128-bit multiplication mod 2^128: (a_hi, a_lo) * (b_hi, b_lo) → low 128.
+fn u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> U128
+    with Mut, Div, Panic
+{
+    let res_lo = a_lo * b_lo
+    // High = umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi  (mod 2^64)
+    let res_hi = umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
+    U128 { hi: res_hi, lo: res_lo }
+}
+
+// 64-bit right rotation. Valid for 0 <= rot < 64.
+fn rotr64(x: i64, rot: i64) -> i64 with Mut, Div, Panic {
+    let r = rot & 63
+    if r == 0 { return x }
+    let right = lshr(x, r)
+    let left = x << (64 - r)
+    right | left
+}
+
+// ─── PCG64-XSL-RR step + init ──────────────────────────────────────────────
+
+// One PCG64 advance. Returns (new_rng, u64_output_as_i64).
+fn pcg64_step(rng: DstPcg64) -> (DstPcg64, i64) with Mut, Div, Panic {
+    let old_hi = rng.state_hi
+    let old_lo = rng.state_lo
+
+    // PCG_DEFAULT_MULTIPLIER_128.
+    let mult_hi: i64 = 2549297995355413924
+    let mult_lo: i64 = 4865540595714422341
+
+    // new_state = old_state * MULT_128 + inc  (mod 2^128)
+    let mul = u128_mul(old_hi, old_lo, mult_hi, mult_lo)
+    let add = u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
+
+    // XSL-RR output from NEW state.
+    // pcg-cpp setseq_base output_previous defaults to (sizeof(itype) <= 8); for
+    // pcg64 itype is pcg128_t (sizeof=16) → output_previous=false → operator()
+    // returns output(base_generate()) where base_generate advances first.
+    let new_hi = add.hi
+    let new_lo = add.lo
+    let xorshifted = new_hi ^ new_lo
+    let rot = lshr(new_hi, 58) & 63
+    let output = rotr64(xorshifted, rot)
+
+    (DstPcg64 { state_hi: new_hi, state_lo: new_lo, inc_hi: rng.inc_hi, inc_lo: rng.inc_lo }, output)
+}
+
+// Initialize PCG64 from scalar i64 seed using O'Neill's canonical pattern.
+// inc = PCG_DEFAULT_INCREMENT_128 (odd; guaranteed by low byte 0x4F).
+fn pcg64_new(seed: i64) -> DstPcg64 with Mut, Div, Panic {
+    let inc_hi: i64 = 6364136223846793005
+    let inc_lo: i64 = 1442695040888963407
+    var rng = DstPcg64 { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = pcg64_step(rng)
+    rng = r1.0
+    // state += (0, seed)
+    let add = u128_add(rng.state_hi, rng.state_lo, 0, seed)
+    rng = DstPcg64 { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = pcg64_step(rng)
+    r2.0
+}
+
+// ─── Oracle stream emission ────────────────────────────────────────────────
+
+fn emit_stream(seed: i64, n: i64) with IO, Mut, Div, Panic {
+    var rng = pcg64_new(seed)
+    var i: i64 = 0
+    while i < n {
+        let r = pcg64_step(rng)
+        rng = r.0
+        println(r.1)
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    // Phase A oracle: 256 samples per seed, 4 seeds.
+    let n: i64 = 256
+    println(0)
+    emit_stream(0, n)
+    println(1)
+    emit_stream(1, n)
+    println(31415)
+    emit_stream(31415, n)
+    println(20260516)
+    emit_stream(20260516, n)
+}

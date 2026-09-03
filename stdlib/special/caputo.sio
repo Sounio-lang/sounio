@@ -1,0 +1,289 @@
+// stdlib/special/caputo.sio — Scalar Caputo fractional derivative helpers.
+//
+// Implements the L1 discretization for 0 < alpha < 1:
+//
+//   D_C^alpha f(t_n) ~= 1 / (Gamma(2-alpha) h^alpha)
+//       * sum_{j=0}^{n-1} b_j (f_{n-j} - f_{n-j-1})
+//
+// where b_j = (j+1)^(1-alpha) - j^(1-alpha). The summation uses Kahan
+// compensation because the weights are decreasing and the finite differences
+// can be small for smooth decay curves.
+
+fn cap_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn cap_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 36 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn cap_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 32 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    return result
+}
+
+pub fn caputo_pow(base: f64, exponent: f64) -> f64 with Mut, Div, Panic {
+    if base <= 0.0 {
+        if base == 0.0 && exponent > 0.0 { return 0.0 }
+        return 0.0
+    }
+    return cap_exp(exponent * cap_ln(base))
+}
+
+fn cap_int_pow(base: f64, exponent: i32) -> f64 {
+    if exponent == 0 { return 1.0 }
+    var result = 1.0
+    var i = 0
+    while i < exponent {
+        result = result * base
+        i = i + 1
+    }
+    return result
+}
+
+fn cap_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let two_pi = 6.28318530717958647692
+    var a = x
+    while a > pi { a = a - two_pi }
+    while a < 0.0 - pi { a = a + two_pi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 20 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cap_cos(x: f64) -> f64 with Mut, Div, Panic {
+    return cap_sin(1.57079632679489661923 - x)
+}
+
+pub fn caputo_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let ln_sqrt_2pi = 0.91893853320467274178
+
+    if x <= 0.0 { return 1.0e300 }
+    if x < 0.5 {
+        let s = cap_abs(cap_sin(pi * x))
+        if s < 1.0e-15 { return 1.0e300 }
+        return cap_ln(pi / s) - caputo_lgamma(1.0 - x)
+    }
+
+    let c0 = 0.99999999999980993
+    let c1 = 676.5203681218851
+    let c2 = 0.0 - 1259.1392167224028
+    let c3 = 771.32342877765313
+    let c4 = 0.0 - 176.61502916214059
+    let c5 = 12.507343278686905
+    let c6 = 0.0 - 0.13857109526572012
+    let c7 = 9.9843695780195716e-6
+    let c8 = 1.5056327351493116e-7
+
+    let w = x - 1.0
+    let ag = c0
+        + c1 / (w + 1.0)
+        + c2 / (w + 2.0)
+        + c3 / (w + 3.0)
+        + c4 / (w + 4.0)
+        + c5 / (w + 5.0)
+        + c6 / (w + 6.0)
+        + c7 / (w + 7.0)
+        + c8 / (w + 8.0)
+    let t = w + 7.5
+    return ln_sqrt_2pi + (w + 0.5) * cap_ln(t) - t + cap_ln(ag)
+}
+
+pub fn caputo_gamma(x: f64) -> f64 with Mut, Div, Panic {
+    return cap_exp(caputo_lgamma(x))
+}
+
+pub fn caputo_l1_weight(alpha: f64, k: i32) -> f64 with Mut, Div, Panic {
+    if k < 0 { return 0.0 }
+    let beta = 1.0 - alpha
+    let kp1 = (k + 1) as f64
+    let kf = k as f64
+    return caputo_pow(kp1, beta) - caputo_pow(kf, beta)
+}
+
+pub fn caputo_l1_scale(alpha: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    if alpha <= 0.0 || alpha >= 1.0 { return 0.0 }
+    if dt <= 0.0 { return 0.0 }
+    let denom = caputo_gamma(2.0 - alpha) * caputo_pow(dt, alpha)
+    if denom <= 0.0 { return 0.0 }
+    return 1.0 / denom
+}
+
+pub fn caputo_l1_derivative(samples: [f64; 512], n: i32, dt: f64, alpha: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    if n >= 512 { return 0.0 }
+    if alpha <= 0.0 || alpha >= 1.0 { return 0.0 }
+    if dt <= 0.0 { return 0.0 }
+
+    var sum = 0.0
+    var compensation = 0.0
+    var j = 0
+    while j < n {
+        let weight = caputo_l1_weight(alpha, j)
+        let diff = samples[n - j] - samples[n - j - 1]
+        let y = weight * diff - compensation
+        let t = sum + y
+        compensation = (t - sum) - y
+        sum = t
+        j = j + 1
+    }
+    return caputo_l1_scale(alpha, dt) * sum
+}
+
+pub fn caputo_power_exact(beta: f64, alpha: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= 0.0 { return 0.0 }
+    let numerator = caputo_gamma(beta + 1.0)
+    let denominator = caputo_gamma(beta + 1.0 - alpha)
+    if denominator <= 0.0 { return 0.0 }
+    return numerator / denominator * caputo_pow(t, beta - alpha)
+}
+
+fn mittag_leffler_neg_real_large(alpha: f64, z: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let x = 0.0 - z
+    if x < 5.0 { return 0.0 }
+
+    let sin_pa = cap_sin(pi * alpha)
+    let cos_pa = cap_cos(pi * alpha)
+    let scale = sin_pa / (pi * alpha)
+    if scale <= 0.0 { return 0.0 }
+
+    // Stable negative-real branch used by the D.8 reference grid:
+    //
+    //   E_alpha(-x^alpha)
+    //     = sin(pi alpha)/(pi alpha)
+    //       * int_0^inf exp(-x s^(1/alpha))
+    //         / (s^2 + 2s cos(pi alpha) + 1) ds
+    //
+    // The s = r^alpha substitution removes the endpoint singularity in
+    // the completely monotone density.  For x >= 5, s in [0, 4] leaves a
+    // negligible positive tail in the D.8 alpha range; a dense uniform
+    // Simpson grid is used because the mass moves toward s = 0 as x grows.
+    let n = 32768
+    let h = 4.0 / (n as f64)
+    var acc = 0.0
+    var c = 0.0
+    var i = 0
+    while i <= n {
+        let s = (i as f64) * h
+        let denom = s * s + 2.0 * s * cos_pa + 1.0
+        let expo = if s <= 0.0 { 1.0 } else { cap_exp(0.0 - x * caputo_pow(s, 1.0 / alpha)) }
+        let f = expo / denom
+        var w = 2.0
+        if i == 0 || i == n {
+            w = 1.0
+        } else if (i / 2) * 2 != i {
+            w = 4.0
+        }
+        let y = w * f - c
+        let t = acc + y
+        c = (t - acc) - y
+        acc = t
+        i = i + 1
+    }
+    return scale * h * acc / 3.0
+}
+
+fn mittag_leffler_half_neg_large(z: f64) -> f64 with Mut, Div {
+    let sqrt_pi = 1.77245385090551602730
+    let x = 0.0 - z
+    if x <= 0.0 { return 1.0 }
+
+    // E_{1/2}(-x) = exp(x^2) erfc(x).  For x >= 5 the erfcx asymptotic
+    // is alternating and rapidly convergent.
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 24 {
+        term = 0.0 - term * (((2 * n - 1) as f64) / (2.0 * x * x))
+        sum = sum + term
+        if cap_abs(term) < cap_abs(sum) * 1.0e-15 {
+            n = 24
+        } else {
+            n = n + 1
+        }
+    }
+    return sum / (sqrt_pi * x)
+}
+
+pub fn mittag_leffler_e_alpha(alpha: f64, z: f64) -> f64 with Mut, Div, Panic {
+    if alpha <= 0.0 { return 0.0 }
+    if cap_abs(z) < 1.0e-15 { return 1.0 }
+    if alpha < 1.0 && z <= 0.0 - 5.0 {
+        if cap_abs(alpha - 0.5) < 1.0e-12 {
+            return mittag_leffler_half_neg_large(z)
+        }
+        return mittag_leffler_neg_real_large(alpha, z)
+    }
+
+    var sum = 1.0
+    var compensation = 0.0
+    var k = 1
+    while k < 160 {
+        let g = caputo_gamma(alpha * (k as f64) + 1.0)
+        let term = cap_int_pow(z, k) / g
+        let y = term - compensation
+        let t = sum + y
+        compensation = (t - sum) - y
+        sum = t
+        if cap_abs(term) < cap_abs(sum) * 1.0e-13 {
+            k = 160
+        } else {
+            k = k + 1
+        }
+    }
+    return sum
+}
+
+pub fn fractional_decay_ml(c0: f64, lambda: f64, t: f64, alpha: f64) -> f64 with Mut, Div, Panic {
+    if t <= 0.0 { return c0 }
+    return c0 * mittag_leffler_e_alpha(alpha, 0.0 - lambda * caputo_pow(t, alpha))
+}

@@ -1,0 +1,303 @@
+//! stdlib/crypto/aes.sio — AES-128/256 (FIPS-197) key schedule and
+//! single-block forward-cipher (encrypt-only). Decryption is intentionally
+//! not implemented: GCM mode (Task 2 of the AEAD ciphers plan) only ever
+//! needs the forward cipher, applied to a counter block, to build a
+//! keystream -- it never runs AES decryption.
+//!
+//! Reference: NIST FIPS 197, "Advanced Encryption Standard (AES)", 2001
+//!   https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197.pdf
+//! S-box (this file's `aes_sbox()`) transcribed and diffed byte-for-byte
+//! against FIPS-197 Figure 7 (p.16 of the primary-source PDF) on 2026-08-25.
+//! Key schedule / cipher structure follows FIPS-197 Sec. 5.1/5.2 (Figs. 5,
+//! 11) and was validated end-to-end against the FIPS-197 Appendix C.1 and
+//! C.3 worked examples (see tests/run-pass/aes_block_encrypt.sio), including
+//! cross-checking the ShiftRows byte permutation used below against the
+//! Appendix B round-1 "After ShiftRows" state.
+//!
+//! Bit-shift operand convention (Step 1 of this task's brief): probed
+//! 2026-08-25 with /tmp/shift_probe.sio on this exact checkout's Madaros
+//! v0.80.0 -- both `x >> 4` (bare i32 shift amount) and `x >> (4 as u8)`
+//! (explicit u8 shift amount) compiled and printed the identical result
+//! (`12 12`). CLAUDE.md's "stale as of 2026-08-20" note is accurate; the
+//! `u8`-required claim in docs/guide/SOUNIO_GOTCHAS.md is stale. This file
+//! therefore uses bare integer shift amounts throughout (no `as u8`),
+//! matching the prevailing convention already used elsewhere in
+//! stdlib/crypto/ (see hash.sio, random.sio).
+//!
+//! Byte-arithmetic convention: measured 2026-08-25 that `u8` shifts do not
+//! auto-wrap at 8 bits on this compiler (`0xAE_u8 << 1` yields the
+//! *unwrapped* value 348, not 92 mod 256) -- consistent with
+//! stdlib/compress/gzip.sio's existing note that "[u8; N] arithmetic ...
+//! elements are word-sized". Consequently every GF(2^8) computation in this
+//! file is carried out in `i64` with an explicit `& 0xFF` mask after each
+//! shift/xor that could overflow a byte, and values are cast to `u8` only
+//! when written into the public `[u8; N]` interface arrays -- the same
+//! pattern already used by stdlib/x509/cert.sio and stdlib/crypto/hash.sio.
+
+pub const AES_128_ROUNDS: i64 = 10
+pub const AES_256_ROUNDS: i64 = 14
+
+pub struct AesRoundKeys {
+    keys: [[u8;16];15],
+    rounds: i64,
+}
+
+// ============================================================================
+// S-BOX (FIPS-197 Figure 7)
+// ============================================================================
+
+fn aes_sbox() -> [i64; 256] {
+    let s: [i64; 256] = [
+        0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+        0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+        0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+        0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+        0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+        0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+        0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+        0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+        0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+        0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+        0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+        0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+        0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+        0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+        0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+        0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+    ]
+    return s
+}
+
+fn aes_sbox_lookup(sbox: &[i64;256], b: i64) -> i64 {
+    return sbox[(b & 0xFF) as usize]
+}
+
+// ============================================================================
+// GF(2^8) ARITHMETIC (FIPS-197 Sec. 4.2) -- multiplication modulo
+// m(x) = x^8 + x^4 + x^3 + x + 1, via the standard "xtime" construction.
+// ============================================================================
+
+fn aes_xtime(a: i64) -> i64 {
+    let hi = a & 0x80
+    var r = (a << 1) & 0xFF
+    if hi != 0 {
+        r = r ^ 0x1b
+    }
+    return r
+}
+
+fn aes_gf_mul2(a: i64) -> i64 {
+    return aes_xtime(a)
+}
+
+fn aes_gf_mul3(a: i64) -> i64 {
+    return aes_xtime(a) ^ a
+}
+
+// ============================================================================
+// ROUND TRANSFORMATIONS (FIPS-197 Sec. 5.1)
+//
+// State is represented as a flat 16-byte i64 array using FIPS-197's own
+// input/output byte order: flat[r + 4*c] == s[r,c]. This means the public
+// [u8;16] plaintext/ciphertext/round-key arrays need NO transpose at all --
+// they already are FIPS's `in[]`/`out[]`/`k_sch[]` byte order.
+// ============================================================================
+
+fn aes_sub_bytes(state: [i64;16], sbox: &[i64;256]) -> [i64;16] {
+    var out: [i64;16] = [0;16]
+    var j: i64 = 0
+    while j < 16 {
+        out[j as usize] = aes_sbox_lookup(sbox, state[j as usize])
+        j = j + 1
+    }
+    return out
+}
+
+// ShiftRows byte permutation for the flat r+4c layout: row r is
+// cyclic-left-shifted by r columns. Verified against FIPS-197 Appendix B's
+// round-1 "After ShiftRows" state (see task-1-report.md).
+fn aes_shift_rows(state: [i64;16]) -> [i64;16] {
+    let perm: [i64;16] = [0,5,10,15, 4,9,14,3, 8,13,2,7, 12,1,6,11]
+    var out: [i64;16] = [0;16]
+    var j: i64 = 0
+    while j < 16 {
+        out[j as usize] = state[perm[j as usize] as usize]
+        j = j + 1
+    }
+    return out
+}
+
+// MixColumns (FIPS-197 Sec. 5.1.3, Eq. 5.6/4.13): for each column c (bytes
+// at flat indices 4c..4c+3), left-multiply by the fixed polynomial
+// {03}x^3+{01}x^2+{01}x+{02}.
+fn aes_mix_columns(state: [i64;16]) -> [i64;16] {
+    var out: [i64;16] = [0;16]
+    var c: i64 = 0
+    while c < 4 {
+        let b0 = state[(4*c+0) as usize]
+        let b1 = state[(4*c+1) as usize]
+        let b2 = state[(4*c+2) as usize]
+        let b3 = state[(4*c+3) as usize]
+        out[(4*c+0) as usize] = aes_gf_mul2(b0) ^ aes_gf_mul3(b1) ^ b2 ^ b3
+        out[(4*c+1) as usize] = b0 ^ aes_gf_mul2(b1) ^ aes_gf_mul3(b2) ^ b3
+        out[(4*c+2) as usize] = b0 ^ b1 ^ aes_gf_mul2(b2) ^ aes_gf_mul3(b3)
+        out[(4*c+3) as usize] = aes_gf_mul3(b0) ^ b1 ^ b2 ^ aes_gf_mul2(b3)
+        c = c + 1
+    }
+    return out
+}
+
+fn aes_add_round_key(state: [i64;16], round_keys: &AesRoundKeys, round: i64) -> [i64;16] {
+    var out: [i64;16] = [0;16]
+    var j: i64 = 0
+    while j < 16 {
+        let kb = round_keys.keys[round as usize][j as usize]
+        out[j as usize] = state[j as usize] ^ ((kb as i64) & 0xFF)
+        j = j + 1
+    }
+    return out
+}
+
+// ============================================================================
+// KEY EXPANSION (FIPS-197 Sec. 5.2, Fig. 11) -- shared core for both key
+// sizes; `nk` is the key length in 32-bit words (4 for AES-128, 8 for
+// AES-256), `nr` is the number of rounds (AES_128_ROUNDS / AES_256_ROUNDS).
+// ============================================================================
+
+fn aes_key_schedule_core(key_bytes: [i64;32], nk: i64, nr: i64) -> AesRoundKeys {
+    let sbox = aes_sbox()
+    // Rcon[i] = {x^(i-1), 00, 00, 00} in GF(2^8); index 0 unused/unreachable.
+    let rcon: [i64;11] = [0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
+
+    // w[] holds up to Nb*(Nr+1) = 60 words (AES-256 worst case), 4 bytes each.
+    var w: [i64;240] = [0;240]
+
+    var i: i64 = 0
+    while i < nk {
+        w[(i*4+0) as usize] = key_bytes[(i*4+0) as usize]
+        w[(i*4+1) as usize] = key_bytes[(i*4+1) as usize]
+        w[(i*4+2) as usize] = key_bytes[(i*4+2) as usize]
+        w[(i*4+3) as usize] = key_bytes[(i*4+3) as usize]
+        i = i + 1
+    }
+
+    let total_words = 4 * (nr + 1)
+    var idx = nk
+    while idx < total_words {
+        var t0 = w[((idx-1)*4+0) as usize]
+        var t1 = w[((idx-1)*4+1) as usize]
+        var t2 = w[((idx-1)*4+2) as usize]
+        var t3 = w[((idx-1)*4+3) as usize]
+
+        if idx % nk == 0 {
+            // RotWord: [b0,b1,b2,b3] -> [b1,b2,b3,b0]
+            let r0 = t1
+            let r1 = t2
+            let r2 = t3
+            let r3 = t0
+            // SubWord
+            t0 = aes_sbox_lookup(&sbox, r0)
+            t1 = aes_sbox_lookup(&sbox, r1)
+            t2 = aes_sbox_lookup(&sbox, r2)
+            t3 = aes_sbox_lookup(&sbox, r3)
+            // XOR Rcon into the first byte only
+            t0 = t0 ^ rcon[(idx / nk) as usize]
+        } else {
+            if nk > 6 {
+                if idx % nk == 4 {
+                    // AES-256 extra SubWord (no RotWord, no Rcon) at i%Nk==4
+                    t0 = aes_sbox_lookup(&sbox, t0)
+                    t1 = aes_sbox_lookup(&sbox, t1)
+                    t2 = aes_sbox_lookup(&sbox, t2)
+                    t3 = aes_sbox_lookup(&sbox, t3)
+                }
+            }
+        }
+
+        w[(idx*4+0) as usize] = w[((idx-nk)*4+0) as usize] ^ t0
+        w[(idx*4+1) as usize] = w[((idx-nk)*4+1) as usize] ^ t1
+        w[(idx*4+2) as usize] = w[((idx-nk)*4+2) as usize] ^ t2
+        w[(idx*4+3) as usize] = w[((idx-nk)*4+3) as usize] ^ t3
+        idx = idx + 1
+    }
+
+    // Pack words into round keys. Round r's key is the concatenation of
+    // words w[4r]..w[4r+3], which (per FIPS-197's own printed k_sch values
+    // in Appendix C) is exactly the flat r+4c byte order used everywhere
+    // else in this file -- no transpose needed.
+    var keys: [[u8;16];15] = [[(0 as u8);16];15]
+    var r: i64 = 0
+    while r <= nr {
+        var j: i64 = 0
+        while j < 16 {
+            let word_col = j / 4
+            let byte_in_word = j % 4
+            let word_index = 4*r + word_col
+            keys[r as usize][j as usize] = (w[(word_index*4+byte_in_word) as usize] & 0xFF) as u8
+            j = j + 1
+        }
+        r = r + 1
+    }
+
+    return AesRoundKeys { keys: keys, rounds: nr }
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+pub fn aes128_key_schedule(key: &[u8;16]) -> AesRoundKeys {
+    var key_bytes: [i64;32] = [0;32]
+    var i: i64 = 0
+    while i < 16 {
+        key_bytes[i as usize] = (key[i as usize] as i64) & 0xFF
+        i = i + 1
+    }
+    return aes_key_schedule_core(key_bytes, 4, AES_128_ROUNDS)
+}
+
+pub fn aes256_key_schedule(key: &[u8;32]) -> AesRoundKeys {
+    var key_bytes: [i64;32] = [0;32]
+    var i: i64 = 0
+    while i < 32 {
+        key_bytes[i as usize] = (key[i as usize] as i64) & 0xFF
+        i = i + 1
+    }
+    return aes_key_schedule_core(key_bytes, 8, AES_256_ROUNDS)
+}
+
+// AES forward cipher (FIPS-197 Fig. 5): AddRoundKey(round 0), then
+// (rounds-1) full rounds of SubBytes/ShiftRows/MixColumns/AddRoundKey, then
+// a final round of SubBytes/ShiftRows/AddRoundKey (no MixColumns).
+pub fn aes_encrypt_block(round_keys: &AesRoundKeys, block: &[u8;16]) -> [u8;16] {
+    let sbox = aes_sbox()
+    var state: [i64;16] = [0;16]
+    var i: i64 = 0
+    while i < 16 {
+        state[i as usize] = (block[i as usize] as i64) & 0xFF
+        i = i + 1
+    }
+
+    state = aes_add_round_key(state, round_keys, 0)
+
+    var round: i64 = 1
+    while round < round_keys.rounds {
+        state = aes_sub_bytes(state, &sbox)
+        state = aes_shift_rows(state)
+        state = aes_mix_columns(state)
+        state = aes_add_round_key(state, round_keys, round)
+        round = round + 1
+    }
+
+    state = aes_sub_bytes(state, &sbox)
+    state = aes_shift_rows(state)
+    state = aes_add_round_key(state, round_keys, round_keys.rounds)
+
+    var out: [u8;16] = [0;16]
+    i = 0
+    while i < 16 {
+        out[i as usize] = (state[i as usize] & 0xFF) as u8
+        i = i + 1
+    }
+    return out
+}

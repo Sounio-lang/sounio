@@ -1,0 +1,126 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/fit_beta.sio — beta-distribution fitting (method of moments)
+//
+// Estimates the two beta shape parameters from data on (0,1) by matching the
+// first two moments — the natural fit for proportions and bounded rates:
+//
+//   fit_beta(x, n) -> BetaFit
+//
+// For Beta(α, β) with mean m and variance v (with v < m(1−m)),
+//   c = m(1−m)/v − 1,   α̂ = m·c,   β̂ = (1−m)·c.
+// The sample variance uses the (n−1) denominator.
+//
+// Pure Sounio: one pass for the mean, one for the variance; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Johnson, Kotz & Balakrishnan, "Continuous Univariate Distributions" vol.2, ch.25.
+
+module stats::fit_beta
+
+pub struct BetaFit {
+    pub alpha: f64,
+    pub beta: f64,
+    pub mean: f64,
+    pub variance: f64,
+}
+
+/// Method-of-moments beta fit for data on (0,1).
+///
+/// Parâmetros: x — data in (0,1); n — size (>=2, <=256).
+/// Retorno: BetaFit (alpha, beta, mean, variance).
+/// Referências: Johnson, Kotz & Balakrishnan ch.25.
+pub fn fit_beta(x: &[f64; 256], n: i32) -> BetaFit with Mut, Div, Panic {
+    if n < 2 { return BetaFit { alpha: 0.0, beta: 0.0, mean: 0.0, variance: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let variance = ss / (nf - 1.0)
+    let mm = mean * (1.0 - mean)
+    if variance <= 0.0 || variance >= mm || mean <= 0.0 || mean >= 1.0 {
+        return BetaFit { alpha: 0.0, beta: 0.0, mean: mean, variance: variance }
+    }
+    let c = mm / variance - 1.0
+    let alpha = mean * c
+    let beta = (1.0 - mean) * c
+    return BetaFit { alpha: alpha, beta: beta, mean: mean, variance: variance }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {0.25,0.25,0.75,0.75}: mean 0.5, sample var 0.25/3=0.083333.
+// c = 0.25/0.083333 - 1 = 3 - 1 = 2; alpha=0.5·2=1; beta=0.5·2=1 (uniform).
+fn test_uniform() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=0.25; x[1]=0.25; x[2]=0.75; x[3]=0.75
+    let r = fit_beta(&x, 4)
+    var ok = true
+    ok = check(1, approx(r.mean, 0.5, 1.0e-9)) && ok
+    ok = check(2, approx(r.variance, 0.083333, 1.0e-5)) && ok
+    ok = check(3, approx(r.alpha, 1.0, 1.0e-5)) && ok
+    ok = check(4, approx(r.beta, 1.0, 1.0e-5)) && ok
+    return ok
+}
+
+// asymmetric: {0.4,0.4,0.4,0.8}: mean 0.5, dev -0.1·3,0.3 -> ss=3·0.01+0.09=0.12,
+// var=0.12/3=0.04. c=0.25/0.04-1=6.25-1=5.25. alpha=0.5·5.25=2.625; beta=2.625.
+// (mean 0.5 so symmetric params here.)
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=0.4; x[1]=0.4; x[2]=0.4; x[3]=0.8
+    let r = fit_beta(&x, 4)
+    var ok = true
+    ok = check(10, approx(r.variance, 0.04, 1.0e-6)) && ok
+    ok = check(11, approx(r.alpha, 2.625, 1.0e-4)) && ok
+    return ok
+}
+
+// skewed mean: {0.6,0.6,0.6,0.6,0.2}: mean 0.52, check alpha/beta from formula.
+// dev: 0.08·4, -0.32 -> ss=4·0.0064+0.1024=0.128; var=0.128/4=0.032.
+// mm=0.52·0.48=0.2496. c=0.2496/0.032-1=7.8-1=6.8. alpha=0.52·6.8=3.536; beta=0.48·6.8=3.264.
+fn test_skew() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=0.6; x[1]=0.6; x[2]=0.6; x[3]=0.6; x[4]=0.2
+    let r = fit_beta(&x, 5)
+    var ok = true
+    ok = check(20, approx(r.mean, 0.52, 1.0e-9)) && ok
+    ok = check(21, approx(r.alpha, 3.536, 1.0e-3)) && ok
+    ok = check(22, approx(r.beta, 3.264, 1.0e-3)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_uniform() && ok
+    ok = test_symmetric() && ok
+    ok = test_skew() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

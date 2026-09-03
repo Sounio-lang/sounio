@@ -1,28 +1,121 @@
-// Example: Source-level kernel compilation via HLIR→GPU lowering pipeline
+// Kretikos GPU Compiler — bounded kernel-surface example
 //
-// Demonstrates the syntax for kernel functions that will be lowered through
-// hlir_to_gpu.sio using gpu.thread_id.x, gpu.block_id.x, gpu.sync_threads(),
-// and the standard 1D global index pattern.
+// This example demonstrates the currently checked source-level GPU builtins.
+// The native CPU fallback is serial: x-axis IDs are deterministic, y/z IDs are
+// recognized but stubbed, and gpu_sync_threads() is a no-op.
 //
-// Pipeline: Source → HLIR (SSA) → hlir_to_gpu → GpuKernelIr → PTX/Metal/SPIR-V
+// Kretikos (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth,
+// these builtins give Sounio a named, inspectable path toward owned GPU codegen.
 //
 // GPU builtins available in kernel fn bodies:
-//   gpu.thread_id.x  → GpuGetTid  axis=0
-//   gpu.thread_id.y  → GpuGetTid  axis=1
-//   gpu.block_id.x   → GpuGetBid  axis=0
-//   gpu.block_dim.x  → GpuGetNtid axis=0
-//   gpu.sync_threads → GpuBarrierSync
+//   gpu_thread_id_x()  → thread index within block (x axis)
+//   gpu_thread_id_y()  → recognized; CPU fallback returns 0
+//   gpu_thread_id_z()  → recognized; CPU fallback returns 0
+//   gpu_block_id_x()   → block index within grid (x axis)
+//   gpu_block_id_y()   → recognized; CPU fallback returns 0
+//   gpu_block_id_z()   → recognized; CPU fallback returns 0
+//   gpu_block_dim_x()  → number of threads per block (x axis)
+//   gpu_block_dim_y()  → recognized; CPU fallback returns 1
+//   gpu_block_dim_z()  → recognized; CPU fallback returns 1
+//   gpu_sync_threads() → recognized; CPU fallback no-op
 //
-// Usage:
-//   souc check examples/kernel_source_level.sio
+// Compile and run:
+//   souc examples/kernel_source_level.sio /tmp/kretikos_demo.elf
+//   /tmp/kretikos_demo.elf
+//
+// Build PTX (requires GPU profile compiler):
+//   artifacts/omega/souc-bin/souc-linux-x86_64-gpu build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos_demo.ptx
 
-kernel fn vec_scale(n: i64) with GPU, Div, Mut, Panic {
-    var i: i64 = 0
-    while i < n {
-        i = i + 1
+// ============================================================================
+// Kernel: verify_indexing
+//
+// Each thread computes its global ID and verifies the math is correct.
+// In CPU fallback mode, the kernel runs as a serial native program.
+// GPU backend lanes can lower this surface to real hardware-specific code.
+// ============================================================================
+kernel fn verify_indexing(n: i64) with GPU, Panic {
+    let tid_x = gpu_thread_id_x()
+    let tid_y = gpu_thread_id_y()
+    let tid_z = gpu_thread_id_z()
+    let bid_x = gpu_block_id_x()
+    let bid_y = gpu_block_id_y()
+    let bid_z = gpu_block_id_z()
+    let bdim_x = gpu_block_dim_x()
+    let bdim_y = gpu_block_dim_y()
+    let bdim_z = gpu_block_dim_z()
+
+    // Current checked public contract: 1D x-axis indexing.
+    let global_id = bid_x * bdim_x + tid_x
+
+    // Bounds check: threads beyond the problem size exit early
+    // This is the standard CUDA "guard" pattern
+    if global_id >= n {
+        return
     }
+
+    // Verify thread IDs are non-negative (always true on real hardware)
+    if tid_x < 0 { return }
+    if tid_y < 0 { return }
+    if tid_z < 0 { return }
+    if bid_x < 0 { return }
+    if bid_y < 0 { return }
+    if bid_z < 0 { return }
+
+    // In a hardware-lowered kernel, this thread would now process element
+    // [global_id] of the input/output arrays.
 }
 
-fn main() -> i32 with IO {
+// ============================================================================
+// Kernel: scale_element
+//
+// Demonstrates the bounded source-level pattern:
+// 1. Compute global thread ID
+// 2. Check bounds
+// 3. Perform work (here: just arithmetic on scalar params)
+// 4. Sync threads before any cross-thread communication
+// ============================================================================
+kernel fn scale_element(scale: f64, n: i64) with GPU, Div {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+
+    if i >= n {
+        return
+    }
+
+    // Each thread computes scale * (i + 1) for its assigned element
+    let value = scale * ((i + 1) as f64)
+
+    // In a fuller backend path, value would be stored to an output array:
+    //   out[i] = value
+    // Store/load lowering is a separate backend contract.
+
+    // Barrier spelling is recognized. The native CPU fallback treats it as no-op.
+    gpu_sync_threads()
+}
+
+// ============================================================================
+// Main: launch kernels and report
+// ============================================================================
+fn main() -> i32 with IO, GPU {
+    let n: i64 = 1024
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
+
+    // Launch verify_indexing kernel
+    perform GPU.launch(verify_indexing, grid, block)(n)
+    perform GPU.sync()
+
+    // Launch scale_element kernel
+    perform GPU.launch(scale_element, grid, block)(2.5, n)
+    perform GPU.sync()
+
+    println("Kretikos GPU Compiler — bounded GPU surface demo complete")
+    println("Launched 2 kernels through the checked GPU launch surface")
+    println("Grid: 16 blocks × 64 threads = 1024 total threads")
+    println("Native CPU fallback: deterministic serial execution")
+    println("GPU backend lanes own the hardware-specific lowering")
+
     0
 }

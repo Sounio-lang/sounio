@@ -1,0 +1,201 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/trend.sio — Cochran-Armitage test for trend in proportions
+//
+// Tests whether an event proportion changes linearly across k *ordered* groups
+// (e.g. dose levels): the categorical dose-response analogue of a regression
+// slope test.
+//
+//   cochran_armitage(events, totals, scores, k) -> TrendResult
+//
+// With group scores dᵢ, counts nᵢ, events rᵢ, N=Σnᵢ, R=Σrᵢ, p̄=R/N:
+//   T   = Σ dᵢ (rᵢ − nᵢ p̄)
+//   Sxx = Σ nᵢ dᵢ² − (Σ nᵢ dᵢ)² / N
+//   V   = p̄(1−p̄)·Sxx,   χ² = T²/V  (df 1),   z = T/√V,
+//   slope (proportion per unit score) = T / Sxx.
+//
+// Pure Sounio: inline sqrt/erf for the normal tail; fixed [32]-wide group
+// scratch (k ≤ 32); no nested data-array calls.
+//
+// References:
+//   Cochran (1954); Armitage (1955); Agresti "Categorical Data Analysis" §5.3.5.
+
+module stats::trend
+
+fn tr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn tr_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / tr_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn tr_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * tr_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn tr_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - tr_erf(z * INV_SQRT2))
+}
+
+pub struct TrendResult {
+    pub z: f64,     // signed trend z-statistic
+    pub chi2: f64,  // T²/V, df 1
+    pub p: f64,     // two-sided p-value
+    pub slope: f64, // fitted proportion change per unit score
+    pub pbar: f64,  // overall event proportion R/N
+}
+
+/// Cochran-Armitage trend test across k ordered groups.
+///
+/// Parâmetros: events[i], totals[i] — counts; scores[i] — ordered dose scores;
+///             k — number of groups (2..32).
+/// Retorno: TrendResult (z, chi2, p, slope, pbar).
+/// Referências: Armitage (1955); Agresti §5.3.5.
+pub fn cochran_armitage(events: &[f64; 32], totals: &[f64; 32],
+                        scores: &[f64; 32], k: i32) -> TrendResult with Mut, Div, Panic {
+    if k < 2 || k > 32 {
+        return TrendResult { z: 0.0, chi2: 0.0, p: 1.0, slope: 0.0, pbar: 0.0 }
+    }
+    var bigN = 0.0
+    var bigR = 0.0
+    var snd = 0.0    // Σ n_i d_i
+    var snd2 = 0.0   // Σ n_i d_i²
+    var i = 0
+    while i < k {
+        let ni = totals[i as usize]
+        let ri = events[i as usize]
+        let di = scores[i as usize]
+        bigN = bigN + ni
+        bigR = bigR + ri
+        snd = snd + ni * di
+        snd2 = snd2 + ni * di * di
+        i = i + 1
+    }
+    if bigN <= 0.0 { return TrendResult { z: 0.0, chi2: 0.0, p: 1.0, slope: 0.0, pbar: 0.0 } }
+    let pbar = bigR / bigN
+    // T = Σ d_i (r_i - n_i·pbar)
+    var t = 0.0
+    var j = 0
+    while j < k {
+        t = t + scores[j as usize] * (events[j as usize] - totals[j as usize] * pbar)
+        j = j + 1
+    }
+    let sxx = snd2 - snd * snd / bigN
+    if sxx <= 0.0 || pbar <= 0.0 || pbar >= 1.0 {
+        return TrendResult { z: 0.0, chi2: 0.0, p: 1.0, slope: 0.0, pbar: pbar }
+    }
+    let v = pbar * (1.0 - pbar) * sxx
+    let z = t / tr_sqrt(v)
+    let chi2 = t * t / v
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    let p = 2.0 * tr_normal_sf(az)
+    let slope = t / sxx
+    return TrendResult { z: z, chi2: chi2, p: p, slope: slope, pbar: pbar }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Perfect linear dose-response: d=0,1,2,3; n=100 each; r=10,20,30,40 (p=.1..4).
+// N=400, R=100, pbar=0.25. T=50. Sxx=1400-600²/400=500. V=.25·.75·500=93.75.
+// chi2=2500/93.75=26.6667; z=50/9.682458=5.163978; slope=50/500=0.1.
+fn test_trend() -> bool with IO, Mut, Div, Panic {
+    var ev: [f64; 32] = [0.0; 32]
+    var nt: [f64; 32] = [0.0; 32]
+    var sc: [f64; 32] = [0.0; 32]
+    ev[0]=10.0; ev[1]=20.0; ev[2]=30.0; ev[3]=40.0
+    nt[0]=100.0; nt[1]=100.0; nt[2]=100.0; nt[3]=100.0
+    sc[0]=0.0; sc[1]=1.0; sc[2]=2.0; sc[3]=3.0
+    let r = cochran_armitage(&ev, &nt, &sc, 4)
+    var ok = true
+    ok = check(1, approx(r.chi2, 26.666667, 1.0e-4)) && ok
+    ok = check(2, approx(r.z, 5.163978, 1.0e-4)) && ok
+    ok = check(3, approx(r.slope, 0.1, 1.0e-6)) && ok
+    ok = check(4, approx(r.pbar, 0.25, 1.0e-9)) && ok
+    return ok
+}
+
+// No trend: equal proportions across groups -> T=0, chi2=0, slope=0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var ev: [f64; 32] = [0.0; 32]
+    var nt: [f64; 32] = [0.0; 32]
+    var sc: [f64; 32] = [0.0; 32]
+    ev[0]=10.0; ev[1]=10.0; ev[2]=10.0
+    nt[0]=50.0; nt[1]=50.0; nt[2]=50.0
+    sc[0]=0.0; sc[1]=1.0; sc[2]=2.0
+    let r = cochran_armitage(&ev, &nt, &sc, 3)
+    var ok = true
+    ok = check(10, approx(r.chi2, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.slope, 0.0, 1.0e-9)) && ok
+    ok = check(12, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+// Decreasing trend gives negative z (protective dose-response).
+fn test_negative() -> bool with IO, Mut, Div, Panic {
+    var ev: [f64; 32] = [0.0; 32]
+    var nt: [f64; 32] = [0.0; 32]
+    var sc: [f64; 32] = [0.0; 32]
+    ev[0]=40.0; ev[1]=30.0; ev[2]=20.0; ev[3]=10.0
+    nt[0]=100.0; nt[1]=100.0; nt[2]=100.0; nt[3]=100.0
+    sc[0]=0.0; sc[1]=1.0; sc[2]=2.0; sc[3]=3.0
+    let r = cochran_armitage(&ev, &nt, &sc, 4)
+    var ok = true
+    ok = check(20, approx(r.z, 0.0 - 5.163978, 1.0e-4)) && ok
+    ok = check(21, approx(r.slope, 0.0 - 0.1, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_trend() && ok
+    ok = test_null() && ok
+    ok = test_negative() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

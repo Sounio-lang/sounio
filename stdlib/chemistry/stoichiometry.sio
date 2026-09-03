@@ -1,0 +1,88 @@
+// stdlib/chemistry/stoichiometry.sio — Real stoichiometry with GUM uncertainty
+//
+// Moles <-> mass, limiting reagent, theoretical and percent yield,
+// all with first-order (JCGM) uncertainty propagation.
+//@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"
+
+module chemistry::stoichiometry
+
+// FULL ChEBI ontology for real stoich species
+use chemistry::ontology;
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic {
+    if x <= 0.0 { return 0.0; }
+    var g = if x > 1.0 { x } else { 1.0 };
+    var i = 0;
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1; }
+    g
+}
+
+// n = m / M  (mol); u via relative-error RSS
+pub fn moles_from_mass(m: f64, um: f64, mm: f64, umm: f64) -> (f64, f64) with Mut, Div, Panic {
+    let n = m / mm;
+    let u = n * sqrt_approx((um / m) * (um / m) + (umm / mm) * (umm / mm));
+    (n, u)
+}
+
+// m = n * M  (g); u via relative-error RSS
+pub fn mass_from_moles(n: f64, un: f64, mm: f64, umm: f64) -> (f64, f64) with Mut, Div, Panic {
+    let m = n * mm;
+    let u = m * sqrt_approx((un / n) * (un / n) + (umm / mm) * (umm / mm));
+    (m, u)
+}
+
+// Reaction extent limited by each reactant: min(n_a/ν_a, n_b/ν_b)
+pub fn limiting_extent(n_a: f64, coef_a: f64, n_b: f64, coef_b: f64) -> f64 with Div {
+    let xa = n_a / coef_a;
+    let xb = n_b / coef_b;
+    if xa < xb { xa } else { xb }
+}
+
+// true when reactant A is the limiting one
+pub fn is_limiting_a(n_a: f64, coef_a: f64, n_b: f64, coef_b: f64) -> bool with Div {
+    n_a / coef_a < n_b / coef_b
+}
+
+// Theoretical product mass: extent * (ν_prod/ν_lim) * M_prod
+pub fn theoretical_yield(n_lim: f64, coef_lim: f64, coef_prod: f64, mm_prod: f64) -> f64 with Mut, Div, Panic {
+    n_lim / coef_lim * coef_prod * mm_prod
+}
+
+// Percent yield = 100 * actual / theoretical; u via relative-error RSS
+pub fn percent_yield(actual: f64, uact: f64, theo: f64, utheo: f64) -> (f64, f64) with Mut, Div, Panic {
+    let y = 100.0 * actual / theo;
+    let u = y * sqrt_approx((uact / actual) * (uact / actual) + (utheo / theo) * (utheo / theo));
+    (y, u)
+}
+
+pub fn test_moles_basic() -> bool with Mut, Div, Panic {
+    // 36.03 g water / 18.015 g/mol = 2.000 mol
+    let (n, un) = moles_from_mass(36.03, 0.01, 18.015, 0.001);
+    check_near(n, 2.0, 0.001) && un > 0.0
+}
+
+pub fn test_limiting() -> bool with Mut, Div, Panic {
+    // 2 H2 + O2 -> 2 H2O: 3.0 mol H2 (extent 1.5) vs 1.0 mol O2 (extent 1.0)
+    // -> O2 limiting, extent 1.0, theoretical H2O = 1.0 * (2/1) * 18.015 = 36.03 g
+    let x = limiting_extent(3.0, 2.0, 1.0, 1.0);
+    let limited_o2 = is_limiting_a(1.0, 1.0, 3.0, 2.0);
+    let theo = theoretical_yield(1.0, 1.0, 2.0, 18.015);
+    check_near(x, 1.0, 1e-9) && limited_o2 && check_near(theo, 36.03, 0.01)
+}
+
+pub fn test_yield() -> bool with Mut, Div, Panic {
+    // actual 28.0 g vs theoretical 36.03 g -> 77.71%
+    let (y, uy) = percent_yield(28.0, 0.1, 36.03, 0.01);
+    check_near(y, 77.71, 0.05) && uy > 0.0
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var p = 0; var f = 0;
+    if test_moles_basic() { p = p + 1 } else { f = f + 1; println("FAIL stoich moles") }
+    if test_limiting() { p = p + 1 } else { f = f + 1; println("FAIL stoich lim") }
+    if test_yield() { p = p + 1 } else { f = f + 1; println("FAIL stoich yield") }
+    if f == 0 { println("STOICH REAL GUM PASS") } else { println("STOICH FAIL") }
+    return f
+}

@@ -1,0 +1,177 @@
+// stdlib/pbpk/rapamycin_sprint26_gate.sio — Sprint 26: N_crit Gate
+//
+// 56-assertion certification for N_crit (minimum doses for 95% CI certification)
+// and certification window analysis across all clinical strata.
+
+module pbpk::rapamycin_sprint26_gate
+
+use pbpk::rapamycin_n_crit::{
+    nc_find_crit, nc_find_close,
+    nc_std_crit, nc_slow_crit, nc_fast_crit, nc_inh_crit, nc_ind_crit,
+    nc_slow_window_close, nc_std_window_close
+}
+use pbpk::rapamycin_expanded_u::{
+    eu_fully_in_range, eu_lo_below_floor, eu_hi_above_ceil,
+    eu_u_c, eu_lo, eu_hi
+}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn s26_chk(b: bool) -> i64 with Mut, Div, Panic {
+    if b { 1 } else { 0 }
+}
+
+pub fn rapamycin_sprint26_gate() -> i64 with Mut, Div, Panic {
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let kev  = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+    let floor  = trough_floor_mg_l()
+    let ceil   = trough_ceil_mg_l()
+
+    var ok = 0
+
+    // ── Section A: N_crit exact values ───────────────────────────────────────
+    // A1: slow certifies earliest
+    ok = ok + s26_chk(nc_slow_crit() == 3)
+    // A2: standard certifies at N=6
+    ok = ok + s26_chk(nc_std_crit() == 6)
+    // A3: inhibitor certifies at N=7
+    ok = ok + s26_chk(nc_inh_crit() == 7)
+    // A4: fast needs N=15
+    ok = ok + s26_chk(nc_fast_crit() == 15)
+    // A5: inducer structurally uncertifiable (returns 0)
+    ok = ok + s26_chk(nc_ind_crit() == 0)
+    // A6: ordering: slow < std < inh
+    ok = ok + s26_chk(nc_slow_crit() < nc_std_crit() && nc_std_crit() < nc_inh_crit())
+
+    // ── Section B: Boundary — certified at N_crit, not at N_crit-1 ───────────
+    // B7-B8: standard boundary
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 5, 0.01118, 0.141, ka, fv, kev, k12v, k21v) == false)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 6, 0.01118, 0.141, ka, fv, kev, k12v, k21v))
+    // B9-B10: slow boundary
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 2, 0.00838, 0.188, ka, fv, kev, k12v, k21v) == false)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 3, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // B11-B12: fast boundary — N=14 NOT certified, N=15 IS
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v) == false)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 15, 0.01677, 0.094, ka, fv, kev, k12v, k21v))
+    // B13-B14: inhibitor boundary
+    ok = ok + s26_chk(eu_fully_in_range(1.5, 6, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == false)
+    ok = ok + s26_chk(eu_fully_in_range(1.5, 7, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v))
+
+    // ── Section C: Slow genotype window analysis ──────────────────────────────
+    // C15: window opens at N=3
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 3, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // C16: N=17 still certified
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 17, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // C17: N=18 still certified (last certified dose)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 18, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // C18: N=19 NOT certified (first uncertified — window close)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 19, 0.00838, 0.188, ka, fv, kev, k12v, k21v) == false)
+    // C19: window close confirmed at N=19
+    ok = ok + s26_chk(nc_slow_window_close() == 19)
+    // C20: at N=19, lo is still above floor (only hi fails — CI straddles CEILING, not floor)
+    ok = ok + s26_chk(eu_lo(5.0, 19, 0.00838, 0.188, ka, fv, kev, k12v, k21v) > floor)
+    // C21: at N=19, hi > ceil (confirmed ceiling breach)
+    ok = ok + s26_chk(eu_hi_above_ceil(5.0, 19, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // C22: window width = close - open = 19 - 3 = 16 doses
+    ok = ok + s26_chk(nc_slow_window_close() - nc_slow_crit() == 16)
+    // C23: N=20 also uncertified (window stays closed)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 20, 0.00838, 0.188, ka, fv, kev, k12v, k21v) == false)
+    // C24: fast window does NOT close within N=50 (only opens, never straddles ceiling at standard dose)
+    ok = ok + s26_chk(nc_find_close(5.0, 15, 50, 0.01677, 0.094, ka, fv, kev, k12v, k21v) == 0)
+
+    // ── Section D: Inducer structural uncertifiability ────────────────────────
+    // D25: inducer at SS (N=26): C above floor (point estimate therapeutic)
+    ok = ok + s26_chk(as_trough_mg_l(20.0, 26, 0.05590, 0.047) > floor)
+    // D26: inducer at SS: lo still below floor (CI straddles)
+    ok = ok + s26_chk(eu_lo_below_floor(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v))
+    // D27: structural proof: C_SS < floor + 2*u_c  (lo can never rise above floor)
+    let c_ind_ss  = as_trough_mg_l(20.0, 26, 0.05590, 0.047)
+    let uc_ind_ss = eu_u_c(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    ok = ok + s26_chk(c_ind_ss < floor + 2.0 * uc_ind_ss)
+    // D28: inducer N=40: still not certified
+    ok = ok + s26_chk(eu_fully_in_range(20.0, 40, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == false)
+    // D29: inducer N=50: still not certified
+    ok = ok + s26_chk(eu_fully_in_range(20.0, 50, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == false)
+    // D30: nc_ind_crit returns 0 explicitly
+    ok = ok + s26_chk(nc_ind_crit() == 0)
+
+    // ── Section E: Fast genotype delayed certification ────────────────────────
+    // E31: fast N=14: point estimate above floor (therapeutic by classification)
+    ok = ok + s26_chk(as_trough_mg_l(5.0, 14, 0.01677, 0.094) > floor)
+    // E32: fast N=14: lo below floor (CI not certified at standard N_min)
+    ok = ok + s26_chk(eu_lo_below_floor(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v))
+    // E33: fast N=15: lo above floor (first certified dose)
+    ok = ok + s26_chk(eu_lo(5.0, 15, 0.01677, 0.094, ka, fv, kev, k12v, k21v) > floor)
+    // E34: gap between fast N_crit and standard N_crit = 9 extra doses
+    ok = ok + s26_chk(nc_fast_crit() - nc_std_crit() == 9)
+    // E35: fast N_crit strictly greater than standard N_min (14)
+    ok = ok + s26_chk(nc_fast_crit() > 14)
+    // E36: fast N_crit less than triple standard N_crit (within 3× overhead: 15 < 18)
+    ok = ok + s26_chk(nc_fast_crit() < 3 * nc_std_crit())
+    // E37: fast N=20: certified (window stays open well past N_crit=15)
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 20, 0.01677, 0.094, ka, fv, kev, k12v, k21v))
+    // E38: fast certifies 8 doses later than slow (15-3=12, certifies > slow+11)
+    ok = ok + s26_chk(nc_fast_crit() - nc_slow_crit() == 12)
+
+    // ── Section F: Standard and inhibitor window stability ────────────────────
+    // F39: standard window closes at N=37 (hi first exceeds ceil at N=37)
+    ok = ok + s26_chk(nc_std_window_close() == 37)
+    // F40: standard N=14 certified
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v))
+    // F41: standard N=20 certified
+    ok = ok + s26_chk(eu_fully_in_range(5.0, 20, 0.01118, 0.141, ka, fv, kev, k12v, k21v))
+    // F42: inhibitor N=14 certified (SS remains certified)
+    ok = ok + s26_chk(eu_fully_in_range(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v))
+    // F43: inhibitor N=20 certified
+    ok = ok + s26_chk(eu_fully_in_range(1.5, 20, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v))
+    // F44: inhibitor window closes at N=38 (hi exceeds ceil at N=38 with long accumulation)
+    ok = ok + s26_chk(nc_find_close(1.5, 7, 50, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) == 38)
+
+    // ── Section G: N_crit clinical ordering summary ───────────────────────────
+    // G45: full ordering: slow < std
+    ok = ok + s26_chk(nc_slow_crit() < nc_std_crit())
+    // G46: std < inh
+    ok = ok + s26_chk(nc_std_crit() < nc_inh_crit())
+    // G47: inh < fast
+    ok = ok + s26_chk(nc_inh_crit() < nc_fast_crit())
+    // G48: slow (3) is at least 3× fewer doses than fast (15)
+    ok = ok + s26_chk(nc_fast_crit() >= 3 * nc_slow_crit())
+    // G49: inducer uncertifiable while slow certifies early (inducer deficit)
+    ok = ok + s26_chk(nc_ind_crit() == 0 && nc_slow_crit() == 3)
+    // G50: all certifiable strata achieve N_crit <= 15
+    ok = ok + s26_chk(nc_slow_crit() <= 15 && nc_std_crit() <= 15 && nc_inh_crit() <= 15 && nc_fast_crit() <= 15)
+
+    // ── Section H: Safety — dual risk certification ───────────────────────────
+    // H51: slow N=19 straddles ceiling (over-accumulation risk)
+    ok = ok + s26_chk(eu_hi_above_ceil(5.0, 19, 0.00838, 0.188, ka, fv, kev, k12v, k21v))
+    // H52: fast N=14 straddles floor (under-exposure risk)
+    ok = ok + s26_chk(eu_lo_below_floor(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v))
+    // H53: both risks compile-time detectable: slow ceiling-breach AND fast floor-straddle
+    ok = ok + s26_chk(
+        eu_hi_above_ceil(5.0, 19, 0.00838, 0.188, ka, fv, kev, k12v, k21v) &&
+        eu_lo_below_floor(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v)
+    )
+    // H54: slow N=18 hi < ceil (last safe dose — within 0.63 ng/mL of ceiling)
+    ok = ok + s26_chk(eu_hi(5.0, 18, 0.00838, 0.188, ka, fv, kev, k12v, k21v) < ceil)
+    // H55: standard geometry is safe — standard N=14 has no ceiling or floor risk
+    ok = ok + s26_chk(
+        eu_lo(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v) > floor &&
+        eu_hi(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v) < ceil
+    )
+    // H56: inh N=14 similarly safe (no ceiling risk at reduced dose)
+    ok = ok + s26_chk(
+        eu_lo(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) > floor &&
+        eu_hi(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v) < ceil
+    )
+
+    ok
+}

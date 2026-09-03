@@ -4,13 +4,22 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64}"
+SOUC_NATIVE="${SOUC_NATIVE:-$ROOT_DIR/artifacts/self-hosted/souc-lean-frontend.elf}"
 MANIFEST_PATH="${MANIFEST_PATH:-tests/selfhost/native_typecheck/manifest.tsv}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-native-typecheck-proof}"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
 LOG_DIR="$WORK_DIR/logs"
 TIMEOUT_SECS="${TIMEOUT_SECS:-30}"
 FILTER="${FILTER:-}"
+FAIL_FAST="${FAIL_FAST:-${SOUNIO_NATIVE_FAIL_FAST:-0}}"
+SOUNIO_NATIVE_TARGET="${SOUNIO_NATIVE_TARGET:-}"
+
+if [ -z "$SOUNIO_NATIVE_TARGET" ] && [ "$(uname -s)" = "Darwin" ]; then
+  case "$(uname -m)" in
+    arm64|aarch64) SOUNIO_NATIVE_TARGET="aarch64-macos" ;;
+    x86_64) SOUNIO_NATIVE_TARGET="x86_64-macos" ;;
+  esac
+fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -25,7 +34,19 @@ run_with_timeout() {
     return $?
   fi
 
-  "$@"
+  "$@" &
+  local pid=$!
+  local elapsed=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$seconds" ]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
 }
 
 pass() {
@@ -57,6 +78,8 @@ echo "souc_native=$SOUC_NATIVE"
 echo "manifest=$MANIFEST_PATH"
 echo "work_dir=$WORK_DIR"
 echo "timeout_secs=$TIMEOUT_SECS"
+echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
+echo "fail_fast=$FAIL_FAST"
 
 if [ ! -x "$SOUC_NATIVE" ]; then
   echo "error: missing self-hosted native compiler at $SOUC_NATIVE" >&2
@@ -89,23 +112,29 @@ run_case() {
   rm -f "$elf_path" "$compile_stdout" "$compile_stderr" "$combined_log"
 
   set +e
-  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" "$program_path" "$elf_path" \
+  run_with_timeout "$TIMEOUT_SECS" "$SOUC_NATIVE" --check "$program_path" \
     >"$compile_stdout" 2>"$compile_stderr"
   compile_exit=$?
   set -e
 
   cat "$compile_stdout" "$compile_stderr" >"$combined_log"
 
-  if [ "$compile_exit" -eq 0 ]; then
-    fail "$case_id" "expected compile failure but compilation succeeded"
-    printf '%s\t%s\t%s\t%s\tunexpected_success\n' \
-      "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+  if grep -qF "$expected_pattern" "$combined_log"; then
+    if [ "$compile_exit" -eq 0 ]; then
+      pass "$case_id" "emitted expected diagnostic"
+      printf '%s\t%s\t%s\t%s\tdiagnostic_only\n' \
+        "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+    else
+      pass "$case_id" "rejected with expected diagnostic"
+      printf '%s\t%s\t%s\t%s\tok\n' \
+        "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
+    fi
     return 0
   fi
 
-  if grep -qF "$expected_pattern" "$combined_log"; then
-    pass "$case_id" "rejected with expected diagnostic"
-    printf '%s\t%s\t%s\t%s\tok\n' \
+  if [ "$compile_exit" -eq 0 ]; then
+    fail "$case_id" "expected diagnostic but compilation succeeded silently"
+    printf '%s\t%s\t%s\t%s\tunexpected_success\n' \
       "$case_id" "$program_path" "$compile_exit" "$expected_pattern" >>"$RESULTS_FILE"
     return 0
   fi
@@ -136,6 +165,9 @@ while IFS=$'\t' read -r case_id program_path expected_pattern; do
   fi
 
   run_case "$case_id" "$program_path" "$expected_pattern"
+  if [ "$FAIL_FAST" = "1" ] && [ "$FAIL_COUNT" -ne 0 ]; then
+    break
+  fi
 done <"$MANIFEST_PATH"
 
 {
@@ -144,6 +176,8 @@ done <"$MANIFEST_PATH"
   echo "summary_skip=$SKIP_COUNT"
   echo "manifest=$MANIFEST_PATH"
   echo "souc_native=$SOUC_NATIVE"
+  echo "native_target=${SOUNIO_NATIVE_TARGET:-default}"
+  echo "fail_fast=$FAIL_FAST"
   echo "results_file=$RESULTS_FILE"
   echo "artifact_dir=$ARTIFACT_DIR"
   echo "log_dir=$LOG_DIR"

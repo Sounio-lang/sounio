@@ -1,0 +1,208 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint20_gate.sio — Sprint 20 F* bioavailability theorem gate
+//
+// 56 assertions certifying four bioavailability thresholds that govern the
+// epistemic regime of oral rapamycin TDM, unifying Sprint 18 (CYP3A5) and
+// Sprint 19 (DDI) under a single structural principle.
+//
+// ══ The four thresholds (D=5mg, N=14, ke_std, ka_std = 0.0225) ═══════════════
+//
+//   F_low ∈ (0.047, 0.048): conf=700 → 820   (Regime I → II)
+//   F*    ∈ (0.127, 0.128): conf=820 → 900   (Regime II → III)
+//   F**   ∈ (0.149, 0.150): ka÷16 conf=900→950 (Regime III → IV)
+//   F***  ∈ (0.360, 0.370): std ka conf=900→950 (Regime III → IV without ka tightening)
+//
+// ══ The decisive result: F* is a concentration threshold, not a variance one ══
+//
+//   f_var÷256 at F=0.094 → still conf=820 (f_var irrelevant)
+//   D=50mg at F=0.094 → still conf=820 (dose-independent)
+//   F=0.094 + ka÷4 → conf=900 (F*' shifts to ~0.073 at ka÷4)
+//   → Only raising F or reducing ka_var can cross the F* boundary.
+//
+// ══ Clinical classification of all prior scenarios ════════════════════════════
+//
+//   *1/*1 F=0.094 < F*: Regime II — Sprint 18 conf=820 ceiling explained
+//   *1/*3 F=0.141 ≥ F*: Regime III — standard 900 accessible
+//   *3/*3 F=0.188 ≥ F**: Regime IV — 950 accessible via ka÷16
+//   Inducer F=0.047 < F_low: Regime I — Sprint 19 conf=700 explained
+//   *3/*3+Inh F=0.376 ≥ F***: Regime IV — 950 at standard ka
+//
+// Assertion map:
+//   A (1–8):   F_low threshold: 0.047→700, 0.048→820
+//   B (9–14):  F* threshold: 0.127→820, 0.128→900
+//   C (15–20): D-independence: F=0.094 conf=820 at D=5,10,20,50mg
+//   D (21–26): Absorbed dose (D×F) insufficient: same D×F, different F, different conf
+//   E (27–32): f_var reduction cannot cross F*: f_var÷4 to ÷256 → still 820
+//   F (33–38): F** threshold and F*** threshold
+//   G (39–44): ka_var-dependent F* shift: F*'≈0.073 at ka÷4 explains Sprint 18
+//   H (45–48): Clinical scenario regime classification
+//   I (49–52): Constant consistency
+//   J (53–56): Atlas unification — F* explains S18 (*1/*1) and S19 (DDI) ceilings
+
+use pbpk::rapamycin_f_threshold::{
+    ft_regime_i_below, ft_regime_ii_below_flow,
+    ft_f_star_lower, ft_f_star_upper, ft_cyp11_regime_ii,
+    ft_f_starstar_lower, ft_f_starstar_upper,
+    ft_dose_independent, ft_absorbed_dose_insufficient,
+    ft_fvar_reduction_irrelevant, ft_ka4_shifts_f_star,
+    ft_f_star_ka4_bounds, ft_f_starstar_star_lower, ft_f_starstar_star_upper,
+    conf_at_f_ka, conf_at_f_d, conf_at_f_fvar,
+    f_low_below, f_low_above, f_star_below, f_star_above,
+    f_starstar_below, f_starstar_above,
+    f_star_ka4_below, f_star_ka4_above,
+    ft_ka_var_std, ft_f_var_std
+}
+use pbpk::rapamycin_clinical::{conf_clinical_min, decision_therapeutic, decision_uncertain}
+
+var SPR20_PASS: [i64; 2] = [0; 2]
+
+fn s20_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR20_PASS[0] = SPR20_PASS[0] + 1
+    } else {
+        SPR20_PASS[1] = SPR20_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint20_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka = ft_ka_var_std()
+    let fv = ft_f_var_std()
+
+    // ── Section A: F_low threshold (8 assertions) ────────────────────────────
+    // F=0.047 → Regime I (conf=700); F=0.048 → Regime II (conf=820)
+
+    s20_chk(ft_regime_i_below())                                              // 1 (F=0.047: 700)
+    s20_chk(ft_regime_ii_below_flow())                                        // 2 (F=0.048: 820)
+    // F=0.047 is strictly below F_low (conf drops to 700 — epistemic impossibility)
+    s20_chk(conf_at_f_ka(f_low_below(), ka) == 700)                          // 3
+    s20_chk(conf_at_f_ka(f_low_above(), ka) == 820)                          // 4
+    // Strong DDI inducer F=0.047 → Regime I (confirms Sprint 19 finding)
+    s20_chk(conf_at_f_ka(0.047, ka) == 700)                                  // 5 (inducer: Regime I)
+    // *1/*1+inducer F=0.031 → also Regime I
+    s20_chk(conf_at_f_ka(0.031, ka) == 700)                                  // 6 (*1/*1+ind: Regime I)
+    // F=0.070 → Regime II (well above F_low)
+    s20_chk(conf_at_f_ka(0.070, ka) == 820)                                  // 7 (F=0.070: Regime II)
+    // F_low strict ordering: F_low_below < F_low_above confirmed by conf difference
+    s20_chk(conf_at_f_ka(f_low_below(), ka) < conf_at_f_ka(f_low_above(), ka)) // 8 (700 < 820)
+
+    // ── Section B: F* threshold (6 assertions) ────────────────────────────────
+    // F=0.127 → 820; F=0.128 → 900 — exact crossover bracket
+
+    s20_chk(ft_f_star_lower())                                                // 9  (F=0.127: 820)
+    s20_chk(ft_f_star_upper())                                                // 10 (F=0.128: 900)
+    s20_chk(ft_cyp11_regime_ii())                                             // 11 (*1/*1 F=0.094 < F*: 820)
+    // F* bracket: 0.127 and 0.128 are adjacent — sharp transition
+    s20_chk(conf_at_f_ka(f_star_below(), ka) == 820)                         // 12 (0.127: Regime II)
+    s20_chk(conf_at_f_ka(f_star_above(), ka) == 900)                         // 13 (0.128: Regime III)
+    // F* > F_low (three-regime ordering: 700 < 820 < 900)
+    s20_chk(conf_at_f_ka(f_star_below(), ka) > conf_at_f_ka(f_low_below(), ka)) // 14 (820 > 700)
+
+    // ── Section C: D-independence (6 assertions) ──────────────────────────────
+    // Conf is independent of dose D: F=0.094 gives conf=820 at any dose.
+
+    s20_chk(ft_dose_independent())                                            // 15 (D=5,10,20,50: all 820)
+    s20_chk(conf_at_f_d(0.094, ka, 5.0)  == 820)                            // 16 (D=5)
+    s20_chk(conf_at_f_d(0.094, ka, 10.0) == 820)                            // 17 (D=10)
+    s20_chk(conf_at_f_d(0.094, ka, 20.0) == 820)                            // 18 (D=20)
+    s20_chk(conf_at_f_d(0.094, ka, 50.0) == 820)                            // 19 (D=50)
+    // F=0.128 (above F*) at D=2mg still conf=900 — D-independence above threshold too
+    s20_chk(conf_at_f_d(0.128, ka, 2.0) == 900)                             // 20 (D=2 above F*: still 900)
+
+    // ── Section D: Absorbed dose (D×F) insufficient (6 assertions) ───────────
+    // D×F is NOT the epistemic driver — F alone determines regime.
+
+    s20_chk(ft_absorbed_dose_insufficient())                                  // 21 (same D×F, diff regime)
+    // F=0.141 D=3.33: D×F≈0.470mg, conf=900
+    s20_chk(conf_at_f_d(0.141, ka, 3.33) == 900)                            // 22 (F=0.141 D=3.33: 900)
+    // F=0.094 D=5.0: D×F=0.470mg, conf=820 (same absorbed dose, lower regime)
+    s20_chk(conf_at_f_d(0.094, ka, 5.0)  == 820)                            // 23 (F=0.094 D=5.0: 820)
+    // F=0.094 D=7.5: D×F=0.705mg (> baseline D×F 0.705), still conf=820
+    s20_chk(conf_at_f_d(0.094, ka, 7.5)  == 820)                            // 24 (D×F same as std: 820)
+    // F=0.141 D=5.0: conf=900 (baseline)
+    s20_chk(conf_at_f_d(0.141, ka, 5.0)  == 900)                            // 25 (baseline: 900)
+    // F-ordering: conf(F=0.141) > conf(F=0.094) at any dose — F governs regime
+    s20_chk(conf_at_f_d(0.141, ka, 3.33) > conf_at_f_d(0.094, ka, 5.0))    // 26 (900 > 820)
+
+    // ── Section E: f_var reduction cannot cross F* (6 assertions) ─────────────
+    // The F* ceiling is driven by low MEAN concentration, not F uncertainty.
+
+    s20_chk(ft_fvar_reduction_irrelevant())                                   // 27 (f_var÷4,÷64,÷256: all 820)
+    s20_chk(conf_at_f_fvar(0.094, ka, fv)       == 820)                      // 28 (f_var std: 820)
+    s20_chk(conf_at_f_fvar(0.094, ka, fv/4.0)   == 820)                      // 29 (f_var÷4: 820)
+    s20_chk(conf_at_f_fvar(0.094, ka, fv/16.0)  == 820)                      // 30 (f_var÷16: 820)
+    s20_chk(conf_at_f_fvar(0.094, ka, fv/64.0)  == 820)                      // 31 (f_var÷64: 820)
+    s20_chk(conf_at_f_fvar(0.094, ka, fv/256.0) == 820)                      // 32 (f_var÷256: 820)
+
+    // ── Section F: F** and F*** thresholds (6 assertions) ────────────────────
+
+    s20_chk(ft_f_starstar_lower())           // 33 (F=0.149 ka÷16: 900)
+    s20_chk(ft_f_starstar_upper())           // 34 (F=0.150 ka÷16: 950)
+    s20_chk(ft_f_starstar_star_lower())      // 35 (F=0.360 std ka: 900)
+    s20_chk(ft_f_starstar_star_upper())      // 36 (F=0.370 std ka: 950)
+    // F** > F* (three thresholds strictly ordered)
+    s20_chk(conf_at_f_ka(f_starstar_below(), ka/16.0) < conf_at_f_ka(f_starstar_above(), ka/16.0)) // 37 (900 < 950)
+    // *3/*3+inhibitor F=0.376 ≥ F***: conf=950 at standard ka
+    s20_chk(conf_at_f_ka(0.376, ka) == 950)                                  // 38 (*3/*3+inh: Regime IV)
+
+    // ── Section G: ka_var-dependent F* shift (6 assertions) ──────────────────
+    // At ka÷4, F* shifts from 0.128 down to ≈0.073; F=0.094 crosses the threshold.
+
+    s20_chk(ft_ka4_shifts_f_star())          // 39 (*1/*1 F=0.094: 820→900 at ka÷4)
+    s20_chk(ft_f_star_ka4_bounds())          // 40 (F*'∈(0.070,0.075) at ka÷4)
+    // F=0.070 at ka÷4: conf=820 (below F*')
+    s20_chk(conf_at_f_ka(f_star_ka4_below(), ka/4.0) == 820)                // 41 (F=0.070 ka÷4: 820)
+    // F=0.075 at ka÷4: conf=900 (above F*')
+    s20_chk(conf_at_f_ka(f_star_ka4_above(), ka/4.0) == 900)                // 42 (F=0.075 ka÷4: 900)
+    // F=0.094 at ka÷4: conf=900 (explains Sprint 18 *1/*1+ka÷4 result)
+    s20_chk(conf_at_f_ka(0.094, ka/4.0) == 900)                             // 43 (*1/*1 ka÷4: 900)
+    // F=0.094 at std ka: conf=820 (Regime II — ka÷4 is needed to cross)
+    s20_chk(conf_at_f_ka(0.094, ka) == 820)                                 // 44 (*1/*1 std: 820)
+
+    // ── Section H: Clinical scenario regime classification (4 assertions) ─────
+
+    // *1/*1 F=0.094: Regime II (820 ceiling, S18 confirmed)
+    s20_chk(conf_at_f_ka(0.094, ka) == 820)                                  // 45
+    // *1/*3 F=0.141: Regime III (900, above F*)
+    s20_chk(conf_at_f_ka(0.141, ka) == 900)                                  // 46
+    // *3/*3 F=0.188 with ka÷16: Regime IV (950)
+    s20_chk(conf_at_f_ka(0.188, ka/16.0) == 950)                             // 47
+    // Inducer F=0.047: Regime I (700, below F_low)
+    s20_chk(conf_at_f_ka(0.047, ka) == 700)                                  // 48
+
+    // ── Section I: Constant consistency (4 assertions) ───────────────────────
+
+    s20_chk(conf_clinical_min()    == 800)                                    // 49
+    s20_chk(ft_ka_var_std()        == 0.0225)                                 // 50
+    s20_chk(f_star_below()         == 0.127)                                  // 51
+    s20_chk(f_star_above()         == 0.128)                                  // 52
+
+    // ── Section J: Atlas unification (4 assertions) ──────────────────────────
+    // F* theorem explains the conf=820 ceiling in S18 (*1/*1) and S19 (inducer).
+
+    // S18 unification: *1/*1 F=0.094 < F*=0.128 → conf=820 (certified)
+    s20_chk(conf_at_f_ka(0.094, ka) == 820 &&
+            conf_at_f_ka(0.128, ka) == 900)                                   // 53 (S18 boundary)
+    // S19 unification: inducer F=0.047 < F_low=0.048 → conf=700 (certified)
+    s20_chk(conf_at_f_ka(0.047, ka) == 700 &&
+            conf_at_f_ka(0.048, ka) == 820)                                   // 54 (S19 boundary)
+    // Unified: four regimes span all clinical scenarios encountered in S12-S19
+    s20_chk(conf_at_f_ka(0.047, ka) < conf_at_f_ka(0.094, ka) &&
+            conf_at_f_ka(0.094, ka) < conf_at_f_ka(0.141, ka))               // 55 (700 < 820 < 900)
+    // The only intervention that crosses F* at F=0.094: reducing ka_var (not f_var or dose)
+    // Certified: ka÷4 crosses F*, f_var÷256 does NOT
+    s20_chk(conf_at_f_ka(0.094, ka/4.0) == 900 &&
+            conf_at_f_fvar(0.094, ka, fv/256.0) == 820)                       // 56 (ka÷4 yes, f_var no)
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint20_gate()
+    if SPR20_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

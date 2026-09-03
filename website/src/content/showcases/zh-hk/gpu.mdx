@@ -1,0 +1,112 @@
+---
+title: "Kretikos GPU Compiler"
+description: "GPU compiler lane with checked thread builtins, serial CPU fallback, in-tree PTX/CUBIN templates, and artifact bundles."
+domain: "gpu"
+icon: "🏛️"
+topic_id: "website.showcases.zh-hk.gpu"
+authority: "website_only"
+audience: "researchers"
+last_validated: "2026-03-07"
+validated_by: "A6"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.zh-hk.gpu"
+---
+# Kretikos GPU Compiler
+
+> **范围说明：** Kretikos 是一个活跃的研究领域。临床药理学（万古霉素 ε 门，PBPK 论文演示）是此网站上的主要公共演示表面 — 不是 GPU 商店功能。
+
+**Kretikos** (Κρητικός) = 克里特岛。就像阿里阿德涅在克诺索斯迷宫中的线索，
+这是 Sounio 的 GPU 编译器工作的命名路径：源级线程内置，串行 CPU 回退，内部 PTX/CUBIN 模板，以及制品包。
+
+## 执行阅读
+
+大多数语言对 GPU 雄心挥手致意，并隐藏了当前的边界。Kretikos 则相反：它暴露了一个受限的 GPU 表面作为第一类语言特性，然后将每个声明与可检查的制品或命令绑定。- 今日已检查x軸自定義內置函式編譯：`gpu_thread_id_x()`，`gpu_block_id_x()`，`gpu_block_dim_x()`，`gpu_sync_threads()`
+- y/z自定義拼寫已被識別；本地CPU fallback返回確定性虛擬函式
+- 透過`kretikos emit-ptx`使用內部`self-hosted/gpu/ptx.sio`发射器，已啟用預定義PTX模板
+- 透過`kretikos emit-cubin`使用內部`self-hosted/gpu/nvidia_bare.sio`发射器，已啟用預定義CUBIN模板
+- 結構性人工ifact包已透過`kretikos bundle`啟用，包括PTX/CUBIN哈希值和明確的非聲明
+- Kretikos依賴於活躍的`bin/souc`/`souc-linux-x86_64`編譯器以構建其小型发射器驅動程式
+- CPU fallback路徑是確定性的和串行；它不是並行GPU模擬器
+- 後端來源 — PTX发射器、SPIR-V降低器、CUDA ELF生成器 — 存放在內部`self-hosted/gpu/`
+
+## 什麼Kretikos證明
+
+一個認真對科學軟件的語言必須不將GPU誠實性委託給黑盒運行時。Kretikos證明Sounio可以：- 暴露线程索引为源级语法，而非驱动级魔法
+- 从自托管的代码中发射预定义的 PTX 和 CUBIN 艺术作品模板
+- 在语法和运行时烟雾测试下，以确定性串行 CPU 后备运行内核
+- 在真实压力下，将编译器、运行时和叙述保持一致
+
+## 裸金属语法
+
+```sio
+kernel fn vec_add(n: i64) with GPU {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+    if i >= n { return }
+    // 呢个线程拥有元素 i。
+}
+
+fn main() with GPU, IO {
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
+    perform GPU.launch(vec_add, grid, block)(1024)
+    perform GPU.sync()
+}
+```
+
+今次是经过验证的公开形状：1D 索引加上确定性 CPU 后备。更广泛的 y/z 降低和更丰富的内存表面是单独的推广路线。
+
+## 验证命令# 串行 CPU 回退编译及运行 (无需 GPU 硬件)
+souc examples/kernel_source_level.sio /tmp/kretikos_demo.elf
+/tmp/kretikos_demo.elf
+
+# 发射预设的 PTX 模板 (自托理，无需 GPU)
+kretikos emit-ptx vec_add     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_div     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kretikos.ptx
+kretikos emit-ptx fma         -o /tmp/kretikos.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kretikos.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kretikos.ptx
+
+# 发射预设的 Metal/MSL 模板 (自托理，无需 macOS)
+kretikos emit-metal vec_add          -o /tmp/kretikos.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kretikos.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kretikos.metal
+
+# 发射预设的 vec_add_f32 CUBIN 模板
+kretikos emit-cubin vec_add_f32 -o /tmp/kretikos.cubin
+
+# 发射结构化产物包，包括哈希及界限
+kretikos bundle -o /tmp/kretikos-bundle
+
+# 当主机提供这些工具时，可选地添加工具链/运行时验证
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime# 使用已检查的GPU artifacts构建PTX（更广泛的模式支持）
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos.ptx
+
+## 为什么这很重要
+
+GPU工作是语言营销的终结之地。描绘指令集或承诺张量核心支持很容易。但要保持自托管的编译器、受限的GPU表面和面向公众的叙述在真实bug出现时保持一致，例如堆栈对齐、发射参数和PTX模块加载，则要困难得多。
+
+Kretikos不仅因为加速计算而宝贵，还因为它迫使语言揭示其在与后端artifacts接触时是否保持诚实。
+
+## 支持层级- 已检查的内建函数: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — 自托管的编译器
+- 已识别 CPU 回退的占位符: y/z 线程/区块 ID 返回 `0`; y/z 区块尺寸返回 `1`
+- PTX 模板: `kretikos emit-ptx` 与 6 种模式 (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma); 通过 `build --backend gpu` 更广泛的 PTX 发射 (已检查 GPU 人工制品)
+- MSL 模板: `kretikos emit-metal` 与 3 种模式 (vec_add, ossm_oct_step, sedenion_cd_step) 来自自托管的内部发射器
+- CUBIN 模板: `kretikos emit-cubin` (自托管的内部发射器)
+- 人工制品捆绑: `kretikos bundle` 发射 PTX+CUBIN 加上 `sounio.kretikos.bundle.v1`
+- 可选的提升检查: `--validate-toolchain` 记录 `ptxas`/`nvdisasm` 证据, 和 `--validate-runtime` 尝试在非 GPU 主机上使用 CUDA Driver API 的精确 `not_run` 理由
+- 后端源: `self-hosted/gpu/ptx.sio`, `self-hosted/gpu/ptx_advanced.sio`, `self-hosted/gpu/nvidia_bare.sio`, `self-hosted/gpu/spirv_lower.sio`
+- 已验证的目标: CUDA `sm_80`, ROCm `gfx942`
+
+## 边界Kretikos **唔** 声称：
+- 每一个GPU后端都已生产完成
+- 多维度的内核为所有模式（目前已匹配的模式）生成PTX
+- `gpu.alloc<T>()` 或共享内存抽象是公开表面的一部分
+- CPU的降级模拟一个并行GPU网格
+
+真实的声称更为狭窄和因此更强：这里存在一个GPU编译器车道，而当前的Kretikos CLI artifact bundle是一个预定义模板的表面，而非任意用户内核降低。工具链和运行时验证仅适用于这些被选择的模板；它们不验证任意用户编写的GPU内核。

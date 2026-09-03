@@ -1,0 +1,453 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cohomological subspace decomposition at k=5 (trigintaduonions)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Extends examples/cocycle_subspace_168.sio from k=4 to k=5.
+//
+// Builds trigintaduonion (32-dim) basis multiplication from CD doubling
+// of sedenions. Enumerates the 155 = P_5 three-dimensional subspaces of
+// (Z/2)^5 via their dual 2-dim functional kernels, computes per-subspace
+// nonzero associator counts.
+//
+// Predicted (Conjecture 5 numeric form): T_5 = 95 * 168 = 15960.
+// What this test reveals: the FULL distribution of per-subspace counts
+// at k=5, testing whether the trichotomy (168 / 96 / 0) generalizes
+// or whether new intermediate classes appear.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Octonion multiplication table
+var O_MUL: [i64; 64] = [0; 64]
+var O_SGN: [i64; 64] = [0; 64]
+
+fn init_oct() with Mut {
+    var i = 0
+    while i < 8 {
+        O_MUL[0 * 8 + i] = i
+        O_SGN[0 * 8 + i] = 1
+        O_MUL[i * 8 + 0] = i
+        O_SGN[i * 8 + 0] = 1
+        i = i + 1
+    }
+    i = 1
+    while i < 8 {
+        O_MUL[i * 8 + i] = 0
+        O_SGN[i * 8 + i] = 0 - 1
+        i = i + 1
+    }
+    var FA: [i64; 7] = [1, 2, 3, 4, 5, 6, 7]
+    var FB: [i64; 7] = [2, 3, 4, 5, 6, 7, 1]
+    var FC: [i64; 7] = [4, 5, 6, 7, 1, 2, 3]
+    var t = 0
+    while t < 7 {
+        let a = FA[t]
+        let b = FB[t]
+        let c = FC[t]
+        O_MUL[a * 8 + b] = c
+        O_SGN[a * 8 + b] = 1
+        O_MUL[b * 8 + a] = c
+        O_SGN[b * 8 + a] = 0 - 1
+        O_MUL[b * 8 + c] = a
+        O_SGN[b * 8 + c] = 1
+        O_MUL[c * 8 + b] = a
+        O_SGN[c * 8 + b] = 0 - 1
+        O_MUL[c * 8 + a] = b
+        O_SGN[c * 8 + a] = 1
+        O_MUL[a * 8 + c] = b
+        O_SGN[a * 8 + c] = 0 - 1
+        t = t + 1
+    }
+}
+
+// Sedenion (k=4) basis table built from CD doubling of octonions.
+var S_MUL: [i64; 256] = [0; 256]
+var S_SGN: [i64; 256] = [0; 256]
+
+fn cd_double(
+    base_mul: &[i64; 256], base_sgn: &[i64; 256], base_dim: i64,
+    out_mul: &![i64; 1024], out_sgn: &![i64; 1024]
+) with Mut, Panic {
+    // Generic CD doubling step. base has dim N entries, output has 2N.
+    // (a, b)(c, d) = (a*c - conj(d)*b, d*a + b*conj(c))
+    // For basis: index = (sub_idx, top_bit), with top_bit in {0, 1}.
+    // conj(e_0) = e_0, conj(e_x) = -e_x for x != 0.
+    let n2 = base_dim * 2
+    var i = 0
+    while i < n2 {
+        var j = 0
+        while j < n2 {
+            let a_part = i & (base_dim - 1)
+            let top_a = i / base_dim
+            let b_part = j & (base_dim - 1)
+            let top_b = j / base_dim
+
+            let ab_idx = (*base_mul)[a_part * base_dim + b_part]
+            let ab_sgn = (*base_sgn)[a_part * base_dim + b_part]
+            let ba_idx = (*base_mul)[b_part * base_dim + a_part]
+            let ba_sgn = (*base_sgn)[b_part * base_dim + a_part]
+
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+
+            (*out_mul)[i * n2 + j] = r_idx + r_top * base_dim
+            (*out_sgn)[i * n2 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Trigintaduonion (k=5) basis table from CD doubling of sedenions.
+var T_MUL: [i64; 1024] = [0; 1024]
+var T_SGN: [i64; 1024] = [0; 1024]
+
+fn init_sed_and_tri() with Mut, Panic {
+    // Bootstrap: O is 8-dim, build S (16-dim) and then T (32-dim).
+    // First need to "lift" O_MUL/O_SGN into 256-element form... but it's already
+    // 64-element. Use a temporary.
+    // Step 1: build S from O. S_MUL[i*16+j] for i,j in 0..15.
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            let a_part = i & 7
+            let top_a = i >> 3
+            let b_part = j & 7
+            let top_b = j >> 3
+
+            let ab_idx = O_MUL[a_part * 8 + b_part]
+            let ab_sgn = O_SGN[a_part * 8 + b_part]
+            let ba_idx = O_MUL[b_part * 8 + a_part]
+            let ba_sgn = O_SGN[b_part * 8 + a_part]
+
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+
+            S_MUL[i * 16 + j] = r_idx + r_top * 8
+            S_SGN[i * 16 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: build T from S. Same structure with base_dim = 16.
+    i = 0
+    while i < 32 {
+        var j = 0
+        while j < 32 {
+            let a_part = i & 15
+            let top_a = i >> 4
+            let b_part = j & 15
+            let top_b = j >> 4
+
+            let ab_idx = S_MUL[a_part * 16 + b_part]
+            let ab_sgn = S_SGN[a_part * 16 + b_part]
+            let ba_idx = S_MUL[b_part * 16 + a_part]
+            let ba_sgn = S_SGN[b_part * 16 + a_part]
+
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+
+            if top_a == 0 {
+                if top_b == 0 {
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+
+            T_MUL[i * 32 + j] = r_idx + r_top * 16
+            T_SGN[i * 32 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+var TR_IDX: i64 = 0
+var TR_SGN: i64 = 0
+
+fn tri_bmul(i_idx: i64, i_sgn: i64, j_idx: i64, j_sgn: i64) with Mut, Panic {
+    TR_IDX = T_MUL[i_idx * 32 + j_idx]
+    TR_SGN = i_sgn * j_sgn * T_SGN[i_idx * 32 + j_idx]
+}
+
+fn tri_associator_nonzero(x: i64, y: i64, z: i64) -> i64 with Mut, Panic {
+    tri_bmul(x, 1, y, 1)
+    let li_t = TR_IDX
+    let ls_t = TR_SGN
+    tri_bmul(li_t, ls_t, z, 1)
+    let l_idx = TR_IDX
+    let l_sgn = TR_SGN
+    tri_bmul(y, 1, z, 1)
+    let ri_t = TR_IDX
+    let rs_t = TR_SGN
+    tri_bmul(x, 1, ri_t, rs_t)
+    let r_idx = TR_IDX
+    let r_sgn = TR_SGN
+    if l_idx != r_idx { return 1 }
+    if l_sgn != r_sgn { return 1 }
+    0
+}
+
+fn popcount_mod2(v: i64) -> i64 with Mut {
+    var p = 0
+    var w = v
+    while w > 0 {
+        p = p ^ (w & 1)
+        w = w >> 1
+    }
+    p
+}
+
+// Test if x is in V = ker(c1) ∩ ker(c2): i.e., orthogonal to both c1 and c2.
+fn in_subspace(x: i64, c1: i64, c2: i64) -> i64 with Mut {
+    if popcount_mod2(c1 & x) != 0 { return 0 }
+    if popcount_mod2(c2 & x) != 0 { return 0 }
+    1
+}
+
+// Count nonzero associators in V_c1c2 for the trigintaduonions.
+fn count_subspace_assoc_k5(c1: i64, c2: i64) -> i64 with Mut, Panic {
+    var n = 0
+    var i = 1
+    while i < 32 {
+        if in_subspace(i, c1, c2) == 1 {
+            var j = 1
+            while j < 32 {
+                if in_subspace(j, c1, c2) == 1 {
+                    var k = 1
+                    while k < 32 {
+                        if in_subspace(k, c1, c2) == 1 {
+                            if tri_associator_nonzero(i, j, k) == 1 {
+                                n = n + 1
+                            }
+                        }
+                        k = k + 1
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Total nonzero trigintaduonion associators (sanity).
+fn count_total_tri() -> i64 with Mut, Panic {
+    var n = 0
+    var i = 1
+    while i < 32 {
+        var j = 1
+        while j < 32 {
+            var k = 1
+            while k < 32 {
+                if tri_associator_nonzero(i, j, k) == 1 {
+                    n = n + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Distribution buckets — tally counts that match certain values.
+// We'll bucket: 168, 96, 0, and "other" with up to 6 distinct other values.
+var BUCKET_VAL: [i64; 8] = [0; 8]   // value
+var BUCKET_CNT: [i64; 8] = [0; 8]   // how many subspaces had this count
+var N_BUCKETS: i64 = 0
+
+fn record_bucket(v: i64) with Mut, Panic {
+    var i = 0
+    while i < N_BUCKETS {
+        if BUCKET_VAL[i] == v {
+            BUCKET_CNT[i] = BUCKET_CNT[i] + 1
+            return
+        }
+        i = i + 1
+    }
+    if N_BUCKETS < 8 {
+        BUCKET_VAL[N_BUCKETS] = v
+        BUCKET_CNT[N_BUCKETS] = 1
+        N_BUCKETS = N_BUCKETS + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  Subspace decomposition at k=5 (trigintaduonions, dim 32)")
+    println("═══════════════════════════════════════════════════════════════")
+
+    init_oct()
+    init_sed_and_tri()
+
+    var pass = 0
+    var fail = 0
+
+    // 1. Sanity: total trigintaduonion associators = 15960.
+    let total = count_total_tri()
+    print("  Total trigintaduonion associators: ")
+    print_int(total)
+    print(" (expected 15960)\n")
+    if total == 15960 {
+        print("  [PASS] T_5 = 15960 = 95 * 168\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] T_5 mismatch (CD multiplication or table bug)\n")
+        fail = fail + 1
+    }
+
+    // 2. Enumerate 155 three-dim subspaces V ≤ (Z/2)^5 via canonical
+    //    pairs (c1, c2) of LI nonzero functionals with c1 < c2 < c1^c2.
+    //    Each such canonical pair represents one 2-dim functional space,
+    //    whose perpendicular is a unique 3-dim V.
+    var seen = 0
+    var c1 = 1
+    while c1 < 32 {
+        var c2 = c1 + 1
+        while c2 < 32 {
+            let c3 = c1 ^ c2
+            if c3 > c2 {
+                let cnt = count_subspace_assoc_k5(c1, c2)
+                record_bucket(cnt)
+                seen = seen + 1
+            }
+            c2 = c2 + 1
+        }
+        c1 = c1 + 1
+    }
+    print("  Enumerated 3-dim subspaces: ")
+    print_int(seen)
+    print(" (expected 155 = P_5)\n")
+    if seen == 155 {
+        print("  [PASS] P_5 = 155 enumerated correctly\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] subspace enumeration count\n")
+        fail = fail + 1
+    }
+
+    // 3. Print distribution.
+    print("\n  Distribution of per-subspace nonzero associator counts:\n")
+    var i = 0
+    while i < N_BUCKETS {
+        print("    count=")
+        print_int(BUCKET_VAL[i])
+        print(" -> ")
+        print_int(BUCKET_CNT[i])
+        print(" subspaces\n")
+        i = i + 1
+    }
+
+    print("\nPassed: ")
+    print_int(pass)
+    print("\nFailed: ")
+    print_int(fail)
+    print("\n")
+    if fail == 0 { println("ALL PASS") }
+    else { println("SOME FAILED") }
+    0
+}

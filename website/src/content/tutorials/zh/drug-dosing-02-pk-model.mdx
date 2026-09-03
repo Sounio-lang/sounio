@@ -1,0 +1,123 @@
+---
+title: "构建PK模型"
+description: "将药代动力学参数定义为带效应注释的已类型化结构"
+series: "drug-dosing"
+order: 2
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-01-intro"]
+topic_id: "website.tutorials.zh.drug-dosing-02-pk-model"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.zh.drug-dosing-02-pk-model"
+---
+# 构建PK模型
+
+一个单室药代动力学（PK）模型描述了药物在体内的移动方式。它有三个核心参数：
+
+- **清除率（CL）**：身体消除药物的速度（L/h）
+- **分布容积（Vd）**：药物分布到的表观体积（L）
+- **半衰期（t½）**：血浆浓度减半所需的时间（h）
+
+这些参数之间有关联：`t½ = 0.693 × Vd / CL`。
+
+## 定义模型
+
+在Sounio中，我们将PK参数表示为结构体：
+
+```sio
+struct PKParams {
+    clearance: f64,    // L/h
+    volume: f64,       // L
+    dose: f64,         // mg
+    tau: f64,          // 给药间隔，小时
+}
+```
+
+现在让我们编写计算衍生量的函数。注意效应注释：
+
+```sio
+fn half_life(pk: PKParams) -> f64 with Div {
+    0.693 * pk.volume / pk.clearance
+}
+
+fn elimination_rate(pk: PKParams) -> f64 with Div {
+    pk.clearance / pk.volume
+}
+``````markdown
+# 峰值浓度计算
+
+`peak_concentration(pk: PKParams) -> f64 with Div`
+
+// 首剂量静脉注射，单室模型下的峰值浓度
+pk.dose / pk.volume
+
+# 谷浓度计算
+
+`trough_concentration(pk: PKParams, ke: f64) -> f64 with Div, Mut, Panic`
+
+// 稳态下的谷浓度
+let cmax = peak_concentration(pk)
+let numerator = cmax * exp_approx(0.0 - ke * pk.tau)
+let denominator = 1.0 - exp_approx(0.0 - ke * pk.tau)
+numerator / denominator
+
+## 计算给药方案
+
+让我们将上述内容与现实中的万古霉素场景结合起来：
+``````sio
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n &lt;= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let pk = PKParams {
+        clearance: 4.5,  // L/h (typical for vancomycin)
+        volume: 50.0,    // L
+        dose: 1000.0,    // mg
+        tau: 12.0,       // q12h dosing
+    }
+
+    let ke = elimination_rate(pk)
+    let t_half = half_life(pk)
+    let cmax = peak_concentration(pk)
+    let cmin = trough_concentration(pk, ke)
+```markdown
+    print("半衰期：")
+    println(t_half)            // ~7.7小时
+    print("峰值（Cmax）：")
+    println(cmax)              // 20.0 mg/L
+    print("谷值（Cmin）：")
+    println(cmin)              // ~6.8 mg/L
+
+    0
+}
+```
+
+## 问题：隐藏的不确定性
+
+这个模型给出了精确的数字：Cmin = 6.8 mg/L。但是那个数字有多可靠呢？清除率值4.5 L/h来自于人口平均值。对于这位患者，它可能因肾功能不同而从3.0到6.0 L/h不等。
+
+万古霉素的治疗窗口是15-20 mg/L，以AUC指导的剂量。6.8 mg/L是否安全地低于毒性阈值，或者不确定性是否足够大，以至于真正的谷值可能危险地高？
+
+使用原始`f64`值，我们没有办法回答这个问题。在下一课中，我们将用`Knowledge<T>`值替换我们的参数，这些值会携带不确定性。
+
+## 关键总结
+```- Sounio 结构体自然地建模 PK 参数
+- 效果注释（`with Div, Mut, Panic`）明确了计算要求
+- 传统的 `f64` 模型提供虚假精度 — 它们将不确定性隐藏在精确数字背后
+- 下一步是将不确定性作为模型中一等公民的一部分

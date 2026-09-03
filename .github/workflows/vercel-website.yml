@@ -1,0 +1,136 @@
+name: Deploy Website to Vercel
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+  push:
+    tags:
+      - 'website-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-website-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    env:
+      VERCEL_EXPECTED_PROJECT_ID: prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s
+      VERCEL_EXPECTED_PROJECT_NAME: sounio
+      VERCEL_ORG_ID: team_rWORp5HA3dSzo95gt1RZd3sh
+      VERCEL_PROJECT_ID: prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run website quality gates
+        run: npm run check:quality
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Verify required Vercel credentials
+        run: |
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "::error::Missing VERCEL_TOKEN secret. Set the token for the live sounio Vercel project."
+            exit 1
+          fi
+          echo "Resolved Vercel org: $VERCEL_ORG_ID"
+          echo "Resolved Vercel project: $VERCEL_PROJECT_ID"
+
+      - name: Pull preview environment
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'preview'
+        run: vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+
+      - name: Pull production environment
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Verify Vercel project target
+        run: |
+          test -f .vercel/project.json
+          node <<'EOF'
+          const fs = require('node:fs');
+          const project = JSON.parse(fs.readFileSync('.vercel/project.json', 'utf8'));
+          const expectedProjectId = process.env.VERCEL_EXPECTED_PROJECT_ID;
+          const expectedProjectName = process.env.VERCEL_EXPECTED_PROJECT_NAME;
+          const actualProjectId = project.projectId;
+          const actualOrgId = project.orgId;
+
+          console.log(`Resolved Vercel org: ${actualOrgId}`);
+          console.log(`Resolved Vercel project: ${actualProjectId}`);
+
+          if (actualProjectId !== expectedProjectId) {
+            console.error(`Expected Vercel project ${expectedProjectName} (${expectedProjectId}) but workflow resolved ${actualProjectId}.`);
+            process.exit(1);
+          }
+
+          fs.appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              '## Vercel target verification',
+              '',
+              `- Project: ${expectedProjectName}`,
+              `- Project ID: ${actualProjectId}`,
+              `- Org ID: ${actualOrgId}`,
+              '',
+            ].join('\n'),
+          );
+          EOF
+
+      - name: Build preview deployment
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'preview'
+        run: vercel build --token="$VERCEL_TOKEN"
+
+      - name: Build production deployment
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy preview
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'preview'
+        id: deploy_preview
+        run: |
+          url="$(vercel deploy --prebuilt --token="$VERCEL_TOKEN")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Preview deployment: $url"
+
+      - name: Deploy production
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')
+        id: deploy_production
+        run: |
+          url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Production deployment: $url"
+
+      - name: Deployment summary
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.target }}" = "preview" ]; then
+            echo "Deployed preview: ${{ steps.deploy_preview.outputs.url }}"
+          else
+            echo "Deployed production: ${{ steps.deploy_production.outputs.url }}"
+          fi

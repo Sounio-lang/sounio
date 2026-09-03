@@ -108,21 +108,23 @@ def gaussianM4 (sigma_sq : Float) : Float :=
     Proof: 2σ⁴ ≠ 3σ⁴ iff σ⁴ ≠ 0 iff σ² ≠ 0.
     This shows the dist_class annotation is not redundant — the two distribution
     classes produce DIFFERENT 4th moments even though their R-transforms coincide. -/
-theorem m4_wigner_vs_gaussian (sigma_sq : Float) (h : sigma_sq ≠ 0.0) :
-    wignerM4 sigma_sq ≠ gaussianM4 sigma_sq := by
-  unfold wignerM4 gaussianM4
-  intro h_eq
-  -- 2σ⁴ = 3σ⁴ → σ⁴ = 0 → σ² = 0 → contradiction
-  have : (2.0 : Float) * sigma_sq * sigma_sq = 3.0 * sigma_sq * sigma_sq := h_eq
-  simp at this
+theorem m4_wigner_vs_gaussian : (wignerM4 2.0 == gaussianM4 2.0) = false := by
+  -- Distinguishing witness at the canonical test vector σ²=2: 8 ≠ 12,
+  -- established by IEEE-754 value computation.
+  -- NOTE: the unrestricted ∀ σ²≠0 statement is FALSE over `Float` — under
+  -- overflow both 4th moments saturate to +∞ and compare equal — so the
+  -- claim is a finite decidable witness, not a universally quantified law.
+  -- A general (overflow-free) proof belongs to the RNE-bounded real model.
+  native_decide
 
 /-- **Concrete computation.**  For σ² = 2.0 (free convolution of two σ²=1 semicircles):
     Wigner m₄ = 8.0, Gaussian m₄ = 12.0, overestimate = 4.0.
     This matches the science spine test `free_probability_rtr.sio`. -/
 theorem m4_at_sigma_sq_2 :
-    wignerM4 2.0 = 8.0 ∧ gaussianM4 2.0 = 12.0 := by
-  unfold wignerM4 gaussianM4
-  simp [Float.mul_def]
+    (wignerM4 2.0 == 8.0) = true ∧ (gaussianM4 2.0 == 12.0) = true :=
+  -- IEEE-754 value equality (`==`); opaque `Float` has no `DecidableEq`, so
+  -- the concrete test vector is stated via Bool `==` and closed by native eval.
+  ⟨by native_decide, by native_decide⟩
 
 -- ---------------------------------------------------------------------------
 -- §4. Commutativity of free convolution (for semicircle class)
@@ -134,8 +136,11 @@ theorem m4_at_sigma_sq_2 :
 theorem free_convolve_comm (σa σb : Float) :
     (freeConvolve (rTransformSemicircle σa) (rTransformSemicircle σb)).coeff =
     (freeConvolve (rTransformSemicircle σb) (rTransformSemicircle σa)).coeff := by
-  unfold freeConvolve rTransformSemicircle
-  ring
+  -- Goal reduces to σa + σb = σb + σa; `ring` is a Mathlib tactic and this
+  -- tree is Mathlib-free, so we use the IEEE-754 additive-commutativity axiom
+  -- (bit-exact for finite non-NaN).
+  show σa + σb = σb + σa
+  exact Sounio.HessianAD.float_add_comm_ax σa σb
 
 -- ---------------------------------------------------------------------------
 -- §5. Summary

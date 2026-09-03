@@ -1,0 +1,702 @@
+// stdlib/x509/chain.sio — certificate chain path building (Task 3 of the
+// X.509 chain-validation plan; part 1 of 2 -- Task 4 appends path
+// verification and the public entry point to this same file).
+//
+// `chain_build_candidates` performs a depth-bounded DFS with explicit-stack
+// backtracking over a pool of (intermediate ++ trust-store) certificates to
+// find every candidate leaf -> ... -> trusted-root path, given the pool may
+// be in ARBITRARY order (not leaf-to-root sorted). This is what makes it a
+// real path-building search rather than a naive linear scan: an
+// out-of-order intermediate pool (see
+// tests/run-pass/x509_chain_path_building_reordered.sio) must still be
+// found via the pool-index search + backtrack, not by assuming
+// `intermediates[i]` issues `intermediates[i+1]`.
+
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::ocsp::*
+use x509::trust_store::*
+
+pub const CHAIN_MAX_DEPTH: i64 = 10
+pub const MAX_INTERMEDIATES: i64 = 8
+const MAX_CHAIN_CANDIDATES: i64 = 16
+const CHAIN_POOL_CAP: i64 = 520 // MAX_INTERMEDIATES + TRUST_STORE_MAX_CERTS
+
+struct ChainCandidate {
+    certs: [Certificate; 11], // CHAIN_MAX_DEPTH + 1
+    bufs: [RawBuf; 11],
+    len: i32,
+}
+
+// ARENA DISCIPLINE FOR THIS WHOLE MODULE (2026-08-26, see
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md):
+// the Madaros runtime arena is NEVER reclaimed -- every allocation is a
+// permanent per-process budget spend against a fixed ~1.85 GiB heap, and
+// running out is an uncatchable `madaros: arena full` / exit 181 abort
+// (Finding 12, docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md).
+// A `Certificate` is ~46 KB. Binding one by value -- `let c = certs[i]` --
+// therefore burns 46 KB of a non-refundable budget, and this module's DFS
+// used to do exactly that once per POOL ENTRY per DFS STEP (150+ trust-store
+// roots x several steps = tens of MB per single chain verification).
+//
+// RULE: never bind a `Certificate` (or a `ChainCandidate`, which holds 11 of
+// them) to a `let`/`var` when a `&` reference taken directly on the array
+// element will do. `&some_array[i as usize]` and `&some.field[i as usize]`
+// are both well-supported and are what the code below uses throughout.
+//
+// The one deliberate exception is the `rc` temporary in the "record a
+// completed path" branch: writing straight into `candidates[n].certs[ci]`
+// would be a doubly-indexed struct-in-array write, which is a KNOWN-
+// CORRUPTING shape on this compiler (see the long comment in
+// stdlib/x509/cert.sio's x509_parse_general_names). That temp costs ~506 KB
+// but is paid at most MAX_CHAIN_CANDIDATES times, not per pool entry.
+
+// True when `candidate` is a plausible issuer of `cert`: AKI/SKI match when
+// `cert` carries an authorityKeyIdentifier AND `candidate` carries a
+// subjectKeyIdentifier, else issuer-DN == candidate-subject equality.
+//
+// Exists so the search below can compare through `&Certificate` references
+// taken on the array element rather than copying each candidate by value.
+fn cert_is_plausible_issuer(cert: &Certificate, candidate: &Certificate) -> bool {
+    if cert.authority_key_id_len > 0 && candidate.subject_key_id_len > 0 {
+        // Note the asymmetry with the DN fallback, preserved exactly from
+        // the original inline form: when both key identifiers are present
+        // but their LENGTHS differ, the result is `false` -- it does NOT
+        // fall through to a DN comparison.
+        if cert.authority_key_id_len != candidate.subject_key_id_len {
+            return false
+        }
+        var same: bool = true
+        var b: i32 = 0
+        while b < cert.authority_key_id_len {
+            if cert.authority_key_id[b as usize] != candidate.subject_key_id[b as usize] { same = false }
+            b = b + 1
+        }
+        return same
+    }
+    x509_name_eq(&cert.issuer, &candidate.subject)
+}
+
+// Returns the count of pool indices (written into `out_indices`) that are
+// plausible issuers of `cert`.
+//
+// The "pool" is VIRTUAL: index `i` denotes `intermediates[i]` while
+// `i < intermediate_count`, and `trust_store.certs[i - intermediate_count]`
+// beyond that. The previous version materialised this as a real
+// `[Certificate; 520]` array that the caller rebuilt on every verification
+// -- ~24 MB of permanent arena for the array plus one 46 KB copy per
+// trust-store root to fill it, all to hold certificates that already exist
+// in memory. Nothing is copied now; only i64 indices are.
+fn chain_find_issuer_candidates(
+    cert: &Certificate,
+    intermediates: &[Certificate; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
+    exclude_index: &[i64; 11],
+    exclude_len: i32,
+    out_indices: &![i64; 520],
+) -> i32 with Mut {
+    var out_count: i32 = 0
+    let split: i64 = intermediate_count as i64
+    let pool_len: i64 = split + (trust_store.count as i64)
+    var i: i64 = 0
+    while i < pool_len {
+        var already_used: bool = false
+        var e: i32 = 0
+        while e < exclude_len {
+            if exclude_index[e as usize] == i { already_used = true }
+            e = e + 1
+        }
+        if !already_used {
+            var matches: bool = false
+            if i < split {
+                matches = cert_is_plausible_issuer(cert, &intermediates[i as usize])
+            } else {
+                matches = cert_is_plausible_issuer(cert, &trust_store.certs[(i - split) as usize])
+            }
+            if matches {
+                out_indices[out_count as usize] = i
+                out_count = out_count + 1
+            }
+        }
+        i = i + 1
+    }
+    out_count
+}
+
+// SECURITY (fixed 2026-08-25, final-plan-review Finding 1 -- chain-
+// validation bypass): a terminal certificate is only a trusted root if it
+// is self-signed AND some trust-store entry has BOTH a matching Subject DN
+// AND a byte-identical public key. The prior version accepted any
+// self-signed cert whose Subject DN string-matched a trust-store entry,
+// with no check that the certificate's actual key matched the trust
+// store's key at all -- Subject DNs are public information, so an attacker
+// could forge a self-signed cert with a real root CA's exact Subject DN
+// and their own key and have it accepted as a trust anchor. Proven with an
+// executed proof-of-concept during review: a forged "Test Root CA T4" cert
+// with an attacker's own key was accepted as a trust anchor when only the
+// genuine root (different key, same subject) was in the trust store. See
+// tests/run-pass/x509_chain_forged_root_dn_collision.sio.
+fn chain_is_trusted_root(cert: &Certificate, trust_store: &TrustStore) -> bool {
+    if !x509_name_eq(&cert.subject, &cert.issuer) {
+        return false
+    }
+    trust_store_has_matching_key_for_subject(trust_store, cert)
+}
+
+pub fn chain_build_candidates(
+    leaf: &Certificate,
+    leaf_buf: &RawBuf,
+    intermediates: &[Certificate; 8],
+    intermediate_bufs: &[RawBuf; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
+) -> ([ChainCandidate; 16], i32) with IO, Mut {
+    var results: [ChainCandidate; 16] = [
+        ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: 0 };
+        16
+    ]
+    var result_count: i32 = 0
+
+    // Virtual pool (see chain_find_issuer_candidates): pool index `i` is
+    // `intermediates[i]` while `i < split`, else `trust_store.certs[i -
+    // split]`. No `[Certificate; 520]` pool array is materialised.
+    let split: i64 = intermediate_count as i64
+
+    // Explicit-stack DFS (no recursion needed): each stack frame is a path
+    // prefix plus the list of pool indices already tried as its next
+    // issuer. `path_pool_index[d]` (d >= 1) records which pool index is
+    // currently occupying depth d, so it doubles as both the "already used
+    // in this path" exclusion set AND the backtracking undo record.
+    var path_certs: [Certificate; 11] = [certificate_zero(); 11]
+    var path_bufs: [RawBuf; 11] = [rawbuf_new(1); 11]
+    var path_pool_index: [i64; 11] = [0 - 1; 11]
+    var depth: i64 = 0
+    path_certs[0] = *leaf
+    path_bufs[0] = *leaf_buf
+    depth = 1
+
+    // `tried[d]` = how many of chain_find_issuer_candidates' results at
+    // depth d have already been attempted (drives backtracking: when a
+    // depth's candidates are exhausted, pop back to depth-1 and advance
+    // ITS tried-count instead).
+    var tried: [i32; 11] = [0; 11]
+
+    // Hoisted out of the DFS loop: this is 4 KB, and the arena never gives
+    // it back, so re-declaring it per iteration leaked 4 KB per DFS step.
+    // It is fully overwritten by chain_find_issuer_candidates' out_count
+    // prefix on every use, so hoisting carries no stale-data risk.
+    var candidate_indices: [i64; 520] = [0; 520]
+
+    // NOTE (fix round, Findings 1+2 from adversarial review): the loop's
+    // exit condition must fire ONLY on `depth == 0` (search space fully
+    // explored) or `result_count >= MAX_CHAIN_CANDIDATES` (enough
+    // candidates already found) -- never on "some branch got too deep".
+    // The original `depth <= CHAIN_MAX_DEPTH` clause in this while-test
+    // made a branch that overran the depth cap ABORT THE WHOLE FUNCTION
+    // instead of backtracking, silently discarding every untried sibling
+    // candidate at shallower depths (Finding 1). The depth cap is now
+    // enforced inside the loop body instead, as an explicit backtrack.
+    while depth >= 1 && (result_count as i64) < MAX_CHAIN_CANDIDATES {
+        // `&path_certs[(depth - 1) as usize]`, not `let current =
+        // path_certs[...]`: the by-value bind allocated a fresh ~46 KB
+        // Certificate copy on EVERY iteration of this loop.
+        if chain_is_trusted_root(&path_certs[(depth - 1) as usize], trust_store) && depth > 1 {
+            var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
+            var ci: i64 = 0
+            while ci < depth {
+                rc.certs[ci as usize] = path_certs[ci as usize]
+                rc.bufs[ci as usize] = path_bufs[ci as usize]
+                ci = ci + 1
+            }
+            results[result_count as usize] = rc
+            result_count = result_count + 1
+            // Backtrack after recording: a trusted root is a leaf of the
+            // search tree, never itself an issuer we recurse through.
+            depth = depth - 1
+        } else if depth > CHAIN_MAX_DEPTH {
+            // Path already holds CHAIN_MAX_DEPTH+1 certs (every path_certs/
+            // path_pool_index/tried slot, indices 0..CHAIN_MAX_DEPTH, is in
+            // use) and `current` is not a trusted root: this branch is a
+            // dead end, since pushing one more cert would need index
+            // CHAIN_MAX_DEPTH+1, past the end of the fixed-size path
+            // arrays. Treat it exactly like "issuer candidates exhausted
+            // at this depth" (Finding 1's fix): backtrack so the parent's
+            // tried-counter can advance to ITS next untried candidate,
+            // instead of the whole search terminating here. No
+            // path_pool_index[depth]/tried[depth] bookkeeping is needed
+            // for this depth value: depth > CHAIN_MAX_DEPTH is only ever
+            // reached by a push (see the `depth <= CHAIN_MAX_DEPTH` guard
+            // below), never by a search-and-choose step at this same
+            // depth, so nothing was ever written to those arrays at this
+            // index in the first place.
+            depth = depth - 1
+        } else {
+            // Finding 2's fix: exclude_len must be `depth`, not `depth -
+            // 1`. `path_pool_index[i]` records the pool index of the cert
+            // occupying path position `i`, and `current` (the cert whose
+            // issuer we are about to search for) occupies position
+            // `depth - 1` -- so the exclusion range must cover indices
+            // `0..depth-1` INCLUSIVE, i.e. `exclude_len = depth`. Passing
+            // `depth - 1` (the original code) left `current`'s own pool
+            // slot out of the excluded set, so a self-referential pool
+            // entry (issuer == subject, or AKI == own SKI) that was not
+            // itself in the trust store could be re-selected as its own
+            // issuer over and over -- an infinite self-loop that, combined
+            // with Finding 1's bug, could exhaust the whole search on a
+            // dead-end branch before ever trying the real sibling
+            // candidate sitting right next to it in `tried[]`.
+            let n = chain_find_issuer_candidates(&path_certs[(depth - 1) as usize], intermediates, intermediate_count, trust_store, &path_pool_index, depth as i32, &!candidate_indices)
+            if (tried[depth as usize] as i64) < (n as i64) {
+                let chosen = candidate_indices[tried[depth as usize] as usize]
+                tried[depth as usize] = tried[depth as usize] + 1
+                path_pool_index[depth as usize] = chosen
+                // Virtual-pool resolution, replacing the materialised
+                // pool_certs/pool_bufs arrays. Same index ordering as
+                // before: intermediates first, then trust-store roots.
+                if chosen < split {
+                    path_certs[depth as usize] = intermediates[chosen as usize]
+                    path_bufs[depth as usize] = intermediate_bufs[chosen as usize]
+                } else {
+                    path_certs[depth as usize] = trust_store.certs[(chosen - split) as usize]
+                    path_bufs[depth as usize] = trust_store.bufs[(chosen - split) as usize]
+                }
+                depth = depth + 1
+                // Only reset the new depth's tried-counter when that depth
+                // is still within the searchable range (<= CHAIN_MAX_DEPTH
+                // + 1, i.e. it corresponds to a real path_certs slot that a
+                // future iteration might search FROM). When the push lands
+                // exactly on depth = CHAIN_MAX_DEPTH + 1 (path fully in
+                // use), the `depth > CHAIN_MAX_DEPTH` branch above handles
+                // that depth without ever consulting tried[]/
+                // path_pool_index[] at that index, so writing them here
+                // would be both unnecessary and (since those arrays are
+                // sized CHAIN_MAX_DEPTH + 1, indices 0..CHAIN_MAX_DEPTH)
+                // out of bounds.
+                if depth <= CHAIN_MAX_DEPTH {
+                    tried[depth as usize] = 0
+                }
+            } else {
+                // Exhausted this depth's candidates -- backtrack. Also
+                // clear this depth's pool-index slot so it no longer
+                // shows up in the exclusion set once depth-1 advances.
+                tried[depth as usize] = 0
+                path_pool_index[depth as usize] = 0 - 1
+                depth = depth - 1
+            }
+        }
+    }
+
+    (results, result_count)
+}
+
+// --- Task 4: path verification, hostname check, public entry point ---
+
+pub const CHAIN_OK: i64 = 0
+pub const CHAIN_ERR_NO_PATH_TO_ROOT: i64 = 0 - 1
+pub const CHAIN_ERR_EXPIRED: i64 = 0 - 2
+pub const CHAIN_ERR_NOT_YET_VALID: i64 = 0 - 3
+pub const CHAIN_ERR_NOT_CA: i64 = 0 - 4
+pub const CHAIN_ERR_PATH_LEN_EXCEEDED: i64 = 0 - 5
+pub const CHAIN_ERR_BAD_SIGNATURE: i64 = 0 - 6
+pub const CHAIN_ERR_HOSTNAME_MISMATCH: i64 = 0 - 7
+pub const CHAIN_ERR_OCSP_REVOKED: i64 = 0 - 8
+pub const CHAIN_ERR_OCSP_INVALID: i64 = 0 - 9
+
+// KeyUsage's DER BIT STRING is decoded by x509_decode_key_usage
+// (stdlib/x509/cert.sio) as: mask = byte0 when only one usage byte is
+// present (encipherOnly/decipherOnly absent), or mask = (byte0 << 8) | byte1
+// when a second usage byte is present. keyCertSign is RFC 5280 SS4.2.1.3's
+// named bit 5 (0-indexed from the MSB of byte0), i.e. byte0 & 0x04. In the
+// one-byte encoding that bit sits at mask & 0x04; in the two-byte encoding
+// it has been shifted left by 8 along with the rest of byte0, i.e.
+// mask & 0x0400 (0x04 << 8 == 1024). Both constants below test the SAME
+// bit, just at the two different positions mask can leave it in -- verified
+// against x509_decode_key_usage's actual `mask = (mask << 8) | byte_val`
+// packing (grep-confirmed 2026-08-24), not assumed from the plan brief.
+const KEY_USAGE_KEY_CERT_SIGN_BYTE0: i32 = 4    // 0x04: keyCertSign when keyUsage is 1 usage-byte (the common case)
+const KEY_USAGE_KEY_CERT_SIGN_BYTE0_SHIFTED: i32 = 1024  // 0x0400: same bit, when keyUsage is 2 usage-bytes (encipherOnly/decipherOnly present)
+
+fn key_usage_allows_cert_sign(key_usage_bits: i32) -> bool {
+    (key_usage_bits & KEY_USAGE_KEY_CERT_SIGN_BYTE0) != 0 || (key_usage_bits & KEY_USAGE_KEY_CERT_SIGN_BYTE0_SHIFTED) != 0
+}
+
+// Verifies one candidate path (path_certs[0] = leaf ... path_certs[len-1] =
+// trusted root) fully. Returns (CHAIN_OK, depth_reached) on success, or
+// (error_code, depth_reached) on the first failure -- depth_reached is how
+// many links verified successfully before the failure, used by
+// x509_verify_chain to pick the "most progress" candidate to report when
+// every candidate fails for a different reason.
+fn chain_verify_path(path_certs: &[Certificate; 11], path_bufs: &[RawBuf; 11], path_len: i32, now_unix: i64) -> (i64, i32) with IO {
+    // Every certificate here is read through a direct array-element field
+    // access or a `&` reference -- never bound by value. See this module's
+    // "ARENA DISCIPLINE" note: `let cert = path_certs[i]` allocated a
+    // permanent ~46 KB copy per loop iteration, and this function runs once
+    // per candidate path.
+    var i: i32 = 0
+    while i < path_len {
+        if now_unix < path_certs[i as usize].not_before_unix {
+            return (CHAIN_ERR_NOT_YET_VALID, i)
+        }
+        if now_unix > path_certs[i as usize].not_after_unix {
+            return (CHAIN_ERR_EXPIRED, i)
+        }
+        i = i + 1
+    }
+
+    var d: i32 = 0
+    while d < path_len - 1 {
+        if !x509_verify_signature(&path_bufs[d as usize], &path_certs[d as usize], &path_certs[(d + 1) as usize]) {
+            return (CHAIN_ERR_BAD_SIGNATURE, d)
+        }
+
+        if !path_certs[(d + 1) as usize].is_ca {
+            return (CHAIN_ERR_NOT_CA, d + 1)
+        }
+        if path_certs[(d + 1) as usize].key_usage_bits != 0 && !key_usage_allows_cert_sign(path_certs[(d + 1) as usize].key_usage_bits) {
+            return (CHAIN_ERR_NOT_CA, d + 1)
+        }
+        if path_certs[(d + 1) as usize].path_len_constraint >= 0 {
+            // Number of CA certs strictly between `issuer` and the leaf:
+            // path_certs[0..d] excludes the leaf itself (index 0) when d>0,
+            // so the count of intermediates below `issuer` is exactly `d`.
+            if (d as i64) > (path_certs[(d + 1) as usize].path_len_constraint as i64) {
+                return (CHAIN_ERR_PATH_LEN_EXCEEDED, d + 1)
+            }
+        }
+
+        d = d + 1
+    }
+
+    (CHAIN_OK, path_len)
+}
+
+// ASCII case-fold (uppercase -> lowercase; all other bytes unchanged).
+// Hostname comparison must be case-insensitive per RFC 1035 / RFC 6125 --
+// applied to both the SAN bytes and the hostname bytes before comparing.
+fn ascii_lower(b: u8) -> u8 {
+    if b >= (65 as u8) && b <= (90 as u8) {
+        b + (32 as u8)
+    } else {
+        b
+    }
+}
+
+pub fn x509_verify_hostname(leaf: &Certificate, hostname: &RawBuf, hostname_len: i64) -> bool with IO {
+    var i: i32 = 0
+    while i < leaf.san_count {
+        let san = leaf.san_entries[i as usize]
+        if san.tag == GENERAL_NAME_DNS_NAME {
+            // Exact match and wildcard match are tried INDEPENDENTLY (fix
+            // for final-plan-review Finding 2): the original code used an
+            // if/else-if keyed on value_len == hostname_len, so whenever the
+            // SAN pattern and the hostname happened to be the same length
+            // (e.g. "*.example.com" vs "a.example.com", both 13 bytes) only
+            // the exact-match branch ran, byte-compare failed, and the
+            // wildcard branch -- which would have matched -- was never even
+            // attempted. Both checks now run regardless of length equality.
+            if (san.value_len as i64) == hostname_len {
+                var same: bool = true
+                var j: i64 = 0
+                while j < hostname_len {
+                    let sb = ascii_lower(san.value[j as usize])
+                    let hb = ascii_lower(rawbuf_get(hostname, j) as u8)
+                    if sb != hb { same = false }
+                    j = j + 1
+                }
+                if same { return true }
+            }
+            if san.value_len >= 2 && san.value[0] == (42 as u8) && san.value[1] == (46 as u8) {
+                // "*." prefix: match against the hostname's suffix starting
+                // right after its own first '.' -- and require the hostname
+                // to actually contain a '.' at all (a single-label hostname
+                // can never match a wildcard).
+                var dot_pos: i64 = 0 - 1
+                var k: i64 = 0
+                while k < hostname_len {
+                    if (rawbuf_get(hostname, k) as u8) == (46 as u8) && dot_pos == (0 - 1) {
+                        dot_pos = k
+                    }
+                    k = k + 1
+                }
+                if dot_pos >= 0 {
+                    let suffix_len = hostname_len - dot_pos - 1
+                    let pattern_suffix_len = (san.value_len as i64) - 2
+                    if suffix_len == pattern_suffix_len {
+                        var same2: bool = true
+                        var m: i64 = 0
+                        while m < suffix_len {
+                            let sb2 = ascii_lower(san.value[(2 + m) as usize])
+                            let hb2 = ascii_lower(rawbuf_get(hostname, dot_pos + 1 + m) as u8)
+                            if sb2 != hb2 { same2 = false }
+                            m = m + 1
+                        }
+                        if same2 { return true }
+                    }
+                }
+            }
+        } else if san.tag == GENERAL_NAME_IP_ADDRESS {
+            // A `GeneralName` of type iPAddress (RFC 5280 SubjectAltName)
+            // stores the raw address octets, not ASCII text -- an IPv4 SAN
+            // is exactly 4 bytes. This stack's `tls_connect` only ever
+            // verifies against a dotted-decimal IPv4 hostname string (it
+            // has no DNS resolver and no IPv6 support anywhere), so parse
+            // `hostname` the same way and compare octet-for-octet. Before
+            // this branch existed, NO iPAddress SAN was ever matched --
+            // every `tls_connect` to an IP-literal host against a
+            // correctly-formed certificate (RFC 5280 requires an IP
+            // identity to be encoded as iPAddress, not dNSName) failed
+            // hostname verification unconditionally. Found while
+            // integrating `Sounio-lang/conclave-search`'s DNS-over-HTTPS
+            // resolver against Cloudflare's real, publicly-trusted
+            // `1.1.1.1` certificate.
+            if san.value_len == 4 {
+                var octet_idx: i64 = 0
+                var value: i64 = 0
+                var have_digit: bool = false
+                var ok: bool = true
+                var octets: [i64; 4] = [0; 4]
+                var p: i64 = 0
+                while p < hostname_len && ok {
+                    let c = rawbuf_get(hostname, p)
+                    if c == (46 as i64) {
+                        if !have_digit || octet_idx > 2 || value > 255 {
+                            ok = false
+                        } else {
+                            octets[octet_idx as usize] = value
+                            octet_idx = octet_idx + 1
+                            value = 0
+                            have_digit = false
+                        }
+                    } else if c >= (48 as i64) && c <= (57 as i64) {
+                        value = value * 10 + (c - (48 as i64))
+                        if value > 255 { ok = false }
+                        have_digit = true
+                    } else {
+                        ok = false
+                    }
+                    p = p + 1
+                }
+                if ok && have_digit && octet_idx == 3 {
+                    octets[3] = value
+                    var same3: bool = true
+                    var q: i64 = 0
+                    while q < 4 {
+                        if (san.value[q as usize] as i64) != octets[q as usize] { same3 = false }
+                        q = q + 1
+                    }
+                    if same3 { return true }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// IMPLEMENTATION NOTE (found during Task 4 implementation, 2026-08-24/25):
+// `x509_verify_chain` does NOT call `chain_build_candidates` as a
+// subroutine, even though that is the obvious, DRY way to write it (and is
+// exactly what an earlier draft of this function did). It instead inlines
+// `chain_build_candidates`'s full DFS body below.
+//
+// Why: measured, reproducible Madaros compiler defect. A minimal probe
+// (`pub fn probe(...) with IO, Mut { let (candidates, n) =
+// chain_build_candidates(...); candidates[0].len }`, added to THIS module
+// and called from a separate test module) returns a garbage `len` (observed
+// 92176 and 102550 across runs) for `candidates[0]` even though:
+//   - calling `chain_build_candidates` DIRECTLY from the test's own `main`
+//     (no intermediate function) returns the correct candidate every time
+//     (verified repeatedly, `len == 3` for the 3-level fixture below), and
+//   - a LOCAL helper function defined in the *same file as main* (i.e. in
+//     the test module, not in x509::chain) that calls `chain_build_candidates`
+//     and then `chain_verify_path` on the result also returns correct values
+//     every time.
+// So the corruption is specific to: a `pub fn` in x509::chain that is
+// reached via a CROSS-MODULE call (e.g. from a test's `main`) and that,
+// *from within its own module*, calls ANOTHER function in that same module
+// which returns a large fixed-size struct-array tuple
+// (`([ChainCandidate; 16], i32)`, each `ChainCandidate` holding
+// `[Certificate; 11]`). Confirmed NOT caused by the >8-argument call-arg
+// "scratch overflow" path (`lower_array: arena_reset_skipped`, see
+// `module_frontend.sio`'s `MF_AREBOX_*` machinery): the corruption
+// reproduces even when arena resets report fully OK (`arena_reset_totals
+// ok=18 skip=0`) and even with the 9-argument `x509_verify_chain` signature
+// removed from the module entirely. This is the same class of defect as
+// the "residual D3 family: multi-module memory-wall / exclusive-ref
+// fragile chains" already tracked in this repo's
+// `docs/compiler/KNOWN_LIMITATIONS.md` / CLAUDE.md SS13, now hit by a new,
+// more specific trigger (same-module nested call, from a cross-module
+// entry point, returning a large struct-array tuple) -- reported in this
+// task's completion report per the forensic-dispatch protocol; NOT
+// patched in `self-hosted/` here, per this repo's explicit rule against ad
+// hoc compiler patches.
+//
+// `chain_verify_path` (small `(i64, i32)` return) and `x509_verify_hostname`
+// (`bool` return) ARE called as ordinary nested same-module calls below and
+// were verified correct in this configuration -- only the large
+// struct-array-tuple return via `chain_build_candidates` triggers the
+// defect, so only that one call is inlined.
+pub fn x509_verify_chain(
+    leaf: &Certificate,
+    leaf_buf: &RawBuf,
+    intermediates: &[Certificate; 8],
+    intermediate_bufs: &[RawBuf; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
+    hostname: &RawBuf,
+    hostname_len: i64,
+    now_unix: i64,
+    ocsp_response: &RawBuf,
+    ocsp_response_len: i64,
+) -> i64 with IO, Mut {
+    // Final-plan-review Finding 4 (2026-08-25): RE-TESTED whether the
+    // original reason for inlining this DFS (see the long comment below)
+    // still applies now that self-hosted/ir/lower.sio's compiler defect fix
+    // (commit 1168f99a3, earlier on this plan) has landed. It does NOT
+    // still apply in the form originally diagnosed -- but switching this
+    // call site to `let (candidates, candidate_count) =
+    // chain_build_candidates(...)` reproduced a fresh, deterministic
+    // divergence: x509_chain_verify_positive.sio's known-good 3-level chain
+    // (independently verified correct via the inlined path below and via
+    // chain_build_candidates's own direct tests) returned
+    // CHAIN_ERR_EXPIRED (-2) instead of CHAIN_OK on every run, with no
+    // change to `now_unix` or the fixture. This is a DIFFERENT symptom than
+    // the original probe's garbage `len` (92176/102550), so it is evidence
+    // of a second, still-live instance of the same defect class (cross-
+    // module entry point -> same-module nested call returning a large
+    // fixed-size struct-array tuple), not confirmation that the original
+    // one was fixed. Per this task's instructions, KEPT the inlined
+    // duplicate rather than consolidating, and added
+    // tests/run-pass/x509_chain_dfs_via_entry_point.sio to drive the
+    // self-referential-candidate and reordered-intermediates DFS scenarios
+    // (previously only exercised against chain_build_candidates directly by
+    // x509_chain_path_building_self_referential.sio /
+    // x509_chain_path_building_reordered.sio) through this actual
+    // `x509_verify_chain` entry point, so the shipping/inlined copy now has
+    // its own direct test coverage.
+    //
+    // --- inlined DFS, verifying each path in place (see note above) ---
+    //
+    // D18 (measured live 2026-08-27): this loop used to MATERIALISE every
+    // trusted-root-terminated path into a `[ChainCandidate; 16]` array and
+    // verify the array afterwards. That array is unusable on this compiler:
+    // scalar-field access through one of its elements resolves to a wrong
+    // offset that lands inside that same element's `bufs` array.
+    //
+    // Measured, in this exact function, during a live TLS 1.3 handshake:
+    //   * `candidates[i].len` read back ~5e5 -- an arena pointer, and it
+    //     tracked arena state across runs -- immediately after
+    //     `candidates[i] = rc`, though `rc.len` was correct (2) one line up;
+    //   * `candidates[0].len` was already garbage straight out of the
+    //     array-repeat initialiser that sets `len: 0`;
+    //   * `candidates[0].bufs[0].cap` read 255, not the 1 it was built with;
+    //   * writing `candidates[0].len = 7` clobbered `bufs[0].cap` from 1 to
+    //     0 and made a following `bufs[10].cap` read SEGFAULT -- so the
+    //     obvious "store the field again after the struct assignment"
+    //     repair is not safe here, it corrupts buffer pointers.
+    //
+    // Symptom: chain_verify_path received a garbage `path_len` (e.g.
+    // 504725) instead of 2, walked off the end of the 11-slot path arrays
+    // into zeroed slots whose `not_after_unix` is 0, and returned
+    // CHAIN_ERR_EXPIRED (-2) for a chain entirely within its validity
+    // window; a path that got past that then failed
+    // CHAIN_ERR_BAD_SIGNATURE (-6) on correct DER.
+    //
+    // The repair is to not round-trip the path through that structure at
+    // all: each path is verified at the moment the DFS completes it, while
+    // `path_certs` / `path_bufs` / `depth` are still plain locals that read
+    // back correctly. Search order, the first-CHAIN_OK early return, the
+    // MAX_CHAIN_CANDIDATES cap and the "deepest failure wins" reporting
+    // rule are all preserved exactly. It also drops ~8 MB of arena that the
+    // 16-element candidate array cost on every verification (see D12/D16).
+    //
+    // See docs/audit/D18_CHAIN_CANDIDATE_SCALAR_FIELD_OFFSET_DISPATCH_2026-08-27.md.
+    var candidate_count: i32 = 0
+    var best_depth: i32 = 0 - 1
+    var best_error: i64 = CHAIN_ERR_NO_PATH_TO_ROOT
+
+    // Virtual pool -- see chain_find_issuer_candidates and the matching
+    // comment in chain_build_candidates.
+    let split: i64 = intermediate_count as i64
+
+    var path_certs: [Certificate; 11] = [certificate_zero(); 11]
+    var path_bufs: [RawBuf; 11] = [rawbuf_new(1); 11]
+    var path_pool_index: [i64; 11] = [0 - 1; 11]
+    var depth: i64 = 0
+    path_certs[0] = *leaf
+    path_bufs[0] = *leaf_buf
+    depth = 1
+
+    var tried: [i32; 11] = [0; 11]
+
+    // Hoisted out of the loop -- see the matching comment in
+    // chain_build_candidates.
+    var candidate_indices: [i64; 520] = [0; 520]
+
+    while depth >= 1 && (candidate_count as i64) < MAX_CHAIN_CANDIDATES {
+        if chain_is_trusted_root(&path_certs[(depth - 1) as usize], trust_store) && depth > 1 {
+            // D18: verify this completed path HERE, against the live local
+            // arrays, instead of copying it into a ChainCandidate first.
+            candidate_count = candidate_count + 1
+            let (result, depth_reached) = chain_verify_path(&path_certs, &path_bufs, depth as i32, now_unix)
+            if result == CHAIN_OK {
+                if !x509_verify_hostname(leaf, hostname, hostname_len) {
+                    return CHAIN_ERR_HOSTNAME_MISMATCH
+                }
+                if ocsp_response_len > 0 {
+                    let (ocsp_status, ocsp_err) = ocsp_verify_response(ocsp_response, ocsp_response_len, leaf, &path_certs[1], now_unix)
+                    if ocsp_err != OCSP_OK {
+                        return CHAIN_ERR_OCSP_INVALID
+                    }
+                    if ocsp_status != OCSP_STATUS_GOOD {
+                        return CHAIN_ERR_OCSP_REVOKED
+                    }
+                }
+                return CHAIN_OK
+            }
+            if depth_reached > best_depth {
+                best_depth = depth_reached
+                best_error = result
+            }
+            depth = depth - 1
+        } else if depth > CHAIN_MAX_DEPTH {
+            depth = depth - 1
+        } else {
+            let n = chain_find_issuer_candidates(&path_certs[(depth - 1) as usize], intermediates, intermediate_count, trust_store, &path_pool_index, depth as i32, &!candidate_indices)
+            if (tried[depth as usize] as i64) < (n as i64) {
+                let chosen = candidate_indices[tried[depth as usize] as usize]
+                tried[depth as usize] = tried[depth as usize] + 1
+                path_pool_index[depth as usize] = chosen
+                // Virtual-pool resolution, replacing the materialised
+                // pool_certs/pool_bufs arrays. Same index ordering as
+                // before: intermediates first, then trust-store roots.
+                if chosen < split {
+                    path_certs[depth as usize] = intermediates[chosen as usize]
+                    path_bufs[depth as usize] = intermediate_bufs[chosen as usize]
+                } else {
+                    path_certs[depth as usize] = trust_store.certs[(chosen - split) as usize]
+                    path_bufs[depth as usize] = trust_store.bufs[(chosen - split) as usize]
+                }
+                depth = depth + 1
+                if depth <= CHAIN_MAX_DEPTH {
+                    tried[depth as usize] = 0
+                }
+            } else {
+                tried[depth as usize] = 0
+                path_pool_index[depth as usize] = 0 - 1
+                depth = depth - 1
+            }
+        }
+    }
+    // --- end inlined DFS ---
+
+    // Every completed path was already verified in place above, so reaching
+    // here means none of them returned CHAIN_OK.
+    if candidate_count == 0 {
+        return CHAIN_ERR_NO_PATH_TO_ROOT
+    }
+
+    best_error
+}

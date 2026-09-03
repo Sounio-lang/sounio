@@ -1,0 +1,443 @@
+// examples/erdos/spindle_proof_cert.sio
+//
+// EXACT GEOMETRY  ->  COLORING-IMPOSSIBILITY PROOF  ->  EXTERNAL VERIFICATION.
+//
+// The Moser spindle is the atomic unit-distance graph behind de Grey's
+// 5-chromatic plane graph (Erdős #508). Here the whole chain lives in Sounio:
+//
+//   (1) the 7 spindle vertices are placed with EXACT coordinates in Q(√3,√11)
+//       (scaled ×12); an edge exists iff the squared distance is EXACTLY the
+//       rational 144 (every √3/√11/√33 component cancels — verified, not rounded);
+//   (2) the resulting adjacency is compiled into a 3-coloring CNF;
+//   (3) a DPLL engine refutes it and EMITS a DRUP proof; our native RUP checker
+//       verifies the proof; and the same certificate is emitted in standard
+//       DIMACS + DRAT so an external checker (drat-trim) can confirm it.
+//
+// A VERIFIED empty clause = "the spindle is not 3-colorable" = chi(spindle) >= 4,
+// with the graph's edges DERIVED from exact algebraic geometry, not assumed.
+// This is the de Grey mechanism in miniature: realize the graph exactly, then
+// certify chromatic lower bounds by an independently checkable UNSAT proof.
+//
+// All integer arithmetic; literals are DIMACS-style signed ints.
+
+// ===================== exact Q(√3,√11) geometry =============================
+// Number a + b√3 + c√11 + d√33 as the integer 4-tuple (a,b,c,d). Table:
+//   √3·√3=3  √11·√11=11  √33·√33=33  √3·√11=√33  √3·√33=3√11  √11·√33=11√3
+
+struct Qf { a: i64, b: i64, c: i64, d: i64 }
+
+fn qsub(x: Qf, y: Qf) -> Qf {
+    return Qf { a: x.a - y.a, b: x.b - y.b, c: x.c - y.c, d: x.d - y.d }
+}
+fn qadd(x: Qf, y: Qf) -> Qf {
+    return Qf { a: x.a + y.a, b: x.b + y.b, c: x.c + y.c, d: x.d + y.d }
+}
+fn qmul(x: Qf, y: Qf) -> Qf {
+    let ra  = x.a*y.a + 3*x.b*y.b + 11*x.c*y.c + 33*x.d*y.d
+    let r3  = x.a*y.b + y.a*x.b + 11*(x.c*y.d + y.c*x.d)
+    let r11 = x.a*y.c + y.a*x.c + 3*(x.b*y.d + y.b*x.d)
+    let r33 = x.a*y.d + y.a*x.d + x.b*y.c + y.b*x.c
+    return Qf { a: ra, b: r3, c: r11, d: r33 }
+}
+fn qsq(x: Qf) -> Qf { return qmul(x, x) }
+
+var XA: [i64; 7] = [0; 7]
+var XB: [i64; 7] = [0; 7]
+var XC: [i64; 7] = [0; 7]
+var XD: [i64; 7] = [0; 7]
+var YA: [i64; 7] = [0; 7]
+var YB: [i64; 7] = [0; 7]
+var YC: [i64; 7] = [0; 7]
+var YD: [i64; 7] = [0; 7]
+var ADJ: [i64; 49] = [0; 49]
+
+fn setup_points() with Mut, Panic {
+    XA[0] = 0  XB[0] = 0       XC[0] = 0       XD[0] = 0
+    YA[0] = 0  YB[0] = 0       YC[0] = 0       YD[0] = 0
+    XA[1] = 0  XB[1] = 6       XC[1] = 0       XD[1] = 0
+    YA[1] = 6  YB[1] = 0       YC[1] = 0       YD[1] = 0
+    XA[2] = 0  XB[2] = 12      XC[2] = 0       XD[2] = 0
+    YA[2] = 0  YB[2] = 0       YC[2] = 0       YD[2] = 0
+    XA[3] = 0  XB[3] = 6       XC[3] = 0       XD[3] = 0
+    YA[3] = 0 - 6  YB[3] = 0   YC[3] = 0       YD[3] = 0
+    XA[4] = 0  XB[4] = 5       XC[4] = 0 - 1   XD[4] = 0
+    YA[4] = 5  YB[4] = 0       YC[4] = 0       YD[4] = 1
+    XA[5] = 0  XB[5] = 10      XC[5] = 0       XD[5] = 0
+    YA[5] = 0  YB[5] = 0       YC[5] = 0       YD[5] = 2
+    XA[6] = 0  XB[6] = 5       XC[6] = 1       XD[6] = 0
+    YA[6] = 0 - 5  YB[6] = 0   YC[6] = 0       YD[6] = 1
+}
+
+fn get_x(i: i64) -> Qf with Panic {
+    return Qf { a: XA[i as usize], b: XB[i as usize], c: XC[i as usize], d: XD[i as usize] }
+}
+fn get_y(i: i64) -> Qf with Panic {
+    return Qf { a: YA[i as usize], b: YB[i as usize], c: YC[i as usize], d: YD[i as usize] }
+}
+fn dist2(i: i64, j: i64) -> Qf with Panic {
+    let dx = qsub(get_x(i), get_x(j))
+    let dy = qsub(get_y(i), get_y(j))
+    return qadd(qsq(dx), qsq(dy))
+}
+fn is_unit(d: Qf) -> i64 {
+    if d.a == 144 { if d.b == 0 { if d.c == 0 { if d.d == 0 { return 1 } } } }
+    return 0
+}
+fn build_edges() -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < 49 { ADJ[i as usize] = 0  i = i + 1 }
+    var cnt: i64 = 0
+    i = 0
+    while i < 7 {
+        var j = i + 1
+        while j < 7 {
+            if is_unit(dist2(i, j)) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+                cnt = cnt + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return cnt
+}
+
+// ===================== SAT proof kernel (DPLL -> DRUP + RUP checker) =========
+
+struct Db {
+    n_vars: i32,
+    n_clauses: i32,
+    cstart: [i32; 1024],
+    clen: [i32; 1024],
+    lits: [i64; 4096],
+    assign: [i32; 256],
+}
+struct Proof {
+    n: i32,
+    pstart: [i32; 2048],
+    plen: [i32; 2048],
+    plits: [i64; 8192],
+}
+
+fn lit_var(l: i64) -> i32 with Panic {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+
+fn db_add_clause(db: &!Db, arr: &[i64; 16], n: i32) with Mut, Panic {
+    if db.n_clauses >= 1024 { return }
+    let idx = db.n_clauses
+    var start: i32 = 0
+    if idx > 0 { start = db.cstart[idx - 1] + db.clen[idx - 1] }
+    if start + n > 4096 { return }
+    db.cstart[idx] = start
+    db.clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        db.lits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > db.n_vars { db.n_vars = v }
+        i = i + 1
+    }
+    db.n_clauses = idx + 1
+}
+
+fn propagate(db: &!Db) -> i32 with Mut, Panic {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < db.n_clauses {
+            let st = db.cstart[c]
+            let ln = db.clen[c]
+            var sat: i32 = 0
+            var unassigned: i32 = 0
+            var last_lit: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = db.lits[st + k]
+                let v = lit_var(l)
+                var a = db.assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { unassigned = unassigned + 1  last_lit = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if unassigned == 0 { return 1 }
+                if unassigned == 1 {
+                    let v = lit_var(last_lit)
+                    if last_lit < 0 { db.assign[v] = 0 - 1 } else { db.assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+
+fn reset_assign(db: &!Db) with Mut, Panic {
+    var i: i32 = 0
+    while i <= db.n_vars { db.assign[i] = 0  i = i + 1 }
+}
+
+fn emit_neg(proof: &!Proof, dec: &[i64; 64], dec_len: i32) with Mut, Panic {
+    if proof.n >= 2048 { return }
+    let idx = proof.n
+    var start: i32 = 0
+    if idx > 0 { start = proof.pstart[idx - 1] + proof.plen[idx - 1] }
+    if start + dec_len > 8192 { return }
+    proof.pstart[idx] = start
+    proof.plen[idx] = dec_len
+    var i: i32 = 0
+    while i < dec_len {
+        proof.plits[start + i] = 0 - dec[i]
+        i = i + 1
+    }
+    proof.n = idx + 1
+}
+
+fn solve_rec(db: &!Db, proof: &!Proof, dec: &![i64; 64], dec_len: i32) -> i32 with Mut, Panic {
+    let cf = propagate(db)
+    if cf == 1 {
+        emit_neg(proof, dec, dec_len)
+        return 0
+    }
+    var x: i32 = 0
+    var i: i32 = 1
+    while i <= db.n_vars {
+        if db.assign[i] == 0 { x = i  i = db.n_vars + 1 } else { i = i + 1 }
+    }
+    if x == 0 { return 1 }
+
+    var snap: [i32; 256] = [0; 256]
+    var s: i32 = 0
+    while s <= db.n_vars { snap[s] = db.assign[s]  s = s + 1 }
+
+    db.assign[x] = 1
+    dec[dec_len] = x as i64
+    let r1 = solve_rec(db, proof, dec, dec_len + 1)
+    if r1 == 1 { return 1 }
+
+    s = 0
+    while s <= db.n_vars { db.assign[s] = snap[s]  s = s + 1 }
+
+    db.assign[x] = 0 - 1
+    dec[dec_len] = 0 - (x as i64)
+    let r2 = solve_rec(db, proof, dec, dec_len + 1)
+    if r2 == 1 { return 1 }
+
+    s = 0
+    while s <= db.n_vars { db.assign[s] = snap[s]  s = s + 1 }
+
+    emit_neg(proof, dec, dec_len)
+    return 0
+}
+
+fn add_lits_as_clause(db: &!Db, proof: &Proof, pst: i32, pln: i32) with Mut, Panic {
+    if db.n_clauses >= 1024 { return }
+    let idx = db.n_clauses
+    var start: i32 = 0
+    if idx > 0 { start = db.cstart[idx - 1] + db.clen[idx - 1] }
+    if start + pln > 4096 { return }
+    db.cstart[idx] = start
+    db.clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { db.lits[start + i] = proof.plits[pst + i]  i = i + 1 }
+    db.n_clauses = idx + 1
+}
+
+fn verify(db: &!Db, proof: &Proof) -> i32 with Mut, Panic {
+    var pi: i32 = 0
+    while pi < proof.n {
+        let pst = proof.pstart[pi]
+        let pln = proof.plen[pi]
+        reset_assign(db)
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = proof.plits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = 0 - 1
+            if l < 0 { want = 1 }
+            if db.assign[v] != 0 {
+                if db.assign[v] != want { taut = 1 }
+            }
+            db.assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 {
+            ok = 1
+        } else {
+            let cf = propagate(db)
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return 0 - 1 }
+        if pln == 0 { return 1 }
+        add_lits_as_clause(db, proof, pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+// ===================== inline decimal print + DIMACS/DRAT ====================
+
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") }
+    else if d == 1 { print("1") }
+    else if d == 2 { print("2") }
+    else if d == 3 { print("3") }
+    else if d == 4 { print("4") }
+    else if d == 5 { print("5") }
+    else if d == 6 { print("6") }
+    else if d == 7 { print("7") }
+    else if d == 8 { print("8") }
+    else { print("9") }
+}
+fn print_dec(n: i64) with IO, Mut, Div, Panic {
+    if n == 0 { print("0") return }
+    var x = n
+    if x < 0 { print("-") x = 0 - x }
+    var buf: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { buf[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { print_digit(buf[i])  i = i - 1 }
+}
+fn emit_dimacs(db: &Db, orig_nc: i32) with IO, Mut, Div, Panic {
+    print("p cnf ")
+    print_dec(db.n_vars as i64)
+    print(" ")
+    print_dec(orig_nc as i64)
+    print("\n")
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = db.cstart[c]
+        let ln = db.clen[c]
+        var k: i32 = 0
+        while k < ln { print_dec(db.lits[st + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        c = c + 1
+    }
+}
+fn emit_drat(proof: &Proof) with IO, Mut, Div, Panic {
+    var pi: i32 = 0
+    while pi < proof.n {
+        let pst = proof.pstart[pi]
+        let pln = proof.plen[pi]
+        var k: i32 = 0
+        while k < pln { print_dec(proof.plits[pst + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        pi = pi + 1
+    }
+}
+
+// ===================== build k-coloring CNF from ADJ =========================
+
+fn vc(v: i64, c: i64, k: i64) -> i64 {
+    return v*k + c + 1
+}
+
+// At-least-one-color per vertex + edge inequality clauses. (No at-most-one is
+// needed: ALO + edge constraints already force chi colors on the graph.)
+fn build_coloring(db: &!Db, nverts: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 16] = [0; 16]
+    var v: i64 = 0
+    while v < nverts {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = vc(v, c, k)  c = c + 1 }
+        db_add_clause(db, &arr, k as i32)
+        v = v + 1
+    }
+    var u: i64 = 0
+    while u < nverts {
+        var w: i64 = u + 1
+        while w < nverts {
+            if ADJ[(u*7 + w) as usize] == 1 {
+                var c: i64 = 0
+                while c < k {
+                    arr[0] = 0 - vc(u, c, k)
+                    arr[1] = 0 - vc(w, c, k)
+                    db_add_clause(db, &arr, 2)
+                    c = c + 1
+                }
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+}
+
+fn run() -> i32 with IO, Mut, Div, Panic {
+    print("=== Erdős #508: Moser spindle is NOT 3-colorable (chi >= 4) ===\n")
+    print("exact Q(√3,√11) geometry -> 3-coloring CNF -> DRUP proof -> RUP + drat-trim\n\n")
+
+    setup_points()
+    let nedges = build_edges()
+    print("spindle built from EXACT coordinates: vertices=7  unit edges=")
+    print_int(nedges)
+    print("  (expected 11)\n")
+    if nedges != 11 {
+        print("UNEXPECTED edge count — abort.\n")
+        return 1
+    }
+
+    var db: Db = Db {
+        n_vars: 0,
+        n_clauses: 0,
+        cstart: [0; 1024],
+        clen: [0; 1024],
+        lits: [0; 4096],
+        assign: [0; 256],
+    }
+    build_coloring(&!db, 7, 3)
+    print("3-coloring CNF: vars=")
+    print_int(db.n_vars)
+    print("  clauses=")
+    print_int(db.n_clauses)
+    print("\n")
+    let orig_nc = db.n_clauses
+
+    var proof: Proof = Proof {
+        n: 0,
+        pstart: [0; 2048],
+        plen: [0; 2048],
+        plits: [0; 8192],
+    }
+    var dec: [i64; 64] = [0; 64]
+
+    let sat = solve_rec(&!db, &!proof, &!dec, 0)
+    if sat == 1 {
+        print("SOLVER: SAT — the spindle WOULD be 3-colorable (contradicts chi=4!).\n")
+        return 1
+    }
+    print("SOLVER: UNSAT.  DRUP lemmas=")
+    print_int(proof.n)
+    print("  last-lemma-len=")
+    print_int(proof.plen[proof.n - 1])
+    print(" (0=empty clause)\n")
+
+    reset_assign(&!db)
+    let vr = verify(&!db, &proof)
+    if vr != 1 {
+        print("NATIVE CHECKER: proof did NOT verify (result=")
+        print_int(vr)
+        print(").\n")
+        return 1
+    }
+    print("NATIVE CHECKER: VERIFIED — every lemma RUP, empty clause derived.\n")
+    print(">>> chi(Moser spindle) >= 4, certified natively over exact geometry.\n")
+
+    db.n_clauses = orig_nc
+    print("\n%%DIMACS%%\n")
+    emit_dimacs(&db, orig_nc)
+    print("%%DRAT%%\n")
+    emit_drat(&proof)
+    print("%%END%%\n")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic { return run() }

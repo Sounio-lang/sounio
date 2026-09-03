@@ -1,0 +1,446 @@
+module check::ontology_side_table_cache
+
+pub struct OntologySideTableCachePlan {
+    valid: bool,
+    slot_count: i64,
+    slot0: i64,
+    slot1: i64,
+    slot2: i64,
+    slot3: i64,
+    slot4: i64,
+    slot5: i64,
+    subclass_axiom_count: i64,
+    subclass_subject0: i64,
+    subclass_object0: i64,
+    subclass_subject1: i64,
+    subclass_object1: i64,
+    subclass_subject2: i64,
+    subclass_object2: i64,
+    subclass_subject3: i64,
+    subclass_object3: i64,
+    disjoint_axiom_count: i64,
+    disjoint_subject0: i64,
+    disjoint_object0: i64,
+}
+
+var ONTOLOGY_SIDE_TABLE_CACHE_DATA: [i8; 262144] = [0; 262144]
+
+fn ontology_side_table_cache_empty_plan() -> OntologySideTableCachePlan {
+    OntologySideTableCachePlan {
+        valid: false,
+        slot_count: 0,
+        slot0: 0 - 1,
+        slot1: 0 - 1,
+        slot2: 0 - 1,
+        slot3: 0 - 1,
+        slot4: 0 - 1,
+        slot5: 0 - 1,
+        subclass_axiom_count: 0,
+        subclass_subject0: 0 - 1,
+        subclass_object0: 0 - 1,
+        subclass_subject1: 0 - 1,
+        subclass_object1: 0 - 1,
+        subclass_subject2: 0 - 1,
+        subclass_object2: 0 - 1,
+        subclass_subject3: 0 - 1,
+        subclass_object3: 0 - 1,
+        disjoint_axiom_count: 0,
+        disjoint_subject0: 0 - 1,
+        disjoint_object0: 0 - 1,
+    }
+}
+
+fn ontology_side_table_cache_load_file(path: string) -> i64 with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return 0
+    }
+    let n = if size > 262144 { 262144 } else { size }
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < n {
+        ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize] = raw[i as usize]
+        i = i + 1
+    }
+    n
+}
+
+fn ontology_side_table_cache_matches_at(pos: i64, size: i64, pattern: string) -> bool with Mut, Panic, Div {
+    let plen = str_len(pattern)
+    if pos < 0 || pos + plen > size {
+        return false
+    }
+    var j: i64 = 0
+    while j < plen {
+        if ONTOLOGY_SIDE_TABLE_CACHE_DATA[(pos + j) as usize] != pattern[j as usize] {
+            return false
+        }
+        j = j + 1
+    }
+    true
+}
+
+fn ontology_side_table_cache_find_pattern_from(start: i64, size: i64, pattern: string) -> i64 with Mut, Panic, Div {
+    let plen = str_len(pattern)
+    if plen <= 0 {
+        return start
+    }
+    var i = start
+    while i + plen <= size {
+        if ontology_side_table_cache_matches_at(i, size, pattern) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn ontology_side_table_cache_byte_to_str(c: i8) -> string {
+    let v = c as i64
+    if v >= 97 && v <= 122 {
+        return str_slice("abcdefghijklmnopqrstuvwxyz", v - 97, v - 96)
+    }
+    if v >= 65 && v <= 90 {
+        return str_slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ", v - 65, v - 64)
+    }
+    if v >= 48 && v <= 57 {
+        return str_slice("0123456789", v - 48, v - 47)
+    }
+    if v == 95 { return "_" }
+    if v == 47 { return "/" }
+    if v == 46 { return "." }
+    if v == 45 { return "-" }
+    if v == 58 { return ":" }
+    ""
+}
+
+fn ontology_side_table_cache_read_int_at(pos: i64, end: i64) -> (i64, i64) {
+    var i = pos
+    var sign: i64 = 1
+    if i < end && ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize] == (45 as i8) {
+        sign = 0 - 1
+        i = i + 1
+    }
+    var value: i64 = 0
+    var saw_digit = false
+    while i < end {
+        let ch = ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize]
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            value = (value * 10) + ((ch as i64) - 48)
+            saw_digit = true
+            i = i + 1
+        } else {
+            if saw_digit {
+                return (value * sign, i)
+            }
+            return (0 - 1, i)
+        }
+    }
+    if saw_digit {
+        return (value * sign, i)
+    }
+    (0 - 1, i)
+}
+
+fn ontology_side_table_cache_read_int_after(pattern: string, size: i64) -> i64 with Mut, Panic, Div {
+    let pos = ontology_side_table_cache_find_pattern_from(0, size, pattern)
+    if pos < 0 {
+        return 0 - 1
+    }
+    let pair = ontology_side_table_cache_read_int_at(pos + str_len(pattern), size)
+    pair.0
+}
+
+fn ontology_side_table_cache_skip_to_next_int(pos: i64, end: i64) -> i64 {
+    var i = pos
+    while i < end {
+        let ch = ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize]
+        if (ch >= (48 as i8) && ch <= (57 as i8)) || ch == (45 as i8) {
+            return i
+        }
+        i = i + 1
+    }
+    end
+}
+
+fn ontology_side_table_cache_hydrate_slots(size: i64, plan: OntologySideTableCachePlan) -> OntologySideTableCachePlan with Mut, Panic, Div {
+    var p = plan
+    p.slot_count = ontology_side_table_cache_read_int_after("kernel_slot_count=", size)
+    let start = ontology_side_table_cache_find_pattern_from(0, size, "kernel_slots=")
+    if start < 0 {
+        return p
+    }
+    var cursor = start + str_len("kernel_slots=")
+    var idx: i64 = 0
+    while idx < p.slot_count && idx < 6 {
+        cursor = ontology_side_table_cache_skip_to_next_int(cursor, size)
+        let pair = ontology_side_table_cache_read_int_at(cursor, size)
+        if idx == 0 { p.slot0 = pair.0 }
+        if idx == 1 { p.slot1 = pair.0 }
+        if idx == 2 { p.slot2 = pair.0 }
+        if idx == 3 { p.slot3 = pair.0 }
+        if idx == 4 { p.slot4 = pair.0 }
+        if idx == 5 { p.slot5 = pair.0 }
+        cursor = pair.1
+        idx = idx + 1
+    }
+    p
+}
+
+fn ontology_side_table_cache_hydrate_subclass_axioms(size: i64, plan: OntologySideTableCachePlan) -> OntologySideTableCachePlan with Mut, Panic, Div {
+    var p = plan
+    p.subclass_axiom_count = ontology_side_table_cache_read_int_after("kernel_subclass_axiom_count=", size)
+    let start = ontology_side_table_cache_find_pattern_from(0, size, "kernel_subclass_axioms=")
+    if start < 0 {
+        return p
+    }
+    var cursor = start + str_len("kernel_subclass_axioms=")
+    var idx: i64 = 0
+    while idx < p.subclass_axiom_count && idx < 4 {
+        cursor = ontology_side_table_cache_skip_to_next_int(cursor, size)
+        let subject = ontology_side_table_cache_read_int_at(cursor, size)
+        cursor = ontology_side_table_cache_skip_to_next_int(subject.1, size)
+        let object = ontology_side_table_cache_read_int_at(cursor, size)
+        if idx == 0 { p.subclass_subject0 = subject.0; p.subclass_object0 = object.0 }
+        if idx == 1 { p.subclass_subject1 = subject.0; p.subclass_object1 = object.0 }
+        if idx == 2 { p.subclass_subject2 = subject.0; p.subclass_object2 = object.0 }
+        if idx == 3 { p.subclass_subject3 = subject.0; p.subclass_object3 = object.0 }
+        cursor = object.1
+        idx = idx + 1
+    }
+    p
+}
+
+fn ontology_side_table_cache_hydrate_disjoint_axioms(size: i64, plan: OntologySideTableCachePlan) -> OntologySideTableCachePlan with Mut, Panic, Div {
+    var p = plan
+    p.disjoint_axiom_count = ontology_side_table_cache_read_int_after("kernel_disjoint_axiom_count=", size)
+    let start = ontology_side_table_cache_find_pattern_from(0, size, "kernel_disjoint_axioms=")
+    if start < 0 || p.disjoint_axiom_count <= 0 {
+        return p
+    }
+    var cursor = ontology_side_table_cache_skip_to_next_int(start + str_len("kernel_disjoint_axioms="), size)
+    let subject = ontology_side_table_cache_read_int_at(cursor, size)
+    cursor = ontology_side_table_cache_skip_to_next_int(subject.1, size)
+    let object = ontology_side_table_cache_read_int_at(cursor, size)
+    p.disjoint_subject0 = subject.0
+    p.disjoint_object0 = object.0
+    p
+}
+
+fn ontology_side_table_cache_import(cache_path: string) -> OntologySideTableCachePlan with IO, Mut, Panic, Div {
+    var p = ontology_side_table_cache_empty_plan()
+    let size = ontology_side_table_cache_load_file(cache_path)
+    if size <= 0 {
+        return p
+    }
+    let header_ok = ontology_side_table_cache_matches_at(0, size, "// Sounio native ontology side-table .ontocache v1")
+    let format_ok = ontology_side_table_cache_find_pattern_from(0, size, "format=bounded-kernel-facts") >= 0
+    let authority_ok = ontology_side_table_cache_find_pattern_from(0, size, "authority=compiler-side-bounded-side-table-cache-not-live-checker-kernel") >= 0
+    if !header_ok || !format_ok || !authority_ok {
+        return p
+    }
+    p = ontology_side_table_cache_hydrate_slots(size, p)
+    p = ontology_side_table_cache_hydrate_subclass_axioms(size, p)
+    p = ontology_side_table_cache_hydrate_disjoint_axioms(size, p)
+    p.valid = p.slot_count > 0 && p.subclass_axiom_count > 0
+    p
+}
+
+fn ontology_side_table_cache_slot_at(plan: OntologySideTableCachePlan, idx: i64) -> i64 {
+    if idx == 0 { return plan.slot0 }
+    if idx == 1 { return plan.slot1 }
+    if idx == 2 { return plan.slot2 }
+    if idx == 3 { return plan.slot3 }
+    if idx == 4 { return plan.slot4 }
+    if idx == 5 { return plan.slot5 }
+    0 - 1
+}
+
+fn ontology_side_table_cache_slot_index(plan: OntologySideTableCachePlan, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < plan.slot_count && i < 6 {
+        if ontology_side_table_cache_slot_at(plan, i) == id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn ontology_side_table_cache_subclass_subject_at(plan: OntologySideTableCachePlan, idx: i64) -> i64 {
+    if idx == 0 { return plan.subclass_subject0 }
+    if idx == 1 { return plan.subclass_subject1 }
+    if idx == 2 { return plan.subclass_subject2 }
+    if idx == 3 { return plan.subclass_subject3 }
+    0 - 1
+}
+
+fn ontology_side_table_cache_subclass_object_at(plan: OntologySideTableCachePlan, idx: i64) -> i64 {
+    if idx == 0 { return plan.subclass_object0 }
+    if idx == 1 { return plan.subclass_object1 }
+    if idx == 2 { return plan.subclass_object2 }
+    if idx == 3 { return plan.subclass_object3 }
+    0 - 1
+}
+
+fn ontology_side_table_cache_direct_subclass_idx(plan: OntologySideTableCachePlan, child_idx: i64, parent_idx: i64) -> bool {
+    var i: i64 = 0
+    while i < plan.subclass_axiom_count && i < 4 {
+        if ontology_side_table_cache_subclass_subject_at(plan, i) == child_idx &&
+           ontology_side_table_cache_subclass_object_at(plan, i) == parent_idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ontology_side_table_cache_subclass_idx(plan: OntologySideTableCachePlan, child_idx: i64, parent_idx: i64, depth: i64) -> bool {
+    if child_idx < 0 || parent_idx < 0 {
+        return false
+    }
+    if child_idx == parent_idx {
+        return true
+    }
+    if depth > 8 {
+        return false
+    }
+    var i: i64 = 0
+    while i < plan.subclass_axiom_count && i < 4 {
+        if ontology_side_table_cache_subclass_subject_at(plan, i) == child_idx {
+            let mid = ontology_side_table_cache_subclass_object_at(plan, i)
+            if mid == parent_idx {
+                return true
+            }
+            if ontology_side_table_cache_subclass_idx(plan, mid, parent_idx, depth + 1) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ontology_side_table_cache_subclass(plan: OntologySideTableCachePlan, child_id: i64, parent_id: i64) -> bool {
+    let child_idx = ontology_side_table_cache_slot_index(plan, child_id)
+    let parent_idx = ontology_side_table_cache_slot_index(plan, parent_id)
+    ontology_side_table_cache_subclass_idx(plan, child_idx, parent_idx, 0)
+}
+
+fn ontology_side_table_cache_disjoint(plan: OntologySideTableCachePlan, left_id: i64, right_id: i64) -> bool {
+    let left_idx = ontology_side_table_cache_slot_index(plan, left_id)
+    let right_idx = ontology_side_table_cache_slot_index(plan, right_id)
+    if left_idx < 0 || right_idx < 0 {
+        return false
+    }
+    if plan.disjoint_axiom_count <= 0 {
+        return false
+    }
+    (plan.disjoint_subject0 == left_idx && plan.disjoint_object0 == right_idx) ||
+    (plan.disjoint_subject0 == right_idx && plan.disjoint_object0 == left_idx)
+}
+
+fn ontology_side_table_cache_source_directive_path(source_path: string) -> string with IO, Mut, Panic, Div {
+    let size = ontology_side_table_cache_load_file(source_path)
+    if size <= 0 {
+        return ""
+    }
+    let pattern = "//@ ontology-side-table-cache:"
+    let pos = ontology_side_table_cache_find_pattern_from(0, size, pattern)
+    if pos < 0 {
+        return ""
+    }
+    var i = pos + str_len(pattern)
+    while i < size && ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize] != (34 as i8) {
+        i = i + 1
+    }
+    if i >= size {
+        return ""
+    }
+    i = i + 1
+    var value = ""
+    while i < size && ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize] != (34 as i8) {
+        value = value ++ ontology_side_table_cache_byte_to_str(ONTOLOGY_SIDE_TABLE_CACHE_DATA[i as usize])
+        i = i + 1
+    }
+    value
+}
+
+fn ontology_side_table_cache_import_from_source(source_path: string) -> OntologySideTableCachePlan with IO, Mut, Panic, Div {
+    let cache_path = ontology_side_table_cache_source_directive_path(source_path)
+    if str_len(cache_path) <= 0 {
+        return ontology_side_table_cache_empty_plan()
+    }
+    ontology_side_table_cache_import(cache_path)
+}
+
+pub fn ontology_side_table_cache_source_plan_valid(source_path: string) -> bool with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).valid
+}
+
+pub fn ontology_side_table_cache_source_slot_count(source_path: string) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).slot_count
+}
+
+pub fn ontology_side_table_cache_source_slot_at(source_path: string, idx: i64) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_slot_at(ontology_side_table_cache_import_from_source(source_path), idx)
+}
+
+pub fn ontology_side_table_cache_source_subclass_axiom_count(source_path: string) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).subclass_axiom_count
+}
+
+pub fn ontology_side_table_cache_source_subclass_subject_at(source_path: string, idx: i64) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_subclass_subject_at(ontology_side_table_cache_import_from_source(source_path), idx)
+}
+
+pub fn ontology_side_table_cache_source_subclass_object_at(source_path: string, idx: i64) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_subclass_object_at(ontology_side_table_cache_import_from_source(source_path), idx)
+}
+
+pub fn ontology_side_table_cache_source_disjoint_axiom_count(source_path: string) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).disjoint_axiom_count
+}
+
+pub fn ontology_side_table_cache_source_disjoint_subject0(source_path: string) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).disjoint_subject0
+}
+
+pub fn ontology_side_table_cache_source_disjoint_object0(source_path: string) -> i64 with IO, Mut, Panic, Div {
+    ontology_side_table_cache_import_from_source(source_path).disjoint_object0
+}
+
+pub fn ontology_side_table_cache_verdict_ok() -> i64 { 0 }
+pub fn ontology_side_table_cache_verdict_no_directive() -> i64 { 1 }
+pub fn ontology_side_table_cache_verdict_invalid_cache() -> i64 { 2 }
+pub fn ontology_side_table_cache_verdict_reject() -> i64 { 152 }
+
+pub fn ontology_side_table_cache_subclass_verdict(source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div {
+    let cache_path = ontology_side_table_cache_source_directive_path(source_path)
+    if str_len(cache_path) <= 0 {
+        return ontology_side_table_cache_verdict_no_directive()
+    }
+    let plan = ontology_side_table_cache_import(cache_path)
+    if !plan.valid {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    if ontology_side_table_cache_subclass(plan, child_id, parent_id) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
+}
+
+pub fn ontology_side_table_cache_disjoint_verdict(source_path: string, left_id: i64, right_id: i64) -> i64 with IO, Mut, Panic, Div {
+    let cache_path = ontology_side_table_cache_source_directive_path(source_path)
+    if str_len(cache_path) <= 0 {
+        return ontology_side_table_cache_verdict_no_directive()
+    }
+    let plan = ontology_side_table_cache_import(cache_path)
+    if !plan.valid {
+        return ontology_side_table_cache_verdict_invalid_cache()
+    }
+    if ontology_side_table_cache_disjoint(plan, left_id, right_id) {
+        return ontology_side_table_cache_verdict_ok()
+    }
+    ontology_side_table_cache_verdict_reject()
+}

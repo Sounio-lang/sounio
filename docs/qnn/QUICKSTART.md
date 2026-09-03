@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.quickstart
 
 Get started with Quaternion Neural Networks in 5 minutes.
 
-Public execution in this repository should start from the checked JIT artifact.
+Public execution in this repository should start from the checked launcher at `bin/souc`, which routes to Madaros by default.
 Treat older Rust-era `cargo run` snippets as historical unless they have been
 revalidated against the exact binary you are using.
 
@@ -20,10 +20,13 @@ revalidated against the exact binary you are using.
 ## 1. Install & Run
 
 ```bash
-cd /home/demetrios/RustroverProjects/sounio
+cd /workspace/sounio
 export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" check examples/qnn/01_hello_quaternion.sio
 ```
+
+If you need the legacy bootstrap compiler for a specific compatibility check, set
+`SOUNIO_SOUC_ENGINE=lean_single` explicitly.
 
 ---
 

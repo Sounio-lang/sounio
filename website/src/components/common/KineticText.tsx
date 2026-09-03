@@ -1,56 +1,25 @@
-import React, { useRef } from 'react';
-import { motion, useInView } from 'framer-motion';
+import type { CSSProperties } from 'react';
 
 interface Props {
   text: string;
   className?: string;
 }
 
-export function KineticText({ text, className = "section-heading" }: Props) {
-  const ref = useRef(null);
-  const isInView = useInView(ref, { once: true, margin: "-10% 0px" });
-
+export function KineticText({ text, className = 'section-heading' }: Props) {
   const letters = Array.from(text);
 
-  const container = {
-    hidden: { opacity: 0 },
-    visible: {
-      opacity: 1,
-      transition: { staggerChildren: 0.03 },
-    },
-  };
-
-  const child = {
-    visible: {
-      opacity: 1,
-      y: 0,
-      rotateX: 0,
-      filter: "blur(0px)",
-      transition: { type: "spring", damping: 12, stiffness: 200 },
-    },
-    hidden: {
-      opacity: 0,
-      y: 20,
-      rotateX: -90,
-      filter: "blur(4px)",
-      transition: { type: "spring", damping: 12, stiffness: 200 },
-    },
-  };
-
   return (
-    <motion.h2
-      ref={ref}
-      style={{ perspective: "1000px" }}
-      variants={container}
-      initial="hidden"
-      animate={isInView ? "visible" : "hidden"}
-      className={className + " flex flex-wrap"}
-    >
+    <h2 className={`${className} kinetic-text flex flex-wrap`} aria-label={text}>
       {letters.map((letter, index) => (
-        <motion.span variants={child} key={index} className="inline-block whitespace-pre">
-          {letter === " " ? "\u00A0" : letter}
-        </motion.span>
+        <span
+          key={index}
+          className="kinetic-text-letter inline-block whitespace-pre"
+          aria-hidden="true"
+          style={{ ['--kinetic-index' as '--kinetic-index']: index } as CSSProperties}
+        >
+          {letter === ' ' ? '\u00A0' : letter}
+        </span>
       ))}
-    </motion.h2>
+    </h2>
   );
 }

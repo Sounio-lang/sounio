@@ -16,6 +16,7 @@
 
 module wasm::lower
 use wasm::core::*
+use wasm::emitter::*
 use wasm::encode::*
 use ir::ir::*
 use parser::ast::{Name, StringList, AstPath, BinaryOp, UnaryOp}
@@ -249,7 +250,7 @@ fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx 
     var label_pos: [i64; 512] = [0 - 1; 512]
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrLabel => {
                 if instr.label_id >= 0 && instr.label_id < 512 {
@@ -280,7 +281,7 @@ fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx 
     //     end  ← emitted when IrLabel(exit_lid) is encountered
     i = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         let tgt = instr.label_id
         let is_branch = match instr.op {
             IrOpcode::IrJump        => true
@@ -297,7 +298,7 @@ fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx 
                 if out.loop_exit[tgt as usize] < 0 {
                     var k: i64 = lpos + 1
                     while k < i {
-                        let inner = func.instrs[k as usize]
+                        let inner = ir_arena_load(ir_region_slot_r(func.region, (k)))
                         let inner_branch = match inner.op {
                             IrOpcode::IrJump        => true
                             IrOpcode::IrBranchTrue  => true
@@ -344,7 +345,7 @@ fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCt
     // IrLoadFloat dst registers are marked as f64 locals.
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if instr.dst >= 0 {
             out = wasm_lower_alloc_local(out, instr.dst)
         }
@@ -985,7 +986,7 @@ fn wasm_lower_return_type(func: IrFunction) -> i64 with Mut, Panic, Div {
     var float_regs: [i64; 512] = [0; 512]
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrLoadFloat => {
                 if instr.dst >= 0 && instr.dst < 512 {
@@ -999,7 +1000,7 @@ fn wasm_lower_return_type(func: IrFunction) -> i64 with Mut, Panic, Div {
     // Pass 2: find IrReturn and determine type of returned value
     i = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrReturn => {
                 if instr.src1 >= 0 {
@@ -1033,7 +1034,7 @@ fn wasm_lower_infer_param_types(func: IrFunction) -> [i64; 32] with Mut, Panic, 
     var float_regs: [i64; 512] = [0; 512]
     var i: i64 = 0
     while i < func.instr_count && i < 4096 {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrLoadFloat => {
                 if instr.dst >= 0 && instr.dst < 512 {
@@ -1051,7 +1052,7 @@ fn wasm_lower_infer_param_types(func: IrFunction) -> [i64; 32] with Mut, Panic, 
     while pass < 3 {
         i = 0
         while i < func.instr_count && i < 4096 {
-            let instr = func.instrs[i as usize]
+            let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
             match instr.op {
                 IrOpcode::IrBinOp => {
                     let s1f = instr.src1 >= 0 && instr.src1 < 512
@@ -1175,7 +1176,7 @@ fn wasm_lower_basic_block(ctx: WasmLowerCtx, func: IrFunction, start: i64, end_i
     var out = ctx
     var i = start
     while i < end_idx && i < func.instr_count {
-        out = wasm_lower_instruction(out, func.instrs[i as usize])
+        out = wasm_lower_instruction(out, ir_arena_load(ir_region_slot_r(func.region, (i))))
         i = i + 1
     }
     out
@@ -1313,7 +1314,7 @@ fn wasm_lower_is_builtin(func: IrFunction) -> bool with Mut, Panic {
 // print / print_int / print_char → 1 param (the string/value as i64)
 // str_len → 1 param (string pointer)
 // All others → 2 params (two i64 args)
-fn wasm_lower_builtin_param_count(name: Name) -> i64 {
+fn wasm_lower_builtin_param_count(name: Name) -> i64 with Mut, Panic {
     if wasm_lower_name_is_print(name) { return 1 }        // print
     if wasm_lower_name_starts_print_under(name) { return 1 }  // print_int, print_char
     if name.len == 7 { return 1 }                          // str_len (len=7: s-t-r-_-l-e-n)
@@ -1322,7 +1323,7 @@ fn wasm_lower_builtin_param_count(name: Name) -> i64 {
 
 // Returns true if the builtin returns i64 (false → void return).
 // print / print_int / print_char return void; str_* and get_* return i64.
-fn wasm_lower_builtin_returns_i64(name: Name) -> bool {
+fn wasm_lower_builtin_returns_i64(name: Name) -> bool with Mut, Panic {
     if wasm_lower_name_is_print(name) { return false }
     if wasm_lower_name_starts_print_under(name) { return false }
     true
@@ -1529,9 +1530,9 @@ fn wasm_lower_test_make_add_func() -> IrFunction with Mut, Panic, Div {
     func.reg_count = 3
 
     // r2 = r0 + r1
-    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_binop(2, 0, BinaryOp::OpAdd, 1))
     // return r2
-    func.instrs[1 as usize] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(2))
     func.instr_count = 2
 
     func
@@ -1544,9 +1545,9 @@ fn wasm_lower_test_make_const_func() -> IrFunction with Mut, Panic, Div {
     func.reg_count = 1
 
     // r0 = 42
-    func.instrs[0 as usize] = ir_load_imm(0, 42)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 42))
     // return r0
-    func.instrs[1 as usize] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
 
     func
@@ -1560,13 +1561,13 @@ fn wasm_lower_test_make_branch_func() -> IrFunction with Mut, Panic, Div {
     func.reg_count = 2
 
     // label 0 (block start)
-    func.instrs[0 as usize] = ir_label(0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_label(0))
     // branch_true r0, label 0
-    func.instrs[1 as usize] = ir_branch_true(0, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_branch_true(0, 0))
     // r1 = 0
-    func.instrs[2 as usize] = ir_load_imm(1, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_load_imm(1, 0))
     // return r1
-    func.instrs[3 as usize] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (3)), ir_return(1))
     func.instr_count = 4
 
     func
@@ -1580,9 +1581,9 @@ fn wasm_lower_test_make_neg_func() -> IrFunction with Mut, Panic, Div {
     func.reg_count = 2
 
     // r1 = -r0
-    func.instrs[0 as usize] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_unaryop(1, UnaryOp::OpNeg, 0))
     // return r1
-    func.instrs[1 as usize] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(1))
     func.instr_count = 2
 
     func
@@ -1596,9 +1597,9 @@ fn wasm_lower_test_make_copy_func() -> IrFunction with Mut, Panic, Div {
     func.reg_count = 2
 
     // r1 = r0
-    func.instrs[0 as usize] = ir_copy(1, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_copy(1, 0))
     // return r1
-    func.instrs[1 as usize] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(1))
     func.instr_count = 2
 
     func
@@ -1612,8 +1613,8 @@ fn wasm_lower_test_make_sub_func() -> IrFunction with Mut, Panic, Div {
     func.param_regs[1 as usize] = 1
     func.reg_count = 3
 
-    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
-    func.instrs[1 as usize] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_binop(2, 0, BinaryOp::OpSub, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(2))
     func.instr_count = 2
 
     func
@@ -1627,8 +1628,8 @@ fn wasm_lower_test_make_compare_func() -> IrFunction with Mut, Panic, Div {
     func.param_regs[1 as usize] = 1
     func.reg_count = 3
 
-    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpLt, 1)
-    func.instrs[1 as usize] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_binop(2, 0, BinaryOp::OpLt, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(2))
     func.instr_count = 2
 
     func
@@ -1640,8 +1641,8 @@ fn wasm_lower_test_make_bool_func() -> IrFunction with Mut, Panic, Div {
     func.param_count = 0
     func.reg_count = 1
 
-    func.instrs[0 as usize] = ir_load_bool(0, true)
-    func.instrs[1 as usize] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_bool(0, true))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
 
     func
@@ -1895,7 +1896,7 @@ fn test_wasm_lower_prescan() -> bool with Mut, Panic, Div {
 // Test runner
 // ============================================================================
 
-fn wasm_lower_run_tests() -> i64 with Mut, Panic, Div {
+fn wasm_lower_run_tests() -> i64 with Mut, Panic, Div, IO {
     var passed: i64 = 0
     var failed: i64 = 0
 

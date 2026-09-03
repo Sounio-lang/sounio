@@ -1,0 +1,414 @@
+// stdlib/pbpk/rapamycin_ddi.sio — CYP3A4/P-gp drug-drug interaction GUM for oral rapamycin
+//
+// Sprint 19 dissertation finding: drug-drug interactions (DDI) with CYP3A4/P-gp
+// inhibitors and inducers change the trough decision (TOXIC/UNCERTAIN) but never
+// change the dominant uncertainty source — ka remains dominant for every realistic
+// DDI scenario.
+//
+// ── DDI scenarios modelled ────────────────────────────────────────────────────────
+//
+//   Baseline (*1/*3, no DDI):    ke = 0.01118 h⁻¹, F = 0.141
+//   Strong inhibitor (ketoconazole-like): ke÷5 = 0.00224 h⁻¹, F×2 = 0.282
+//   Moderate inhibitor (fluconazole/diltiazem): ke÷2 = 0.00559 h⁻¹, F×1.5 = 0.2115
+//   Strong inducer (rifampin-like): ke×5 = 0.05590 h⁻¹, F÷3 = 0.047
+//   Extreme inducer: ke×10 = 0.11180 h⁻¹, F÷5 = 0.02820
+//
+// ── ke_var scaling: realistic DDI uncertainty model ───────────────────────────────
+//
+//   ke_var is modelled as (ke_val × CV_ke)² with CV_ke = 26% (constant CV):
+//     Baseline:        ke_var = (0.01118 × 0.26)² = 8.41 × 10⁻⁶ (standard)
+//     Strong inhibitor: ke_var = (0.00224 × 0.26)² = 3.38 × 10⁻⁷ (smaller)
+//     Strong inducer:   ke_var = (0.05590 × 0.26)² = 2.11 × 10⁻⁴ (larger)
+//     Extreme inducer:  ke_var = (0.11180 × 0.26)² = 8.44 × 10⁻⁴ (maximum realistic)
+//
+// ── Universal finding: ka dominates all realistic DDI scenarios ───────────────────
+//
+//   Even with extreme inducer ke_var = 8.44 × 10⁻⁴ (100× standard), dom = ka.
+//   The ke dominance crossover requires ke_var > 0.002 — achievable only at
+//   CV ≈ 26% with ke_val > 0.172 h⁻¹ (15× standard elimination), which is
+//   physiologically impossible for rapamycin under any CYP3A4 interaction.
+//
+// ── DDI decision consequences ─────────────────────────────────────────────────────
+//
+//   Strong inhibitor at 5mg → TOXIC (dec=2): dose must be reduced 75–80%
+//   Strong inhibitor at 1–2mg → THERAPEUTIC/900/ka: ka remains the uncertainty driver
+//   Strong inducer at any dose N=14 → UNCERTAIN/700: even 40mg insufficient
+//   Strong inducer at 20mg N=28 → THERAPEUTIC/820/ka: needs 4 weeks + 4× dose
+//   Extreme inducer at any dose N=14 → UNCERTAIN (oral TDM effectively impossible)
+//
+// ── Measurement hierarchy survives DDI ────────────────────────────────────────────
+//
+//   ka÷4 under strong inhibitor (1.5mg): conf=900→950, dom shifts to k12
+//   ke÷4 under strong inhibitor (1.5mg): conf unchanged (900), ke irrelevant
+//   ka÷4 cannot rescue under-dosed inducer: 5mg + inducer + ka÷4 → SUB (dec=0)
+//   → ka improvement alone cannot fix a sub-therapeutic dose; dosing is primary
+//
+// ── ke_var crossover certification ────────────────────────────────────────────────
+//
+//   ke_var = 0.001 (119× standard): dom = ka (below threshold)
+//   ke_var = 0.002 (238× standard): dom = ke (above threshold, crossover ≈ 0.0015)
+//   Extreme inducer ke_var = 8.44e-4 < 0.001: below crossover, ka still dominates
+//   Crossover ke_val (at CV=26%): ke_val > 0.172 h⁻¹, impossible for rapamycin
+//
+// ── Budget channel indices ────────────────────────────────────────────────────────
+//   0 = F (bioavailability)
+//   1 = ka (absorption rate)   ← universally dominant for all DDI scenarios
+//   2 = ke (elimination)       ← dominates only at ke_var > 0.002 (unphysiological)
+//   3 = k12 (distribution)     ← second bottleneck after ka÷4 under inhibitor
+//   4 = k21 (return rate)      ← minor
+//
+// Effect annotations:
+//   classify_ddi_ss, conf_ddi_ss, dom_ddi_ss: matching effects (Epistemic/Mut/Div/Panic)
+//   all gate functions: with Mut, Div, Panic (or Epistemic where classify used)
+
+module pbpk::rapamycin_ddi
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_clinical::{
+    assess_trough, conf_from_rel,
+    decision_therapeutic, decision_uncertain, decision_sub, decision_toxic
+}
+
+fn ddi_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+fn ddi_argmax5(b0: f64, b1: f64, b2: f64, b3: f64, b4: f64) -> i64 {
+    var idx = 0; var dv = b0
+    if b1 > dv { idx = 1; dv = b1 }
+    if b2 > dv { idx = 2; dv = b2 }
+    if b3 > dv { idx = 3; dv = b3 }
+    if b4 > dv { idx = 4 }
+    idx
+}
+
+// ── DDI scenario constants ─────────────────────────────────────────────────────
+
+pub fn ddi_ke_baseline()    -> f64 { 0.01118 }   // *1/*3 standard
+pub fn ddi_f_baseline()     -> f64 { 0.141 }
+
+pub fn ddi_ke_inh_strong()  -> f64 { 0.002236 }  // ke÷5: strong CYP3A4/P-gp inhibitor
+pub fn ddi_f_inh_strong()   -> f64 { 0.282 }     // F×2: P-gp inhibition raises bioavailability
+
+pub fn ddi_ke_inh_mod()     -> f64 { 0.00559 }   // ke÷2: moderate inhibitor
+pub fn ddi_f_inh_mod()      -> f64 { 0.2115 }    // F×1.5
+
+pub fn ddi_ke_ind_strong()  -> f64 { 0.05590 }   // ke×5: strong CYP3A4 inducer
+pub fn ddi_f_ind_strong()   -> f64 { 0.047 }     // F÷3: induction reduces bioavailability
+
+pub fn ddi_ke_ind_ext()     -> f64 { 0.11180 }   // ke×10: extreme inducer
+pub fn ddi_f_ind_ext()      -> f64 { 0.02820 }   // F÷5
+
+// ── Variance constants ─────────────────────────────────────────────────────────
+// ke_var scales as (ke_val × CV_ke)², CV_ke = 26% (constant population CV)
+// ka_var, k12_var, k21_var, f_var unchanged by DDI
+
+pub fn ddi_ka_var_std()      -> f64 { 0.0225 }
+pub fn ddi_f_var_std()       -> f64 { 0.001521 }
+pub fn ddi_k12_var_std()     -> f64 { 0.000156 }
+pub fn ddi_k21_var_std()     -> f64 { 0.0000016 }
+
+pub fn ddi_ke_var_baseline() -> f64 { 0.00000841 }   // (0.01118 × 0.26)²
+pub fn ddi_ke_var_inh()      -> f64 { 0.000000338 }  // (0.002236 × 0.26)²
+pub fn ddi_ke_var_inh_mod()  -> f64 { 0.0000021 }    // (0.00559 × 0.26)²
+pub fn ddi_ke_var_ind()      -> f64 { 0.000211 }     // (0.05590 × 0.26)²
+pub fn ddi_ke_var_ind_ext()  -> f64 { 0.000844 }     // (0.11180 × 0.26)²
+
+// ke_var crossover thresholds (for certifying universal ka dominance)
+pub fn ddi_ke_var_below_crossover() -> f64 { 0.001 }   // dom=ka at this value (119× std)
+pub fn ddi_ke_var_above_crossover() -> f64 { 0.002 }   // dom=ke at this value (238× std)
+
+// ── classify_ddi_ss ────────────────────────────────────────────────────────────
+
+pub fn classify_ddi_ss(
+    ke_val: f64, f_val: f64,
+    d_oral: f64, n_doses: i64,
+    ke_var: f64, k12_var: f64, k21_var: f64,
+    ka_var: f64, f_var: f64
+) -> i64 with Epistemic, Mut, Div, Panic {
+    let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val  = 75.0;   let ka_val  = 0.62
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    let c_t   = a1 / vc_val
+    let std_t = ddi_sqrt(v1) / vc_val
+    let conf  = conf_from_rel(c_t, std_t)
+    let c_ep  = Epistemic::new(c_t, v1 / (vc_val * vc_val), conf)
+    assess_trough(&c_ep)
+}
+
+// ── conf_ddi_ss ────────────────────────────────────────────────────────────────
+
+pub fn conf_ddi_ss(
+    ke_val: f64, f_val: f64,
+    d_oral: f64, n_doses: i64,
+    ke_var: f64, k12_var: f64, k21_var: f64,
+    ka_var: f64, f_var: f64
+) -> i64 with Mut, Div, Panic {
+    let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val  = 75.0;   let ka_val  = 0.62
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    let c_t   = a1 / vc_val
+    let std_t = ddi_sqrt(v1) / vc_val
+    conf_from_rel(c_t, std_t)
+}
+
+// ── dom_ddi_ss ─────────────────────────────────────────────────────────────────
+
+pub fn dom_ddi_ss(
+    ke_val: f64, f_val: f64,
+    d_oral: f64, n_doses: i64,
+    ke_var: f64, k12_var: f64, k21_var: f64,
+    ka_var: f64, f_var: f64
+) -> i64 with Mut, Div, Panic {
+    let k12_val = 0.05;   let k21_val = 0.005
+    let vc_val  = 75.0;   let ka_val  = 0.62
+
+    let j11 = 0.0 - (ke_val + k12_val);  let j12 = k21_val
+    let j21 = k12_val;                    let j22 = 0.0 - k21_val
+    let g11 = 1.0 + 0.5 * j11;           let g12 = 0.5 * j12
+    let g21 = 0.5 * j21;                 let g22 = 1.0 + 0.5 * j22
+    let g_gut    = 1.0 - 0.5 * ka_val
+    let g11sq    = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;   var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;   var v2      = 0.0
+    var bud_f    = 0.0;   var bud_ka  = 0.0
+    var bud_ke   = 0.0;   var bud_k12 = 0.0;  var bud_k21 = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let ckac     = 0.25 * ka_var * a_gut * a_gut * f_val * f_val
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            let bfc      = 0.25 * ka_val * ka_val * v_gut_f
+            let bkac     = 0.25 * ka_val * ka_val * v_gut_ka + ckac
+            a_gut = new_ag; a1 = new_a1; a2 = new_a2
+            v_gut_f = new_vgf; v_gut_ka = new_vgka
+            v1 = new_v1; v2 = new_v2
+            bud_f   = g11sq * bud_f   + bfc
+            bud_ka  = g11sq * bud_ka  + bkac
+            bud_ke  = g11sq * bud_ke  + cke
+            bud_k12 = g11sq * bud_k12 + ck12
+            bud_k21 = g11sq * bud_k21 + ck21
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    ddi_argmax5(bud_f, bud_ka, bud_ke, bud_k12, bud_k21)
+}
+
+// ── Gate summary functions ─────────────────────────────────────────────────────
+
+// ka dominates all four DDI scenarios (baseline + 3 interactions)
+pub fn ddi_ka_universal() -> bool with Epistemic, Mut, Div, Panic {
+    let ka  = ddi_ka_var_std()
+    let fv  = ddi_f_var_std()
+    let k12 = ddi_k12_var_std()
+    let k21 = ddi_k21_var_std()
+    dom_ddi_ss(ddi_ke_baseline(),   ddi_f_baseline(),   5.0, 14, ddi_ke_var_baseline(), k12, k21, ka, fv) == 1 &&
+    dom_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 5.0, 14, ddi_ke_var_inh(),     k12, k21, ka, fv) == 1 &&
+    dom_ddi_ss(ddi_ke_inh_mod(),    ddi_f_inh_mod(),    5.0, 14, ddi_ke_var_inh_mod(), k12, k21, ka, fv) == 1 &&
+    dom_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14, ddi_ke_var_ind(),     k12, k21, ka, fv) == 1
+}
+
+// Strong inhibitor at 5mg → TOXIC (requires dose reduction)
+pub fn ddi_inhibitor_toxic_at_standard() -> bool with Epistemic, Mut, Div, Panic {
+    classify_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 5.0, 14,
+                    ddi_ke_var_inh(), ddi_k12_var_std(), ddi_k21_var_std(),
+                    ddi_ka_var_std(), ddi_f_var_std()) == decision_toxic()
+}
+
+// Strong inhibitor at 1mg → THERAPEUTIC (minimum safe dose with inhibitor)
+pub fn ddi_inhibitor_safe_at_1mg() -> bool with Epistemic, Mut, Div, Panic {
+    classify_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.0, 14,
+                    ddi_ke_var_inh(), ddi_k12_var_std(), ddi_k21_var_std(),
+                    ddi_ka_var_std(), ddi_f_var_std()) == decision_therapeutic()
+}
+
+// Strong inhibitor at 1.5mg → THERAPEUTIC/900
+pub fn ddi_inhibitor_safe_at_1p5mg() -> bool with Mut, Div, Panic {
+    let dec  = conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14,
+                            ddi_ke_var_inh(), ddi_k12_var_std(), ddi_k21_var_std(),
+                            ddi_ka_var_std(), ddi_f_var_std())
+    dec == 900
+}
+
+// Strong inducer at 20mg N=14 → UNCERTAIN (dose alone insufficient)
+pub fn ddi_inducer_uncertain_n14() -> bool with Epistemic, Mut, Div, Panic {
+    classify_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 14,
+                    ddi_ke_var_ind(), ddi_k12_var_std(), ddi_k21_var_std(),
+                    ddi_ka_var_std(), ddi_f_var_std()) == decision_uncertain()
+}
+
+// Strong inducer at 20mg N=28 → THERAPEUTIC (requires double accumulation period)
+pub fn ddi_inducer_therapeutic_n28() -> bool with Epistemic, Mut, Div, Panic {
+    classify_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 20.0, 28,
+                    ddi_ke_var_ind(), ddi_k12_var_std(), ddi_k21_var_std(),
+                    ddi_ka_var_std(), ddi_f_var_std()) == decision_therapeutic()
+}
+
+// ke÷4 is irrelevant under strong inhibitor: conf and dom unchanged
+pub fn ddi_ke_irrelevant_inhibitor() -> bool with Mut, Div, Panic {
+    let ka  = ddi_ka_var_std();   let fv = ddi_f_var_std()
+    let k12 = ddi_k12_var_std();  let k21 = ddi_k21_var_std()
+    let kev = ddi_ke_var_inh()
+    let conf_base = conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14, kev,       k12, k21, ka, fv)
+    let conf_kei  = conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14, kev/4.0,   k12, k21, ka, fv)
+    let dom_base  = dom_ddi_ss(ddi_ke_inh_strong(),  ddi_f_inh_strong(), 1.5, 14, kev,       k12, k21, ka, fv)
+    let dom_kei   = dom_ddi_ss(ddi_ke_inh_strong(),  ddi_f_inh_strong(), 1.5, 14, kev/4.0,   k12, k21, ka, fv)
+    conf_base == conf_kei && dom_base == dom_kei
+}
+
+// ka÷4 under inhibitor → conf=950, dom=k12 (global optimum reached under DDI)
+pub fn ddi_ka4_fires_inhibitor() -> bool with Mut, Div, Panic {
+    let ka  = ddi_ka_var_std();   let fv = ddi_f_var_std()
+    let k12 = ddi_k12_var_std();  let k21 = ddi_k21_var_std()
+    let kev = ddi_ke_var_inh()
+    let conf = conf_ddi_ss(ddi_ke_inh_strong(), ddi_f_inh_strong(), 1.5, 14, kev, k12, k21, ka/4.0, fv)
+    let dom  = dom_ddi_ss(ddi_ke_inh_strong(),  ddi_f_inh_strong(), 1.5, 14, kev, k12, k21, ka/4.0, fv)
+    conf == 950 && dom == 3
+}
+
+// ka÷4 cannot rescue under-dosed inducer scenario: sub-therapeutic dose + ka÷4 → still SUB
+pub fn ddi_ka4_cannot_rescue_underdose() -> bool with Epistemic, Mut, Div, Panic {
+    classify_ddi_ss(ddi_ke_ind_strong(), ddi_f_ind_strong(), 5.0, 14,
+                    ddi_ke_var_ind(), ddi_k12_var_std(), ddi_k21_var_std(),
+                    ddi_ka_var_std() / 4.0, ddi_f_var_std()) == decision_sub()
+}
+
+// ke_var crossover: ke_var < 0.002 → ka still dominates (ke_var=0.001, below threshold)
+pub fn ddi_ke_var_below_threshold_dom_ka() -> bool with Mut, Div, Panic {
+    dom_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+               ddi_ke_var_below_crossover(), ddi_k12_var_std(), ddi_k21_var_std(),
+               ddi_ka_var_std(), ddi_f_var_std()) == 1
+}
+
+// ke_var crossover: ke_var = 0.002 → ke dominates (above threshold)
+pub fn ddi_ke_var_above_threshold_dom_ke() -> bool with Mut, Div, Panic {
+    dom_ddi_ss(ddi_ke_baseline(), ddi_f_baseline(), 5.0, 14,
+               ddi_ke_var_above_crossover(), ddi_k12_var_std(), ddi_k21_var_std(),
+               ddi_ka_var_std(), ddi_f_var_std()) == 2
+}
+
+// Extreme inducer ke_var (8.44e-4) is below the crossover threshold (0.001)
+// → ka still dominates even at the maximum realistic DDI-induced ke_var
+pub fn ddi_extreme_inducer_still_ka() -> bool with Mut, Div, Panic {
+    dom_ddi_ss(ddi_ke_ind_ext(), ddi_f_ind_ext(), 5.0, 14,
+               ddi_ke_var_ind_ext(), ddi_k12_var_std(), ddi_k21_var_std(),
+               ddi_ka_var_std(), ddi_f_var_std()) == 1
+}

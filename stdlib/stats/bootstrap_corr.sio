@@ -1,0 +1,203 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bootstrap_corr.sio — bootstrap CI for a Pearson correlation
+//
+// Resamples paired observations (the same drawn index for both coordinates) to
+// give a distribution-free confidence interval for a Pearson correlation — where
+// the Fisher-z interval's normality assumption is doubtful:
+//
+//   bootstrap_corr(x, y, n, b, conf, seed) -> BootCorrResult
+//
+// Each of `b` resamples draws n pairs with replacement and recomputes r; the SE
+// is the sd of the resampled r's and the CI is their α/2, 1−α/2 quantiles.
+//
+// Seeded Park-Miller MINSTD (exact f64) → bit-reproducible. Pure Sounio: inline
+// sort of the resampled correlations; no external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Efron & Tibshirani, "An Introduction to the Bootstrap", §12.
+
+module stats::bootstrap_corr
+
+fn bc_floor(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+fn bc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct BootCorrResult {
+    pub r: f64,      // original Pearson correlation (point estimate)
+    pub se: f64,
+    pub lo: f64,
+    pub hi: f64,
+    pub b: i64,
+}
+
+/// Percentile bootstrap CI and SE for a Pearson correlation.
+///
+/// Parâmetros: x, y — paired data; n — size (>=3, <=256); b — resamples (2..1024);
+///             conf — confidence; seed — PRNG seed (>0).
+/// Retorno: BootCorrResult (r, se, lo, hi, b).
+/// Referências: Efron & Tibshirani §12.
+pub fn bootstrap_corr(x: &[f64; 256], y: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootCorrResult with Mut, Div, Panic {
+    if n < 3 || b < 2 { return BootCorrResult { r: 0.0, se: 0.0, lo: 0.0, hi: 0.0, b: 0 } }
+    var bb = b
+    if bb > 1024 { bb = 1024 }
+    let nf = n as f64
+    // original r
+    var sx0 = 0.0
+    var sy0 = 0.0
+    var i = 0
+    while i < n { sx0 = sx0 + x[i as usize]; sy0 = sy0 + y[i as usize]; i = i + 1 }
+    let mx0 = sx0 / nf
+    let my0 = sy0 / nf
+    var sxx0 = 0.0
+    var syy0 = 0.0
+    var sxy0 = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx0
+        let dy = y[j as usize] - my0
+        sxx0 = sxx0 + dx * dx
+        syy0 = syy0 + dy * dy
+        sxy0 = sxy0 + dx * dy
+        j = j + 1
+    }
+    var r0 = 0.0
+    let den0 = bc_sqrt(sxx0 * syy0)
+    if den0 > 0.0 { r0 = sxy0 / den0 }
+    let A = 16807.0
+    let M = 2147483647.0
+    var st = seed as f64
+    if st < 1.0 { st = 1.0 }
+    var rs: [f64; 1024] = [0.0; 1024]
+    var rep = 0
+    while rep < bb {
+        // one bootstrap sample of n paired indices; accumulate moments in one pass
+        var sx = 0.0
+        var sy = 0.0
+        var sxx = 0.0
+        var syy = 0.0
+        var sxy = 0.0
+        var k = 0
+        while k < n {
+            let prod = A * st
+            st = prod - bc_floor(prod / M) * M
+            let u = st / M
+            var idx = bc_floor(u * nf) as i32
+            if idx >= n { idx = n - 1 }
+            let xv = x[idx as usize]
+            let yv = y[idx as usize]
+            sx = sx + xv
+            sy = sy + yv
+            sxx = sxx + xv * xv
+            syy = syy + yv * yv
+            sxy = sxy + xv * yv
+            k = k + 1
+        }
+        // r from raw sums: cov = sxy - sx·sy/n, etc.
+        let cxx = sxx - sx * sx / nf
+        let cyy = syy - sy * sy / nf
+        let cxy = sxy - sx * sy / nf
+        var rr = 0.0
+        let den = bc_sqrt(cxx * cyy)
+        if den > 1.0e-300 { rr = cxy / den }
+        if rr > 1.0 { rr = 1.0 }
+        if rr < 0.0 - 1.0 { rr = 0.0 - 1.0 }
+        rs[rep as usize] = rr
+        rep = rep + 1
+    }
+    var sm = 0.0
+    var a = 0
+    while a < bb { sm = sm + rs[a as usize]; a = a + 1 }
+    let mbar = sm / (bb as f64)
+    var ss = 0.0
+    var c = 0
+    while c < bb { let d = rs[c as usize] - mbar; ss = ss + d * d; c = c + 1 }
+    let se = bc_sqrt(ss / ((bb - 1) as f64))
+    var p = 1
+    while p < bb {
+        let key = rs[p as usize]
+        var q = p - 1
+        while q >= 0 && rs[q as usize] > key { rs[(q + 1) as usize] = rs[q as usize]; q = q - 1 }
+        rs[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let alpha = 1.0 - conf
+    var ilo = bc_floor(alpha * 0.5 * (bb as f64)) as i32
+    var ihi = bc_floor((1.0 - alpha * 0.5) * (bb as f64)) as i32
+    if ilo < 0 { ilo = 0 }
+    if ihi > bb - 1 { ihi = bb - 1 }
+    return BootCorrResult { r: r0, se: se, lo: rs[ilo as usize], hi: rs[ihi as usize], b: bb as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfectly correlated y=2x+1: every resample has r=1, so r=1, SE=0, CI=[1,1].
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 6 { x[i as usize] = (i + 1) as f64; y[i as usize] = 2.0 * ((i + 1) as f64) + 1.0; i = i + 1 }
+    let r = bootstrap_corr(&x, &y, 6, 500, 0.95, 42)
+    var ok = true
+    ok = check(1, approx(r.r, 1.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.se, 0.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.lo, 1.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.hi, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// noisy positive association: point r > 0.5, CI brackets it, SE > 0.
+fn test_noisy() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0; x[5]=6.0; x[6]=7.0; x[7]=8.0
+    y[0]=1.0; y[1]=3.0; y[2]=2.0; y[3]=5.0; y[4]=4.0; y[5]=7.0; y[6]=6.0; y[7]=9.0
+    let r = bootstrap_corr(&x, &y, 8, 800, 0.95, 20261)
+    var ok = true
+    ok = check(10, r.r > 0.8) && ok
+    ok = check(11, r.lo < r.r + 1.0e-9 && r.hi > r.r - 1.0e-9) && ok
+    ok = check(12, r.se > 0.0) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_perfect() && ok
+    ok = test_noisy() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,146 @@
+//@ run-pass
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Time-Bounded Reversible Surgery (G10, Revivable<T>)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Problem:
+//   Surgical model interventions (unlearn, edit, gate) are typically
+//   treated as irreversible by design: once data is unlearned or a
+//   capability gated, there is no structural way to bring it back.
+//   But policy evolves — a capability gated today may be safe tomorrow
+//   under new operational constraints; an edit misapplied must be
+//   undone BEFORE the commit is signed off.
+//
+// Revivable<T>:
+//   A Revivable<T> value carries a bounded *Temporal window* inside
+//   which any applied surgery can be inverted exactly.  After the window
+//   closes, the surgery is algebraically irrevocable in the compiler's
+//   type system — re-applying the inverse has no effect because the
+//   Temporal capability has been consumed.
+//
+//   Operational invariant:
+//     for t in [arm_tick, arm_tick + window]:
+//         revive(t) = pre_surgery_state  (fp-exact)
+//     for t > arm_tick + window:
+//         revive(t) = post_surgery_state (surgery locked-in)
+//
+// Protocol:
+//   1. Arm revival with pre_surgery_state at tick 100, window = 5.
+//   2. Apply an edit (ZD delta).
+//   3. Revive at tick 103 (inside window) — should restore pre exactly.
+//   4. Re-apply the edit.
+//   5. Try to revive at tick 110 (outside window) — should NOT restore.
+//
+// Expected outcome:
+//   in-window revival residual = 0.000000
+//   out-of-window revival residual > 0 (post state returned instead)
+//   final status: "ZD REVIVE PASS"
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn l2_sq(u: &[f64;16], v: &[f64;16]) -> f64 with Mut, Panic {
+    var s = 0.0
+    var i = 0
+    while i < 16 { let d = (*u)[i] - (*v)[i]; s = s + d * d; i = i + 1 }
+    s
+}
+
+// Inline revivable-style state management (mirrors stdlib/epistemic/revivable.sio
+// but without the Temporal effect since the pre-rebuild compiler doesn't
+// know Temporal yet).  The algebra is the same; the Temporal effect in the
+// stdlib is the compile-time enforcement.
+var REV_PRE: [f64; 16] = [0.0; 16]
+var REV_POST: [f64; 16] = [0.0; 16]
+var REV_TICK: i64 = 0
+var REV_WINDOW: i64 = 0
+var REV_ARMED: bool = false
+
+fn rev_arm(w_pre: &[f64;16], now: i64, window: i64) with Mut, Panic, ZD {
+    var i = 0
+    while i < 16 { REV_PRE[i] = (*w_pre)[i]; i = i + 1 }
+    REV_TICK = now
+    REV_WINDOW = window
+    REV_ARMED = true
+}
+
+fn rev_commit(w_post: &[f64;16]) with Mut, Panic, ZD {
+    var i = 0
+    while i < 16 { REV_POST[i] = (*w_post)[i]; i = i + 1 }
+}
+
+fn rev_in_window(now: i64) -> bool with Mut, ZD {
+    if !REV_ARMED { return false }
+    let elapsed = now - REV_TICK
+    elapsed >= 0 && elapsed <= REV_WINDOW
+}
+
+fn rev_revive(now: i64) -> [f64;16] with Mut, Panic, ZD {
+    var out: [f64; 16] = [0.0; 16]
+    let ok = rev_in_window(now)
+    var i = 0
+    if ok {
+        while i < 16 { out[i] = REV_PRE[i]; i = i + 1 }
+    } else {
+        while i < 16 { out[i] = REV_POST[i]; i = i + 1 }
+    }
+    out
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, ZD {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Time-Bounded Reversible Surgery (G10, Revivable<T>)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    let s = 0.707107
+
+    // ─── Pre-surgery state: a fact stored in the ZD kernel ────────────────
+    var w_pre: [f64; 16] = [0.0; 16]
+    w_pre[6]  =  0.6 * s
+    w_pre[15] = 0.0 - 0.6 * s
+
+    print("  Pre-surgery state stored in ZD kernel of (e3+e10).\n")
+    print("    w_pre[6]  = "); print(w_pre[6]); print("\n")
+    print("    w_pre[15] = "); print(w_pre[15]); print("\n\n")
+
+    // ─── Step 1: arm revival ─────────────────────────────────────────────
+    print("  Step 1: rev_arm(w_pre, tick=100, window=5)\n")
+    rev_arm(&w_pre, 100, 5)
+    print("    armed=true  tick=100  window=5\n\n")
+
+    // ─── Step 2: apply a ZD edit (rotate the kernel projection) ──────────
+    // Edit delta: flip the u1 sign (analogous to "edit fact from A to not-A").
+    print("  Step 2: apply edit (flip kernel projection)\n")
+    var w_post: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { w_post[i] = w_pre[i]; i = i + 1 }
+    w_post[6]  = 0.0 - w_post[6]
+    w_post[15] = 0.0 - w_post[15]
+    rev_commit(&w_post)
+    print("    w_post[6]  = "); print(w_post[6]); print("\n")
+    print("    w_post[15] = "); print(w_post[15]); print("\n\n")
+
+    // ─── Step 3: revive at tick 103 (inside window) ──────────────────────
+    print("  Step 3: rev_revive(tick=103)   [inside window, expect pre]\n")
+    let w_rev_in = rev_revive(103)
+    let res_in = l2_sq(&w_rev_in, &w_pre)
+    print("    ‖w_rev_in - w_pre‖² = "); print(res_in); print("  (want 0)\n\n")
+
+    // ─── Step 4: re-apply edit, then try revive at tick 110 ──────────────
+    print("  Step 4: rev_revive(tick=110)   [outside window, expect post]\n")
+    let w_rev_out = rev_revive(110)
+    let res_out_pre  = l2_sq(&w_rev_out, &w_pre)
+    let res_out_post = l2_sq(&w_rev_out, &w_post)
+    print("    ‖w_rev_out - w_pre‖²  = "); print(res_out_pre);  print("\n")
+    print("    ‖w_rev_out - w_post‖² = "); print(res_out_post); print("  (want 0: surgery locked)\n\n")
+
+    // ─── Summary ─────────────────────────────────────────────────────────
+    print("  ─── Summary ──────────────────────────────────────────────\n")
+    print("    in-window revival:  res = "); print(res_in);      print("  (ideal 0)\n")
+    print("    out-of-window:       res = "); print(res_out_post); print("  (ideal 0 to post)\n\n")
+
+    let in_exact  = res_in       < 0.0000000001
+    let out_locked = res_out_post < 0.0000000001
+    if in_exact && out_locked { println("ZD REVIVE PASS") }
+    else { println("ZD REVIVE FAIL") }
+    0
+}

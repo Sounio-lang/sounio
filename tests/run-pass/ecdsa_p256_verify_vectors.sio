@@ -1,0 +1,168 @@
+//@ run-pass
+//@ requires: madaros
+
+// ECDSA P-256 (secp256r1) / SHA-256 signature verification (FIPS 186-4
+// SS6.4.2) against a real, independently-generated-and-verified test
+// vector -- NOT transcribed from any pre-existing hex in this plan or
+// repository, per this task's brief.
+//
+// SOURCE / METHOD (see task-2-report.md for the full transcript):
+//   1. Generated with Python's `cryptography` library 43.0.0 (an
+//      OpenSSL-backed, independent implementation from this project's own
+//      Sounio code): `ec.generate_private_key(ec.SECP256R1())`, then
+//      `priv.sign(message, ec.ECDSA(hashes.SHA256()))`, producing a DER
+//      SEQUENCE { r INTEGER, s INTEGER } signature. Self-checked with
+//      `pub.verify(...)` at generation time.
+//   2. INDEPENDENTLY RE-VERIFIED with a second, separate tool: the system
+//      `openssl dgst -sha256 -verify pub.pem -signature sig.der msg.bin`
+//      CLI (OpenSSL 3.5.6), against a PEM-exported SubjectPublicKeyInfo,
+//      the raw message bytes, and the raw DER signature bytes. Printed
+//      "Verified OK" (exit 0) from this fully independent verification
+//      path.
+//
+// Public key coordinates (Qx, Qy) and signature (r, s) below are embedded
+// as little-endian 16-bit limb arrays, derived by a Python script directly
+// from the generated values (never retyped by hand). The raw DER signature
+// bytes are embedded as a literal byte array taken directly from the same
+// script's output.
+
+use crypto::ecdsa_p256::*
+use bignum::bigint::*
+use net::socket::*
+
+fn write_str(buf: &RawBuf, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    n
+}
+
+fn build_bigint_16(values: [u16; 16]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 16 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 16
+    result
+}
+
+fn write_bytes(buf: &RawBuf, values: [i64; 71], n: i64) -> i64 with IO {
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, values[i as usize])
+        i = i + 1
+    }
+    n
+}
+
+// Qx, Qy: the independently-generated P-256 public key's affine
+// coordinates.
+fn pubkey_qx_limbs() -> [u16; 16] {
+    let r: [u16; 16] = [
+        12818, 9061, 5049, 41817, 39821, 18641, 37633, 29124,
+        55165, 60762, 29292, 62960, 35975, 3200, 37298, 1321,
+    ]
+    r
+}
+
+fn pubkey_qy_limbs() -> [u16; 16] {
+    let r: [u16; 16] = [
+        25180, 29165, 54287, 11615, 48556, 6827, 22626, 48472,
+        45570, 51234, 49897, 10208, 4629, 22820, 62964, 10234,
+    ]
+    r
+}
+
+// The DER-encoded ECDSA signature (SEQUENCE { r INTEGER, s INTEGER }),
+// 71 bytes, over the message below.
+fn signature_der_bytes() -> [i64; 71] {
+    [
+        48, 69, 2, 33, 0, 174, 242, 153, 137, 203, 154, 108, 172, 174, 177, 137,
+        118, 31, 115, 101, 193, 123, 122, 137, 169, 141, 106, 114, 13, 253, 50, 14,
+        205, 34, 196, 102, 180, 2, 32, 122, 106, 241, 163, 12, 216, 66, 145, 44,
+        142, 187, 38, 111, 111, 25, 102, 172, 117, 118, 197, 5, 193, 161, 70, 127,
+        166, 13, 34, 62, 116, 107, 235,
+    ]
+}
+
+fn main() -> i64 with IO {
+    let qx = build_bigint_16(pubkey_qx_limbs())
+    let qy = build_bigint_16(pubkey_qy_limbs())
+    let pubkey = EcPoint { x: qx, y: qy }
+
+    let message = "ECDSA P-256 independent test vector for Sounio TLS 1.3 ecdsa_p256_verify"
+    let message_len = str_len(message)
+    let msg_buf = rawbuf_new(message_len + 8)
+    let written = write_str(&msg_buf, message)
+    if written != message_len {
+        println("ecdsa_p256_verify_vectors: message setup failed")
+        return 1
+    }
+
+    let sig_bytes = signature_der_bytes()
+    let sig_len = 71
+    let sig_buf = rawbuf_new(sig_len + 8)
+    write_bytes(&sig_buf, sig_bytes, sig_len)
+
+    // ---- True case: the real, independently-verified signature must
+    // verify. ----
+    let ok = ecdsa_p256_verify(&pubkey, &msg_buf, message_len, &sig_buf, sig_len)
+    if ok == false {
+        println("ecdsa_p256_verify_vectors: valid signature rejected")
+        return 1
+    }
+    assert(ok)
+
+    // ---- Negative case: a signature with one flipped byte (inside the s
+    // INTEGER's content, away from any DER length/tag byte) must NOT
+    // verify. ----
+    var corrupted_bytes = sig_bytes
+    corrupted_bytes[70] = corrupted_bytes[70] ^ 1
+    let bad_sig_buf = rawbuf_new(sig_len + 8)
+    write_bytes(&bad_sig_buf, corrupted_bytes, sig_len)
+    let bad_ok = ecdsa_p256_verify(&pubkey, &msg_buf, message_len, &bad_sig_buf, sig_len)
+    if bad_ok == true {
+        println("ecdsa_p256_verify_vectors: corrupted signature accepted")
+        return 1
+    }
+    assert(bad_ok == false)
+
+    // ---- Negative case: the correct signature against a corrupted
+    // message must NOT verify either. ----
+    let wrong_msg_buf = rawbuf_new(message_len + 8)
+    write_str(&wrong_msg_buf, message)
+    let wrong_first = rawbuf_get(&wrong_msg_buf, 0)
+    rawbuf_set(&wrong_msg_buf, 0, wrong_first ^ 1)
+    let bad_msg_ok = ecdsa_p256_verify(&pubkey, &wrong_msg_buf, message_len, &sig_buf, sig_len)
+    if bad_msg_ok == true {
+        println("ecdsa_p256_verify_vectors: signature over corrupted message accepted")
+        return 1
+    }
+    assert(bad_msg_ok == false)
+
+    // ---- Negative case: a signature with r decremented by 1 (still a
+    // syntactically valid DER INTEGER, still 1 <= r < n) must NOT verify --
+    // this specifically exercises the arithmetic verification steps (2-5),
+    // not just DER-structure or hash rejection. Decrementing r's very last
+    // byte by 1 keeps the DER encoding's length/leading-zero-pad structure
+    // identical, so this mutation is isolated to the signature's numeric
+    // value.
+    var wrong_r_bytes = sig_bytes
+    wrong_r_bytes[36] = wrong_r_bytes[36] - 1
+    let wrong_r_buf = rawbuf_new(sig_len + 8)
+    write_bytes(&wrong_r_buf, wrong_r_bytes, sig_len)
+    let wrong_r_ok = ecdsa_p256_verify(&pubkey, &msg_buf, message_len, &wrong_r_buf, sig_len)
+    if wrong_r_ok == true {
+        println("ecdsa_p256_verify_vectors: signature with decremented r accepted")
+        return 1
+    }
+    assert(wrong_r_ok == false)
+
+    println("ecdsa_p256_verify_vectors: valid signature accepted, corrupted signature/message/r rejected")
+    return 0
+}

@@ -1,0 +1,81 @@
+// stdlib/hash/word64.sio
+//
+// 64-bit word arithmetic for SHA-384/512, represented as two independent
+// i64 scalars (high 32 bits, low 32 bits of the logical 64-bit value) --
+// NOT a struct, NOT an array of a pair type. See this plan's Global
+// Constraints for why: this branch has proven scalar arrays and scalar
+// tuples extensively, but never a struct-typed array or a reference to a
+// single array element, and this module has no need to introduce either.
+//
+// Every value here is masked to 0..0xFFFFFFFF after any operation that
+// could exceed 32 bits, so no intermediate value in this file ever
+// approaches i64's own bit-63 boundary (Finding 11's danger zone) --
+// this file sidesteps Finding 11 by construction, the same discipline
+// stdlib/bignum/bigint.sio established for 16-bit limbs, applied here to
+// 32-bit halves instead.
+//
+// This file's own primitives are audited (Task 4) against exactly the
+// case BigInt never needed to handle: values with the top bit of a half
+// set, which is the COMMON case for hash state, not an edge case.
+
+pub fn add64(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> (i64, i64) {
+    let lo_sum = a_lo + b_lo                 // at most 2*0xFFFFFFFF, far under bit 63
+    let carry = lo_sum >> 32                  // lo_sum < 2^33, safe shift, yields 0 or 1
+    let lo_out = lo_sum & 4294967295
+    let hi_sum = a_hi + b_hi + carry          // at most 2*0xFFFFFFFF + 1, far under bit 63
+    let hi_out = hi_sum & 4294967295          // mod-2^32 wraparound on the high half,
+                                                 // matching true mod-2^64 addition overall
+    (hi_out, lo_out)
+}
+
+pub fn xor64(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> (i64, i64) {
+    (a_hi ^ b_hi, a_lo ^ b_lo)   // XOR is unconditionally safe per Finding 11
+}
+
+pub fn and64(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> (i64, i64) {
+    (a_hi & b_hi, a_lo & b_lo)
+}
+
+pub fn not64(a_hi: i64, a_lo: i64) -> (i64, i64) {
+    (a_hi ^ 4294967295, a_lo ^ 4294967295)
+}
+
+// Logical right shift by n bits, 0 < n < 64, treating (hi,lo) as one
+// 64-bit value with hi as the more-significant half.
+// PRECONDITION: 0 < n < 64. Callers must not pass n=0 or n=64 (this
+// module's own bit width).
+pub fn shr64(a_hi: i64, a_lo: i64, n: i64) -> (i64, i64) {
+    if n < 32 {
+        // Bits shifted out of hi's bottom feed into lo's top; both shift
+        // amounts here are in [1,31], safe on 32-bit-bounded values.
+        let lo_out = ((a_lo >> n) | (a_hi << (32 - n))) & 4294967295
+        let hi_out = a_hi >> n
+        (hi_out, lo_out)
+    } else {
+        // n in [32,63]: everything from the low half is shifted off
+        // entirely; only the high half's own bits (shifted further)
+        // survive, landing in the new low half.
+        let shift = n - 32
+        (0, a_hi >> shift)
+    }
+}
+
+// Left shift by n bits, 0 < n < 64 -- only used internally by rotr64.
+// PRECONDITION: 0 < n < 64. Callers must not pass n=0 or n=64 (this
+// module's own bit width).
+fn shl64(a_hi: i64, a_lo: i64, n: i64) -> (i64, i64) {
+    if n < 32 {
+        let hi_out = ((a_hi << n) | (a_lo >> (32 - n))) & 4294967295
+        let lo_out = (a_lo << n) & 4294967295
+        (hi_out, lo_out)
+    } else {
+        let shift = n - 32
+        (((a_lo << shift) & 4294967295), 0)
+    }
+}
+
+pub fn rotr64(a_hi: i64, a_lo: i64, n: i64) -> (i64, i64) {
+    let (r_hi, r_lo) = shr64(a_hi, a_lo, n)
+    let (l_hi, l_lo) = shl64(a_hi, a_lo, 64 - n)
+    (r_hi | l_hi, r_lo | l_lo)
+}

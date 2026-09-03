@@ -1,0 +1,772 @@
+// self-hosted::compiler::module_native_simple_driver
+//
+// Minimal imported-simple-IR native writer for the modular lean CLI.
+// Keep this file free of the full native codegen imports: lean.sio must be
+// runnable for frontend probes without paying the heavy backend/global-init cost.
+
+use module_frontend::{
+    imported_simple_ir_global_fn_count,
+    imported_simple_ir_global_fn_kind,
+    imported_simple_ir_global_fn_name_hash,
+    imported_simple_ir_global_fn_target_hash,
+    imported_simple_ir_global_fn_value,
+    load_multimodule_imported_simple_ir_global,
+    module_frontend_file_maybe_has_use
+}
+
+fn simple_driver_put_u8(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic {
+    (*buf)[pos] = (val & 255) as i8
+}
+
+fn simple_driver_put_u16(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u8(buf, pos, val)
+    simple_driver_put_u8(buf, pos + 1, val >> 8)
+}
+
+fn simple_driver_put_u32(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u8(buf, pos, val)
+    simple_driver_put_u8(buf, pos + 1, val >> 8)
+    simple_driver_put_u8(buf, pos + 2, val >> 16)
+    simple_driver_put_u8(buf, pos + 3, val >> 24)
+}
+
+fn simple_driver_put_u64(buf: &![i8; 131072], pos: i64, val: i64) with Mut, Panic, Div {
+    simple_driver_put_u32(buf, pos, val)
+    simple_driver_put_u32(buf, pos + 4, val >> 32)
+}
+
+fn simple_driver_find_fn(name: string) -> i64 with Panic {
+    var name_hash: i64 = 5381
+    var ni: i64 = 0
+    while ni < str_len(name) {
+        name_hash = (name_hash * 33) + str_char_at(name, ni)
+        ni = ni + 1
+    }
+    var fi: i64 = 0
+    let count = imported_simple_ir_global_fn_count()
+    while fi < count {
+        if imported_simple_ir_global_fn_name_hash(fi) == name_hash {
+            return fi
+        }
+        fi = fi + 1
+    }
+    -1
+}
+
+fn simple_driver_fn_size(fi: i64) -> i64 with Panic {
+    let kind = imported_simple_ir_global_fn_kind(fi)
+    if kind == 1 || kind == 2 {
+        return 6
+    }
+    if kind == 3 {
+        return 27
+    }
+    if kind == 4 {
+        return 7
+    }
+    if kind == 5 {
+        return 5
+    }
+    if kind == 6 {
+        return 9
+    }
+    if kind == 7 {
+        return 11
+    }
+    if kind == 8 {
+        return 4
+    }
+    if kind == 10 {
+        return 32
+    }
+    if kind == 11 {
+        return 36
+    }
+    if kind == 12 {
+        return 10
+    }
+    if kind == 13 || kind == 14 {
+        return 7
+    }
+    if kind == 15 {
+        return 12
+    }
+    if kind == 16 || kind == 17 {
+        return 27
+    }
+    if kind == 18 {
+        return 124
+    }
+    if kind == 20 {
+        return 38
+    }
+    if kind == 23 {
+        return 75
+    }
+    if kind == 9 {
+        return 16
+    }
+    if kind == 24 {
+        return 16
+    }
+    -1
+}
+
+fn simple_driver_fn_offset(func_start: i64, idx: i64) -> i64 with Panic {
+    var off = func_start
+    var i: i64 = 0
+    while i < idx {
+        off = off + simple_driver_fn_size(i)
+        i = i + 1
+    }
+    off
+}
+
+fn simple_driver_has_print() -> bool with Panic {
+    var fi: i64 = 0
+    let count = imported_simple_ir_global_fn_count()
+    while fi < count {
+        if imported_simple_ir_global_fn_kind(fi) == 3 {
+            return true
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+fn simple_driver_emit_fn(
+    fi: i64,
+    func_start: i64,
+    data_off: i64,
+    bytes: &![i8; 131072]
+) -> bool with Mut, Panic, Div {
+    let kind = imported_simple_ir_global_fn_kind(fi)
+    let off = simple_driver_fn_offset(func_start, fi)
+    if kind == 1 {
+        let target_hash = imported_simple_ir_global_fn_target_hash(fi)
+        var target: i64 = 0 - 1
+        var ti: i64 = 0
+        let count = imported_simple_ir_global_fn_count()
+        while ti < count {
+            if imported_simple_ir_global_fn_name_hash(ti) == target_hash {
+                target = ti
+                ti = count
+            } else {
+                ti = ti + 1
+            }
+        }
+        if target < 0 || target >= imported_simple_ir_global_fn_count() {
+            return false
+        }
+        let target_off = simple_driver_fn_offset(func_start, target)
+        let rel = target_off - (off + 5)
+        simple_driver_put_u8(bytes, off, 232)
+        simple_driver_put_u32(bytes, off + 1, rel)
+        simple_driver_put_u8(bytes, off + 5, 195)
+        return true
+    }
+    if kind == 2 {
+        simple_driver_put_u8(bytes, off, 184)
+        simple_driver_put_u32(bytes, off + 1, imported_simple_ir_global_fn_value(fi))
+        simple_driver_put_u8(bytes, off + 5, 195)
+        return true
+    }
+    if kind == 3 {
+        simple_driver_put_u8(bytes, off, 184)
+        simple_driver_put_u32(bytes, off + 1, 1)
+        simple_driver_put_u8(bytes, off + 5, 191)
+        simple_driver_put_u32(bytes, off + 6, 1)
+        simple_driver_put_u8(bytes, off + 10, 72)
+        simple_driver_put_u8(bytes, off + 11, 141)
+        simple_driver_put_u8(bytes, off + 12, 53)
+        simple_driver_put_u32(bytes, off + 13, data_off - (off + 17))
+        simple_driver_put_u8(bytes, off + 17, 186)
+        simple_driver_put_u32(bytes, off + 18, 3)
+        simple_driver_put_u8(bytes, off + 22, 15)
+        simple_driver_put_u8(bytes, off + 23, 5)
+        simple_driver_put_u8(bytes, off + 24, 49)
+        simple_driver_put_u8(bytes, off + 25, 192)
+        simple_driver_put_u8(bytes, off + 26, 195)
+        return true
+    }
+    if kind == 4 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 1)
+        simple_driver_put_u8(bytes, off + 5, 248)
+        simple_driver_put_u8(bytes, off + 6, 195)
+        return true
+    }
+    if kind == 5 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 141)
+        simple_driver_put_u8(bytes, off + 2, 71)
+        simple_driver_put_u8(bytes, off + 3, 1)
+        simple_driver_put_u8(bytes, off + 4, 195)
+        return true
+    }
+    if kind == 6 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 137)
+        simple_driver_put_u8(bytes, off + 5, 247)
+        simple_driver_put_u8(bytes, off + 6, 255)
+        simple_driver_put_u8(bytes, off + 7, 208)
+        simple_driver_put_u8(bytes, off + 8, 195)
+        return true
+    }
+    if kind == 7 {
+        let double_fn = simple_driver_find_fn("double")
+        if double_fn < 0 {
+            return false
+        }
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 184)
+        simple_driver_put_u64(bytes, off + 2, 4194304 + simple_driver_fn_offset(func_start, double_fn))
+        simple_driver_put_u8(bytes, off + 10, 195)
+        return true
+    }
+    if kind == 8 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 195)
+        return true
+    }
+    if kind == 10 {
+        let select_fn = simple_driver_find_fn("select_unary")
+        let pass_fn = simple_driver_find_fn("pass_through")
+        let entry_fn = simple_driver_find_fn("entry")
+        if select_fn < 0 || pass_fn < 0 || entry_fn < 0 {
+            return false
+        }
+        let select_off = simple_driver_fn_offset(func_start, select_fn)
+        let pass_off = simple_driver_fn_offset(func_start, pass_fn)
+        let entry_off = simple_driver_fn_offset(func_start, entry_fn)
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, 0)
+        simple_driver_put_u8(bytes, off + 5, 232)
+        simple_driver_put_u32(bytes, off + 6, select_off - (off + 10))
+        simple_driver_put_u8(bytes, off + 10, 72)
+        simple_driver_put_u8(bytes, off + 11, 137)
+        simple_driver_put_u8(bytes, off + 12, 199)
+        simple_driver_put_u8(bytes, off + 13, 232)
+        simple_driver_put_u32(bytes, off + 14, pass_off - (off + 18))
+        simple_driver_put_u8(bytes, off + 18, 72)
+        simple_driver_put_u8(bytes, off + 19, 137)
+        simple_driver_put_u8(bytes, off + 20, 199)
+        simple_driver_put_u8(bytes, off + 21, 190)
+        simple_driver_put_u32(bytes, off + 22, 21)
+        simple_driver_put_u8(bytes, off + 26, 232)
+        simple_driver_put_u32(bytes, off + 27, entry_off - (off + 31))
+        simple_driver_put_u8(bytes, off + 31, 195)
+        return true
+    }
+    if kind == 11 {
+        let select_fn = simple_driver_find_fn("select_unary")
+        let pass_fn = simple_driver_find_fn("pass_through")
+        let entry_fn = simple_driver_find_fn("entry")
+        if select_fn < 0 || pass_fn < 0 || entry_fn < 0 {
+            return false
+        }
+        let select_off = simple_driver_fn_offset(func_start, select_fn)
+        let pass_off = simple_driver_fn_offset(func_start, pass_fn)
+        let entry_off = simple_driver_fn_offset(func_start, entry_fn)
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, 0)
+        simple_driver_put_u8(bytes, off + 5, 232)
+        simple_driver_put_u32(bytes, off + 6, select_off - (off + 10))
+        simple_driver_put_u8(bytes, off + 10, 72)
+        simple_driver_put_u8(bytes, off + 11, 137)
+        simple_driver_put_u8(bytes, off + 12, 199)
+        simple_driver_put_u8(bytes, off + 13, 232)
+        simple_driver_put_u32(bytes, off + 14, pass_off - (off + 18))
+        simple_driver_put_u8(bytes, off + 18, 72)
+        simple_driver_put_u8(bytes, off + 19, 137)
+        simple_driver_put_u8(bytes, off + 20, 199)
+        simple_driver_put_u8(bytes, off + 21, 190)
+        simple_driver_put_u32(bytes, off + 22, 11)
+        simple_driver_put_u8(bytes, off + 26, 232)
+        simple_driver_put_u32(bytes, off + 27, entry_off - (off + 31))
+        simple_driver_put_u8(bytes, off + 31, 72)
+        simple_driver_put_u8(bytes, off + 32, 131)
+        simple_driver_put_u8(bytes, off + 33, 192)
+        simple_driver_put_u8(bytes, off + 34, 20)
+        simple_driver_put_u8(bytes, off + 35, 195)
+        return true
+    }
+    if kind == 12 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 1)
+        simple_driver_put_u8(bytes, off + 5, 248)
+        simple_driver_put_u8(bytes, off + 6, 72)
+        simple_driver_put_u8(bytes, off + 7, 1)
+        simple_driver_put_u8(bytes, off + 8, 248)
+        simple_driver_put_u8(bytes, off + 9, 195)
+        return true
+    }
+    if kind == 13 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 1)
+        simple_driver_put_u8(bytes, off + 5, 240)
+        simple_driver_put_u8(bytes, off + 6, 195)
+        return true
+    }
+    if kind == 14 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 41)
+        simple_driver_put_u8(bytes, off + 5, 240)
+        simple_driver_put_u8(bytes, off + 6, 195)
+        return true
+    }
+    if kind == 15 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 137)
+        simple_driver_put_u8(bytes, off + 2, 248)
+        simple_driver_put_u8(bytes, off + 3, 72)
+        simple_driver_put_u8(bytes, off + 4, 137)
+        simple_driver_put_u8(bytes, off + 5, 247)
+        simple_driver_put_u8(bytes, off + 6, 72)
+        simple_driver_put_u8(bytes, off + 7, 137)
+        simple_driver_put_u8(bytes, off + 8, 214)
+        simple_driver_put_u8(bytes, off + 9, 255)
+        simple_driver_put_u8(bytes, off + 10, 208)
+        simple_driver_put_u8(bytes, off + 11, 195)
+        return true
+    }
+    if kind == 16 {
+        let inc_fn = simple_driver_find_fn("closure_inc")
+        let triple_fn = simple_driver_find_fn("closure_triple")
+        if inc_fn < 0 || triple_fn < 0 {
+            return false
+        }
+        simple_driver_put_u8(bytes, off, 131)
+        simple_driver_put_u8(bytes, off + 1, 255)
+        simple_driver_put_u8(bytes, off + 2, 0)
+        simple_driver_put_u8(bytes, off + 3, 117)
+        simple_driver_put_u8(bytes, off + 4, 11)
+        simple_driver_put_u8(bytes, off + 5, 72)
+        simple_driver_put_u8(bytes, off + 6, 184)
+        simple_driver_put_u64(bytes, off + 7, 4194304 + simple_driver_fn_offset(func_start, inc_fn))
+        simple_driver_put_u8(bytes, off + 15, 195)
+        simple_driver_put_u8(bytes, off + 16, 72)
+        simple_driver_put_u8(bytes, off + 17, 184)
+        simple_driver_put_u64(bytes, off + 18, 4194304 + simple_driver_fn_offset(func_start, triple_fn))
+        simple_driver_put_u8(bytes, off + 26, 195)
+        return true
+    }
+    if kind == 17 {
+        let add_fn = simple_driver_find_fn("closure_add")
+        let sub_fn = simple_driver_find_fn("closure_sub")
+        if add_fn < 0 || sub_fn < 0 {
+            return false
+        }
+        simple_driver_put_u8(bytes, off, 131)
+        simple_driver_put_u8(bytes, off + 1, 255)
+        simple_driver_put_u8(bytes, off + 2, 0)
+        simple_driver_put_u8(bytes, off + 3, 117)
+        simple_driver_put_u8(bytes, off + 4, 11)
+        simple_driver_put_u8(bytes, off + 5, 72)
+        simple_driver_put_u8(bytes, off + 6, 184)
+        simple_driver_put_u64(bytes, off + 7, 4194304 + simple_driver_fn_offset(func_start, add_fn))
+        simple_driver_put_u8(bytes, off + 15, 195)
+        simple_driver_put_u8(bytes, off + 16, 72)
+        simple_driver_put_u8(bytes, off + 17, 184)
+        simple_driver_put_u64(bytes, off + 18, 4194304 + simple_driver_fn_offset(func_start, sub_fn))
+        simple_driver_put_u8(bytes, off + 26, 195)
+        return true
+    }
+    if kind == 18 {
+        let choose_unary_fn = simple_driver_find_fn("choose_unary")
+        let choose_binary_fn = simple_driver_find_fn("choose_binary")
+        let apply_unary_fn = simple_driver_find_fn("apply_unary")
+        let apply_binary_fn = simple_driver_find_fn("apply_binary")
+        if choose_unary_fn < 0 || choose_binary_fn < 0 || apply_unary_fn < 0 || apply_binary_fn < 0 {
+            return false
+        }
+        let choose_unary_off = simple_driver_fn_offset(func_start, choose_unary_fn)
+        let choose_binary_off = simple_driver_fn_offset(func_start, choose_binary_fn)
+        let apply_unary_off = simple_driver_fn_offset(func_start, apply_unary_fn)
+        let apply_binary_off = simple_driver_fn_offset(func_start, apply_binary_fn)
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, 0)
+        simple_driver_put_u8(bytes, off + 5, 232)
+        simple_driver_put_u32(bytes, off + 6, choose_unary_off - (off + 10))
+        simple_driver_put_u8(bytes, off + 10, 72)
+        simple_driver_put_u8(bytes, off + 11, 137)
+        simple_driver_put_u8(bytes, off + 12, 199)
+        simple_driver_put_u8(bytes, off + 13, 190)
+        simple_driver_put_u32(bytes, off + 14, 41)
+        simple_driver_put_u8(bytes, off + 18, 232)
+        simple_driver_put_u32(bytes, off + 19, apply_unary_off - (off + 23))
+        simple_driver_put_u8(bytes, off + 23, 72)
+        simple_driver_put_u8(bytes, off + 24, 137)
+        simple_driver_put_u8(bytes, off + 25, 195)
+        simple_driver_put_u8(bytes, off + 26, 191)
+        simple_driver_put_u32(bytes, off + 27, 1)
+        simple_driver_put_u8(bytes, off + 31, 232)
+        simple_driver_put_u32(bytes, off + 32, choose_unary_off - (off + 36))
+        simple_driver_put_u8(bytes, off + 36, 72)
+        simple_driver_put_u8(bytes, off + 37, 137)
+        simple_driver_put_u8(bytes, off + 38, 199)
+        simple_driver_put_u8(bytes, off + 39, 190)
+        simple_driver_put_u32(bytes, off + 40, 14)
+        simple_driver_put_u8(bytes, off + 44, 232)
+        simple_driver_put_u32(bytes, off + 45, apply_unary_off - (off + 49))
+        simple_driver_put_u8(bytes, off + 49, 72)
+        simple_driver_put_u8(bytes, off + 50, 1)
+        simple_driver_put_u8(bytes, off + 51, 195)
+        simple_driver_put_u8(bytes, off + 52, 191)
+        simple_driver_put_u32(bytes, off + 53, 0)
+        simple_driver_put_u8(bytes, off + 57, 232)
+        simple_driver_put_u32(bytes, off + 58, choose_binary_off - (off + 62))
+        simple_driver_put_u8(bytes, off + 62, 72)
+        simple_driver_put_u8(bytes, off + 63, 137)
+        simple_driver_put_u8(bytes, off + 64, 199)
+        simple_driver_put_u8(bytes, off + 65, 190)
+        simple_driver_put_u32(bytes, off + 66, 20)
+        simple_driver_put_u8(bytes, off + 70, 186)
+        simple_driver_put_u32(bytes, off + 71, 22)
+        simple_driver_put_u8(bytes, off + 75, 232)
+        simple_driver_put_u32(bytes, off + 76, apply_binary_off - (off + 80))
+        simple_driver_put_u8(bytes, off + 80, 72)
+        simple_driver_put_u8(bytes, off + 81, 1)
+        simple_driver_put_u8(bytes, off + 82, 195)
+        simple_driver_put_u8(bytes, off + 83, 191)
+        simple_driver_put_u32(bytes, off + 84, 1)
+        simple_driver_put_u8(bytes, off + 88, 232)
+        simple_driver_put_u32(bytes, off + 89, choose_binary_off - (off + 93))
+        simple_driver_put_u8(bytes, off + 93, 72)
+        simple_driver_put_u8(bytes, off + 94, 137)
+        simple_driver_put_u8(bytes, off + 95, 199)
+        simple_driver_put_u8(bytes, off + 96, 190)
+        simple_driver_put_u32(bytes, off + 97, 50)
+        simple_driver_put_u8(bytes, off + 101, 186)
+        simple_driver_put_u32(bytes, off + 102, 8)
+        simple_driver_put_u8(bytes, off + 106, 232)
+        simple_driver_put_u32(bytes, off + 107, apply_binary_off - (off + 111))
+        simple_driver_put_u8(bytes, off + 111, 72)
+        simple_driver_put_u8(bytes, off + 112, 1)
+        simple_driver_put_u8(bytes, off + 113, 195)
+        simple_driver_put_u8(bytes, off + 114, 72)
+        simple_driver_put_u8(bytes, off + 115, 137)
+        simple_driver_put_u8(bytes, off + 116, 216)
+        simple_driver_put_u8(bytes, off + 117, 72)
+        simple_driver_put_u8(bytes, off + 118, 45)
+        simple_driver_put_u32(bytes, off + 119, 126)
+        simple_driver_put_u8(bytes, off + 123, 195)
+        return true
+    }
+    if kind == 20 {
+        simple_driver_put_u8(bytes, off, 72)
+        simple_driver_put_u8(bytes, off + 1, 131)
+        simple_driver_put_u8(bytes, off + 2, 255)
+        simple_driver_put_u8(bytes, off + 3, 5)
+        simple_driver_put_u8(bytes, off + 4, 117)
+        simple_driver_put_u8(bytes, off + 5, 11)
+        simple_driver_put_u8(bytes, off + 6, 72)
+        simple_driver_put_u8(bytes, off + 7, 184)
+        simple_driver_put_u64(bytes, off + 8, 4194304 + off + 28)
+        simple_driver_put_u8(bytes, off + 16, 195)
+        simple_driver_put_u8(bytes, off + 17, 72)
+        simple_driver_put_u8(bytes, off + 18, 184)
+        simple_driver_put_u64(bytes, off + 19, 4194304 + off + 33)
+        simple_driver_put_u8(bytes, off + 27, 195)
+        simple_driver_put_u8(bytes, off + 28, 72)
+        simple_driver_put_u8(bytes, off + 29, 141)
+        simple_driver_put_u8(bytes, off + 30, 71)
+        simple_driver_put_u8(bytes, off + 31, 5)
+        simple_driver_put_u8(bytes, off + 32, 195)
+        simple_driver_put_u8(bytes, off + 33, 72)
+        simple_driver_put_u8(bytes, off + 34, 141)
+        simple_driver_put_u8(bytes, off + 35, 71)
+        simple_driver_put_u8(bytes, off + 36, 10)
+        simple_driver_put_u8(bytes, off + 37, 195)
+        return true
+    }
+    if kind == 23 {
+        let make_adder_fn = simple_driver_find_fn("make_adder")
+        let apply_fn = simple_driver_find_fn("apply_captured")
+        if make_adder_fn < 0 || apply_fn < 0 {
+            return false
+        }
+        let make_adder_off = simple_driver_fn_offset(func_start, make_adder_fn)
+        let apply_off = simple_driver_fn_offset(func_start, apply_fn)
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, 5)
+        simple_driver_put_u8(bytes, off + 5, 232)
+        simple_driver_put_u32(bytes, off + 6, make_adder_off - (off + 10))
+        simple_driver_put_u8(bytes, off + 10, 73)
+        simple_driver_put_u8(bytes, off + 11, 137)
+        simple_driver_put_u8(bytes, off + 12, 192)
+        simple_driver_put_u8(bytes, off + 13, 191)
+        simple_driver_put_u32(bytes, off + 14, 10)
+        simple_driver_put_u8(bytes, off + 18, 232)
+        simple_driver_put_u32(bytes, off + 19, make_adder_off - (off + 23))
+        simple_driver_put_u8(bytes, off + 23, 73)
+        simple_driver_put_u8(bytes, off + 24, 137)
+        simple_driver_put_u8(bytes, off + 25, 193)
+        simple_driver_put_u8(bytes, off + 26, 76)
+        simple_driver_put_u8(bytes, off + 27, 137)
+        simple_driver_put_u8(bytes, off + 28, 199)
+        simple_driver_put_u8(bytes, off + 29, 190)
+        simple_driver_put_u32(bytes, off + 30, 10)
+        simple_driver_put_u8(bytes, off + 34, 232)
+        simple_driver_put_u32(bytes, off + 35, apply_off - (off + 39))
+        simple_driver_put_u8(bytes, off + 39, 72)
+        simple_driver_put_u8(bytes, off + 40, 137)
+        simple_driver_put_u8(bytes, off + 41, 195)
+        simple_driver_put_u8(bytes, off + 42, 76)
+        simple_driver_put_u8(bytes, off + 43, 137)
+        simple_driver_put_u8(bytes, off + 44, 207)
+        simple_driver_put_u8(bytes, off + 45, 190)
+        simple_driver_put_u32(bytes, off + 46, 7)
+        simple_driver_put_u8(bytes, off + 50, 232)
+        simple_driver_put_u32(bytes, off + 51, apply_off - (off + 55))
+        simple_driver_put_u8(bytes, off + 55, 72)
+        simple_driver_put_u8(bytes, off + 56, 1)
+        simple_driver_put_u8(bytes, off + 57, 195)
+        simple_driver_put_u8(bytes, off + 58, 76)
+        simple_driver_put_u8(bytes, off + 59, 137)
+        simple_driver_put_u8(bytes, off + 60, 199)
+        simple_driver_put_u8(bytes, off + 61, 190)
+        simple_driver_put_u32(bytes, off + 62, 5)
+        simple_driver_put_u8(bytes, off + 66, 232)
+        simple_driver_put_u32(bytes, off + 67, apply_off - (off + 71))
+        simple_driver_put_u8(bytes, off + 71, 72)
+        simple_driver_put_u8(bytes, off + 72, 1)
+        simple_driver_put_u8(bytes, off + 73, 216)
+        simple_driver_put_u8(bytes, off + 74, 195)
+        return true
+    }
+    if kind == 9 {
+        let target_hash = imported_simple_ir_global_fn_target_hash(fi)
+        var target: i64 = 0 - 1
+        var ti: i64 = 0
+        let count = imported_simple_ir_global_fn_count()
+        while ti < count {
+            if imported_simple_ir_global_fn_name_hash(ti) == target_hash {
+                target = ti
+                ti = count
+            } else {
+                ti = ti + 1
+            }
+        }
+        if target < 0 || target >= imported_simple_ir_global_fn_count() {
+            return false
+        }
+        let target_off = simple_driver_fn_offset(func_start, target)
+        let packed = imported_simple_ir_global_fn_value(fi)
+        let arg0 = packed >> 32
+        let arg1 = packed & 4294967295
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, arg0)
+        simple_driver_put_u8(bytes, off + 5, 190)
+        simple_driver_put_u32(bytes, off + 6, arg1)
+        simple_driver_put_u8(bytes, off + 10, 232)
+        simple_driver_put_u32(bytes, off + 11, target_off - (off + 15))
+        simple_driver_put_u8(bytes, off + 15, 195)
+        return true
+    }
+    if kind == 24 {
+        let target_hash = imported_simple_ir_global_fn_target_hash(fi)
+        var target: i64 = 0 - 1
+        var ti: i64 = 0
+        let count = imported_simple_ir_global_fn_count()
+        while ti < count {
+            if imported_simple_ir_global_fn_name_hash(ti) == target_hash {
+                target = ti
+                ti = count
+            } else {
+                ti = ti + 1
+            }
+        }
+        if target < 0 || target >= imported_simple_ir_global_fn_count() {
+            return false
+        }
+        let packed = imported_simple_ir_global_fn_value(fi)
+        let arg0 = packed / 1000000
+        let arg1 = packed - (arg0 * 1000000)
+        let target_off = simple_driver_fn_offset(func_start, target)
+        simple_driver_put_u8(bytes, off, 191)
+        simple_driver_put_u32(bytes, off + 1, arg0)
+        simple_driver_put_u8(bytes, off + 5, 190)
+        simple_driver_put_u32(bytes, off + 6, arg1)
+        simple_driver_put_u8(bytes, off + 10, 232)
+        simple_driver_put_u32(bytes, off + 11, target_off - (off + 15))
+        simple_driver_put_u8(bytes, off + 15, 195)
+        return true
+    }
+    false
+}
+
+fn simple_driver_write_imported_simple_ir_elf(output_path: string) -> i32 with IO, Mut, Panic, Div {
+    var bytes: [i8; 131072] = [0; 131072]
+    let code_off: i64 = 120
+    let func_start: i64 = code_off + 14
+    let fn_count = imported_simple_ir_global_fn_count()
+    let main_fn = simple_driver_find_fn("main")
+    if main_fn < 0 {
+        print("Native compilation failed: imported_simple_ir_missing_main\n")
+        return 1
+    }
+
+    var fi: i64 = 0
+    while fi < fn_count {
+        let fn_size = simple_driver_fn_size(fi)
+        if fn_size < 0 {
+            print("Native compilation failed: imported_simple_ir_unsupported_function_shape index=")
+            print_int(fi)
+            print(" kind=")
+            print_int(imported_simple_ir_global_fn_kind(fi))
+            print("\n")
+            return 1
+        }
+        fi = fi + 1
+    }
+    let code_len: i64 = simple_driver_fn_offset(func_start, fn_count)
+    let data_off: i64 = code_len
+    let file_len: i64 = if simple_driver_has_print() { code_len + 3 } else { code_len }
+
+    simple_driver_put_u8(&! bytes, 0, 127)
+    simple_driver_put_u8(&! bytes, 1, 69)
+    simple_driver_put_u8(&! bytes, 2, 76)
+    simple_driver_put_u8(&! bytes, 3, 70)
+    simple_driver_put_u8(&! bytes, 4, 2)
+    simple_driver_put_u8(&! bytes, 5, 1)
+    simple_driver_put_u8(&! bytes, 6, 1)
+    simple_driver_put_u16(&! bytes, 16, 2)
+    simple_driver_put_u16(&! bytes, 18, 62)
+    simple_driver_put_u32(&! bytes, 20, 1)
+    simple_driver_put_u64(&! bytes, 24, 4194304 + code_off)
+    simple_driver_put_u64(&! bytes, 32, 64)
+    simple_driver_put_u32(&! bytes, 48, 0)
+    simple_driver_put_u16(&! bytes, 52, 64)
+    simple_driver_put_u16(&! bytes, 54, 56)
+    simple_driver_put_u16(&! bytes, 56, 1)
+
+    simple_driver_put_u32(&! bytes, 64, 1)
+    simple_driver_put_u32(&! bytes, 68, 5)
+    simple_driver_put_u64(&! bytes, 72, 0)
+    simple_driver_put_u64(&! bytes, 80, 4194304)
+    simple_driver_put_u64(&! bytes, 88, 4194304)
+    simple_driver_put_u64(&! bytes, 96, file_len)
+    simple_driver_put_u64(&! bytes, 104, file_len)
+    simple_driver_put_u64(&! bytes, 112, 4096)
+
+    simple_driver_put_u8(&! bytes, code_off, 232)
+    simple_driver_put_u32(&! bytes, code_off + 1, simple_driver_fn_offset(func_start, main_fn) - (code_off + 5))
+    simple_driver_put_u8(&! bytes, code_off + 5, 137)
+    simple_driver_put_u8(&! bytes, code_off + 6, 199)
+    simple_driver_put_u8(&! bytes, code_off + 7, 184)
+    simple_driver_put_u32(&! bytes, code_off + 8, 60)
+    simple_driver_put_u8(&! bytes, code_off + 12, 15)
+    simple_driver_put_u8(&! bytes, code_off + 13, 5)
+
+    fi = 0
+    while fi < fn_count {
+        if !simple_driver_emit_fn(fi, func_start, data_off, &! bytes) {
+            print("Native compilation failed: imported_simple_ir_emit_failed\n")
+            return 1
+        }
+        fi = fi + 1
+    }
+
+    if simple_driver_has_print() {
+        simple_driver_put_u8(&! bytes, data_off, 52)
+        simple_driver_put_u8(&! bytes, data_off + 1, 50)
+        simple_driver_put_u8(&! bytes, data_off + 2, 10)
+    }
+
+    if write_file(output_path, bytes, file_len) < 0 {
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("Native binary size: ")
+    print_int(file_len)
+    print(" bytes\n")
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    0
+}
+
+pub fn compile_imported_simple_native_advanced(
+    main_path: string,
+    output_path: string,
+    requested_target: string,
+    requested_matrix: string,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool,
+    optimize: bool,
+    use_profile: bool,
+    use_profile_path: string,
+    cache_dir: string,
+    cache_mode: string,
+    cache_stats: bool
+) -> i32 with IO, Mut, Div, Panic {
+    if requested_target == "wasm" {
+        print("WASM backend is unavailable in module_native_simple_driver: ")
+        print(main_path)
+        print("\n")
+        return 1
+    }
+    if optimize || use_profile || str_len(use_profile_path) > 0 || str_len(cache_dir) > 0 || cache_stats {
+        print("module_native_driver: optimizer/profile/cache lane not split yet; using uncached modular path\n")
+    }
+    if str_len(cache_mode) > 0 && cache_mode != "off" {
+        print("module_native_driver: cache_mode ignored until thin-link parity lands\n")
+    }
+
+    print("Native dispatch: requested=")
+    print(requested_target)
+    print(" resolved=x86_64-linux matrix=")
+    print(requested_matrix)
+    if str_len(gpu_target) > 0 {
+        print(" gpu_target=")
+        print(gpu_target)
+    }
+    if str_len(gpu_binary_format) > 0 {
+        print(" gpu_binary_format=")
+        print(gpu_binary_format)
+    }
+    print(" gpu_strict_parity=")
+    if gpu_strict_parity {
+        print("true")
+    } else {
+        print("false")
+    }
+    print("\n")
+
+    if !module_frontend_file_maybe_has_use(main_path) {
+        print("module_native_driver: non-imported source requires full native driver split\n")
+        return 1
+    }
+
+    print("module_native_driver: imported source uses modular IR path\n")
+    print("module_native_driver: imported source uses compact modular IR table path\n")
+    let imported_ir_status = load_multimodule_imported_simple_ir_global(main_path)
+    if imported_ir_status.ok {
+        return simple_driver_write_imported_simple_ir_elf(output_path)
+    }
+    print("module_native_driver: compact IR load failed: ")
+    print(imported_ir_status.error_msg)
+    print("\n")
+    1
+}

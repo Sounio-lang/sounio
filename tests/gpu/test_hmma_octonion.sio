@@ -1,28 +1,56 @@
 //@ run-pass
-//@ expect-stdout: PASS: HMMA octonion sign correction
+//@ expect-stdout: PASS: HMMA octonion left-mul matrix is Convention X
 
-fn hmma_sign_mask_for_output_component(k: i64) -> i64 with Mut {
-    var mask: i64 = 0
-    if k == 0 { mask = 0 }
-    if k == 1 { mask = 0 }
-    if k == 2 { mask = 2 + 32 }
-    if k == 3 { mask = 2 + 128 }
-    if k == 4 { mask = 4 + 16 + 64 }
-    if k == 5 { mask = 8 + 32 + 128 }
-    if k == 6 { mask = 2 + 16 + 64 }
-    if k == 7 { mask = 4 + 16 + 128 }
-    mask
+// Verifies the tensor-core octonion multiply's left-multiply-matrix construction
+// (self-hosted/gpu/kernels/hmma_signs.sio) implements Convention X:
+//   a·b = L(a)·b,  L(a)[k][j] = σ(k⊕j, j) · a[k⊕j]
+// so e_ia · e_ib lands in component (ia⊕ib) with sign σ(ia, ib) = left_mul_sign(ia⊕ib, ib).
+// (Replaces the former trivial mask-property assertions on a broken sign-correction.)
+// The tensor-core execution of exactly this construction is hardware-validated on the
+// DGX Spark (GB10, sm_121): see docs/gpu/oct_wmma_validate.cu.
+
+fn cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
 }
+fn left_mul_sign(k: i64, j: i64) -> i64 { cd_sigma(k ^ j, j, 3) }
+fn prod_component(ia: i64, ib: i64) -> i64 { ia ^ ib }
+fn prod_sign(ia: i64, ib: i64) -> i64 { left_mul_sign(ia ^ ib, ib) }
 
 fn main() -> i32 with IO, Panic, Mut {
-    let mask0 = hmma_sign_mask_for_output_component(0)
-    assert(mask0 == 0)
-    let mask1 = hmma_sign_mask_for_output_component(1)
-    assert(mask1 == 0)
-    let mask2 = hmma_sign_mask_for_output_component(2)
-    assert(mask2 != 0)
-    let mask4 = hmma_sign_mask_for_output_component(4)
-    assert(mask4 != 0)
-    println("PASS: HMMA octonion sign correction")
+    var fails: i64 = 0
+    // e1·e2 = +e3  (Convention X; Convention Y would give e4)
+    if prod_component(1, 2) != 3 { fails = fails + 1 }
+    if prod_sign(1, 2) != 1 { fails = fails + 1 }
+    // e2·e1 = −e3
+    if prod_sign(2, 1) != 0 - 1 { fails = fails + 1 }
+    // e2·e5 = +e7
+    if prod_component(2, 5) != 7 { fails = fails + 1 }
+    if prod_sign(2, 5) != 1 { fails = fails + 1 }
+    // e_i·e_i = −e0  (i = 1..7): component 0, sign −1
+    var i: i64 = 1
+    while i < 8 {
+        if prod_component(i, i) != 0 { fails = fails + 1 }
+        if left_mul_sign(0, i) != 0 - 1 { fails = fails + 1 }
+        i = i + 1
+    }
+    if fails == 0 {
+        println("PASS: HMMA octonion left-mul matrix is Convention X")
+    } else {
+        println("FAIL: HMMA octonion left-mul matrix")
+    }
     0
 }

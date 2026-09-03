@@ -1,0 +1,1895 @@
+// AST-level generic-fn specializer (monomorphizer).
+//
+// Runs AFTER parsing, BEFORE type checking. The parser currently discards a
+// fn's `<T, U>` type-param header (parse_type_param_header consumes the
+// tokens without storing them on FnDef — FnDef has no type_params field).
+// So "is this fn generic" is recovered structurally: any single-segment,
+// single-UPPERCASE-letter TypeNamed in a fn's params/return type that is not
+// a locally declared struct/enum name is treated as a free type variable
+// (a conservative variant of check.sio's
+// type_is_unresolved_type_param_in_tables/collect_fn_generic_names_*).
+// The pass is only hooked into the single-module (no imports) pipeline
+// lanes, so imported type names can never be misread as type variables.
+//
+// Algorithm (SAME-NAME single-instantiation scheme):
+//   1. Collect every top-level ItemFn with >=1 free type var into a table;
+//      collect generic struct templates (StructDef has real type_params).
+//   2. READ-ONLY scan of all non-generic fn bodies for Call exprs carrying
+//      turbofish type_args whose callee matches a collected generic fn AND
+//      whose arg count matches the fn's free-var count. Count mismatches
+//      leave the call site untouched and pin the template so the checker's
+//      own E010 still fires.
+//   3. First matching instantiation of a template: clone + substitute the
+//      FnDef, KEEPING THE TEMPLATE'S OWN NAME, and scan the clone's body
+//      (transitive turbofish calls, incl. self-recursion; the per-slot
+//      instantiation hash guarantees termination). A SECOND instantiation
+//      with different type args POISONS the template back to baseline
+//      behavior. Call sites are NEVER rewritten: the checker ignores
+//      turbofish on non-generic signatures (generic_names comes out empty
+//      at its call-check), and the lowering has no generics concept.
+//   4. Finalize: replace each single-instantiation template item with its
+//      concrete same-name clone; keep poisoned/still-referenced templates
+//      verbatim; drop never-referenced templates. Generic-struct instances
+//      (CDExact<i64> -> struct CDExact__i64 items) referenced from clone
+//      signatures/bodies are appended, with type annotations and struct
+//      literals inside clones rewritten to the mangled concrete names
+//      (the checker's signature lowering erases generic struct args, and
+//      its literal inference is TyNamed-only, so only concrete names
+//      survive both).
+//
+// Backend-safety notes (this file runs inside the lean_single-compiled
+// Madaros binary, so it must stay inside the proven-safe subset):
+//   - No Name/struct-typed GLOBAL arrays: global aggregate array elements
+//     read back corrupted (witnessed on this exact pass).
+//   - No Option<Box<...>> globals either: a global Option<Box<Node>> does
+//     not round-trip (store-then-load returns garbage; witnessed with a
+//     standalone probe). The ONLY safe global state is flat i64/bool
+//     arrays + scalars (check/mod.sio sidecar precedent).
+//   - Heap state therefore lives behind raw pointers from heap_alloc,
+//     accessed via *mut field reads/writes and parked in i64 globals —
+//     the check/mod.sio *mut-Checker-spine pattern (probe-validated for
+//     both scalar and big-aggregate fields, including Option<Box<T>>
+//     fields THROUGH the *mut node).
+//   - Type-param and dedup lookups compare ast_name_hash i64 values, the
+//     module_frontend hash-table pattern.
+
+module check::specializer
+
+use parser::ast::*
+use parser::parser::{dummy_type_expr}
+use io::env::{read_env}
+
+// ============================================================
+// Small fixed-capacity LOCAL helper structs (never stored in globals)
+// ============================================================
+
+struct SpecKnownNames { names: [Name; 32], count: i64 }
+struct SpecNameBuf { names: [Name; 4], count: i64 }
+
+// ============================================================
+// Generic-fn table: heap_alloc'd all-scalar nodes reached through raw
+// pointers parked in a flat i64 global array (*mut spine pattern).
+// ============================================================
+
+struct SpecGfNode {
+    name_hash: i64,
+    tp_count: i64,
+    tp_h0: i64,
+    tp_h1: i64,
+    tp_h2: i64,
+    tp_h3: i64,
+    fd: Option<Box<FnDef>>,
+}
+
+// Generic STRUCT template node (StructDef carries real type_params, so no
+// heuristic recovery is needed for structs).
+struct SpecStNode {
+    name_hash: i64,
+    tp_count: i64,
+    tp_h0: i64,
+    tp_h1: i64,
+    tp_h2: i64,
+    tp_h3: i64,
+    sd: Option<Box<StructDef>>,
+}
+
+// Substitution context: the ACTIVE type-param set during one clone's
+// substitution (either a generic fn's recovered params or a generic
+// struct's declared params). Reached via raw pointer like the table nodes.
+struct SpecCtxNode {
+    tp_count: i64,
+    h0: i64,
+    h1: i64,
+    h2: i64,
+    h3: i64,
+}
+
+// Chain node for freshly instantiated items (Item stored inline in the
+// heap node; `next` is a raw pointer, 0 = end of chain).
+struct SpecItemNode {
+    it: Item,
+    next: i64,
+}
+
+// Staging wrappers: WHOLE-struct stores through *mut ((*q) = v) are
+// miscompiled (probe-witnessed: destination stays zeroed), while FIELD
+// stores through *mut ((*q).e = v) work. All big AST values are therefore
+// staged inside single-field wrapper nodes.
+struct SpecExprStage { e: Expr }
+struct SpecStmtStage { s: Stmt }
+struct SpecFnDefStage { fd: FnDef }
+struct SpecStructDefStage { sd: StructDef }
+
+// Mutable driver state. Reset unconditionally at the top of every
+// specialize_generics() call — this pass may run more than once per
+// process (preflight + IR-lowering both invoke it on independently
+// re-parsed item lists), so no state may leak across invocations.
+var SPEC_GF_COUNT: i64 = 0
+var SPEC_GF_PTRS: [i64; 256] = [0; 256]
+var SPEC_GF_NEEDED: [bool; 256] = [false; 256]
+var SPEC_GF_INST_HASH: [i64; 256] = [0; 256]
+var SPEC_GF_POISONED: [bool; 256] = [false; 256]
+var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
+var SPEC_ST_COUNT: i64 = 0
+var SPEC_ST_PTRS: [i64; 256] = [0; 256]
+var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
+var SPEC_EMITTED_COUNT: i64 = 0
+var SPEC_EXTRA_HEAD: i64 = 0
+
+fn spec_reset_state() with Mut {
+    SPEC_EMITTED_COUNT = 0
+    SPEC_EXTRA_HEAD = 0
+    var i: i64 = 0
+    while i < 256 {
+        SPEC_GF_PTRS[i as usize] = 0
+        SPEC_GF_NEEDED[i as usize] = false
+        SPEC_GF_INST_HASH[i as usize] = 0
+        SPEC_GF_POISONED[i as usize] = false
+        SPEC_GF_CLONE_PTR[i as usize] = 0
+        SPEC_ST_PTRS[i as usize] = 0
+        i = i + 1
+    }
+    SPEC_GF_COUNT = 0
+    SPEC_ST_COUNT = 0
+}
+
+// ============================================================
+// Name / string helpers
+// ============================================================
+
+fn spec_name_to_string(name: Name) -> string with Mut, Panic, Div {
+    var buf: [i8; 128] = name.buf
+    str_from_bytes(buf, name.len)
+}
+
+fn spec_path_single_name(path: AstPath) -> Name {
+    if path.seg_count != 1 { return empty_name() }
+    Name { buf: path.segments.head_buf, len: path.segments.head_len }
+}
+
+// ============================================================
+// Known type names (structs/enums declared in this item list)
+// ============================================================
+
+fn spec_known_names_has(kn: SpecKnownNames, n: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < kn.count {
+        if name_eq(kn.names[i as usize], n) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_known_names_push(kn: SpecKnownNames, n: Name) -> SpecKnownNames with Mut, Panic, Div {
+    var out = kn
+    if out.count < 32 && !spec_known_names_has(out, n) {
+        out.names[out.count as usize] = n
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn spec_collect_known_names(items: Option<Box<ItemList>>, acc: SpecKnownNames) -> SpecKnownNames with Mut, Panic, Div {
+    match items {
+        None => acc
+        Some(list) => {
+            var out = acc
+            let it = (*list).head
+            if it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum {
+                out = spec_known_names_push(out, it.name)
+            }
+            spec_collect_known_names((*list).tail, out)
+        }
+    }
+}
+
+// ============================================================
+// Free-type-variable detection
+// ============================================================
+
+// A candidate type parameter must be a single UPPERCASE letter (T, U, F, K,
+// V, ...). The single-letter restriction keeps stdlib named types (Option,
+// Box, ...) from being misread as free type variables; generic fns with
+// multi-character param names simply stay on the baseline checker path.
+fn spec_type_is_free_var(te: TypeExpr, known: SpecKnownNames) -> bool with Mut, Panic, Div {
+    if te.kind != TypeExprKind::TypeNamed { return false }
+    if te.path.seg_count != 1 { return false }
+    let seg = spec_path_single_name(te.path)
+    if seg.len != 1 { return false }
+    let c0 = seg.buf[0] as i64
+    if c0 < 65 || c0 > 90 { return false }
+    if spec_known_names_has(known, seg) { return false }
+    true
+}
+
+fn spec_name_buf_has(buf: SpecNameBuf, n: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.count {
+        if name_eq(buf.names[i as usize], n) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_name_buf_push(buf: SpecNameBuf, n: Name) -> SpecNameBuf with Mut, Panic, Div {
+    var out = buf
+    if out.count < 4 && !spec_name_buf_has(out, n) {
+        out.names[out.count as usize] = n
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn spec_collect_free_vars_from_type(te: TypeExpr, known: SpecKnownNames, buf: SpecNameBuf) -> SpecNameBuf with Mut, Panic, Div {
+    var out = buf
+    if spec_type_is_free_var(te, known) {
+        out = spec_name_buf_push(out, spec_path_single_name(te.path))
+    }
+    match te.inner {
+        Some(inner) => out = spec_collect_free_vars_from_type(*inner, known, out)
+        None => {}
+    }
+    match te.type_args {
+        Some(list) => out = spec_collect_free_vars_from_type_list(*list, known, out)
+        None => {}
+    }
+    out
+}
+
+fn spec_collect_free_vars_from_type_list(list: TypeExprList, known: SpecKnownNames, buf: SpecNameBuf) -> SpecNameBuf with Mut, Panic, Div {
+    let with_head = spec_collect_free_vars_from_type(list.head, known, buf)
+    match list.tail {
+        Some(rest) => spec_collect_free_vars_from_type_list(*rest, known, with_head)
+        None => with_head
+    }
+}
+
+fn spec_collect_free_vars_from_params(opt: Option<Box<ParamList>>, known: SpecKnownNames, buf: SpecNameBuf) -> SpecNameBuf with Mut, Panic, Div {
+    match opt {
+        None => buf
+        Some(list) => {
+            let with_head = spec_collect_free_vars_from_type((*list).head.ty, known, buf)
+            spec_collect_free_vars_from_params((*list).tail, known, with_head)
+        }
+    }
+}
+
+fn spec_collect_free_vars_from_fndef(fd: FnDef, known: SpecKnownNames) -> SpecNameBuf with Mut, Panic, Div {
+    var buf = spec_collect_free_vars_from_params(fd.params, known, SpecNameBuf { names: [empty_name(); 4], count: 0 })
+    match fd.return_type {
+        Some(rt) => buf = spec_collect_free_vars_from_type(*rt, known, buf)
+        None => {}
+    }
+    buf
+}
+
+// ============================================================
+// Generic-fn table operations (hash-keyed *mut arena)
+// ============================================================
+
+fn spec_generic_table_find(name: Name) -> i64 with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < SPEC_GF_COUNT {
+        let p = SPEC_GF_PTRS[i as usize] as *mut SpecGfNode
+        if (*p).name_hash == h {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_generic_table_tp_count(slot: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_GF_COUNT { return 0 - 1 }
+    let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
+    (*p).tp_count
+}
+
+// The template FnDef box for a slot (shared pointer, read-only use).
+fn spec_generic_table_fd(slot: i64) -> Option<Box<FnDef>> with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_GF_COUNT { return None }
+    let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
+    (*p).fd
+}
+
+fn spec_tp_hash_at(buf: SpecNameBuf, i: i64) -> i64 with Mut, Panic, Div {
+    if i < buf.count && i < 4 {
+        return ast_name_hash(buf.names[i as usize])
+    }
+    0 - 1
+}
+
+// ============================================================
+// Substitution contexts
+// ============================================================
+
+fn spec_ctx_new(count: i64, h0: i64, h1: i64, h2: i64, h3: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let p = heap_alloc(256) as *mut SpecCtxNode
+    (*p).tp_count = count
+    (*p).h0 = h0
+    (*p).h1 = h1
+    (*p).h2 = h2
+    (*p).h3 = h3
+    p as i64
+}
+
+fn spec_ctx_tp_index(ctx: i64, h: i64) -> i64 with Mut, Panic, Div {
+    if ctx == 0 { return 0 - 1 }
+    let p = ctx as *mut SpecCtxNode
+    if (*p).tp_count > 0 && (*p).h0 == h { return 0 }
+    if (*p).tp_count > 1 && (*p).h1 == h { return 1 }
+    if (*p).tp_count > 2 && (*p).h2 == h { return 2 }
+    if (*p).tp_count > 3 && (*p).h3 == h { return 3 }
+    0 - 1
+}
+
+fn spec_ctx_from_fn_slot(slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if slot < 0 || slot >= SPEC_GF_COUNT { return 0 }
+    let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
+    spec_ctx_new((*p).tp_count, (*p).tp_h0, (*p).tp_h1, (*p).tp_h2, (*p).tp_h3)
+}
+
+fn spec_ctx_from_struct_slot(slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return 0 }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    spec_ctx_new((*p).tp_count, (*p).tp_h0, (*p).tp_h1, (*p).tp_h2, (*p).tp_h3)
+}
+
+// ============================================================
+// Generic-struct template table (*mut arena)
+// ============================================================
+
+fn spec_struct_table_find(name: Name) -> i64 with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < SPEC_ST_COUNT {
+        let p = SPEC_ST_PTRS[i as usize] as *mut SpecStNode
+        if (*p).name_hash == h {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_struct_table_tp_count(slot: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return 0 - 1 }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    (*p).tp_count
+}
+
+fn spec_struct_table_tp_hash(slot: i64, k: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return 0 - 1 }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    if k == 0 { return (*p).tp_h0 }
+    if k == 1 { return (*p).tp_h1 }
+    if k == 2 { return (*p).tp_h2 }
+    if k == 3 { return (*p).tp_h3 }
+    0 - 1
+}
+
+fn spec_struct_table_sd(slot: i64) -> Option<Box<StructDef>> with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return None }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    (*p).sd
+}
+
+fn spec_struct_tp_count_of(opt: Option<Box<TypeParamDefList>>) -> i64 with Mut, Panic, Div {
+    match opt {
+        None => 0
+        Some(list) => 1 + spec_struct_tp_count_of((*list).tail)
+    }
+}
+
+fn spec_struct_tp_hash_of(opt: Option<Box<TypeParamDefList>>, n: i64) -> i64 with Mut, Panic, Div {
+    match opt {
+        None => 0 - 1
+        Some(list) => {
+            if n <= 0 {
+                ast_name_hash((*list).head.name)
+            } else {
+                spec_struct_tp_hash_of((*list).tail, n - 1)
+            }
+        }
+    }
+}
+
+fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemStruct {
+                match it.struct_def {
+                    Some(sd_box) => {
+                        let tp_count = spec_struct_tp_count_of((*sd_box).type_params)
+                        if tp_count > 0 && tp_count <= 4 && SPEC_ST_COUNT < 256 && spec_struct_table_find(it.name) < 0 {
+                            let slot = SPEC_ST_COUNT
+                            let p = heap_alloc(4096) as *mut SpecStNode
+                            (*p).name_hash = ast_name_hash(it.name)
+                            (*p).tp_count = tp_count
+                            (*p).tp_h0 = spec_struct_tp_hash_of((*sd_box).type_params, 0)
+                            (*p).tp_h1 = spec_struct_tp_hash_of((*sd_box).type_params, 1)
+                            (*p).tp_h2 = spec_struct_tp_hash_of((*sd_box).type_params, 2)
+                            (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
+                            (*p).sd = it.struct_def
+                            SPEC_ST_PTRS[slot as usize] = p as i64
+                            SPEC_ST_COUNT = SPEC_ST_COUNT + 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_collect_generic_structs((*list).tail)
+        }
+    }
+}
+
+fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn {
+                match it.fn_def {
+                    Some(fd_box) => {
+                        let tp = spec_collect_free_vars_from_fndef((*fd_box), known)
+                        if tp.count > 0 && SPEC_GF_COUNT < 256 && spec_generic_table_find(it.name) < 0 {
+                            let slot = SPEC_GF_COUNT
+                            let p = heap_alloc(4096) as *mut SpecGfNode
+                            (*p).name_hash = ast_name_hash(it.name)
+                            (*p).tp_count = tp.count
+                            (*p).tp_h0 = spec_tp_hash_at(tp, 0)
+                            (*p).tp_h1 = spec_tp_hash_at(tp, 1)
+                            (*p).tp_h2 = spec_tp_hash_at(tp, 2)
+                            (*p).tp_h3 = spec_tp_hash_at(tp, 3)
+                            (*p).fd = it.fn_def
+                            SPEC_GF_PTRS[slot as usize] = p as i64
+                            SPEC_GF_NEEDED[slot as usize] = false
+                            SPEC_GF_COUNT = SPEC_GF_COUNT + 1
+                            if spec_trace_enabled() {
+                                print("specializer: registered=")
+                                print(spec_name_to_string(it.name))
+                                print(" slot=")
+                                print_int(spec_generic_table_find(it.name))
+                                print(" tp=")
+                                print_int(spec_generic_table_tp_count(slot))
+                                print("\n")
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_collect_generic_fns((*list).tail, known)
+        }
+    }
+}
+
+// ============================================================
+// Turbofish type-arg list helpers (work on the parsed list in place;
+// no array-of-TypeExpr copies)
+// ============================================================
+
+fn spec_type_args_count(opt: Option<Box<TypeExprList>>) -> i64 with Mut, Panic, Div {
+    match opt {
+        None => 0
+        Some(list) => 1 + spec_type_args_count((*list).tail)
+    }
+}
+
+fn spec_type_args_nth(opt: Option<Box<TypeExprList>>, n: i64) -> TypeExpr with Mut, Panic, Div, Alloc {
+    match opt {
+        None => dummy_type_expr()
+        Some(list) => {
+            if n <= 0 {
+                (*list).head
+            } else {
+                spec_type_args_nth((*list).tail, n - 1)
+            }
+        }
+    }
+}
+
+fn spec_render_type_name(te: TypeExpr) -> Name with Mut, Panic, Div {
+    if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
+        return spec_path_single_name(te.path)
+    }
+    make_name("T")
+}
+
+fn spec_mangle_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div {
+    var s = spec_name_to_string(base)
+    var cur = targs
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                s = str_concat(str_concat(s, "__"), spec_name_to_string(spec_render_type_name((*list).head)))
+                cur = (*list).tail
+            }
+        }
+    }
+    make_name(s)
+}
+
+// ============================================================
+// Type-substitution visitor. Context = (ctx, targs): a type param is any
+// single-segment TypeNamed whose name-hash matches one of the ctx's
+// registered params; it is replaced by the corresponding turbofish arg.
+// Recurses into every TypeExpr-bearing AST slot, including nested turbofish
+// `type_args` on calls inside the body — that is what makes generic-to-
+// generic chaining (the transitive case) resolve correctly.
+// After substitution, a reference to a LOCAL generic struct with concrete
+// args (e.g. Wrapper<i64>) is rewritten to the checker's mangled instance
+// name (Wrapper__i64) and the concrete struct item is emitted — the
+// checker's fn-signature lowering erases generic struct args, so only
+// plain concrete names survive it.
+// ============================================================
+
+fn spec_name_to_path(n: Name) -> AstPath {
+    AstPath {
+        segments: StringList { head_buf: n.buf, head_len: n.len, tail: None },
+        seg_count: 1,
+    }
+}
+
+fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
+    if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
+        let idx = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name(te.path)))
+        if idx >= 0 {
+            return spec_type_args_nth(targs, idx)
+        }
+    }
+    var out = te
+    out.inner = spec_subst_type_opt(te.inner, ctx, targs)
+    out.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
+
+    // Local generic struct with (now concrete) args -> mangled instance name.
+    if out.kind == TypeExprKind::TypeNamed && out.path.seg_count == 1 {
+        match out.type_args {
+            Some(al) => {
+                let base = spec_path_single_name(out.path)
+                let st_idx = spec_struct_table_find(base)
+                if st_idx >= 0 && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st_idx) {
+                    let mangled = spec_get_or_create_struct_instance(st_idx, base, Some(al))
+                    out.path = spec_name_to_path(mangled)
+                    out.type_args = None
+                }
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+fn spec_subst_type_opt(opt: Option<Box<TypeExpr>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<TypeExpr>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(t) => Some(Box::new(spec_subst_type(*t, ctx, targs)))
+    }
+}
+
+fn spec_subst_type_list_opt(opt: Option<Box<TypeExprList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => Some(Box::new(TypeExprList { head: spec_subst_type((*list).head, ctx, targs), tail: spec_subst_type_list_opt((*list).tail, ctx, targs) }))
+    }
+}
+
+// In-place substitution over an Expr staged in a heap buffer. Every write
+// goes through the *mut node: direct field writes on big Expr LOCALS are
+// silently dropped by the bundle backend (witnessed via trace), while
+// *mut field writes are its proven-safe path (check/mod.sio spine).
+fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    (*p).e.left = spec_subst_expr_opt((*p).e.left, ctx, targs)
+    (*p).e.right = spec_subst_expr_opt((*p).e.right, ctx, targs)
+    (*p).e.block = spec_subst_block_opt((*p).e.block, ctx, targs)
+    (*p).e.else_expr = spec_subst_expr_opt((*p).e.else_expr, ctx, targs)
+    (*p).e.args = spec_subst_expr_list_opt((*p).e.args, ctx, targs)
+    (*p).e.arms = spec_subst_match_arm_list_opt((*p).e.arms, ctx, targs)
+    (*p).e.fields = spec_subst_struct_field_list_opt((*p).e.fields, ctx, targs)
+    (*p).e.cast_type = spec_subst_type_opt((*p).e.cast_type, ctx, targs)
+    (*p).e.handler_block = spec_subst_block_opt((*p).e.handler_block, ctx, targs)
+    (*p).e.closure_return = spec_subst_type_opt((*p).e.closure_return, ctx, targs)
+    (*p).e.closure_body = spec_subst_expr_opt((*p).e.closure_body, ctx, targs)
+    (*p).e.closure_params = spec_subst_closure_param_list_opt((*p).e.closure_params, ctx, targs)
+    (*p).e.type_args = spec_subst_type_list_opt((*p).e.type_args, ctx, targs)
+
+    // Struct literal of a LOCAL generic struct template inside a substituted
+    // body: `CDExact { ... }` written in a fn generic over F names the
+    // instantiation CDExact<F> — resolvable only when the struct's param
+    // names appear in the active ctx (the common same-name convention).
+    // When every struct param resolves through ctx, rewrite the literal to
+    // the concrete instance name; otherwise leave it for the checker's own
+    // literal-inference path (baseline behavior).
+    if (*p).e.kind == ExprKind::ExprStructLit && (*p).e.path.seg_count == 1 {
+        let base = spec_path_single_name((*p).e.path)
+        let st_idx = spec_struct_table_find(base)
+        if st_idx >= 0 {
+            let st_count = spec_struct_table_tp_count(st_idx)
+            var all_resolved = true
+            var k: i64 = 0
+            while k < st_count {
+                if spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, k)) < 0 {
+                    all_resolved = false
+                }
+                k = k + 1
+            }
+            if all_resolved && st_count > 0 {
+                // Build the concrete arg list in param order.
+                var args_list: Option<Box<TypeExprList>> = None
+                var r: i64 = st_count - 1
+                while r >= 0 {
+                    let pick = spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, r))
+                    args_list = Some(Box::new(TypeExprList { head: spec_type_args_nth(targs, pick), tail: args_list }))
+                    r = r - 1
+                }
+                spec_get_or_create_struct_instance(st_idx, base, args_list)
+                // Recompute the mangled name AFTER the deep instantiation
+                // call (Name values held across deep calls arrive corrupted).
+                var args_list2: Option<Box<TypeExprList>> = None
+                var r2 = spec_struct_table_tp_count(st_idx) - 1
+                while r2 >= 0 {
+                    let pick2 = spec_ctx_tp_index(ctx, spec_struct_table_tp_hash(st_idx, r2))
+                    args_list2 = Some(Box::new(TypeExprList { head: spec_type_args_nth(targs, pick2), tail: args_list2 }))
+                    r2 = r2 - 1
+                }
+                let base2 = spec_path_single_name((*p).e.path)
+                (*p).e.path = spec_name_to_path(spec_mangle_name(base2, args_list2))
+            }
+        }
+    }
+}
+
+fn spec_subst_expr_opt(opt: Option<Box<Expr>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<Expr>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(b) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = *b
+            (*q).e = tmp
+            spec_subst_expr_mut(q, ctx, targs)
+            Some(Box::new((*q).e))
+        }
+    }
+}
+
+fn spec_subst_block(b: Block, ctx: i64, targs: Option<Box<TypeExprList>>) -> Block with Mut, Panic, Div, Alloc {
+    Block { stmts: spec_subst_stmt_list_opt(b.stmts, ctx, targs), span: b.span }
+}
+
+fn spec_subst_block_opt(opt: Option<Box<Block>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<Block>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(b) => Some(Box::new(spec_subst_block(*b, ctx, targs)))
+    }
+}
+
+fn spec_subst_stmt_list_opt(opt: Option<Box<StmtList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<StmtList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let sp = heap_alloc(16384) as *mut SpecStmtStage
+            let tmp = (*list).head
+            (*sp).s = tmp
+            (*sp).s.ty = spec_subst_type_opt((*sp).s.ty, ctx, targs)
+            (*sp).s.expr = spec_subst_expr_opt((*sp).s.expr, ctx, targs)
+            (*sp).s.target = spec_subst_expr_opt((*sp).s.target, ctx, targs)
+            Some(Box::new(StmtList { head: (*sp).s, tail: spec_subst_stmt_list_opt((*list).tail, ctx, targs) }))
+        }
+    }
+}
+
+fn spec_subst_expr_list_opt(opt: Option<Box<ExprList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ExprList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head
+            (*q).e = tmp
+            spec_subst_expr_mut(q, ctx, targs)
+            Some(Box::new(ExprList { label: (*list).label, head: (*q).e, tail: spec_subst_expr_list_opt((*list).tail, ctx, targs) }))
+        }
+    }
+}
+
+fn spec_subst_match_arm_list_opt(opt: Option<Box<MatchArmList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<MatchArmList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head.body
+            (*q).e = tmp
+            spec_subst_expr_mut(q, ctx, targs)
+            let new_arm = MatchArm {
+                pattern: (*list).head.pattern,
+                guard: spec_subst_expr_opt((*list).head.guard, ctx, targs),
+                body: (*q).e,
+                span: (*list).head.span,
+            }
+            Some(Box::new(MatchArmList { head: new_arm, tail: spec_subst_match_arm_list_opt((*list).tail, ctx, targs) }))
+        }
+    }
+}
+
+fn spec_subst_struct_field_list_opt(opt: Option<Box<StructFieldList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<StructFieldList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head.value
+            (*q).e = tmp
+            spec_subst_expr_mut(q, ctx, targs)
+            let new_init = StructFieldInit { name: (*list).head.name, value: (*q).e }
+            Some(Box::new(StructFieldList { head: new_init, tail: spec_subst_struct_field_list_opt((*list).tail, ctx, targs) }))
+        }
+    }
+}
+
+fn spec_subst_closure_param(cp: ClosureParam, ctx: i64, targs: Option<Box<TypeExprList>>) -> ClosureParam with Mut, Panic, Div, Alloc {
+    ClosureParam { name: cp.name, ty: spec_subst_type(cp.ty, ctx, targs), span: cp.span }
+}
+
+fn spec_subst_closure_param_list_opt(opt: Option<Box<ClosureParamList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => Some(Box::new(ClosureParamList { head: spec_subst_closure_param((*list).head, ctx, targs), tail: spec_subst_closure_param_list_opt((*list).tail, ctx, targs) }))
+    }
+}
+
+fn spec_subst_param(p: Param, ctx: i64, targs: Option<Box<TypeExprList>>) -> Param with Mut, Panic, Div, Alloc {
+    Param { name: p.name, ty: spec_subst_type(p.ty, ctx, targs), is_self: p.is_self, is_self_mut: p.is_self_mut, span: p.span }
+}
+
+fn spec_subst_param_list_opt(opt: Option<Box<ParamList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ParamList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => Some(Box::new(ParamList { head: spec_subst_param((*list).head, ctx, targs), tail: spec_subst_param_list_opt((*list).tail, ctx, targs) }))
+    }
+}
+
+
+// ============================================================
+// Struct monomorphization: emit `struct S__i64 { ... }` items so the
+// checker only ever sees concrete named structs in signatures.
+// ============================================================
+
+fn spec_subst_field_list_opt(opt: Option<Box<FieldDefList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<FieldDefList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let f = (*list).head
+            let new_f = FieldDef { name: f.name, ty: spec_subst_type(f.ty, ctx, targs), span: f.span }
+            Some(Box::new(FieldDefList { head: new_f, tail: spec_subst_field_list_opt((*list).tail, ctx, targs) }))
+        }
+    }
+}
+
+fn spec_make_struct_item(name: Name, sd: StructDef) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility_private(), name: name, fn_def: None,
+        struct_def: Some(Box::new(sd)), enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+
+fn spec_extra_push_item(it: Item) with Mut, Panic, Div, Alloc {
+    let np = heap_alloc(16384) as *mut SpecItemNode
+    (*np).it = it
+    (*np).next = SPEC_EXTRA_HEAD
+    SPEC_EXTRA_HEAD = np as i64
+}
+
+// Get-or-create a monomorphized struct instance `S__Args` for struct
+// template slot st_idx. Dedup shares the emitted-hash cache; nested
+// generic-struct fields recurse through spec_subst_type (terminating via
+// the same cache).
+fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
+    let mangled = spec_mangle_name(base, targs)
+    if spec_emitted_has(mangled) { return mangled }
+    spec_emitted_push(mangled)
+
+    match spec_struct_table_sd(st_idx) {
+        None => {}
+        Some(sd_box) => {
+            // Stage the struct clone in a *mut heap node; write the mangled
+            // name before the deep field-substitution call (see fn-instance
+            // note about Name locals across deep calls).
+            let sp = heap_alloc(16384) as *mut SpecStructDefStage
+            let tmp_sd = (*sd_box)
+            (*sp).sd = tmp_sd
+            (*sp).sd.name = mangled
+            (*sp).sd.type_params = None
+            let st_ctx = spec_ctx_from_struct_slot(st_idx)
+            (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
+            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
+        }
+    }
+    mangled
+}
+
+// ============================================================
+// Dedup / instantiation cache (name-hash keyed)
+// ============================================================
+
+fn spec_emitted_has(n: Name) -> bool with Mut, Panic, Div {
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_EMITTED_COUNT {
+        if SPEC_EMITTED_HASHES[i as usize] == h { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_emitted_push(n: Name) with Mut, Panic, Div {
+    if SPEC_EMITTED_COUNT < 64 {
+        SPEC_EMITTED_HASHES[SPEC_EMITTED_COUNT as usize] = ast_name_hash(n)
+        SPEC_EMITTED_COUNT = SPEC_EMITTED_COUNT + 1
+    }
+}
+
+fn spec_make_fn_item(name: Name, fd: FnDef) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility_private(), name: name, fn_def: Some(Box::new(fd)),
+        struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+
+// Ensure a monomorphized clone of template `base_name` for `targs` exists.
+//
+// SAME-NAME SCHEME: the clone keeps the TEMPLATE\'S OWN NAME and at finalize
+// time REPLACES the template item, so call sites need no rewriting at all
+// (the checker ignores turbofish on non-generic signatures — generic_names
+// comes out empty at check.sio:6323 — and the lowering has no generics
+// concept). This sidesteps the callee-rename Expr-field write that the
+// bundle backend silently drops. A template instantiated with TWO OR MORE
+// distinct type-arg lists is POISONED back to baseline behavior (template
+// kept verbatim, calls untouched).
+//
+// Reserves the instantiation hash BEFORE processing the clone\'s own body so
+// a self-recursive generic fn terminates.
+fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
+    let gt_idx = spec_generic_table_find(base_name)
+    if gt_idx < 0 { return }
+    if spec_type_args_count(targs) != spec_generic_table_tp_count(gt_idx) { return }
+
+    let inst_hash = ast_name_hash(spec_mangle_name(base_name, targs))
+    if SPEC_GF_INST_HASH[gt_idx as usize] != 0 {
+        if SPEC_GF_INST_HASH[gt_idx as usize] != inst_hash {
+            SPEC_GF_POISONED[gt_idx as usize] = true
+            if spec_trace_enabled() { print("specializer: poisoned (second distinct instantiation)\n") }
+        }
+        return
+    }
+    SPEC_GF_INST_HASH[gt_idx as usize] = inst_hash
+
+    match spec_generic_table_fd(gt_idx) {
+        None => {}
+        Some(fd_box) => {
+            let fp = heap_alloc(32768) as *mut SpecFnDefStage
+            let tmp_fd = (*fd_box)
+            (*fp).fd = tmp_fd
+            let fn_ctx = spec_ctx_from_fn_slot(gt_idx)
+            (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, fn_ctx, targs)
+            (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, fn_ctx, targs)
+            (*fp).fd.body = spec_subst_block((*fp).fd.body, fn_ctx, targs)
+            // Scan the clone body for transitive turbofish instantiations
+            // (read-only walk; no tree mutation).
+            spec_scan_block((*fp).fd.body)
+            let np = heap_alloc(16384) as *mut SpecItemNode
+            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
+            (*np).next = 0
+            SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
+            if spec_trace_enabled() {
+                print("specializer: clone_ready=")
+                print(spec_name_to_string((*fp).fd.name))
+                print("\n")
+            }
+        }
+    }
+}
+
+// ============================================================
+// Call-site rewriting visitor: finds turbofish Call exprs targeting a
+// collected generic fn and rewrites callee+type_args in place. Mirrors
+// check.sio's call_expr_type_args lookup (type_args lives on the call node
+// itself OR on its callee ident — the parser stamps both).
+// ============================================================
+
+fn spec_call_expr_type_args(e: Expr) -> Option<Box<TypeExprList>> with Mut, Panic, Div {
+    match e.type_args {
+        Some(args) => Some(args)
+        None => {
+            match e.left {
+                Some(callee) => (*callee).type_args
+                None => None
+            }
+        }
+    }
+}
+
+fn spec_call_expr_callee_name(e: Expr) -> Name with Mut, Panic, Div {
+    match e.left {
+        None => empty_name()
+        Some(callee) => {
+            let c = *callee
+            if c.kind == ExprKind::ExprIdent {
+                c.name
+            } else if c.kind == ExprKind::ExprPath && c.path.seg_count == 1 {
+                spec_path_single_name(c.path)
+            } else {
+                empty_name()
+            }
+        }
+    }
+}
+
+// Rewrite a call's callee to the mangled instance name, returning the new
+// callee box. IMPORTANT: this deliberately returns only the small
+// Option<Box<Expr>> — an earlier version returned the whole rewritten Expr
+// and the caller's `out = rewrite(out, ...)` self-assignment silently lost
+// the update (the large-struct SRET self-by-value hazard documented in
+// compiler/main.sio). Callers assign the returned box into out.left and
+// clear out.type_args themselves.
+// Read-only scanner: walks fn bodies looking for turbofish calls that
+// target a collected generic template, instantiating clones as a side
+// effect. NO tree mutation happens here (call sites are deliberately left
+// untouched — see spec_ensure_instance's same-name scheme).
+fn spec_scan_expr_opt(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(b) => spec_scan_expr((*b))
+    }
+}
+
+fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
+    spec_scan_expr_opt(e.left)
+    spec_scan_expr_opt(e.right)
+    spec_scan_block_opt(e.block)
+    spec_scan_expr_opt(e.else_expr)
+    spec_scan_expr_list_opt(e.args)
+    spec_scan_match_arm_list_opt(e.arms)
+    spec_scan_struct_field_list_opt(e.fields)
+    spec_scan_block_opt(e.handler_block)
+    spec_scan_expr_opt(e.closure_body)
+
+    if e.kind == ExprKind::ExprCall {
+        let callee_name = spec_call_expr_callee_name(e)
+        if !name_is_empty(callee_name) {
+            let gt_idx = spec_generic_table_find(callee_name)
+            if gt_idx >= 0 {
+                var specialized = false
+                match spec_call_expr_type_args(e) {
+                    Some(targs) => {
+                        let provided = spec_type_args_count(Some(targs))
+                        if spec_trace_enabled() {
+                            print("specializer: call=")
+                            print(spec_name_to_string(callee_name))
+                            print(" gt=")
+                            print_int(gt_idx)
+                            print(" targs=")
+                            print_int(provided)
+                            print(" want=")
+                            print_int(spec_generic_table_tp_count(gt_idx))
+                            print("\n")
+                        }
+                        if provided == spec_generic_table_tp_count(gt_idx) {
+                            spec_ensure_instance(callee_name, Some(targs))
+                            specialized = true
+                        }
+                    }
+                    None => {}
+                }
+                if !specialized {
+                    SPEC_GF_NEEDED[gt_idx as usize] = true
+                }
+            }
+        }
+    }
+}
+
+fn spec_scan_block(b: Block) with IO, Mut, Panic, Div, Alloc {
+    spec_scan_stmt_list_opt(b.stmts)
+}
+
+fn spec_scan_block_opt(opt: Option<Box<Block>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(b) => spec_scan_stmt_list_opt((*b).stmts)
+    }
+}
+
+fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            spec_scan_expr_opt((*list).head.expr)
+            spec_scan_expr_opt((*list).head.target)
+            spec_scan_stmt_list_opt((*list).tail)
+        }
+    }
+}
+
+fn spec_scan_expr_list_opt(opt: Option<Box<ExprList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            spec_scan_expr((*list).head)
+            spec_scan_expr_list_opt((*list).tail)
+        }
+    }
+}
+
+fn spec_scan_match_arm_list_opt(opt: Option<Box<MatchArmList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            spec_scan_expr_opt((*list).head.guard)
+            spec_scan_expr((*list).head.body)
+            spec_scan_match_arm_list_opt((*list).tail)
+        }
+    }
+}
+
+fn spec_scan_struct_field_list_opt(opt: Option<Box<StructFieldList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            spec_scan_expr((*list).head.value)
+            spec_scan_struct_field_list_opt((*list).tail)
+        }
+    }
+}
+
+fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+                match it.fn_def {
+                    Some(fd_box) => spec_scan_block((*fd_box).body)
+                    None => {}
+                }
+            }
+            spec_scan_items((*list).tail)
+        }
+    }
+}
+
+// ============================================================
+// Top-level driver
+// ============================================================
+
+fn spec_append_items(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    match a {
+        None => b
+        Some(list) => Some(Box::new(ItemList { head: (*list).head, tail: spec_append_items((*list).tail, b) }))
+    }
+}
+
+// Materialize the *mut chain of freshly instantiated items into a real
+// Option<Box<ItemList>> (order does not matter for top-level fns).
+fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out: Option<Box<ItemList>> = None
+    var cur = SPEC_EXTRA_HEAD
+    while cur != 0 {
+        let p = cur as *mut SpecItemNode
+        out = Some(Box::new(ItemList { head: (*p).it, tail: out }))
+        cur = (*p).next
+    }
+    out
+}
+
+// Finalize phase (runs after ALL bodies have been scanned, so every call
+// site has voted): for each generic template item —
+//   - poisoned (2+ distinct instantiations) or still referenced by a
+//     turbofish-less/arity-mismatched call: keep the template verbatim so
+//     the checker\'s existing diagnostics (e.g. E010) keep firing;
+//   - exactly one instantiation: REPLACE the template with its concrete
+//     same-name clone;
+//   - never referenced: drop it so the checker never sees a body with free
+//     type vars.
+fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match items {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_finalize_items((*list).tail)
+            if it.kind == ItemKind::ItemFn {
+                let gt_idx = spec_generic_table_find(it.name)
+                if gt_idx >= 0 {
+                    if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
+                        return Some(Box::new(ItemList { head: it, tail: rest }))
+                    }
+                    if SPEC_GF_CLONE_PTR[gt_idx as usize] != 0 {
+                        let np = SPEC_GF_CLONE_PTR[gt_idx as usize] as *mut SpecItemNode
+                        return Some(Box::new(ItemList { head: (*np).it, tail: rest }))
+                    }
+                    return rest
+                }
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
+
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var SPEC_TRACE_ENABLED_ON: i64 = 0
+var SPEC_TRACE_ENABLED_CHECKED: i64 = 0
+
+fn spec_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if SPEC_TRACE_ENABLED_CHECKED == 0 {
+        SPEC_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SPEC_TRACE"), "1") {
+            SPEC_TRACE_ENABLED_ON = 1
+        }
+    }
+    SPEC_TRACE_ENABLED_ON == 1
+}
+
+fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn {
+                print("specializer: out_fn ")
+                print(spec_name_to_string(it.name))
+                print("\n")
+            } else if it.kind == ItemKind::ItemStruct {
+                print("specializer: out_struct ")
+                print(spec_name_to_string(it.name))
+                print("\n")
+            }
+            spec_trace_out_items((*list).tail)
+        }
+    }
+}
+
+pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    spec_reset_state()
+    let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    spec_collect_generic_fns(items, known)
+    spec_collect_generic_structs(items)
+    if spec_trace_enabled() {
+        print("specializer: generic_fns=")
+        print_int(SPEC_GF_COUNT)
+        print("\n")
+    }
+    if SPEC_GF_COUNT == 0 {
+        return items
+    }
+    spec_scan_items(items)
+    let finalized = spec_finalize_items(items)
+    let out = spec_append_items(finalized, spec_extra_items_to_list())
+    if spec_trace_enabled() {
+        print("specializer: instances=")
+        print_int(SPEC_EMITTED_COUNT)
+        print("\n")
+        spec_trace_out_items(out)
+    }
+    out
+}
+
+// ============================================================
+// Multi-module lane support (WP-A3)
+// ============================================================
+//
+// The multi-module driver (compiler/module_frontend.sio) merges every module's
+// item list into ONE list and calls specialize_generics over it (design (a):
+// with all imported structs/enums present, the "locally declared struct/enum"
+// exclusion in spec_type_is_free_var covers imported single-letter type names
+// too, so a real imported `struct F {..}` is never misread as a free type var).
+// It then needs two things this state exposes AFTER a specialize_generics call:
+//   1. spec_last_instantiated() — did the pass actually replace a generic fn
+//      template with a concrete clone, or emit a concrete struct instance?
+//      Only then does the driver collapse the merged+specialized list into one
+//      module. When false, the merged list differs from the inputs by at most
+//      dropped never-referenced templates, so the driver leaves the per-module
+//      programs untouched (plain multi-module code stays byte-identical).
+//   2. spec_append_item_lists() — a public wrapper over the proven internal
+//      concat, used to build the merged list without duplicating the pattern.
+
+pub fn spec_last_instantiated() -> bool with Mut, Panic, Div {
+    spec_mono_marker_count() > 0
+}
+
+// Seed-safe i64 count of monomorphization markers after specialize_generics:
+// emitted struct instances + same-name fn clones. Drivers that arm IR collapse
+// should prefer this over bare bool negation — CI-seed rebuilds miscompiled
+// `if !spec_last_instantiated() { return … }` so non-generic multi-mod still
+// collapsed (generic_fns=0 → ir_summary_failed on imported_deref_f64_array).
+pub fn spec_mono_marker_count() -> i64 with Mut, Panic, Div {
+    var n: i64 = SPEC_EMITTED_COUNT
+    var i: i64 = 0
+    while i < SPEC_GF_COUNT {
+        if SPEC_GF_CLONE_PTR[i as usize] != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    spec_append_items(a, b)
+}
+
+// ============================================================
+// Specialized-list reachability DCE (Wave13)
+// ============================================================
+//
+// After merge→specialize, the monomorphized ItemList still carries every
+// top-level ItemFn from every imported module (e.g. full f64 cayley_dickson
+// arithmetic when only `cd_sigma` is used). Body-lowering those unused
+// aggregate f64 CD helpers is a known SEGV surface (Wave12 residual class:
+// float-layout poison / large [f64;2048] loops). This pass marks callables
+// reachable from `main` via fixed-point BFS over ExprCall + ExprMethodCall
+// edges, then drops unmarked top-level ItemFns. Non-fn items (structs,
+// impls, traits, …) are always kept so layout + method dispatch survive.
+//
+// Seed-safe: local i64 hash tables only (no Name/Option globals).
+
+// WHY THIS TABLE IS A HASH SET AND NOT A LIST.
+//
+// It used to be `[i64; 512]` scanned linearly, and both halves of that were
+// load-bearing in the wrong direction.
+//
+// The FATAL half: when the list was full, spec_dce_hash_insert returned false
+// and inserted nothing — silently. A callee whose mark could not be recorded is
+// then not found by spec_dce_filter_items, and filter_items DELETES every
+// top-level ItemFn it cannot find. So past 512 distinct reachable names this
+// pass did not merely stop optimising, it started removing live functions from
+// the program. Measured on 2026-08-04: a name-based reachability census over
+// main.sio's own 120-module closure marks 5889 names. The compiler was 11x past
+// the point where its own dead-code pass begins deleting reachable code.
+//
+// It compounded: spec_dce_scan_item_if_marked reports "changed" as
+// `*count > before`, and once the table is full nothing can be inserted, so
+// `changed` is false and the fixed-point loop EXITS SATISFIED with the mark set
+// incomplete. A saturated table looked exactly like convergence.
+//
+// The LINEAR half is why the cap could not simply be raised: find is O(count),
+// run for every item on every round, so at 16k marks over ~10k items the pass
+// would be quadratic and the build would not finish. Open addressing makes the
+// cap affordable, which is what makes the refusal below affordable too.
+//
+// The table is a power of two so the probe wraps by mask, and 0 stays the empty
+// sentinel — ast_name_hash returns |hash| and insert rejects 0, so no live name
+// can be confused with an empty slot.
+let SPEC_DCE_SLOTS: i64 = 16384
+let SPEC_DCE_SLOT_MASK: i64 = 16383
+// 50% load. Past this the probe lengths stop being constant and, more to the
+// point, the pass must refuse rather than guess.
+let SPEC_DCE_MAX: i64 = 8192
+// Fixed-point rounds. Was the same constant as the table size, which meant
+// nothing in particular; reachability over this graph converges in far fewer.
+let SPEC_DCE_MAX_ROUNDS: i64 = 64
+
+fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut, Panic, Div {
+    if h == 0 {
+        return false
+    }
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == 0 {
+            return false
+        }
+        if cur == h {
+            return true
+        }
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
+    }
+    false
+}
+
+fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
+    if h == 0 {
+        return false
+    }
+    if *count >= SPEC_DCE_MAX {
+        // Do NOT insert and do NOT pretend this was a no-op: the caller reads
+        // *count against SPEC_DCE_MAX and abandons filtering entirely. Silence
+        // here is what deleted live code before.
+        return false
+    }
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == h {
+            return false
+        }
+        if cur == 0 {
+            marks[slot as usize] = h
+            *count = *count + 1
+            return true
+        }
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
+    }
+    false
+}
+
+// Walk an expression tree; insert callee / method name hashes into `marks`.
+fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+    if e.kind == ExprKind::ExprCall {
+        let callee = spec_call_expr_callee_name(e)
+        if !name_is_empty(callee) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(callee))
+        }
+    } else if e.kind == ExprKind::ExprMethodCall {
+        if !name_is_empty(e.name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        }
+    }
+    match e.left {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.right {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.else_expr {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.closure_body {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.block {
+        Some(b) => spec_dce_scan_block(*b, marks, count)
+        None => {}
+    }
+    match e.handler_block {
+        Some(b) => spec_dce_scan_block(*b, marks, count)
+        None => {}
+    }
+    match e.args {
+        Some(list) => {
+            spec_dce_scan_expr((*list).head, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        spec_dce_scan_expr((*rest).head, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    match e.arms {
+        Some(list) => {
+            match (*list).head.guard {
+                Some(g) => spec_dce_scan_expr(*g, marks, count)
+                None => {}
+            }
+            spec_dce_scan_expr((*list).head.body, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        match (*rest).head.guard {
+                            Some(g) => spec_dce_scan_expr(*g, marks, count)
+                            None => {}
+                        }
+                        spec_dce_scan_expr((*rest).head.body, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    match e.fields {
+        Some(list) => {
+            spec_dce_scan_expr((*list).head.value, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        spec_dce_scan_expr((*rest).head.value, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+    var cur = b.stmts
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                match (*list).head.expr {
+                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    None => {}
+                }
+                match (*list).head.target {
+                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    None => {}
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// If item is a body the filter can delete (a top-level ItemFn), scan its
+// body only when it is marked. Impl and trait methods are never deleted by
+// the filter, so their bodies are scanned unconditionally — a retained body
+// must contribute its callees to the mark set. Returns true if any new hash
+// was inserted.
+fn spec_dce_scan_item_if_marked(
+    it: Item,
+    marks: &! [i64; 16384],
+    count: &! i64
+) -> bool with Mut, Panic, Div {
+    let before = *count
+    if it.kind == ItemKind::ItemFn {
+        let h = ast_name_hash(it.name)
+        if spec_dce_hash_find(marks, *count, h) {
+            match it.fn_def {
+                Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                None => {}
+            }
+        }
+    } else if it.kind == ItemKind::ItemImpl {
+        // Method bodies are scanned UNCONDITIONALLY, not only when the bare
+        // method name is marked. The filter below never deletes an ItemImpl,
+        // and the dep body pass lowers every method of a kept impl, so a
+        // method body is retained even when nothing reachable calls it. A
+        // retained body's callees must therefore be marked, or the callee is
+        // deleted from the item list while the wrapper that calls it still
+        // lowers — the call then binds to an instr_count==0 stub and native
+        // codegen traps it (ud2). Measured 2026-08-19 on madaros_root2_associated_
+        // import: Epistemic::measured lowered with a real delegation body while
+        // ep_measured (called only from that impl) was filtered out — SIGILL
+        // rc=132; the same program runs green with SOUNIO_DISABLE_MM_DCE=1. The
+        // associated call could not mark "measured" either, because
+        // spec_call_expr_callee_name returns empty for multi-segment paths —
+        // so the gate could never open for this shape at all.
+        match it.impl_def {
+            Some(id) => {
+                var mcur = (*id).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        None => { mgoing = false }
+                        Some(mlist) => {
+                            let mit = (*mlist).head
+                            if mit.kind == ItemKind::ItemFn {
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
+                                }
+                            }
+                            mcur = (*mlist).tail
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    } else if it.kind == ItemKind::ItemTrait {
+        // Same unconditional scan as ItemImpl above: the filter keeps
+        // ItemTrait whole, so a default-method body is retained and its
+        // callees must be marked.
+        match it.trait_def {
+            Some(td) => {
+                var mcur = (*td).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        None => { mgoing = false }
+                        Some(mlist) => {
+                            let mit = (*mlist).head
+                            if mit.kind == ItemKind::ItemFn {
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
+                                }
+                            }
+                            mcur = (*mlist).tail
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    *count > before
+}
+
+fn spec_dce_scan_list_if_marked(
+    items: Option<Box<ItemList>>,
+    marks: &! [i64; 16384],
+    count: &! i64
+) -> bool with Mut, Panic, Div {
+    var changed = false
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_dce_scan_item_if_marked((*list).head, marks, count) {
+                    changed = true
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    changed
+}
+
+fn spec_dce_has_main(items: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    let main_h = ast_name_hash(make_name("main"))
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemFn {
+                    if ast_name_hash(it.name) == main_h {
+                        return true
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_dce_count_item_fns(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemFn {
+                    n = n + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    n
+}
+
+// Drop top-level ItemFns whose name hash is not in `marks`. Keep every
+// non-fn item (and keep order of survivors).
+fn spec_dce_filter_items(
+    items: Option<Box<ItemList>>,
+    marks: &[i64; 16384],
+    mark_count: i64
+) -> Option<Box<ItemList>> with Mut, Alloc, Panic, Div {
+    match items {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_dce_filter_items((*list).tail, marks, mark_count)
+            if it.kind == ItemKind::ItemFn {
+                // A MODULE-LEVEL GLOBAL IS ALSO AN ItemFn. parse_global_var_item
+                // and parse_global_let_item (parser/items.sio:1394, :1338) both
+                // build `kind: ItemKind::ItemFn` with `fn_def: None` -- there is
+                // no ItemVar in the enum. Lowering then gives each one an
+                // IrFunction slot with compile_strategy = IR_STRATEGY_BSS_GLOBAL,
+                // carrying its BSS offset and size (ir/lower.sio:1609).
+                //
+                // Nothing CALLS a global -- globals are read, not called -- so no
+                // reachability scan rooted at `main` can ever mark one, and
+                // filtering by marks alone deletes the program's BSS slots.
+                //
+                // Measured 2026-08-06, before this guard, on the ordinary
+                // multi-module path:
+                //
+                //   var G: [i64; 4]                    merged 4 -> 3, and
+                //   fn main() { print_int(G[0]) ... }  the binary printed NOTHING
+                //
+                // No crash and no diagnostic: bss_total_size is accumulated as
+                // the slots are lowered, so dropping one shifts every global
+                // after it and the program reads someone else's storage. A
+                // struct-typed global then segfaults outright. Confirmed by
+                // A/B against SOUNIO_DISABLE_MM_DCE=1 on the same binary.
+                //
+                // `fn_def: None` is the discriminator, and it is the RIGHT one:
+                // a real function always carries a body here, and the other
+                // fn_def-less ItemFns the parser builds are error-recovery
+                // stubs, which are harmless to keep and dangerous to guess at.
+                match it.fn_def {
+                    None => return Some(Box::new(ItemList { head: it, tail: rest }))
+                    Some(_) => {}
+                }
+                let h = ast_name_hash(it.name)
+                if spec_dce_hash_find(marks, mark_count, h) {
+                    return Some(Box::new(ItemList { head: it, tail: rest }))
+                }
+                return rest
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
+
+// Public entry: reachability-DCE unused top-level ItemFns from a specialized
+// (or otherwise merged) item list, rooted at `main`. No-op when main is
+// missing (caller keeps the list for hollow-main fallback paths).
+// ---------------------------------------------------------------------------
+// Cross-module reachability DCE for the ORDINARY multi-module path.
+//
+// spec_dce_unreachable_item_fns below only runs on the specialized-collapse
+// path (module_frontend_specialized_prepare returns early when there are no
+// monomorphisation markers), so a program with no generics gets no pruning at
+// all. Measured 2026-08-05: compiling self-hosted/compiler/main.sio loads 120
+// modules, typechecks clean, lowers, and then dies in the merge —
+// "too many functions: shared IR module capacity exceeded (max 8191 slots)" —
+// with 10705 declared functions, of which a reachability census from `main`
+// says 5997 are live. The pruning that would have fitted it already exists and
+// was simply never asked to run here.
+//
+// MARKS LIVE IN GLOBALS, and that is not a style choice. Filtering in place
+// would mean `(*programs)[k].items = filtered`, a nested field-in-array store
+// through `&!` — the shape module_frontend.sio's own comments record as
+// dropped by lean_single ("Handoff MUST NOT rely on nested field-in-array
+// store"). So the marks are computed once into globals and the caller filters
+// at its two READ sites, where the result is an ordinary local.
+var SPEC_DCE_G_MARKS: [i64; 16384]
+var SPEC_DCE_G_COUNT: i64 = 0
+var SPEC_DCE_G_READY: i64 = 0
+
+// Memoised for the same reason as every other read_env in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak.
+var SPEC_DCE_MM_OFF: i64 = 0
+var SPEC_DCE_MM_OFF_CHECKED: i64 = 0
+
+fn spec_dce_mm_disabled() -> bool with IO, Mut, Panic, Div {
+    if SPEC_DCE_MM_OFF_CHECKED == 0 {
+        SPEC_DCE_MM_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_MM_DCE"), "1") {
+            SPEC_DCE_MM_OFF = 1
+        }
+    }
+    SPEC_DCE_MM_OFF == 1
+}
+
+// Compute the live set across every loaded program. Returns the mark count, 0
+// if there is no `main` to root from, or -1 if the mark set could not be
+// completed — in which case the caller must NOT filter.
+pub fn spec_dce_mark_across_programs(
+    programs: &! [Program; 256],
+    loaded: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    SPEC_DCE_G_READY = 0
+    SPEC_DCE_G_COUNT = 0
+
+    // SOUNIO_DISABLE_MM_DCE=1 forces the refusal path. Two reasons it exists.
+    //
+    // First, it is the only cheap way to attribute a miscompile to this pass. A
+    // Madaros built before cross-module DCE ran on the ordinary path and one
+    // built after are ~100 MB binaries from tree states that cannot be diffed,
+    // so "did the DCE do this?" otherwise costs a 40-minute rebuild per guess.
+    //
+    // Second, this pass deletes by SOURCE-LEVEL reachability, and lowering
+    // emits calls that no source-level scan can see. Measured 2026-08-06 on a
+    // 5-function program with a struct-typed global: 9 merged functions before,
+    // 7 after, and the emitted binary SILENTLY SKIPS `print_int(G.len)` -- no
+    // crash, no diagnostic, a statement that simply does not execute. The
+    // filter's own contract ("returns its input unchanged unless a COMPLETE
+    // mark set is ready") was honoured: the mark set was complete for the AST
+    // and still wrong for the program.
+    //
+    // Until the seed set covers what lowering synthesises, this knob is the
+    // difference between a suspected miscompile and a demonstrated one.
+    if spec_dce_mm_disabled() {
+        return 0 - 1
+    }
+
+    var z: i64 = 0
+    while z < SPEC_DCE_SLOTS {
+        SPEC_DCE_G_MARKS[z as usize] = 0
+        z = z + 1
+    }
+
+    var has_main = false
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        if spec_dce_has_main((*programs)[i as usize].items) {
+            has_main = true
+        }
+        i = i + 1
+    }
+    if !has_main {
+        return 0
+    }
+
+    var count: i64 = 0
+    let main_h = ast_name_hash(make_name("main"))
+    var _seeded = spec_dce_hash_insert(&! SPEC_DCE_G_MARKS, &! count, main_h)
+
+    // Fixed point over ALL programs at once: a callee in module B reached from
+    // a body in module A must extend the same mark set, which is the whole
+    // reason this cannot be done per module.
+    var fuel: i64 = 0
+    var going = true
+    while going {
+        var changed = false
+        var m: i64 = 0
+        while m < loaded && m < 256 {
+            if spec_dce_scan_list_if_marked((*programs)[m as usize].items, &! SPEC_DCE_G_MARKS, &! count) {
+                changed = true
+            }
+            m = m + 1
+        }
+        fuel = fuel + 1
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
+            going = false
+        }
+    }
+
+    // Same refusal as the single-list entry point, and for the same reason: a
+    // saturated table and a converged one look identical from inside the loop,
+    // so the test is on capacity. Filtering against an incomplete mark set
+    // deletes reachable code.
+    if count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce_mm: REFUSING to filter — mark set incomplete (marks ")
+        print_int(count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(")\n")
+        return 0 - 1
+    }
+
+    SPEC_DCE_G_COUNT = count
+    SPEC_DCE_G_READY = 1
+    count
+}
+
+// Filter one module's items against the marks computed above. Returns the input
+// unchanged unless a complete mark set is ready, so a refusal upstream cannot
+// silently become a deletion here.
+pub fn spec_dce_filter_with_global_marks(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return items
+    }
+    spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT)
+}
+
+// How many top-level fns survive in `items` under the current marks. Lets the
+// caller's capacity preflight count what will ACTUALLY be lowered rather than
+// what was parsed.
+pub fn spec_dce_live_item_fns(items: Option<Box<ItemList>>) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return spec_dce_count_item_fns(items)
+    }
+    spec_dce_count_item_fns(spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT))
+}
+
+pub fn spec_dce_unreachable_item_fns(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    if !spec_dce_has_main(items) {
+        return items
+    }
+    var marks: [i64; 16384] = [0; 16384]
+    var mark_count: i64 = 0
+    let main_h = ast_name_hash(make_name("main"))
+    var _seeded = spec_dce_hash_insert(&! marks, &! mark_count, main_h)
+
+    // Fixed-point: scan bodies of marked callables, extend mark set.
+    //
+    // `changed` is only trustworthy while the table can still accept marks.
+    // When it cannot, `changed` is false for a reason that has nothing to do
+    // with convergence, so the round count alone must not be read as "done" —
+    // that is checked separately below, against mark_count, not against this
+    // loop's exit.
+    var fuel: i64 = 0
+    var going = true
+    while going {
+        let changed = spec_dce_scan_list_if_marked(items, &! marks, &! mark_count)
+        fuel = fuel + 1
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
+            going = false
+        }
+    }
+
+    // REFUSE RATHER THAN DELETE. Filtering is only sound if the mark set is
+    // complete, and it is complete only if nothing was ever turned away. A
+    // saturated table and a converged one are indistinguishable from the loop
+    // above, so the test is on capacity: at the limit, hand back the input
+    // untouched. The cost of refusing is a larger IrModule; the cost of
+    // filtering against a truncated mark set is a compiler with live functions
+    // missing, which is what this pass did before.
+    //
+    // Rounds are checked too, for the same reason: exhausting them means the
+    // reachable set was still growing when the loop stopped.
+    if mark_count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce: REFUSING to filter — the mark set is not complete (marks ")
+        print_int(mark_count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(" of ")
+        print_int(SPEC_DCE_MAX_ROUNDS)
+        print("). Every top-level fn is kept; the module will be larger than it needs to be.\n")
+        return items
+    }
+
+    let before_fns = spec_dce_count_item_fns(items)
+    let out = spec_dce_filter_items(items, &marks, mark_count)
+    let after_fns = spec_dce_count_item_fns(out)
+    if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+        print("spec_dce: item_fns ")
+        print_int(before_fns)
+        print(" -> ")
+        print_int(after_fns)
+        print(" marks=")
+        print_int(mark_count)
+        print("\n")
+    }
+    out
+}

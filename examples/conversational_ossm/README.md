@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.conversational-ossm.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.conversational-ossm.readme
+-->
+
 # Conversational O-SSM
 
 This directory now has a repo-native conversational O-SSM scaffold instead of only isolated octonion demos.

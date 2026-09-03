@@ -399,3 +399,58 @@ Got an error?
 │
 └─ Undefined variable → Top-level let? Convert to fn constant
 ```
+
+---
+
+## Machine-Readable Error Code Reference
+
+Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `souc check --json` flag and **no** `souc explain <CODE>` subcommand in Madaros v0.80.0 (both were removed / never shipped — verify with `souc --help`). Read the per-code files under `explanations/` directly.
+
+> **⚠️ Enforcement reality — verified 2026-07-11 against the default `bin/souc` (Madaros).** The default compiler is **more permissive** than this table implies; several listed codes do **not** currently fire under `souc check` (the "wrong" example compiles clean). Verified non-firing: **E035** (missing IO/Div/Observe effect — effects are not enforced under `check`), **E040/E041/E042/E043** (Rust `let mut` / `&mut` / `#[...]` / `ident!()` — these surface as a bare `parse error` or `check: OK`, not a coded compat error), **E201–E207** (the `ZD` capability family — unenforced), **E208/E209** (refinement predicates — `Pos`/`Prob` treated nominally; the predicate is not evaluated), **E213** (tuple-destructure arity), **E216** (recursive struct type), **E224** (unreadable/dead import — silently ignored). Wrong code numbers: an arity mismatch surfaces as **E010** (not E006); a tail/return-type mismatch as **E008** (not E218). Confirmed firing: E001, E010, E170, E171. `check` stops before codegen, so codegen/linker codes (E007, E217–E223) are not reachable via `check`. Treat this table as the code *namespace*, not a guarantee that every guard is wired. (Note: the `lean_single` seed engine is stricter and rejects some of the above — but agents use the default Madaros.)
+
+| Code | Component | Severity | Gloss | Explanation |
+|------|-----------|----------|-------|-------------|
+| E000 | legacy | error | Unclassified error (legacy — no code assigned) | — |
+| E001 | type-checker | error | Type mismatch / linear constraint violation | [E001.md](explanations/E001.md) |
+| E006 | type-checker | error | Arity mismatch — wrong number of arguments | [E006.md](explanations/E006.md) |
+| E007 | codegen | error | Too many local variables in function | [E007.md](explanations/E007.md) |
+| E008 | codegen | error | Too many globals | [E008.md](explanations/E008.md) |
+| E035 | type-checker/effects | error | Effect not declared in function signature | [E035.md](explanations/E035.md) |
+| E036 | type-checker/effects | error | Unobserved\<T\> crosses observation boundary without Observe | [E036.md](explanations/E036.md) |
+| E040 | parser/compat | error | Rust `let mut` — use `var` instead | [E040.md](explanations/E040.md) |
+| E041 | parser/compat | error | Rust `&mut` — use `&!` instead | [E041.md](explanations/E041.md) |
+| E042 | parser/compat | error | Rust attribute `#[...]` not valid in Sounio | [E042.md](explanations/E042.md) |
+| E043 | parser/compat | error | Rust macro `ident!(...)` not valid in Sounio | [E043.md](explanations/E043.md) |
+| E067 | type-checker/epistemic | warning | Potential confounding in epistemic model | [E067.md](explanations/E067.md) |
+| E070 | type-checker/kernel | error | IO or Mut effect in kernel function | [E070.md](explanations/E070.md) |
+| E072 | type-checker/kernel | error | Kernel function must return unit `()` | [E072.md](explanations/E072.md) |
+| E170 | type-checker/epistemic | error | `.value` on `Knowledge<T>` requires `with Epistemic` | [E170.md](explanations/E170.md) |
+| E171 | type-checker/epistemic | error | Cannot cast epistemic type to its inner type | [E171.md](explanations/E171.md) |
+| E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
+| E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
+| E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
+| E204 | type-checker/zero-divisor | error | `Composable<T>` requires `with ZD` | [E204.md](explanations/E204.md) |
+| E205 | type-checker/zero-divisor | error | `Audited<T>` requires `with ZD, Witness` | [E205.md](explanations/E205.md) |
+| E206 | type-checker/zero-divisor | error | `Revivable<T>` requires `with ZD, Temporal` | [E206.md](explanations/E206.md) |
+| E207 | type-checker/zero-divisor | error | `Interpretable<T>` requires `with ZD` | [E207.md](explanations/E207.md) |
+| E208 | type-checker/refinement | error | refinement type violation — integer value violates predicate | [E208.md](explanations/E208.md) |
+| E209 | type-checker/refinement | error | refinement type violation — f64 value violates predicate | [E209.md](explanations/E209.md) |
+| E210 | type-checker/algebra | error | algebra property violation | [E210.md](explanations/E210.md) |
+| E211 | type-checker/study | error | study block requires at least one hypothesis | [E211.md](explanations/E211.md) |
+| E212 | type-checker/algebra | error | Hessian AD over a non-associative algebra | [E212.md](explanations/E212.md) |
+| E213 | type-checker/destructure | error | tuple destructure arity mismatch | [E213.md](explanations/E213.md) |
+| E214 | type-checker/epistemic | error | confidence gate violation | [E214.md](explanations/E214.md) |
+| E215 | type-checker/epistemic | error | EpistemicComplete violation | [E215.md](explanations/E215.md) |
+| E216 | type-checker/recursive-type | error | infinite recursive type | [E216.md](explanations/E216.md) |
+| E217 | codegen | error | invalid function body span | [E217.md](explanations/E217.md) |
+| E218 | codegen | error | tail type mismatch | [E218.md](explanations/E218.md) |
+| E219 | codegen | error | function pass mismatch | [E219.md](explanations/E219.md) |
+| E220 | codegen/linker | error | unresolved function body for call target | [E220.md](explanations/E220.md) |
+| E221 | codegen/linker | error | no main function | [E221.md](explanations/E221.md) |
+| E222 | codegen | error | code buffer overflow | [E222.md](explanations/E222.md) |
+| E223 | codegen/pe | error | too many ExitProcess call sites | [E223.md](explanations/E223.md) |
+| E224 | import | error | unreadable import | [E224.md](explanations/E224.md) |
+| E225 | import | error | import dedup table full | [E225.md](explanations/E225.md) |
+| E226 | import | error | import path table full | [E226.md](explanations/E226.md) |
+| E227 | import | error | import too large for SRC buffer | [E227.md](explanations/E227.md) |
+| E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |

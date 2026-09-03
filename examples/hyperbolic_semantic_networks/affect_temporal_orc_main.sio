@@ -1,0 +1,86 @@
+//! TEMPORAL-TRANSITION full-network ORC — direct heir of affect_network_orc.sio (4 nodes -> all 12).
+//! Concatenated as: affect_temporal_orc_data.sio + _orc_helpers_block.sio + this file.
+//!
+//! For each consecutive window-pair t -> t+1 and each of the 12 mood items, the temporal Ollivier-Ricci
+//! curvature of the binarized marginal shift is computed via the verified forward-AD Sinkhorn orc2x2:
+//!   source = (p_active(t), 1-p_active(t)),  target = (p_active(t+1), 1-p_active(t+1)),  kappa = 1 - W1.
+//! Mean network curvature kappa_bar(t) over 12 nodes; GUM sigma_bar(t) = sqrt(Σσ_i²)/12.
+//! Then: does kappa_bar drop at the phase 3->4 depressive transition, and does it co-move with the
+//! classical CSD indicators (variance, lag-1 AC) — the MATCHED comparison to the structural-curvature
+//! result (which gave corr(Forman, AC1) ≈ -0.5).
+
+fn tm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0; while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }; y
+}
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let K = fx_n_nodes()
+    let nW = fx_n_windows()
+    var pact: [f64; 4096] = [0.0; 4096]; var pvar: [f64; 4096] = [0.0; 4096]
+    var wp: [i64; 256] = [0; 256]; var varm: [f64; 256] = [0.0; 256]; var ac1: [f64; 256] = [0.0; 256]
+    load_pact(&!pact); load_pvar(&!pvar); load_win_phase(&!wp); load_var_mean(&!varm); load_ac1_mean(&!ac1)
+
+    let nP = nW - 1                      // number of window-pairs
+    var kbar: [f64; 64] = [0.0; 64]
+    var sbar: [f64; 64] = [0.0; 64]
+
+    println("pair phase   kappa_bar    sigma_bar    var        ac1")
+    var t: i64 = 0
+    while t < nP {
+        var ksum = 0.0; var vsum = 0.0
+        var i: i64 = 0
+        while i < K {
+            let p0 = pact[t*K + i];       let q0 = pact[(t+1)*K + i]
+            let pv = pvar[t*K + i];       let qv = pvar[(t+1)*K + i]
+            let ek = orc2x2(p0, 1.0 - p0, q0, 1.0 - q0,  pv, pv, qv, qv,  0.1, 120)
+            ksum = ksum + ek.val
+            vsum = vsum + ek.variance
+            i = i + 1
+        }
+        kbar[t] = ksum / (K as f64)
+        sbar[t] = tm_sqrt(vsum) / (K as f64)
+        print(t as f64); print("  ph"); print(wp[t] as f64); print("  kb="); print(kbar[t])
+        print("  sb="); print(sbar[t]); print("  var="); print(varm[t]); print("  ac1="); print(ac1[t]); println("")
+        t = t + 1
+    }
+
+    // phase-band shift (source-window phase): baseline phase<=2 vs phase4
+    var bf=0.0; var nb=0.0; var p4=0.0; var n4=0.0
+    t=0
+    while t < nP {
+        if wp[t] <= 2 { bf=bf+kbar[t]; nb=nb+1.0 }
+        if wp[t] == 4 { p4=p4+kbar[t]; n4=n4+1.0 }
+        t=t+1
+    }
+    let base = bf/nb; let mp4 = p4/n4
+    var sd=0.0; t=0; while t<nP { if wp[t]<=2 { sd=sd+(kbar[t]-base)*(kbar[t]-base) }; t=t+1 }
+    let sdb = tm_sqrt(sd/nb)
+
+    // co-movement of kappa_bar with classical CSD over pairs (source-window aligned)
+    var mk=0.0; var mv=0.0; var ma=0.0
+    t=0; while t<nP { mk=mk+kbar[t]; mv=mv+varm[t]; ma=ma+ac1[t]; t=t+1 }
+    mk=mk/(nP as f64); mv=mv/(nP as f64); ma=ma/(nP as f64)
+    var ckv=0.0; var cka=0.0; var vk=0.0; var vv=0.0; var va=0.0
+    t=0
+    while t<nP {
+        let dk=kbar[t]-mk; let dv=varm[t]-mv; let da=ac1[t]-ma
+        ckv=ckv+dk*dv; cka=cka+dk*da; vk=vk+dk*dk; vv=vv+dv*dv; va=va+da*da
+        t=t+1
+    }
+    let r_k_var = if vk>0.0 && vv>0.0 { ckv/tm_sqrt(vk*vv) } else { 0.0 }
+    let r_k_ac1 = if vk>0.0 && va>0.0 { cka/tm_sqrt(vk*va) } else { 0.0 }
+
+    println("=== temporal-ORC summary ===")
+    print_kv("n_pairs", nP as f64)
+    print_kv("kappa_bar_mean", mk)
+    print_kv("baseline_phase12_kappa_bar", base)
+    print_kv("phase4_kappa_bar", mp4)
+    print_kv("delta_kappa_bar_p4_minus_base", mp4 - base)
+    print_kv("delta_kappa_bar_in_baseline_SD", if sdb>0.0 { (mp4-base)/sdb } else { 0.0 })
+    print_kv("corr_kappaBar_vs_variance", r_k_var)
+    print_kv("corr_kappaBar_vs_ac1", r_k_ac1)
+    println("AFFECT_TEMPORAL_ORC_DONE")
+    0
+}

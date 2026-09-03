@@ -1,0 +1,98 @@
+//@ run-pass
+//@ expect-stdout-contains: PD_CORONARY_SMC_SMOKE_PASS
+
+// Smoke test for stdlib/darwin_pbpk/pd/coronary_smc_prolif.sio (Stage G-ε-13).
+//
+// Drives the rapamycin PD pair-of-scalars step under three target_a regimes:
+//
+//   1. target_a = 1.0  (no drug, full mTORC1) → A stays at 1, N grows
+//      under k_prolif (~5e-4 /h).
+//   2. target_a = 0.1  (90% receptor inhibition) → A decays toward 0.1,
+//      apoptosis term k_apo·(1-A) dominates, N held near 0.
+//   3. target_a = 0.0  (full inhibition) → A → 0, N → 0 (apoptosis wins).
+//
+// Confirms the qualitative dissertation message: rapamycin elution at the
+// stent suppresses neointimal growth by driving A below 1, which switches
+// the N ODE from net-prolif to net-apoptosis.
+
+use darwin_pbpk::pd::coronary_smc_prolif::*
+
+fn fmt_6(x: f64) -> i64 { return (x * 1000000.0) as i64 }
+
+fn run_scenario(target_a: f64, n_steps: i64) -> PdState with Mut, Div, IO {
+    let p = coronary_pd_params()
+    var s = pd_state_init()
+    let dt = 1.0    // hours per step
+    var k = 0
+    while k < n_steps {
+        s = pd_step_rapamycin(s, target_a, p, dt)
+        k = k + 1
+    }
+    print("target_a*1e6=")
+    print(fmt_6(target_a))
+    print(" A*1e6=")
+    print(fmt_6(s.a))
+    print(" N*1e6=")
+    println(fmt_6(s.n))
+    return s
+}
+
+fn main() with Mut, Div, IO {
+    println("PD rapamycin smoke — 168 h per scenario (1 week)")
+
+    // Scenario 1: no drug — A stays at 1, N grows linearly at k_prolif
+    print("scenario=no_drug  ")
+    let s1 = run_scenario(1.0, 168)
+    // A should remain at exactly 1.0
+    let s1_a_ok = (s1.a > 0.99) && (s1.a < 1.01)
+    // N at 168 h = k_prolif · 168 = 5e-4 · 168 = 0.084 (linear approx)
+    let s1_n_ok = (s1.n > 0.05) && (s1.n < 0.10)
+    if !s1_a_ok {
+        println("FAIL: scenario 1 A not pinned at 1.0")
+        return
+    }
+    if !s1_n_ok {
+        println("FAIL: scenario 1 N out of [0.05, 0.10]")
+        return
+    }
+
+    // Scenario 2: heavy inhibition — A → 0.1, N stays low
+    print("scenario=partial  ")
+    let s2 = run_scenario(0.1, 168)
+    let s2_a_ok = (s2.a > 0.09) && (s2.a < 0.11)
+    let s2_n_ok = (s2.n < 0.05)
+    if !s2_a_ok {
+        println("FAIL: scenario 2 A not near 0.1")
+        return
+    }
+    if !s2_n_ok {
+        println("FAIL: scenario 2 N too high")
+        return
+    }
+
+    // Scenario 3: full inhibition — A → 0, N → 0
+    print("scenario=full_inh ")
+    let s3 = run_scenario(0.0, 168)
+    let s3_a_ok = (s3.a < 0.05)
+    let s3_n_ok = (s3.n < 0.01)
+    if !s3_a_ok {
+        println("FAIL: scenario 3 A not near 0")
+        return
+    }
+    if !s3_n_ok {
+        println("FAIL: scenario 3 N too high under full inhibition")
+        return
+    }
+
+    // Late-lumen-loss stub: at α = 1.0 mm/unit-N, scenario 1's no-drug N
+    // converts to ~0.084 mm LLL — same order of magnitude as RAVEL's ~0.74
+    // bare-stent LLL at 6 months. Sanity check on the stub.
+    let lll = pd_late_lumen_loss_mm(s1.n)
+    let lll_ok = (lll > 0.05) && (lll < 0.10)
+    if !lll_ok {
+        println("FAIL: LLL stub gave unphysical value")
+        return
+    }
+
+    println("PD_CORONARY_SMC_SMOKE_PASS")
+}

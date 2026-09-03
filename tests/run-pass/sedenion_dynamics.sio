@@ -1,0 +1,375 @@
+//@ run-pass
+//@ expect-stdout: DYNAMICS OK
+// FRENTE B, vector 4(2) — the substrate DYNAMICS of the sedenion ZD geometry, executed exactly.
+//
+// Vector 4/1 (sedenion_spectra.sio) proved the ZD-geometry graphs have INTEGRAL spectra. The Laplacian
+// L = D - A is the generator of the substrate dynamics (heat flow e^{-tL}, random walk). Two exact,
+// integer-certified invariants of that dynamics:
+//
+//   1. SPANNING-TREE COMPLEXITY tau (Matrix-Tree theorem): tau = det of ANY principal (n-1)x(n-1)
+//      cofactor of L, an exact positive integer. Computed by FRACTION-FREE (Bareiss) integer Gaussian
+//      elimination — no rationals, no float, every intermediate an exact i64.
+//        * fiber graph K_{6,6}-3K_{2,2} (12 vertices, degree 4): tau = 393216.
+//        * 2*K_7 fiber-incidence graph (7 vertices, off-diag 2, degree 12): tau = 1075648.
+//      Cross-check vs the integral spectra: tau = (1/n)*prod(nonzero Laplacian eigenvalues), i.e.
+//        fiber (2^2 * 4^6 * 6^2 * 8)/12 = 393216 ; 2*K_7  14^6/7 = 1075648.
+//
+//   2. RANDOM-WALK RETURN COUNTS (A^k)_{ii} = number of closed walks of length k from vertex i. These
+//      graphs are vertex-transitive: the return counts are the same at every vertex.
+//        * fiber (A^2)_{00} = 4 = degree, (A^4)_{00} = 48.
+//        * 2*K_7 (A^2)_{00} = 24 = 2^2*6 (NB: the DEGREE is 12; for the entries-2 matrix the closed
+//          2-walk count is sum_j A_{0j}^2 = 6*2^2 = 24, not the degree), (A^4)_{00} = 2976.
+//
+// Decidable integer arithmetic, no float. SELF-CONTAINED (Lean-bridge prim_prod idiom, avoids #637).
+// Cross-verified vs scripts/research/sedenion_dynamics_oracle.py by scripts/ci/sedenion_dynamics_gate.sh
+// and by formal/lean4/SounioSedenionDynamics.lean (native_decide).
+//
+// NB: bin/souc SIGSEGVs on a single monolithic main() computing BOTH graphs (a codegen defect — the
+// values are all computed correctly, the crash is during output; the fiber and 2*K_7 halves each run
+// clean in isolation). Splitting the two graphs into separate functions (main stays tiny) sidesteps it,
+// so this brick runs correctly under BOTH bin/souc AND the fresh stage2 compiler.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+// tau of the fiber via Matrix-Tree + Bareiss integer Gaussian elimination.
+fn fiber_tau() -> i64 with Mut, Panic, Div {
+    var flo = [0; 12]
+    var fhi = [0; 12]
+    var fng = [0; 12]
+    var m = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            if (lo ^ hi) == 9 && hi != 8 {
+                var neg = 0
+                while neg <= 1 {
+                    if m < 12 {
+                        flo[m as usize] = lo
+                        fhi[m as usize] = hi
+                        fng[m as usize] = neg
+                        m = m + 1
+                    }
+                    neg = neg + 1
+                }
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    var A = [0; 144]
+    var i = 0
+    while i < 12 {
+        var j = 0
+        while j < 12 {
+            if i != j {
+                if is_zero_pair(flo[i as usize], fhi[i as usize], fng[i as usize],
+                                flo[j as usize], fhi[j as usize], fng[j as usize]) {
+                    A[(i * 12 + j) as usize] = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var fdeg = [0; 12]
+    var di = 0
+    while di < 12 {
+        var s = 0
+        var dj = 0
+        while dj < 12 {
+            s = s + A[(di * 12 + dj) as usize]
+            dj = dj + 1
+        }
+        fdeg[di as usize] = s
+        di = di + 1
+    }
+    // Laplacian cofactor: reduced 11x11 (delete vertex 0); rows/cols map to graph vertices 1..11.
+    var Wf = [0; 121]
+    var rr = 0
+    while rr < 11 {
+        var cc = 0
+        while cc < 11 {
+            let gr = rr + 1
+            let gc = cc + 1
+            var v = 0 - A[(gr * 12 + gc) as usize]
+            if gr == gc {
+                v = fdeg[gr as usize] - A[(gr * 12 + gc) as usize]
+            }
+            Wf[(rr * 11 + cc) as usize] = v
+            cc = cc + 1
+        }
+        rr = rr + 1
+    }
+    // Fraction-free (Bareiss) integer Gaussian elimination on the 11x11 cofactor.
+    var prevf = 1
+    var kf = 0
+    while kf < 10 {
+        var if2 = kf + 1
+        while if2 < 11 {
+            var jf2 = kf + 1
+            while jf2 < 11 {
+                let nv = (Wf[(if2 * 11 + jf2) as usize] * Wf[(kf * 11 + kf) as usize]
+                          - Wf[(if2 * 11 + kf) as usize] * Wf[(kf * 11 + jf2) as usize]) / prevf
+                Wf[(if2 * 11 + jf2) as usize] = nv
+                jf2 = jf2 + 1
+            }
+            if2 = if2 + 1
+        }
+        prevf = Wf[(kf * 11 + kf) as usize]
+        kf = kf + 1
+    }
+    Wf[(10 * 11 + 10) as usize]
+}
+
+// fiber vertex count (must be 12).
+fn fiber_verts() -> i64 with Mut, Panic, Div {
+    var m = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            if (lo ^ hi) == 9 && hi != 8 { m = m + 2 }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    m
+}
+
+// fiber closed-walk return counts at vertex 0: kk=2 -> (A^2)_00, kk=4 -> (A^4)_00.
+fn fiber_walk(kk: i64) -> i64 with Mut, Panic, Div {
+    var flo = [0; 12]
+    var fhi = [0; 12]
+    var fng = [0; 12]
+    var m = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            if (lo ^ hi) == 9 && hi != 8 {
+                var neg = 0
+                while neg <= 1 {
+                    if m < 12 {
+                        flo[m as usize] = lo
+                        fhi[m as usize] = hi
+                        fng[m as usize] = neg
+                        m = m + 1
+                    }
+                    neg = neg + 1
+                }
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    var A = [0; 144]
+    var i = 0
+    while i < 12 {
+        var j = 0
+        while j < 12 {
+            if i != j {
+                if is_zero_pair(flo[i as usize], fhi[i as usize], fng[i as usize],
+                                flo[j as usize], fhi[j as usize], fng[j as usize]) {
+                    A[(i * 12 + j) as usize] = 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // row 0 of A^2 (A symmetric): row0[c] = sum_s A[0][s]*A[s][c].
+    var row0 = [0; 12]
+    var c = 0
+    while c < 12 {
+        var s2 = 0
+        var s = 0
+        while s < 12 {
+            s2 = s2 + A[(0 * 12 + s) as usize] * A[(s * 12 + c) as usize]
+            s = s + 1
+        }
+        row0[c as usize] = s2
+        c = c + 1
+    }
+    if kk == 2 { return row0[0 as usize] }
+    // (A^4)_00 = sum_t (A^2)_{0t}*(A^2)_{t0} = sum_t row0[t]^2 (symmetry).
+    var acc = 0
+    var tt = 0
+    while tt < 12 {
+        acc = acc + row0[tt as usize] * row0[tt as usize]
+        tt = tt + 1
+    }
+    acc
+}
+
+// tau of 2*K_7 via Matrix-Tree + Bareiss on the reduced 6x6 Laplacian cofactor.
+fn k7_tau() -> i64 with Mut, Panic, Div {
+    var B = [0; 49]
+    var bi = 0
+    while bi < 7 {
+        var bj = 0
+        while bj < 7 {
+            if bi != bj { B[(bi * 7 + bj) as usize] = 2 }
+            bj = bj + 1
+        }
+        bi = bi + 1
+    }
+    var bdeg = [0; 7]
+    var ki = 0
+    while ki < 7 {
+        var sk = 0
+        var kj = 0
+        while kj < 7 {
+            sk = sk + B[(ki * 7 + kj) as usize]
+            kj = kj + 1
+        }
+        bdeg[ki as usize] = sk
+        ki = ki + 1
+    }
+    var Wk = [0; 36]
+    var kr = 0
+    while kr < 6 {
+        var kc = 0
+        while kc < 6 {
+            let gr = kr + 1
+            let gc = kc + 1
+            var v = 0 - B[(gr * 7 + gc) as usize]
+            if gr == gc {
+                v = bdeg[gr as usize] - B[(gr * 7 + gc) as usize]
+            }
+            Wk[(kr * 6 + kc) as usize] = v
+            kc = kc + 1
+        }
+        kr = kr + 1
+    }
+    var prevk = 1
+    var kk = 0
+    while kk < 5 {
+        var ik2 = kk + 1
+        while ik2 < 6 {
+            var jk2 = kk + 1
+            while jk2 < 6 {
+                let nv = (Wk[(ik2 * 6 + jk2) as usize] * Wk[(kk * 6 + kk) as usize]
+                          - Wk[(ik2 * 6 + kk) as usize] * Wk[(kk * 6 + jk2) as usize]) / prevk
+                Wk[(ik2 * 6 + jk2) as usize] = nv
+                jk2 = jk2 + 1
+            }
+            ik2 = ik2 + 1
+        }
+        prevk = Wk[(kk * 6 + kk) as usize]
+        kk = kk + 1
+    }
+    Wk[(5 * 6 + 5) as usize]
+}
+
+// 2*K_7 closed-walk return counts at vertex 0: kk=2 -> (A^2)_00 = 24, kk=4 -> (A^4)_00 = 2976.
+fn k7_walk(kk: i64) -> i64 with Mut, Panic, Div {
+    var B = [0; 49]
+    var bi = 0
+    while bi < 7 {
+        var bj = 0
+        while bj < 7 {
+            if bi != bj { B[(bi * 7 + bj) as usize] = 2 }
+            bj = bj + 1
+        }
+        bi = bi + 1
+    }
+    var row0 = [0; 7]
+    var c = 0
+    while c < 7 {
+        var sb = 0
+        var bt = 0
+        while bt < 7 {
+            sb = sb + B[(0 * 7 + bt) as usize] * B[(bt * 7 + c) as usize]
+            bt = bt + 1
+        }
+        row0[c as usize] = sb
+        c = c + 1
+    }
+    if kk == 2 { return row0[0 as usize] }
+    var acc = 0
+    var tt = 0
+    while tt < 7 {
+        acc = acc + row0[tt as usize] * row0[tt as usize]
+        tt = tt + 1
+    }
+    acc
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let tau_fib = fiber_tau()
+    let tau_k7 = k7_tau()
+    let fib_a2 = fiber_walk(2)
+    let fib_a4 = fiber_walk(4)
+    let k7_a2 = k7_walk(2)
+    let k7_a4 = k7_walk(4)
+    let verts = fiber_verts()
+
+    // one value per line (single print_int + explicit newline) — portable across souc builds.
+    print("SPANTREE_FIB ")
+    print_int(tau_fib)
+    print("\n")
+    print("SPANTREE_K7 ")
+    print_int(tau_k7)
+    print("\n")
+    print("FIB_A2 ")
+    print_int(fib_a2)
+    print("\n")
+    print("FIB_A4 ")
+    print_int(fib_a4)
+    print("\n")
+    print("K7_A2 ")
+    print_int(k7_a2)
+    print("\n")
+    print("K7_A4 ")
+    print_int(k7_a4)
+    print("\n")
+    print("VERTS ")
+    print_int(verts)
+    print("\n")
+    // single load-bearing verdict.
+    if tau_fib == 393216 && tau_k7 == 1075648 && fib_a2 == 4 && fib_a4 == 48
+       && k7_a2 == 24 && k7_a4 == 2976 && verts == 12 {
+        println("DYNAMICS OK")
+    } else {
+        println("DYNAMICS FAIL")
+    }
+}

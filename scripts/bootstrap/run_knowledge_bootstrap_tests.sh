@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
+PINNED_BIN="${PINNED_BIN:-bin/souc}"
 OUTPUT_DIR="build"
 OUTPUT_FILE="$OUTPUT_DIR/bootstrap_knowledge_tests.sio"
 ARTIFACT_DIR="artifacts/omega"
@@ -41,6 +41,7 @@ FILES=(
   self-hosted/check/effects.sio
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
+  self-hosted/check/ontology_side_table_cache.sio
   self-hosted/check/check.sio
   self-hosted/ir/ir.sio
   self-hosted/check/mod.sio
@@ -85,7 +86,19 @@ for f in "${FILES[@]}"; do
     sed \
       -e '/^[[:space:]]*module[[:space:]]\+[A-Za-z0-9_:]\+[[:space:]]*;*[[:space:]]*$/d' \
       -e '/^[[:space:]]*use[[:space:]].*$/d' \
-      "$f"
+      "$f" |
+      if [ "$f" = "self-hosted/check/mod.sio" ]; then
+        # Keep this focused Knowledge bootstrap gate off unrelated Wave 10
+        # hypercomplex law-profile probes. Those probes depend on a broader
+        # IR metadata surface than this narrow bundle is meant to validate.
+        awk '
+          /^fn check_hyper_expr_law_profile_probe\(/ { skip = 1 }
+          /^fn check_program\(/ { skip = 0 }
+          skip == 0 { print }
+        '
+      else
+        cat
+      fi
   } >> "$OUTPUT_FILE"
 
   if [ "$DECL_LINES" -gt 0 ]; then

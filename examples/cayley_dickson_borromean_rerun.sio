@@ -1,0 +1,682 @@
+//! examples/cayley_dickson_borromean_rerun.sio
+//!
+//! Corrected re-run of the §4.3 Borromean-vs-unlinked discrimination
+//! experiment from docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md,
+//! whose original AUROC≈0.50 ("chance") claim was retracted (§9) after an
+//! independent re-run of the checked-in `run_borromean_experiment()` found
+//! AUROC=0.000 (perfect separation) — traced to a confound: the original
+//! `generate_borromean_path` (smooth cos/sin + small noise) and
+//! `generate_unlinked_path` (pure i.i.d. N(0,1)) differ ~10x in local
+//! roughness, which by itself is enough to separate the two classes,
+//! independent of any linking/associativity structure.
+//!
+//! THE FIX: both classes are now smooth curves of the SAME functional
+//! family and SAME noise level (matched local roughness, verified below
+//! by measuring mean |successive difference| for both classes). The only
+//! difference is the phase relationship between the three components:
+//!
+//!   Positive (Borromean-type): x=cos(t), y=sin(t), z=cos(2t)sin(t)
+//!     — the frequency-doubled cross term in z couples all three axes.
+//!   Negative (unlinked-type): x=cos(t+phi1), y=cos(t+phi2), z=cos(t+phi3)
+//!     — three independent-phase copies of the SAME single-frequency
+//!       cosine, i.e. structurally decoupled axes (no cross term), which
+//!       is the "unlinked" analogue at matched smoothness.
+//!
+//! Reuses this repo's already-verified [2,1]-hook and sedenion associator
+//! (see examples/cayley_dickson_hook21_g2_verification.sio) as the probe
+//! features, and reports AUROC + Cohen's d honestly — this file does NOT
+//! assume the result will replicate "chance"; it reports whatever comes
+//! out, per CLAUDE.md's FAIL_HONEST principle.
+//!
+//! THREE FURTHER DEFECTS SURFACED WHILE BUILDING THIS RE-RUN (none were in
+//! either prior audit) — see the in-code comments at pack_sed() and the
+//! printed [Interpretation] block for detail:
+//!   1. The original `pack(x)` (s[:3]=x, s[3]=1.0) confines every operand
+//!      to sedenion slots {0,1,2,3} — EXACTLY the quaternion subalgebra H
+//!      under Cayley-Dickson doubling, which is associative. Associator
+//!      (and hence [2,1]-hook) was IDENTICALLY ZERO by a theorem, for
+//!      BOTH classes, regardless of roughness or linking. Verified here:
+//!      ||associator|| ~ 1e-9 (machine epsilon) on 3 random such vectors.
+//!   2. Fixing (1) by spreading coordinates across non-quaternion slots
+//!      makes the ordinary associator genuinely nonzero — but the
+//!      [2,1]-hook STILL reads exactly 0, because packing a,b,c as scalar
+//!      amplitudes along the SAME FIXED 3 imaginary directions (however
+//!      the coefficients are assigned to those 3 slots — verified with a
+//!      cyclic rotation AND a fully i.i.d. random permutation, byte-
+//!      identical zero both times) makes every associator a pure-basis-
+//!      triple associator, which is a textbook fact ALWAYS totally
+//!      antisymmetric (Lambda^3) — independent of coefficients, of the
+//!      assignment, or of Borromean-vs-unlinked structure.
+//!   3. Escaping (2) requires a, b, c to collectively span >=4 independent
+//!      imaginary directions, not 3. Adding one genuinely independent 4th
+//!      feature per operand (a one-step delay-embedded coordinate) into a
+//!      4th slot finally makes BOTH the associator and the [2,1]-hook
+//!      nonzero. At n=15/class this looked like a real effect (hook
+//!      AUROC=0.25); at n=25/class it moved MUCH closer to chance (hook
+//!      AUROC=0.32) — the direction a small-sample artifact would move.
+//!
+//! RESULT (2026-08-15, n=50/class, K_PERMS=2000 label reshuffles, seed
+//! 20260814 -- reproduced byte-for-byte across repeat runs): hook
+//! AUROC=0.392 (Cohen's d=-0.42, permutation p=0.060) and associator
+//! AUROC=0.416 (d=-0.25, p=0.154). NEITHER survives an uncorrected
+//! p<0.05 threshold (hook is borderline at p=0.06). DO NOT read the
+//! AUROC series (n=15: 0.25 -> n=25: 0.32 -> n=50: 0.39, hook) as
+//! "shrinking toward chance" -- a math-review pass caught an earlier
+//! draft of this docstring making exactly that claim as an over-read:
+//! Cohen's d has been essentially flat since n=25 (-0.44 -> -0.42, not
+//! still shrinking). At n=50 specifically, AUROC ~= Phi(d/sqrt(2))
+//! applied to that stable d predicts ~=0.38, close to the observed 0.39
+//! -- a single-point match, NOT validation of the whole n=15->25->50
+//! trajectory: at n=15/25, applying the same link to that n's (still-
+//! moving) d gives a HIGHER predicted AUROC than what was actually
+//! observed (predicted~=0.31 vs observed 0.25 at n=15; ~=0.38 vs 0.32 at
+//! n=25) -- the link overpredicts AUROC at small n, the opposite of what
+//! a naive "small-n AUROC biased toward 0.5" story needs to hold across
+//! the whole series. That's further reason not to over-read the
+//! trajectory in EITHER direction, not support for the stable-effect
+//! reading beyond the single n=50 match above.
+//! HONEST BOTTOM LINE: with every identified confound and structural
+//! degeneracy fixed AND a real permutation-test p-value computed for the
+//! first time, this experiment FAILS TO REJECT the null at alpha=0.05 --
+//! which is not the same as CONFIRMING the null (p=0.06 is compatible
+//! with both a real small effect and no effect at all; no CI, power
+//! curve, or equivalence test was computed to tell them apart). What
+//! changed is that there is now a real, if inconclusive, statistical
+//! test in place of "underpowered to say anything." n=75/class was ALSO attempted and hit
+//! Madaros's documented resource ceiling (exit 182, the same one already
+//! hit at 4 seeds in examples/cayley_dickson_octtree_realtree_training.sio
+//! and examples/cayley_dickson_sedentree_realtree16_training.sio); n=50
+//! is the largest verified-complete scale for this file's current
+//! structure. Treat the original paper's numbers, the initial flat
+//! retraction, and this file's own n=15/n=25 (no p-value) intermediate
+//! results as all superseded by the numbers above. See the paper's §9
+//! for how this is now reported.
+//!
+//! Run: SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
+//!        examples/cayley_dickson_borromean_rerun.sio
+//!      (this file needs no extern "C" FFI -- unlike the LEMON pilot,
+//!      Madaros, the default engine, is the right tool here. It was
+//!      checked against SOUNIO_SOUC_ENGINE=lean_single too: that engine's
+//!      effect checker rejects this file's sin_f64/sqrt_f64 for reasons
+//!      that did not reproduce under direct inspection or under Madaros's
+//!      own checker (`souc check` reports clean) -- not investigated
+//!      further since Madaros already runs this file correctly.)
+
+const PATH_T: i64 = 100
+const N_SAMPLES: i64 = 50   // per class
+const MAXN: i64 = 256       // >= 2*N_SAMPLES, scratch array size for AUROC
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_i64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); print_i64(0 - x) }
+    else if x < 10 { print_digit(x) }
+    else { print_i64(x / 10); print_digit(x - (x / 10) * 10) }
+}
+
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+
+fn print_f64(x: f64, decimals: i64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); print_f64(0.0 - x, decimals) }
+    else {
+        let int_part = x as i64
+        print_i64(int_part)
+        print(".")
+        var frac = x - (int_part as f64)
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_digit(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+// =============================================================================
+// PRNG + TRIG (self-contained; sin/cos mirror stdlib/nn/autograd.sio's
+// Taylor-with-range-reduction implementation)
+// =============================================================================
+
+var RNG_STATE: [i64; 1] = [0; 1]
+fn rng_seed(seed: i64) with Mut { RNG_STATE[0] = seed }
+fn rng_next_u64() -> i64 with Mut {
+    RNG_STATE[0] = RNG_STATE[0] + 0x9e3779b97f4a7c15 as i64
+    var z = RNG_STATE[0]
+    z = z ^ (z >> 30)
+    z = z * 0xbf58476d as i64
+    z = z ^ (z >> 27)
+    z = z * 0x94d049bb as i64
+    z = z ^ (z >> 31)
+    z
+}
+fn rng_next_signed() -> f64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    let v = (u as f64) / 1073741823.5
+    v - 1.0
+}
+fn rng_next_unit() -> f64 with Mut, Div {
+    (rng_next_signed() + 1.0) / 2.0  // uniform [0,1]
+}
+
+fn sin_f64(x: f64) -> f64 with Div {
+    var v = x
+    while v > 3.14159265358979 { v = v - 6.28318530717959 }
+    while v < 0.0 - 3.14159265358979 { v = v + 6.28318530717959 }
+    let x2 = v * v
+    var term = v
+    var sum = v
+    term = 0.0 - term * x2 / 6.0;   sum = sum + term
+    term = 0.0 - term * x2 / 20.0;  sum = sum + term
+    term = 0.0 - term * x2 / 42.0;  sum = sum + term
+    term = 0.0 - term * x2 / 72.0;  sum = sum + term
+    term = 0.0 - term * x2 / 110.0; sum = sum + term
+    sum
+}
+fn cos_f64(x: f64) -> f64 with Div { sin_f64(x + 1.5707963267949) }
+
+fn sqrt_f64(x: f64) -> f64 with Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 30 { g = (g + x/g) / 2.0; i = i + 1 }
+    g
+}
+
+// =============================================================================
+// SEDENION PRODUCT (identical to examples/cayley_dickson_hook21_g2_verification.sio,
+// copied for self-containment)
+// =============================================================================
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var r0 = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    out[0] = r0
+    var r1 = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    out[1] = r1
+    var r2 = a[0]*b[2] + a[2]*b[0] - a[1]*b[3] + a[3]*b[1] + a[4]*b[6] - a[6]*b[4] + a[5]*b[7] - a[7]*b[5]
+    out[2] = r2
+    var r3 = a[0]*b[3] + a[3]*b[0] + a[1]*b[2] - a[2]*b[1] + a[4]*b[7] - a[7]*b[4] - a[5]*b[6] + a[6]*b[5]
+    out[3] = r3
+    var r4 = a[0]*b[4] + a[4]*b[0] - a[1]*b[5] + a[5]*b[1] - a[2]*b[6] + a[6]*b[2] - a[3]*b[7] + a[7]*b[3]
+    out[4] = r4
+    var r5 = a[0]*b[5] + a[5]*b[0] + a[1]*b[4] - a[4]*b[1] - a[2]*b[7] + a[7]*b[2] + a[3]*b[6] - a[6]*b[3]
+    out[5] = r5
+    var r6 = a[0]*b[6] + a[6]*b[0] + a[1]*b[7] - a[7]*b[1] + a[2]*b[4] - a[4]*b[2] - a[3]*b[5] + a[5]*b[3]
+    out[6] = r6
+    var r7 = a[0]*b[7] + a[7]*b[0] - a[1]*b[6] + a[6]*b[1] + a[2]*b[5] - a[5]*b[2] + a[3]*b[4] - a[4]*b[3]
+    out[7] = r7
+}
+
+fn sed_conj(src: &[f64; 8], dst: &![f64; 8]) with Mut {
+    dst[0] = src[0]
+    var i: i64 = 1
+    while i < 8 { dst[i] = 0.0 - src[i]; i = i + 1 }
+}
+
+var SED_P: [f64; 8] = [0.0; 8]
+var SED_Q: [f64; 8] = [0.0; 8]
+
+fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut, Div, NonAssoc {
+    var a_lo: [f64; 8] = [0.0; 8]
+    var a_hi: [f64; 8] = [0.0; 8]
+    var b_lo: [f64; 8] = [0.0; 8]
+    var b_hi: [f64; 8] = [0.0; 8]
+    var conj: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        a_lo[i] = a[i]; a_hi[i] = a[8 + i]
+        b_lo[i] = b[i]; b_hi[i] = b[8 + i]
+        i = i + 1
+    }
+    oct_mul(&a_lo, &b_lo, &!SED_P)
+    sed_conj(&b_hi, &!conj)
+    oct_mul(&conj, &a_hi, &!SED_Q)
+    i = 0
+    while i < 8 { out[i] = SED_P[i] - SED_Q[i]; i = i + 1 }
+    oct_mul(&b_hi, &a_lo, &!SED_P)
+    sed_conj(&b_lo, &!conj)
+    oct_mul(&a_hi, &conj, &!SED_Q)
+    i = 0
+    while i < 8 { out[8 + i] = SED_P[i] + SED_Q[i]; i = i + 1 }
+}
+
+fn sed_sub(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
+    var i: i64 = 0
+    while i < 16 { out[i] = a[i] - b[i]; i = i + 1 }
+}
+
+fn sed_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i: i64 = 0
+    while i < 16 { s = s + a[i]*a[i]; i = i + 1 }
+    sqrt_f64(s)
+}
+
+fn sed_associator(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], out: &![f64; 16]) with Mut, Div, NonAssoc {
+    var ab: [f64; 16] = [0.0; 16]
+    sed_mul(a, b, &!ab)
+    var ab_c: [f64; 16] = [0.0; 16]
+    sed_mul(&ab, c, &!ab_c)
+    var bc: [f64; 16] = [0.0; 16]
+    sed_mul(b, c, &!bc)
+    var a_bc: [f64; 16] = [0.0; 16]
+    sed_mul(a, &bc, &!a_bc)
+    sed_sub(&ab_c, &a_bc, out)
+}
+
+// [2,1]-hook, closed form (2T(a,b,c) - T(b,c,a) - T(c,a,b))/3 — see
+// examples/cayley_dickson_hook21_g2_verification.sio for the derivation.
+fn hook21_sed_closed(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], out: &![f64; 16]) with Mut, Div, NonAssoc {
+    var tabc: [f64; 16] = [0.0; 16]
+    var tbca: [f64; 16] = [0.0; 16]
+    var tcab: [f64; 16] = [0.0; 16]
+    sed_associator(a, b, c, &!tabc)
+    sed_associator(b, c, a, &!tbca)
+    sed_associator(c, a, b, &!tcab)
+    var i: i64 = 0
+    while i < 16 {
+        out[i] = (2.0 * tabc[i] - tbca[i] - tcab[i]) / 3.0
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// PATH GENERATORS (matched local roughness — see file header)
+// =============================================================================
+
+var PATH_X: [f64; 100] = [0.0; 100]
+var PATH_Y: [f64; 100] = [0.0; 100]
+var PATH_Z: [f64; 100] = [0.0; 100]
+// One of 6 permutations of (SLOT_A,SLOT_B,SLOT_C), i.i.d. per time step —
+// used to test whether the cyclic (deterministic) role rotation's
+// continued hook21=0 was itself a hidden symmetry of that SPECIFIC
+// regular rotation, or a more general property of sparse 3-slot packing.
+var PATH_ROLE: [i64; 100] = [0; 100]
+
+fn randomize_roles() with Mut, Div {
+    var i: i64 = 0
+    while i < PATH_T {
+        PATH_ROLE[i as usize] = rng_nonneg(6)
+        i = i + 1
+    }
+}
+
+fn rng_nonneg(bound: i64) -> i64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    u - (u / bound) * bound
+}
+
+fn generate_borromean_path(noise_sigma: f64) with Mut, Div {
+    var i: i64 = 0
+    while i < PATH_T {
+        let t = 12.56637061435917 * (i as f64) / ((PATH_T - 1) as f64)  // 0..4*pi
+        PATH_X[i as usize] = cos_f64(t) + noise_sigma * rng_next_signed()
+        PATH_Y[i as usize] = sin_f64(t) + noise_sigma * rng_next_signed()
+        PATH_Z[i as usize] = cos_f64(2.0 * t) * sin_f64(t) + noise_sigma * rng_next_signed()
+        i = i + 1
+    }
+    randomize_roles()
+}
+
+fn generate_unlinked_path(noise_sigma: f64) with Mut, Div {
+    let phi1 = 6.28318530717959 * rng_next_unit()
+    let phi2 = 6.28318530717959 * rng_next_unit()
+    let phi3 = 6.28318530717959 * rng_next_unit()
+    var i: i64 = 0
+    while i < PATH_T {
+        let t = 12.56637061435917 * (i as f64) / ((PATH_T - 1) as f64)
+        PATH_X[i as usize] = cos_f64(t + phi1) + noise_sigma * rng_next_signed()
+        PATH_Y[i as usize] = cos_f64(t + phi2) + noise_sigma * rng_next_signed()
+        PATH_Z[i as usize] = cos_f64(t + phi3) + noise_sigma * rng_next_signed()
+        i = i + 1
+    }
+    randomize_roles()
+}
+
+// Mean |successive difference| across all 3 axes — the roughness probe
+// that caught the original confound (0.138 vs 1.435).
+fn path_roughness() -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i: i64 = 1
+    while i < PATH_T {
+        let dx = PATH_X[i as usize] - PATH_X[(i-1) as usize]
+        let dy = PATH_Y[i as usize] - PATH_Y[(i-1) as usize]
+        let dz = PATH_Z[i as usize] - PATH_Z[(i-1) as usize]
+        let adx = if dx < 0.0 { 0.0 - dx } else { dx }
+        let ady = if dy < 0.0 { 0.0 - dy } else { dy }
+        let adz = if dz < 0.0 { 0.0 - dz } else { dz }
+        sum = sum + adx + ady + adz
+        i = i + 1
+    }
+    sum / ((PATH_T - 1) as f64 * 3.0)
+}
+
+// FIXED (2026-08-14, second correction): the original packing put
+// (x,y,z,bias) into sedenion slots {0,1,2,3}. Under Cayley-Dickson
+// doubling H -> O -> S, those 4 slots are EXACTLY the quaternion
+// subalgebra H, which is associative — so every triple's associator
+// (and hence the [2,1]-hook) was IDENTICALLY ZERO by a theorem,
+// regardless of Borromean vs unlinked structure (verified above,
+// ||associator||~1e-9 = machine epsilon, on 3 random such vectors).
+//
+// FIXED AGAIN (2026-08-14, third correction): merely moving off the
+// quaternion subalgebra was not enough. As long as a=pack(t-2),
+// b=pack(t-1), c=pack(t) all use the SAME FIXED assignment of
+// (x,y,z) -> (slot_i,slot_j,slot_k), every associator reduces to a
+// scalar multiple of the single pure-basis-triple associator
+// [e_i,e_j,e_k], which is a general algebraic fact ALWAYS antisymmetric
+// under permutation (lies entirely in Lambda^3) — so hook21 = 0 no
+// matter which 3 slots are chosen (verified identical to 8dp across
+// two unrelated slot choices).
+//
+// FIXED A THIRD TIME (2026-08-14): neither the cyclic rotation nor a
+// fully i.i.d.-random permutation of roles broke the zero — both still
+// gave hook21=0.00000000 to 8dp. Root cause, now understood cleanly:
+// a, b, c stayed confined to the SAME 4-dimensional span{e0,e_i,e_j,e_k}
+// (bias + exactly 3 fixed imaginary directions {SLOT_A,SLOT_B,SLOT_C})
+// in EVERY variant — only which coefficient landed in which of those 3
+// slots changed, never the SPAN itself. This is the general fact: for
+// any three vectors confined to a fixed span of the real unit plus
+// EXACTLY 3 imaginary basis directions, the associator is a multilinear
+// combination of permutations of the single basis-triple associator
+// [e_i,e_j,e_k] — which is a textbook fact ALWAYS totally antisymmetric
+// under permutation of 3 DISTINCT basis units — so it always lands
+// entirely in Lambda^3 and [2,1] vanishes, independent of coefficients
+// or their assignment. Escaping this requires a, b, c to collectively
+// engage >=4 independent imaginary directions, not just 3.
+//
+// THE FIX: pack 4 independent physical quantities per operand — the 3
+// path coordinates PLUS a genuinely independent 4th (the previous
+// z-value, a short delay-embedding feature) — into 4 distinct slots
+// {SLOT_A,SLOT_B,SLOT_C,SLOT_D}, breaking the 3-direction confinement.
+const SLOT_A: i64 = 1    // quaternion-imaginary
+const SLOT_B: i64 = 5    // octonion non-quaternion
+const SLOT_C: i64 = 9    // sedenion "hi" half
+const SLOT_D: i64 = 11   // sedenion "hi" half, 2nd independent direction
+
+fn pack_sed(t: i64, out: &![f64; 16]) with Mut, Div {
+    var i: i64 = 0
+    while i < 16 { out[i] = 0.0; i = i + 1 }
+    out[0] = 1.0                       // bias / real part
+    let x = PATH_X[t as usize]
+    let y = PATH_Y[t as usize]
+    let z = PATH_Z[t as usize]
+    let w = if t > 0 { PATH_Z[(t - 1) as usize] } else { 0.0 }  // 4th, independent (delay-embedded) feature
+    out[SLOT_A as usize] = x
+    out[SLOT_B as usize] = y
+    out[SLOT_C as usize] = z
+    out[SLOT_D as usize] = w
+}
+
+// Mean hook-norm and mean associator-norm over consecutive triples of the
+// CURRENT path in PATH_X/Y/Z (out[0]=hook_mean, out[1]=assoc_mean).
+fn compute_hook_features(out: &![f64; 2]) with Mut, Div, Panic, NonAssoc {
+    var hook_sum = 0.0
+    var assoc_sum = 0.0
+    var count: i64 = 0
+    var t: i64 = 2
+    while t < PATH_T {
+        var a: [f64; 16] = [0.0; 16]
+        var b: [f64; 16] = [0.0; 16]
+        var c: [f64; 16] = [0.0; 16]
+        pack_sed(t - 2, &!a)
+        pack_sed(t - 1, &!b)
+        pack_sed(t, &!c)
+        var hook: [f64; 16] = [0.0; 16]
+        hook21_sed_closed(&a, &b, &c, &!hook)
+        hook_sum = hook_sum + sed_norm(&hook)
+        var assoc: [f64; 16] = [0.0; 16]
+        sed_associator(&a, &b, &c, &!assoc)
+        assoc_sum = assoc_sum + sed_norm(&assoc)
+        count = count + 1
+        t = t + 1
+    }
+    out[0] = hook_sum / (count as f64)
+    out[1] = assoc_sum / (count as f64)
+}
+
+// =============================================================================
+// STATS: AUROC (Mann-Whitney rank formula) + Cohen's d
+// =============================================================================
+
+fn auroc(scores: &[f64; 256], labels: &[i64; 256], n: i64, n_pos: i64, n_neg: i64) -> f64 with Mut, Div, Panic {
+    var rank_sum_pos = 0.0
+    var i: i64 = 0
+    while i < n {
+        if labels[i as usize] == 1 {
+            var rank = 1.0
+            var j: i64 = 0
+            while j < n {
+                if j != i && scores[j as usize] < scores[i as usize] { rank = rank + 1.0 }
+                j = j + 1
+            }
+            rank_sum_pos = rank_sum_pos + rank
+        }
+        i = i + 1
+    }
+    let npf = n_pos as f64
+    (rank_sum_pos - npf * (npf + 1.0) / 2.0) / (npf * (n_neg as f64))
+}
+
+fn mean_of(scores: &[f64; 256], labels: &[i64; 256], n: i64, target_label: i64) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if labels[i as usize] == target_label { s = s + scores[i as usize]; c = c + 1 }
+        i = i + 1
+    }
+    s / (c as f64)
+}
+
+fn std_of(scores: &[f64; 256], labels: &[i64; 256], n: i64, target_label: i64, mean: f64) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if labels[i as usize] == target_label {
+            let d = scores[i as usize] - mean
+            s = s + d*d; c = c + 1
+        }
+        i = i + 1
+    }
+    sqrt_f64(s / (c as f64))
+}
+
+fn cohens_d(scores: &[f64; 256], labels: &[i64; 256], n: i64) -> f64 with Mut, Div, Panic {
+    let m1 = mean_of(scores, labels, n, 1)
+    let m0 = mean_of(scores, labels, n, 0)
+    let s1 = std_of(scores, labels, n, 1, m1)
+    let s0 = std_of(scores, labels, n, 0, m0)
+    (m1 - m0) / sqrt_f64((s1*s1 + s0*s0) / 2.0)
+}
+
+// =============================================================================
+// PERMUTATION TEST (Fisher-Yates reshuffle of the label/class assignment,
+// AUROC recomputed each draw, two-sided on |AUROC-0.5|): the real
+// significance test this file's own trailing note has flagged as missing
+// since n=15/class. Scores are the already-computed, expensive-to-generate
+// per-sample features; only the label assignment is reshuffled per draw,
+// so K_PERMS draws cost K_PERMS AUROC evaluations (O(n^2) each), not
+// K_PERMS path regenerations.
+// =============================================================================
+
+const K_PERMS: i64 = 2000
+
+fn permutation_p_value(scores: &[f64; 256], n: i64, n_pos: i64, n_neg: i64, observed_auc: f64) -> f64 with Mut, Div, Panic {
+    let observed_dev = if observed_auc > 0.5 { observed_auc - 0.5 } else { 0.5 - observed_auc }
+    var perm_labels: [i64; 256] = [0; 256]
+    var count_extreme: i64 = 0
+    var p: i64 = 0
+    while p < K_PERMS {
+        var i: i64 = 0
+        while i < n { perm_labels[i as usize] = if i < n_pos { 1 } else { 0 }; i = i + 1 }
+        var j: i64 = n - 1
+        while j > 0 {
+            let r = rng_nonneg(j + 1)
+            let tmp = perm_labels[j as usize]
+            perm_labels[j as usize] = perm_labels[r as usize]
+            perm_labels[r as usize] = tmp
+            j = j - 1
+        }
+        let perm_auc = auroc(scores, &perm_labels, n, n_pos, n_neg)
+        let perm_dev = if perm_auc > 0.5 { perm_auc - 0.5 } else { 0.5 - perm_auc }
+        if perm_dev >= observed_dev { count_extreme = count_extreme + 1 }
+        p = p + 1
+    }
+    (count_extreme as f64) / (K_PERMS as f64)
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    print("=== Borromean-vs-unlinked re-run, matched local roughness ===\n")
+    rng_seed(20260814)
+    let noise_sigma = 0.1
+
+    // --- Hypothesis check: pack_sed puts (x,y,z,bias) into sedenion slots
+    //     0..3. Under the standard Cayley-Dickson doubling H -> O -> S,
+    //     slots {0,1,2,3} are EXACTLY the quaternion subalgebra H (the
+    //     "lower half of the lower half"), which is associative. If true,
+    //     ANY triple confined to those 4 slots has associator IDENTICALLY
+    //     ZERO — a theorem, not a measurement — independent of Borromean
+    //     vs unlinked structure. Verify on 3 random such vectors before
+    //     trusting the AUROC below.
+    var qa: [f64; 16] = [0.0; 16]
+    var qb: [f64; 16] = [0.0; 16]
+    var qc: [f64; 16] = [0.0; 16]
+    var qi: i64 = 0
+    while qi < 4 {
+        qa[qi as usize] = rng_next_signed()
+        qb[qi as usize] = rng_next_signed()
+        qc[qi as usize] = rng_next_signed()
+        qi = qi + 1
+    }
+    var qassoc: [f64; 16] = [0.0; 16]
+    sed_associator(&qa, &qb, &qc, &!qassoc)
+    print("\n[Hypothesis check] associator of 3 random vectors confined to\n")
+    print("  sedenion slots {0,1,2,3} (the quaternion subalgebra):\n")
+    print("  ||associator|| = "); print_f64(sed_norm(&qassoc), 12)
+    print("  (should be EXACTLY 0 if the pack() embedding never leaves H)\n")
+
+    // --- Roughness sanity check (this is the exact probe that caught
+    //     the original confound; both classes should now be close) ---
+    generate_borromean_path(noise_sigma)
+    let rough_pos = path_roughness()
+    generate_unlinked_path(noise_sigma)
+    let rough_neg = path_roughness()
+    print("\n[Sanity] mean |successive difference| (local roughness):\n")
+    print("  Borromean-type: "); print_f64(rough_pos, 4); print("\n")
+    print("  unlinked-type:  "); print_f64(rough_neg, 4); print("\n")
+    print("  (original confound was 0.138 vs 1.435, ~10x apart; these should be close)\n")
+
+    // --- Generate N_SAMPLES per class, collect hook_mean/assoc_mean ---
+    var hook_scores: [f64; 256] = [0.0; 256]
+    var assoc_scores: [f64; 256] = [0.0; 256]
+    var labels: [i64; 256] = [0; 256]
+    var idx: i64 = 0
+
+    var s: i64 = 0
+    while s < N_SAMPLES {
+        generate_borromean_path(noise_sigma)
+        var feat: [f64; 2] = [0.0; 2]
+        compute_hook_features(&!feat)
+        hook_scores[idx as usize] = feat[0]
+        assoc_scores[idx as usize] = feat[1]
+        labels[idx as usize] = 1
+        idx = idx + 1
+        s = s + 1
+    }
+    s = 0
+    while s < N_SAMPLES {
+        generate_unlinked_path(noise_sigma)
+        var feat: [f64; 2] = [0.0; 2]
+        compute_hook_features(&!feat)
+        hook_scores[idx as usize] = feat[0]
+        assoc_scores[idx as usize] = feat[1]
+        labels[idx as usize] = 0
+        idx = idx + 1
+        s = s + 1
+    }
+    let n_total = idx
+
+    print("\n[Results] n="); print_i64(N_SAMPLES); print(" per class, roughness-matched:\n")
+
+    let hook_m1 = mean_of(&hook_scores, &labels, n_total, 1)
+    let hook_m0 = mean_of(&hook_scores, &labels, n_total, 0)
+    let hook_auc = auroc(&hook_scores, &labels, n_total, N_SAMPLES, N_SAMPLES)
+    let hook_d = cohens_d(&hook_scores, &labels, n_total)
+    print("  [2,1]-hook:   Borromean mean="); print_f64(hook_m1, 8)
+    print("  unlinked mean="); print_f64(hook_m0, 8)
+    print("  AUROC="); print_f64(hook_auc, 4)
+    print("  Cohen's d="); print_f64(hook_d, 4); print("\n")
+
+    let assoc_m1 = mean_of(&assoc_scores, &labels, n_total, 1)
+    let assoc_m0 = mean_of(&assoc_scores, &labels, n_total, 0)
+    let assoc_auc = auroc(&assoc_scores, &labels, n_total, N_SAMPLES, N_SAMPLES)
+    let assoc_d = cohens_d(&assoc_scores, &labels, n_total)
+    print("  associator:   Borromean mean="); print_f64(assoc_m1, 8)
+    print("  unlinked mean="); print_f64(assoc_m0, 8)
+    print("  AUROC="); print_f64(assoc_auc, 4)
+    print("  Cohen's d="); print_f64(assoc_d, 4); print("\n")
+
+    print("\n[Permutation test] "); print_i64(K_PERMS); print(" label reshuffles,\n")
+    print(" two-sided on |AUROC-0.5| (the real significance test this file's own\n")
+    print(" prior version flagged as missing -- p = fraction of reshuffled label\n")
+    print(" assignments whose |AUROC-0.5| is at least as large as the observed one):\n")
+    let hook_p = permutation_p_value(&hook_scores, n_total, N_SAMPLES, N_SAMPLES, hook_auc)
+    let assoc_p = permutation_p_value(&assoc_scores, n_total, N_SAMPLES, N_SAMPLES, assoc_auc)
+    print("  [2,1]-hook:   p="); print_f64(hook_p, 4); print("\n")
+    print("  associator:   p="); print_f64(assoc_p, 4); print("\n")
+
+    print("\n[Interpretation, honest, final state]:\n")
+    print(" Four defects fixed in sequence: (1) roughness confound, (2) operands\n")
+    print(" confined to the associative quaternion subalgebra (hook=assoc=0 by a\n")
+    print(" theorem, verified), (3) operands confined to a fixed 3-imaginary-\n")
+    print(" direction span (hook=0 for ANY coefficients/permutation within that\n")
+    print(" span, also a general fact, verified with 3 unrelated slot/role\n")
+    print(" schemes), (4) escaping (3) required a genuinely 4th independent\n")
+    print(" basis direction per operand (here: a one-step delay-embedded\n")
+    print(" feature). With that: [2,1]-hook and associator are BOTH now\n")
+    print(" genuinely nonzero for the first time in this investigation.\n")
+    print(" DO NOT read the AUROC series (n=15: 0.25/0.31, n=25: 0.32/0.34,\n")
+    print(" n=50: 0.39/0.42, hook/associator) as \"shrinking toward chance\" --\n")
+    print(" Cohen's d for the hook has been essentially flat since n=25\n")
+    print(" (-0.44 -> -0.42, not still shrinking). At n=50 specifically,\n")
+    print(" AUROC ~= Phi(d/sqrt(2)) applied to that stable d predicts ~0.38,\n")
+    print(" close to the observed 0.39 -- a SINGLE-POINT match, not\n")
+    print(" validation of the whole n=15->25->50 trajectory: at n=15/25 the\n")
+    print(" same link (applied to that n's still-moving d) predicts a HIGHER\n")
+    print(" AUROC than observed (~0.31 vs 0.25 at n=15; ~0.38 vs 0.32 at\n")
+    print(" n=25) -- overpredicting, the opposite of what \"small-n AUROC\n")
+    print(" biased toward 0.5\" needs across the whole series.\n")
+    print(" That's enough to make \"the effect is decaying to zero\" an\n")
+    print(" unearned reading, without establishing the reverse (a stable\n")
+    print(" small effect) either. Read the printed p-values above as a\n")
+    print(" genuine hypothesis\n")
+    print(" test, not as proof either way: p<0.05 (two-sided, uncorrected\n")
+    print(" across the 2 features tested here) would mean the AUROCs above are\n")
+    print(" unlikely under the null; p>=0.05 (what was actually observed, hook\n")
+    print(" p=0.06 borderline) means this run FAILS TO REJECT the null -- which\n")
+    print(" is not the same as CONFIRMING it. No CI, power curve, or\n")
+    print(" equivalence test (TOST) was computed to adjudicate between \"no\n")
+    print(" effect\" and \"stable small effect,\" and the resource ceiling that\n")
+    print(" blocked n=75/class is exactly what would be needed to try. What IS\n")
+    print(" true: this is now a real, if inconclusive, statistical test, not a\n")
+    print(" provisional \"not yet powered to test at all\" state -- the original\n")
+    print(" paper's AUROC numbers, the flat retraction, and this file's own\n")
+    print(" earlier (n=15/n=25, no p-value) intermediate results are all\n")
+    print(" superseded by the numbers above, but so is any \"resolved to\n")
+    print(" chance\" reading of them.\n")
+
+    print("\n=== DONE ===\n")
+    0
+}

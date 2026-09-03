@@ -1,70 +1,42 @@
-# database — SQL Database Interface
+# stdlib/database
 
-SQL database connectivity for Sounio with both pure Sounio and native FFI backends.
+In-memory SQL-like database with relational algebra operations.
 
-## Overview
+## Architecture
 
-The `database` module provides a unified SQL interface supporting:
+- `pure/types.sio` - Core types (InMemoryDB, Table)
+- `pure/queries.sio` - Query execution engine
+- `lib.sio` - Public API
 
-- **Pure Sounio Engine** (`pure/engine.sio`) — In-memory SQLite-like engine with no external dependencies
-- **FFI Backends** (`ffi/`) — Native libsqlite3 and libpq when available
+## Storage Model
 
-## Epistemic Differentiators
+- Flat array storage: 4 tables × 16 rows × 4 columns = 256 slots
+- Column types: STRING, I64, F64
+- Null markers for empty slots
 
-- `EpistemicResultSet` — Query results with `Knowledge<f64>` uncertainty for aggregates
-- Provenance tracking for query lineage
-- Confidence-aware aggregation functions
-- GUM-compliant uncertainty propagation
+## Capabilities
 
-## Quickstart
+- CREATE TABLE, INSERT, SELECT, UPDATE, DELETE
+- WHERE clause filtering
+- Aggregate functions: COUNT, SUM, AVG, MIN, MAX
+- JOIN support (INNER)
+- GROUP BY with aggregates
 
-```sio
-use database::pure::engine
+## Usage
 
-let mut db = in_memory_db_new()
+```
+use database::lib
 
-// Create and populate
-let sql = "CREATE TABLE users (id INTEGER, name TEXT, age REAL)".to_string()
-engine_execute_sql(&mut db, sql)
-
-let insert = "INSERT INTO users VALUES (1, 'Alice', 30.5)".to_string()
-engine_execute_sql(&mut db, insert)
-
-// Query
-let select = "SELECT name, age FROM users WHERE age > 25".to_string()
-let result = engine_execute_sql(&mut db, select)
+var db = database_new()
+execute(&! db, "CREATE TABLE users (name STRING, age I64)")
+execute(&! db, "INSERT INTO users VALUES ('Alice', 30)")
+execute(&! db, "INSERT INTO users VALUES ('Bob', 25)")
+let result = query(&db, "SELECT name, age FROM users WHERE age > 25")
 ```
 
-## Module Structure
+## Tests
 
-| File | Description |
-|------|-------------|
-| `pure/types.sio` | Core types: Database, Connection, Value, ResultSet |
-| `pure/parser.sio` | SQL parser (SELECT, INSERT, UPDATE, DELETE, CREATE TABLE) |
-| `pure/engine.sio` | In-memory SQL execution engine |
-| `ffi/bindings.sio` | FFI declarations for libsqlite3 and libpq |
-| `ffi/wrapper.sio` | Sounio wrapper over FFI when available |
-| `ffi/fallback.sio` | Graceful fallback when FFI unavailable |
+- `tests/stdlib/database/test_database_core.sio` — CRUD + drop (check-only)
+- `tests/stdlib_database/test_database_e2e.sio` — legacy run-pass harness
 
-## Supported SQL
-
-- `SELECT` with WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET, DISTINCT
-- `INSERT INTO table VALUES (...)`
-- `UPDATE table SET col = val WHERE ...`
-- `DELETE FROM table WHERE ...`
-- `CREATE TABLE table_name (col_name TYPE, ...)`
-- `DROP TABLE table_name`
-
-## Benchmarks
-
-See `../../benchmarks/README.md` for performance targets vs SQLite/libpq.
-
-## Validation Status
-
-- Parser: ✅ Tests passing for all supported SQL forms
-- Engine: ✅ CREATE, INSERT, SELECT, UPDATE, DELETE working
-- FFI: ⚠️ Bindings declared but require libsqlite3/libpq to be linked
-
-## License
-
-MIT / Apache-2.0 (same as Sounio)
+FFI (`database::ffi::*`) exposes SQLite/libpq stubs returning errors until wired.

@@ -1,0 +1,42 @@
+// Run-proof for stdlib data::uncertain_frame — GUM-compliant column uncertainty.
+// Flagship: Type A evaluation of the mean (ISO/IEC Guide 98-3 "GUM" §4.2). Readings
+// {5.02,5.00,5.01,4.99,4.98}: mean 5.00, s = 0.0158114, u_c = s/sqrt(5) = 0.00707107,
+// nu = 4, k95 = t_0.95(4) = 2.776, U95 = 0.0196. lean_single engine.
+use data::dataframe::*
+use data::uncertain_frame::*
+use epistemic::gum::{GUMResult, gum_value, gum_std_u, gum_dof, gum_k95, gum_u95, gum_report}
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn r1(df: &!DataFrame, a: f64) with Mut, Div, Panic { var r: [f64;64]=[0.0;64]; r[0]=a; df_add_row(df,&r) }
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var v = df_new(1)
+    r1(&!v,5.02); r1(&!v,5.00); r1(&!v,5.01); r1(&!v,4.99); r1(&!v,4.98)
+    // ---- FLAGSHIP: Type A mean ----
+    let m = uframe_mean_type_a(&v, 0)
+    if ae(gum_value(m),5.00) >= 1.0e-9 { print("FAIL mean\n"); return 1 }
+    if ae(gum_std_u(m),0.00707107) >= 1.0e-6 { print("FAIL u_c\n"); return 2 }
+    if ae(gum_dof(m),4.0) >= 1.0e-9 { print("FAIL dof\n"); return 3 }
+    if ae(gum_k95(m),2.776) >= 1.0e-2 { print("FAIL k95\n"); return 4 }
+    if ae(gum_u95(m),0.0196293) >= 1.0e-5 { print("FAIL U95\n"); return 5 }
+    // human-readable metrology report
+    gum_report("mean concentration", "mg/L", m)
+    // ---- combined Type A + independent Type B (each reading u = 0.01) ----
+    var u = df_new(1)
+    r1(&!u,0.01); r1(&!u,0.01); r1(&!u,0.01); r1(&!u,0.01); r1(&!u,0.01)
+    let c = uframe_mean_combined(&v, 0, &u, 0)
+    // u_B(mean)=sqrt(5*0.0001)/5=0.00447214 ; u_c=sqrt(0.00707107^2+0.00447214^2)=0.00836660
+    if ae(gum_std_u(c),0.00836660) >= 1.0e-6 { print("FAIL comb_uc\n"); return 6 }
+    if gum_dof(c) < 7.0 || gum_dof(c) > 9.0 { print("FAIL comb_dof\n"); return 7 }  // Welch-Satterthwaite ~7.84
+    // ---- uncorrelated sum ----
+    let s = uframe_sum_independent(&v, 0, &u, 0)
+    if ae(gum_value(s),25.0) >= 1.0e-9 { print("FAIL sum_val\n"); return 8 }
+    if ae(gum_std_u(s),0.02236068) >= 1.0e-6 { print("FAIL sum_uc\n"); return 9 }
+    // ---- units: compatibility + guarded add ----
+    if !uframe_units_ok(3,3) { print("FAIL units_same\n"); return 10 }
+    if uframe_units_ok(3,4) { print("FAIL units_diff\n"); return 11 }
+    if !uframe_units_ok(0,4) { print("FAIL units_dimless\n"); return 12 }
+    let a2 = uframe_add(m, 3, m, 3)   // same unit -> variances add: value 10, u_c = sqrt(2)*u
+    if ae(gum_value(a2),10.0) >= 1.0e-9 { print("FAIL add_val\n"); return 13 }
+    if ae(gum_std_u(a2),0.00707107*1.41421356) >= 1.0e-6 { print("FAIL add_uc\n"); return 14 }
+    print("UNCERTAIN_FRAME_STDLIB_OK\n")
+    return 0
+}

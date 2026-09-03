@@ -1,0 +1,119 @@
+// stdlib/genomics/gpu/gf4.sio — GF(4) genomics kernels
+
+module genomics::gpu::gf4
+//
+// Public GPU-shaped API with a deterministic CPU fallback. The current stdlib
+// contract does not claim a runtime GPU launch here; these functions preserve
+// the kernel semantics in ordinary Sounio so genomics callers can execute.
+//
+// Base encoding: A=0, C=1, G=2, T=3. Addition is XOR. Multiplication uses the
+// primitive polynomial x^2 + x + 1 over GF(2).
+
+struct Gf4Seq256 {
+    data: [i32; 256],
+    len: i32,
+}
+
+fn gf4_norm(x: i32) -> i32 {
+    x & 3
+}
+
+fn gf4_add(a: i32, b: i32) -> i32 {
+    (a ^ b) & 3
+}
+
+fn gf4_mul(a: i32, b: i32) -> i32 {
+    let aa = a & 3
+    let bb = b & 3
+    if aa == 0 || bb == 0 { return 0 }
+    if aa == 1 { return bb }
+    if bb == 1 { return aa }
+    if aa == 2 && bb == 2 { return 3 }
+    if aa == 2 && bb == 3 { return 1 }
+    if aa == 3 && bb == 2 { return 1 }
+    2
+}
+
+fn gf4_complement_base(base: i32) -> i32 {
+    (base ^ 3) & 3
+}
+
+fn gf4_complement_seq(seq: &[i32; 256], len: i32) -> Gf4Seq256 with Mut, Panic, Div {
+    var out = Gf4Seq256 { data: [0; 256], len: 0 }
+    var n = len
+    if n < 0 { n = 0 }
+    if n > 256 { n = 256 }
+    var i = 0
+    while i < n {
+        out.data[i] = gf4_complement_base(seq[i])
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+fn gf4_add_seq(a: &[i32; 256], b: &[i32; 256], len: i32) -> Gf4Seq256 with Mut, Panic, Div {
+    var out = Gf4Seq256 { data: [0; 256], len: 0 }
+    var n = len
+    if n < 0 { n = 0 }
+    if n > 256 { n = 256 }
+    var i = 0
+    while i < n {
+        out.data[i] = gf4_add(a[i], b[i])
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+fn gf4_mul_seq(a: &[i32; 256], b: &[i32; 256], len: i32) -> Gf4Seq256 with Mut, Panic, Div {
+    var out = Gf4Seq256 { data: [0; 256], len: 0 }
+    var n = len
+    if n < 0 { n = 0 }
+    if n > 256 { n = 256 }
+    var i = 0
+    while i < n {
+        out.data[i] = gf4_mul(a[i], b[i])
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+fn gf4_dot(a: &[i32; 256], b: &[i32; 256], len: i32) -> i32 with Mut, Panic, Div {
+    var acc = 0
+    var n = len
+    if n < 0 { n = 0 }
+    if n > 256 { n = 256 }
+    var i = 0
+    while i < n {
+        acc = gf4_add(acc, gf4_mul(a[i], b[i]))
+        i = i + 1
+    }
+    acc
+}
+
+pub fn gf4_self_test() -> i32 with Mut, Panic, Div {
+    if gf4_complement_base(0) != 3 { return 1 }
+    if gf4_complement_base(1) != 2 { return 2 }
+    if gf4_complement_base(2) != 1 { return 3 }
+    if gf4_complement_base(3) != 0 { return 4 }
+    if gf4_add(2, 3) != 1 { return 5 }
+    if gf4_mul(2, 2) != 3 { return 6 }
+    if gf4_mul(2, 3) != 1 { return 7 }
+    if gf4_mul(3, 3) != 2 { return 8 }
+
+    var a: [i32; 256] = [0; 256]
+    var b: [i32; 256] = [0; 256]
+    a[0] = 0; a[1] = 1; a[2] = 2; a[3] = 3
+    b[0] = 1; b[1] = 1; b[2] = 2; b[3] = 3
+    let c = gf4_complement_seq(&a, 4)
+    if c.len != 4 { return 9 }
+    if c.data[0] != 3 || c.data[1] != 2 || c.data[2] != 1 || c.data[3] != 0 { return 10 }
+    let s = gf4_add_seq(&a, &b, 4)
+    if s.data[0] != 1 || s.data[1] != 0 || s.data[2] != 0 || s.data[3] != 0 { return 11 }
+    let p = gf4_mul_seq(&a, &b, 4)
+    if p.data[0] != 0 || p.data[1] != 1 || p.data[2] != 3 || p.data[3] != 2 { return 12 }
+    if gf4_dot(&a, &b, 4) != 0 { return 13 }
+    0
+}

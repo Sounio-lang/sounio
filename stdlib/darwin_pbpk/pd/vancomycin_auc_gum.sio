@@ -1,0 +1,231 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// darwin_pbpk/pd/vancomycin_auc_gum.sio — AUC/MIC GUM Uncertainty + Knightian Gate
+//
+// Propagates uncertainty to AUC24/MIC for vancomycin TDM using JCGM 100:2008
+// (first-order law of propagation of uncertainty), then applies a Knightian
+// p-box gate (Ferson & Ginzburg 1996) over the ±1σ_CL clearance range.
+//
+// Output quantity: Q = AUC24 / MIC  [units: mg·h/L / mg/L = h]
+// Target: 400 ≤ Q ≤ 600 h (ASHP/SIDP/IDSA 2020 guidelines, MIC = 1 mg/L)
+//
+// GUM sources (7, JCGM 100:2008):
+//   1. CL inter-individual variability (Matzke/Pryka, CV=25%)
+//   2. CrCl estimation error (Cockcroft-Gault, CV=15%)
+//   3. Vc volume estimation (Roberts 2011, CV=25%)
+//   4. Vp volume estimation (Roberts 2011, CV=25%)
+//   5. fu_plasma uncertainty (equilibrium dialysis, CV=10%)
+//   6. MIC assay uncertainty (clinical microdilution, CV=30%)
+//   7. Numerical integration residual (RK4 step-size, CV=2%)
+//
+// Knightian p-box (±1σ_CL bounds):
+//   AUC_lower = 2·Dose / (CL + σ_CL)   [pessimistic: high CL → low AUC]
+//   AUC_upper = 2·Dose / (CL - σ_CL)   [optimistic: low CL → high AUC]
+//   Recommend: both bounds in [400, 600] → proceed without monitoring
+//   Adjust:    upper > 600 only          → reduce dose or extend interval
+//   Refuse:    lower > 600 (supratherapeutic even at pessimistic CL)
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn vg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+fn vg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// GUM SENSITIVITIES AND COMBINED UNCERTAINTY
+// ============================================================================
+// AUC24 (steady state, 1-comp approx) = dose_total / CL
+//   dose_total = dose_mg × doses_per_24h
+//   CL (L/h) = (0.689 × CrCl + 3.66) × 0.06
+//
+// Partial derivatives (output = AUC24):
+//   ∂AUC/∂CL   = -dose_total / CL²
+//   ∂CL/∂CrCl  = 0.689 × 0.06 = 0.04134 L/h per mL/min
+//   ∂AUC/∂CrCl = (∂AUC/∂CL) × (∂CL/∂CrCl)
+//   ∂AUC/∂Vc   ≈ 0 at steady state (volume-independent AUC)
+//   ∂AUC/∂Vp   ≈ 0 at steady state
+//   ∂AUC/∂fu   = 0 (total drug clearance independent of fu for renal-dominant CL)
+//
+// For AUC/MIC ratio (output Q = AUC/MIC):
+//   ∂Q/∂CL   = -dose_total / (CL² × MIC)
+//   ∂Q/∂CrCl = ∂Q/∂CL × 0.04134
+//   ∂Q/∂MIC  = -AUC / MIC²
+//   ∂Q/∂Vc   ≈ 0.05 × AUC/MIC × (1/Vc) [heuristic for first-dose non-ss correction]
+//   ∂Q/∂Vp   ≈ 0.05 × AUC/MIC × (1/Vp)
+
+struct VancoGUM {
+    ratio:      f64,    // AUC24/MIC point estimate
+    u_ratio:    f64,    // combined standard uncertainty u(Q)
+    u_cl:       f64,    // contribution from CL IIV
+    u_crcl:     f64,    // contribution from CrCl estimation
+    u_vc:       f64,    // contribution from Vc (heuristic)
+    u_vp:       f64,    // contribution from Vp (heuristic)
+    u_fu:       f64,    // contribution from fu (zero for total AUC)
+    u_mic:      f64,    // contribution from MIC assay
+    u_num:      f64,    // contribution from numerical integration
+}
+
+// Compute GUM uncertainty for AUC24/MIC.
+// crcl: CrCl (mL/min), weight (kg), dose (mg), mic (mg/L)
+fn vg_gum(crcl: f64, weight: f64, dose_mg: f64, mic: f64) -> VancoGUM with Mut, Div {
+    let cl_lh   = (0.689 * crcl + 3.66) * 0.06
+    let vc_l    = 0.40 * weight
+    let vp_l    = 0.30 * weight
+    let auc24   = 2.0 * dose_mg / cl_lh
+    let ratio   = auc24 / mic
+
+    // Standard deviations of inputs
+    let sigma_cl   = 0.25 * cl_lh
+    let sigma_crcl = 0.15 * crcl
+    let sigma_vc   = 0.25 * vc_l
+    let sigma_vp   = 0.25 * vp_l
+    // fu: CV=10%, but ∂Q/∂fu=0 for total drug monitoring → zero contribution
+    let sigma_mic  = 0.30 * mic
+    let sigma_num  = 0.02 * auc24
+
+    // Partial derivatives of Q = AUC/MIC
+    let dq_dcl   = 0.0 - 2.0 * dose_mg / (cl_lh * cl_lh * mic)
+    let dcl_dccl = 0.04134
+    let dq_dcrcl = dq_dcl * dcl_dccl
+    let dq_dmic  = 0.0 - auc24 / (mic * mic)
+    // Volume corrections (5% sensitivity heuristic for first-dose non-steady-state)
+    let dq_dvc   = 0.05 * ratio / vc_l
+    let dq_dvp   = 0.05 * ratio / vp_l
+
+    // GUM individual contributions |∂Q/∂xi| × σ(xi)
+    let u_cl   = vg_abs(dq_dcl)   * sigma_cl
+    let u_crcl = vg_abs(dq_dcrcl) * sigma_crcl
+    let u_vc   = vg_abs(dq_dvc)   * sigma_vc
+    let u_vp   = vg_abs(dq_dvp)   * sigma_vp
+    let u_fu   = 0.0
+    let u_mic  = vg_abs(dq_dmic)  * sigma_mic
+    let u_num  = sigma_num / mic
+
+    let sq     = u_cl*u_cl + u_crcl*u_crcl + u_vc*u_vc + u_vp*u_vp
+                + u_fu*u_fu + u_mic*u_mic + u_num*u_num
+    let u_tot  = vg_sqrt(sq)
+
+    VancoGUM {
+        ratio:   ratio,
+        u_ratio: u_tot,
+        u_cl:    u_cl,
+        u_crcl:  u_crcl,
+        u_vc:    u_vc,
+        u_vp:    u_vp,
+        u_fu:    u_fu,
+        u_mic:   u_mic,
+        u_num:   u_num,
+    }
+}
+
+// Knightian p-box decision using ±1σ_CL bounds on AUC24.
+// Returns 0 = Recommend, 1 = Adjust, 2 = Refuse
+fn vg_knightian(crcl: f64, weight: f64, dose_mg: f64, mic: f64) -> i32 with Div {
+    let cl_lh    = (0.689 * crcl + 3.66) * 0.06
+    let sigma_cl = 0.25 * cl_lh
+    let cl_hi    = cl_lh + sigma_cl    // pessimistic CL → lower AUC
+    let cl_lo    = cl_lh - sigma_cl    // optimistic CL → higher AUC
+    if cl_lo <= 0.0 { return 2 }      // degenerate: refuse
+    let auc_lo   = 2.0 * dose_mg / cl_hi / mic
+    let auc_hi   = 2.0 * dose_mg / cl_lo / mic
+    // Refuse: even pessimistic CL gives supratherapeutic (entire box above ceiling)
+    if auc_lo > 600.0 { return 2 }
+    // Adjust: upper bound exceeds ceiling
+    if auc_hi > 600.0 { return 1 }
+    // Recommend: both bounds in [400, 600]
+    0
+}
+
+// ============================================================================
+// GATE TESTS
+// ============================================================================
+
+fn test_uncertainty_exists() -> i32 with IO, Mut, Div {
+    // T1: Combined u(AUC24/MIC) > 50 h (sanity: uncertainty is non-trivial)
+    let g = vg_gum(90.0, 70.0, 15.0 * 70.0, 1.0)
+    if g.u_ratio > 50.0 {
+        println("T1 PASS: GUM uncertainty exists (u > 50 h)")
+        1
+    } else {
+        print("T1 FAIL: u_ratio=")
+        print(g.u_ratio)
+        println(" h (expected >50)")
+        0
+    }
+}
+
+fn test_mic_dominance() -> i32 with IO, Mut, Div {
+    // T2: MIC fraction of variance > 30% (MIC assay is a significant uncertainty source)
+    let g  = vg_gum(90.0, 70.0, 15.0 * 70.0, 1.0)
+    let sq = g.u_cl*g.u_cl + g.u_crcl*g.u_crcl + g.u_vc*g.u_vc + g.u_vp*g.u_vp
+            + g.u_fu*g.u_fu + g.u_mic*g.u_mic + g.u_num*g.u_num
+    if sq <= 0.0 {
+        println("T2 FAIL: zero combined variance")
+        return 0
+    }
+    let mic_frac = g.u_mic * g.u_mic / sq
+    if mic_frac > 0.30 {
+        println("T2 PASS: MIC fraction of variance > 30%")
+        1
+    } else {
+        print("T2 FAIL: MIC fraction=")
+        print(mic_frac)
+        println(" (expected >0.30)")
+        0
+    }
+}
+
+fn test_standard_adjust() -> i32 with IO, Div {
+    // T3: Standard patient (CrCl=90) → Knightian = Adjust or Recommend (not Refuse)
+    // With ±1σ_CL: upper bound ~710 h → Adjust; standard dosing with monitoring
+    let dec = vg_knightian(90.0, 70.0, 15.0 * 70.0, 1.0)
+    if dec == 0 || dec == 1 {
+        println("T3 PASS: Standard patient is Adjust or Recommend (not Refuse)")
+        1
+    } else {
+        println("T3 FAIL: Standard patient is Refuse (unexpected with CrCl=90)")
+        0
+    }
+}
+
+fn test_renal_refuse() -> i32 with IO, Div {
+    // T4: Renal-impaired (CrCl=20, same 15mg/kg dose) → Knightian = Refuse
+    // CL drops to ~1.05 L/h, AUC24/MIC ~2006 >> 600 → even pessimistic CL gives >600
+    let dec = vg_knightian(20.0, 70.0, 15.0 * 70.0, 1.0)
+    if dec == 2 {
+        println("T4 PASS: Renal-impaired (CrCl=20) is Refuse (dose must be reduced)")
+        1
+    } else {
+        print("T4 FAIL: Expected Refuse (2), got ")
+        print(dec)
+        println("")
+        0
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var passed = 0
+    passed = passed + test_uncertainty_exists()
+    passed = passed + test_mic_dominance()
+    passed = passed + test_standard_adjust()
+    passed = passed + test_renal_refuse()
+    if passed == 4 {
+        println("ALL PASS")
+    } else {
+        print("PARTIAL: ")
+        print(passed)
+        println("/4 passed")
+    }
+    0
+}

@@ -1,0 +1,179 @@
+// stdlib/epistemic/product_nonassoc.sio — non-associative structural variance
+//
+// When a scalar observable is computed through a product of non-associative
+// quantities (octonions), the *order* of multiplication is not free:
+// (a·b)·c ≠ a·(b·c). That order-indeterminacy is genuine structural uncertainty
+// — distinct from measurement variance — and the associator
+//   [a,b,c] = (a·b)·c − a·(b·c)
+// measures it exactly:
+//
+//   Var_total = Var_GUM + κ·‖[a,b,c]‖²
+//
+// Associative / Fano triple  ⇒ ‖α‖² = 0 ⇒ no augmentation (order was safe).
+// Non-associative triple     ⇒ variance grows by exactly the order-ambiguity.
+//
+// Madaros native-import leaf (2026-07-20):
+//   Previously product_nonassoc lived in epistemic::propagate and called
+//   algebra::associator_field (private helpers + exclusive-ref oct_mul). That
+//   multi-module chain is not Madaros-native-trustworthy (compile may succeed;
+//   exclusive-ref path SEGV's; named-import surface often fails E137).
+//
+//   Fix: self-contain the octonion multiply + associator norm² here using a
+//   field-wise PnOct struct (return-by-value). Canonical math is identical to
+//   algebra::octonion::{oct_mul, oct_associator, oct_norm_sq} + window 7 of
+//   algebra::associator_field (af_augmented_variance = base + κ·‖α‖²).
+//   No algebra:: use remains.
+//
+// Execution-verified targets (basis e1,e2,e3 / e1,e2,e4, κ=1, base σ²=0.25):
+//   Fano:    variance = 0.25
+//   non-Fano: variance = 4.25  (‖α‖² = 4 for unit basis non-Fano triple)
+
+use epistemic::knowledge::{Epistemic}
+
+// ---------------------------------------------------------------------------
+// Local octonion — field-wise struct (Madaros-safe). Do NOT use &![f64; 8]
+// exclusive-ref mutation for the multiply body under default Madaros native.
+// ---------------------------------------------------------------------------
+
+struct PnOct {
+    c0: f64
+    c1: f64
+    c2: f64
+    c3: f64
+    c4: f64
+    c5: f64
+    c6: f64
+    c7: f64
+}
+
+// Cayley–Dickson / Fano-plane octonion product (same expansion as algebra::octonion::oct_mul).
+fn pn_oct_mul(a: &PnOct, b: &PnOct) -> PnOct with Mut, Div {
+    var r0 = a.c0 * b.c0
+    r0 = r0 - a.c1 * b.c1
+    r0 = r0 - a.c2 * b.c2
+    r0 = r0 - a.c3 * b.c3
+    r0 = r0 - a.c4 * b.c4
+    r0 = r0 - a.c5 * b.c5
+    r0 = r0 - a.c6 * b.c6
+    r0 = r0 - a.c7 * b.c7
+    var r1 = a.c0 * b.c1 + a.c1 * b.c0
+    r1 = r1 + a.c2 * b.c3 - a.c3 * b.c2
+    r1 = r1 + a.c4 * b.c5 - a.c5 * b.c4
+    r1 = r1 - a.c6 * b.c7 + a.c7 * b.c6
+    var r2 = a.c0 * b.c2 + a.c2 * b.c0
+    r2 = r2 - a.c1 * b.c3 + a.c3 * b.c1
+    r2 = r2 + a.c4 * b.c6 - a.c6 * b.c4
+    r2 = r2 + a.c5 * b.c7 - a.c7 * b.c5
+    var r3 = a.c0 * b.c3 + a.c3 * b.c0
+    r3 = r3 + a.c1 * b.c2 - a.c2 * b.c1
+    r3 = r3 + a.c4 * b.c7 - a.c7 * b.c4
+    r3 = r3 - a.c5 * b.c6 + a.c6 * b.c5
+    var r4 = a.c0 * b.c4 + a.c4 * b.c0
+    r4 = r4 - a.c1 * b.c5 + a.c5 * b.c1
+    r4 = r4 - a.c2 * b.c6 + a.c6 * b.c2
+    r4 = r4 - a.c3 * b.c7 + a.c7 * b.c3
+    var r5 = a.c0 * b.c5 + a.c5 * b.c0
+    r5 = r5 + a.c1 * b.c4 - a.c4 * b.c1
+    r5 = r5 - a.c2 * b.c7 + a.c7 * b.c2
+    r5 = r5 + a.c3 * b.c6 - a.c6 * b.c3
+    var r6 = a.c0 * b.c6 + a.c6 * b.c0
+    r6 = r6 + a.c1 * b.c7 - a.c7 * b.c1
+    r6 = r6 + a.c2 * b.c4 - a.c4 * b.c2
+    r6 = r6 - a.c3 * b.c5 + a.c5 * b.c3
+    var r7 = a.c0 * b.c7 + a.c7 * b.c0
+    r7 = r7 - a.c1 * b.c6 + a.c6 * b.c1
+    r7 = r7 + a.c2 * b.c5 - a.c5 * b.c2
+    r7 = r7 + a.c3 * b.c4 - a.c4 * b.c3
+    PnOct { c0: r0, c1: r1, c2: r2, c3: r3, c4: r4, c5: r5, c6: r6, c7: r7 }
+}
+
+fn pn_oct_from_arr(a: &[f64; 8]) -> PnOct {
+    PnOct {
+        c0: a[0], c1: a[1], c2: a[2], c3: a[3],
+        c4: a[4], c5: a[5], c6: a[6], c7: a[7],
+    }
+}
+
+fn pn_oct_norm_sq(a: &PnOct) -> f64 {
+    a.c0 * a.c0 + a.c1 * a.c1 + a.c2 * a.c2 + a.c3 * a.c3
+        + a.c4 * a.c4 + a.c5 * a.c5 + a.c6 * a.c6 + a.c7 * a.c7
+}
+
+// Associator [a,b,c] = (a·b)·c − a·(b·c) as a PnOct (return-by-value).
+fn pn_associator(a: &PnOct, b: &PnOct, c: &PnOct) -> PnOct with Mut, Div, NonAssoc {
+    let ab = pn_oct_mul(a, b)
+    let ab_c = pn_oct_mul(&ab, c)
+    let bc = pn_oct_mul(b, c)
+    let a_bc = pn_oct_mul(a, &bc)
+    PnOct {
+        c0: ab_c.c0 - a_bc.c0,
+        c1: ab_c.c1 - a_bc.c1,
+        c2: ab_c.c2 - a_bc.c2,
+        c3: ab_c.c3 - a_bc.c3,
+        c4: ab_c.c4 - a_bc.c4,
+        c5: ab_c.c5 - a_bc.c5,
+        c6: ab_c.c6 - a_bc.c6,
+        c7: ab_c.c7 - a_bc.c7,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public science surface
+// ---------------------------------------------------------------------------
+
+// Basis element e_idx as [f64; 8] (local — no algebra::octonion import).
+// idx in 0..=7; out-of-range yields the zero octonion.
+pub fn pn_oct_basis(idx: i64) -> [f64; 8] with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    if idx >= 0 {
+        if idx < 8 {
+            o[idx] = 1.0
+        }
+    }
+    o
+}
+
+// ‖[a,b,c]‖² — order-ambiguity signal for the triple (a,b,c).
+// Fano (e1,e2,e3) → 0; non-Fano unit basis (e1,e2,e4) → 4.
+pub fn associator_norm_sq(
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
+) -> f64 with Mut, Div, Panic, NonAssoc {
+    let oa = pn_oct_from_arr(a)
+    let ob = pn_oct_from_arr(b)
+    let oc = pn_oct_from_arr(c)
+    let alpha = pn_associator(&oa, &ob, &oc)
+    pn_oct_norm_sq(&alpha)
+}
+
+// Knowledge-free path: base GUM variance + κ·‖[a,b,c]‖² (clamped ≥ 0).
+// Prefer this under Madaros when only the variance number is needed.
+pub fn product_nonassoc_augment(
+    base_variance: f64,
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
+    kappa: f64,
+) -> f64 with Mut, Div, Panic, NonAssoc {
+    let total = base_variance + kappa * associator_norm_sq(a, b, c)
+    if total < 0.0 { 0.0 } else { total }
+}
+
+// Augment a scalar observable's variance with the order-indeterminacy of the
+// non-associative octonion triple (a,b,c) it was computed through.
+// `base.val` is unchanged (the structural term is uncertainty, not a bias);
+// confidence passes through — order-ambiguity lives in the variance channel
+// per the GUM-augmentation model.
+//
+// Madaros note: free-function / field form of Epistemic is the native-safe
+// surface (D3 partial 2026-07-19). Callers under Madaros should build base via
+// ep_measured rather than Epistemic::measured method form.
+pub fn product_nonassoc(
+    base: Epistemic,
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
+    kappa: f64,
+) -> Epistemic with Mut, Div, Panic, NonAssoc {
+    let total = product_nonassoc_augment(base.variance, a, b, c, kappa)
+    Epistemic {
+        val: base.val,
+        variance: total,
+        confidence: base.confidence,
+    }
+}

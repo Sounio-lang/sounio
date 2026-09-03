@@ -82,6 +82,15 @@ if [[ ! -f "$MANIFEST_PATH" ]]; then
   echo "[native-v2-gum] FAIL: missing manifest $MANIFEST_PATH" >&2
   exit 1
 fi
+# Manifest row floor: the case loop appends exactly one results row per
+# non-comment data row. An empty manifest runs zero cases, case_count reads
+# 0, and 0 == 0 computes status "pass" -- an instrument that answered
+# nothing certifying itself.
+gum_manifest_rows="$(grep -vE '^[[:space:]]*(#|$)' "$MANIFEST_PATH" | grep -c . || true)"
+if [[ "$gum_manifest_rows" -lt 1 ]]; then
+  echo "[native-v2-gum] FAIL: manifest $MANIFEST_PATH has no data rows -- nothing to verify" >&2
+  exit 1
+fi
 
 bash scripts/ci/native_v2_driver_self_compile_gate.sh >"$SELF_GATE_LOG" 2>&1
 
@@ -196,59 +205,101 @@ if command -v objdump >/dev/null 2>&1; then
     fi
   fi
 else
-  echo "[native-v2-gum] NOTE: objdump not available — sqrtsd scan skipped"
+  echo "[native-v2-gum] NOTE: objdump not available -- sqrtsd scan skipped"
 fi
 
-python3 - "$SUMMARY_JSON" "$RESULTS_TSV" "$SOUC_BIN" "$MANIFEST_PATH" \
-         "$STAGE1_DRIVER" "$STAGE1_DRIVER_2" "$OUT_DIR" "$GUM_SSE2_VERIFIED" <<'PY'
-import csv, hashlib, json, pathlib, sys
+# Pure-bash summary JSON emitter (replaces python3 csv.DictReader + json.dump heredoc).
+# TSV header: case_id($1) program($2) claim_class($3) expected_exit($4) pass1_exit($5)
+#   pass2_exit($6) stdout($7) status($8) pass1_sha256($9) pass2_sha256($10) bytes($11)
+# Keys sorted alphabetically per sort_keys=True.
+MANIFEST_SHA256="$(sha256sum "$MANIFEST_PATH" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$MANIFEST_PATH" | awk '{print $1}')"
+STAGE1_SHA256="$(sha256sum "$STAGE1_DRIVER" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$STAGE1_DRIVER" | awk '{print $1}')"
+STAGE1_2_SHA256="$(sha256sum "$STAGE1_DRIVER_2" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$STAGE1_DRIVER_2" | awk '{print $1}')"
+if [[ "$STAGE1_SHA256" == "$STAGE1_2_SHA256" ]]; then
+  stage1_deterministic=true
+else
+  stage1_deterministic=false
+fi
+gum_sse2_bool=false
+[[ "${GUM_SSE2_VERIFIED,,}" == "true" ]] && gum_sse2_bool=true
+case_count="$(awk 'NR>1 && NF>0' "$RESULTS_TSV" | wc -l | tr -d ' ')"
+# Every manifest data row must have answered exactly once; a shortfall is
+# lost rows, not a smaller corpus (0 == 0 would otherwise read "pass").
+if [[ "$case_count" -ne "$gum_manifest_rows" ]]; then
+  echo "[native-v2-gum] FAIL: $case_count of $gum_manifest_rows manifest cases produced results -- incomplete pass" >&2
+  exit 1
+fi
+pass_count_gum="$(awk -F'\t' 'NR>1 && $8=="ok"' "$RESULTS_TSV" | wc -l | tr -d ' ')"
+fail_count_gum=$(( case_count - pass_count_gum ))
+if [[ "$pass_count_gum" -eq "$case_count" ]]; then
+  status_str="pass"
+else
+  status_str="fail"
+fi
 
-summary_path = pathlib.Path(sys.argv[1])
-results_path = pathlib.Path(sys.argv[2])
-souc_bin = sys.argv[3]
-manifest_path = pathlib.Path(sys.argv[4])
-stage1_path = pathlib.Path(sys.argv[5])
-stage1_replay_path = pathlib.Path(sys.argv[6])
-out_dir = pathlib.Path(sys.argv[7])
-gum_sse2 = sys.argv[8].lower() == "true"
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-rows = []
-with open(results_path, "r", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f, delimiter="\t"))
-
-payload = {
-    "schema": "sounio.native_v2_gum_primitives.v1",
-    "status": "pass" if all(r["status"] == "ok" for r in rows) else "fail",
-    "compiler_resolved": souc_bin,
-    "target": "x86_64-linux",
-    "fallback_path": "none",
-    "host_callback": "none",
-    "driver_source": "self-hosted/compiler/native_compile_driver.sio",
-    "manifest": str(manifest_path),
-    "manifest_sha256": sha256(manifest_path),
-    "stage1_driver_sha256": sha256(stage1_path),
-    "stage1_driver_deterministic": sha256(stage1_path) == sha256(stage1_replay_path),
-    "gum_sse2_verified": gum_sse2,
-    "sota_claim": "ISO JCGM 100:2008 GUM uncertainty propagation as native x86-64 SSE2 IR primitive",
-    "case_count": len(rows),
-    "pass_count": sum(1 for r in rows if r["status"] == "ok"),
-    "fail_count": sum(1 for r in rows if r["status"] != "ok"),
-    "results_tsv": str(results_path),
-    "artifact_dir": str(out_dir),
-    "cases": rows,
+CASES_JSON="$(awk -F'\t' '
+function jsesc(s,    out, i, c) {
+  out = ""
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c == "\\") out = out "\\\\"
+    else if (c == "\"") out = out "\\\""
+    else if (c == "\n") out = out "\\n"
+    else if (c == "\r") out = out "\\r"
+    else if (c == "\t") out = out "\\t"
+    else out = out c
+  }
+  return out
 }
+NR==1 { next }
+NR>1 && NF>=8 {
+  if (printed) printf ",\n"
+  printed = 1
+  printf "    {\n"
+  printf "      \"bytes\": \"%s\",\n",          jsesc($11)
+  printf "      \"case_id\": \"%s\",\n",        jsesc($1)
+  printf "      \"claim_class\": \"%s\",\n",    jsesc($3)
+  printf "      \"expected_exit\": \"%s\",\n",  jsesc($4)
+  printf "      \"pass1_exit\": \"%s\",\n",     jsesc($5)
+  printf "      \"pass1_sha256\": \"%s\",\n",   jsesc($9)
+  printf "      \"pass2_exit\": \"%s\",\n",     jsesc($6)
+  printf "      \"pass2_sha256\": \"%s\",\n",   jsesc($10)
+  printf "      \"program\": \"%s\",\n",        jsesc($2)
+  printf "      \"status\": \"%s\",\n",         jsesc($8)
+  printf "      \"stdout\": \"%s\"\n",          jsesc($7)
+  printf "    }"
+}
+END { if (printed) printf "\n" }
+' "$RESULTS_TSV")"
+CASES_JSON="[
+$CASES_JSON
+  ]"
 
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if payload["status"] != "pass" or not payload["stage1_driver_deterministic"]:
-    raise SystemExit(1)
-PY
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --string  "artifact_dir=$OUT_DIR" \
+  --int     "case_count=$case_count" \
+  --raw-json "cases=$CASES_JSON" \
+  --string  "compiler_resolved=$SOUC_BIN" \
+  --string  "driver_source=self-hosted/compiler/native_compile_driver.sio" \
+  --int     "fail_count=$fail_count_gum" \
+  --string  "fallback_path=none" \
+  --bool    "gum_sse2_verified=$gum_sse2_bool" \
+  --string  "host_callback=none" \
+  --string  "manifest=$MANIFEST_PATH" \
+  --string  "manifest_sha256=$MANIFEST_SHA256" \
+  --int     "pass_count=$pass_count_gum" \
+  --string  "results_tsv=$RESULTS_TSV" \
+  --string  "schema=sounio.native_v2_gum_primitives.v1" \
+  --string  "sota_claim=ISO JCGM 100:2008 GUM uncertainty propagation as native x86-64 SSE2 IR primitive" \
+  --bool    "stage1_driver_deterministic=$stage1_deterministic" \
+  --string  "stage1_driver_sha256=$STAGE1_SHA256" \
+  --string  "status=$status_str" \
+  --string  "target=x86_64-linux" \
+  > "$SUMMARY_JSON"
+
+if [[ "$status_str" != "pass" || "$stage1_deterministic" != "true" ]]; then
+  exit 1
+fi
 
 echo "[native-v2-gum] PASS: sqrt_f64 SSE2, ISO GUM addition, GUM multiplication, epistemic PBPK confidence gate, deterministic replay"
 echo "[native-v2-gum] summary=$SUMMARY_JSON"

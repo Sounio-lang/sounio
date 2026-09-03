@@ -1,0 +1,498 @@
+// self-hosted/gpu/test_kaxi_driver.sio — K-AXI end-to-end simulator tests
+//
+// Validates the full assemble → simulate pipeline for multiple instruction
+// sequences with register and memory state verification.
+
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_c::*
+use gpu::kaxi_opt::*
+
+fn str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if hlen < nlen { return false }
+    var i: i64 = 0
+    while i <= (hlen - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if str_char_at(haystack, i + j) != str_char_at(needle, j) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn test_c_transpile() -> bool with IO, Mut, Panic, Div, Alloc {
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "add r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    let c_code = kaxi_transpile_to_c(asm)
+    if !str_contains(c_code, "#include <stdio.h>") { return false }
+    if !str_contains(c_code, "void kaxi_kernel") { return false }
+    if !str_contains(c_code, "reg_val[1] = 10") { return false }
+    if !str_contains(c_code, "reg_val[2] = 20") { return false }
+    if !str_contains(c_code, "reg_val[3] = reg_val[1] + reg_val[2]") { return false }
+    if !str_contains(c_code, "mem[reg_val[0]] = reg_val[3]") { return false }
+    true
+}
+
+fn test_vec_add() -> bool with IO, Mut, Panic, Div, Alloc {
+    // result = 10 + 20, store at mem[0]
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "add r3, r1, r2, var=+12.5%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    if state.reg_val[1] != 10 { return false }
+    if state.reg_val[2] != 20 { return false }
+    if state.reg_val[3] != 30 { return false }
+    if state.mem[0] != 30 { return false }
+    // 2 load_imm + 1 add + 1 store_global + 1 ret = 5 instr
+    if state.instr_count != 6 { return false }
+    if state.mem_writes != 1 { return false }
+    if state.arith_ops != 1 { return false }
+    true
+}
+
+fn test_fma() -> bool with IO, Mut, Panic, Div, Alloc {
+    // fma(2, 3, 4) = 2*3 + 4 = 10, store at mem[0]
+    // K-AXI FMA does: dst = src_a * src_b + src_a
+    // So we need: src_a=2, src_b=3 → 2*3+2 = 8. Then add 2 more.
+    // Actually, let's just test FMA directly: 2*3 + 2 = 8
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=2, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=3, seq=2")
+    asm = kaxi_asm_push_line(asm, "fma r3, r1, r2, var=+81.25%, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r3, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    // 2*3 + 2 = 8
+    if state.reg_val[3] != 8 { return false }
+    if state.mem[0] != 8 { return false }
+    if state.instr_count != 6 { return false }
+    if state.arith_ops != 1 { return false }
+    if state.mem_writes != 1 { return false }
+    true
+}
+
+fn test_load_store_roundtrip() -> bool with IO, Mut, Panic, Div, Alloc {
+    // Store 42 at address 5, load it back to r2, store r2 at address 7
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=5, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=42, seq=1")
+    asm = kaxi_asm_push_line(asm, "store_global r1, addr=r0, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_global r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=7, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r3, seq=5")
+    asm = kaxi_asm_push_line(asm, "ret seq=6")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 7 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    if state.mem[5] != 42 { return false }
+    if state.mem[7] != 42 { return false }
+    if state.reg_val[2] != 42 { return false }
+    if state.instr_count != 7 { return false }
+    if state.mem_reads != 1 { return false }
+    if state.mem_writes != 2 { return false }
+    true
+}
+
+fn test_shared_memory() -> bool with IO, Mut, Panic, Div, Alloc {
+    // Write 42 to shared_mem[5], read it back to r2, store to global mem[0]
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=5, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=42, seq=1")
+    asm = kaxi_asm_push_line(asm, "store_shared r1, addr=r0, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_shared r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=0, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r3, seq=5")
+    asm = kaxi_asm_push_line(asm, "ret seq=6")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 7 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    if state.shared_mem[5] != 42 { return false }
+    if state.reg_val[2] != 42 { return false }
+    if state.mem[0] != 42 { return false }
+    true
+}
+
+fn test_multi_lane() -> bool with IO, Mut, Panic, Div, Alloc {
+    // 4 lanes: each computes tid + 10 and stores to mem[tid]
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r2, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "ret seq=4")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 5 { return false }
+
+    var lane: i64 = 0
+    while lane < 4 {
+        var state: KaxiSimState = kaxi_sim_new_with_tid(lane)
+        state = kaxi_sim_exec(state, stream)
+        let expected = lane + 10
+        if state.mem[lane as usize] != expected {
+            return false
+        }
+        lane = lane + 1
+    }
+    true
+}
+
+fn test_predicate() -> bool with IO, Mut, Panic, Div, Alloc {
+    // setp.gt p0, r1, r2  (5 > 3 → true)
+    // selp r3, r1, r2, pred=p0  (true → r3 = r1 = 5)
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=5, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=3, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.gt p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "selp r2, r0, r1, pred=p0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r1, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    if state.pred[0] != true { return false }
+    if state.reg_val[2] != 5 { return false }
+    if state.mem[3] != 5 { return false }
+
+    // Now test false path: setp.lt p0, r0, r1 (5 < 3 → false)
+    var asm2: KaxiAsmBuf = kaxi_asm_new()
+    asm2 = kaxi_asm_push_line(asm2, "load_imm r0, imm=5, seq=0")
+    asm2 = kaxi_asm_push_line(asm2, "load_imm r1, imm=3, seq=1")
+    asm2 = kaxi_asm_push_line(asm2, "setp.lt p0, r0, r1, seq=2")
+    asm2 = kaxi_asm_push_line(asm2, "selp r2, r0, r1, pred=p0, seq=3")
+    asm2 = kaxi_asm_push_line(asm2, "store_global r2, addr=r1, seq=4")
+    asm2 = kaxi_asm_push_line(asm2, "ret seq=5")
+
+    var stream2: KaxiTxnStream = kaxi_assemble(asm2)
+    var state2: KaxiSimState = kaxi_sim_new()
+    state2 = kaxi_sim_exec(state2, stream2)
+
+    if state2.pred[0] != false { return false }
+    if state2.reg_val[2] != 3 { return false }
+    if state2.mem[3] != 3 { return false }
+    true
+}
+
+fn test_mul_div() -> bool with IO, Mut, Panic, Div, Alloc {
+    // (10 * 20) / 4 = 50
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=20, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=4, seq=3")
+    asm = kaxi_asm_push_line(asm, "mul r4, r1, r2, var=+62.5%, seq=4")
+    asm = kaxi_asm_push_line(asm, "div r5, r4, r3, var=+75%, seq=5")
+    asm = kaxi_asm_push_line(asm, "store_global r5, addr=r0, seq=6")
+    asm = kaxi_asm_push_line(asm, "ret seq=7")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 8 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+
+    if state.reg_val[4] != 200 { return false }
+    if state.reg_val[5] != 50 { return false }
+    if state.mem[0] != 50 { return false }
+    if state.instr_count != 8 { return false }
+    if state.arith_ops != 2 { return false }
+    if state.mem_writes != 1 { return false }
+    true
+}
+
+fn test_warp_divergence() -> bool with IO, Mut, Panic, Div, Alloc {
+    // 8 lanes: lanes with tid==0 skip the store; others store 100 to mem[tid]
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")            // 0
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=0, seq=1")           // 1
+    asm = kaxi_asm_push_line(asm, "setp.eq p0, r0, r1, seq=2")          // 2
+    asm = kaxi_asm_push_line(asm, "branch p0, target=6, seq=3")         // 3
+    asm = kaxi_asm_push_line(asm, "load_imm r2, imm=100, seq=4")        // 4
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=5")    // 5
+    asm = kaxi_asm_push_line(asm, "reconverge seq=6")                   // 6
+    asm = kaxi_asm_push_line(asm, "ret seq=7")                          // 7
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 8 { return false }
+
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+
+    // Lane 0 did not write (skipped via branch)
+    if warp.mem[0] != 0 { return false }
+    // Lanes 1-7 wrote 100
+    var lane: i64 = 1
+    while lane < 8 {
+        if warp.mem[lane as usize] != 100 { return false }
+        lane = lane + 1
+    }
+    true
+}
+
+fn test_vote_ballot() -> bool with IO, Mut, Panic, Div, Alloc {
+    // 8 lanes: vote.ballot on (tid > 3)
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=3, seq=1")
+    asm = kaxi_asm_push_line(asm, "setp.gt p0, r0, r1, seq=2")
+    asm = kaxi_asm_push_line(asm, "vote.ballot r2, p0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r1, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+
+    // Expected ballot: lanes 4-7 true → bitmask = 0b11110000 = 240
+    if warp.mem[3] != 240 { return false }
+    true
+}
+
+fn test_shuffle_xor() -> bool with IO, Mut, Panic, Div, Alloc {
+    // 8 lanes: r0 = 10 + tid, then r1 = shuffle_xor(r0, 1)
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=10, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r0, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "shuffle.xor r2, r0, imm=1, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r0, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+
+    // lane 0: mem[10] = r0[1] = 11
+    // lane 1: mem[11] = r0[0] = 10
+    // lane 2: mem[12] = r0[3] = 13
+    // lane 3: mem[13] = r0[2] = 12
+    if warp.mem[10] != 11 { return false }
+    if warp.mem[11] != 10 { return false }
+    if warp.mem[12] != 13 { return false }
+    if warp.mem[13] != 12 { return false }
+    true
+}
+
+fn test_warp_reduce() -> bool with IO, Mut, Panic, Div, Alloc {
+    // 8 lanes: r0 = 1 + tid, then r1 = warp_reduce_add(r0)
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "get_tid r0, var=0%, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=1, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r0, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "warp.reduce.add r2, r0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r1, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    if stream.count != 6 { return false }
+
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+
+    // sum(1+0, 1+1, ..., 1+7) = sum(1..8) = 36
+    if warp.mem[1] != 36 { return false }
+    true
+}
+
+fn test_opt_constant_fold() -> bool with IO, Mut, Panic, Div, Alloc {
+    // load_imm r0, 2; load_imm r1, 3; add r2, r0, r1; store_global r2, addr=r3
+    // Should fold to: load_imm r2, 5; store_global r2, addr=r3
+    // Then DCE removes dead r0/r1 → 4 instructions total
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=2, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=3, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r2, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=0, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r2, addr=r3, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var opt: KaxiTxnStream = kaxi_optimize(stream)
+
+    // After fold + DCE: load_imm r2=5, load_imm r3=0, store_global, ret = 4
+    if opt.count != 4 { return false }
+
+    // Verify correctness
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, opt)
+    if state.mem[0] != 5 { return false }
+    true
+}
+
+fn test_opt_dead_code() -> bool with IO, Mut, Panic, Div, Alloc {
+    // load_imm r0, 10; load_imm r1, 20; add r2, r0, r1; load_imm r3, 99; store_global r0, addr=r3
+    // r1 and r2 are dead; only r0 store matters
+    // After DCE: load_imm r0, 10; load_imm r3, 99; store_global r0, addr=r3
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=10, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=20, seq=1")
+    asm = kaxi_asm_push_line(asm, "add r2, r0, r1, var=+12.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=99, seq=3")
+    asm = kaxi_asm_push_line(asm, "store_global r0, addr=r3, seq=4")
+    asm = kaxi_asm_push_line(asm, "ret seq=5")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var opt: KaxiTxnStream = kaxi_optimize(stream)
+
+    // After DCE, should have 4 instructions (add and load_imm r1 removed)
+    if opt.count != 4 { return false }
+
+    // Verify correctness
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, opt)
+    if state.mem[99] != 10 { return false }
+    true
+}
+
+fn test_opt_combined() -> bool with IO, Mut, Panic, Div, Alloc {
+    // Chain: load_imm r0, 4; load_imm r1, 5; mul r2, r0, r1; load_imm r3, 2; div r4, r2, r3; store_global r4, addr=r0
+    // Fold: mul → 20, div → 10. Then DCE removes dead intermediates.
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=4, seq=0")
+    asm = kaxi_asm_push_line(asm, "load_imm r1, imm=5, seq=1")
+    asm = kaxi_asm_push_line(asm, "mul r2, r0, r1, var=+62.5%, seq=2")
+    asm = kaxi_asm_push_line(asm, "load_imm r3, imm=2, seq=3")
+    asm = kaxi_asm_push_line(asm, "div r4, r2, r3, var=+75%, seq=4")
+    asm = kaxi_asm_push_line(asm, "store_global r4, addr=r0, seq=5")
+    asm = kaxi_asm_push_line(asm, "ret seq=6")
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var opt: KaxiTxnStream = kaxi_optimize(stream)
+
+    // After fold+DCE: load_imm r4, 10; store_global r4, addr=r0; ret
+    // But r0 is used as addr, so load_imm r0 stays. Total = 4
+    if opt.count != 4 { return false }
+
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, opt)
+    if state.mem[4] != 10 { return false }
+    true
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !test_vec_add() {
+        println("FAIL test_vec_add")
+        return 1
+    }
+    if !test_fma() {
+        println("FAIL test_fma")
+        return 1
+    }
+    if !test_load_store_roundtrip() {
+        println("FAIL test_load_store_roundtrip")
+        return 1
+    }
+    if !test_multi_lane() {
+        println("FAIL test_multi_lane")
+        return 1
+    }
+    if !test_predicate() {
+        println("FAIL test_predicate")
+        return 1
+    }
+    if !test_mul_div() {
+        println("FAIL test_mul_div")
+        return 1
+    }
+    if !test_shared_memory() {
+        println("FAIL test_shared_memory")
+        return 1
+    }
+    if !test_c_transpile() {
+        println("FAIL test_c_transpile")
+        return 1
+    }
+    if !test_warp_divergence() {
+        println("FAIL test_warp_divergence")
+        return 1
+    }
+    if !test_vote_ballot() {
+        println("FAIL test_vote_ballot")
+        return 1
+    }
+    if !test_shuffle_xor() {
+        println("FAIL test_shuffle_xor")
+        return 1
+    }
+    if !test_warp_reduce() {
+        println("FAIL test_warp_reduce")
+        return 1
+    }
+    if !test_opt_constant_fold() {
+        println("FAIL test_opt_constant_fold")
+        return 1
+    }
+    if !test_opt_dead_code() {
+        println("FAIL test_opt_dead_code")
+        return 1
+    }
+    if !test_opt_combined() {
+        println("FAIL test_opt_combined")
+        return 1
+    }
+    // Run one final combined kernel for perf reporting
+    var perf_asm: KaxiAsmBuf = kaxi_asm_new()
+    perf_asm = kaxi_asm_push_line(perf_asm, "load_imm r0, imm=0, seq=0")
+    perf_asm = kaxi_asm_push_line(perf_asm, "load_imm r1, imm=5, seq=1")
+    perf_asm = kaxi_asm_push_line(perf_asm, "load_imm r2, imm=7, seq=2")
+    perf_asm = kaxi_asm_push_line(perf_asm, "add r3, r1, r2, var=+12.5%, seq=3")
+    perf_asm = kaxi_asm_push_line(perf_asm, "mul r4, r3, r1, var=+62.5%, seq=4")
+    perf_asm = kaxi_asm_push_line(perf_asm, "store_global r4, addr=r0, seq=5")
+    perf_asm = kaxi_asm_push_line(perf_asm, "barrier seq=6")
+    perf_asm = kaxi_asm_push_line(perf_asm, "ret seq=7")
+    var perf_stream: KaxiTxnStream = kaxi_assemble(perf_asm)
+    var perf_state: KaxiSimState = kaxi_sim_new()
+    perf_state = kaxi_sim_exec(perf_state, perf_stream)
+    kaxi_perf_report(perf_state)
+
+    println("PASS kaxi_end_to_end")
+    0
+}

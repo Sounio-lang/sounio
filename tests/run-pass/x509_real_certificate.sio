@@ -1,0 +1,377 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 8 Step 1/2: end-to-end test against a REAL, openssl-generated X.509
+// certificate's DER bytes -- not a hand-built plausible fixture. Per the
+// controller's ONE deviation from this task's brief (decided before this
+// dispatch): the brief offered two ways to "obtain a real certificate" --
+// fetching one live via `openssl s_client -connect <site>:443` from a real
+// external website, or generating a self-signed one locally. This test uses
+// ONLY the self-signed path:
+//
+//   openssl req -x509 -newkey rsa:2048 -days 365 -nodes -subj "/CN=test.example" \
+//     -keyout key.pem -out cert.pem
+//   openssl x509 -in cert.pem -outform DER -out cert.der
+//
+// A live `s_client` fetch was deliberately ruled out: an unattended
+// background agent making an outbound connection to an arbitrary
+// third-party site is undesirable, and a test depending on a live site's
+// certificate would become flaky/non-reproducible whenever that
+// certificate rotates. The self-signed certificate below is a real,
+// openssl-generated DER-encoded X.509v3 certificate with realistic wire
+// bytes (RSA-2048, SHA-256, UTF8String RDNs, SKI/AKI/basicConstraints
+// extensions) -- fully sufficient for this task's goal of exercising the
+// parser against real bytes it did not author, and it keeps the test
+// self-contained and reproducible forever.
+//
+// Independent cross-check performed during test authoring, via
+// `openssl x509 -in cert.pem -text -noout` and `openssl asn1parse -in
+// cert.der -inform DER` against this same cert.der:
+//
+//   Serial Number: 24:6e:12:87:8b:3c:8d:ae:ff:aa:0a:e3:c9:c7:af:24:1f:1c:80:65
+//     (20 bytes, positive -- high bit of first byte 0x24 is 0)
+//   Signature Algorithm: sha256WithRSAEncryption (both outer and TBS-inner
+//     copies -- self-signed, so no SIG_ALG_MISMATCH)
+//   Issuer: CN=test.example  (UTF8String, 12 bytes: 74 65 73 74 2E 65 78 61
+//     6D 70 6C 65)
+//   Subject: CN=test.example  (identical bytes -- self-signed)
+//   Validity:
+//     Not Before: Aug 24 16:05:34 2026 GMT -> Unix 1787587534
+//     Not After : Aug 24 16:05:34 2027 GMT -> Unix 1819123534
+//     (independently converted via Python's stdlib `datetime`, UTC,
+//     `datetime(2026,8,24,16,5,34,tzinfo=utc).timestamp()` and the 2027
+//     equivalent -- cross-checking parse_utc_time_to_unix's own
+//     Y/M/D/H/M/S -> Unix arithmetic against a second implementation)
+//   RSA modulus: 2048 bits (256 bytes), leading byte 0xD9, trailing byte
+//     0x3F (`openssl x509 -in cert.pem -noout -modulus`, first/last two hex
+//     chars: D9...3F)
+//   RSA public exponent: 65537 (0x010001), openssl's default
+//   Extensions (3, v3 cert): Subject Key Identifier, Authority Key
+//     Identifier, Basic Constraints (critical, CA:TRUE, no pathLenConstraint)
+//   TBSCertificate TLV: offset 4, header 0x30 0x82 0x01 0xF7 (long-form,
+//     4-byte header, content length 503) -> total TLV length 507 bytes
+//     (independently confirmed via `openssl asn1parse`: "4:d=1 hl=4 l=503
+//     cons: SEQUENCE").
+//   Outer signatureValue: BIT STRING, unused-bits=0, 256-byte RSA-2048
+//     signature payload (`openssl asn1parse` depth-1 BIT STRING, l=257 =
+//     1 unused-bits byte + 256 payload bytes).
+//
+// This certificate is self-signed (Issuer == Subject == CN=test.example,
+// and the AKI's key identifier bytes are byte-identical to the SKI's own),
+// so its own modulus/exponent verify its own outer signature -- exercised
+// below via x509_verify_signature.
+//
+// DEVIATION FROM THE BRIEF'S LITERAL STEP 1 TEXT: the brief's cross-check
+// list includes "issuer subject CN" and "issuer CN" as if they might
+// differ; for a self-signed certificate they are byte-identical, so both
+// checks below compare against the same expected bytes -- this is not a
+// weaker test, since the parser has two INDEPENDENT call sites
+// (x509_parse_name is invoked once for `issuer` and once for `subject`,
+// see stdlib/x509/cert.sio's x509_parse_tbs_core), so both call sites are
+// still separately exercised.
+//
+// KNOWN, DOCUMENTED LIMITATION NOT ASSERTED HERE (not a new finding): this
+// real certificate's Authority Key Identifier extension encodes its
+// extnValue as `AuthorityKeyIdentifier ::= SEQUENCE { [0] IMPLICIT
+// keyIdentifier OCTET STRING, ... }` (wire bytes `30 16 80 14 <20 bytes>`),
+// but stdlib/x509/cert.sio's `x509_decode_key_identifier` (shared with
+// subjectKeyIdentifier's decode path) only accepts a bare OCTET STRING tag
+// (0x04) at the top of the extnValue -- exactly what subjectKeyIdentifier
+// itself encodes (`04 14 <20 bytes>`), but NOT what authorityKeyIdentifier
+// encodes per RFC 5280 SS4.2.1.1. This is pre-existing stdlib behavior
+// (Tasks 1-7, not touched by this test-only task) rather than a new
+// Madaros compiler defect, so it is out of this task's scope to fix; this
+// test does not assert on `cert.authority_key_id`/`authority_key_id_len`
+// in either direction to avoid encoding an assumption about behavior this
+// task was not chartered to change.
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+// Little-endian 16-bit limbs of the real certificate's RSA-2048 modulus,
+// from `openssl x509 -in cert.pem -noout -modulus`, regrouped the same way
+// as tests/run-pass/x509_verify_signature.sio's own issuer_modulus_limbs.
+fn real_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        37951, 35382, 32799, 2233, 40121, 22763, 303, 31788,
+        16505, 53957, 52021, 47483, 30524, 54977, 43824, 48682,
+        28014, 61227, 15917, 22318, 14977, 14405, 16055, 9157,
+        5471, 47438, 29471, 22038, 1933, 15096, 24241, 39253,
+        63253, 38312, 58310, 5945, 57704, 48858, 31110, 38986,
+        7989, 24911, 14142, 12651, 31477, 15505, 26615, 45494,
+        11859, 3656, 40290, 32469, 50116, 26677, 50949, 48665,
+        60746, 35213, 9468, 27325, 40940, 36311, 47022, 28578,
+        37420, 9160, 26561, 2409, 19984, 16902, 29230, 54350,
+        32858, 47177, 27599, 32308, 6498, 29328, 7898, 45320,
+        15678, 61048, 53173, 31698, 13426, 51491, 12734, 63137,
+        12463, 64847, 54282, 31560, 47058, 7837, 9756, 16370,
+        42256, 56939, 30029, 7616, 47128, 3348, 25339, 47384,
+        44396, 26057, 2930, 51707, 59936, 52053, 2654, 3066,
+        27634, 26785, 45251, 7514, 4989, 2063, 3782, 38761,
+        7438, 28073, 47592, 30901, 1439, 40140, 20417, 55762,
+    ]
+    r
+}
+
+fn build_bigint_128(values: [u16; 128]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 128 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 128
+    result
+}
+
+// Little-endian 16-bit limbs of the real certificate's 20-byte serial
+// number (24:6e:12:87:8b:3c:8d:ae:ff:aa:0a:e3:c9:c7:af:24:1f:1c:80:65),
+// padded to 16 limbs (only the first 10 are non-zero -- 20 bytes = 10
+// u16 limbs).
+fn real_serial_limbs() -> [u16; 16] {
+    let r: [u16; 16] = [
+        32869, 7964, 44836, 51655, 2787, 65450, 36270, 35644,
+        4743, 9326, 0, 0, 0, 0, 0, 0,
+    ]
+    r
+}
+
+fn build_bigint_16(values: [u16; 16], count: i64) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < count {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = count
+    result
+}
+
+fn main() -> i64 with IO {
+    let total_len: i64 = 787
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 787] = [
+        0x30, 0x82, 0x03, 0x0F, 0x30, 0x82, 0x01, 0xF7, 0xA0, 0x03, 0x02, 0x01,
+        0x02, 0x02, 0x14, 0x24, 0x6E, 0x12, 0x87, 0x8B, 0x3C, 0x8D, 0xAE, 0xFF,
+        0xAA, 0x0A, 0xE3, 0xC9, 0xC7, 0xAF, 0x24, 0x1F, 0x1C, 0x80, 0x65, 0x30,
+        0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B,
+        0x05, 0x00, 0x30, 0x17, 0x31, 0x15, 0x30, 0x13, 0x06, 0x03, 0x55, 0x04,
+        0x03, 0x0C, 0x0C, 0x74, 0x65, 0x73, 0x74, 0x2E, 0x65, 0x78, 0x61, 0x6D,
+        0x70, 0x6C, 0x65, 0x30, 0x1E, 0x17, 0x0D, 0x32, 0x36, 0x30, 0x38, 0x32,
+        0x34, 0x31, 0x36, 0x30, 0x35, 0x33, 0x34, 0x5A, 0x17, 0x0D, 0x32, 0x37,
+        0x30, 0x38, 0x32, 0x34, 0x31, 0x36, 0x30, 0x35, 0x33, 0x34, 0x5A, 0x30,
+        0x17, 0x31, 0x15, 0x30, 0x13, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x0C,
+        0x74, 0x65, 0x73, 0x74, 0x2E, 0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65,
+        0x30, 0x82, 0x01, 0x22, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86,
+        0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0F, 0x00,
+        0x30, 0x82, 0x01, 0x0A, 0x02, 0x82, 0x01, 0x01, 0x00, 0xD9, 0xD2, 0x4F,
+        0xC1, 0x9C, 0xCC, 0x05, 0x9F, 0x78, 0xB5, 0xB9, 0xE8, 0x6D, 0xA9, 0x1D,
+        0x0E, 0x97, 0x69, 0x0E, 0xC6, 0x08, 0x0F, 0x13, 0x7D, 0x1D, 0x5A, 0xB0,
+        0xC3, 0x68, 0xA1, 0x6B, 0xF2, 0x0B, 0xFA, 0x0A, 0x5E, 0xCB, 0x55, 0xEA,
+        0x20, 0xC9, 0xFB, 0x0B, 0x72, 0x65, 0xC9, 0xAD, 0x6C, 0xB9, 0x18, 0x62,
+        0xFB, 0x0D, 0x14, 0xB8, 0x18, 0x1D, 0xC0, 0x75, 0x4D, 0xDE, 0x6B, 0xA5,
+        0x10, 0x3F, 0xF2, 0x26, 0x1C, 0x1E, 0x9D, 0xB7, 0xD2, 0x7B, 0x48, 0xD4,
+        0x0A, 0xFD, 0x4F, 0x30, 0xAF, 0xF6, 0xA1, 0x31, 0xBE, 0xC9, 0x23, 0x34,
+        0x72, 0x7B, 0xD2, 0xCF, 0xB5, 0xEE, 0x78, 0x3D, 0x3E, 0xB1, 0x08, 0x1E,
+        0xDA, 0x72, 0x90, 0x19, 0x62, 0x7E, 0x34, 0x6B, 0xCF, 0xB8, 0x49, 0x80,
+        0x5A, 0xD4, 0x4E, 0x72, 0x2E, 0x42, 0x06, 0x4E, 0x10, 0x09, 0x69, 0x67,
+        0xC1, 0x23, 0xC8, 0x92, 0x2C, 0x6F, 0xA2, 0xB7, 0xAE, 0x8D, 0xD7, 0x9F,
+        0xEC, 0x6A, 0xBD, 0x24, 0xFC, 0x89, 0x8D, 0xED, 0x4A, 0xBE, 0x19, 0xC7,
+        0x05, 0x68, 0x35, 0xC3, 0xC4, 0x7E, 0xD5, 0x9D, 0x62, 0x0E, 0x48, 0x2E,
+        0x53, 0xB1, 0xB6, 0x67, 0xF7, 0x3C, 0x91, 0x7A, 0xF5, 0x31, 0x6B, 0x37,
+        0x3E, 0x61, 0x4F, 0x1F, 0x35, 0x98, 0x4A, 0x79, 0x86, 0xBE, 0xDA, 0xE1,
+        0x68, 0x17, 0x39, 0xE3, 0xC6, 0x95, 0xA8, 0xF7, 0x15, 0x99, 0x55, 0x5E,
+        0xB1, 0x3A, 0xF8, 0x07, 0x8D, 0x56, 0x16, 0x73, 0x1F, 0xB9, 0x4E, 0x15,
+        0x5F, 0x23, 0xC5, 0x3E, 0xB7, 0x38, 0x45, 0x3A, 0x81, 0x57, 0x2E, 0x3E,
+        0x2D, 0xEF, 0x2B, 0x6D, 0x6E, 0xBE, 0x2A, 0xAB, 0x30, 0xD6, 0xC1, 0x77,
+        0x3C, 0xB9, 0x7B, 0xCB, 0x35, 0xD2, 0xC5, 0x40, 0x79, 0x7C, 0x2C, 0x01,
+        0x2F, 0x58, 0xEB, 0x9C, 0xB9, 0x08, 0xB9, 0x80, 0x1F, 0x8A, 0x36, 0x94,
+        0x3F, 0x02, 0x03, 0x01, 0x00, 0x01, 0xA3, 0x53, 0x30, 0x51, 0x30, 0x1D,
+        0x06, 0x03, 0x55, 0x1D, 0x0E, 0x04, 0x16, 0x04, 0x14, 0x7E, 0x92, 0x7F,
+        0x6A, 0x11, 0x0C, 0xD4, 0x73, 0x7D, 0xB3, 0x61, 0x31, 0x24, 0x89, 0x96,
+        0x79, 0xDB, 0x47, 0x5D, 0xBD, 0x30, 0x1F, 0x06, 0x03, 0x55, 0x1D, 0x23,
+        0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0x7E, 0x92, 0x7F, 0x6A, 0x11, 0x0C,
+        0xD4, 0x73, 0x7D, 0xB3, 0x61, 0x31, 0x24, 0x89, 0x96, 0x79, 0xDB, 0x47,
+        0x5D, 0xBD, 0x30, 0x0F, 0x06, 0x03, 0x55, 0x1D, 0x13, 0x01, 0x01, 0xFF,
+        0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xFF, 0x30, 0x0D, 0x06, 0x09, 0x2A,
+        0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B, 0x05, 0x00, 0x03, 0x82,
+        0x01, 0x01, 0x00, 0x51, 0x22, 0xD4, 0x2A, 0xBD, 0xB1, 0xD2, 0x2F, 0x1A,
+        0x9C, 0xBC, 0xFB, 0xA8, 0xE1, 0x32, 0x42, 0x7B, 0xF6, 0x3C, 0xAF, 0x7A,
+        0x6A, 0xA7, 0x6E, 0x10, 0xFF, 0x6E, 0xCC, 0xB9, 0x5B, 0x1A, 0xF5, 0xE9,
+        0xDC, 0x51, 0xD8, 0xF8, 0xD3, 0xCE, 0xCA, 0xDC, 0xDF, 0xBB, 0xE1, 0x6D,
+        0x91, 0x67, 0x83, 0x74, 0x96, 0xB3, 0xD9, 0x12, 0x92, 0x75, 0xC2, 0x06,
+        0x78, 0x6D, 0x75, 0x45, 0x5E, 0xD8, 0x5B, 0xF8, 0x70, 0x81, 0x26, 0x53,
+        0x45, 0x8A, 0x1A, 0x31, 0xA4, 0x15, 0x63, 0x35, 0xD7, 0x3A, 0xC7, 0x18,
+        0x1D, 0xFD, 0xAF, 0xDB, 0xBB, 0x3A, 0x8E, 0xE0, 0x82, 0xA6, 0x6E, 0x67,
+        0x65, 0x75, 0x84, 0xAC, 0x8A, 0xC9, 0xCA, 0x30, 0x6B, 0x72, 0x1C, 0x3C,
+        0xA1, 0x9F, 0xE9, 0xFD, 0xFE, 0x5B, 0x82, 0xC1, 0xD4, 0xFB, 0x87, 0xA7,
+        0xA2, 0x29, 0xFE, 0xC0, 0xF4, 0x6F, 0xF2, 0x71, 0xAB, 0x4F, 0x40, 0x2A,
+        0x82, 0x04, 0x41, 0x0B, 0x8F, 0x6B, 0xAA, 0x1C, 0xB2, 0x68, 0x20, 0xB3,
+        0x01, 0x8A, 0xCD, 0x83, 0x4F, 0x63, 0x08, 0x8C, 0x55, 0xB9, 0xC2, 0xC1,
+        0x84, 0x40, 0x1C, 0x4E, 0x62, 0x7A, 0xC5, 0x4F, 0x1C, 0x6E, 0xFF, 0x00,
+        0x0F, 0x08, 0x9A, 0xFB, 0x4E, 0x16, 0xC9, 0x4E, 0x8D, 0x52, 0xA0, 0x22,
+        0x00, 0x07, 0xA5, 0x9E, 0x10, 0x85, 0x4F, 0xF0, 0xE1, 0xBF, 0x67, 0xE1,
+        0x3B, 0x40, 0xEA, 0xCB, 0x66, 0x39, 0xE0, 0x75, 0x9C, 0x3D, 0xF2, 0xD8,
+        0x1F, 0x61, 0x2B, 0x99, 0xC1, 0x28, 0xF3, 0x10, 0x5D, 0x1A, 0xC8, 0xF0,
+        0xD0, 0x6D, 0xD4, 0x46, 0xD4, 0xC7, 0x48, 0xCD, 0xDA, 0xA3, 0x0F, 0x49,
+        0xF0, 0x5C, 0x56, 0x89, 0xBD, 0x2C, 0x04, 0xA0, 0x1E, 0xF9, 0x24, 0xC1,
+        0x6E, 0xC9, 0xE6, 0xE2, 0xA0, 0x33, 0x51, 0x91, 0xA6, 0xAE, 0x6F, 0x3B,
+        0x15, 0xA2, 0xB2, 0xAF, 0xF4, 0xCF, 0x7A,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    // Per Finding 25's workaround (tuple-destructured struct-typed local
+    // does not propagate the struct type): declare `cert` first via
+    // certificate_zero(), then overwrite its VALUE via assignment.
+    var cert = certificate_zero()
+    let (cert_raw, status) = x509_parse_certificate(&buf, total_len)
+    cert = cert_raw
+
+    if status != X509_OK {
+        print_int(1)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    // TBSCertificate TLV: offset 4, total length 507 (long-form header 4
+    // bytes + 503 content bytes) -- confirmed via `openssl asn1parse`.
+    if cert.tbs_start != 4 {
+        print_int(2)
+        return 1
+    }
+    assert(cert.tbs_start == 4)
+    if cert.tbs_len != 507 {
+        print_int(3)
+        return 1
+    }
+    assert(cert.tbs_len == 507)
+
+    // Serial number: 20-byte positive integer, cross-checked against
+    // `openssl x509 -text -noout`'s own Serial Number field.
+    let expected_serial = build_bigint_16(real_serial_limbs(), 10)
+    if bigint_cmp(&cert.serial_number, &expected_serial) != 0 {
+        print_int(4)
+        return 1
+    }
+    assert(bigint_cmp(&cert.serial_number, &expected_serial) == 0)
+
+    // Subject CN and Issuer CN: both "test.example" (self-signed), 12 bytes.
+    if cert.issuer.count != 1 {
+        print_int(5)
+        return 1
+    }
+    assert(cert.issuer.count == 1)
+    if cert.issuer.entries[0].value_len != 12 {
+        print_int(6)
+        return 1
+    }
+    assert(cert.issuer.entries[0].value_len == 12)
+    if (cert.issuer.entries[0].value[0] as i64) != 0x74 {
+        print_int(7)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[11] as i64) != 0x65 {
+        print_int(8)
+        return 1
+    }
+    assert((cert.issuer.entries[0].value[0] as i64) == 0x74)
+    assert((cert.issuer.entries[0].value[11] as i64) == 0x65)
+
+    if cert.subject.count != 1 {
+        print_int(9)
+        return 1
+    }
+    assert(cert.subject.count == 1)
+    if cert.subject.entries[0].value_len != 12 {
+        print_int(10)
+        return 1
+    }
+    assert(cert.subject.entries[0].value_len == 12)
+    if (cert.subject.entries[0].value[0] as i64) != 0x74 {
+        print_int(11)
+        return 1
+    }
+    if (cert.subject.entries[0].value[11] as i64) != 0x65 {
+        print_int(12)
+        return 1
+    }
+    assert((cert.subject.entries[0].value[0] as i64) == 0x74)
+    assert((cert.subject.entries[0].value[11] as i64) == 0x65)
+
+    // Validity dates, converted to Unix timestamps (independently
+    // cross-checked against Python's `datetime` for the same UTC Y/M/D/H/M/S).
+    if cert.not_before_unix != 1787587534 {
+        print_int(13)
+        return 1
+    }
+    assert(cert.not_before_unix == 1787587534)
+    if cert.not_after_unix != 1819123534 {
+        print_int(14)
+        return 1
+    }
+    assert(cert.not_after_unix == 1819123534)
+
+    // RSA modulus: first/last few bytes cross-checked against `openssl x509
+    // -noout -modulus` (leading 0xD9, trailing 0x3F).
+    let expected_modulus = build_bigint_128(real_modulus_limbs())
+    if bigint_cmp(&cert.modulus, &expected_modulus) != 0 {
+        print_int(15)
+        return 1
+    }
+    assert(bigint_cmp(&cert.modulus, &expected_modulus) == 0)
+
+    let expected_exponent = bigint_from_u32(65537)
+    if bigint_cmp(&cert.public_exponent, &expected_exponent) != 0 {
+        print_int(16)
+        return 1
+    }
+    assert(bigint_cmp(&cert.public_exponent, &expected_exponent) == 0)
+
+    // v3 extensions: Subject Key Identifier + Authority Key Identifier +
+    // Basic Constraints (critical, CA:TRUE, no pathLenConstraint).
+    if cert.extension_count != 3 {
+        print_int(17)
+        return 1
+    }
+    assert(cert.extension_count == 3)
+    if cert.is_ca != true {
+        print_int(18)
+        return 1
+    }
+    assert(cert.is_ca == true)
+    if cert.path_len_constraint != (0 - 1) {
+        print_int(19)
+        return 1
+    }
+    assert(cert.path_len_constraint == (0 - 1))
+
+    // Outer signature: 256-byte RSA-2048/SHA-256 signature payload.
+    if cert.outer_signature_len != 256 {
+        print_int(20)
+        return 1
+    }
+    assert(cert.outer_signature_len == 256)
+
+    // Self-signed: this certificate's OWN modulus/exponent must verify its
+    // own outer signature. x509_verify_signature now takes the issuer's
+    // full Certificate (so it can branch on issuer.public_key_algorithm) --
+    // for a self-signed cert, issuer == cert itself.
+    let ok = x509_verify_signature(&buf, &cert, &cert)
+    if ok == false {
+        print_int(21)
+        return 1
+    }
+    assert(ok)
+
+    println("x509_real_certificate: real openssl-generated self-signed certificate parses and self-verifies correctly")
+    return 0
+}

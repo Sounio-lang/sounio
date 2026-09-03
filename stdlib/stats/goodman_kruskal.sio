@@ -1,0 +1,183 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/goodman_kruskal.sio — Goodman-Kruskal gamma
+//
+// The ordinal association measure that ignores tied pairs entirely — the
+// proportion by which concordant pairs exceed discordant among the *untied*
+// pairs:
+//
+//   goodman_kruskal(x, y, n) -> GammaResult
+//
+//   γ = (C − D) / (C + D)   ∈ [−1, 1].
+// A null Wald test uses the pair-count standard error
+//   SE(γ) = √( 4·C·D / (C+D)³ ) = (2/(C+D))·√( C·D/(C+D) ),  z = γ/SE,
+// which is the large-sample SE under H₀: γ = 0 (Goodman & Kruskal 1963).
+//
+// Pure Sounio: an O(n²) pair scan; inline sqrt/erf; no external dependency, no
+// nested data-array calls.
+//
+// References:
+//   Goodman & Kruskal (1954, 1963) JASA 49:732, 58:310.
+
+module stats::goodman_kruskal
+
+fn gk_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn gk_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / gk_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn gk_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * gk_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn gk_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - gk_erf(z * INV_SQRT2))
+}
+
+pub struct GammaResult {
+    pub gamma: f64,
+    pub z: f64,          // Wald z for H0: gamma = 0
+    pub p: f64,          // two-sided p
+    pub concordant: i64,
+    pub discordant: i64,
+}
+
+/// Goodman-Kruskal gamma between x and y.
+///
+/// Parâmetros: x, y — paired ordinal data; n — size (2..256).
+/// Retorno: GammaResult (gamma, z, p, C, D).
+/// Referências: Goodman & Kruskal (1954, 1963).
+pub fn goodman_kruskal(x: &[f64; 256], y: &[f64; 256], n: i32) -> GammaResult with Mut, Div, Panic {
+    if n < 2 { return GammaResult { gamma: 0.0, z: 0.0, p: 1.0, concordant: 0, discordant: 0 } }
+    var c = 0
+    var d = 0
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let dx = x[j as usize] - x[i as usize]
+            let dy = y[j as usize] - y[i as usize]
+            if dx != 0.0 && dy != 0.0 {
+                if (dx > 0.0) == (dy > 0.0) { c = c + 1 } else { d = d + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let cd = (c + d) as f64
+    if cd <= 0.0 { return GammaResult { gamma: 0.0, z: 0.0, p: 1.0, concordant: c as i64, discordant: d as i64 } }
+    let gamma = ((c - d) as f64) / cd
+    // consistent large-sample SE: sqrt( (1 - gamma^2)^2 / (C+D) · (n(n-1)/... ))
+    // simple form SE = (2/(C+D)) sqrt(C*D/(C+D)); z = gamma/SE
+    let cf = c as f64
+    let df = d as f64
+    var z = 0.0
+    if cf > 0.0 && df > 0.0 {
+        let se = (2.0 / cd) * gk_sqrt(cf * df / cd)
+        if se > 0.0 { z = gamma / se }
+    } else {
+        z = 1.0e9   // perfect association -> effectively infinite z
+    }
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    var p = 2.0 * gk_normal_sf(az)
+    if p < 0.0 { p = 0.0 }
+    return GammaResult { gamma: gamma, z: z, p: p, concordant: c as i64, discordant: d as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// partial x={1,2,3,4}, y={1,3,2,4}: C=5,D=1 -> gamma=(5-1)/(5+1)=0.666667.
+fn test_partial() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=1.0; y[1]=3.0; y[2]=2.0; y[3]=4.0
+    let r = goodman_kruskal(&x, &y, 4)
+    var ok = true
+    ok = check(1, approx(r.gamma, 0.666667, 1.0e-5)) && ok
+    ok = check(2, r.concordant == 5) && ok
+    ok = check(3, r.discordant == 1) && ok
+    return ok
+}
+
+// with ties, gamma still uses only untied pairs. x={1,1,2,3}, y={1,2,2,3}.
+// untied pairs: C=4, D=0 -> gamma=1 (perfect on untied pairs).
+fn test_ties() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=1.0; y[1]=2.0; y[2]=2.0; y[3]=3.0
+    let r = goodman_kruskal(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.gamma, 1.0, 1.0e-9)) && ok
+    ok = check(11, r.concordant == 4) && ok
+    ok = check(12, r.discordant == 0) && ok
+    return ok
+}
+
+// perfect discordance -> gamma = -1.
+fn test_discordant() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=4.0; y[1]=3.0; y[2]=2.0; y[3]=1.0
+    let r = goodman_kruskal(&x, &y, 4)
+    return check(20, approx(r.gamma, 0.0 - 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_partial() && ok
+    ok = test_ties() && ok
+    ok = test_discordant() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

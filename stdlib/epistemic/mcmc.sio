@@ -4,6 +4,7 @@
 //
 // Metropolis-Hastings and diagnostics (R-hat, ESS).
 // Fixed arrays: max 16 parameters, max 4 chains, max 2048 samples per chain.
+// Uses xoshiro256** PRNG via Prob effect for high-quality random sampling.
 
 // ============================================================================
 // Helpers
@@ -97,40 +98,10 @@ fn chain_acceptance_rate(c: &MCMCChain) -> f64 with Div, Panic {
 }
 
 // ============================================================================
-// Simple pseudo-random number generator (LCG)
+// Random Number Generation (xoshiro256**)
 // ============================================================================
 
-struct RNG {
-    state: i64,
-}
-
-fn rng_new(seed: i64) -> RNG {
-    RNG { state: seed }
-}
-
-fn rng_next_i64(rng: &!RNG) -> i64 {
-    // Linear congruential generator
-    rng.state = rng.state * 6364136223846793005 + 1442695040888963407
-    rng.state
-}
-
-fn rng_next_f64(rng: &!RNG) -> f64 with Div, Panic {
-    let v = rng_next_i64(rng)
-    let pos = if v < 0 { 0 - v } else { v }
-    (pos as f64) / 9223372036854775807.0
-}
-
-// Approximate normal sample via Box-Muller-like transform
-fn rng_normal(rng: &!RNG) -> f64 with Mut, Div, Panic {
-    // Simple approximation: sum of 12 uniform - 6
-    var sum = 0.0
-    var i = 0
-    while i < 12 {
-        sum = sum + rng_next_f64(rng)
-        i = i + 1
-    }
-    sum - 6.0
-}
+use random::xoshiro::{Xoshiro256, xoshiro_seed, standard_normal, uniform}
 
 // ============================================================================
 // Metropolis-Hastings Sampler
@@ -155,9 +126,9 @@ fn mh_sample_chain(
     n_params: i64,
     opts: &MHOptions,
     chain_seed: i64
-) -> MCMCChain with Mut, Div, Panic {
+) -> MCMCChain with Prob, Mut, Div, Panic {
     var chain = mcmc_chain_new(n_params)
-    var rng = rng_new(chain_seed)
+    var rng = xoshiro_seed(chain_seed)
     var theta = [0.0; 16]
     var lp = demo_log_posterior(theta, n_params)
 
@@ -169,14 +140,14 @@ fn mh_sample_chain(
         var j = 0
         while j < n_params {
             if j < 16 {
-                theta_new[j] = theta[j] + opts.proposal_scale * rng_normal(&!rng)
+                theta_new[j] = theta[j] + opts.proposal_scale * standard_normal(&!rng)
             }
             j = j + 1
         }
 
         let lp_new = demo_log_posterior(theta_new, n_params)
         let log_alpha = lp_new - lp
-        let u = rng_next_f64(&!rng)
+        let u = uniform(&!rng)
 
         // Accept/reject (compare log_alpha with log(u))
         // Approximate: accept if log_alpha > log(u) ~ u < exp(log_alpha)

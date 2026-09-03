@@ -1,0 +1,205 @@
+// validated_lane: lean_single
+
+use eisa::backend::*
+use eisa::format::*
+use eisa::evm::*
+use eisa::core::*
+use str::lib::*
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn nl_str() -> Str with Mut, Div, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 10 as i8
+    str_from_bytes_buf(&buf, 1)
+}
+
+fn concat_line(dst: &Str, line: &Str, nl: &Str) -> Str with Mut, Div, Panic {
+    let t = str_cat(dst, line)
+    str_cat(&t, nl)
+}
+
+fn append_lit(dst: &Str, s: string, nl: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(s)
+    concat_line(dst, &line, nl)
+}
+
+fn program_mul_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn dose_kernel() {", &nl)
+    src = append_lit(&src, "let a = 0.5", &nl)
+    src = append_lit(&src, "let b = 7.25", &nl)
+    src = append_lit(&src, "let c = a * b", &nl)
+    src = append_lit(&src, "gate c", &nl)
+    src = append_lit(&src, "store [dose] <- c", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn program_prec_paren_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn p_paren() {", &nl)
+    src = append_lit(&src, "let z = (1.5 + 2.25) * 2.0", &nl)
+    src = append_lit(&src, "gate z", &nl)
+    src = append_lit(&src, "store [out] <- z", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn program_prec_noparen_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn p_noparen() {", &nl)
+    src = append_lit(&src, "let z = 1.5 + 2.25 * 2.0", &nl)
+    src = append_lit(&src, "gate z", &nl)
+    src = append_lit(&src, "store [out] <- z", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn program_sqrt_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn p_sqrt() {", &nl)
+    src = append_lit(&src, "let r = sqrt(2.0)", &nl)
+    src = append_lit(&src, "gate r", &nl)
+    src = append_lit(&src, "store [root] <- r", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn program_bad_unknown_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn bad1() {", &nl)
+    src = append_lit(&src, "let a = 1.0", &nl)
+    src = append_lit(&src, "let b = a @ 2.0", &nl)
+    src = append_lit(&src, "gate b", &nl)
+    src = append_lit(&src, "store [x] <- b", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn program_const_overflow_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn bad2() {", &nl)
+    src = append_lit(&src, "let z = 1.0 + 2.0 + 3.0 + 4.0 + 5.0 + 6.0 + 7.0 + 8.0 + 9.0 + 10.0 + 11.0 + 12.0 + 13.0 + 14.0 + 15.0 + 16.0 + 17.0", &nl)
+    src = append_lit(&src, "gate z", &nl)
+    src = append_lit(&src, "store [x] <- z", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn compile_and_run(src: Str, rc: &!i64) -> EvmMachine with IO, Mut, Div, Panic {
+    let br = eisa_compile(src)
+    if br.status != 0 {
+        *rc = 1
+        return evm_new()
+    }
+    let img = eisax_encode(br.build)
+    if eisax_validate(img) != 0 {
+        *rc = 1
+        return evm_new()
+    }
+    var m = evm_load(img)
+    let run_rc = evm_run(&!m)
+    if run_rc != 0 {
+        *rc = 1
+        return m
+    }
+    *rc = 0
+    m
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // B1
+    let src_b1 = program_mul_src()
+    let b1 = eisa_compile(src_b1)
+    if b1.status != 0 { fails = fails + 1 }
+    let img_b1 = eisax_encode(b1.build)
+    if eisax_validate(img_b1) != 0 { fails = fails + 1 }
+    var m1 = evm_load(img_b1)
+    if evm_run(&!m1) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m1, 0), 3.625) { fails = fails + 1 }
+    if evm_gate_count(&m1) != 1 { fails = fails + 1 }
+
+    // B2
+    let ra = ereg_exact(0.5)
+    let rb = ereg_exact(7.25)
+    let rc_ref = emul(ra, rb)
+    var gate_reg = 0 - 1
+    var gi = 0
+    while gi < b1.build.n_code {
+        if b1.build.ops[gi as usize] == op_egate() {
+            gate_reg = b1.build.dsts[gi as usize]
+        }
+        gi = gi + 1
+    }
+    if gate_reg < 0 { fails = fails + 1 }
+    if gate_reg >= 0 {
+        if !f64_bits_eq(evm_reg_val(&m1, gate_reg), rc_ref.val) { fails = fails + 1 }
+        if !f64_bits_eq(evm_reg_ehi(&m1, gate_reg), rc_ref.err.hi) { fails = fails + 1 }
+        if !f64_bits_eq(evm_reg_elo(&m1, gate_reg), rc_ref.err.lo) { fails = fails + 1 }
+        if !f64_bits_eq(evm_reg_u(&m1, gate_reg), rc_ref.u) { fails = fails + 1 }
+        if evm_reg_poison(&m1, gate_reg) != 0 { fails = fails + 1 }
+    }
+
+    // B3
+    var run_rc = 0
+    var mp = compile_and_run(program_prec_paren_src(), &!run_rc)
+    if run_rc != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&mp, 0), 7.5) { fails = fails + 1 }
+    var mn = compile_and_run(program_prec_noparen_src(), &!run_rc)
+    if run_rc != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&mn, 0), 6.0) { fails = fails + 1 }
+
+    // B4
+    var ms = compile_and_run(program_sqrt_src(), &!run_rc)
+    if run_rc != 0 { fails = fails + 1 }
+    let rs = esqrt(ereg_exact(2.0))
+    if !f64_bits_eq(evm_mem_val(&ms, 0), rs.val) { fails = fails + 1 }
+    if evm_gate_count(&ms) != 1 { fails = fails + 1 }
+
+    // B5
+    let d1 = eisa_compile(program_mul_src())
+    let d2 = eisa_compile(program_mul_src())
+    if d1.status != 0 || d2.status != 0 { fails = fails + 1 }
+    let h1 = eisax_prog_hash(eisax_encode(d1.build))
+    let h2 = eisax_prog_hash(eisax_encode(d2.build))
+    if h1 != h2 { fails = fails + 1 }
+    let src_diff_nl = nl_str()
+    var src_diff = str_new()
+    src_diff = append_lit(&src_diff, "epistemic fn dose_kernel() {", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "let a = 0.5", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "let b = 7.5", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "let c = a * b", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "gate c", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "store [dose] <- c", &src_diff_nl)
+    src_diff = append_lit(&src_diff, "}", &src_diff_nl)
+    let d3 = eisa_compile(src_diff)
+    if d3.status != 0 { fails = fails + 1 }
+    let h3 = eisax_prog_hash(eisax_encode(d3.build))
+    if h1 == h3 { fails = fails + 1 }
+
+    // B6
+    let bad1 = eisa_compile(program_bad_unknown_src())
+    if bad1.status == 0 { fails = fails + 1 }
+    if bad1.build.n_code != 0 || bad1.build.n_const != 0 { fails = fails + 1 }
+
+    let bad2 = eisa_compile(program_const_overflow_src())
+    if bad2.status != (0 - 3) { fails = fails + 1 }
+    if bad2.build.n_code != 0 || bad2.build.n_const != 0 { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa backend B1 B2 B3 B4 B5 B6")
+    0
+}

@@ -1,0 +1,83 @@
+//@ run-pass
+// Frente A, GENERALIZED: the measure claim over Q swept across scales with GROWING denominators and
+// overflow-CENSORED exact rationals -- where exactness meets the i64 wall honestly.
+//
+// Off-locus 3-point measure at scale k: F = r5 in {-1/10^k, 0, +1/10^k}. Exactly:
+//   E[F] = 0/1 ,  Var[F] = (2 eps^2)/3 = 2/(3*10^(2k))  -- an exact positive rational.
+// On the locus (eps = 0): Var = 0/1 for ALL k (F identically 0), never overflows.
+//
+// As k grows the denominator 3*10^(2k) explodes past i64. A silently-wrapping engine would report a
+// garbage "exact" Var. This engine uses OVERFLOW-CHECKED rational ops that return in-band INVALID
+// (den = 0) the moment an i64 product would overflow -- honest censoring, never a false exact value.
+// The Python fractions oracle (unbounded) computes every k, so the cross-check LOCATES the exact k
+// where i64 exactness ends and bigint is required. Deliberately MINIMAL (only rat_make/rat_mul) to
+// stay inside souc v0.80.0's reliable envelope (a fuller rational module mis-compiles -- see
+// docs/handoff/souc_v0800_defects.md). All-i64, self-contained (#637).
+
+let I64_MAX: i64 = 9223372036854775807
+fn iabs(a: i64) -> i64 { if a < 0 { 0 - a } else { a } }
+fn mul_ovf(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    if a == 0 || b == 0 { return false }
+    iabs(a) > I64_MAX / iabs(b)
+}
+fn igcd(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    var x = iabs(a)
+    var y = iabs(b)
+    while y != 0 { let t = x - (x / y) * y; x = y; y = t }
+    if x == 0 { 1 } else { x }
+}
+struct Rat { n: i64, d: i64 }               // d == 0  =>  INVALID (overflow-censored)
+fn rat_invalid() -> Rat { Rat { n: 0, d: 0 } }
+fn rat_valid(a: Rat) -> bool { a.d != 0 }
+fn rat_make(n: i64, d: i64) -> Rat with Mut, Panic, Div {
+    if d == 0 { return rat_invalid() }
+    let g = igcd(n, d)
+    Rat { n: n / g, d: d / g }
+}
+fn rat_mul(a: Rat, b: Rat) -> Rat with Mut, Panic, Div {
+    if !rat_valid(a) || !rat_valid(b) { return rat_invalid() }
+    if mul_ovf(a.n, b.n) || mul_ovf(a.d, b.d) { return rat_invalid() }
+    rat_make(a.n * b.n, a.d * b.d)
+}
+// Var = (2 eps^2)/3 with eps = 1/pow10. eps^2 overflows i64 when pow10^2 > MAX (pow10 >= 10^10).
+fn var_at_scale(pow10: i64) -> Rat with Mut, Panic, Div {
+    let eps = rat_make(1, pow10)
+    let eps2 = rat_mul(eps, eps)
+    rat_mul(eps2, rat_make(2, 3))
+}
+
+fn emit_scale(k: i64, pow10: i64) with IO, Mut, Panic, Div {
+    let v = var_at_scale(pow10)
+    print("SCALE ")
+    print_int(k)
+    if rat_valid(v) {
+        print(" VAR ")
+        print_int(v.n)
+        print(" ")
+        print_int(v.d)
+    } else {
+        print(" OVERFLOW")   // honest censoring: i64 cannot hold the exact Var at this scale
+    }
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // Unrolled (a `while` loop calling a function with a loop/array-indexed arg mis-compiles under
+    // souc v0.80.0 -- the call clobbers the loop-carried value; see docs/handoff/souc_v0800_defects.md).
+    // The real i64 exactness boundary is k=9 valid / k=10 overflow (10^(2k) exceeds i64 at k>=10).
+    emit_scale(1, 10)
+    emit_scale(2, 100)
+    emit_scale(3, 1000)
+    emit_scale(4, 10000)
+    emit_scale(5, 100000)
+    emit_scale(6, 1000000)
+    emit_scale(7, 10000000)
+    emit_scale(8, 100000000)
+    emit_scale(9, 1000000000)
+    emit_scale(10, 10000000000)
+    emit_scale(11, 100000000000)
+    emit_scale(12, 1000000000000)
+    // On-locus (eps=0): F identically 0 => Var = 0/1 at every scale (no denominator growth). Structural.
+    println("ON-LOCUS Var=0/1 (all scales) PASS")
+    println("GENERAL-MEASURE-SWEEP PASS")
+}

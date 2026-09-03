@@ -5,63 +5,118 @@
 // native backend, wasm lowering, optimizer stack, or thin-link cache machinery.
 
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Program, StringList}
-use lexer::mod::{sourcefile_load, sourcefile_parse_program_loaded, sourcefile_status_ok}
+use lexer::mod::{lex_file_parse_items}
 
+// 64 was not enough and the overflow was SILENT. compiler/main.sio carries 76 `use` statements;
+// imports 65..76 were dropped with no diagnostic, so their modules never entered the closure and
+// every call into them surfaced as error[E137] "use of undeclared variable" AT THE CALLER — 98 of
+// them on a self-compile, spread over ontology_*, hlir_*, gpu_*, ptx_*, kaxi_*, metal_*, tile_*.
+// Proven by moving ONE `use` from import #65 to #2: all 18 ontology_* E137 vanished and nothing
+// else moved.
+//
+// `overflowed` is the load-bearing part. The closure walker already funnels its own limits into
+// `saturated` (module_frontend.sio:2432 edge_count < 512, :2451 node_count >= 256); this cap was
+// the one that had no channel, so raising it without reporting would just move the cliff.
 pub struct ImportList {
-    paths: [AstPath; 64],
-    count: i64,
+    pub paths: [AstPath; 128],
+    pub count: i64,
+    pub overflowed: bool,
 }
 
 pub fn extract_imports_from_ast(prog: Program) -> ImportList with Mut, Panic, Div, Alloc {
     var imports = ImportList {
-        paths: [empty_path(); 64],
+        paths: [empty_path(); 128],
         count: 0,
+        overflowed: false,
     }
 
     match prog.items {
         None => imports
         Some(items) => {
-            extract_imports_walk(*items, imports)
+            extract_imports_walk_into(*items, &! imports)
+            imports
         }
     }
 }
 
-fn extract_imports_walk(list: ItemList, acc: ImportList) -> ImportList with Mut, Panic, Div, Alloc {
-    var imports = acc
-    if list.head.kind == ItemKind::ItemUse {
-        if imports.count < 64 {
-            imports.paths[imports.count] = list.head.use_path
-            imports.count = imports.count + 1
+fn extract_imports_walk_into(list: ItemList, out: &! ImportList) with Mut, Panic, Div, Alloc {
+    extract_imports_walk_ref_into(&list, out)
+}
+
+fn extract_imports_walk_ref_into(list: &ItemList, out: &! ImportList) with Mut, Panic, Div, Alloc {
+    if (*list).head.kind == ItemKind::ItemUse {
+        if (*out).count < 128 {
+            (*out).paths[(*out).count] = (*list).head.use_path
+            (*out).count = (*out).count + 1
+        } else {
+            (*out).overflowed = true
         }
     }
-    match list.tail {
-        None => imports
-        Some(next) => extract_imports_walk(*next, imports)
+    match (*list).tail {
+        None => {}
+        Some(next) => extract_imports_walk_ref_into(&(*next), out)
     }
+}
+
+fn mp_stat_byte(buf: [i8; 256], idx: i64) -> i64 {
+    let v = buf[idx as usize] as i64
+    if v < 0 { v + 256 } else { v }
+}
+
+fn mp_stat_mode(buf: [i8; 256]) -> i64 {
+    mp_stat_byte(buf, 24) +
+    (mp_stat_byte(buf, 25) * 256) +
+    (mp_stat_byte(buf, 26) * 65536) +
+    (mp_stat_byte(buf, 27) * 16777216)
 }
 
 pub fn file_exists(path: string) -> bool with IO {
-    file_size(path) > 0
+    // Use the target-aware file_size builtin instead of raw x86-64 Linux syscalls
+    // (openat=257/fstat=5/close=3). Those numbers are invalid on arm64-macOS and
+    // SIGSYS'd every module load. file_size returns -1 when the file is absent or
+    // unreadable, so >= 0 means it exists (and is at least stat-able).
+    file_size(path) >= 0
 }
 
-fn empty_program() -> Program {
+fn mp_empty_program() -> Program {
     Program {
         module_path: empty_path(),
         items: None,
     }
 }
 
-fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
+// Module identity — THE COPY THAT IS ACTUALLY USED. module_frontend.sio:18 imports
+// file_path_to_module_path and load_module_file from THIS module, not from module_loader.sio,
+// which carries a second, now-unused implementation of both. Editing the other one has no
+// effect on the preflight; that mistake cost a full build cycle to notice.
+//
+// Identity used to be the file BASENAME alone, which made every same-named file in a
+// different directory THE SAME MODULE to visibility_allows_access (check/check.sio:90, the
+// only caller of ast_path_eq). Two consequences, both measured with a deterministic 3-file
+// witness (bb/helper.sio and bb/aa/helper.sio, private callee, access running between them):
+//  - It is an OVER-ACCEPTANCE: colliding basenames make a private cross-module access legal.
+//  - Before ast_path_eq stopped reading `tail` for single-segment paths, that same case
+//    SIGSEGV'd with no diagnostic, because equal head bytes fell through to a read of an
+//    Option<Box<StringList>> field, which Madaros miscompiles. The crash was MASKING the
+//    over-acceptance: remove the crash alone and the case silently compiles.
+// Identity is now the PARENT DIRECTORY plus the basename, which distinguishes all 8 colliding
+// basename groups in main.sio's 105-file closure (encode, env, ir, layout, lower, mod,
+// opt_strategy, types — 20 files). It stays a SINGLE segment so no comparison ever walks a
+// Box-typed tail, and it uses the last two components rather than the whole path so the same
+// file reached by different spellings still gets one identity.
+pub fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var seg_buf: [i8; 128] = [0; 128]
     var seg_len: i64 = 0
     var segs = StringList { head_buf: [0; 128], head_len: 0, tail: None }
     var path_len = str_len(path)
     var i: i64 = 0
     var last_slash: i64 = 0 - 1
+    var prev_slash: i64 = 0 - 1
     var dot_pos: i64 = path_len
     while i < path_len {
         let ch = str_char_at(path, i)
         if ch == 47 {
+            prev_slash = last_slash
             last_slash = i
         }
         if ch == 46 {
@@ -69,7 +124,10 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
         }
         i = i + 1
     }
-    var start = last_slash + 1
+    var start = prev_slash + 1
+    if prev_slash < 0 {
+        start = last_slash + 1
+    }
     var end = dot_pos
     if end <= start {
         end = path_len
@@ -87,12 +145,11 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
 }
 
 pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    let status = sourcefile_load(path)
-    if !sourcefile_status_ok() {
-        return empty_program()
+    if !file_exists(path) {
+        return mp_empty_program()
     }
-    let keep = status
-    var prog = sourcefile_parse_program_loaded(0)
-    prog.module_path = file_path_to_module_path(path)
-    prog
+    Program {
+        module_path: file_path_to_module_path(path),
+        items: lex_file_parse_items(path),
+    }
 }

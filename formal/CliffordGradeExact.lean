@@ -110,13 +110,11 @@ theorem grade_product_upper_bound (r s k max_grade : Grade)
 theorem same_grade_includes_scalar (r max_grade : Grade)
     (hr : r ≤ max_grade) :
     IsOutputGrade r r 0 max_grade := by
+  -- lo = |r-r| = 0; hi = min(2r, max_grade) ≥ 0; (0-0) % 2 = 0.
+  -- `omega` is unusable on `Grade`-typed atoms in this toolchain, so the
+  -- three conjuncts are discharged structurally.
   unfold IsOutputGrade
-  constructor
-  · simp
-  constructor
-  · simp
-    exact Nat.le_of_dvd (by omega) (by omega)
-  · simp
+  refine ⟨by simp, Nat.zero_le _, by simp⟩
 
 -- ---------------------------------------------------------------------------
 -- §4. Scalar multiplication — Case 2 lowering
@@ -129,17 +127,25 @@ theorem same_grade_includes_scalar (r max_grade : Grade)
 theorem scalar_mul_preserves_grades (k s max_grade : Grade)
     (hs : s ≤ max_grade) :
     IsOutputGrade 0 s k max_grade ↔ (k = s ∧ k ≤ max_grade) := by
+  -- For r = 0: lo = |0 - s| = s and hi = min(0+s, max_grade) = s (since
+  -- s ≤ max_grade), so `IsOutputGrade 0 s k` collapses to s ≤ k ∧ k ≤ s,
+  -- i.e. k = s.  `omega` is unusable on `Grade`-typed atoms here, so the
+  -- bounds are reduced explicitly and the equivalence proved structurally.
   unfold IsOutputGrade
-  simp [Nat.zero_sub]
+  have e1 : (if (0 : Grade) ≥ s then (0 : Grade) - s else s - 0) = s := by
+    rcases Nat.eq_zero_or_pos s with h | h
+    · subst h; decide
+    · rw [if_neg (Nat.not_le.mpr h)]; exact Nat.sub_zero s
+  have e2 : Nat.min (0 + s) max_grade = s := by
+    rw [Nat.zero_add]; exact Nat.min_eq_left hs
+  rw [e1, e2]
   constructor
-  · intro ⟨h1, h2, h3⟩
-    constructor
-    · omega
-    · exact Nat.le_of_lt_succ (Nat.lt_of_le_of_lt h2 (by omega))
-  · intro ⟨h1, h2⟩
-    refine ⟨by omega, ?_, by omega⟩
-    simp [h1, Nat.min_def]
-    exact if_pos h2
+  · rintro ⟨h1, h2, _⟩
+    have hk : k = s := Nat.le_antisymm h2 h1
+    exact ⟨hk, hk ▸ hs⟩
+  · rintro ⟨hk, _⟩
+    subst hk
+    exact ⟨Nat.le_refl k, Nat.le_refl k, by simp⟩
 
 -- ---------------------------------------------------------------------------
 -- §5. Summary

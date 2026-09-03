@@ -1,0 +1,235 @@
+//@ run-pass
+// validated_lane: lean_single
+
+use eisa::backend::*
+use eisa::format::*
+use eisa::evm::*
+use math::dd64::*
+use str::lib::*
+
+struct KernelChain {
+    pub compile_status: i64,
+    pub validate_status: i64,
+    pub run_status: i64,
+    pub hash: i64,
+    pub build: EisaxBuild,
+    pub machine: EvmMachine,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn nl_str() -> Str with Mut, Div, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 10 as i8
+    str_from_bytes_buf(&buf, 1)
+}
+
+fn concat_line(dst: &Str, line: &Str, nl: &Str) -> Str with Mut, Div, Panic {
+    let t = str_cat(dst, line)
+    str_cat(&t, nl)
+}
+
+fn append_lit(dst: &Str, s: string, nl: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(s)
+    concat_line(dst, &line, nl)
+}
+
+fn build_e5_kernel_src() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn k() {", &nl)
+    src = append_lit(&src, "let a = 1.000001", &nl)
+    src = append_lit(&src, "let b = a * a", &nl)
+    src = append_lit(&src, "let c = b * a", &nl)
+    src = append_lit(&src, "let d = b * b", &nl)
+    src = append_lit(&src, "let e = 6.0 * b", &nl)
+    src = append_lit(&src, "let f = d + e", &nl)
+    src = append_lit(&src, "let g = f + 1.0", &nl)
+    src = append_lit(&src, "let h = 4.0 * c", &nl)
+    src = append_lit(&src, "let i = 4.0 * a", &nl)
+    src = append_lit(&src, "let j = h + i", &nl)
+    // Gate the large operand before the cancellation: its receipt shows the
+    // O(1) magnitude that the subtraction below annihilates in the val lane.
+    src = append_lit(&src, "gate j", &nl)
+    src = append_lit(&src, "let k = g - j", &nl)
+    src = append_lit(&src, "store [r] <- k", &nl)
+    src = append_lit(&src, "gate k", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn find_gate_reg(build: &EisaxBuild, gate_ix: i64) -> i64 with Mut, Panic {
+    var seen = 0
+    var i = 0
+    while i < build.n_code {
+        if build.ops[i as usize] == op_egate() {
+            if seen == gate_ix {
+                return build.dsts[i as usize]
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn kernel_ref_dd() -> Dd64 with Mut, Div {
+    let a = dd_from_f64(1.000001)
+    let b = dd_mul(a, a)
+    let c = dd_mul(b, a)
+    let d = dd_mul(b, b)
+    let e = dd_mul_f64(b, 6.0)
+    let f = dd_add(d, e)
+    let g = dd_add_f64(f, 1.0)
+    let h = dd_mul_f64(c, 4.0)
+    let i = dd_mul_f64(a, 4.0)
+    let j = dd_add(h, i)
+    let k = dd_sub(g, j)
+    k
+}
+
+fn compile_run(src: Str) -> KernelChain with IO, Mut, Div, Panic {
+    let br = eisa_compile(src)
+    if br.status != 0 {
+        return KernelChain {
+            compile_status: br.status,
+            validate_status: 0 - 1,
+            run_status: 0 - 1,
+            hash: 0,
+            build: br.build,
+            machine: evm_new(),
+        }
+    }
+    let img = eisax_encode(br.build)
+    let vrc = eisax_validate(img)
+    if vrc != 0 {
+        return KernelChain {
+            compile_status: 0,
+            validate_status: vrc,
+            run_status: 0 - 1,
+            hash: eisax_prog_hash(img),
+            build: br.build,
+            machine: evm_new(),
+        }
+    }
+    var m = evm_load(img)
+    let rrc = evm_run(&!m)
+    KernelChain {
+        compile_status: 0,
+        validate_status: 0,
+        run_status: rrc,
+        hash: eisax_prog_hash(img),
+        build: br.build,
+        machine: m,
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    var fails = 0
+    let src = build_e5_kernel_src()
+
+    // K1: compile/encode/validate and pin backend emission budget.
+    let k1 = compile_run(src)
+    if k1.compile_status != 0 { fails = fails + 1 }
+    if k1.validate_status != 0 { fails = fails + 1 }
+    if k1.build.n_code != 18 { fails = fails + 1 }
+    if k1.build.n_const != 4 { fails = fails + 1 }
+    if k1.build.n_code > 32 { fails = fails + 1 }
+    if k1.build.n_const > 16 { fails = fails + 1 }
+
+    // K2: EVM run status and receipt count (gate j = pre-cancel operand,
+    // gate k = cancellation result).
+    if k1.run_status != 0 { fails = fails + 1 }
+    if evm_gate_count(&k1.machine) != 2 { fails = fails + 1 }
+
+    let precancel_reg = find_gate_reg(&k1.build, 0)
+    let cancel_reg = find_gate_reg(&k1.build, 1)
+    let result_reg = cancel_reg
+    if precancel_reg < 0 { fails = fails + 1 }
+    if cancel_reg < 0 { fails = fails + 1 }
+
+    // The annihilated operand is O(1): its val exponent field is >= 1023
+    // (magnitude >= 1.0), witnessing what the subtraction destroys.
+    let pj = f64_parts(evm_reg_val(&k1.machine, precancel_reg))
+    if pj.exp < 1023 { fails = fails + 1 }
+
+    // K3: cancellation exposure (non-vacuous form, per math-review).
+    // For x = 1 + 1e-6 the true quartic value is (1e-6)^4 = 1e-24 ~ 2^-79.7,
+    // far below one ulp of the O(1) operands g and j, so fl(g) == fl(j) and
+    // IEEE round-to-nearest guarantees val = fl(g - j) = +0.0 exactly.
+    // Assert that directly (bit pattern s0e0m0), and pin err.hi to the
+    // derived magnitude window [2^-90, 2^-70] around 1e-24 (exponent field
+    // 933..953, sign +). A relative threshold like |err.hi| > |val|*2^20
+    // would be decorative here since val is exactly zero.
+    let cancel_val = evm_reg_val(&k1.machine, cancel_reg)
+    let cancel_ehi = evm_reg_ehi(&k1.machine, cancel_reg)
+    let pv = f64_parts(cancel_val)
+    if pv.sign != 0 { fails = fails + 1 }
+    if pv.exp != 0 { fails = fails + 1 }
+    if pv.mant != 0 { fails = fails + 1 }
+    let pe = f64_parts(cancel_ehi)
+    if pe.sign != 0 { fails = fails + 1 }
+    if pe.exp < 933 { fails = fails + 1 }
+    if pe.exp > 953 { fails = fails + 1 }
+
+    // K4: reference agreement of val + err.hi against direct dd64 chain.
+    let out_val = evm_mem_val(&k1.machine, 0)
+    let out_ehi = evm_mem_ehi(&k1.machine, 0)
+    let out_elo = evm_mem_elo(&k1.machine, 0)
+    if evm_mem_poison(&k1.machine, 0) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(out_val, evm_reg_val(&k1.machine, result_reg)) { fails = fails + 1 }
+    if !f64_bits_eq(out_ehi, evm_reg_ehi(&k1.machine, result_reg)) { fails = fails + 1 }
+
+    let evm_sum = dd_add(dd_from_f64(out_val), dd_from_f64(out_ehi))
+    let ref = kernel_ref_dd()
+    let diff = dd_abs(dd_sub(evm_sum, ref))
+
+    // K4 bound (revised per math-review: the previous absolute 1e-12 floor
+    // was vacuous — it exceeds |ref.hi| ~ 2^-80 by twelve decimal orders, so
+    // even a zeroed err lane would have passed). Three derivable terms, all
+    // at the RESULT scale so the bound keeps discriminating power:
+    //   (1) 8 * (|out_elo| + |ref.lo|): omitted dd64 low tails, with slack;
+    //   (2) eps_algo * |ref.hi| with eps_algo = 2^-24: relative slack for
+    //       the EVM err lane and the dd64 reference being first-order-
+    //       equivalent but differently associated algorithms;
+    //   (3) 8 * u^2 (u = 2^-53): second-order rounding residue of the O(1)
+    //       intermediates that survives the exact cancellation.
+    // Measured delta ~ 1.44 * 2^-104; bound ~ 3 * 2^-104. A zeroed err lane
+    // gives delta = |ref.hi| ~ 2^-80, failing by ~24 binary orders (asserted
+    // below as an anti-vacuity witness).
+    let u53 = 1.1102230246251565e-16
+    let eps_algo = 0.000000059604644775390625
+    let tail_budget = abs_f64(out_elo) + abs_f64(ref.lo)
+    let k4_bound = 8.0 * tail_budget + eps_algo * abs_f64(ref.hi) + u53 * u53 * 8.0
+    if dd_to_f64(diff) > k4_bound { fails = fails + 1 }
+    // Anti-vacuity witness: a zeroed err lane (delta == |ref.hi|) must fail.
+    if abs_f64(ref.hi) <= k4_bound { fails = fails + 1 }
+
+    // K5: determinism over two full chain runs.
+    let k5 = compile_run(src)
+    if k5.compile_status != 0 { fails = fails + 1 }
+    if k5.validate_status != 0 { fails = fails + 1 }
+    if k5.run_status != 0 { fails = fails + 1 }
+    if k1.hash != k5.hash { fails = fails + 1 }
+
+    if !f64_bits_eq(evm_mem_val(&k1.machine, 0), evm_mem_val(&k5.machine, 0)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_ehi(&k1.machine, 0), evm_mem_ehi(&k5.machine, 0)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_elo(&k1.machine, 0), evm_mem_elo(&k5.machine, 0)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_u(&k1.machine, 0), evm_mem_u(&k5.machine, 0)) { fails = fails + 1 }
+    if evm_mem_poison(&k1.machine, 0) != evm_mem_poison(&k5.machine, 0) { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_val(&k1.machine, cancel_reg), evm_reg_val(&k5.machine, cancel_reg)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_ehi(&k1.machine, cancel_reg), evm_reg_ehi(&k5.machine, cancel_reg)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_val(&k1.machine, result_reg), evm_reg_val(&k5.machine, result_reg)) { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_ehi(&k1.machine, result_reg), evm_reg_ehi(&k5.machine, result_reg)) { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa e5 K1 K2 K3 K4 K5")
+}

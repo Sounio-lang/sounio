@@ -264,7 +264,10 @@ axiom decidable_fano :
     shadow computation is Fano-lawful.  This is the user trust boundary
     Kimi 2.6 flagged; a future phase could replace this axiom with a
     decidable, compile-time-verifiable Fano-annotation check. -/
-axiom annotation_asserts_fano : True  -- placeholder — annotation is unverified
+-- [audit] was `axiom ... : True` (a no-op masquerading as a verified anchor).
+-- Now a proved triviality so it no longer appears in `#print axioms`. The
+-- substantive Fano-annotation check remains genuinely unverified (see docstring).
+theorem annotation_asserts_fano : True := trivial
 
 -- ---------------------------------------------------------------------------
 -- §8. Summary

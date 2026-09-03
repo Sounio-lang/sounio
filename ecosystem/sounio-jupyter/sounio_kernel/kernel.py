@@ -8,13 +8,14 @@ from ipykernel.kernelbase import Kernel
 
 from sounio_kernel.executor import CellExecutor
 from sounio_kernel.display import format_knowledge_html
+from sounio_kernel.magics import SounioMagics
 
 
 class SounioKernel(Kernel):
     """Jupyter kernel for the Sounio programming language."""
 
     implementation = "sounio_kernel"
-    implementation_version = "0.1.0"
+    implementation_version = "0.2.0"
     language = "sounio"
     language_version = "0.1.0"
     language_info = {
@@ -26,8 +27,9 @@ class SounioKernel(Kernel):
         "nbconvert_exporter": "sounio",
     }
     banner = """
-    Sounio Jupyter Kernel v0.1.0
+    Sounio Jupyter Kernel v0.2.0
     Epistemic computing and uncertainty quantification
+    Session-persistent declarations across cells
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -40,6 +42,9 @@ class SounioKernel(Kernel):
         # Initialize completion support
         from sounio_kernel.completion import SounioCompleter
         self.completer = SounioCompleter()
+
+        # Initialize magic commands
+        self.magics = SounioMagics(self)
 
         # Track execution state
         self.execution_count = 0
@@ -71,6 +76,11 @@ class SounioKernel(Kernel):
         # Extract definitions for completion support
         self.completer.extract_definitions(code)
 
+        # Check for magic commands first
+        stripped = code.strip()
+        if stripped.startswith("%"):
+            return self._handle_magic(stripped, silent)
+
         # Execute the code
         success = False
         try:
@@ -100,6 +110,29 @@ class SounioKernel(Kernel):
             "execution_count": self.execution_count,
             "payload": [],
             "user_expressions": user_expressions or {},
+        }
+
+    def _handle_magic(self, code: str, silent: bool) -> Dict[str, Any]:
+        """Dispatch a magic command and return the execute reply."""
+        handled, result = self.magics.handle_magic(code)
+        if not handled:
+            if not silent:
+                self._post_error(f"Unknown magic command: {code.split()[0]}")
+            return {
+                "status": "error",
+                "execution_count": self.execution_count,
+                "payload": [],
+                "user_expressions": {},
+            }
+
+        if not silent:
+            self._post_output(result)
+
+        return {
+            "status": "ok",
+            "execution_count": self.execution_count,
+            "payload": [],
+            "user_expressions": {},
         }
 
     def do_complete(

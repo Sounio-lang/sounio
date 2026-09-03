@@ -1,0 +1,174 @@
+// examples/survival_dashboard/main.sio — Clinical statistics dashboard
+//
+// Five-panel layout (640×480):
+//   Top-left  (0-310, 0-230):   Kaplan-Meier survival curve + CI
+//   Top-right (330-630, 0-230): Volcano plot (log2FC vs -log10p)
+//   Mid-left  (0-200, 245-450): Q-Q normal plot with BSM envelope
+//   Mid-center(210-420, 245-450): Parallel coordinates (4 PK axes)
+//   Mid-right (430-630, 245-450): Radar chart (drug property profile)
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear, canvas_fill_rect}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use display::canvas_ext::{canvas_fxaa}
+use display::font::{font_draw_string}
+use viz::coord::{CoordSystem, coord_new, coord_draw_axes, coord_draw_frame}
+use viz::epiviz::{epiviz_kaplan_meier, epiviz_volcano, epiviz_qqplot,
+                  epiviz_parallel_coords, epiviz_radar}
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+    let scratch = heap_alloc(W * H * 8) as *mut i64
+
+    var win = window_open(W, H)
+
+    // --------------------------------------------------------
+    // Panel 1 — Kaplan-Meier (synthetic trial, n=20)
+    // Times (months), events (1=event, 0=censored)
+    // --------------------------------------------------------
+    var km_times: [f64; 256] = [0.0; 256]
+    var km_events: [i64; 256] = [0; 256]
+    // Arm A: 10 patients, median ≈ 12 mo
+    km_times[0]  = 2.1;  km_events[0]  = 1
+    km_times[1]  = 4.5;  km_events[1]  = 1
+    km_times[2]  = 6.0;  km_events[2]  = 0
+    km_times[3]  = 7.3;  km_events[3]  = 1
+    km_times[4]  = 9.0;  km_events[4]  = 1
+    km_times[5]  = 10.2; km_events[5]  = 0
+    km_times[6]  = 12.5; km_events[6]  = 1
+    km_times[7]  = 15.0; km_events[7]  = 0
+    km_times[8]  = 18.3; km_events[8]  = 1
+    km_times[9]  = 24.0; km_events[9]  = 0
+    let km_n: i64 = 10
+    let cs_km = coord_new(0.0, 26.0, 0.0, 1.05, 30, 12, 280, 205)
+
+    // --------------------------------------------------------
+    // Panel 2 — Volcano plot (n=40 synthetic genes/drugs)
+    // --------------------------------------------------------
+    var v_fc:   [f64; 256] = [0.0; 256]
+    var v_pval: [f64; 256] = [0.0; 256]
+    // Scatter of fold-changes and p-values (synthetic)
+    v_fc[0]=2.3;   v_pval[0]=0.001
+    v_fc[1]=1.8;   v_pval[1]=0.008
+    v_fc[2]=3.1;   v_pval[2]=0.0001
+    v_fc[3]=0.45;  v_pval[3]=0.0003
+    v_fc[4]=0.3;   v_pval[4]=0.002
+    v_fc[5]=1.2;   v_pval[5]=0.15
+    v_fc[6]=0.9;   v_pval[6]=0.32
+    v_fc[7]=1.05;  v_pval[7]=0.22
+    v_fc[8]=0.95;  v_pval[8]=0.08
+    v_fc[9]=1.6;   v_pval[9]=0.04
+    v_fc[10]=0.55; v_pval[10]=0.05
+    v_fc[11]=2.8;  v_pval[11]=0.0008
+    v_fc[12]=0.38; v_pval[12]=0.0005
+    v_fc[13]=1.1;  v_pval[13]=0.7
+    v_fc[14]=0.85; v_pval[14]=0.45
+    v_fc[15]=4.2;  v_pval[15]=0.00002
+    v_fc[16]=0.22; v_pval[16]=0.00009
+    v_fc[17]=1.3;  v_pval[17]=0.12
+    v_fc[18]=0.78; v_pval[18]=0.33
+    v_fc[19]=2.1;  v_pval[19]=0.015
+    let v_n: i64 = 20
+    let cs_vol = coord_new(0.0 - 4.0, 4.0, 0.0, 6.0, 340, 12, 280, 205)
+
+    // --------------------------------------------------------
+    // Panel 3 — Q-Q plot (normal residuals)
+    // --------------------------------------------------------
+    var qq_data: [f64; 256] = [0.0; 256]
+    // Synthetic near-normal sample n=30
+    qq_data[0] =-2.1; qq_data[1] =-1.7; qq_data[2] =-1.4; qq_data[3] =-1.1
+    qq_data[4] =-0.9; qq_data[5] =-0.7; qq_data[6] =-0.5; qq_data[7] =-0.4
+    qq_data[8] =-0.3; qq_data[9] =-0.2; qq_data[10]=-0.1; qq_data[11]= 0.0
+    qq_data[12]= 0.1; qq_data[13]= 0.2; qq_data[14]= 0.3; qq_data[15]= 0.35
+    qq_data[16]= 0.5; qq_data[17]= 0.6; qq_data[18]= 0.8; qq_data[19]= 0.9
+    qq_data[20]= 1.0; qq_data[21]= 1.2; qq_data[22]= 1.5; qq_data[23]= 1.8
+    qq_data[24]= 2.0; qq_data[25]= 0.15; qq_data[26]=-0.05; qq_data[27]= 0.25
+    qq_data[28]=-0.45; qq_data[29]= 0.55
+    let qq_n: i64 = 30
+    let cs_qq = coord_new(0.0 - 2.5, 2.5, 0.0 - 2.5, 2.5, 12, 250, 185, 188)
+
+    // --------------------------------------------------------
+    // Panel 4 — Parallel coordinates (PK: Cmax, Tmax, AUC, t½)
+    // --------------------------------------------------------
+    // 12 synthetic subjects × 4 PK parameters
+    var pk_flat: [f64; 2048] = [0.0; 2048]
+    // [Cmax mg/L, Tmax h, AUC h·mg/L, t½ h]
+    pk_flat[0] =12.4; pk_flat[1] =1.5; pk_flat[2] =68.0; pk_flat[3] =4.2
+    pk_flat[4] = 9.1; pk_flat[5] =2.0; pk_flat[6] =52.0; pk_flat[7] =3.8
+    pk_flat[8] =15.3; pk_flat[9] =1.0; pk_flat[10]=85.0; pk_flat[11]=5.1
+    pk_flat[12]=11.0; pk_flat[13]=1.8; pk_flat[14]=61.0; pk_flat[15]=4.0
+    pk_flat[16]= 8.5; pk_flat[17]=2.5; pk_flat[18]=47.0; pk_flat[19]=3.5
+    pk_flat[20]=13.8; pk_flat[21]=1.2; pk_flat[22]=78.0; pk_flat[23]=4.8
+    pk_flat[24]=10.2; pk_flat[25]=1.9; pk_flat[26]=57.0; pk_flat[27]=4.1
+    pk_flat[28]=16.1; pk_flat[29]=0.9; pk_flat[30]=90.0; pk_flat[31]=5.5
+    pk_flat[32]= 7.8; pk_flat[33]=3.0; pk_flat[34]=43.0; pk_flat[35]=3.2
+    pk_flat[36]=14.0; pk_flat[37]=1.3; pk_flat[38]=80.0; pk_flat[39]=5.0
+    pk_flat[40]=10.9; pk_flat[41]=2.1; pk_flat[42]=60.0; pk_flat[43]=4.3
+    pk_flat[44]= 9.6; pk_flat[45]=2.3; pk_flat[46]=54.0; pk_flat[47]=3.9
+    let pk_n: i64 = 12
+
+    // --------------------------------------------------------
+    // Panel 5 — Radar chart (drug property profile, K=6 axes)
+    // --------------------------------------------------------
+    // Axes: Efficacy, Safety, Selectivity, Bioavailability, Half-life, CNS
+    // 2 drugs (values normalised 0-1)
+    var radar_data: [f64; 64] = [0.0; 64]
+    // Drug A (rapamycin-like)
+    radar_data[0]=0.85; radar_data[1]=0.60; radar_data[2]=0.75
+    radar_data[3]=0.40; radar_data[4]=0.90; radar_data[5]=0.20
+    // Drug B (ideal)
+    radar_data[6]=0.70; radar_data[7]=0.80; radar_data[8]=0.65
+    radar_data[9]=0.85; radar_data[10]=0.55; radar_data[11]=0.70
+    var r_colors_r: [i64; 8] = [80, 200, 0, 0, 0, 0, 0, 0]
+    var r_colors_g: [i64; 8] = [160, 100, 0, 0, 0, 0, 0, 0]
+    var r_colors_b: [i64; 8] = [220, 60, 0, 0, 0, 0, 0, 0]
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 14, 16, 26)
+
+        // Panel separators
+        canvas_fill_rect(&!c, 320, 0, 1, H, 40, 40, 55)
+        canvas_fill_rect(&!c, 0, 235, W, 1, 40, 40, 55)
+        canvas_fill_rect(&!c, 205, 235, 1, H - 235, 40, 40, 55)
+        canvas_fill_rect(&!c, 425, 235, 1, H - 235, 40, 40, 55)
+
+        // Panel 1: KM curve
+        coord_draw_axes(&cs_km, &!c)
+        epiviz_kaplan_meier(&cs_km, &km_times, &km_events, km_n, &!c, 80, 180, 255)
+
+        // Panel 2: Volcano
+        coord_draw_frame(&cs_vol, &!c)
+        epiviz_volcano(&cs_vol, &v_fc, &v_pval, v_n, 1.0, 1.301, &!c)
+
+        // Panel 3: Q-Q
+        coord_draw_frame(&cs_qq, &!c)
+        epiviz_qqplot(&cs_qq, &qq_data, qq_n, &!c, 100, 210, 140)
+
+        // Panel 4: Parallel coords
+        epiviz_parallel_coords(&pk_flat, pk_n, 4, 212, 252, 210, 185, &!c)
+
+        // Panel 5: Radar
+        epiviz_radar(&radar_data, 2, 6, 528, 360, 85,
+                     &r_colors_r, &r_colors_g, &r_colors_b, 140, &!c)
+
+        // FXAA post-process
+        canvas_fxaa(&!c, scratch)
+
+        window_present(&!win)
+    }
+
+    heap_free(scratch as *mut i8)
+    window_close(&!win)
+}

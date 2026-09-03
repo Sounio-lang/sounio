@@ -1,0 +1,404 @@
+// stdlib/clinical/tacrolimus_oral_safety.sio
+//
+// Tacrolimus oral steady-state C24h-trough screening with Knightian
+// uncertainty inputs.
+//
+// Pipeline:
+//   PK params (Vc, CL, F_oral) --lift--> Knightian PBoxes
+//   --1-compartment oral SS approximation (ka >> ke)--> Knightian C24h PBox
+//   --within(target_lo, target_hi) support gate--> {WITHIN_BAND, REFUSE}
+//
+// This module is the F_oral-dominant analog of stdlib/clinical/vancomycin_pbpk.sio.
+// It is the formal-export surface for `formal/lean4/SounioTacrolimusDosingSafety.lean`.
+//
+// References:
+//   Jusko WJ et al. (1995) Clin Pharmacol Ther 57:281–290.  (popPK in
+//     liver transplant, CL ≈ 0.4 L/h/kg.)
+//   Kershner RP & Fitzsimmons WE (1996) Transplantation 62:920–926.
+//     (Whole-blood concentration / efficacy + toxicity, oral F ≈ 0.25
+//     CV ≈ 50%.)
+//   Bekersky I et al. (1999) J Clin Pharmacol 39:1212–1216.  (Oral
+//     absorption, ka ≈ 0.38 h⁻¹.)
+//   Staatz CE & Tett SE (2004) Clin Pharmacokinet 43:623–653.  (Review
+//     used as umbrella citation for Vd_ss ≈ 1300 L and TDM targets.)
+//   Hesselink DA et al. (2014) Clin Pharmacokinet 53:123–139.  (CYP3A5
+//     expressor pharmacogenetics, used by validation gate T6.)
+//
+// Therapeutic window (whole-blood C24h trough, Prograf US label, kidney
+// transplant maintenance): 5–15 ng/mL. The narrower 5–10 ng/mL band is
+// used for late maintenance and is parameterizable via `is_safe_tac_dose`.
+//
+// Clinical warning: this is a conservative compiler/stdlib example of
+// Knightian interval propagation for trough screening. It is not an
+// AUC-guided clinical dosing engine and must not be used as medical
+// guidance.
+//
+// Refinement-type-style contracts (currently enforced at runtime):
+//   weight_kg     in [30, 200]
+//   crcl_ml_min   in (0, 200]
+//   dose_mg       in (0, 20.0]      // oral daily limit (Prograf label)
+//   interval_h    in [8, 24]
+//   tdm_samples   >= 0
+// Each violation produces a vacuous PBox with confidence 0 (REFUSE).
+//
+// Lean export: formal/lean4/SounioTacrolimusDosingSafety.lean (M3-stage,
+// statement-only — same maturity as the vancomycin obligation).
+
+use epistemic::knightian::*
+
+// ============================================================================
+// PK PARAMETERS — simplified IV-equivalent values for trough-screening with
+// explicit F_oral as a separate variance axis.
+//
+// Identifiability note (important for the dissertation argument):
+//   Standard oral popPK fits report V/F and CL/F (apparent values) because
+//   F is non-identifiable from oral data alone. To expose F as a separate
+//   uncertainty source — the dissertation contribution for this drug — we
+//   adopt the IV-equivalent frame (V, CL, F as three independent inputs):
+//
+//       C_trough_ss(F, V, CL; D, τ) = F · D / V / (exp(CL·τ/V) − 1)
+//
+//   Population means calibrated so that 5 mg PO q12h (F=0.25) reproduces
+//   the clinically observed whole-blood C12h trough of ~8 ng/mL (Prograf
+//   label; Kershner 1996):
+//       V_true = 3.6 L/kg     → 252 L for a 70 kg patient
+//       CL_true = 0.144 L/h/kg → 10.1 L/h     (apparent t½ ≈ 17 h)
+//       F = 0.25                                (Kershner 1996)
+//   These are NOT directly Jusko 1995 apparent values; they are the
+//   IV-equivalent factorisation V = (V/F)·F, CL = (CL/F)·F using V/F ≈
+//   14 L/kg and CL/F ≈ 0.58 L/h/kg, i.e. the apparent fit divided by F.
+//
+//   The full 14-compartment Vd_ss ≈ 1300 L is exercised separately in
+//   stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio. This 1-comp
+//   IV-equivalent model is the *trough-screening* approximation used by
+//   the Knightian gate (matches the role of vp_default in vancomycin_pbpk).
+//
+// CrCl is retained as a refinement-input constraint per the project's
+// uniform-screening convention, even though tacrolimus is < 1% renally
+// cleared.
+// ============================================================================
+
+pub struct TacPKParams {
+    vc_l: f64,              // IV-equivalent central volume (L)
+    cl_l_per_h: f64,        // IV-equivalent whole-blood clearance (L/h)
+    ka_per_h: f64,          // oral absorption rate constant (h⁻¹)
+    f_oral: f64,            // oral bioavailability (dimensionless, [0,1])
+}
+
+pub fn tp_default(weight_kg: f64, crcl_ml_min: f64) -> TacPKParams {
+    // V_true ≈ 3.6 L/kg (IV-equivalent factorisation of V/F ≈ 14 L/kg × F)
+    let vc = 3.6 * weight_kg
+    // CL_true ≈ 0.144 L/h/kg (IV-equivalent factorisation; gives apparent
+    // terminal t½ ≈ 17 h, matching Kershner 1996)
+    let cl = 0.144 * weight_kg
+    // Refinement-input only — current model does not scale CL by CrCl.
+    let _ = crcl_ml_min
+    let ka = 0.38     // h⁻¹ (Bekersky 1999, fasted)
+    let f  = 0.25     // Kershner 1996, CV ~50%
+    TacPKParams { vc_l: vc, cl_l_per_h: cl, ka_per_h: ka, f_oral: f }
+}
+
+// ============================================================================
+// LIFT params -> PBox with Knightian bands.
+// Band widths shrink in tdm_samples (post-TDM Bayesian narrowing).
+//
+// Pre-TDM widths reflect literature popPK variability:
+//   Vc:     ±15% (Staatz 2004)
+//   CL:     ±25% (Jusko 1995; CYP3A4 IIV + CYP3A5 polymorphism)
+//   F_oral: ±50% (Kershner 1996; food, formulation, P-gp IIV)
+// ka is held fixed in the Fréchet enclosure because for ka >> ke the
+// C24h trough is insensitive to ka (sensitivity ≈ 0 to leading order).
+// ============================================================================
+
+fn tp_band_vc(tdm_samples: i64) -> f64 {
+    if tdm_samples >= 3 { return 0.07 }
+    if tdm_samples >= 1 { return 0.10 }
+    0.15
+}
+
+fn tp_band_cl(tdm_samples: i64) -> f64 {
+    if tdm_samples >= 3 { return 0.10 }
+    if tdm_samples >= 1 { return 0.15 }
+    0.25
+}
+
+fn tp_band_f(tdm_samples: i64) -> f64 {
+    // F_oral does not narrow much with TDM alone (TDM measures C, not F
+    // directly; post-TDM the F·V combination is well-identified, but F by
+    // itself remains uncertain). The post-TDM narrowing here represents
+    // additional information from CYP3A5 genotyping or repeat-dose data
+    // routinely collected alongside TDM in transplant clinics — see Staatz
+    // 2004 §3.3 and Hesselink 2014.
+    if tdm_samples >= 3 { return 0.25 }
+    if tdm_samples >= 1 { return 0.40 }
+    0.50
+}
+
+pub fn tp_vc_to_pbox(p: &TacPKParams, tdm_samples: i64) -> PBox {
+    let frac = tp_band_vc(tdm_samples)
+    let lo = (1.0 - frac) * p.vc_l
+    let hi = (1.0 + frac) * p.vc_l
+    let v = 0.0025 * p.vc_l * p.vc_l
+    pb_new(lo, hi, v, 920)
+}
+
+pub fn tp_cl_to_pbox(p: &TacPKParams, tdm_samples: i64) -> PBox {
+    let frac = tp_band_cl(tdm_samples)
+    let lo = (1.0 - frac) * p.cl_l_per_h
+    let hi = (1.0 + frac) * p.cl_l_per_h
+    let v = 0.01 * p.cl_l_per_h * p.cl_l_per_h
+    pb_new(lo, hi, v, 880)
+}
+
+pub fn tp_f_to_pbox(p: &TacPKParams, tdm_samples: i64) -> PBox with Mut {
+    let frac = tp_band_f(tdm_samples)
+    var lo = (1.0 - frac) * p.f_oral
+    var hi = (1.0 + frac) * p.f_oral
+    // Bioavailability is bounded in [0, 1]; clamp.
+    if lo < 0.0 { lo = 0.0 }
+    if hi > 1.0 { hi = 1.0 }
+    let v = 0.04 * p.f_oral * p.f_oral
+    pb_new(lo, hi, v, 700)
+}
+
+// ============================================================================
+// EXPONENTIAL — range-reduced Taylor approximation. Identical mathematical
+// content to stdlib/clinical/vancomycin_pbpk.sio::vp_exp_approx (Fréchet
+// enclosure requires a numerically stable exp over the full ke·τ range).
+// ============================================================================
+
+fn tp_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { panic("negative exp domain") }
+    if x > 64.0 { panic("exp domain outside trough-screening contract") }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i32 = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i: i32 = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var j: i32 = 0
+        while j < (0 - k) {
+            result = result / 2.0
+            j = j + 1
+        }
+    }
+    result
+}
+
+fn tp_expm1_pos(theta: f64) -> f64 with Mut, Div, Panic {
+    if theta <= 0.0 { panic("invalid theta") }
+    if theta < 0.001 {
+        let t2 = theta * theta
+        let t3 = t2 * theta
+        let t4 = t3 * theta
+        let t5 = t4 * theta
+        return theta + t2 / 2.0 + t3 / 6.0 + t4 / 24.0 + t5 / 120.0
+    }
+    tp_exp_approx(theta) - 1.0
+}
+
+// ============================================================================
+// STEADY-STATE C24h TROUGH (1-compartment oral, ka >> ke approximation).
+//
+// For ka >> ke (tacrolimus: ka=0.38 h⁻¹, ke = CL/Vc ≈ 0.022 h⁻¹, ratio ≈ 17),
+// the absorption phase is complete well before τ and the trough at time τ
+// reduces to the IV-bolus steady-state Cmin scaled by F_oral:
+//
+//   C_trough_ss(F, Vc, CL; D, τ)
+//      = F · D / (Vc · (exp(ke·τ) − 1))
+//      = F · D / (Vc · (exp(CL·τ/Vc) − 1))
+//
+// This is exactly F times the vancomycin Cmin formula in
+// stdlib/clinical/vancomycin_pbpk.sio. We inherit the hand-derived
+// monotonicity of the inner Cmin term (vancomycin_pbpk.sio:158-165):
+//
+//   d(F·Cmin)/d(F)  = Cmin                                  > 0
+//   d(F·Cmin)/d(D)  = F · Cmin / D                          > 0
+//   d(F·Cmin)/d(Vc) = F · D · [e^θ(θ−1) + 1] / [Vc²(e^θ−1)²] > 0  ∀ θ > 0
+//   d(F·Cmin)/d(CL) = −F · D · τ · e^θ / [Vc²(e^θ−1)²]      < 0
+//
+// Fréchet enclosure on the joint distribution of (F, Vc, CL):
+//   C24h is INCREASING in F, INCREASING in Vc, DECREASING in CL.
+//   → C24h_min at (F_lo, Vc_lo, CL_hi)
+//   → C24h_max at (F_hi, Vc_hi, CL_lo)
+// Independent of correlation between F, Vc, CL.
+//
+// Refs: Moore (1966); Williamson & Downs (1990); Ferson et al. (2003).
+// The general 2-arg theorem (`pb_apply2_monotone_inc_dec`) extends to
+// 3-arg monotone composition by associativity (compose F·g then g·Cmin).
+// Lean obligation: formal/lean4/SounioTacrolimusDosingSafety.lean ::
+// `tac_c24h_monotone_corners_enclose`.
+// ============================================================================
+
+fn tp_c_trough_ss_point(f: f64, vc: f64, cl: f64, dose: f64, tau: f64)
+    -> f64 with Mut, Div, Panic
+{
+    if f  < 0.0 { panic("invalid f_oral") }
+    if f  > 1.0 { panic("invalid f_oral") }
+    if vc <= 0.0 { panic("invalid vc") }
+    if cl <= 0.0 { panic("invalid cl") }
+    if dose <= 0.0 { panic("invalid dose") }
+    if tau <= 0.0 { panic("invalid tau") }
+    let theta = (cl * tau) / vc
+    let denom = tp_expm1_pos(theta)
+    if denom <= 0.0 { panic("invalid c24h denominator") }
+    (f * dose / vc) / denom
+}
+
+// ============================================================================
+// CONTRACT GATES (refinement-style runtime enforcement).
+// Tacrolimus oral daily dose: Prograf label cap is ~0.2 mg/kg/day for adults
+// (= 14 mg for a 70 kg patient). We use 20 mg as a hard outer bound; doses
+// above this require ID/pediatric specialist override outside the screening
+// pathway.
+// ============================================================================
+
+fn tp_dose_valid(dose: f64) -> bool { dose > 0.0 && dose <= 20.0 }
+fn tp_tau_valid(tau: f64) -> bool { tau >= 8.0 && tau <= 24.0 }
+fn tp_weight_valid(w: f64) -> bool { w >= 30.0 && w <= 200.0 }
+fn tp_crcl_valid(c: f64) -> bool { c > 0.0 && c <= 200.0 }
+fn tp_tdm_valid(t: i64) -> bool { t >= 0 }
+
+// ============================================================================
+// CONSTANT — convert mg to ng for output. C24h is reported in ng/mL,
+// which is mg·1e6 / L. The dose-to-Vc ratio above is already in mg/L, so
+// we apply the 1e6 ng/mg factor at the public-API boundary.
+// ============================================================================
+
+fn tp_mg_per_l_to_ng_per_ml(x: f64) -> f64 { x * 1000.0 }
+//                                              ^ 1 mg/L = 1000 ng/mL
+
+// ============================================================================
+// PUBLIC API — predict_c_trough_knightian
+// ============================================================================
+// Returns a PBox over C24h trough in ng/mL. Vacuous (confidence 0) if any
+// refinement-type contract fails.
+
+pub fn predict_c_trough_knightian(
+    weight_kg: f64,
+    crcl_ml_min: f64,
+    dose_mg: f64,
+    interval_h: f64,
+    tdm_samples: i64,
+) -> PBox with Mut, Div, Panic {
+    if !tp_dose_valid(dose_mg) { return pb_vacuous() }
+    if !tp_tau_valid(interval_h) { return pb_vacuous() }
+    if !tp_weight_valid(weight_kg) { return pb_vacuous() }
+    if !tp_crcl_valid(crcl_ml_min) { return pb_vacuous() }
+    if !tp_tdm_valid(tdm_samples) { return pb_vacuous() }
+
+    let params = tp_default(weight_kg, crcl_ml_min)
+    let vc_pb = tp_vc_to_pbox(&params, tdm_samples)
+    let cl_pb = tp_cl_to_pbox(&params, tdm_samples)
+    let f_pb  = tp_f_to_pbox(&params, tdm_samples)
+
+    if pb_lo_mean(&vc_pb) <= 0.0 { return pb_vacuous() }
+    if pb_hi_mean(&vc_pb) <= 0.0 { return pb_vacuous() }
+    if pb_lo_mean(&cl_pb) <= 0.0 { return pb_vacuous() }
+    if pb_hi_mean(&cl_pb) <= 0.0 { return pb_vacuous() }
+    if pb_lo_mean(&f_pb)  <  0.0 { return pb_vacuous() }
+    if pb_hi_mean(&f_pb)  <= 0.0 { return pb_vacuous() }
+    if pb_lo_mean(&vc_pb) > pb_hi_mean(&vc_pb) { return pb_vacuous() }
+    if pb_lo_mean(&cl_pb) > pb_hi_mean(&cl_pb) { return pb_vacuous() }
+    if pb_lo_mean(&f_pb)  > pb_hi_mean(&f_pb)  { return pb_vacuous() }
+
+    // Fréchet outer enclosure on (F, Vc, CL).
+    // C24h is INCREASING in F, INCREASING in Vc, DECREASING in CL ⇒
+    //   C24h_min at (F_lo, Vc_lo, CL_hi);  C24h_max at (F_hi, Vc_hi, CL_lo).
+    // Holds for ANY joint distribution of (F, Vc, CL) — see header.
+    let c_lo_mg_l = tp_c_trough_ss_point(
+        pb_lo_mean(&f_pb), pb_lo_mean(&vc_pb), pb_hi_mean(&cl_pb),
+        dose_mg, interval_h,
+    )
+    let c_hi_mg_l = tp_c_trough_ss_point(
+        pb_hi_mean(&f_pb), pb_hi_mean(&vc_pb), pb_lo_mean(&cl_pb),
+        dose_mg, interval_h,
+    )
+
+    let gap = c_hi_mg_l - c_lo_mg_l
+    if gap < 0.0 { return pb_vacuous() }
+
+    // Convert to ng/mL at the API boundary.
+    let lo_ng = tp_mg_per_l_to_ng_per_ml(c_lo_mg_l)
+    let hi_ng = tp_mg_per_l_to_ng_per_ml(c_hi_mg_l)
+
+    // Support-only enclosure (vancomycin convention): leave variance
+    // uncalibrated instead of inventing pseudo-statistics from an unknown
+    // joint distribution.
+    let v = 0.0
+    // Preserve the weakest input confidence (3-way min over F, Vc, CL).
+    let vc_conf = pb_confidence(&vc_pb)
+    let cl_conf = pb_confidence(&cl_pb)
+    let f_conf  = pb_confidence(&f_pb)
+    var c1 = if vc_conf < cl_conf { vc_conf } else { cl_conf }
+    if f_conf < c1 { c1 = f_conf }
+
+    pb_new(lo_ng, hi_ng, v, c1)
+}
+
+// ============================================================================
+// SAFETY GATE — conservative support-band therapeutic-window screen.
+// Refuses if the *band* crosses either boundary OR confidence is below
+// the structural provenance threshold.
+// ============================================================================
+
+pub fn is_safe_tac_dose(predicted_c24h: &PBox, target_lo_ng_ml: f64,
+                        target_hi_ng_ml: f64, min_conf: i64) -> bool {
+    if pb_confidence(predicted_c24h) <= 0 { return false }
+    if !pb_is_credible(predicted_c24h, min_conf) { return false }
+    pb_within(predicted_c24h, target_lo_ng_ml, target_hi_ng_ml)
+}
+
+// ============================================================================
+// SELF-TEST main()
+// ============================================================================
+// Three scenarios:
+//   1. Pre-TDM (0 samples) — wide band, refuse 4 mg q24h.
+//   2. Post-TDM (3 samples) — narrow band, in target → recommend.
+//   3. Contract violation — weight 15 kg (out of [30, 200]) → vacuous PBox.
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    // Standard adult kidney-transplant maintenance patient:
+    // 70 kg, CrCl 80 mL/min, oral 7 mg q12h immediate-release Prograf,
+    // target whole-blood trough C12h ∈ [5, 15] ng/mL (Prograf label).
+    let pre = predict_c_trough_knightian(70.0, 80.0, 5.0, 12.0, 0)
+    println(pb_lo_mean(&pre))
+    println(pb_hi_mean(&pre))
+    if is_safe_tac_dose(&pre, 5.0, 15.0, 700) {
+        println("PRE_PRESCRIBE")
+    } else {
+        println("PRE_REFUSE")
+    }
+
+    let post = predict_c_trough_knightian(70.0, 80.0, 5.0, 12.0, 3)
+    println(pb_lo_mean(&post))
+    println(pb_hi_mean(&post))
+    if is_safe_tac_dose(&post, 5.0, 15.0, 700) {
+        println("POST_PRESCRIBE")
+    } else {
+        println("POST_REFUSE")
+    }
+
+    let bad = predict_c_trough_knightian(15.0, 80.0, 7.0, 12.0, 0)
+    if pb_confidence(&bad) == 0 {
+        println("CONTRACT_BLOCK")
+    } else {
+        println("CONTRACT_LEAK")
+    }
+    0
+}

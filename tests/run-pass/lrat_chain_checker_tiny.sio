@@ -1,0 +1,185 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: Scalar LRAT/RUP proof-chain smoke with derived lemma and empty clause
+
+fn active_clause(id: i64, deleted3: i64, added4: i64) -> i64 {
+    if id == 1 { return 1 } // x OR y
+    if id == 2 { return 1 } // -x
+    if id == 3 {
+        if deleted3 == 0 { return 1 }
+        return 0
+    }
+    if id == 4 { return added4 } // derived y
+    return 0
+}
+
+fn clause_lit(id: i64, pos: i64) -> i64 {
+    if id == 1 {
+        if pos == 0 { return 1 }
+        if pos == 1 { return 2 }
+    }
+    if id == 2 {
+        if pos == 0 { return 0 - 1 }
+    }
+    if id == 3 {
+        if pos == 0 { return 0 - 2 }
+    }
+    if id == 4 {
+        if pos == 0 { return 2 }
+    }
+    return 0
+}
+
+fn clause_len(id: i64) -> i64 {
+    if id == 1 { return 2 }
+    if id == 2 { return 1 }
+    if id == 3 { return 1 }
+    if id == 4 { return 1 }
+    return 0 - 1
+}
+
+fn lit_var(lit: i64) -> i64 {
+    if lit < 0 { return 0 - lit }
+    return lit
+}
+
+fn lit_value(lit: i64, ax: i64, ay: i64) -> i64 {
+    let v = lit_var(lit)
+    var a: i64 = 0
+    if v == 1 { a = ax }
+    if v == 2 { a = ay }
+    if lit < 0 { return 0 - a }
+    return a
+}
+
+fn assign_lit(lit: i64, ax: i64, ay: i64) -> i64 {
+    let v = lit_var(lit)
+    var want: i64 = 1
+    if lit < 0 { want = 0 - 1 }
+    if v == 1 {
+        if ax == 0 { return want }
+        if ax == want { return ax }
+        return 99
+    }
+    if v == 2 {
+        if ay == 0 { return want }
+        if ay == want { return ay }
+        return 99
+    }
+    return 99
+}
+
+// Replay one antecedent. Return:
+//   0 = invalid antecedent
+//   1 = no conflict
+//   2 = conflict
+//   10 + assignment marker for unit propagation:
+//      11 x=true, 12 x=false, 21 y=true, 22 y=false
+fn replay_clause(id: i64, ax: i64, ay: i64, deleted3: i64, added4: i64) -> i64 {
+    if active_clause(id, deleted3, added4) == 0 { return 0 }
+    let n = clause_len(id)
+    var sat: i64 = 0
+    var unassigned: i64 = 0
+    var last: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let lit = clause_lit(id, i)
+        let v = lit_value(lit, ax, ay)
+        if v == 1 { sat = 1 }
+        if v == 0 {
+            unassigned = unassigned + 1
+            last = lit
+        }
+        i = i + 1
+    }
+    if sat == 1 { return 1 }
+    if unassigned == 0 { return 2 }
+    if unassigned == 1 {
+        let v = lit_var(last)
+        if v == 1 {
+            if last > 0 { return 11 }
+            return 12
+        }
+        if v == 2 {
+            if last > 0 { return 21 }
+            return 22
+        }
+    }
+    return 1
+}
+
+fn apply_marker(marker: i64, ax: i64, ay: i64) -> i64 {
+    if marker == 11 { return assign_lit(1, ax, ay) }
+    if marker == 12 { return assign_lit(0 - 1, ax, ay) }
+    if marker == 21 { return assign_lit(2, ax, ay) }
+    if marker == 22 { return assign_lit(0 - 2, ax, ay) }
+    return 99
+}
+
+// Candidate lemma is y. Negating it starts with y=false.
+// Hints [1,2] prove y by propagating x from (x OR y), then conflicting with -x.
+fn check_derive_y(h0: i64, h1: i64, hlen: i64, deleted3: i64) -> i64 {
+    if hlen < 0 { return 0 }
+    if hlen > 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0 - 1
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, deleted3, 0)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+// Empty lemma. Hints [4,3] conflict between derived y and original -y.
+fn check_empty_from_y(h0: i64, h1: i64, hlen: i64, deleted3: i64, added4: i64) -> i64 {
+    if hlen < 0 { return 0 }
+    if hlen > 2 { return 0 }
+    var ax: i64 = 0
+    var ay: i64 = 0
+    var step: i64 = 0
+    while step < hlen {
+        var id = h0
+        if step == 1 { id = h1 }
+        let r = replay_clause(id, ax, ay, deleted3, added4)
+        if r == 0 { return 0 }
+        if r == 2 { return 1 }
+        if r >= 10 {
+            let assigned = apply_marker(r, ax, ay)
+            if assigned == 99 { return 1 }
+            if r == 11 { ax = assigned }
+            if r == 12 { ax = assigned }
+            if r == 21 { ay = assigned }
+            if r == 22 { ay = assigned }
+        }
+        step = step + 1
+    }
+    return 0
+}
+
+fn main() -> i64 {
+    if check_derive_y(1, 2, 2, 0) != 1 { return 1 }
+    if check_derive_y(2, 1, 2, 0) != 1 { return 2 }
+    if check_derive_y(1, 0, 1, 0) != 0 { return 3 }
+    if check_derive_y(42, 2, 2, 0) != 0 { return 4 }
+
+    if check_empty_from_y(4, 3, 2, 0, 1) != 1 { return 5 }
+    if check_empty_from_y(3, 4, 2, 0, 1) != 1 { return 6 }
+    if check_empty_from_y(4, 0, 1, 0, 1) != 0 { return 7 }
+    if check_empty_from_y(4, 3, 2, 0, 0) != 0 { return 8 }
+    if check_empty_from_y(4, 3, 2, 1, 1) != 0 { return 9 }
+
+    return 0
+}

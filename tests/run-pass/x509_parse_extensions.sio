@@ -1,0 +1,268 @@
+//@ run-pass
+//@ requires: madaros
+
+// RFC 5280 SS4.2 Extensions parsing test: a hand-built SEQUENCE OF
+// Extension (the v3 [3]-wrapped Extensions field's INNER content -- see
+// x509_parse_extensions's own doc comment: the caller is expected to have
+// already entered both the [3] EXPLICIT wrapper and the Extensions
+// SEQUENCE itself before calling it, so this fixture is just the four
+// Extension SEQUENCEs concatenated with no outer wrapper of its own).
+//
+// Four extensions, in order:
+//
+//   1. basicConstraints (2.5.29.19), critical=TRUE, cA=TRUE,
+//      pathLenConstraint=0.
+//      0x30, 0x12,                          -- Extension SEQUENCE, len 18
+//        0x06, 0x03, 0x55, 0x1D, 0x13,      -- OID 2.5.29.19 (5 bytes)
+//        0x01, 0x01, 0xFF,                  -- critical BOOLEAN TRUE (3 bytes)
+//        0x04, 0x08,                        -- extnValue OCTET STRING, len 8
+//          0x30, 0x06,                      -- BasicConstraints SEQUENCE, len 6
+//            0x01, 0x01, 0xFF,              -- cA TRUE
+//            0x02, 0x01, 0x00               -- pathLenConstraint 0
+//      content = 5 + 3 + (2+8) = 18. Confirmed. Total TLV = 2 + 18 = 20 bytes.
+//
+//   2. keyUsage (2.5.29.15), no critical field (defaults to FALSE),
+//      digitalSignature (bit 0) + keyCertSign (bit 5) set.
+//      0x30, 0x0B,                          -- Extension SEQUENCE, len 11
+//        0x06, 0x03, 0x55, 0x1D, 0x0F,      -- OID 2.5.29.15 (5 bytes)
+//        0x04, 0x04,                        -- extnValue OCTET STRING, len 4
+//          0x03, 0x02, 0x02, 0x84           -- BIT STRING: unused=2, byte=0x84
+//                                               (bit0=0x80 digitalSignature,
+//                                                bit5=0x04 keyCertSign, sum=0x84)
+//      content = 5 + (2+4) = 11. Confirmed. Total TLV = 2 + 11 = 13 bytes.
+//
+//   3. subjectKeyIdentifier (2.5.29.14), no critical field, 20-byte kid
+//      (bytes 0x01..0x14).
+//      0x30, 0x1D,                          -- Extension SEQUENCE, len 29
+//        0x06, 0x03, 0x55, 0x1D, 0x0E,      -- OID 2.5.29.14 (5 bytes)
+//        0x04, 0x16,                        -- extnValue OCTET STRING, len 22
+//          0x04, 0x14,                      -- inner OCTET STRING, len 20
+//            0x01, 0x02, ..., 0x14          -- 20 bytes
+//      content = 5 + (2+22) = 29. Confirmed. Total TLV = 2 + 29 = 31 bytes.
+//
+//   4. certificatePolicies (2.5.29.32) -- deliberately NOT one of the four
+//      OIDs x509_parse_extensions semantically decodes, to prove the
+//      generic-capture path works for OIDs outside that set. No critical
+//      field, extnValue content is arbitrary raw bytes (this generic path
+//      never looks inside extnValue).
+//      0x30, 0x0B,                          -- Extension SEQUENCE, len 11
+//        0x06, 0x03, 0x55, 0x1D, 0x20,      -- OID 2.5.29.32 (5 bytes)
+//        0x04, 0x04,                        -- extnValue OCTET STRING, len 4
+//          0xDE, 0xAD, 0xBE, 0xEF
+//      content = 5 + (2+4) = 11. Confirmed. Total TLV = 2 + 11 = 13 bytes.
+//
+//   Sum of all four TLVs = 20 + 13 + 31 + 13 = 77 bytes total buffer.
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+fn main() -> i64 with IO {
+    let total_len: i64 = 77
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 77] = [
+        // 1. basicConstraints: critical=TRUE, cA=TRUE, pathLenConstraint=0
+        0x30, 0x12,
+        0x06, 0x03, 0x55, 0x1D, 0x13,
+        0x01, 0x01, 0xFF,
+        0x04, 0x08,
+        0x30, 0x06,
+        0x01, 0x01, 0xFF,
+        0x02, 0x01, 0x00,
+        // 2. keyUsage: digitalSignature + keyCertSign
+        0x30, 0x0B,
+        0x06, 0x03, 0x55, 0x1D, 0x0F,
+        0x04, 0x04,
+        0x03, 0x02, 0x02, 0x84,
+        // 3. subjectKeyIdentifier: 20-byte kid 0x01..0x14
+        0x30, 0x1D,
+        0x06, 0x03, 0x55, 0x1D, 0x0E,
+        0x04, 0x16,
+        0x04, 0x14,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+        0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+        // 4. certificatePolicies: generic, not semantically decoded
+        0x30, 0x0B,
+        0x06, 0x03, 0x55, 0x1D, 0x20,
+        0x04, 0x04,
+        0xDE, 0xAD, 0xBE, 0xEF,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    let r = der_reader_new(&buf, 0, total_len)
+
+    var extensions: [ExtensionEntry; 32] = [
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+    ]
+    let (extensions_raw, extension_count, is_ca, path_len_constraint, key_usage_bits, subject_key_id, subject_key_id_len, authority_key_id, authority_key_id_len, status) = x509_parse_extensions(&buf, &r)
+    extensions = extensions_raw
+
+    if status != X509_OK {
+        print_int(1)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    if extension_count != 4 {
+        print_int(2)
+        return 1
+    }
+    assert(extension_count == 4)
+
+    if is_ca != true {
+        print_int(3)
+        return 1
+    }
+    assert(is_ca == true)
+
+    if path_len_constraint != 0 {
+        print_int(4)
+        return 1
+    }
+    assert(path_len_constraint == 0)
+
+    // keyUsage bits: bit0 (digitalSignature, 0x80) + bit5 (keyCertSign,
+    // 0x04) == 0x84 == 132.
+    if key_usage_bits != 132 {
+        print_int(5)
+        return 1
+    }
+    assert(key_usage_bits == 132)
+    // Check the specific bit positions directly too, not just the combined mask.
+    if (key_usage_bits & 0x80) == 0 {
+        print_int(6)
+        return 1
+    }
+    assert((key_usage_bits & 0x80) != 0)
+    if (key_usage_bits & 0x04) == 0 {
+        print_int(7)
+        return 1
+    }
+    assert((key_usage_bits & 0x04) != 0)
+    // A bit that was NOT set (keyEncipherment, 0x20) must read as unset.
+    if (key_usage_bits & 0x20) != 0 {
+        print_int(8)
+        return 1
+    }
+    assert((key_usage_bits & 0x20) == 0)
+
+    if subject_key_id_len != 20 {
+        print_int(9)
+        return 1
+    }
+    assert(subject_key_id_len == 20)
+    var kidx: i64 = 0
+    while kidx < 20 {
+        if (subject_key_id[kidx as usize] as i64) != kidx + 1 {
+            print_int(10)
+            return 1
+        }
+        kidx = kidx + 1
+    }
+    assert((subject_key_id[0] as i64) == 1)
+    assert((subject_key_id[19] as i64) == 20)
+
+    // authorityKeyIdentifier was never present in this fixture -- must stay
+    // at its zero default.
+    if authority_key_id_len != 0 {
+        print_int(11)
+        return 1
+    }
+    assert(authority_key_id_len == 0)
+
+    // 4th extension (generic, certificatePolicies): captured but not
+    // semantically decoded. Check BOTH the .oid-style and .value-style
+    // fields, per this branch's discipline after Finding 24.
+    let cert_policies_oid = oid_ext_certificate_policies()
+    if extensions[3].oid_len != 3 {
+        print_int(12)
+        return 1
+    }
+    assert(extensions[3].oid_len == 3)
+    if oid_eq3(&extensions[3].oid, extensions[3].oid_len, &cert_policies_oid) == false {
+        print_int(13)
+        return 1
+    }
+    assert(oid_eq3(&extensions[3].oid, extensions[3].oid_len, &cert_policies_oid) == true)
+    if extensions[3].critical != false {
+        print_int(14)
+        return 1
+    }
+    assert(extensions[3].critical == false)
+    if extensions[3].value_len != 4 {
+        print_int(15)
+        return 1
+    }
+    assert(extensions[3].value_len == 4)
+    if (extensions[3].value[0] as i64) != 0xDE {
+        print_int(16)
+        return 1
+    }
+    if (extensions[3].value[1] as i64) != 0xAD {
+        print_int(17)
+        return 1
+    }
+    if (extensions[3].value[2] as i64) != 0xBE {
+        print_int(18)
+        return 1
+    }
+    if (extensions[3].value[3] as i64) != 0xEF {
+        print_int(19)
+        return 1
+    }
+    assert((extensions[3].value[0] as i64) == 0xDE)
+    assert((extensions[3].value[3] as i64) == 0xEF)
+
+    // 1st extension (basicConstraints): also check its raw generic-capture
+    // fields, not just its semantic decode, since it's the same array.
+    let basic_constraints_oid = oid_ext_basic_constraints()
+    if oid_eq3(&extensions[0].oid, extensions[0].oid_len, &basic_constraints_oid) == false {
+        print_int(20)
+        return 1
+    }
+    assert(oid_eq3(&extensions[0].oid, extensions[0].oid_len, &basic_constraints_oid) == true)
+    if extensions[0].critical != true {
+        print_int(21)
+        return 1
+    }
+    assert(extensions[0].critical == true)
+
+    // 2nd extension (keyUsage): OID + no-critical-field default.
+    let key_usage_oid = oid_ext_key_usage()
+    if oid_eq3(&extensions[1].oid, extensions[1].oid_len, &key_usage_oid) == false {
+        print_int(22)
+        return 1
+    }
+    assert(oid_eq3(&extensions[1].oid, extensions[1].oid_len, &key_usage_oid) == true)
+    if extensions[1].critical != false {
+        print_int(23)
+        return 1
+    }
+    assert(extensions[1].critical == false)
+
+    // 3rd extension (subjectKeyIdentifier): OID check too.
+    let ski_oid = oid_ext_subject_key_identifier()
+    if oid_eq3(&extensions[2].oid, extensions[2].oid_len, &ski_oid) == false {
+        print_int(24)
+        return 1
+    }
+    assert(oid_eq3(&extensions[2].oid, extensions[2].oid_len, &ski_oid) == true)
+
+    println("x509_parse_extensions: generic list + basicConstraints/keyUsage/subjectKeyIdentifier decoded correctly")
+    return 0
+}

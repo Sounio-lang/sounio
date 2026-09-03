@@ -130,6 +130,16 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
     if payload is None:
         return
 
+    if payload.get("stale"):
+        # The report's *_status/*_rtl_present fields describe an environment
+        # this checkout doesn't have (hardware/** has never been versioned
+        # here -- see stale_reason). Validating their shape or strict-mode
+        # truth would still credit a measurement that never happened here.
+        errors.append(
+            f"{path}: fpga report is stale: {payload.get('stale_reason', 'no reason given')}"
+        )
+        return
+
     if payload.get("schema") != FPGA_REPORT_SCHEMA:
         errors.append(
             f"{path}: schema mismatch (expected {FPGA_REPORT_SCHEMA}, got {payload.get('schema')})"

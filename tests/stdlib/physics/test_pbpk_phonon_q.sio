@@ -1,0 +1,143 @@
+//@ run-pass
+// tests/stdlib/physics/test_pbpk_phonon_q.sio
+//
+// Integration test for stdlib/physics/pbpk_phonon_q.sio
+//
+// Validates:
+//   1. phonon_liver_cycle_q returns a Quantity in dim_concentration
+//   2. The cycle-averaged outflow is positive for non-zero boundary
+//   3. phonon_correction_q returns a non-trivial Quantity (non-zero diff
+//      between phonon and well-stirred estimates)
+//   4. phonon_init_uniform_q sets all 64 sites to the requested value
+//   5. pbpk_phonon_q produces equivalent results to pbpk_phonon (legacy)
+//      when the same physical scenario is run, after unit conversion
+
+use physics::phonon::*
+use physics::pbpk_phonon::*
+use physics::phonon_quantity::*
+use physics::pbpk_phonon_q::*
+use units::lib::*
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > tol {
+        panic()
+    }
+}
+
+fn test_liver_cycle_dim() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    var s = lattice64_zero()
+
+    // PBPK inputs in kg/m³ (10 ng/mL portal, 8 ng/mL arterial, 2 ng/mL tissue)
+    let c_portal   = q_concentration_mass(1.0e-5, 0.0)
+    let c_arterial = q_concentration_mass(8.0e-6, 0.0)
+    let c_tissue   = q_concentration_mass(2.0e-6, 0.0)
+
+    let out = phonon_liver_cycle_q(c_portal, c_arterial, c_tissue, &base, &!s)
+    assert(dim_eq(out.dim, dim_concentration()))
+    assert(out.value > 0.0)
+    assert(out.uncertainty >= 0.0)
+}
+
+fn test_liver_cycle_drives_lattice() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    var s = lattice64_zero()
+
+    // After a full cardiac cycle of flow with non-zero boundary,
+    // the outlet site (s.values[63]) should be > 0.
+    let c_portal   = q_concentration_mass(1.0e-5, 0.0)
+    let c_arterial = q_concentration_mass(8.0e-6, 0.0)
+    let c_tissue   = q_concentration_mass(2.0e-6, 0.0)
+
+    let _out = phonon_liver_cycle_q(c_portal, c_arterial, c_tissue, &base, &!s)
+    assert(s.values[63] > 0.0)
+    // And the inlet (s.values[0]) should be near the boundary value
+    // (1e-5 kg/m³) since the boundary is the dominant source.
+    assert(s.values[0] > 0.5e-5)
+}
+
+fn test_correction_non_trivial() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    var s = lattice64_zero()
+
+    let c_liver = q_concentration_mass(2.0e-6, 0.0)
+    let kp      = q_dimensionless(5.0, 0.0)
+    let c_portal   = q_concentration_mass(1.0e-5, 0.0)
+    let c_arterial = q_concentration_mass(8.0e-6, 0.0)
+
+    let corr = phonon_correction_q(c_liver, kp, c_portal, c_arterial, &base, &!s)
+    assert(dim_eq(corr.dim, dim_concentration()))
+    // The correction is the difference between two well-defined scales
+    // (c_venous_phonon - c_venous_wellstirred) so it should be non-zero
+    // and have a meaningful magnitude (< 1e-5 kg/m³).
+    let d = if corr.value < 0.0 { 0.0 - corr.value } else { corr.value }
+    assert(d > 0.0)
+    assert(d < 1.0e-5)
+}
+
+fn test_init_uniform_q() with Mut, Panic {
+    var s = lattice64_zero()
+    phonon_init_uniform_q(&!s, 1.5e-5, 1.0e-12)
+    assert_close(s.values[0],    1.5e-5,  1.0e-15)
+    assert_close(s.values[32],   1.5e-5,  1.0e-15)
+    assert_close(s.values[63],   1.5e-5,  1.0e-15)
+    assert_close(s.variances[0], 1.0e-12, 1.0e-18)
+    assert(s.n == 64)
+}
+
+// --- Parity: pbpk_phonon (legacy) vs pbpk_phonon_q (new) ---
+
+fn test_pbpk_parity() with Mut, Div, Panic {
+    // Same physical scenario, expressed in ng/mL (legacy) and kg/m³ (new).
+    // The legacy pbpk returns raw f64 in ng/mL, the new returns Quantity
+    // in kg/m³. After multiplying the legacy by 1e-6, they should match.
+
+    // Build legacy params
+    var legacy_params: [f64; 64] = [0.0; 64]
+    legacy_params[PP_D_EFF]     = 1.0e-9
+    legacy_params[PP_DX]        = 3.9e-6
+    legacy_params[PP_K_RELEASE] = 0.1
+    legacy_params[PP_CL_SITE]   = 0.003
+    legacy_params[PP_FU]        = 0.075
+    legacy_params[PP_KP]        = 5.0
+    legacy_params[PP_C_PORTAL]  = 10.0   // ng/mL
+    legacy_params[PP_C_HA]      = 8.0    // ng/mL
+    legacy_params[PP_F_HEART]   = 1.2
+    legacy_params[PP_A_PORTAL]  = 0.05
+    legacy_params[PP_A_HA]      = 0.30
+    legacy_params[PP_PHI_HA]    = 0.785
+    legacy_params[PP_C_TISSUE]  = 2.0    // ng/mL
+    legacy_params[PP_V_BLOOD]   = 3.0e-4
+    legacy_params[PP_ZONATION]  = 1.0
+
+    var legacy_s = phonon_state_zero()
+    phonon_init_uniform(&!legacy_s, 0.0, 0.0)
+    let legacy_out_ng_ml = phonon_liver_cycle(
+        10.0, 8.0, 2.0, &legacy_params, &!legacy_s
+    )
+
+    // New: same scenario in SI
+    let base = rapamycin_phonon_params_q()
+    var new_s = lattice64_zero()
+    let c_portal   = q_concentration_mass(1.0e-5, 0.0)
+    let c_arterial = q_concentration_mass(8.0e-6, 0.0)
+    let c_tissue   = q_concentration_mass(2.0e-6, 0.0)
+    let new_out = phonon_liver_cycle_q(c_portal, c_arterial, c_tissue, &base, &!new_s)
+
+    // Compare: legacy_out_ng_ml × 1e-6 should match new_out.value
+    let legacy_kg_m3 = legacy_out_ng_ml * 1.0e-6
+    let d = new_out.value - legacy_kg_m3
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    assert(ad < 1.0e-9)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    test_liver_cycle_dim()
+    test_liver_cycle_drives_lattice()
+    test_correction_non_trivial()
+    test_init_uniform_q()
+    test_pbpk_parity()
+    0
+}

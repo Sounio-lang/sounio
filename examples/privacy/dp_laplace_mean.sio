@@ -1,0 +1,124 @@
+// examples/privacy/dp_laplace_mean.sio — ε-DP Laplace mean with GUM uncertainty
+//
+// Scenario: a clinic publishes the mean systolic blood pressure across a
+// cohort of 32 patients. To protect individual records, the released estimate
+// must be ε-differentially private. We use the Laplace mechanism with a
+// per-record clip yielding sensitivity s = 4.0 / N = 0.125 mmHg.
+//
+// The output is a GUM-typed Knowledge<f64> channel: the practitioner sees
+// both the mean and a combined uncertainty that includes the privacy noise.
+//
+// Privacy budget: ε_cap = 1.0 (single query at ε = 0.5 leaves 0.5 for follow-up).
+
+// ----- inline copies of the privacy module ----------------------------------
+// Phase 1 has no module-import shim yet; we paste the minimum surface here.
+
+pub type Eps = { e: f64 | e >= 0.0 };
+pub type Sensitivity = { s: f64 | s >= 0.0 };
+
+pub linear struct PrivacyBudget {
+    eps_cap: f64,
+    eps_spent: f64,
+}
+
+pub fn budget_new(eps_cap: f64) -> PrivacyBudget {
+    PrivacyBudget { eps_cap: eps_cap, eps_spent: 0.0 }
+}
+
+pub fn budget_spend(b: PrivacyBudget, eps_used: f64) -> PrivacyBudget with Mut, Div, Panic {
+    let remaining = b.eps_cap - b.eps_spent
+    if eps_used > remaining { panic("PrivacyBudget: spend exceeds cap") }
+    PrivacyBudget { eps_cap: b.eps_cap, eps_spent: b.eps_spent + eps_used }
+}
+
+pub fn budget_close(b: PrivacyBudget) -> f64 { b.eps_spent }
+
+pub fn budget_remaining(b: &PrivacyBudget) -> f64 { b.eps_cap - b.eps_spent }
+
+pub struct DPMeanResult {
+    mu: f64,
+    std_a: f64,
+    std_b: f64,
+    std_c: f64,
+    budget: PrivacyBudget,
+}
+
+fn dp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    for i in 0..10 { y = 0.5 * (y + x / y) }
+    y
+}
+
+fn dp_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn dp_arr_mean(xs: &[f64; 32]) -> f64 with Div, Panic {
+    var i: i64 = 0
+    var acc: f64 = 0.0
+    for i in 0..32 { acc = acc + (*xs)[i] }
+    acc / 32.0
+}
+
+fn dp_arr_var(xs: &[f64; 32], mean: f64) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var acc: f64 = 0.0
+    for i in 0..32 {
+        let d = (*xs)[i] - mean
+        acc = acc + d * d
+    }
+    acc / 31.0
+}
+
+pub fn laplace_mean(
+    xs: &[f64; 32],
+    sens: f64,
+    eps_used: f64,
+    b: PrivacyBudget,
+) -> DPMeanResult with Mut, Div, Panic {
+    let b2 = budget_spend(b, eps_used)
+    let mu = dp_arr_mean(xs)
+    let var_hat = dp_arr_var(xs, mu)
+    let std_a = dp_sqrt(var_hat / 32.0)
+    let sqrt2 = 1.414213562373095
+    let std_b = if eps_used > 0.0 { sqrt2 * dp_abs(sens) / eps_used } else { 0.0 }
+    let std_c = dp_sqrt(std_a * std_a + std_b * std_b)
+    DPMeanResult { mu: mu, std_a: std_a, std_b: std_b, std_c: std_c, budget: b2 }
+}
+
+// ----------------------------------------------------------------------------
+// MAIN — clinic mean SBP with ε-DP audit trail
+// ----------------------------------------------------------------------------
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // 32 synthetic patient SBPs (mmHg), pre-clipped to [110, 142] (range 32, so
+    // sensitivity of the mean = 32 / 32 = 1.0).
+    var sbp: [f64; 32] = [0.0; 32]
+    sbp[0] = 118.0;  sbp[1] = 124.0;  sbp[2] = 131.0;  sbp[3] = 128.0
+    sbp[4] = 142.0;  sbp[5] = 115.0;  sbp[6] = 122.0;  sbp[7] = 136.0
+    sbp[8] = 119.0;  sbp[9] = 127.0;  sbp[10] = 133.0; sbp[11] = 120.0
+    sbp[12] = 129.0; sbp[13] = 138.0; sbp[14] = 116.0; sbp[15] = 124.0
+    sbp[16] = 130.0; sbp[17] = 121.0; sbp[18] = 135.0; sbp[19] = 128.0
+    sbp[20] = 117.0; sbp[21] = 125.0; sbp[22] = 132.0; sbp[23] = 140.0
+    sbp[24] = 122.0; sbp[25] = 128.0; sbp[26] = 134.0; sbp[27] = 119.0
+    sbp[28] = 126.0; sbp[29] = 131.0; sbp[30] = 137.0; sbp[31] = 123.0
+
+    let budget = budget_new(1.0)
+    print("DP budget cap: 1.0\n")
+
+    // Single-query release at ε = 0.5
+    let dp = laplace_mean(&sbp, 1.0, 0.5, budget)
+
+    print("epsilon used: 0.5\n")
+    print("mean SBP (mmHg): "); print_f64(dp.mu); print("\n")
+    print("std_a (sampling): "); print_f64(dp.std_a); print("\n")
+    print("std_b (privacy):  "); print_f64(dp.std_b); print("\n")
+    print("std_c (combined): "); print_f64(dp.std_c); print("\n")
+
+    let spent = budget_close(dp.budget)
+    print("budget spent: "); print_f64(spent); print("\n")
+    print("budget remaining for next query: "); print_f64(1.0 - spent); print("\n")
+    0
+}

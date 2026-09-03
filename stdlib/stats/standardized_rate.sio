@@ -1,0 +1,154 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/standardized_rate.sio — directly & indirectly standardized rates
+//
+// Age- (or stratum-) standardised rates that make two populations comparable by
+// removing differences in their stratum structure:
+//
+//   direct_standardized(events, pop, std_weight, k) -> DSRResult
+//   smr(events, expected, k)                        -> SMRResult   (indirect)
+//
+// Direct: with stratum rates rᵢ = eventsᵢ/popᵢ and a standard-population weight
+// wᵢ,  DSR = Σ wᵢ rᵢ / Σ wᵢ,  with a Poisson SE  √(Σ wᵢ² rᵢ/popᵢ)/Σwᵢ.
+// Indirect: SMR = Σ observedᵢ / Σ expectedᵢ, expected from a reference rate.
+//
+// Pure Sounio: inline sqrt; one pass over the strata. No external dependency,
+// no nested data-array calls.
+//
+// References:
+//   Rothman, Greenland & Lash, "Modern Epidemiology" 3e, §4 (standardisation).
+
+module stats::standardized_rate
+
+fn sr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct DSRResult {
+    pub dsr: f64,   // directly standardized rate
+    pub se: f64,    // Poisson standard error
+    pub lo: f64,    // 95% CI lower
+    pub hi: f64,    // 95% CI upper
+}
+
+pub struct SMRResult {
+    pub smr: f64,       // standardized mortality/morbidity ratio
+    pub observed: f64,
+    pub expected: f64,
+}
+
+/// Directly standardized rate over k strata against a standard-population weight.
+///
+/// Parâmetros: events, pop — per-stratum counts & person-time; std_weight — standard
+///             population weight per stratum; k — strata (1..64).
+/// Retorno: DSRResult (dsr, se, lo, hi).
+/// Referências: Rothman et al. §4.
+pub fn direct_standardized(events: &[f64; 64], pop: &[f64; 64], std_weight: &[f64; 64], k: i32) -> DSRResult with Mut, Div, Panic {
+    if k < 1 { return DSRResult { dsr: 0.0, se: 0.0, lo: 0.0, hi: 0.0 } }
+    var wsum = 0.0
+    var wr = 0.0       // Σ w r
+    var var_acc = 0.0  // Σ w² r / pop
+    var i = 0
+    while i < k {
+        let e = events[i as usize]
+        let p = pop[i as usize]
+        let w = std_weight[i as usize]
+        wsum = wsum + w
+        if p > 0.0 {
+            let r = e / p
+            wr = wr + w * r
+            var_acc = var_acc + w * w * r / p
+        }
+        i = i + 1
+    }
+    if wsum <= 0.0 { return DSRResult { dsr: 0.0, se: 0.0, lo: 0.0, hi: 0.0 } }
+    let dsr = wr / wsum
+    let se = sr_sqrt(var_acc) / wsum
+    let z = 1.959963984540054
+    return DSRResult { dsr: dsr, se: se, lo: dsr - z * se, hi: dsr + z * se }
+}
+
+/// Standardized mortality/morbidity ratio (indirect standardisation).
+///
+/// Parâmetros: events — observed per stratum; expected — expected per stratum
+///             (reference rate × local pop); k — strata (1..64).
+/// Retorno: SMRResult (smr, observed, expected).
+pub fn smr(events: &[f64; 64], expected: &[f64; 64], k: i32) -> SMRResult with Mut, Div, Panic {
+    if k < 1 { return SMRResult { smr: 0.0, observed: 0.0, expected: 0.0 } }
+    var obs = 0.0
+    var exp = 0.0
+    var i = 0
+    while i < k { obs = obs + events[i as usize]; exp = exp + expected[i as usize]; i = i + 1 }
+    var s = 0.0
+    if exp > 0.0 { s = obs / exp }
+    return SMRResult { smr: s, observed: obs, expected: exp }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// two strata: r1=10/1000=0.01, r2=30/1000=0.03; weights 0.4, 0.6.
+// DSR = (0.4·0.01 + 0.6·0.03)/(0.4+0.6) = (0.004+0.018)/1 = 0.022.
+fn test_dsr() -> bool with IO, Mut, Div, Panic {
+    var e: [f64; 64] = [0.0; 64]
+    var p: [f64; 64] = [0.0; 64]
+    var w: [f64; 64] = [0.0; 64]
+    e[0]=10.0; p[0]=1000.0; w[0]=0.4
+    e[1]=30.0; p[1]=1000.0; w[1]=0.6
+    let r = direct_standardized(&e, &p, &w, 2)
+    var ok = true
+    ok = check(1, approx(r.dsr, 0.022, 1.0e-9)) && ok
+    ok = check(2, r.se > 0.0) && ok
+    ok = check(3, r.lo < 0.022 && r.hi > 0.022) && ok
+    return ok
+}
+
+// SMR: observed 15+25=40, expected 10+40=50 -> SMR=0.8.
+fn test_smr() -> bool with IO, Mut, Div, Panic {
+    var o: [f64; 64] = [0.0; 64]
+    var ex: [f64; 64] = [0.0; 64]
+    o[0]=15.0; ex[0]=10.0
+    o[1]=25.0; ex[1]=40.0
+    let r = smr(&o, &ex, 2)
+    var ok = true
+    ok = check(10, approx(r.smr, 0.8, 1.0e-9)) && ok
+    ok = check(11, approx(r.observed, 40.0, 1.0e-9)) && ok
+    ok = check(12, approx(r.expected, 50.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_dsr() && ok
+    ok = test_smr() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

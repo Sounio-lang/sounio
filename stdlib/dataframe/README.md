@@ -1,99 +1,36 @@
-# dataframe — Tabular Data Analysis
+# stdlib/dataframe
 
-Tabular data structures with full epistemic uncertainty propagation for Sounio.
+Epistemic-aware dataframe with GUM variance propagation.
 
-## Overview
+## Architecture
 
-The `dataframe` module provides DataFrame and Series types inspired by pandas/R,
-with native support for `Knowledge<f64>` uncertainty tracking:
+- `pure/types.sio` - DataFrame, Column types
+- `pure/epistemic.sio` - Epistemic column operations with uncertainty
+- `lib.sio` - Public API
 
-- **Pure Sounio** — No external dependencies, works everywhere
-- **Epistemic-aware** — All numeric operations track uncertainty via GUM propagation
-- **Arrow-compatible** — FFI layer for Apache Arrow when available
+## Storage Model
 
-## Epistemic Differentiators
+- Fixed capacity: 256 rows × 4 columns
+- Columns stored as flat arrays with type markers
+- Support for string, i64, f64, bool, datetime types
 
-Unlike other DataFrame libraries, every numeric operation in Sounio's dataframe
-returns `Knowledge<f64>` results with:
+## Epistemic Features
 
-- **Confidence** — Probability that the true value is within stated bounds
-- **Uncertainty** — GUM-compliant standard uncertainty
-- **Provenance** — Chain of operations that produced the result
-- **Automatic propagation** — Uncertainty compounds through operations
+- `EColumn` wraps values with `Epistemic` type
+- GUM variance propagation for arithmetic operations
+- `ecolumn_mean`, `ecolumn_std`, `ecolumn_correlation` with uncertainty
 
-## Quickstart
+## Usage
 
-```sio
-use dataframe::pure::core
-use dataframe::pure::epistemic
+```
+use dataframe::lib
 
-// Create from vectors
-let names = vec!["x".to_string(), "y".to_string(), "z".to_string()]
-let vecs = vec![
-    ColumnData::F64(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
-    ColumnData::F64(vec![2.0, 4.0, 6.0, 8.0, 10.0]),
-    ColumnData::F64(vec![1.5, 2.5, 3.5, 4.5, 5.5]),
-]
-let df = dataframe_from_vectors(names, vecs)? assert_eq!(df.n_rows, 5)
-
-// Describe statistics
-let stats = dataframe_describe(&df)
-
-// Epistemic operations
-let col = dataframe_column(&df, "x")?
-let mean = epistemic_mean(col, 0.95)?
-let (lo, hi) = epistemic_confidence_interval(col, 0.95)?
+var df = dataframe_new()
+dataframe_add_column(&! df, "temperature", ColType::F64)
+dataframe_push(&! df, "temperature", 23.5)
+let mean = ecolumn_mean(&df.columns[0])
 ```
 
-## Module Structure
+## Tests
 
-| File | Description |
-|------|-------------|
-| `pure/types.sio` | Core types: DataFrame, Column, Series, DType |
-| `pure/core.sio` | Operations: select, filter, groupby, join, sort, pivot |
-| `pure/epistemic.sio` | Uncertainty-aware operations |
-| `ffi/lib.sio` | FFI layer for Apache Arrow |
-
-## Supported Operations
-
-### Data Manipulation
-- `dataframe_select` — Select columns
-- `dataframe_filter` — Filter rows by mask
-- `dataframe_sort` — Sort by columns
-- `dataframe_head` / `dataframe_tail` — First/last rows
-
-### Aggregation
-- `dataframe_group_by` — Group by columns
-- `groupby_agg` — Aggregate with Mean, Sum, Count, Min, Max, Std
-
-### Joins
-- `dataframe_merge` — Join on keys (inner, left, right, outer)
-
-### Reshaping
-- `dataframe_pivot` — Pivot to wide format
-- `dataframe_melt` — Melt to long format
-- `dataframe_concat` — Concatenate DataFrames
-
-### Rolling
-- `dataframe_rolling` — Rolling window operations
-
-### Epistemic
-- `epistemic_mean`, `epistemic_std` — With uncertainty
-- `epistemic_correlation`, `epistemic_covariance` — With confidence
-- `epistemic_confidence_interval` — GUM-compliant CI
-
-## Benchmarks
-
-See `../../benchmarks/README.md` for performance targets.
-
-## Validation Status
-
-- ✅ DataFrame creation from vectors
-- ✅ Column selection and filtering
-- ✅ Groupby aggregation
-- ✅ Merge/join operations
-- ✅ Epistemic statistics
-
-## License
-
-MIT / Apache-2.0 (same as Sounio)
+`tests/stdlib/dataframe/test_dataframe_core.sio` (check-only, Madaros gate)

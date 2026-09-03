@@ -5,7 +5,7 @@
 # Each test imports from the real stdlib to validate E2E correctness.
 #
 # Annotations:
-#   //@ run-pass                expect souc check; runtime execution occurs when expect-stdout is declared
+#   //@ run-pass                expect souc check and runtime execution
 #   //@ check-only              only run souc check, not souc run
 #   //@ expect-stdout: X        stdout must contain X (run-pass only, optional)
 #   //@ ignore [reason]         skip this test
@@ -33,7 +33,7 @@ FILTER=""
 VERBOSE=0
 JSON_OUT="${STDLIB_E2E_JSON_OUT:-}"
 RUN_TIMEOUT_SEC="${STDLIB_E2E_RUN_TIMEOUT_SEC:-30}"
-RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-0}"
+RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-1}"
 
 usage() {
   cat <<'USAGE'

@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.hot-reload-complete
 -->
 
-
 # 🔥 HOT CODE RELOAD - IMPLEMENTATION COMPLETE
 
 ## What We Built

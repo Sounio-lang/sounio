@@ -1,0 +1,247 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint18_gate.sio — Sprint 18 CYP3A5 genotype gate
+//
+// 56 assertions certifying that CYP3A5 pharmacogenomics does not change the
+// dominant uncertainty source (ka remains dominant for *3/*3, *1/*3, *1/*1)
+// but does impose a genotype-specific confidence ceiling and second bottleneck.
+//
+// ══ Finding 1: ka universally dominant across all CYP3A5 genotypes ═══════════
+//
+//   *3/*3: 5mg N=14 → THERAPEUTIC, conf=900, dom=ka
+//   *1/*3: 5mg N=14 → THERAPEUTIC, conf=900, dom=ka
+//   *1/*1: 5mg N=14 → THERAPEUTIC, conf=820, dom=ka
+//
+//   CYP3A5 alters ke and F but not ka_var — the dominant source is invariant.
+//
+// ══ Finding 2: *1/*1 structural confidence penalty at 820 ════════════════════
+//
+//   Lower F=0.094 → wider rel_std → conf=820 (not 900).
+//   Dose escalation (7, 9, 12mg) gives THERAPEUTIC but conf remains 820.
+//   This is a measurement problem (ka), not a dosing problem.
+//
+// ══ Finding 3: genotype-specific second bottleneck ════════════════════════════
+//
+//   *1/*3 standard: ka÷16 → conf=950, dom=k12 (same as Sprint 14)
+//   *1/*1 fast:     ka÷16 → conf=900, dom=F  (bioavailability, NOT k12)
+//
+//   *1/*1 cannot exceed conf=900 even with extreme ka tightening — F ceiling.
+//
+// ══ Finding 4: ke universally wasted across all genotypes ════════════════════
+//
+//   ke÷4 changes nothing for *3/*3, *1/*3, *1/*1.
+//   ke is irrelevant even for *1/*1 with 1.50× standard ke.
+//
+// ══ Finding 5: *3/*3 dose reduction safe ══════════════════════════════════════
+//
+//   *3/*3 1.5mg N=14 → THERAPEUTIC/900 (half standard dose, same epistemic cert)
+//   *3/*3 1.0mg N=14 → UNCERTAIN (concentration floor issue, not measurement)
+//
+// Assertion map:
+//   A (1–8):   Genotype confidence ordering: slow/hetero=900, fast=820 at 5mg N=14
+//   B (9–14):  Ka universal dominance across all three genotypes
+//   C (15–20): Dose sensitivity: fast=820 regardless of dose (7,9,12mg); slow OK at 1.5mg
+//   D (21–26): Ke irrelevant: ke÷4 changes nothing for any genotype
+//   E (27–32): Ka÷4 rescues fast; ke÷4 does not
+//   F (33–38): Second bottleneck: fast→F (dom=0), standard→k12 (dom=3) at ka÷16
+//   G (39–44): Single-dose confidence: fast=700 < slow=820 < standard N=14 conf=900
+//   H (45–48): Decision correctness: all genotypes THERAPEUTIC at 5mg N=14
+//   I (49–52): Sentinel and constant consistency
+//   J (53–56): Atlas extension: CYP3A5 confirms ke never dominates any genotype
+
+use pbpk::rapamycin_cyp3a5::{
+    cyp_ka_universal, cyp_ke_irrelevant_all,
+    cyp_slow_conf_900, cyp_standard_conf_900, cyp_fast_conf_820,
+    cyp_fast_dose_irrelevant, cyp_ka4_rescues_fast,
+    cyp_slow_dose_halve, cyp_slow_1mg_uncertain,
+    cyp_fast_second_bottleneck_f, cyp_standard_second_bottleneck_k12,
+    cyp_fast_ka16_ceiling, cyp_standard_ka16_conf_900,
+    classify_cyp_ss, conf_cyp_ss, dom_cyp_ss,
+    classify_standard_slow, classify_standard_hetero, classify_standard_fast,
+    conf_standard_slow, conf_standard_hetero, conf_standard_fast,
+    dom_standard_slow, dom_standard_hetero, dom_standard_fast,
+    cyp_ke_slow, cyp_f_slow, cyp_ke_standard, cyp_f_standard,
+    cyp_ke_fast, cyp_f_fast,
+    cyp_ka_var_std, cyp_ke_var_std, cyp_k12_var_std, cyp_k21_var_std, cyp_f_var_std
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, decision_sub, conf_clinical_min
+}
+
+var SPR18_PASS: [i64; 2] = [0; 2]
+
+fn s18_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR18_PASS[0] = SPR18_PASS[0] + 1
+    } else {
+        SPR18_PASS[1] = SPR18_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint18_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ka    = cyp_ka_var_std()     // 0.0225
+    let ke    = cyp_ke_var_std()     // 0.00000841
+    let k12   = cyp_k12_var_std()    // 0.000156
+    let k21   = cyp_k21_var_std()    // 0.0000016
+    let f_var = cyp_f_var_std()      // 0.001521
+
+    // ── Section A: Genotype confidence ordering (8 assertions) ───────────────
+    // *1/*3 and *3/*3: conf=900; *1/*1: conf=820 (structural penalty from low F).
+
+    s18_chk(conf_standard_slow(ka)   == 900)                            // 1 (*3/*3 conf=900)
+    s18_chk(conf_standard_hetero(ka) == 900)                            // 2 (*1/*3 conf=900)
+    s18_chk(conf_standard_fast(ka)   == 820)                            // 3 (*1/*1 conf=820)
+    s18_chk(conf_standard_fast(ka) < conf_standard_slow(ka))            // 4 (820 < 900)
+    s18_chk(conf_standard_fast(ka) < conf_standard_hetero(ka))          // 5 (820 < 900)
+    s18_chk(conf_standard_slow(ka) == conf_standard_hetero(ka))         // 6 (900 == 900)
+    // conf=820 is above conf_clinical_min=800 — *1/*1 is still clinically acceptable
+    s18_chk(conf_standard_fast(ka) >= conf_clinical_min())              // 7 (820 ≥ 800)
+    // *1/*1 does not reach conf=900 baseline; gap = exactly 80 points
+    s18_chk(conf_standard_hetero(ka) - conf_standard_fast(ka) == 80)   // 8 (900-820=80)
+
+    // ── Section B: Ka universal dominance (6 assertions) ─────────────────────
+    // dom=1 (ka) for all three genotypes at standard dose/duration.
+
+    s18_chk(dom_standard_slow(ka)    == 1)   // 9  (*3/*3: ka dom)
+    s18_chk(dom_standard_hetero(ka)  == 1)   // 10 (*1/*3: ka dom)
+    s18_chk(dom_standard_fast(ka)    == 1)   // 11 (*1/*1: ka dom despite 1.50× ke)
+    s18_chk(cyp_ka_universal())              // 12 (all three together)
+    // ka dominance holds at N=1 (single dose) for *1/*1
+    s18_chk(dom_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 1,
+                        ke, k12, k21, ka, f_var) == 1)                  // 13 (*1/*1 N=1: ka dom)
+    // ka dominance holds for *3/*3 even at reduced dose 1.5mg
+    s18_chk(dom_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 1.5, 14,
+                        ke, k12, k21, ka, f_var) == 1)                  // 14 (*3/*3 1.5mg: ka dom)
+
+    // ── Section C: Dose sensitivity (6 assertions) ────────────────────────────
+    // *1/*1 dose escalation cannot improve conf; *3/*3 dose reduction works.
+
+    s18_chk(cyp_fast_dose_irrelevant())   // 15 (*1/*1 12mg N=14 → conf=820, not 900)
+    // 7mg: still 820
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 7.0, 14,
+                         ke, k12, k21, ka, f_var) == 820)               // 16 (*1/*1 7mg: 820)
+    // 9mg: still 820
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 9.0, 14,
+                         ke, k12, k21, ka, f_var) == 820)               // 17 (*1/*1 9mg: 820)
+    // *3/*3 1.5mg → THERAPEUTIC/900 (dose halving safe)
+    s18_chk(cyp_slow_dose_halve())        // 18 (*3/*3 1.5mg: THERAPEUTIC/900)
+    // *3/*3 1mg → UNCERTAIN (below therapeutic floor)
+    s18_chk(cyp_slow_1mg_uncertain())     // 19 (*3/*3 1mg: UNCERTAIN)
+    // *3/*3 1.5mg conf=900 equals standard 5mg conf=900 — same epistemic certainty
+    s18_chk(conf_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 1.5, 14,
+                         ke, k12, k21, ka, f_var) ==
+            conf_standard_slow(ka))                                      // 20 (1.5mg == 5mg conf)
+
+    // ── Section D: Ke universally irrelevant (6 assertions) ──────────────────
+    // ke÷4 does not change conf or dom for any genotype.
+
+    s18_chk(conf_cyp_ss(cyp_ke_slow(),     cyp_f_slow(),     5.0, 14,
+                         ke,       k12, k21, ka, f_var) ==
+            conf_cyp_ss(cyp_ke_slow(),     cyp_f_slow(),     5.0, 14,
+                         ke/4.0,   k12, k21, ka, f_var))                // 21 (*3/*3 ke÷4 conf unchanged)
+    s18_chk(conf_cyp_ss(cyp_ke_standard(), cyp_f_standard(), 5.0, 14,
+                         ke,       k12, k21, ka, f_var) ==
+            conf_cyp_ss(cyp_ke_standard(), cyp_f_standard(), 5.0, 14,
+                         ke/4.0,   k12, k21, ka, f_var))                // 22 (*1/*3 ke÷4 conf unchanged)
+    s18_chk(conf_cyp_ss(cyp_ke_fast(),     cyp_f_fast(),     5.0, 14,
+                         ke,       k12, k21, ka, f_var) ==
+            conf_cyp_ss(cyp_ke_fast(),     cyp_f_fast(),     5.0, 14,
+                         ke/4.0,   k12, k21, ka, f_var))                // 23 (*1/*1 ke÷4 conf unchanged)
+    s18_chk(dom_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 14,
+                        ke/4.0, k12, k21, ka, f_var) == 1)              // 24 (*1/*1 ke÷4: dom still ka)
+    s18_chk(cyp_ke_irrelevant_all())                                    // 25 (omnibus: all 3 genotypes)
+    // ke÷4 + ka÷4 together: same result as ka÷4 alone for *1/*1
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 14,
+                         ke/4.0, k12, k21, ka/4.0, f_var) ==
+            conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 14,
+                         ke,     k12, k21, ka/4.0, f_var))              // 26 (ke÷4 adds nothing to ka÷4)
+
+    // ── Section E: Ka÷4 rescues *1/*1 (6 assertions) ─────────────────────────
+
+    s18_chk(cyp_ka4_rescues_fast())                                     // 27 (ka÷4: 820→900)
+    // ka÷4 also confirmed for slow/hetero (conf stays 900)
+    s18_chk(conf_standard_slow(ka/4.0)   == 900)                        // 28 (*3/*3 ka÷4: 900)
+    s18_chk(conf_standard_hetero(ka/4.0) == 900)                        // 29 (*1/*3 ka÷4: 900)
+    // ka÷4 dom still ka for slow and hetero
+    s18_chk(dom_standard_slow(ka/4.0)   == 1)                           // 30 (*3/*3 ka÷4: dom=ka)
+    s18_chk(dom_standard_hetero(ka/4.0) == 1)                           // 31 (*1/*3 ka÷4: dom=ka)
+    // ka÷4 dom for *1/*1: still ka (not F yet — F surfaces only at ka÷16)
+    s18_chk(dom_standard_fast(ka/4.0)   == 1)                           // 32 (*1/*1 ka÷4: dom still ka)
+
+    // ── Section F: Second bottleneck — genotype-dependent (6 assertions) ─────
+    // *1/*3: ka÷16 → dom=k12; *1/*1: ka÷16 → dom=F (bioavailability, index 0).
+
+    s18_chk(cyp_fast_second_bottleneck_f())                             // 33 (*1/*1 ka÷16: dom=F)
+    s18_chk(cyp_standard_second_bottleneck_k12())                       // 34 (*1/*3 ka÷16: dom=k12)
+    // *1/*1 ka÷16 conf=900 (NOT 950 — F ceiling)
+    s18_chk(cyp_fast_ka16_ceiling())                                    // 35 (*1/*1 ka÷16: conf=900)
+    // *1/*3 ka÷16 conf=900 (uniform SS ceiling; 950 requires loading protocol)
+    s18_chk(cyp_standard_ka16_conf_900())                               // 36 (*1/*3 ka÷16: conf=900)
+    // *3/*3 ka÷16 → dom=k12 (same as *1/*3; slow has high F so F not a bottleneck)
+    s18_chk(dom_standard_slow(ka/16.0) == 3)                            // 37 (*3/*3 ka÷16: dom=k12)
+    // *3/*3 ka÷16 → conf=950 (high F means no F bottleneck)
+    s18_chk(conf_standard_slow(ka/16.0) == 950)                         // 38 (*3/*3 ka÷16: conf=950)
+
+    // ── Section G: Single-dose confidence ordering (6 assertions) ────────────
+    // Single oral dose: *1/*1=700 < *3/*3=820 < SS N=14=900
+
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) == 700)               // 39 (*1/*1 N=1: conf=700)
+    s18_chk(conf_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) == 820)               // 40 (*3/*3 N=1: conf=820)
+    s18_chk(conf_cyp_ss(cyp_ke_standard(), cyp_f_standard(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) == 700)               // 41 (*1/*3 N=1: conf=700, same as Sprint 13)
+    // *1/*1 N=1 < *3/*3 N=1
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) <
+            conf_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 5.0, 1,
+                         ke, k12, k21, ka, f_var))                      // 42 (700 < 820)
+    // Single dose N=1 < SS N=14 for fast genotype
+    s18_chk(conf_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) <
+            conf_standard_fast(ka))                                      // 43 (700 < 820)
+    // Single dose N=1 < SS N=14 for slow genotype
+    s18_chk(conf_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 5.0, 1,
+                         ke, k12, k21, ka, f_var) <
+            conf_standard_slow(ka))                                      // 44 (820 < 900)
+
+    // ── Section H: Decision correctness (4 assertions) ───────────────────────
+    // All three genotypes give THERAPEUTIC (dec=1) at 5mg N=14.
+
+    s18_chk(classify_standard_slow(ka)   == decision_therapeutic())     // 45 (*3/*3 THERAPEUTIC)
+    s18_chk(classify_standard_hetero(ka) == decision_therapeutic())     // 46 (*1/*3 THERAPEUTIC)
+    s18_chk(classify_standard_fast(ka)   == decision_therapeutic())     // 47 (*1/*1 THERAPEUTIC)
+    // *3/*3 at 1.5mg is also THERAPEUTIC (dose halve clinically safe)
+    s18_chk(classify_cyp_ss(cyp_ke_slow(), cyp_f_slow(), 1.5, 14,
+                              ke, k12, k21, ka, f_var) ==
+            decision_therapeutic())                                      // 48 (*3/*3 1.5mg THERAPEUTIC)
+
+    // ── Section I: Sentinel and constant consistency (4 assertions) ──────────
+
+    s18_chk(decision_therapeutic() == 1)                                // 49
+    s18_chk(decision_uncertain()   == 3)                                // 50
+    s18_chk(decision_sub()         == 0)                                // 51
+    s18_chk(conf_clinical_min()    == 800)                              // 52
+
+    // ── Section J: Atlas extension — ke never dominates any genotype (4 assertions) ──
+    // Confirms the Sprint 17 universal principle survives CYP3A5 stratification.
+
+    s18_chk(dom_standard_slow(ka)   != 2)   // 53 (*3/*3: ke not dom, dom=ka)
+    s18_chk(dom_standard_hetero(ka) != 2)   // 54 (*1/*3: ke not dom, dom=ka)
+    s18_chk(dom_standard_fast(ka)   != 2)   // 55 (*1/*1: ke not dom even with 1.50× ke)
+    // ke not dominant even after tightening ke÷4 for *1/*1
+    s18_chk(dom_cyp_ss(cyp_ke_fast(), cyp_f_fast(), 5.0, 14,
+                        ke/4.0, k12, k21, ka, f_var) != 2)              // 56 (*1/*1 ke÷4: ke still not dom)
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint18_gate()
+    if SPR18_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

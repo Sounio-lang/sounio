@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# epistemic_witness_gate.sh — non-trivial witness for the Epistemic Monotonicity Theorem.
+# epistemic_witness_gate.sh -- non-trivial witness for the Epistemic Monotonicity Theorem.
 #
 # Compiles examples/pbpk_simple.sio through native_compile_driver and asserts that
 # u_c_scaled > 0 in the output binary's .sounio.epistemic (SIEP) section.
 #
 # pbpk_simple.sio contains 2 Knowledge<f64> type occurrences, so u_c_scaled must be >= 2.
-# This proves the compiler correctly measures external epistemic density — the gate is
+# This proves the compiler correctly measures external epistemic density -- the gate is
 # not a tautology (u_c=0 for the compiler itself; u_c>=2 for an epistemic program).
 #
 # Theorem instantiation:
@@ -42,55 +42,29 @@ EXPECTED_MIN_UC=3
 trap 'rm -rf "$OUT_DIR"' EXIT
 
 parse_siep() {
-  python3 - "$1" <<'PY'
-import struct, sys, os
-path = sys.argv[1]
-if not os.path.exists(path):
-    print("absent:0:0")
-    sys.exit(0)
-data = open(path, 'rb').read()
-idx = data.find(b'SIEP')
-if idx < 0:
-    print("absent:0:0")
-    sys.exit(0)
-chunk = data[idx:idx+24]
-version  = struct.unpack_from('<I', chunk, 4)[0]
-instr    = struct.unpack_from('<Q', chunk, 8)[0]
-u_c      = struct.unpack_from('<Q', chunk, 16)[0]
-print(f"present:{instr}:{u_c}")
-PY
+  "$ROOT_DIR/bin/kretikos" siep-probe "$1"
 }
 
 emit_json() {
   local status="$1" reason="$2" u_c="$3" instr="$4" siep_present="$5"
-  python3 - "$OUT_JSON" "$status" "$reason" "$u_c" "$instr" "$siep_present" \
-            "$WITNESS_SRC" "$EXPECTED_MIN_UC" <<'PY'
-import json, sys
-from datetime import datetime, timezone
-out, status, reason, u_c, instr, siep_present, src, min_uc = sys.argv[1:]
-payload = {
-  "schema": "sounio.epistemic-witness-gate.v1",
-  "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-  "witness_program": src,
-  "expected_min_u_c_scaled": int(min_uc),
-  "status": status,
-  "reason": reason,
-  "checks": {
-    "siep_section_present": siep_present == "true",
-    "u_c_scaled_ge_expected": int(u_c) >= int(min_uc),
-  },
-  "result": {
-    "instr_count": int(instr),
-    "u_c_scaled": int(u_c),
-  },
-  "theorem": "u_c_scaled >= 3 for epistemic_witness_minimal.sio compiled through native_compile_driver",
-  "note": "u_c_scaled = 0 for the compiler itself (no Knowledge<T>); non-zero here proves external epistemic density is measured correctly",
-}
-with open(out, 'w') as f:
-    json.dump(payload, f, indent=2)
-    f.write('\n')
-print(json.dumps(payload, indent=2))
-PY
+  local ts u_c_ge_expected=false json_out
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [[ "$u_c" -ge "$EXPECTED_MIN_UC" ]] && u_c_ge_expected=true
+  json_out="$("$ROOT_DIR/bin/kretikos" json-emit \
+    --string "schema=sounio.epistemic-witness-gate.v1" \
+    --string "generated_at_utc=$ts" \
+    --string "witness_program=$WITNESS_SRC" \
+    --int    "expected_min_u_c_scaled=$EXPECTED_MIN_UC" \
+    --string "status=$status" \
+    --string "reason=$reason" \
+    --bool   "checks.siep_section_present=$siep_present" \
+    --bool   "checks.u_c_scaled_ge_expected=$u_c_ge_expected" \
+    --int    "result.instr_count=$instr" \
+    --int    "result.u_c_scaled=$u_c" \
+    --string "theorem=u_c_scaled >= 3 for epistemic_witness_minimal.sio compiled through native_compile_driver" \
+    --string "note=u_c_scaled = 0 for the compiler itself (no Knowledge<T>); non-zero here proves external epistemic density is measured correctly")"
+  printf '%s\n' "$json_out" > "$OUT_JSON"
+  printf '%s\n' "$json_out"
 }
 
 printf '[epistemic-witness] souc=%s\n' "$SOUC_BIN"

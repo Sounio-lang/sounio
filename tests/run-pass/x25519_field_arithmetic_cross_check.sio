@@ -1,0 +1,128 @@
+//@ run-pass
+//@ requires: madaros
+// Independent structural cross-check for GF(2^255-19) field arithmetic,
+// deliberately using a DIFFERENT verification strategy than
+// tests/run-pass/x25519_field_arithmetic.sio's round-trip tests, per this
+// plan's own stated rationale: a bug shared between fe_to_bytes's
+// encoding and fe_from_bytes's decoding (e.g. both mis-handling the same
+// limb boundary the same wrong way) would still round-trip correctly
+// while being wrong, so round-trip tests alone cannot catch that bug
+// class. This test instead checks two algebraic identities that relate
+// fe_add/fe_sub/fe_mul/fe_sqr to EACH OTHER in a way a bug in any single
+// one of them would very likely violate:
+//
+//   1. (a+b)^2 = a^2 + b^2 + 2ab   -- relates fe_sqr, fe_add, fe_mul
+//   2. (a-b)+b = a and (a+b)-a = b -- relates fe_sub to fe_add
+//
+// Uses 5 full-width field elements (distinct from Step 1's simple
+// 1/2/42 values, and -- per a 2026-08-25 review finding -- with every one
+// of their 32 encoded bytes non-zero, not just a handful of scattered
+// bytes, so all 10 limbs are actually exercised; see make_fe below), each
+// combined pairwise with the next for 4 pairs.
+use crypto::x25519::*
+
+fn fe_bytes_equal(x: &[u8;32], y: &[u8;32]) -> bool {
+    var i: i64 = 0
+    while i < 32 {
+        if x[i as usize] != y[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Checks (a+b)^2 == a^2 + b^2 + 2ab (via fe_add(fe_mul(a,b), fe_mul(a,b))
+// for the 2ab term, rather than any "multiply by 2" shortcut, so this
+// check exercises fe_add, fe_mul and fe_sqr but never assumes any one of
+// them is already correct). Returns true iff the identity holds.
+fn check_sqr_identity(a: &FieldElement, b: &FieldElement) -> bool {
+    let a_plus_b = fe_add(a, b)
+    let lhs = fe_sqr(&a_plus_b)
+
+    let a_sqr = fe_sqr(a)
+    let b_sqr = fe_sqr(b)
+    let ab = fe_mul(a, b)
+    let two_ab = fe_add(&ab, &ab)
+    let sum1 = fe_add(&a_sqr, &b_sqr)
+    let rhs = fe_add(&sum1, &two_ab)
+
+    let lhs_bytes = fe_to_bytes(&lhs)
+    let rhs_bytes = fe_to_bytes(&rhs)
+    fe_bytes_equal(&lhs_bytes, &rhs_bytes)
+}
+
+// Checks (a-b)+b == a and (a+b)-a == b -- cross-checks fe_sub against
+// fe_add without fe_sub ever appearing on both sides of a single
+// comparison in a way that could self-cancel a shared bug.
+fn check_sub_identity(a: &FieldElement, b: &FieldElement) -> bool {
+    let a_minus_b = fe_sub(a, b)
+    let back_to_a = fe_add(&a_minus_b, b)
+    let a_bytes = fe_to_bytes(a)
+    let back_to_a_bytes = fe_to_bytes(&back_to_a)
+    if !fe_bytes_equal(&a_bytes, &back_to_a_bytes) {
+        return false
+    }
+
+    let a_plus_b = fe_add(a, b)
+    let back_to_b = fe_sub(&a_plus_b, a)
+    let b_bytes = fe_to_bytes(b)
+    let back_to_b_bytes = fe_to_bytes(&back_to_b)
+    fe_bytes_equal(&b_bytes, &back_to_b_bytes)
+}
+
+// make_fe: builds a FULL-WIDTH field element -- every one of the 32
+// bytes is non-zero and derived from all 5 seeds together, so all 10
+// limbs end up populated near their nominal 25/26-bit range rather than
+// mostly zero. This replaces an earlier version of this test that only
+// set 5 of 32 bytes (review finding, 2026-08-25): a post-hoc mutation
+// audit showed that sparse construction left several limbs at zero or
+// far below their nominal range, and the resulting test caught only 6 of
+// 7 injected arithmetic mutations. Every byte here is in [1,255] (never
+// zero) via `(...) % 255 + 1`, and depends on the byte position `i` as
+// well as all 5 seeds, so adjacent bytes differ and no byte is
+// coincidentally zero regardless of which seeds are passed.
+fn make_fe(b0: i64, b1: i64, b2: i64, b3: i64, b4: i64) -> FieldElement {
+    var buf: [u8;32] = [0;32]
+    var i: i64 = 0
+    while i < 32 {
+        let v = (b0 * (i + 1) + b1 * (i + 2) + b2 * (i + 3) + b3 * (i + 5) + b4 * (i + 7) + i * 13 + 1) % 255 + 1
+        buf[i as usize] = (v & 255) as u8
+        i = i + 1
+    }
+    fe_from_bytes(&buf)
+}
+
+fn main() -> i64 with IO {
+    // 5 distinct non-trivial field elements (byte patterns chosen freely,
+    // none equal to Step 1's 1/2/42 values, none all-zero).
+    let v0 = make_fe(200, 5, 91, 3, 250)
+    let v1 = make_fe(17, 233, 8, 199, 1)
+    let v2 = make_fe(64, 64, 64, 64, 64)
+    let v3 = make_fe(255, 1, 255, 1, 255)
+    let v4 = make_fe(9, 210, 33, 176, 45)
+
+    if !check_sqr_identity(&v0, &v1) { print_int(1); return 1 }
+    if !check_sqr_identity(&v1, &v2) { print_int(2); return 1 }
+    if !check_sqr_identity(&v2, &v3) { print_int(3); return 1 }
+    if !check_sqr_identity(&v3, &v4) { print_int(4); return 1 }
+
+    if !check_sub_identity(&v0, &v1) { print_int(5); return 1 }
+    if !check_sub_identity(&v1, &v2) { print_int(6); return 1 }
+    if !check_sub_identity(&v2, &v3) { print_int(7); return 1 }
+    if !check_sub_identity(&v3, &v4) { print_int(8); return 1 }
+
+    // Also verify the identity is non-trivial evidence, not a tautology:
+    // check that at least one intermediate (a+b) actually differs from
+    // both a and b bytewise, so this test isn't silently comparing a
+    // value against itself. (v0 + v1 should differ from both v0 and v1.)
+    let sum01 = fe_add(&v0, &v1)
+    let sum01_bytes = fe_to_bytes(&sum01)
+    let v0_bytes = fe_to_bytes(&v0)
+    let v1_bytes = fe_to_bytes(&v1)
+    if fe_bytes_equal(&sum01_bytes, &v0_bytes) { print_int(9); return 1 }
+    if fe_bytes_equal(&sum01_bytes, &v1_bytes) { print_int(10); return 1 }
+
+    println("x25519_field_arithmetic_cross_check: (a+b)^2=a^2+b^2+2ab and sub/add cross-checks hold for 4 non-trivial pairs")
+    return 0
+}

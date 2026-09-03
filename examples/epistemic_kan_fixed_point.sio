@@ -1,0 +1,102 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// Fixed-point E-KAN witness.
+//
+// Scale: 1000 == 1.0. Each edge is a piecewise-linear hat-basis function with
+// coefficient standard uncertainty. The network composes two input edges into
+// a hidden node, then one output edge, propagating uncertainty by quadrature.
+
+fn abs_i(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+fn isqrt_i(x: i64) -> i64 with Mut, Div {
+    if x <= 0 { return 0 }
+    var y = x
+    var i = 0
+    while i < 16 {
+        y = (y + x / y) / 2
+        i = i + 1
+    }
+    y
+}
+
+fn hat3_i(x: i64, k: i64) -> i64 with Div {
+    let c = k * 500
+    let d = abs_i(x - c)
+    if d >= 500 { return 0 }
+    1000 - d * 2
+}
+
+struct EdgeI { val: i64, unc: i64 }
+
+fn edge3_i(
+    c0: i64,
+    c1: i64,
+    c2: i64,
+    u0: i64,
+    u1: i64,
+    u2: i64,
+    x: i64,
+) -> EdgeI with Div, Mut {
+    let b0 = hat3_i(x, 0)
+    let b1 = hat3_i(x, 1)
+    let b2 = hat3_i(x, 2)
+    let v0 = c0 * b0 / 1000
+    let v1 = c1 * b1 / 1000
+    let v2 = c2 * b2 / 1000
+    let q0 = b0 * u0 / 1000
+    let q1 = b1 * u1 / 1000
+    let q2 = b2 * u2 / 1000
+    EdgeI { val: v0 + v1 + v2, unc: isqrt_i(q0 * q0 + q1 * q1 + q2 * q2) }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    let x0 = 250
+    let x1 = 750
+    let ux0 = 15
+    let ux1 = 25
+
+    let e0 = edge3_i(100, 420, 180, 10, 20, 10, x0)
+    let e1 = edge3_i(260, 120, 360, 20, 10, 20, x1)
+    var hidden = e0.val + e1.val
+    if hidden < 0 { hidden = 0 }
+    if hidden > 1000 { hidden = 1000 }
+    let hidden_unc = isqrt_i(e0.unc * e0.unc + e1.unc * e1.unc + ux0 * ux0 + ux1 * ux1)
+
+    let out = edge3_i(120, 610, 300, 10, 30, 20, hidden)
+    let out_unc = isqrt_i(out.unc * out.unc + hidden_unc * hidden_unc)
+
+    var failed = 0
+    if hidden > 250 && hidden < 700 {
+        println("T1 PASS: hidden bounded")
+    } else {
+        println("T1 FAIL: hidden outside expected range")
+        failed = failed + 1
+    }
+
+    if out.val > 200 && out.val < 650 {
+        println("T2 PASS: output bounded")
+    } else {
+        println("T2 FAIL: output outside expected range")
+        failed = failed + 1
+    }
+
+    if out_unc > out.unc {
+        println("T3 PASS: upstream uncertainty propagated")
+    } else {
+        println("T3 FAIL: upstream uncertainty not propagated")
+        failed = failed + 1
+    }
+
+    if out_unc > 20 && out_unc < 80 {
+        println("T4 PASS: output uncertainty bounded")
+    } else {
+        println("T4 FAIL: output uncertainty outside expected range")
+        failed = failed + 1
+    }
+
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed as i32
+}

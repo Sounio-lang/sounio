@@ -29,6 +29,10 @@ Source of truth:
 - `artifacts/omega/selfhost_compiler_progress.v1.json`
 - `artifacts/omega/parallel_cutover_status.v1.json`
 
+Parallel blocker discipline:
+
+- `.claude/PARALLEL_BLOCKER_CONTRACT.md`
+
 ## Track B Execution Order (locked)
 
 1. `data_structures.md`
@@ -47,3 +51,4 @@ No reorder and no scope drift.
 4. No-rust policy is fail-closed; never silently fallback to local rebuild paths.
 5. Before/after `.claude` governance changes, run `bash scripts/ci/claude_operational_contract_gate.sh` and refresh `artifacts/omega/claude_operational_contract_status.v1.json`.
 6. The active serialized `check.sio` merge window is declared in `.claude/check_sio_integration_window.v1.json` and validated by `bash scripts/check_check_sio_integration_window.sh`.
+7. Any remaining blocker in a parallel lane must use `.claude/PARALLEL_BLOCKER_CONTRACT.md` severity, class, evidence level, ownership, and handoff fields.

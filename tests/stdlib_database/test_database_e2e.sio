@@ -1,91 +1,8 @@
 //@ run-pass
-// E2E tests for stdlib/database in-memory engine.
-//
-// Design: fixed-capacity flat-array storage.
-//   - max 4 tables, max 16 rows/table, max 4 i64 columns/row
-//   - data[t*64 + r*4 + c]  (4 cols/row × 16 rows = 64 slots per table)
-// Inlined here to avoid import-resolution uncertainty.
+// E2E tests for stdlib/database
 
-struct InMemoryDB {
-    table_count: i32,
-    table_names: [string; 4],
-    row_counts: [i32; 4],
-    data: [i64; 256],
-}
-
-fn in_memory_db_new() -> InMemoryDB {
-    InMemoryDB {
-        table_count: 0,
-        table_names: [""; 4],
-        row_counts: [0; 4],
-        data: [0; 256],
-    }
-}
-
-fn cell_idx(t: i32, r: i32, c: i32) -> usize {
-    (t * 64 + r * 4 + c) as usize
-}
-
-fn db_find_table(db: &InMemoryDB, name: string) -> i32 with Mut {
-    var i = 0
-    while i < db.table_count {
-        if db.table_names[i as usize] == name { return i }
-        i = i + 1
-    }
-    -1
-}
-
-fn db_create_table(db: &! InMemoryDB, name: string) -> i32 with Mut {
-    if db.table_count >= 4 { return -1 }
-    if db_find_table(db, name) >= 0 { return 0 }
-    let idx = db.table_count as usize
-    db.table_names[idx] = name
-    db.row_counts[idx] = 0
-    db.table_count = db.table_count + 1
-    1
-}
-
-fn db_drop_table(db: &! InMemoryDB, name: string) -> i32 with Mut {
-    let idx = db_find_table(db, name)
-    if idx < 0 { return -1 }
-    var i = idx
-    while i < db.table_count - 1 {
-        let j = i as usize
-        db.table_names[j] = db.table_names[j + 1]
-        db.row_counts[j] = db.row_counts[j + 1]
-        var d = 0
-        while d < 64 {
-            db.data[j * 64 + d] = db.data[(j + 1) * 64 + d]
-            d = d + 1
-        }
-        i = i + 1
-    }
-    db.table_count = db.table_count - 1
-    1
-}
-
-fn db_table_row_count(db: &InMemoryDB, name: string) -> i32 with Mut {
-    let idx = db_find_table(db, name)
-    if idx < 0 { return -1 }
-    db.row_counts[idx as usize]
-}
-
-fn db_insert_row(db: &! InMemoryDB, name: string, v0: i64, v1: i64) -> i32 with Mut {
-    let idx = db_find_table(db, name)
-    if idx < 0 { return -1 }
-    let row = db.row_counts[idx as usize]
-    if row >= 16 { return -1 }
-    db.data[cell_idx(idx, row, 0)] = v0
-    db.data[cell_idx(idx, row, 1)] = v1
-    db.row_counts[idx as usize] = row + 1
-    1
-}
-
-fn db_get_cell(db: &InMemoryDB, name: string, row: i32, col: i32) -> i64 with Mut {
-    let idx = db_find_table(db, name)
-    if idx < 0 { return -1 }
-    db.data[cell_idx(idx, row, col)]
-}
+use database::pure::types
+use database::pure::engine
 
 fn run_tests() -> i32 with IO, Mut {
     var pass = 0
@@ -93,22 +10,22 @@ fn run_tests() -> i32 with IO, Mut {
     var db = in_memory_db_new()
 
     print("Test 01: create_table... ")
-    if db_create_table(&! db, "users") == 1 {
+    if engine_create_table(&! db, "users") == 1 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
     print("Test 02: duplicate create returns 0... ")
-    if db_create_table(&! db, "users") == 0 {
+    if engine_create_table(&! db, "users") == 0 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
     print("Test 03: insert two rows... ")
-    let ri1 = db_insert_row(&! db, "users", 1, 42)
-    let ri2 = db_insert_row(&! db, "users", 2, 30)
+    let ri1 = engine_insert_row(&! db, "users", 1, 42)
+    let ri2 = engine_insert_row(&! db, "users", 2, 30)
     if ri1 == 1 && ri2 == 1 {
         print("PASS\n") pass = pass + 1
     } else {
@@ -116,30 +33,30 @@ fn run_tests() -> i32 with IO, Mut {
     }
 
     print("Test 04: row_count == 2... ")
-    if db_table_row_count(&db, "users") == 2 {
+    if engine_table_row_count(&! db, "users") == 2 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
     print("Test 05: get_cell(row=0,col=1) == 42... ")
-    if db_get_cell(&db, "users", 0, 1) == 42 {
+    if engine_get_cell(&! db, "users", 0, 1) == 42 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
     print("Test 06: get_cell(row=1,col=0) == 2... ")
-    if db_get_cell(&db, "users", 1, 0) == 2 {
+    if engine_get_cell(&! db, "users", 1, 0) == 2 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
-    print("Test 07: second table \"orders\"... ")
-    let rc_ord = db_create_table(&! db, "orders")
-    let ri_ord = db_insert_row(&! db, "orders", 100, 999)
-    let v_ord = db_get_cell(&db, "orders", 0, 1)
+    print("Test 07: second table 'orders'... ")
+    let rc_ord = engine_create_table(&! db, "orders")
+    let ri_ord = engine_insert_row(&! db, "orders", 100, 999)
+    let v_ord = engine_get_cell(&! db, "orders", 0, 1)
     if rc_ord == 1 && ri_ord == 1 && v_ord == 999 {
         print("PASS\n") pass = pass + 1
     } else {
@@ -147,15 +64,15 @@ fn run_tests() -> i32 with IO, Mut {
     }
 
     print("Test 08: find nonexistent table returns -1... ")
-    if db_find_table(&db, "ghost") == -1 {
+    if db_find_table(&! db, "ghost") == -1 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
-    print("Test 09: drop_table removes \"users\"... ")
-    let rd = db_drop_table(&! db, "users")
-    let rc_gone = db_table_row_count(&db, "users")
+    print("Test 09: drop_table removes 'users'... ")
+    let rd = engine_drop_table(&! db, "users")
+    let rc_gone = engine_table_row_count(&! db, "users")
     let tc = db.table_count
     if rd == 1 && rc_gone == -1 && tc == 1 {
         print("PASS\n") pass = pass + 1
@@ -164,14 +81,16 @@ fn run_tests() -> i32 with IO, Mut {
     }
 
     print("Test 10: orders data intact after drop... ")
-    if db_get_cell(&db, "orders", 0, 1) == 999 {
+    if engine_get_cell(&! db, "orders", 0, 1) == 999 {
         print("PASS\n") pass = pass + 1
     } else {
         print("FAIL\n") fail = fail + 1
     }
 
     if fail == 0 {
-        print("stdlib_database: ALL PASS (10/10)\n")
+        print("stdlib_database: ALL PASS (")
+        print(pass)
+        print("/10)\n")
         0
     } else {
         print("stdlib_database: FAIL\n")

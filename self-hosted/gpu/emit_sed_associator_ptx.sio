@@ -1,0 +1,112 @@
+// Sounio emitter for the SEDENION ASSOCIATOR [a,b,c]=(ab)c−a(bc) on tensor cores.
+// [a,b,c]=M·b, M = R(c)·L(a) − L(a)·R(c) (matrix commutator). Kernel sounio_sed_associator(a,c,M):
+// thread 0 builds L(a)[k][j]=σ(k⊕j,j)·a[k⊕j] and R(c)[k][i]=σ(i,k⊕i)·c[k⊕i] (row-major, 8×8 in a
+// 16×16 tile), bar.sync; two wmma m16n16k16 matmuls (R·L and L·R) + 8 sub.f32 → M (16×16); store.
+// HW-validated on the DGX Spark GB10 (1848 non-assoc triples + norm dichotomy {0,2}).
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    var digits = ""
+    var x = n
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var ch = "0"
+        if d == 1 { ch = "1" }
+        if d == 2 { ch = "2" }
+        if d == 3 { ch = "3" }
+        if d == 4 { ch = "4" }
+        if d == 5 { ch = "5" }
+        if d == 6 { ch = "6" }
+        if d == 7 { ch = "7" }
+        if d == 8 { ch = "8" }
+        if d == 9 { ch = "9" }
+        digits = str_concat(ch, digits)
+        x = x / 10
+    }
+    digits
+}
+fn cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+fn frag(prefix: string, start: i64, count: i64) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, prefix), i64_to_string(start + i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    print(".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    print(".visible .entry sounio_sed_associator(\n")
+    print("    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_c,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    print("    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<28>;\n    .reg .b64 %rd<7>;\n")
+    print("    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sR[512];\n")
+    print("    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_c];\n    ld.param.u64 %rd3, [p_out];\n")
+    print("    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    print("    mov.u32 %r18, sL;\n    mov.u32 %r19, sR;\n")
+    print("    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    // build L(a): L[k][j] = σ(k⊕j,j)·a[k⊕j]
+    var k: i64 = 0
+    while k < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let i = k ^ j
+            print("    ld.global.f32 %f1, [%rd4+") print(i64_to_string(i * 4)) print("];\n")
+            if cd_sigma(i, j, 4) < 0 { print("    neg.f32 %f1, %f1;\n") }
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+") print(i64_to_string((k * 16 + j) * 2)) print("], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    // build R(c): R[k][i] = σ(i, k⊕i)·c[k⊕i]
+    var kk: i64 = 0
+    while kk < 16 {
+        var ii: i64 = 0
+        while ii < 16 {
+            let jj = kk ^ ii
+            print("    ld.global.f32 %f1, [%rd5+") print(i64_to_string(jj * 4)) print("];\n")
+            if cd_sigma(ii, jj, 4) < 0 { print("    neg.f32 %f1, %f1;\n") }
+            print("    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+") print(i64_to_string((kk * 16 + ii) * 2)) print("], %rs1;\n")
+            ii = ii + 1
+        }
+        kk = kk + 1
+    }
+    print("$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    let aF = frag("%r", 2, 8)
+    let bF = frag("%r", 10, 8)
+    let d1 = frag("%f", 2, 8)
+    let d2 = frag("%f", 10, 8)
+    let z8 = "{%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0}"
+    // T1 = R·L : matrix_a=R(sR), matrix_b=L(sL), both row
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ") print(aF) print(", [%r19], %r1;\n")
+    print("    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ") print(bF) print(", [%r18], %r1;\n")
+    print("    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ") print(d1) print(", ") print(aF) print(", ") print(bF) print(", ") print(z8) print(";\n")
+    // T2 = L·R : matrix_a=L(sL), matrix_b=R(sR)
+    print("    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ") print(aF) print(", [%r18], %r1;\n")
+    print("    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ") print(bF) print(", [%r19], %r1;\n")
+    print("    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ") print(d2) print(", ") print(aF) print(", ") print(bF) print(", ") print(z8) print(";\n")
+    // M = T1 - T2 (into %f18..25)
+    var e: i64 = 0
+    while e < 8 {
+        print("    sub.f32 %f") print(i64_to_string(18 + e)) print(", %f") print(i64_to_string(2 + e)) print(", %f") print(i64_to_string(10 + e)) print(";\n")
+        e = e + 1
+    }
+    print("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ") print(frag("%f", 18, 8)) print(", %r1;\n")
+    print("    ret;\n}\n")
+}

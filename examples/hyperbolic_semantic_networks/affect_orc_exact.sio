@@ -1,0 +1,240 @@
+//! Exact-OT Ollivier-Ricci curvature of the per-window affect network — the ORIGINAL instrument.
+//! Concatenated after affect_net_curv_data.sio (per-window 12-item correlation edge lists).
+//!
+//! For each window: build the weighted graph, hop-distance metric (Floyd-Warshall, edge length 1),
+//! and for each edge (u,v) the Ollivier-Ricci curvature
+//!     κ(u,v) = 1 - W1(m_u, m_v) / d(u,v),   d(u,v)=1 (adjacent),
+//! where m_x(y) = w_xy / Σ_z w_xz is the one-step weighted random-walk measure (idleness α=0), and
+//! W1 is the entropic-regularized 1-Wasserstein distance over the 12-node hop-distance cost, solved by
+//! log-domain Sinkhorn (ε=0.05, 200 iters). Mean κ over edges per window.
+//!
+//! Cross-checks the combinatorial Forman-Ricci result: does the user's exact-OT ORC agree (corr with
+//! Forman) and does it likewise anti-track classical CSD (corr with lag-1 AC / variance)?
+
+fn oe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn oe_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn oe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0; while i < 30 { y = 0.5*(y + x/y); i = i+1 }; y
+}
+fn oe_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1.0e9 }
+    let ln2 = 0.6931471805599453
+    var v = x; var k: i64 = 0
+    while v > 2.0 { v = v/2.0; k = k+1 }
+    while v < 1.0 { v = v*2.0; k = k-1 }
+    let y = (v-1.0)/(v+1.0); let yy = y*y
+    var r = 0.0; var p = y; var i: i64 = 1
+    while i <= 29 { r = r + p/(i as f64); p = p*yy; i = i+2 }
+    2.0*r + (k as f64)*ln2
+}
+fn oe_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -700.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var v = x; if v > 700.0 { v = 700.0 }
+    let k = (v/ln2) as i64; let r = v - (k as f64)*ln2
+    var res = 1.0; var term = 1.0; var i: i64 = 1
+    while i <= 15 { term = term*r/(i as f64); res = res + term; i = i+1 }
+    if k >= 0 { var j: i64 = 0; while j < k { res = res*2.0; j = j+1 } }
+    else { var j: i64 = 0; while j < (0-k) { res = res/2.0; j = j+1 } }
+    res
+}
+
+// W1 via log-domain Sinkhorn over n-point marginals a,b with cost C (row-major n*n). ε reg.
+fn sinkhorn_w1(a: &[f64; 12], b: &[f64; 12], C: &[f64; 144], n: i64, eps: f64, iters: i64) -> f64 with Mut, Div, Panic {
+    var la: [f64; 12] = [0.0; 12]; var lb: [f64; 12] = [0.0; 12]
+    var f: [f64; 12] = [0.0; 12]; var g: [f64; 12] = [0.0; 12]
+    var i: i64 = 0
+    while i < n { la[i] = oe_ln(a[i]); lb[i] = oe_ln(b[i]); i = i+1 }
+    var it: i64 = 0
+    while it < iters {
+        // f_i = log a_i - LSE_j( (-C_ij + g_j)/eps )*eps ... keep f,g in log-scale potentials/eps form:
+        // use M_ij = -C_ij/eps ; u_i = la_i - LSE_j(M_ij + v_j) ; v_j = lb_j - LSE_i(M_ij + u_i)
+        i = 0
+        while i < n {
+            var m = -1.0e30; var j: i64 = 0
+            while j < n { let z = (0.0 - C[i*n+j])/eps + g[j]; if z > m { m = z }; j = j+1 }
+            var s = 0.0; j = 0
+            while j < n { s = s + oe_exp(((0.0 - C[i*n+j])/eps + g[j]) - m); j = j+1 }
+            f[i] = la[i] - (m + oe_ln(s)); i = i+1
+        }
+        var j: i64 = 0
+        while j < n {
+            var m = -1.0e30; var ii: i64 = 0
+            while ii < n { let z = (0.0 - C[ii*n+j])/eps + f[ii]; if z > m { m = z }; ii = ii+1 }
+            var s = 0.0; ii = 0
+            while ii < n { s = s + oe_exp(((0.0 - C[ii*n+j])/eps + f[ii]) - m); ii = ii+1 }
+            g[j] = lb[j] - (m + oe_ln(s)); j = j+1
+        }
+        it = it + 1
+    }
+    // transport plan T_ij = exp(f_i + M_ij + g_j); W1 = Σ T_ij C_ij
+    var w1 = 0.0; i = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let t = oe_exp(f[i] + (0.0 - C[i*n+j])/eps + g[j])
+            w1 = w1 + t * C[i*n+j]
+            j = j+1
+        }
+        i = i+1
+    }
+    w1
+}
+
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+// tie-averaged ranks
+fn rank_into(x: &[f64; 256], n: i64, r: &![f64; 256]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        var less=0.0; var eq=0.0; var j: i64 = 0
+        while j < n { if x[j] < x[i] { less=less+1.0 } else { if x[j]==x[i] { eq=eq+1.0 } }; j=j+1 }
+        r[i] = less + (eq+1.0)/2.0; i=i+1
+    }
+}
+fn pear(a: &[f64; 256], b: &[f64; 256], n: i64) -> f64 with Mut, Div, Panic {
+    var sa=0.0; var sb=0.0; var saa=0.0; var sbb=0.0; var sab=0.0; var i: i64 = 0
+    while i<n { sa=sa+a[i]; sb=sb+b[i]; saa=saa+a[i]*a[i]; sbb=sbb+b[i]*b[i]; sab=sab+a[i]*b[i]; i=i+1 }
+    let nf=n as f64; let cov=nf*sab-sa*sb
+    let da=oe_sqrt(nf*saa-sa*sa); let db=oe_sqrt(nf*sbb-sb*sb)
+    if da<=0.0 || db<=0.0 { return 0.0 }
+    cov/(da*db)
+}
+// Spearman: pearson of ranks
+fn spear(x: &[f64; 256], y: &[f64; 256], n: i64, rx: &![f64;256], ry: &![f64;256]) -> f64 with Mut, Div, Panic {
+    rank_into(x,n,rx); rank_into(y,n,ry); pear(rx,ry,n)
+}
+// first-order partial Spearman r(x,y|z) from rank correlations
+fn partial3(rxy: f64, rxz: f64, ryz: f64) -> f64 with Mut, Div, Panic {
+    let den = oe_sqrt((1.0-rxz*rxz)*(1.0-ryz*ryz))
+    if den <= 0.0 { return 0.0 }
+    (rxy - rxz*ryz)/den
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let K = fx_n_nodes()
+    let nW = fx_n_windows()
+    var ws: [i64; 256] = [0; 256]; var wn: [i64; 256] = [0; 256]; var wp: [i64; 256] = [0; 256]
+    var ei: [i64; 32768] = [0; 32768]; var ej: [i64; 32768] = [0; 32768]; var ew: [f64; 32768] = [0.0; 32768]
+    var varm: [f64; 256] = [0.0; 256]; var ac1: [f64; 256] = [0.0; 256]
+    load_win_start(&!ws); load_win_nedge(&!wn); load_win_phase(&!wp)
+    var meanr: [f64; 256] = [0.0; 256]
+    load_ei(&!ei); load_ej(&!ej); load_ew(&!ew); load_var_mean(&!varm); load_ac1_mean(&!ac1)
+    load_mean_absr(&!meanr)
+
+    var orcm: [f64; 256] = [0.0; 256]
+    var form: [f64; 256] = [0.0; 256]
+
+    println("win phase   meanORC      meanForman   var       ac1")
+    var w: i64 = 0
+    while w < nW {
+        let s0 = ws[w]; let ne = wn[w]
+        var A: [f64; 144] = [0.0; 144]
+        var e: i64 = 0
+        while e < ne { let u=ei[s0+e]; let v=ej[s0+e]; let wt=ew[s0+e]; A[u*K+v]=wt; A[v*K+u]=wt; e=e+1 }
+        // degrees
+        var deg: [f64; 12] = [0.0; 12]
+        var i: i64 = 0
+        while i < K { var d=0.0; var j: i64 = 0; while j<K { d=d+A[i*K+j]; j=j+1 }; deg[i]=d; i=i+1 }
+        // Floyd-Warshall hop distance (edge length 1); INF = big
+        var D: [f64; 144] = [0.0; 144]
+        i = 0
+        while i < K {
+            var j: i64 = 0
+            while j < K {
+                if i == j { D[i*K+j] = 0.0 }
+                else { if A[i*K+j] > 0.0 { D[i*K+j] = 1.0 } else { D[i*K+j] = 1.0e6 } }
+                j = j+1
+            }
+            i = i+1
+        }
+        var kk: i64 = 0
+        while kk < K {
+            i = 0
+            while i < K {
+                var j: i64 = 0
+                while j < K { let alt = D[i*K+kk] + D[kk*K+j]; if alt < D[i*K+j] { D[i*K+j] = alt }; j=j+1 }
+                i = i+1
+            }
+            kk = kk+1
+        }
+        // per-edge ORC + Forman
+        var osum = 0.0; var fsum = 0.0
+        e = 0
+        while e < ne {
+            let u = ei[s0+e]; let v = ej[s0+e]; let we = ew[s0+e]
+            // measures m_u, m_v (idleness 0)
+            var mu: [f64; 12] = [0.0; 12]; var mv: [f64; 12] = [0.0; 12]
+            var y: i64 = 0
+            while y < K {
+                mu[y] = if deg[u] > 0.0 { A[u*K+y]/deg[u] } else { 0.0 }
+                mv[y] = if deg[v] > 0.0 { A[v*K+y]/deg[v] } else { 0.0 }
+                y = y+1
+            }
+            let w1 = sinkhorn_w1(&mu, &mv, &D, K, 0.05, 200)
+            osum = osum + (1.0 - w1 / D[u*K+v])   // d(u,v)=1
+            // Forman (weighted, node weight 1): 2 - Σ_{e'~u,≠v} √(we/w') - Σ_{e'~v,≠u} √(we/w')
+            var acc = 0.0; var x: i64 = 0
+            while x < K { if x != v && A[u*K+x] > 0.0 { acc = acc + oe_sqrt(we/A[u*K+x]) }; x=x+1 }
+            x = 0
+            while x < K { if x != u && A[v*K+x] > 0.0 { acc = acc + oe_sqrt(we/A[v*K+x]) }; x=x+1 }
+            fsum = fsum + (2.0 - acc)
+            e = e+1
+        }
+        orcm[w] = if ne>0 { osum/(ne as f64) } else { 0.0 }
+        form[w] = if ne>0 { fsum/(ne as f64) } else { 0.0 }
+        print(w as f64); print("  ph"); print(wp[w] as f64); print("  orc="); print(orcm[w])
+        print("  F="); print(form[w]); print("  var="); print(varm[w]); print("  ac1="); print(ac1[w]); println("")
+        w = w+1
+    }
+
+    // correlations
+    var mo=0.0; var mf=0.0; var mv2=0.0; var ma=0.0
+    var t: i64 = 0
+    while t<nW { mo=mo+orcm[t]; mf=mf+form[t]; mv2=mv2+varm[t]; ma=ma+ac1[t]; t=t+1 }
+    let nf = nW as f64; mo=mo/nf; mf=mf/nf; mv2=mv2/nf; ma=ma/nf
+    var c_of=0.0; var c_oa=0.0; var c_ov=0.0; var vo=0.0; var vf=0.0; var vv=0.0; var vaa=0.0
+    t=0
+    while t<nW {
+        let dorc=orcm[t]-mo; let dform=form[t]-mf; let dv=varm[t]-mv2; let da=ac1[t]-ma
+        c_of=c_of+dorc*dform; c_oa=c_oa+dorc*da; c_ov=c_ov+dorc*dv
+        vo=vo+dorc*dorc; vf=vf+dform*dform; vv=vv+dv*dv; vaa=vaa+da*da
+        t=t+1
+    }
+    println("=== exact-OT ORC summary ===")
+    print_kv("meanORC_overall", mo)
+    print_kv("corr_ORC_vs_Forman", if vo>0.0 && vf>0.0 { c_of/oe_sqrt(vo*vf) } else { 0.0 })
+    print_kv("corr_ORC_vs_ac1", if vo>0.0 && vaa>0.0 { c_oa/oe_sqrt(vo*vaa) } else { 0.0 })
+    print_kv("corr_ORC_vs_variance", if vo>0.0 && vv>0.0 { c_ov/oe_sqrt(vo*vv) } else { 0.0 })
+
+    // ===== density-confound test (Spearman + first-order partials) =====
+    // density covariates: n_edges per window (from wn) and threshold-free mean |r|
+    var nedge: [f64; 256] = [0.0; 256]
+    t=0; while t<nW { nedge[t] = wn[t] as f64; t=t+1 }
+    var rx: [f64; 256] = [0.0; 256]; var ry: [f64; 256] = [0.0; 256]
+
+    // premise: does density co-move with CSD?
+    let r_ne_ac1  = spear(&nedge, &ac1, nW, &!rx, &!ry)
+    let r_mr_ac1  = spear(&meanr, &ac1, nW, &!rx, &!ry)
+    // base spearman curvature vs AC1
+    let r_F_ac1   = spear(&form,  &ac1, nW, &!rx, &!ry)
+    let r_O_ac1   = spear(&orcm,  &ac1, nW, &!rx, &!ry)
+    // curvature vs density
+    let r_F_ne    = spear(&form,  &nedge, nW, &!rx, &!ry)
+    let r_O_ne    = spear(&orcm,  &nedge, nW, &!rx, &!ry)
+    let r_F_mr    = spear(&form,  &meanr, nW, &!rx, &!ry)
+    let r_O_mr    = spear(&orcm,  &meanr, nW, &!rx, &!ry)
+
+    println("=== density-confound test (Spearman) ===")
+    print_kv("premise_corr_nedge_ac1", r_ne_ac1)
+    print_kv("premise_corr_meanAbsR_ac1", r_mr_ac1)
+    print_kv("sp_Forman_ac1", r_F_ac1)
+    print_kv("sp_ORC_ac1", r_O_ac1)
+    print_kv("partial_Forman_ac1_given_nedge", partial3(r_F_ac1, r_F_ne, r_ne_ac1))
+    print_kv("partial_Forman_ac1_given_meanAbsR", partial3(r_F_ac1, r_F_mr, r_mr_ac1))
+    print_kv("partial_ORC_ac1_given_nedge", partial3(r_O_ac1, r_O_ne, r_ne_ac1))
+    print_kv("partial_ORC_ac1_given_meanAbsR", partial3(r_O_ac1, r_O_mr, r_mr_ac1))
+    println("AFFECT_ORC_EXACT_DONE")
+    0
+}

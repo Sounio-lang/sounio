@@ -1,0 +1,263 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 7 Step 4: x509_verify_signature against a REAL, openssl-signed
+// RSA-2048 / SHA-256 signature -- not merely a plausible-looking bit
+// pattern. Per this task's brief ("more simply, sign the exact
+// TBSCertificate bytes from Task 5/7's own fixture with `openssl dgst
+// -sha256 -sign` during this task, using a freshly-generated key pair"),
+// this is exactly what was done:
+//
+//   1. Extracted the 172-byte TBSCertificate TLV from this task's Step 1
+//      fixture (tests/run-pass/x509_parse_full_certificate.sio) to a raw
+//      binary file, tbs.bin.
+//   2. openssl genrsa -out priv.pem 2048
+//      openssl rsa -in priv.pem -pubout -out pub.pem
+//      openssl dgst -sha256 -sign priv.pem -out sig.bin tbs.bin
+//      openssl dgst -sha256 -verify pub.pem -signature sig.bin tbs.bin
+//        -> "Verified OK"
+//   3. The certificate fixture below reuses that SAME TBSCertificate,
+//      wrapped in the outer Certificate SEQUENCE with the outer
+//      signatureAlgorithm set to sha256WithRSAEncryption (matching the
+//      TBS's own inner signature algorithm, as x509_parse_certificate's
+//      cross-check requires) and signatureValue set to the real 256-byte
+//      sig.bin bytes (BIT STRING, unused-bits=0).
+//   4. issuer_modulus/issuer_exponent below are that SAME key pair's real
+//      modulus (openssl rsa -in priv.pem -noout -modulus) and public
+//      exponent (65537, openssl's default), transcribed the same
+//      little-endian-16-bit-limb way as tests/run-pass/pkcs1_verify.sio's
+//      own real vector.
+//
+// Wire layout differs from Step 1's fixture ONLY in the outer Certificate
+// SEQUENCE's own length encoding (194 -> 448 content bytes, since the real
+// 256-byte signature is far larger than Step 1's 4-byte placeholder,
+// pushing the outer length into 2-byte long form) and in the outer
+// signatureValue's own bytes:
+//
+//   [0..4)      Certificate SEQUENCE header: 0x30, 0x82, 0x01, 0xC0
+//               (long-form length 448, 2 length bytes)
+//   [4..176)    tbsCertificate SEQUENCE (172 bytes total TLV) -- BYTE-
+//               IDENTICAL to Step 1's fixture's TBS bytes.
+//   [176..191)  outer signatureAlgorithm (sha256WithRSAEncryption + NULL)
+//               -- identical bytes to Step 1's, and to the TBS's own copy.
+//   [191..452)  outer signatureValue BIT STRING: 0x03, 0x82, 0x01, 0x01,
+//               0x00, <256 bytes of the real openssl signature>
+//               (4-byte long-form header + 1 unused-bits byte + 256
+//               payload bytes = 261-byte TLV content... header itself is
+//               4 bytes, so total TLV = 4 + 257 = 261 bytes)
+//
+// Length arithmetic (independently re-verified via the same Python `tlv()`
+// helper used for Step 1's fixture, byte-for-byte against the hex above):
+//   outer signatureValue TLV: 4(header)+1(unused-bits)+256(sig) = 261 bytes
+//   Certificate content: 172(tbs)+15(outer alg)+261(outer sig) = 448 = 0x1C0
+//   Certificate total: 4(long-form header)+448 = 452 bytes
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+fn build_bigint_128(values: [u16; 128]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 128 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 128
+    result
+}
+
+// Little-endian 16-bit limbs of the real key pair's RSA modulus (from
+// `openssl rsa -in priv.pem -noout -modulus`, regrouped the same way as
+// tests/run-pass/pkcs1_verify.sio's own test_modulus_limbs).
+fn issuer_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        50309, 33971, 25228, 55056, 23810, 16895, 11725, 25180,
+        62359, 36582, 34172, 17924, 29342, 62096, 1248, 11713,
+        56054, 35180, 55879, 27305, 2024, 40477, 54987, 35878,
+        32574, 36087, 62156, 34511, 39718, 28811, 58803, 45836,
+        56340, 14378, 18957, 15991, 41343, 10878, 11150, 44588,
+        18068, 47366, 21884, 52914, 36246, 58148, 41206, 43542,
+        56555, 9296, 54339, 716, 30174, 2222, 9131, 9934,
+        15109, 51715, 35455, 15671, 51837, 14301, 37649, 25725,
+        57030, 52948, 34969, 53396, 60488, 5220, 11058, 1044,
+        17153, 22269, 24615, 11590, 17204, 7391, 57833, 11445,
+        24336, 20811, 2173, 174, 8983, 15988, 11840, 22676,
+        40525, 63697, 54709, 52258, 46609, 33156, 10343, 43122,
+        65471, 46314, 59745, 60011, 50115, 31612, 51714, 9546,
+        35265, 43940, 51584, 16979, 24591, 24286, 20282, 60918,
+        56214, 6958, 57198, 37746, 52719, 40703, 17767, 55894,
+        45383, 28330, 31525, 46307, 42040, 43605, 21688, 50417,
+    ]
+    r
+}
+
+// A DIFFERENT, unrelated RSA-2048 key pair's modulus (also freshly
+// generated with `openssl genrsa -out priv2.pem 2048`) -- used for the
+// "wrong issuer key" false case below.
+fn wrong_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        14925, 24980, 52923, 43530, 60182, 57814, 62840, 18185,
+        42196, 18554, 42616, 61901, 884, 38443, 6340, 33838,
+        24524, 40044, 4275, 38449, 31840, 61235, 16584, 29261,
+        30643, 1905, 58017, 6770, 21049, 21112, 40284, 9365,
+        36952, 42767, 7322, 11733, 46501, 2466, 29721, 58785,
+        31070, 26987, 32553, 56483, 10479, 27363, 48442, 39841,
+        27519, 48665, 30491, 37563, 63523, 28061, 22470, 37571,
+        25704, 1659, 62304, 33508, 11055, 17544, 40960, 46227,
+        37047, 39913, 35603, 50635, 63522, 35261, 60537, 52777,
+        33919, 47756, 40279, 61306, 43649, 50662, 40087, 18146,
+        38687, 53456, 37070, 51250, 44958, 17440, 61390, 6810,
+        52268, 29254, 32617, 6206, 21451, 2687, 48035, 39185,
+        53987, 38963, 49011, 29756, 31056, 40891, 45188, 24099,
+        52558, 297, 29604, 32640, 42199, 3020, 6640, 13159,
+        49169, 48195, 17078, 20225, 6695, 22431, 13929, 40783,
+        5875, 19975, 28002, 6702, 11794, 9054, 6186, 48130,
+    ]
+    r
+}
+
+fn main() -> i64 with IO {
+    let total_len: i64 = 452
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 452] = [
+        0x30, 0x82, 0x01, 0xC0, 0x30, 0x81, 0xA9, 0xA0, 0x03, 0x02, 0x01, 0x02,
+        0x02, 0x02, 0x30, 0x39, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86,
+        0xF7, 0x0D, 0x01, 0x01, 0x0B, 0x05, 0x00, 0x30, 0x12, 0x31, 0x10, 0x30,
+        0x0E, 0x06, 0x03, 0x55, 0x04, 0x03, 0x13, 0x07, 0x54, 0x65, 0x73, 0x74,
+        0x20, 0x43, 0x41, 0x30, 0x1E, 0x17, 0x0D, 0x32, 0x35, 0x30, 0x31, 0x30,
+        0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A, 0x17, 0x0D, 0x32, 0x36,
+        0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A, 0x30,
+        0x14, 0x31, 0x12, 0x30, 0x10, 0x06, 0x03, 0x55, 0x04, 0x03, 0x13, 0x09,
+        0x54, 0x65, 0x73, 0x74, 0x20, 0x4C, 0x65, 0x61, 0x66, 0x30, 0x1B, 0x30,
+        0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01,
+        0x05, 0x00, 0x03, 0x0A, 0x00, 0x30, 0x07, 0x02, 0x02, 0x0C, 0xA1, 0x02,
+        0x01, 0x11, 0xA3, 0x28, 0x30, 0x26, 0x30, 0x12, 0x06, 0x03, 0x55, 0x1D,
+        0x13, 0x01, 0x01, 0xFF, 0x04, 0x08, 0x30, 0x06, 0x01, 0x01, 0xFF, 0x02,
+        0x01, 0x00, 0x30, 0x10, 0x06, 0x03, 0x55, 0x1D, 0x11, 0x04, 0x09, 0x30,
+        0x07, 0x82, 0x05, 0x61, 0x2E, 0x63, 0x6F, 0x6D, 0x30, 0x0D, 0x06, 0x09,
+        0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B, 0x05, 0x00, 0x03,
+        0x82, 0x01, 0x01, 0x00, 0xAC, 0xAF, 0xB6, 0x0F, 0x36, 0x37, 0xBC, 0x3E,
+        0xF7, 0x32, 0xB9, 0x37, 0x89, 0x2D, 0x9A, 0x21, 0x7A, 0x00, 0x6B, 0x26,
+        0xF1, 0xBD, 0xBC, 0xE5, 0x94, 0x8B, 0x5F, 0xF0, 0xD4, 0xD0, 0xDD, 0x85,
+        0x90, 0x2D, 0x86, 0xC0, 0x3D, 0x7E, 0xB0, 0xEB, 0x36, 0x13, 0xCA, 0x11,
+        0x41, 0x23, 0x7C, 0x7D, 0x3F, 0x50, 0x1F, 0xB6, 0xF5, 0x8A, 0x60, 0xBC,
+        0x0B, 0x6C, 0xBB, 0xD3, 0xD2, 0x22, 0xF5, 0x3F, 0x7C, 0xCD, 0x6E, 0xD3,
+        0x3E, 0xAB, 0xAA, 0x0A, 0xB8, 0x79, 0x4A, 0x85, 0xDB, 0x81, 0xDA, 0xCB,
+        0xF5, 0x2E, 0x12, 0xEC, 0xE6, 0xD4, 0x4F, 0xC8, 0x21, 0xEC, 0x16, 0x29,
+        0x62, 0x66, 0xEE, 0x63, 0xA3, 0x56, 0x77, 0x04, 0x27, 0x4C, 0x38, 0x46,
+        0x9A, 0x07, 0x9A, 0x2F, 0x9E, 0x26, 0x02, 0x5C, 0xA8, 0xC2, 0x59, 0xCD,
+        0xC9, 0xC1, 0x90, 0xBB, 0x5D, 0x7D, 0xAB, 0xA8, 0x3A, 0xA7, 0xAF, 0x6B,
+        0xB7, 0x82, 0x7D, 0x37, 0x84, 0x3F, 0xEB, 0x77, 0xC4, 0x38, 0x62, 0x8F,
+        0xEB, 0x8E, 0xCE, 0x1E, 0xF5, 0x13, 0xB3, 0xC8, 0x7D, 0x86, 0xAB, 0x86,
+        0xCE, 0x20, 0x9A, 0xD1, 0xC9, 0xE5, 0xF9, 0xE7, 0xD3, 0x0D, 0x1D, 0xD6,
+        0x20, 0xAB, 0x21, 0x34, 0x5A, 0x85, 0xCC, 0xD2, 0xDA, 0xE7, 0xDC, 0xEF,
+        0x6F, 0x66, 0x05, 0xB6, 0xF6, 0x12, 0xF4, 0xA4, 0x03, 0x6F, 0xA7, 0xB6,
+        0x8F, 0xEC, 0xBB, 0xAF, 0xEB, 0x90, 0xB5, 0x70, 0x53, 0x22, 0x83, 0xB8,
+        0xF1, 0x46, 0xD9, 0xF2, 0xE5, 0xC0, 0xDE, 0xE1, 0xE1, 0x53, 0xB9, 0x86,
+        0xAD, 0x73, 0x4E, 0x94, 0x58, 0x06, 0xD6, 0x72, 0x77, 0x00, 0x20, 0x5E,
+        0xB1, 0x8F, 0x6D, 0xD4, 0xA4, 0xB1, 0x85, 0xFD, 0xC0, 0x68, 0xB8, 0xCE,
+        0xFC, 0xE6, 0x15, 0x1C, 0xA4, 0xC9, 0x5D, 0xAC, 0x78, 0xC5, 0xE0, 0x16,
+        0xC5, 0x49, 0x66, 0x58, 0xE5, 0x7E, 0x61, 0x79,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    var cert = certificate_zero()
+    let (cert_raw, status) = x509_parse_certificate(&buf, total_len)
+    cert = cert_raw
+    if status != X509_OK {
+        print_int(1)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    if cert.tbs_start != 4 {
+        print_int(2)
+        return 1
+    }
+    assert(cert.tbs_start == 4)
+    if cert.tbs_len != 172 {
+        print_int(3)
+        return 1
+    }
+    assert(cert.tbs_len == 172)
+    if cert.outer_signature_len != 256 {
+        print_int(4)
+        return 1
+    }
+    assert(cert.outer_signature_len == 256)
+
+    let issuer_modulus = build_bigint_128(issuer_modulus_limbs())
+    let issuer_exponent = bigint_from_u32(65537)
+
+    // x509_verify_signature now takes the issuer's full Certificate (so it
+    // can branch on issuer.public_key_algorithm), not pre-extracted RSA
+    // fields directly. Build a minimal synthetic issuer Certificate --
+    // certificate_zero() plus exactly the fields the RSA path reads
+    // (modulus/public_exponent/public_key_algorithm) -- rather than parsing
+    // a real issuer cert, since this test's whole point is exercising
+    // x509_verify_signature against a known real key pair's raw
+    // modulus/exponent, independent of any issuer certificate's own wire
+    // encoding.
+    var issuer_cert = certificate_zero()
+    issuer_cert.modulus = issuer_modulus
+    issuer_cert.public_exponent = issuer_exponent
+    issuer_cert.public_key_algorithm = PUBKEY_ALG_RSA
+
+    // ---- True case: the real, openssl-verified signature against the
+    // real key pair's own modulus/exponent must verify. ----
+    let ok = x509_verify_signature(&buf, &cert, &issuer_cert)
+    if ok == false {
+        print_int(5)
+        return 1
+    }
+    assert(ok)
+
+    // ---- False case 1: a corrupted TBSCertificate byte must NOT verify.
+    // Flip one bit inside cert.tbs_start..cert.tbs_start+cert.tbs_len (byte
+    // offset 4 + 20 = 24, inside the issuer Name's own CN OID bytes) in a
+    // FRESH copy of the buffer -- `cert` itself (tbs_start/tbs_len/
+    // signature) is unchanged, only the bytes x509_verify_signature reads
+    // via `buf` are corrupted, exactly matching how a real tampered
+    // certificate would be caught (the signature was computed over the
+    // ORIGINAL bytes, not the tampered ones).
+    let corrupted_buf = rawbuf_new(total_len + 8)
+    var ci: i64 = 0
+    while ci < total_len {
+        rawbuf_set(&corrupted_buf, ci, bytes[ci as usize])
+        ci = ci + 1
+    }
+    let original_byte = rawbuf_get(&corrupted_buf, 24) & 255
+    rawbuf_set(&corrupted_buf, 24, original_byte ^ 1)
+    let bad1 = x509_verify_signature(&corrupted_buf, &cert, &issuer_cert)
+    if bad1 == true {
+        print_int(6)
+        return 1
+    }
+    assert(bad1 == false)
+
+    // ---- False case 2: the correct (uncorrupted) TBSCertificate bytes,
+    // but verified against the WRONG issuer's public key, must NOT verify. --
+    let wrong_modulus = build_bigint_128(wrong_modulus_limbs())
+    var wrong_issuer_cert = certificate_zero()
+    wrong_issuer_cert.modulus = wrong_modulus
+    wrong_issuer_cert.public_exponent = issuer_exponent
+    wrong_issuer_cert.public_key_algorithm = PUBKEY_ALG_RSA
+    let bad2 = x509_verify_signature(&buf, &cert, &wrong_issuer_cert)
+    if bad2 == true {
+        print_int(7)
+        return 1
+    }
+    assert(bad2 == false)
+
+    println("x509_verify_signature: real openssl-signed RSA-2048/SHA-256 signature verifies correctly, both false cases rejected")
+    return 0
+}

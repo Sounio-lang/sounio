@@ -1,0 +1,297 @@
+// ============================================================================
+// HISTOGRAM — Binned data analysis for HEP
+// ============================================================================
+//
+// One-dimensional histogram with fixed maximum bins (256), supporting
+// weighted filling, integral, mean, standard deviation, and rebinning.
+//
+// Conventions:
+// - Underflow goes into bin 0 (counted separately)
+// - Overflow goes into bin n_bins+1 (counted separately)
+// - Bin 1..n_bins are the actual histogram bins
+
+module particle_physics::histogram
+
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+/// 1D histogram with up to 256 bins + underflow/overflow.
+pub struct Histogram1D {
+    pub n_bins: i64,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub bin_width: f64,
+    pub counts: [f64; 258],   // 0 = underflow, 1..n_bins = bins, n_bins+1 = overflow
+    pub sumw2: [f64; 258],    // sum of weights squared for errors
+}
+
+/// Create a new histogram.
+pub fn hist_new(x_min: f64, x_max: f64, n_bins: i64) -> Histogram1D {
+    var h: Histogram1D
+    h.n_bins = n_bins
+    h.x_min = x_min
+    h.x_max = x_max
+    if n_bins > 0 {
+        h.bin_width = (x_max - x_min) / (n_bins as f64)
+    } else {
+        h.bin_width = 0.0
+    }
+    var i: i64 = 0
+    while i < 258 {
+        h.counts[i as usize] = 0.0
+        h.sumw2[i as usize] = 0.0
+        i = i + 1
+    }
+    return h
+}
+
+/// Fill a value into the histogram with optional weight.
+pub fn hist_fill(hist: &!Histogram1D, x: f64, weight: f64) with Mut {
+    if hist.n_bins <= 0 { return }
+    let w = weight
+    var idx: i64 = 0
+    if x < hist.x_min {
+        idx = 0
+    } else if x >= hist.x_max {
+        idx = hist.n_bins + 1
+    } else {
+        idx = 1 + ((x - hist.x_min) / hist.bin_width) as i64
+        if idx > hist.n_bins { idx = hist.n_bins }
+        if idx < 1 { idx = 1 }
+    }
+    hist.counts[idx as usize] = hist.counts[idx as usize] + w
+    hist.sumw2[idx as usize] = hist.sumw2[idx as usize] + w * w
+}
+
+/// Total integral (sum of all bin contents, excluding underflow/overflow).
+pub fn hist_integral(hist: &!Histogram1D) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 1
+    while i <= hist.n_bins {
+        sum = sum + hist.counts[i as usize]
+        i = i + 1
+    }
+    return sum
+}
+
+/// Total entries including underflow and overflow.
+pub fn hist_entries(hist: &!Histogram1D) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i <= hist.n_bins + 1 {
+        sum = sum + hist.counts[i as usize]
+        i = i + 1
+    }
+    return sum
+}
+
+/// Weighted mean of the histogram (using bin centers).
+pub fn hist_mean(hist: &!Histogram1D) -> f64 {
+    var sum_wx: f64 = 0.0
+    var sum_w: f64 = 0.0
+    var i: i64 = 1
+    while i <= hist.n_bins {
+        let w = hist.counts[i as usize]
+        let center = hist.x_min + (i as f64 - 0.5) * hist.bin_width
+        sum_wx = sum_wx + w * center
+        sum_w = sum_w + w
+        i = i + 1
+    }
+    if sum_w == 0.0 { return 0.0 }
+    return sum_wx / sum_w
+}
+
+/// Weighted standard deviation (using bin centers).
+pub fn hist_stddev(hist: &!Histogram1D) -> f64 with Mut, Div, Panic {
+    let mu = hist_mean(hist)
+    var sum_wdx2: f64 = 0.0
+    var sum_w: f64 = 0.0
+    var i: i64 = 1
+    while i <= hist.n_bins {
+        let w = hist.counts[i as usize]
+        let center = hist.x_min + (i as f64 - 0.5) * hist.bin_width
+        let dx = center - mu
+        sum_wdx2 = sum_wdx2 + w * dx * dx
+        sum_w = sum_w + w
+        i = i + 1
+    }
+    if sum_w == 0.0 { return 0.0 }
+    return sqrt(sum_wdx2 / sum_w)
+}
+
+/// Scale histogram contents by a factor.
+pub fn hist_scale(hist: &!Histogram1D, factor: f64) with Mut {
+    var i: i64 = 0
+    while i <= hist.n_bins + 1 {
+        hist.counts[i as usize] = hist.counts[i as usize] * factor
+        hist.sumw2[i as usize] = hist.sumw2[i as usize] * factor * factor
+        i = i + 1
+    }
+}
+
+/// Add two histograms (must have identical binning).
+pub fn hist_add(hist: &!Histogram1D, other: &!Histogram1D) -> i64 with Mut {
+    if hist.n_bins != other.n_bins { return 0 }
+    if hist.x_min != other.x_min { return 0 }
+    if hist.x_max != other.x_max { return 0 }
+    var i: i64 = 0
+    while i <= hist.n_bins + 1 {
+        hist.counts[i as usize] = hist.counts[i as usize] + other.counts[i as usize]
+        hist.sumw2[i as usize] = hist.sumw2[i as usize] + other.sumw2[i as usize]
+        i = i + 1
+    }
+    return 1
+}
+
+/// Rebin by merging adjacent bins (factor must divide n_bins).
+pub fn hist_rebin(hist: &!Histogram1D, factor: i64) -> Histogram1D with Mut {
+    let new_n = hist.n_bins / factor
+    var out = hist_new(hist.x_min, hist.x_max, new_n)
+    out.bin_width = hist.bin_width * (factor as f64)
+    var i: i64 = 1
+    while i <= hist.n_bins {
+        let new_idx = 1 + (i - 1) / factor
+        out.counts[new_idx as usize] = out.counts[new_idx as usize] + hist.counts[i as usize]
+        out.sumw2[new_idx as usize] = out.sumw2[new_idx as usize] + hist.sumw2[i as usize]
+        i = i + 1
+    }
+    // Underflow and overflow copied directly
+    out.counts[0 as usize] = hist.counts[0 as usize]
+    out.sumw2[0 as usize] = hist.sumw2[0 as usize]
+    out.counts[(new_n + 1) as usize] = hist.counts[(hist.n_bins + 1) as usize]
+    out.sumw2[(new_n + 1) as usize] = hist.sumw2[(hist.n_bins + 1) as usize]
+    return out
+}
+
+/// Bin content for a given bin number (1-based; 0 = underflow, n+1 = overflow).
+pub fn hist_bin_content(hist: &!Histogram1D, bin: i64) -> f64 {
+    if bin < 0 || bin > hist.n_bins + 1 { return 0.0 }
+    return hist.counts[bin as usize]
+}
+
+/// Bin error (sqrt of sumw2) for a given bin.
+pub fn hist_bin_error(hist: &!Histogram1D, bin: i64) -> f64 with Mut, Div, Panic {
+    if bin < 0 || bin > hist.n_bins + 1 { return 0.0 }
+    return sqrt(hist.sumw2[bin as usize])
+}
+
+/// Find bin number for a given x value (1-based; returns 0 for underflow, n+1 for overflow).
+pub fn hist_find_bin(hist: &!Histogram1D, x: f64) -> i64 {
+    if hist.n_bins <= 0 { return 0 }
+    if x < hist.x_min { return 0 }
+    if x >= hist.x_max { return hist.n_bins + 1 }
+    var idx = 1 + ((x - hist.x_min) / hist.bin_width) as i64
+    if idx > hist.n_bins { idx = hist.n_bins }
+    if idx < 1 { idx = 1 }
+    return idx
+}
+
+/// Clone a histogram.
+pub fn hist_clone(hist: &!Histogram1D) -> Histogram1D {
+    var out = hist_new(hist.x_min, hist.x_max, hist.n_bins)
+    var i: i64 = 0
+    while i <= hist.n_bins + 1 {
+        out.counts[i as usize] = hist.counts[i as usize]
+        out.sumw2[i as usize] = hist.sumw2[i as usize]
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_hist_new() -> bool {
+    let h = hist_new(0.0, 10.0, 10)
+    if h.n_bins != 10 { return false }
+    if h.x_min != 0.0 { return false }
+    if h.x_max != 10.0 { return false }
+    if h.bin_width != 1.0 { return false }
+    return true
+}
+
+pub fn test_hist_fill() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 5.5, 1.0)
+    if h.counts[6 as usize] != 1.0 { return false }
+    hist_fill(&!h, 5.5, 2.0)
+    if h.counts[6 as usize] != 3.0 { return false }
+    return true
+}
+
+pub fn test_hist_underflow_overflow() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, -1.0, 1.0)
+    hist_fill(&!h, 11.0, 1.0)
+    if h.counts[0 as usize] != 1.0 { return false }
+    if h.counts[11 as usize] != 1.0 { return false }
+    return true
+}
+
+pub fn test_hist_integral() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 1.5, 2.0)
+    hist_fill(&!h, 3.5, 3.0)
+    hist_fill(&!h, -1.0, 1.0)   // underflow
+    let integral = hist_integral(&h)
+    if integral != 5.0 { return false }
+    return true
+}
+
+pub fn test_hist_mean() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 0.5, 1.0)
+    hist_fill(&!h, 9.5, 1.0)
+    let mu = hist_mean(&h)
+    if mu != 5.0 { return false }
+    return true
+}
+
+pub fn test_hist_add() -> bool with Mut {
+    var h1 = hist_new(0.0, 10.0, 10)
+    var h2 = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h1, 5.0, 3.0)
+    hist_fill(&!h2, 5.0, 2.0)
+    let ok = hist_add(&!h1, &!h2)
+    if ok != 1 { return false }
+    if h1.counts[6 as usize] != 5.0 { return false }
+    return true
+}
+
+pub fn test_hist_scale() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 5.0, 3.0)
+    hist_scale(&!h, 2.0)
+    if h.counts[6 as usize] != 6.0 { return false }
+    return true
+}
+
+pub fn test_hist_rebin() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 0.5, 1.0)
+    hist_fill(&!h, 1.5, 2.0)
+    var hr = hist_rebin(&h, 2)
+    if hr.n_bins != 5 { return false }
+    if hr.counts[1 as usize] != 3.0 { return false }
+    return true
+}
+
+pub fn test_hist_bin_error() -> bool with Mut, Div, Panic {
+    var h = hist_new(0.0, 10.0, 10)
+    hist_fill(&!h, 5.0, 2.0)
+    let err = hist_bin_error(&h, 6)
+    if err != 2.0 { return false }
+    return true
+}
+
+pub fn test_hist_find_bin() -> bool with Mut {
+    var h = hist_new(0.0, 10.0, 10)
+    if hist_find_bin(&h, -1.0) != 0 { return false }
+    if hist_find_bin(&h, 5.5) != 6 { return false }
+    if hist_find_bin(&h, 11.0) != 11 { return false }
+    return true
+}

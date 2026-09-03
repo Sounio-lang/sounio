@@ -1,0 +1,412 @@
+// stdlib/viz/physchem.sio — Physico-chemistry visualization data layer
+//
+// Molecules, fields, spectra, trajectories, and uncertainty overlays are
+// represented as Sounio data. Renderers can lower these structs to Visual IR.
+
+use units::lib::{Quantity, UnitDim, dim_dimensionless}
+use epistemic::knowledge::{Epistemic}
+
+pub struct AtomViz {
+    pub atomic_number: i64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub radius: f64,
+    pub charge: Epistemic,
+    pub r: i64,
+    pub g: i64,
+    pub b: i64,
+}
+
+pub struct BondViz {
+    pub atom_a: i64,
+    pub atom_b: i64,
+    pub order: i64,
+    pub length: Quantity,
+    pub variance: f64,
+}
+
+pub struct MoleculeViz {
+    pub atoms: [AtomViz; 64],
+    pub bonds: [BondViz; 96],
+    pub atom_count: i64,
+    pub bond_count: i64,
+}
+
+pub struct ScalarField2D {
+    pub values: [f64; 4096],
+    pub variances: [f64; 4096],
+    pub rows: i64,
+    pub cols: i64,
+    pub unit: UnitDim,
+    pub min_value: f64,
+    pub max_value: f64,
+}
+
+pub struct VectorField2D {
+    pub vx: [f64; 4096],
+    pub vy: [f64; 4096],
+    pub variance: [f64; 4096],
+    pub rows: i64,
+    pub cols: i64,
+    pub unit: UnitDim,
+}
+
+pub struct Trajectory3D {
+    pub x: [f64; 1024],
+    pub y: [f64; 1024],
+    pub z: [f64; 1024],
+    pub t: [f64; 1024],
+    pub variance: [f64; 1024],
+    pub n: i64,
+}
+
+pub struct SpectrumViz {
+    pub x: [f64; 1024],
+    pub intensity: [f64; 1024],
+    pub variance: [f64; 1024],
+    pub n: i64,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub unit: UnitDim,
+}
+
+pub struct LatticeField2D {
+    pub rows: i64,
+    pub cols: i64,
+    pub displacement_x: [f64; 4096],
+    pub displacement_y: [f64; 4096],
+    pub phase: [f64; 4096],
+    pub variance: [f64; 4096],
+    pub unit: UnitDim,
+}
+
+pub struct ParticleEventView {
+    pub x: [f64; 1024],
+    pub y: [f64; 1024],
+    pub z: [f64; 1024],
+    pub energy: [f64; 1024],
+    pub variance: [f64; 1024],
+    pub kind: [i64; 1024],
+    pub n: i64,
+    pub unit: UnitDim,
+}
+
+pub fn atom_viz_default(z: i64, x: f64, y: f64, zz: f64) -> AtomViz {
+    AtomViz {
+        atomic_number: z, x: x, y: y, z: zz, radius: 1.0,
+        charge: Epistemic::certain(0.0),
+        r: if z == 1 { 230 } else if z == 6 { 120 } else if z == 8 { 230 } else { 120 },
+        g: if z == 1 { 230 } else if z == 6 { 135 } else if z == 8 { 70 } else { 160 },
+        b: if z == 1 { 240 } else if z == 6 { 150 } else if z == 8 { 70 } else { 220 },
+    }
+}
+
+pub fn bond_viz(a: i64, b: i64, order: i64, length_value: f64, length_uncertainty: f64) -> BondViz {
+    BondViz {
+        atom_a: a, atom_b: b, order: order,
+        length: Quantity { value: length_value, uncertainty: length_uncertainty, dim: dim_dimensionless() },
+        variance: length_uncertainty * length_uncertainty,
+    }
+}
+
+pub fn molecule_empty() -> MoleculeViz {
+    MoleculeViz {
+        atoms: [atom_viz_default(0, 0.0, 0.0, 0.0); 64],
+        bonds: [bond_viz(0, 0, 0, 0.0, 0.0); 96],
+        atom_count: 0,
+        bond_count: 0,
+    }
+}
+
+pub fn molecule_h2o() -> MoleculeViz with Mut {
+    var m = molecule_empty()
+    m.atoms[0] = atom_viz_default(8, 0.0, 0.0, 0.0)
+    m.atoms[1] = atom_viz_default(1, 0.95, 0.35, 0.0)
+    m.atoms[2] = atom_viz_default(1, -0.95, 0.35, 0.0)
+    m.bonds[0] = bond_viz(0, 1, 1, 0.096, 0.002)
+    m.bonds[1] = bond_viz(0, 2, 1, 0.096, 0.002)
+    m.atom_count = 3
+    m.bond_count = 2
+    m
+}
+
+// ─── Rapamycin (sirolimus) coarse 3D representation ─────────────────────────
+//
+// 44 heavy atoms: 31-membered macrolide ring + pipecolinyl (6-membered) +
+// 8 key substituent oxygens placed radially outward.
+// Coordinates are approximate idealised macrolide geometry; for crystallographic
+// accuracy see PDB:1NSG.
+//
+// Split into helpers to stay within the per-function local-variable budget.
+
+fn rap_fmod(x: f64, mdl: f64) -> f64 with Div {
+    x - ((x / mdl) as i64 as f64) * mdl
+}
+
+fn rap_sin(x: f64) -> f64 with Mut, Div {
+    let pi2: f64 = 6.28318530718
+    let pi:  f64 = 3.14159265359
+    var t = rap_fmod(x, pi2)
+    if t > pi       { t = t - pi2 }
+    if t < 0.0 - pi { t = t + pi2 }
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 / 5040.0)))
+}
+
+fn rap_cos(x: f64) -> f64 with Mut, Div {
+    rap_sin(x + 1.57079632679)
+}
+
+// Fills the 31-membered macrolide ring (atoms 0-30) into m.
+fn rap_fill_ring(m: &!MoleculeViz, step: f64) with Mut, Div {
+    var i: i64 = 0
+    while i < 31 {
+        let theta = (i as f64) * step
+        let rx = 6.5 * rap_cos(theta)
+        let ry = 5.0 * rap_sin(theta)
+        let rz = 0.6 * rap_sin(theta * 2.0)
+        let az = if i == 0 || i == 9 || i == 18 || i == 26 { 8 } else if i == 30 { 7 } else { 6 }
+        m.atoms[i as usize] = atom_viz_default(az, rx, ry, rz)
+        i = i + 1
+    }
+}
+
+// Fills pipecolinyl ring (atoms 31-35; N = atom 30) into m.
+fn rap_fill_pip(m: &!MoleculeViz, step: f64) with Mut, Div {
+    let n_theta = 30.0 * step
+    let pip_cx = 6.5 * rap_cos(n_theta) + 2.8
+    let pip_cy = 5.0 * rap_sin(n_theta) - 0.5
+    let pip_cz = 0.6 * rap_sin(n_theta * 2.0)
+    let pip_step: f64 = 1.04720
+    var j: i64 = 0
+    while j < 5 {
+        let th = (j as f64) * pip_step + 0.52
+        let px = pip_cx + 1.3 * rap_cos(th)
+        let py = pip_cy + 1.3 * rap_sin(th)
+        m.atoms[(31 + j) as usize] = atom_viz_default(6, px, py, pip_cz - 0.1)
+        j = j + 1
+    }
+}
+
+// Fills 8 substituent oxygens (atoms 36-43) into m.
+fn rap_fill_subs(m: &!MoleculeViz, step: f64) with Mut, Div {
+    var k: i64 = 0
+    while k < 8 {
+        let si = if k == 0 { 3 } else if k == 1 { 6 } else if k == 2 { 10 }
+                 else if k == 3 { 14 } else if k == 4 { 17 } else if k == 5 { 21 }
+                 else if k == 6 { 24 } else { 27 }
+        let stheta = (si as f64) * step
+        let sx = 8.2 * rap_cos(stheta)
+        let sy = 6.7 * rap_sin(stheta)
+        let sz = 0.6 * rap_sin(stheta * 2.0) + 0.6
+        m.atoms[(36 + k) as usize] = atom_viz_default(8, sx, sy, sz)
+        k = k + 1
+    }
+}
+
+// Fills macrolide + pipecolinyl bonds (indices 0-36) into m.
+fn rap_fill_bonds(m: &!MoleculeViz) with Mut {
+    var b: i64 = 0
+    while b < 30 {
+        m.bonds[b as usize] = bond_viz(b, b + 1, 1, 1.52, 0.02)
+        b = b + 1
+    }
+    m.bonds[30] = bond_viz(30, 0, 1, 1.52, 0.02)
+    m.bonds[31] = bond_viz(30, 31, 1, 1.47, 0.02)
+    m.bonds[32] = bond_viz(31, 32, 1, 1.52, 0.02)
+    m.bonds[33] = bond_viz(32, 33, 1, 1.52, 0.02)
+    m.bonds[34] = bond_viz(33, 34, 1, 1.52, 0.02)
+    m.bonds[35] = bond_viz(34, 35, 1, 1.52, 0.02)
+    m.bonds[36] = bond_viz(35, 30, 1, 1.47, 0.02)
+}
+
+// Fills substituent bonds (indices 37-44) into m.
+fn rap_fill_sub_bonds(m: &!MoleculeViz) with Mut {
+    var sk: i64 = 0
+    while sk < 8 {
+        let sri = if sk == 0 { 3 } else if sk == 1 { 6 } else if sk == 2 { 10 }
+                  else if sk == 3 { 14 } else if sk == 4 { 17 } else if sk == 5 { 21 }
+                  else if sk == 6 { 24 } else { 27 }
+        m.bonds[(37 + sk) as usize] = bond_viz(sri, 36 + sk, 1, 1.35, 0.02)
+        sk = sk + 1
+    }
+}
+
+pub fn molecule_rapamycin_coarse() -> MoleculeViz with Mut, Div {
+    var m = molecule_empty()
+    let step: f64 = 0.20270    // 2π/31
+    rap_fill_ring(&!m, step)
+    rap_fill_pip(&!m, step)
+    rap_fill_subs(&!m, step)
+    m.atom_count = 44
+    rap_fill_bonds(&!m)
+    rap_fill_sub_bonds(&!m)
+    m.bond_count = 45
+    m
+}
+
+pub fn scalar_field_empty(rows: i64, cols: i64) -> ScalarField2D {
+    ScalarField2D {
+        values: [0.0; 4096], variances: [0.0; 4096],
+        rows: rows, cols: cols, unit: dim_dimensionless(),
+        min_value: 0.0, max_value: 1.0,
+    }
+}
+
+pub fn scalar_field_radial(rows: i64, cols: i64) -> ScalarField2D with Mut, Div {
+    var f = scalar_field_empty(rows, cols)
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            let dx = (c as f64) - (cols as f64) * 0.5
+            let dy = (r as f64) - (rows as f64) * 0.5
+            let v = dx * dx + dy * dy
+            let idx = r * cols + c
+            f.values[idx as usize] = v
+            f.variances[idx as usize] = v * 0.001
+            if idx == 0 || v < f.min_value { f.min_value = v }
+            if idx == 0 || v > f.max_value { f.max_value = v }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    f
+}
+
+pub fn vector_field_empty(rows: i64, cols: i64) -> VectorField2D {
+    VectorField2D {
+        vx: [0.0; 4096], vy: [0.0; 4096], variance: [0.0; 4096],
+        rows: rows, cols: cols, unit: dim_dimensionless(),
+    }
+}
+
+pub fn vector_field_vortex(rows: i64, cols: i64) -> VectorField2D with Mut, Div {
+    var f = vector_field_empty(rows, cols)
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            let dx = (c as f64) - (cols as f64) * 0.5
+            let dy = (r as f64) - (rows as f64) * 0.5
+            let idx = r * cols + c
+            f.vx[idx as usize] = 0.0 - dy
+            f.vy[idx as usize] = dx
+            f.variance[idx as usize] = (dx * dx + dy * dy) * 0.0005
+            c = c + 1
+        }
+        r = r + 1
+    }
+    f
+}
+
+pub fn trajectory_empty() -> Trajectory3D {
+    Trajectory3D {
+        x: [0.0; 1024], y: [0.0; 1024], z: [0.0; 1024],
+        t: [0.0; 1024], variance: [0.0; 1024], n: 0,
+    }
+}
+
+pub fn trajectory_spiral(n: i64) -> Trajectory3D with Mut, Div {
+    var tr = trajectory_empty()
+    var count = n
+    if count > 1024 { count = 1024 }
+    tr.n = count
+    var i: i64 = 0
+    while i < count {
+        let theta = (i as f64) * 0.35
+        let radius = 0.25 + (i as f64) * 0.01
+        tr.x[i as usize] = radius * rap_cos(theta)
+        tr.y[i as usize] = radius * rap_sin(theta)
+        tr.z[i as usize] = (i as f64) * 0.02
+        tr.t[i as usize] = i as f64
+        tr.variance[i as usize] = (i as f64) * 0.0001
+        i = i + 1
+    }
+    tr
+}
+
+pub fn spectrum_empty() -> SpectrumViz {
+    SpectrumViz {
+        x: [0.0; 1024], intensity: [0.0; 1024], variance: [0.0; 1024],
+        n: 0, x_min: 0.0, x_max: 1.0, y_min: 0.0, y_max: 1.0,
+        unit: dim_dimensionless(),
+    }
+}
+
+pub fn spectrum_absorption_demo(n: i64) -> SpectrumViz with Mut, Div {
+    var s = spectrum_empty()
+    var count = n
+    if count > 1024 { count = 1024 }
+    s.n = count
+    var i: i64 = 0
+    while i < count {
+        let x = 350.0 + (i as f64) * 4.0
+        let peak_a = 1.0 / (1.0 + ((x - 430.0) * (x - 430.0)) / 900.0)
+        let peak_b = 0.7 / (1.0 + ((x - 610.0) * (x - 610.0)) / 1600.0)
+        let y = peak_a + peak_b
+        s.x[i as usize] = x
+        s.intensity[i as usize] = y
+        s.variance[i as usize] = y * 0.002
+        if i == 0 || x < s.x_min { s.x_min = x }
+        if i == 0 || x > s.x_max { s.x_max = x }
+        if i == 0 || y < s.y_min { s.y_min = y }
+        if i == 0 || y > s.y_max { s.y_max = y }
+        i = i + 1
+    }
+    s
+}
+
+pub fn lattice_field_empty(rows: i64, cols: i64) -> LatticeField2D {
+    LatticeField2D {
+        rows: rows, cols: cols,
+        displacement_x: [0.0; 4096], displacement_y: [0.0; 4096],
+        phase: [0.0; 4096], variance: [0.0; 4096],
+        unit: dim_dimensionless(),
+    }
+}
+
+pub fn lattice_field_phonon_demo(rows: i64, cols: i64) -> LatticeField2D with Mut, Div {
+    var field = lattice_field_empty(rows, cols)
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            let idx = r * cols + c
+            field.phase[idx as usize] = ((r + c) as f64) * 0.25
+            field.displacement_x[idx as usize] = ((c as f64) - (cols as f64) * 0.5) * 0.02
+            field.displacement_y[idx as usize] = ((r as f64) - (rows as f64) * 0.5) * 0.02
+            field.variance[idx as usize] = 0.001 + (idx as f64) * 0.0001
+            c = c + 1
+        }
+        r = r + 1
+    }
+    field
+}
+
+pub fn particle_event_view_empty() -> ParticleEventView {
+    ParticleEventView {
+        x: [0.0; 1024], y: [0.0; 1024], z: [0.0; 1024],
+        energy: [0.0; 1024], variance: [0.0; 1024],
+        kind: [0; 1024], n: 0, unit: dim_dimensionless(),
+    }
+}
+
+pub fn particle_event_view_demo(n: i64) -> ParticleEventView with Mut, Div {
+    var events = particle_event_view_empty()
+    var i: i64 = 0
+    while i < n && i < 1024 {
+        events.x[i as usize] = (i as f64) * 0.1
+        events.y[i as usize] = ((i * i) as f64) * 0.01
+        events.z[i as usize] = (i as f64) * 0.02
+        events.energy[i as usize] = 1.0 + (i as f64) * 0.05
+        events.variance[i as usize] = 0.01 + (i as f64) * 0.001
+        events.kind[i as usize] = i % 3
+        i = i + 1
+    }
+    events.n = i
+    events
+}

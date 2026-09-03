@@ -1,10 +1,10 @@
 <!-- docs:meta
 topic_id: repo.docs.compiler.nvidia-bare-metal
 authority: repo_only
-audience: implementers
-last_validated: 2026-04-28
-validated_by: native_v2_nvidia_bare_metal_gate
-source_of_truth: scripts/ci/native_v2_nvidia_bare_metal_gate.sh
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.nvidia-bare-metal
 -->
 
 # Sounio NVIDIA Bare GPU Backend

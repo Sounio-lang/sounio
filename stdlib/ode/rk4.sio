@@ -1,3 +1,6 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
 // rk4.d - Classic 4th-order Runge-Kutta ODE Solver for Sounio
 //
 // Fixed-step RK4 method. Simple, robust, but requires user to specify step size.
@@ -17,7 +20,7 @@ fn abs_val(x: f64) -> f64 {
     return x
 }
 
-fn sqrt_val(x: f64) -> f64 {
+fn sqrt_val(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
     var y = x
     y = (y + x / y) / 2.0
@@ -136,7 +139,7 @@ fn exp_decay_f(u: f64, t: f64) -> f64 {
 }
 
 // Single RK4 step for scalar ODE du/dt = f(u, t)
-fn rk4_step_scalar(s: ScalarState, dt: f64) -> ScalarStepResult {
+fn rk4_step_scalar(s: ScalarState, dt: f64) -> ScalarStepResult with Div, Panic {
     let u = s.u
     let t = s.t
     let k1 = exp_decay_f(u, t)
@@ -149,7 +152,7 @@ fn rk4_step_scalar(s: ScalarState, dt: f64) -> ScalarStepResult {
     }
 }
 
-fn solve_rk4_scalar(u0: f64, t0: f64, t_end: f64, n_steps: i64) -> RK4Solution {
+fn solve_rk4_scalar(u0: f64, t0: f64, t_end: f64, n_steps: i64) -> RK4Solution with Mut, Div, Panic {
     let dt = (t_end - t0) / (n_steps as f64)
     var s = ScalarState { u: u0, t: t0 }
     var i: i64 = 0
@@ -213,7 +216,7 @@ fn pk3_ode(gut: f64, central: f64, periph: f64, t: f64, p: PKParams3) -> PKDeriv
     }
 }
 
-fn rk4_step_pk3(s: PKState3, dt: f64, p: PKParams3) -> PKStepResult3 {
+fn rk4_step_pk3(s: PKState3, dt: f64, p: PKParams3) -> PKStepResult3 with Div, Panic {
     let t = s.t
 
     // Stage 1
@@ -261,7 +264,7 @@ struct RK4SolutionPK3 {
     nfeval: i64
 }
 
-fn solve_rk4_pk3(s0: PKState3, p: PKParams3, t_end: f64, n_steps: i64) -> RK4SolutionPK3 {
+fn solve_rk4_pk3(s0: PKState3, p: PKParams3, t_end: f64, n_steps: i64) -> RK4SolutionPK3 with Mut, Div, Panic {
     let dt = t_end / (n_steps as f64)
     var s = s0
     var i: i64 = 0
@@ -286,7 +289,7 @@ fn solve_rk4_pk3(s0: PKState3, p: PKParams3, t_end: f64, n_steps: i64) -> RK4Sol
 // ANALYTICAL SOLUTION FOR VALIDATION
 // ============================================================================
 
-fn exp_approx(x: f64) -> f64 {
+fn exp_approx(x: f64) -> f64 with Div, Panic {
     let x2 = x * x
     let x3 = x2 * x
     let x4 = x3 * x
@@ -297,9 +300,73 @@ fn exp_approx(x: f64) -> f64 {
     return 1.0 + x + x2/2.0 + x3/6.0 + x4/24.0 + x5/120.0 + x6/720.0 + x7/5040.0 + x8/40320.0
 }
 
-fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
+fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 with Div, Panic {
     return u0 * exp_approx(0.0 - k * t)
 }
 
 // ============================================================================
-// TEST
+// TESTS
+// ============================================================================
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_exp_decay() with IO, Mut, Div, Panic {
+    // u' = -0.1*u, u(0) = 1.0
+    // Exact: u(10) = exp(-1) = 0.36787944117144233
+    let sol = solve_rk4_scalar(1.0, 0.0, 10.0, 1000)
+    let exact = 0.36787944117144233
+    chk(1, near(sol.t_final, 10.0, 1e-12))
+    chk(2, near(sol.u_final, exact, 1e-6))
+    chk(3, if sol.nsteps == 1000 { 1 } else { 0 })
+    chk(4, if sol.nfeval == 4000 { 1 } else { 0 })
+}
+
+fn test_pk3() with IO, Mut, Div, Panic {
+    let p = default_pk3_params()
+    let s0 = PKState3 { gut: 100.0, central: 0.0, periph: 0.0, t: 0.0 }
+    let sol = solve_rk4_pk3(s0, p, 24.0, 240)
+
+    // After 24h: gut should be nearly depleted (tau_gut = 1/ka ≈ 0.67h)
+    chk(5, near(sol.gut, 0.0, 0.01))
+    // Central should be positive (drug present)
+    chk(6, if sol.central > 0.0 { 1 } else { 0 })
+    // Total mass should be conserved approximately (gut+central+periph < initial 100)
+    let total = sol.gut + sol.central + sol.periph
+    chk(7, if total < 100.0 { 1 } else { 0 })
+    chk(8, near(sol.t_final, 24.0, 1e-10))
+}
+
+fn test_exp_approx() with IO, Mut, Div, Panic {
+    let e1 = exp_approx(1.0)
+    chk(9, near(e1, 2.718281828, 1e-5))
+    let e0 = exp_approx(0.0)
+    chk(10, near(e0, 1.0, 1e-12))
+    let em1 = exp_approx(0.0 - 1.0)
+    chk(11, near(em1, 0.36787944, 1e-5))
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/ode/rk4 tests ───\n")
+    test_exp_approx()
+    test_exp_decay()
+    test_pk3()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
+}

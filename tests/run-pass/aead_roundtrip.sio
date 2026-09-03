@@ -1,0 +1,87 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 5 Step 7: round-trip tests at non-block-aligned lengths for both
+// dispatch targets, spanning both AES's 16-byte and ChaCha20's 64-byte
+// natural chunk sizes on both sides of each boundary: 1, 15, 17, 63, 65
+// bytes. Split by (algorithm, length) into one helper function per case,
+// following this branch's established pattern for staying under
+// Madaros's per-function IR instruction budget.
+
+use crypto::aead::*
+use net::socket::*
+
+fn fill_pattern(buf: &RawBuf, len: i64) with IO {
+    var i: i64 = 0
+    while i < len {
+        rawbuf_set(buf, i, (i * 37 + 11) & 255)
+        i = i + 1
+    }
+}
+
+fn roundtrip_check(algo: i32, len: i64) -> i64 with IO {
+    let key: [u8;32] = [
+        0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,
+        0x3a,0x3b,0x3c,0x3d,0x3e,0x3f,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49
+    ]
+    let nonce: [u8;12] = [0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c]
+    let aad_bytes: [u8;3] = [9,8,7]
+
+    let pt_buf = rawbuf_new(len + 8)
+    fill_pattern(&pt_buf, len)
+    let aad_buf = rawbuf_new(3 + 8)
+    var j: i64 = 0
+    while j < 3 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(algo, &key, &nonce, &pt_buf, len, &aad_buf, 3)
+    if sealed_len != len + 16 { return 1 }
+
+    let (opened, ok) = aead_open(algo, &key, &nonce, &sealed, sealed_len, &aad_buf, 3)
+    if !ok { return 2 }
+
+    var i: i64 = 0
+    while i < len {
+        if rawbuf_get(&opened, i) != rawbuf_get(&pt_buf, i) { return 3 }
+        i = i + 1
+    }
+    0
+}
+
+fn gcm_len1() -> i64 with IO { roundtrip_check(AEAD_AES_128_GCM, 1) }
+fn gcm_len15() -> i64 with IO { roundtrip_check(AEAD_AES_128_GCM, 15) }
+fn gcm_len17() -> i64 with IO { roundtrip_check(AEAD_AES_128_GCM, 17) }
+fn gcm_len63() -> i64 with IO { roundtrip_check(AEAD_AES_128_GCM, 63) }
+fn gcm_len65() -> i64 with IO { roundtrip_check(AEAD_AES_128_GCM, 65) }
+
+fn chacha_len1() -> i64 with IO { roundtrip_check(AEAD_CHACHA20_POLY1305, 1) }
+fn chacha_len15() -> i64 with IO { roundtrip_check(AEAD_CHACHA20_POLY1305, 15) }
+fn chacha_len17() -> i64 with IO { roundtrip_check(AEAD_CHACHA20_POLY1305, 17) }
+fn chacha_len63() -> i64 with IO { roundtrip_check(AEAD_CHACHA20_POLY1305, 63) }
+fn chacha_len65() -> i64 with IO { roundtrip_check(AEAD_CHACHA20_POLY1305, 65) }
+
+fn main() -> i64 with IO {
+    let r1 = gcm_len1()
+    if r1 != 0 { print_int(100 + r1); return 1 }
+    let r2 = gcm_len15()
+    if r2 != 0 { print_int(110 + r2); return 1 }
+    let r3 = gcm_len17()
+    if r3 != 0 { print_int(120 + r3); return 1 }
+    let r4 = gcm_len63()
+    if r4 != 0 { print_int(130 + r4); return 1 }
+    let r5 = gcm_len65()
+    if r5 != 0 { print_int(140 + r5); return 1 }
+
+    let r6 = chacha_len1()
+    if r6 != 0 { print_int(200 + r6); return 1 }
+    let r7 = chacha_len15()
+    if r7 != 0 { print_int(210 + r7); return 1 }
+    let r8 = chacha_len17()
+    if r8 != 0 { print_int(220 + r8); return 1 }
+    let r9 = chacha_len63()
+    if r9 != 0 { print_int(230 + r9); return 1 }
+    let r10 = chacha_len65()
+    if r10 != 0 { print_int(240 + r10); return 1 }
+
+    println("aead_roundtrip: AES-128-GCM and ChaCha20-Poly1305 round-trip exactly at lengths 1/15/17/63/65 bytes")
+    return 0
+}

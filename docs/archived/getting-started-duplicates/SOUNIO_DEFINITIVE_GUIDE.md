@@ -7,6 +7,7 @@ validated_by: A7
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getting-started-duplicates.sounio-definitive-guide
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `archived`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.

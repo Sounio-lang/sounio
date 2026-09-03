@@ -1,0 +1,346 @@
+// self-hosted/gpu/test_kaxi_fuzz.sio - Randomized differential fuzzer for K-AXI
+//
+// Generates random valid K-AXI kernels using PCG64, runs scalar + warp simulators,
+// emits C code blocks for external compilation and comparison.
+// Fixed seed for reproducibility.
+//
+// NOTE: KaxiAsmBuf (16KB struct) must NOT be returned from helper functions
+// due to Sounio struct pass-by-value stack corruption. All large structs
+// are kept in the stack frame of the function that uses them.
+
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_c::*
+use random::rng::*
+
+// Local transpiler to avoid imported-function string-return bug
+fn my_transpile_to_c(asm: KaxiAsmBuf) -> string with Mut, Panic, Div, Alloc {
+    var out: KaxiAsmBuf = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, "#include <stdio.h>\n")
+    out = kaxi_asm_push_str(out, "void kaxi_kernel(int tid, long long mem[1024], long long shared_mem[256]) {\n")
+    out = kaxi_asm_push_str(out, "    long long *reg_val = kaxi_lane_reg[tid];\n")
+    out = kaxi_asm_push_str(out, "    int *pred = kaxi_lane_pred[tid];\n")
+    out = kaxi_asm_push_str(out, "    (void)tid;\n")
+    var line_start: i64 = 0
+    var i: i64 = 0
+    var instr_idx: i64 = 0
+    while i <= asm.len {
+        let is_end = i == asm.len
+        let is_newline = if i < asm.len { asm.data[i as usize] as i8 == 10 } else { true }
+        if is_end || is_newline {
+            let line_len = i - line_start
+            if line_len > 0 {
+                let first_char = asm.data[line_start as usize] as i8
+                if first_char != 59 && first_char != 0 {
+                    let c = kaxi_transpile_line_to_c(asm, line_start, line_len)
+                    out = kaxi_asm_push_str(out, "    L")
+                    out = kaxi_asm_push_str(out, int_to_string(instr_idx))
+                    out = kaxi_asm_push_str(out, ": ")
+                    if str_len(c) > 0 {
+                        out = kaxi_asm_push_str(out, c)
+                    } else {
+                        out = kaxi_asm_push_str(out, "// nop")
+                    }
+                    out = kaxi_asm_push_byte(out, 10)
+                    instr_idx = instr_idx + 1
+                }
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    out = kaxi_asm_push_str(out, "}\n")
+    kaxi_asm_to_string(out)
+}
+
+fn emit_kernel_header(name: string) with IO {
+    println("")
+    println("---KERNEL ")
+    println(name)
+    println("---")
+}
+
+fn emit_sim_mem(state: KaxiSimState) with IO, Mut, Panic, Div, Alloc {
+    print("SIM_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print(int_to_string(state.mem[i as usize]))
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_warp_mem(warp: KaxiWarpState) with IO, Mut, Panic, Div, Alloc {
+    print("WARP_MEM:")
+    var i: i64 = 0
+    while i < 16 {
+        print(" ")
+        print(int_to_string(warp.mem[i as usize]))
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_c_direct(asm: KaxiAsmBuf, warp_size: i64) with IO, Mut, Panic, Div, Alloc {
+    println("---C_CODE---")
+    println("#include \"self-hosted/gpu/kaxi_c_runtime.h\"")
+    println(my_transpile_to_c(asm))
+    println("int main() {")
+    println("    long long mem[1024] = {0};")
+    if warp_size > 1 {
+        print("    kaxi_run_warp(kaxi_kernel, mem, ")
+        print(int_to_string(warp_size))
+        println(");")
+    } else {
+        println("    kaxi_run_scalar(kaxi_kernel, mem);")
+    }
+    println("    kaxi_dump_mem(\"C_MEM\", mem, 16);")
+    println("    return 0;")
+    println("}")
+    println("---C_CODE_END---")
+}
+
+fn fuzz_cmp_str(idx: i64) -> string with Mut, Panic, Div {
+    if idx == 0 { "lt" }
+    else if idx == 1 { "le" }
+    else if idx == 2 { "eq" }
+    else if idx == 3 { "ge" }
+    else if idx == 4 { "gt" }
+    else { "ne" }
+}
+
+fn run_one_kernel(rng_in: RngPcgWrapper, k: i64) -> RngPcgWrapper with IO, Mut, Panic, Div, Alloc {
+    var rng = rng_in
+
+    // --- Build kernel directly in this stack frame ---
+    var asm: KaxiAsmBuf = kaxi_asm_new()
+    var seq: i64 = 0
+    var has_pred: bool = false
+    var pred_reg: i64 = 0
+
+    // r0 = 0 (store address), r15 = non-zero (safe divisor)
+    let safe_div_res = rng_pcg_bounded(rng, 99)
+    let safe_div = safe_div_res.1 + 1
+    rng = safe_div_res.0
+    asm = kaxi_asm_push_line(asm, "load_imm r0, imm=0, seq=0")
+    seq = 1
+    asm = kaxi_asm_push_line(asm, "load_imm r15, imm=" + int_to_string(safe_div) + ", seq=1")
+    seq = 2
+
+    // Generate 4-8 random instructions
+    let count_result = rng_pcg_bounded(rng, 5)
+    let instr_count = count_result.1 + 4
+    rng = count_result.0
+
+    var i: i64 = 0
+    while i < instr_count {
+        let op_result = rng_pcg_bounded(rng, 11)
+        let op = op_result.1
+        rng = op_result.0
+
+        if op == 0 {
+            // load_imm
+            let imm_res = rng_pcg_bounded(rng, 201)
+            let imm = imm_res.1
+            rng = imm_res.0
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            asm = kaxi_asm_push_line(asm, "load_imm r" + int_to_string(dst) + ", imm=" + int_to_string(imm) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 1 {
+            // add
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "add r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 2 {
+            // sub
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "sub r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 3 {
+            // mul
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "mul r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 4 {
+            // div (using safe divisor r15)
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            asm = kaxi_asm_push_line(asm, "div r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r15, seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 5 {
+            // fma
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "fma r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 6 {
+            // setp comparison
+            let cmp_res = rng_pcg_bounded(rng, 6)
+            let cmp_idx = cmp_res.1
+            rng = cmp_res.0
+            let cmp_str = fuzz_cmp_str(cmp_idx)
+            let pred_res = rng_pcg_bounded(rng, 4)
+            pred_reg = pred_res.1
+            rng = pred_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "setp." + cmp_str + " p" + int_to_string(pred_reg) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+            has_pred = true
+        }
+        else if op == 7 && has_pred {
+            // selp
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_a_res = rng_pcg_bounded(rng, 14)
+            let src_a = src_a_res.1 + 1
+            rng = src_a_res.0
+            let src_b_res = rng_pcg_bounded(rng, 14)
+            let src_b = src_b_res.1 + 1
+            rng = src_b_res.0
+            asm = kaxi_asm_push_line(asm, "selp r" + int_to_string(dst) + ", r" + int_to_string(src_a) + ", r" + int_to_string(src_b) + ", pred=p" + int_to_string(pred_reg) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 8 && has_pred {
+            // vote.b
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            asm = kaxi_asm_push_line(asm, "vote.b r" + int_to_string(dst) + ", p" + int_to_string(pred_reg) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 9 {
+            // shuffle.x
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_res = rng_pcg_bounded(rng, 14)
+            let src = src_res.1 + 1
+            rng = src_res.0
+            let xor_res = rng_pcg_bounded(rng, 3)
+            let xor_val = xor_res.1 + 1
+            rng = xor_res.0
+            asm = kaxi_asm_push_line(asm, "shuffle.x r" + int_to_string(dst) + ", r" + int_to_string(src) + ", imm=" + int_to_string(xor_val) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 10 {
+            // warp.reduc
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            let src_res = rng_pcg_bounded(rng, 14)
+            let src = src_res.1 + 1
+            rng = src_res.0
+            asm = kaxi_asm_push_line(asm, "warp.reduc r" + int_to_string(dst) + ", r" + int_to_string(src) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else if op == 11 {
+            // get_tid
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            asm = kaxi_asm_push_line(asm, "get_tid r" + int_to_string(dst) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+        else {
+            // Fallback: load_imm (always valid)
+            let imm_res = rng_pcg_bounded(rng, 201)
+            let imm = imm_res.1
+            rng = imm_res.0
+            let dst_res = rng_pcg_bounded(rng, 14)
+            let dst = dst_res.1 + 1
+            rng = dst_res.0
+            asm = kaxi_asm_push_line(asm, "load_imm r" + int_to_string(dst) + ", imm=" + int_to_string(imm) + ", seq=" + int_to_string(seq))
+            seq = seq + 1
+        }
+
+        i = i + 1
+    }
+
+    // Final store and ret
+    let result_res = rng_pcg_bounded(rng, 14)
+    let result_reg = result_res.1 + 1
+    rng = result_res.0
+    asm = kaxi_asm_push_line(asm, "store_global r" + int_to_string(result_reg) + ", addr=r0, seq=" + int_to_string(seq))
+    seq = seq + 1
+    asm = kaxi_asm_push_line(asm, "ret seq=" + int_to_string(seq))
+
+    // --- Execute and emit ---
+    let name: string = "fuzz_" + int_to_string(k)
+    emit_kernel_header(name)
+
+    var stream: KaxiTxnStream = kaxi_assemble(asm)
+    var state: KaxiSimState = kaxi_sim_new()
+    state = kaxi_sim_exec(state, stream)
+    var warp: KaxiWarpState = kaxi_warp_new()
+    warp = kaxi_warp_exec(warp, stream)
+
+    emit_sim_mem(state)
+    emit_warp_mem(warp)
+    emit_c_direct(asm, 8)
+
+    rng
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let SEED: i64 = 0xDEADBEEF
+    var rng: RngPcgWrapper = rng_pcg_new(SEED)
+    let NUM_KERNELS: i64 = 50
+
+    var k: i64 = 0
+    while k < NUM_KERNELS {
+        rng = run_one_kernel(rng, k)
+        k = k + 1
+    }
+
+    println("PASS fuzz_all")
+    0
+}

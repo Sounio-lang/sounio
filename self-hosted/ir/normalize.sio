@@ -28,24 +28,30 @@ fn name_less_than(a: Name, b: Name) -> bool with Mut, Panic, Div {
     a.len < b.len
 }
 
-// Bubble sort for functions (small arrays, simplicity over performance)
-fn sort_functions_by_name(funcs: [IrFunction; 1024], count: i64) -> [IrFunction; 1024] with Mut, Panic, Div {
-    var sorted = funcs
+// Bubble sort for functions, in place on the module's function table.
+// Takes &! IrModule rather than a by-value [IrFunction; 16384]: the table is a
+// handle into arena storage, so the old signature never copied the ~23 MiB of
+// IrFunction slots — but the by-value spelling invited that reading and runs
+// against the hardening that moves large structural values off by-value passes.
+// Sorting in place through the module reference makes the intent explicit.
+// (&![T; N] on a bare array is broken in the JIT, so the reference is to the
+// struct, not the array.)
+fn sort_functions_by_name(module: &! IrModule) with Mut, Panic, Div {
+    let count = (*module).fn_count
     var i: i64 = 0
     while i < count {
         var j: i64 = 0
         while j < count - 1 {
-            if name_less_than(sorted[j + 1].name, sorted[j].name) {
+            if name_less_than((*module).functions[j + 1].name, (*module).functions[j].name) {
                 // Swap
-                let temp = sorted[j]
-                sorted[j] = sorted[j + 1]
-                sorted[j + 1] = temp
+                let temp = (*module).functions[j]
+                (*module).functions[j] = (*module).functions[j + 1]
+                (*module).functions[j + 1] = temp
             }
             j = j + 1
         }
         i = i + 1
     }
-    sorted
 }
 
 // Bubble sort for string table
@@ -75,7 +81,7 @@ fn build_label_map(func: IrFunction) -> [i64; 256] with Mut, Panic, Div {
 
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         match instr.op {
             IrOpcode::IrLabel => {
                 let old_label = instr.label_id
@@ -97,10 +103,10 @@ fn build_label_map(func: IrFunction) -> [i64; 256] with Mut, Panic, Div {
 
 // Apply label renumbering to all instructions
 fn renumber_labels(func: IrFunction, label_map: [i64; 256]) -> IrFunction with Mut, Panic, Div {
-    var new_func = func
+    var new_func = ir_function_clone(&func)
     var i: i64 = 0
     while i < new_func.instr_count {
-        let instr = new_func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(new_func.region, (i)))
         let old_label = instr.label_id
         let new_label = if old_label >= 0 && old_label < 256 {
             let mapped = label_map[old_label]
@@ -111,7 +117,7 @@ fn renumber_labels(func: IrFunction, label_map: [i64; 256]) -> IrFunction with M
 
         // Create updated instruction with new label_id
         let base = instr
-        new_func.instrs[i] = IrInstr {
+        ir_arena_store(ir_region_slot_w(new_func.region, (i)), IrInstr {
             op: base.op,
             dst: base.dst,
             src1: base.src1,
@@ -124,10 +130,10 @@ fn renumber_labels(func: IrFunction, label_map: [i64; 256]) -> IrFunction with M
             imm_flags: 0,
             bin_op: base.bin_op,
             un_op: base.un_op,
-            name: base.name,
+            name_id: base.name_id,
             call_args: base.call_args,
             arg_count: base.arg_count,
-        }
+        })
         i = i + 1
     }
     new_func
@@ -141,7 +147,7 @@ fn build_register_map(func: IrFunction) -> [i64; 1024] with Mut, Panic, Div {
     // Scan all instructions
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
 
         // Record dst register (definition)
         if instr.dst >= 0 && instr.dst < 1024 {
@@ -185,7 +191,7 @@ fn map_register(old_reg: i64, reg_map: [i64; 1024]) -> i64 with Mut, Panic, Div 
 
 // Apply register renumbering to all instructions and params
 fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with Mut, Panic, Div {
-    var new_func = func
+    var new_func = ir_function_clone(&func)
 
     // Renumber param_regs
     var j: i64 = 0
@@ -197,12 +203,12 @@ fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with
     // Renumber instruction registers
     var i: i64 = 0
     while i < new_func.instr_count {
-        let instr = new_func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(new_func.region, (i)))
         let new_dst = map_register(instr.dst, reg_map)
         let new_src1 = map_register(instr.src1, reg_map)
         let new_src2 = map_register(instr.src2, reg_map)
 
-        new_func.instrs[i] = IrInstr {
+        ir_arena_store(ir_region_slot_w(new_func.region, (i)), IrInstr {
             op: instr.op,
             dst: new_dst,
             src1: new_src1,
@@ -215,10 +221,10 @@ fn renumber_registers(func: IrFunction, reg_map: [i64; 1024]) -> IrFunction with
             imm_flags: 0,
             bin_op: instr.bin_op,
             un_op: instr.un_op,
-            name: instr.name,
+            name_id: instr.name_id,
             call_args: instr.call_args,
             arg_count: instr.arg_count,
-        }
+        })
         i = i + 1
     }
 
@@ -240,14 +246,18 @@ fn normalize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
 
 // Normalize an entire module
 fn normalize_ir_module(module: IrModule) -> IrModule with Mut, Panic, Div {
-    // Step 1: Sort functions by name
-    let sorted_funcs = sort_functions_by_name(module.functions, module.fn_count)
+    // Step 1: Sort functions by name, in place on a mutable handle. `var m =
+    // module` is a shallow copy of the struct-of-handles (the function table is
+    // a handle, so this does not copy the table); sorting through &! m reorders
+    // the same backing storage the old by-value path already mutated.
+    var m = module
+    sort_functions_by_name(&! m)
 
     // Step 2: Normalize each function
-    var normalized_funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    var normalized_funcs: [IrFunction; 16384] = [ir_empty_function(); 16384]
     var i: i64 = 0
-    while i < module.fn_count {
-        normalized_funcs[i] = normalize_function(sorted_funcs[i])
+    while i < m.fn_count {
+        normalized_funcs[i] = normalize_function(m.functions[i])
         i = i + 1
     }
 
@@ -314,8 +324,8 @@ fn compare_normalized_ir(a: IrModule, b: IrModule) -> i64 with Mut, Panic, Div {
         // Compare instructions (simplified — real impl would compare all fields)
         var j: i64 = 0
         while j < fa.instr_count {
-            let ia = fa.instrs[j]
-            let ib = fb.instrs[j]
+            let ia = ir_arena_load(ir_region_slot_r(fa.region, (j)))
+            let ib = ir_arena_load(ir_region_slot_r(fb.region, (j)))
 
             // Compare opcodes
             if !opcodes_equal(ia.op, ib.op) {
@@ -333,7 +343,7 @@ fn compare_normalized_ir(a: IrModule, b: IrModule) -> i64 with Mut, Panic, Div {
 }
 
 // Helper to compare opcodes (enum equality)
-fn opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
+pub fn opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
     match a {
         IrOpcode::IrLoadImm => matches_opcode(b, IrOpcode::IrLoadImm),
         IrOpcode::IrLoadFloat => matches_opcode(b, IrOpcode::IrLoadFloat),
@@ -343,7 +353,9 @@ fn opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
         IrOpcode::IrBinOp => matches_opcode(b, IrOpcode::IrBinOp),
         IrOpcode::IrUnaryOp => matches_opcode(b, IrOpcode::IrUnaryOp),
         IrOpcode::IrCall => matches_opcode(b, IrOpcode::IrCall),
+        IrOpcode::IrCallSret => matches_opcode(b, IrOpcode::IrCallSret),
         IrOpcode::IrReturn => matches_opcode(b, IrOpcode::IrReturn),
+        IrOpcode::IrReturnSret => matches_opcode(b, IrOpcode::IrReturnSret),
         IrOpcode::IrJump => matches_opcode(b, IrOpcode::IrJump),
         IrOpcode::IrBranchTrue => matches_opcode(b, IrOpcode::IrBranchTrue),
         IrOpcode::IrBranchFalse => matches_opcode(b, IrOpcode::IrBranchFalse),
@@ -377,7 +389,9 @@ fn matches_opcode(op: IrOpcode, target: IrOpcode) -> bool {
         IrOpcode::IrBinOp => match target { IrOpcode::IrBinOp => true, _ => false },
         IrOpcode::IrUnaryOp => match target { IrOpcode::IrUnaryOp => true, _ => false },
         IrOpcode::IrCall => match target { IrOpcode::IrCall => true, _ => false },
+        IrOpcode::IrCallSret => match target { IrOpcode::IrCallSret => true, _ => false },
         IrOpcode::IrReturn => match target { IrOpcode::IrReturn => true, _ => false },
+        IrOpcode::IrReturnSret => match target { IrOpcode::IrReturnSret => true, _ => false },
         IrOpcode::IrJump => match target { IrOpcode::IrJump => true, _ => false },
         IrOpcode::IrBranchTrue => match target { IrOpcode::IrBranchTrue => true, _ => false },
         IrOpcode::IrBranchFalse => match target { IrOpcode::IrBranchFalse => true, _ => false },

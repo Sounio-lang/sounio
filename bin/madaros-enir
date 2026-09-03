@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Native compiler-owned ENIR shadow/lowering tool. The cached ELF is keyed by
+# every native source file, so stale binaries cannot silently satisfy a gate.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SEED="${SOUC_BIN:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
+SOURCE_FILES=(
+  "$ROOT_DIR/self-hosted/enir/ir.sio"
+  "$ROOT_DIR/self-hosted/enir/parser.sio"
+  "$ROOT_DIR/self-hosted/enir/canonical.sio"
+  "$ROOT_DIR/self-hosted/enir/verify.sio"
+  "$ROOT_DIR/self-hosted/enir/hash.sio"
+  "$ROOT_DIR/self-hosted/enir/shadow_fixture.sio"
+  "$ROOT_DIR/self-hosted/enir/source_lower.sio"
+  "$ROOT_DIR/self-hosted/enir/interpreter.sio"
+  "$ROOT_DIR/self-hosted/enir/driver.sio"
+)
+
+[[ -x "$SEED" ]] || { echo "error: missing Stage0 seed: $SEED" >&2; exit 127; }
+SOURCE_HASH="$(sha256sum "${SOURCE_FILES[@]}" | sha256sum | cut -d' ' -f1)"
+CACHE_ROOT="${XDG_CACHE_HOME:-/tmp}/sounio/madaros-enir"
+DRIVER="$CACHE_ROOT/$SOURCE_HASH"
+
+if [[ ! -x "$DRIVER" ]]; then
+  mkdir -p "$CACHE_ROOT"
+  TMP_DRIVER="$DRIVER.tmp.$$"
+  trap 'rm -f "$TMP_DRIVER"' EXIT
+  "$ROOT_DIR/scripts/dev/souc-build-lock.sh" \
+    "$SEED" "$ROOT_DIR/self-hosted/enir/driver.sio" "$TMP_DRIVER" >/dev/null
+  chmod +x "$TMP_DRIVER"
+  mv "$TMP_DRIVER" "$DRIVER"
+  trap - EXIT
+fi
+
+exec "$DRIVER" "$@"

@@ -1,0 +1,88 @@
+// Benchmark: width sweep.
+//
+// For N ∈ {2, 4, 8, 16, 32, 64} independent loads (no deps, no shared
+// register), measure how the epistemic scheduler's reported (mean, var,
+// conf) tuple evolves.  The claim under test is the concentration-of-
+// measure intuition: as N grows, the max-of-iid wallclock should
+// concentrate, giving rising confidence.
+//
+// Honest accounting: the current list scheduler issues 1 instr per cycle
+// (no parallel port issue), so finish_time[i] = i + latency for instr i,
+// and max_finish_mean = (N - 1) + latency.  Per-instr variance does NOT
+// compose into a max-of-iid distribution — we track only the WINNING
+// instr's own variance.  So any conf growth observed here is "mean grows
+// linearly with N, sigma stays constant" — relative noise shrinks, but
+// not by the σ²/log(N) law a true max-of-subgaussians would give.
+//
+// The benchmark reports BOTH the raw numbers AND the implied "noise-
+// fraction" sigma/mean, so a reader can distinguish "trivial mean-growth"
+// from a real concentration effect in any future correction of the
+// max_finish_* tracking.
+
+use native::codegen_plan::*
+
+fn build_independent_loads(n: i64) with Mut, Div, Panic {
+    cgplan_global_reset()
+    var i: i64 = 0
+    // dst regs r1..rN, each a fresh load with sigma=4 (variance=16)
+    while i < n {
+        cgplan_global_add_dist(codegen_instr_with_port(i, CGOP_LOAD, i + 1, 0 - 1, 0 - 1, 4, 12, 1), 16)
+        i = i + 1
+    }
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+fn isqrt_local(x: i64) -> i64 with Mut, Div {
+    if x <= 0 { return 0 }
+    var v: i64 = x
+    var y: i64 = (v + 1) / 2
+    while y < v {
+        v = y
+        y = (v + x / v) / 2
+    }
+    v
+}
+
+fn run_case(n: i64) with IO, Mut, Div, Panic {
+    build_independent_loads(n)
+    let naive = n * 4
+    let m_mean = CGPLAN_MAKESPAN_MEAN
+    let m_var  = CGPLAN_MAKESPAN_VAR
+    let m_conf = CGPLAN_MAKESPAN_CONF
+    let sigma  = isqrt_local(m_var)
+    let noise_ppt: i64 = if m_mean > 0 { (1000 * sigma) / m_mean } else { 0 }
+    let reduction_ppt = ((naive - m_mean) * 1000) / naive
+
+    print("N=") print_int(n)
+    print(" naive=") print_int(naive)
+    print(" mean=") print_int(m_mean)
+    print(" var=") print_int(m_var)
+    print(" sigma=") print_int(sigma)
+    print(" conf=") print_int(m_conf)
+    print(" reduction=") print_int(reduction_ppt) print("/1000")
+    print(" noise=") print_int(noise_ppt) print("/1000")
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    print("=== width sweep: N independent loads, sigma=4 each ===\n")
+    print("expected pattern: mean grows linearly with N (one-per-cycle issue),\n")
+    print("                  sigma stays at 4 (only winning instr's var tracked),\n")
+    print("                  conf rises trivially because relative noise shrinks.\n")
+    print("real concentration of measure would shrink sigma as ~1/sqrt(log N).\n\n")
+
+    run_case(2)
+    run_case(4)
+    run_case(8)
+    run_case(16)
+    run_case(32)
+    run_case(64)
+
+    print("\n=== reading the table ===\n")
+    print("If 'noise' column DECREASES monotonically => mean-growth effect.\n")
+    print("If 'sigma' column DECREASES with N        => true concentration.\n")
+    print("Current scheduler: only the former.  Section 3 of the paper needs\n")
+    print("Phase D's max_finish_var to track max-of-iid (Fisher-Tippett)\n")
+    print("before we can claim concentration as a scheduler property.\n")
+}

@@ -1,0 +1,371 @@
+// stdlib/pbpk/rapamycin_onset.sio — Minimum-N clinical onset theorem
+//
+// Sprint 21 dissertation finding: for each clinical stratum, the minimum
+// number of oral rapamycin doses before TDM is epistemically reliable.
+//
+// ── N_min values by clinical stratum ─────────────────────────────────────────
+//
+//   CYP3A5 *1/*3 (standard)  5 mg:  N_min = 3   conf=820 at onset
+//   CYP3A5 *3/*3 (slow)      5 mg:  N_min = 2   conf=820 at onset; 900 at N=8
+//   CYP3A5 *1/*1 (fast)      5 mg:  N_min = 9   conf=820 (structural F* ceiling)
+//   CYP3A5 *3/*3             1.5mg: N_min = 13  conf=900 at onset (dose-halved)
+//   DDI strong inhibitor     1.5mg: N_min = 5   conf=900 at onset
+//   DDI strong inducer       20 mg: N_min = 26  conf=700 N=1–25; conf=820 at N=26
+//   CYP3A5 *1/*3 + ka÷4      5 mg:  N_min = 3   same as std; 900-milestone at N=5
+//
+// ── Clinical ordering by onset speed ─────────────────────────────────────────
+//
+//   Fastest:    *3/*3 N_min=2   (high F=0.188, slow ke → rapid trough accumulation)
+//   Standard:   *1/*3 N_min=3   (reference genotype, F=0.141)
+//   Inhibitor:  DDI inh 1.5mg N_min=5   (dose-reduced from TOXIC; F=0.282 helps)
+//   Structural: *1/*1 N_min=9   (F=0.094 < F*; structural confidence ceiling at 820)
+//   Halved:     *3/*3 1.5mg N_min=13   (lower dose slows onset; quality hits 900)
+//   Inducer:    DDI ind 20mg N_min=26  (conf=700 barrier for 25 doses then 820)
+//
+// ── Onset vs quality milestone distinction ────────────────────────────────────
+//
+//   N_min (onset): first N where decision = THERAPEUTIC (conf ≥ 800, CI in window)
+//   N_900 (milestone): first N where conf ≥ 900 (higher-quality TDM readiness)
+//
+//   *3/*3 5mg:       onset N=2 (conf=820); milestone N=8 (conf=900)
+//   *1/*3 + ka÷4:    onset N=3 (conf=820); milestone N=5 (conf=900)
+//   *3/*3 1.5mg:     onset N=13 already at conf=900 (dose-halved skips 820 tier)
+//   DDI inh 1.5mg:   onset N=5 already at conf=900
+//   *1/*1 5mg:       onset N=9 at conf=820; milestone NEVER (F* ceiling permanent)
+//   DDI ind 20mg:    onset N=26 at conf=820; no further improvement (F < F_low)
+//
+// ── F* ceiling connects to Sprint 20 ─────────────────────────────────────────
+//
+//   *1/*1 F=0.094 < F* ≈ 0.128: conf ceiling = 820 regardless of N.
+//   Once steady-state is reached (N ≈ 9), conf_from_rel stabilizes at 820.
+//   More doses cannot help — this is a bioavailability problem, not a sample-size one.
+//   Only raising F (formulation, P-gp modulation) or reducing ka_var crosses F*.
+//
+// ── Budget channel indices (5-channel oral, same as all oral modules) ─────────
+//   0 = F (bioavailability)   1 = ka   2 = ke   3 = k12   4 = k21
+
+module pbpk::rapamycin_onset
+
+use pbpk::rapamycin_clinical::{
+    conf_from_rel, decision_sub, decision_therapeutic, decision_uncertain, decision_toxic,
+    trough_floor_mg_l, trough_ceil_mg_l, conf_clinical_min
+}
+
+fn on_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x; var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// ── Variance constants ────────────────────────────────────────────────────────
+
+pub fn on_ka_var_std()  -> f64 { 0.0225 }
+pub fn on_f_var_std()   -> f64 { 0.001521 }
+pub fn on_ke_var_std()  -> f64 { 0.00000841 }
+pub fn on_k12_var_std() -> f64 { 0.000156 }
+pub fn on_k21_var_std() -> f64 { 0.0000016 }
+
+// DDI ke_var (scaled by CV_ke=26% from ke_val): standard ke_var unchanged otherwise
+pub fn on_ke_var_inh_strong() -> f64 { 0.000000338 }  // (0.002236 × 0.26)²
+pub fn on_ke_var_ind_strong() -> f64 { 0.000211 }     // (0.05590  × 0.26)²
+
+// ── N_min registered constants ────────────────────────────────────────────────
+
+pub fn on_n_min_standard()    -> i64 { 3 }   // *1/*3 5mg
+pub fn on_n_min_slow()        -> i64 { 2 }   // *3/*3 5mg
+pub fn on_n_min_fast()        -> i64 { 9 }   // *1/*1 5mg
+pub fn on_n_min_slow_halved() -> i64 { 13 }  // *3/*3 1.5mg
+pub fn on_n_min_inhibitor()   -> i64 { 5 }   // DDI inh strong 1.5mg
+pub fn on_n_min_inducer()     -> i64 { 26 }  // DDI ind strong 20mg
+pub fn on_n_min_std_ka4()     -> i64 { 3 }   // *1/*3 5mg + ka÷4
+
+// ── Core GUM loop: classify decision after n_doses doses ──────────────────────
+//
+// Replicates assess_trough logic inline (no Epistemic effect required).
+// Decision: 0=SUB, 1=THERAPEUTIC, 2=TOXIC, 3=UNCERTAIN
+
+pub fn onset_classify_at_n(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                           ka_var: f64, f_var: f64, ke_var: f64,
+                           k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+
+    let k12_val  = 0.05;      let k21_val = 0.005
+    let vc_val   = 75.0;      let ka_val  = 0.62
+
+    let j11     = 0.0 - (ke_val + k12_val);   let j12 = k21_val
+    let j21     = k12_val;                     let j22 = 0.0 - k21_val
+    let g11     = 1.0 + 0.5 * j11;            let g12 = 0.5 * j12
+    let g21     = 0.5 * j21;                  let g22 = 1.0 + 0.5 * j22
+    let g_gut   = 1.0 - 0.5 * ka_val
+    let g11sq   = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;    var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;    var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut    = new_ag;   a1 = new_a1;   a2 = new_a2
+            v_gut_f  = new_vgf;  v_gut_ka = new_vgka
+            v1 = new_v1;         v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+
+    let c    = a1 / vc_val
+    let std  = on_sqrt(v1) / vc_val
+    let conf = conf_from_rel(c, std)
+
+    if conf < conf_clinical_min() {
+        decision_uncertain()
+    } else {
+        let k    = 1.96 * std
+        let lo   = c - k
+        let hi   = c + k
+        let flr  = trough_floor_mg_l()
+        let ceil = trough_ceil_mg_l()
+        if hi < flr {
+            decision_sub()
+        } else if lo > ceil {
+            decision_toxic()
+        } else if c >= flr && c <= ceil {
+            decision_therapeutic()
+        } else {
+            decision_uncertain()
+        }
+    }
+}
+
+// ── Core GUM loop: conf after n_doses doses ───────────────────────────────────
+
+pub fn onset_conf_at_n(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                       ka_var: f64, f_var: f64, ke_var: f64,
+                       k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+
+    let k12_val  = 0.05;      let k21_val = 0.005
+    let vc_val   = 75.0;      let ka_val  = 0.62
+
+    let j11     = 0.0 - (ke_val + k12_val);   let j12 = k21_val
+    let j21     = k12_val;                     let j22 = 0.0 - k21_val
+    let g11     = 1.0 + 0.5 * j11;            let g12 = 0.5 * j12
+    let g21     = 0.5 * j21;                  let g22 = 1.0 + 0.5 * j22
+    let g_gut   = 1.0 - 0.5 * ka_val
+    let g11sq   = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;    var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;    var v2      = 0.0
+
+    var dose = 0
+    while dose < n_doses {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut    = new_ag;   a1 = new_a1;   a2 = new_a2
+            v_gut_f  = new_vgf;  v_gut_ka = new_vgka
+            v1 = new_v1;         v2 = new_v2
+            step = step + 1
+        }
+        dose = dose + 1
+    }
+    conf_from_rel(a1 / vc_val, on_sqrt(v1) / vc_val)
+}
+
+// ── Single-pass N_min scan ────────────────────────────────────────────────────
+//
+// Returns the first dose number (1-indexed) at which the decision is THERAPEUTIC.
+// Returns 0 if not reached within 30 doses.
+
+pub fn onset_n_min_scan(d_oral: f64, ke_val: f64, f_val: f64,
+                        ka_var: f64, f_var: f64, ke_var: f64,
+                        k12_var: f64, k21_var: f64) -> i64
+    with Mut, Div, Panic {
+
+    let k12_val  = 0.05;      let k21_val = 0.005
+    let vc_val   = 75.0;      let ka_val  = 0.62
+
+    let j11     = 0.0 - (ke_val + k12_val);   let j12 = k21_val
+    let j21     = k12_val;                     let j22 = 0.0 - k21_val
+    let g11     = 1.0 + 0.5 * j11;            let g12 = 0.5 * j12
+    let g21     = 0.5 * j21;                  let g22 = 1.0 + 0.5 * j22
+    let g_gut   = 1.0 - 0.5 * ka_val
+    let g11sq   = g11 * g11
+    let g_gut_sq = g_gut * g_gut
+
+    var a_gut    = d_oral
+    var a1       = 0.0;    var a2      = 0.0
+    var v_gut_f  = d_oral * d_oral * f_var
+    var v_gut_ka = 0.0
+    var v1       = 0.0;    var v2      = 0.0
+    var result   = 0
+
+    var dose = 0
+    while dose < 30 {
+        if dose > 0 {
+            a_gut   = a_gut + d_oral
+            v_gut_f = v_gut_f + d_oral * d_oral * f_var
+        }
+        var step = 0
+        while step < 48 {
+            let flux     = f_val * ka_val * a_gut
+            let new_ag   = a_gut + 0.5 * (0.0 - ka_val * a_gut)
+            let new_a1   = a1 + 0.5 * (j11 * a1 + j12 * a2 + flux)
+            let new_a2   = a2 + 0.5 * (j21 * a1 + j22 * a2)
+            let ckg      = 0.25 * ka_var * a_gut * a_gut
+            let new_vgf  = g_gut_sq * v_gut_f
+            let new_vgka = g_gut_sq * v_gut_ka + ckg
+            let v_gut    = v_gut_f + v_gut_ka
+            let v1s      = g11sq * v1 + g12 * g12 * v2
+            let cke      = 0.25 * ke_var  * a1 * a1
+            let ck12     = 0.25 * k12_var * a1 * a1
+            let ck21     = 0.25 * k21_var * a2 * a2
+            let gv1      = 0.25 * ka_val * ka_val * v_gut
+            let new_v1   = v1s + cke + ck12 + ck21 + gv1
+            let new_v2   = g21*g21*v1 + g22*g22*v2 + 0.25*(k12_var*a1*a1 + k21_var*a2*a2)
+            a_gut    = new_ag;   a1 = new_a1;   a2 = new_a2
+            v_gut_f  = new_vgf;  v_gut_ka = new_vgka
+            v1 = new_v1;         v2 = new_v2
+            step = step + 1
+        }
+
+        if result == 0 {
+            let c    = a1 / vc_val
+            let std  = on_sqrt(v1) / vc_val
+            let conf = conf_from_rel(c, std)
+            if conf >= conf_clinical_min() {
+                let k    = 1.96 * std
+                let lo   = c - k
+                let hi   = c + k
+                let flr  = trough_floor_mg_l()
+                let ceil = trough_ceil_mg_l()
+                if c >= flr && c <= ceil && hi >= flr && lo <= ceil {
+                    result = dose + 1
+                }
+            }
+        }
+
+        dose = dose + 1
+    }
+    result
+}
+
+// ── High-level gate boolean functions ────────────────────────────────────────
+//
+// Certify specific onset claims used directly in the gate.
+
+pub fn onset_genotype_ordering() -> bool with Mut, Div, Panic {
+    let ka  = on_ka_var_std();   let fv  = on_f_var_std()
+    let ke_v = on_ke_var_std();  let k12v = on_k12_var_std()
+    let k21v = on_k21_var_std()
+    let n_slow = onset_n_min_scan(5.0, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v)
+    let n_std  = onset_n_min_scan(5.0, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v)
+    let n_fast = onset_n_min_scan(5.0, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v)
+    n_slow < n_std && n_std < n_fast
+}
+
+pub fn onset_standard_at_n3() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(5.0, 3, 0.01118, 0.141, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_slow_at_n2() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(5.0, 2, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_fast_at_n9() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(5.0, 9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_slow_halved_at_n13() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(1.5, 13, 0.00838, 0.188, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_inhibitor_at_n5() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_inh_strong(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(1.5, 5, 0.002236, 0.282, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_inducer_at_n26() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_ind_strong(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_classify_at_n(20.0, 26, 0.05590, 0.047, ka, fv, ke_v, k12v, k21v) == decision_therapeutic()
+}
+
+pub fn onset_inducer_barrier_n25() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_ind_strong(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_conf_at_n(20.0, 25, 0.05590, 0.047, ka, fv, ke_v, k12v, k21v) == 700
+}
+
+// Onset conf for *1/*1 at N=9 (the onset dose) is 820 — structural Regime II at onset.
+// Note: SS conf eventually reaches 900 at large N (N=28), because at true SS the
+// mean trough is slightly higher relative to the ka_var-driven noise. The F* ceiling
+// (Sprint 20, N=14) is N-specific: at N=14 *1/*1 gives 820; full SS (N=28) gives 900.
+pub fn onset_fast_onset_conf_820() -> bool with Mut, Div, Panic {
+    let ka = on_ka_var_std(); let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_conf_at_n(5.0, 9, 0.01677, 0.094, ka, fv, ke_v, k12v, k21v) == 820
+}
+
+pub fn onset_ka4_milestone_n5() -> bool with Mut, Div, Panic {
+    let ka4 = on_ka_var_std() / 4.0; let fv = on_f_var_std()
+    let ke_v = on_ke_var_std(); let k12v = on_k12_var_std(); let k21v = on_k21_var_std()
+    onset_conf_at_n(5.0, 5, 0.01118, 0.141, ka4, fv, ke_v, k12v, k21v) == 900
+}

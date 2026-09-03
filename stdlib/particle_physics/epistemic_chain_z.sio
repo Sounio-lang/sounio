@@ -1,0 +1,90 @@
+// stdlib/particle_physics/epistemic_chain_z.sio
+//
+// Madaros-safe Z metrology chains (subset of epistemic_chain.sio).
+//
+// Does NOT import vertex/spinor/three_body/higgs — those pull a multimodule
+// graph that SEGVs Madaros native lower (lower_array: dep_begin).
+// Full epistemic_chain.sio remains for the complete package.
+
+module particle_physics::epistemic_chain_z
+
+use epistemic::knowledge::{
+    Epistemic, ep_new, ep_certain, ep_val, ep_variance, ep_confidence,
+    ep_scale, ep_mul, ep_square, ep_add, ep_gate, ep_require_conf,
+}
+use particle_physics::sm_params::{alpha_em, sin2_theta_w, mass_z}
+
+let PI: f64 = 3.141592653589793
+let SQRT2: f64 = 1.4142135623730951
+
+/// g_V = T3 − 2 Q sin²θ_W  (local; avoids vertex module).
+fn nc_gv_ep(t3: f64, charge: f64) -> Epistemic with Mut, Div, Panic {
+    let s2w = sin2_theta_w()
+    // g_V = t3 + (−2Q)·sin²θ_W
+    let term = ep_scale(&s2w, 0.0 - 2.0 * charge)
+    let base = ep_certain(t3)
+    ep_add(&term, &base)
+}
+
+/// GUM-exact σ(e⁺e⁻ → μ⁺μ⁻) in GeV⁻² from α_EM.
+pub fn eemm_qed_xsec_ep(sqrt_s_gev: f64) -> Epistemic with Mut, Div, Panic {
+    if sqrt_s_gev <= 0.0 { return ep_certain(0.0) }
+    let s = sqrt_s_gev * sqrt_s_gev
+    let a = alpha_em()
+    let alpha2 = ep_square(&a)
+    ep_scale(&alpha2, 4.0 * PI / (3.0 * s))
+}
+
+/// GUM-exact σ in pb with confidence gate.
+pub fn eemm_qed_xsec_pb_gated(sqrt_s_gev: f64, min_conf: i64) -> Epistemic with Mut, Div, Panic {
+    let sigma = eemm_qed_xsec_ep(sqrt_s_gev)
+    let sigma_pb = ep_scale(&sigma, 0.389379e9)
+    ep_require_conf(sigma_pb, min_conf)
+}
+
+/// GUM-exact Γ(Z → ee).
+pub fn z_width_ee_ep() -> Epistemic with Mut, Div, Panic {
+    let mz = mass_z()
+    let gf = 1.1663787e-5
+    let mz2 = ep_square(&mz)
+    let mz3 = ep_mul(&mz2, &mz)
+    let pf = gf / (6.0 * SQRT2 * PI)
+    let mz3_pf = ep_scale(&mz3, pf)
+    let gv_ep = nc_gv_ep(0.0 - 0.5, 0.0 - 1.0)
+    let gv2 = ep_square(&gv_ep)
+    let ga2 = ep_certain(0.25)
+    let coupling_sum = ep_add(&gv2, &ga2)
+    ep_mul(&mz3_pf, &coupling_sum)
+}
+
+/// Uncertainty budget for Γ(Z→ee): [Var_MZ, Var_s2w, Var_total, Γ_central].
+pub fn z_width_ee_budget() -> [f64; 4] with Mut, Div, Panic {
+    var out: [f64; 4] = [0.0; 4]
+    let mz = mass_z()
+    let s2w = sin2_theta_w()
+    let gf = 1.1663787e-5
+    let s2 = ep_val(&s2w)
+    let gv_exact = 0.0 - 0.5 + 2.0 * s2
+    let coupling_sum_exact = gv_exact * gv_exact + 0.25
+    let pf = gf / (6.0 * SQRT2 * PI)
+    let mz_val = ep_val(&mz)
+    let dg_dmz = pf * 3.0 * mz_val * mz_val * coupling_sum_exact
+    out[0] = dg_dmz * dg_dmz * ep_variance(&mz)
+    let mz3_val = mz_val * mz_val * mz_val
+    let dg_ds2w = pf * mz3_val * 4.0 * gv_exact
+    out[1] = dg_ds2w * dg_ds2w * ep_variance(&s2w)
+    let total_ep = z_width_ee_ep()
+    out[2] = ep_variance(&total_ep)
+    out[3] = ep_val(&total_ep)
+    out
+}
+
+pub fn chain_gate_qed_xsec(sqrt_s_gev: f64, min_conf: i64) -> i64 with Mut, Div, Panic {
+    let ep = eemm_qed_xsec_pb_gated(sqrt_s_gev, min_conf)
+    ep_gate(&ep, min_conf)
+}
+
+pub fn chain_gate_z_width(min_conf: i64) -> i64 with Mut, Div, Panic {
+    let ep = z_width_ee_ep()
+    ep_gate(&ep, min_conf)
+}

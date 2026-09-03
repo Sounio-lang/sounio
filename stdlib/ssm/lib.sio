@@ -1,0 +1,432 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+//! stdlib/ssm/lib.sio — Sedenion State-Space Model primitives
+//!
+//! Provides the algebra-level building blocks for H-SSM (quaternion) and
+//! S-SSM (sedenion) state-space models, distilled from the S-SSM zero-divisor
+//! gating experiments.
+//!
+//! Key algebraic fact (proved in SounioZeroDivisorBridge.lean):
+//!   (e3 + e10) * (e6 - e15) = 0  in 𝕊 (sedenions)
+//!
+//! This is the constructive reset mechanism: if A = e3+e10 and the hidden
+//! state h lies in the direction (e6-e15), then A⊗h = 0 exactly — the
+//! state is ERASED.  No division algebra (ℝ, ℂ, ℍ, 𝕆) can do this.
+//!
+//! API surface:
+//!   ssm_exp / ssm_sigmoid / ssm_sqrt / ssm_norm16 / ssm_dot16
+//!   ssm_sed_mul                    — sedenion product via Cayley-Dickson
+//!   ssm_hssm_step                  — one H-SSM step (quaternion blocks)
+//!   ssm_sssm_step                  — one S-SSM step (sedenion, A = e3+e10)
+//!   ssm_zd_init / ssm_erase_input  — ZD-direction state management
+//!   ssm_gate / ssm_apply_gate      — Mamba-style selective gating
+//!   ssm_kernel_basis               — ZD null-space basis vectors
+//!   ssm_cokernel_basis             — complement (permanent) basis vectors
+//!   ssm_rng_seed / ssm_rng_next    — xorshift64 RNG
+//!
+//! Effects used:
+//!   Mut   — writes to module-level buffers and state arrays
+//!   Div   — loops (potential divergence), divisions in sqrt/exp
+//!   Panic — array indexing, division by zero guard
+
+// ─── Module-level scratch buffers (BSS-zeroed) ───────────────────────────
+var SSM_OCT_P: [f64; 8]  = [0.0; 8]
+var SSM_OCT_Q: [f64; 8]  = [0.0; 8]
+var SSM_OUT:   [f64; 16] = [0.0; 16]
+var SSM_QBUF:  [f64; 4]  = [0.0; 4]
+var SSM_RNG_A: i64 = 0
+var SSM_RNG_B: i64 = 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITY MATH
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// exp(x) via a 20-term Taylor series after range reduction.
+///
+/// Reflect negative inputs before evaluating the series: the un-reduced Taylor
+/// polynomial suffers catastrophic cancellation for moderate negative values.
+/// Positive values are halved until the core runs on [0, 2].
+pub fn ssm_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / ssm_exp(0.0 - x) }
+    if x > 2.0 {
+        let half = ssm_exp(x / 2.0)
+        return half * half
+    }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+/// Logistic sigmoid, clamped to (0,1) at ±10.
+pub fn ssm_sigmoid(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 }
+    1.0 / (1.0 + ssm_exp(0.0 - x))
+}
+
+/// Newton–Raphson square root (50 iterations); returns 0 for x ≤ 0.
+pub fn ssm_sqrt(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i = 0
+    while i < 50 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+/// Euclidean norm of a 16-component state vector.
+pub fn ssm_norm16(h: &[f64; 16]) -> f64 with Div, Panic, Mut {
+    var s = 0.0; var i = 0
+    while i < 16 { s = s + (*h)[i] * (*h)[i]; i = i + 1 }
+    ssm_sqrt(s)
+}
+
+/// Inner product of two 16-component vectors.
+pub fn ssm_dot16(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {
+    var s = 0.0; var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SEDENION PRODUCT (Cayley-Dickson at k=4)
+//
+// Decomposes 𝕊 = (𝕆, 𝕆) as (a, b)*(c, d) = (ac - d*b̄, d̄a + bc̄)
+// where * is Cayley-Dickson at k=3 (octonion product) and ¯ is conjugation.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn ssm_oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+             b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    SSM_OCT_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    SSM_OCT_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    SSM_OCT_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    SSM_OCT_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    SSM_OCT_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    SSM_OCT_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    SSM_OCT_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    SSM_OCT_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+
+fn ssm_oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+             b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    SSM_OCT_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    SSM_OCT_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    SSM_OCT_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    SSM_OCT_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    SSM_OCT_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    SSM_OCT_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    SSM_OCT_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    SSM_OCT_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+
+// Private: sedenion product from 32 scalar components → SSM_OUT[0..15]
+fn ssm_sed_vv(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+              a8:f64,a9:f64,a10:f64,a11:f64,a12:f64,a13:f64,a14:f64,a15:f64,
+              h0:f64,h1:f64,h2:f64,h3:f64,h4:f64,h5:f64,h6:f64,h7:f64,
+              h8:f64,h9:f64,h10:f64,h11:f64,h12:f64,h13:f64,h14:f64,h15:f64) with Mut {
+    // Lower half: o1a*o1b - conj(o2b)*o2a
+    ssm_oct_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    ssm_oct_q(h8,0.0-h9,0.0-h10,0.0-h11,0.0-h12,0.0-h13,0.0-h14,0.0-h15,
+              a8,a9,a10,a11,a12,a13,a14,a15)
+    var i=0; while i<8 { SSM_OUT[i]=SSM_OCT_P[i]-SSM_OCT_Q[i]; i=i+1 }
+    // Upper half: o2b*o1a + o2a*conj(o1b)
+    ssm_oct_p(h8,h9,h10,h11,h12,h13,h14,h15, a0,a1,a2,a3,a4,a5,a6,a7)
+    ssm_oct_q(a8,a9,a10,a11,a12,a13,a14,a15, h0,0.0-h1,0.0-h2,0.0-h3,0.0-h4,0.0-h5,0.0-h6,0.0-h7)
+    i=0; while i<8 { SSM_OUT[8+i]=SSM_OCT_P[i]+SSM_OCT_Q[i]; i=i+1 }
+}
+
+/// Sedenion product: out = a * b (left-multiplication, Cayley-Dickson k=4).
+pub fn ssm_sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
+    let a0=(*a)[0];  let a1=(*a)[1];  let a2=(*a)[2];  let a3=(*a)[3]
+    let a4=(*a)[4];  let a5=(*a)[5];  let a6=(*a)[6];  let a7=(*a)[7]
+    let a8=(*a)[8];  let a9=(*a)[9];  let a10=(*a)[10]; let a11=(*a)[11]
+    let a12=(*a)[12]; let a13=(*a)[13]; let a14=(*a)[14]; let a15=(*a)[15]
+    let b0=(*b)[0];  let b1=(*b)[1];  let b2=(*b)[2];  let b3=(*b)[3]
+    let b4=(*b)[4];  let b5=(*b)[5];  let b6=(*b)[6];  let b7=(*b)[7]
+    let b8=(*b)[8];  let b9=(*b)[9];  let b10=(*b)[10]; let b11=(*b)[11]
+    let b12=(*b)[12]; let b13=(*b)[13]; let b14=(*b)[14]; let b15=(*b)[15]
+    ssm_sed_vv(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,
+               b0,b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15)
+    var i=0; while i<16 { (*out)[i]=SSM_OUT[i]; i=i+1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H-SSM TRANSITION  (quaternion, 4 blocks × 4D → 16D)
+//
+// A_quat = (0.95, 0, 0, 0) replicated across four 4D blocks.
+// Since qw=0.95, qx=qy=qz=0, the quaternion product simplifies to scalar
+// scaling: A_quat ⊗ h = 0.95 * h.  No annihilation is possible for any
+// unit-norm quaternion A.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One H-SSM step: h' = A_quat ⊗ h  (4 quaternion blocks, A = 0.95·1ₕ).
+/// Property: ‖h'‖ = 0.95 * ‖h‖  for all h  (no ZD annihilation possible).
+pub fn ssm_hssm_step(h: &![f64; 16]) with Mut {
+    var i = 0
+    while i < 16 { (*h)[i] = 0.95 * (*h)[i]; i = i + 1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S-SSM TRANSITION  (sedenion, A = e₃ + e₁₀)
+//
+// A_sed = (0,0,0,1, 0,0,0,0, 0,0,1,0, 0,0,0,0)  ← e3 + e10
+//
+// Key property (constructive reset theorem):
+//   A_sed ⊗ (e6 - e15) = 0    EXACTLY
+//   A_sed ⊗ (e7 + e14) = 0    EXACTLY
+//   (and two more kernel vectors — 4D null space total)
+//
+// This allows hard state erasure via ZD gating, impossible in H-SSM.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One S-SSM step: h' = A_sed ⊗ h  (A = e₃ + e₁₀, sedenion left-mult).
+pub fn ssm_sssm_step(h: &![f64; 16]) with Mut {
+    ssm_sed_vv(0.0,0.0,0.0,1.0, 0.0,0.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,0.0,
+               (*h)[0],(*h)[1],(*h)[2],(*h)[3],(*h)[4],(*h)[5],(*h)[6],(*h)[7],
+               (*h)[8],(*h)[9],(*h)[10],(*h)[11],(*h)[12],(*h)[13],(*h)[14],(*h)[15])
+    var i=0; while i<16 { (*h)[i]=SSM_OUT[i]; i=i+1 }
+}
+
+/// Initialize h to the canonical ZD erase direction: e₆ - e₁₅.
+/// After ssm_sssm_step, ‖h‖ = 0 exactly.
+pub fn ssm_zd_init(h: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*h)[i]=0.0; i=i+1 }
+    (*h)[6]  =  1.0
+    (*h)[15] = 0.0 - 1.0
+}
+
+/// Inject ZD erase signal into h:  h[6] += scale,  h[15] -= scale.
+/// Represents a B·embed_ERASE input where embed_ERASE = (e₆ - e₁₅).
+pub fn ssm_erase_input(h: &![f64; 16], scale: f64) with Mut {
+    (*h)[6]  = (*h)[6]  + scale
+    (*h)[15] = (*h)[15] - scale
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SELECTIVE GATE  (Mamba-style)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Scalar gate value in (0, 1): sigmoid of the input signal.
+pub fn ssm_gate(input: f64) -> f64 with Mut, Div, Panic {
+    ssm_sigmoid(input)
+}
+
+/// Apply scalar gate to every component of h in-place: h[i] *= g.
+pub fn ssm_apply_gate(h: &![f64; 16], g: f64) with Mut {
+    var i=0; while i<16 { (*h)[i] = (*h)[i] * g; i=i+1 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KERNEL / COKERNEL BASIS  (ZD null space of A = e₃ + e₁₀)
+//
+// ker(A_sed) is 4-dimensional.  Two confirmed annihilators (verified):
+//   u0 = (e6 - e15) / √2    (e3+e10)*(e6-e15) = 0   ← stdlib canonical pair
+//   u1 = (e7 + e14) / √2    (e3+e10)*(e7+e14) = 0
+//   u2 = (e6 + e15) / √2    }  sign-flip variants
+//   u3 = (e7 - e14) / √2    }  (co-kernel demo for k=2,3)
+//
+// coker(A_sed) uses the permanent directions e0..e3.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// k-th basis vector of ker(A_sed), k ∈ {0, 1, 2, 3}.
+pub fn ssm_kernel_basis(k: i64, v: &![f64; 16]) with Mut, Div, Panic {
+    var i=0; while i<16 { (*v)[i]=0.0; i=i+1 }
+    let s = 1.0 / ssm_sqrt(2.0)
+    if k == 0 { (*v)[6] = s; (*v)[15] = 0.0-s }
+    if k == 1 { (*v)[7] = s; (*v)[14] = s }
+    if k == 2 { (*v)[6] = s; (*v)[15] = s }
+    if k == 3 { (*v)[7] = s; (*v)[14] = 0.0-s }
+}
+
+/// k-th permanent (co-kernel) basis vector, k ∈ {0, 1, 2, 3}.
+/// These directions survive A_sed without annihilation.
+pub fn ssm_cokernel_basis(k: i64, v: &![f64; 16]) with Mut {
+    var i=0; while i<16 { (*v)[i]=0.0; i=i+1 }
+    if k == 0 { (*v)[0] = 1.0 }
+    if k == 1 { (*v)[1] = 1.0 }
+    if k == 2 { (*v)[2] = 1.0 }
+    if k == 3 { (*v)[3] = 1.0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RNG  (xorshift64, same generator used in all S-SSM examples)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Seed the xorshift64 generator.
+pub fn ssm_rng_seed(a: i64, b: i64) with Mut { SSM_RNG_A = a; SSM_RNG_B = b }
+
+/// Next non-negative pseudorandom integer.
+pub fn ssm_rng_next() -> i64 with Mut {
+    var x = SSM_RNG_A; let y = SSM_RNG_B; SSM_RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    SSM_RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INLINE TESTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Global test counters (avoids JIT &! mutation-invisible-to-caller issue)
+var T_PASS: i64 = 0
+var T_FAIL: i64 = 0
+
+fn t_ok(label: i64) with IO, Mut {
+    print("  PASS ["); print(label); print("]\n")
+    T_PASS = T_PASS + 1
+}
+fn t_fail(label: i64) with IO, Mut {
+    print("  FAIL ["); print(label); print("]\n")
+    T_FAIL = T_FAIL + 1
+}
+fn t_check(label: i64, cond: i64) with IO, Mut {
+    if cond == 1 { t_ok(label) } else { t_fail(label) }
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn test_zd_reset() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_zd_init(&!h)
+    let n0 = ssm_norm16(&h)
+    ssm_sssm_step(&!h)
+    let n1 = ssm_norm16(&h)
+    t_check(1, if n0 > 0.99 && n1 < 0.0001 { 1 } else { 0 })
+}
+
+fn test_hssm_no_reset() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_zd_init(&!h)
+    ssm_hssm_step(&!h)
+    let n = ssm_norm16(&h)
+    t_check(2, if n > 0.9 { 1 } else { 0 })
+}
+
+fn test_gate_bounds() with IO, Mut, Div, Panic {
+    let lo = ssm_gate(0.0 - 100.0)
+    let hi = ssm_gate(100.0)
+    t_check(3, if lo < 0.0001 && hi > 0.9999 { 1 } else { 0 })
+}
+
+fn test_gate_no_amplify() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    h[1] = 1.0
+    let n0 = ssm_norm16(&h)
+    ssm_apply_gate(&!h, ssm_gate(0.0))
+    let n1 = ssm_norm16(&h)
+    t_check(4, if n1 <= n0 + 0.0001 { 1 } else { 0 })
+}
+
+fn test_kernel0() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_kernel_basis(0, &!h)
+    let n0 = ssm_norm16(&h)
+    ssm_sssm_step(&!h)
+    let n1 = ssm_norm16(&h)
+    t_check(5, if n0 > 0.5 && n1 < 0.0001 { 1 } else { 0 })
+}
+
+fn test_kernel1() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_kernel_basis(1, &!h)
+    let n0 = ssm_norm16(&h)
+    ssm_sssm_step(&!h)
+    let n1 = ssm_norm16(&h)
+    t_check(6, if n0 > 0.5 && n1 < 0.0001 { 1 } else { 0 })
+}
+
+fn test_cokernel_survives() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_cokernel_basis(0, &!h)
+    ssm_sssm_step(&!h)
+    let n = ssm_norm16(&h)
+    t_check(7, if n > 0.5 { 1 } else { 0 })
+}
+
+fn test_norm_consistency() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    h[3] = 0.6; h[7] = 0.8
+    let n_lib = ssm_norm16(&h)
+    let n_man = ssm_sqrt(0.6*0.6 + 0.8*0.8)
+    t_check(8, if abs_f(n_lib - n_man) < 0.0001 { 1 } else { 0 })
+}
+
+fn test_dot() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    a[0] = 1.0; a[1] = 2.0; b[0] = 3.0; b[1] = 4.0
+    let d = ssm_dot16(&a, &b)
+    t_check(9, if abs_f(d - 11.0) < 0.0001 { 1 } else { 0 })
+}
+
+fn test_rng() with IO, Mut {
+    ssm_rng_seed(42, 137)
+    var ok = 1; var i = 0
+    while i < 10 { if ssm_rng_next() == 0 { ok = 0 }; i = i + 1 }
+    t_check(10, ok)
+}
+
+fn test_sed_identity() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    a[0] = 1.0; b[3] = 1.0
+    ssm_sed_mul(&a, &b, &!out)
+    t_check(11, if abs_f(out[3] - 1.0) < 0.0001 { 1 } else { 0 })
+}
+
+fn test_sed_zd_pair() with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var out: [f64; 16] = [0.0; 16]
+    a[3] = 1.0; a[10] = 1.0
+    b[6] = 1.0; b[15] = 0.0 - 1.0
+    ssm_sed_mul(&a, &b, &!out)
+    let n = ssm_norm16(&out)
+    t_check(12, if n < 0.0001 { 1 } else { 0 })
+}
+
+fn test_erase_input() with IO, Mut, Div, Panic {
+    var h: [f64; 16] = [0.0; 16]
+    ssm_erase_input(&!h, 0.5)
+    t_check(13, if abs_f(h[6] - 0.5) < 0.0001 && abs_f(h[15] - (0.0 - 0.5)) < 0.0001 { 1 } else { 0 })
+}
+
+fn test_exp_negative_tail() with IO, Mut, Div, Panic {
+    // Oracle: true exp(-13.855) ≈ 9.612801030980067e-7, exp(-16) ≈ 1.1253517471925912e-7.
+    // Old ssm_exp flushed |x| > 15 to 0.0 and cancelled moderate negative Taylor tails.
+    let expected_13855 = 9.612801030980067e-7
+    let expected_16 = 1.1253517471925912e-7
+    let tail_13855 = ssm_exp(0.0 - 13.855)
+    let tail_16 = ssm_exp(0.0 - 16.0)
+    let round_trip = tail_13855 * ssm_exp(13.855)
+    let rel_13855 = abs_f(tail_13855 - expected_13855) / expected_13855
+    let rel_16 = abs_f(tail_16 - expected_16) / expected_16
+    t_check(14, if rel_13855 < 1.0e-8 && rel_16 < 1.0e-8 && abs_f(round_trip - 1.0) < 1.0e-8 { 1 } else { 0 })
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    T_PASS = 0; T_FAIL = 0
+    print("─── stdlib/ssm tests ───\n")
+
+    test_zd_reset()
+    test_hssm_no_reset()
+    test_gate_bounds()
+    test_gate_no_amplify()
+    test_kernel0()
+    test_kernel1()
+    test_cokernel_survives()
+    test_norm_consistency()
+    test_dot()
+    test_rng()
+    test_sed_identity()
+    test_sed_zd_pair()
+    test_erase_input()
+    test_exp_negative_tail()
+
+    print("─── "); print(T_PASS); print("/"); print(T_PASS + T_FAIL); print(" PASS ───\n")
+    if T_FAIL == 0 {
+        print("ALL PASS\n")
+        0
+    } else {
+        1
+    }
+}

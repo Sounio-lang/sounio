@@ -1,0 +1,656 @@
+// examples/erdos/cdcl_fast.sio (GENERATED gen_solver.py php)
+// Fast CDCL (two-watched-literal) correctness harness; cross-checked by drat-trim.
+
+
+var nvars: i32 = 0
+var nclauses: i32 = 0
+var cstart: [i32; 262144] = [0; 262144]
+var clen: [i32; 262144] = [0; 262144]
+var clits: [i64; 4194304] = [0; 4194304]
+
+// clause deletion (LBD-based) state
+var lbd: [i32; 262144] = [0; 262144]
+var keepf: [i32; 262144] = [0; 262144]
+var cmap: [i32; 262144] = [0; 262144]
+var lblmark: [i32; 8192] = [0; 8192]
+var n_orig: i32 = 0
+var last_lbd: i32 = 0
+var max_learnts: i32 = 400
+var LBD_KEEP: i32 = 3
+var n_reduces: i64 = 0
+var n_deleted: i64 = 0
+
+// two-watched-literal scheme: clause c watches clits[cstart[c]+0] and +1.
+// watch node id = 2*c + slot. wnext chains nodes within one literal's list.
+var whead: [i32; 16386] = [0 - 1; 16386]
+var wnext: [i32; 524288] = [0; 524288]
+
+var assign: [i32; 8192] = [0; 8192]
+var vlevel: [i32; 8192] = [0; 8192]
+var reason: [i32; 8192] = [0; 8192]
+var phase:  [i32; 8192] = [0; 8192]
+var activity: [i64; 8192] = [0; 8192]
+var trail_lit: [i64; 8192] = [0; 8192]
+var trail_len: i32 = 0
+var trail_lim: [i32; 8192] = [0; 8192]
+var cur_level: i32 = 0
+var qhead: i32 = 0
+
+var seen: [i32; 8192] = [0; 8192]
+var LEARNT: [i64; 8192] = [0; 8192]
+var llen: i32 = 0
+
+var P_n: i32 = 0
+var P_start: [i32; 1048576] = [0; 1048576]
+var P_len: [i32; 1048576] = [0; 1048576]
+var P_tag: [i32; 1048576] = [0; 1048576]
+var P_lits: [i64; 16777216] = [0; 16777216]
+var P_pos: i64 = 0
+
+var n_conflicts: i64 = 0
+var n_decisions: i64 = 0
+var n_restarts: i64 = 0
+var CONFLICT_CAP: i64 = 200000000
+var var_inc: i64 = 1000000
+
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
+    else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") }
+    else { print("9") }
+}
+fn print_dec(n: i64) with IO, Mut, Div, Panic {
+    if n == 0 { print("0") return }
+    var x = n
+    if x < 0 { print("-") x = 0 - x }
+    var buf: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { buf[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { print_digit(buf[i])  i = i - 1 }
+}
+
+fn lit_var(l: i64) -> i32 with Panic {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+fn litidx(l: i64) -> i32 with Panic {
+    let v = lit_var(l)
+    if l < 0 { return v * 2 + 1 }
+    return v * 2
+}
+fn litval(l: i64) -> i32 with Mut, Panic {
+    let v = lit_var(l)
+    var a = assign[v]
+    if l < 0 { a = 0 - a }
+    return a
+}
+
+fn watch_clause(c: i32) with Mut, Panic {
+    let st = cstart[c]
+    let i0 = litidx(clits[st + 0])
+    wnext[2 * c] = whead[i0]
+    whead[i0] = 2 * c
+    let i1 = litidx(clits[st + 1])
+    wnext[2 * c + 1] = whead[i1]
+    whead[i1] = 2 * c + 1
+}
+
+fn db_add(arr: &[i64; 8192], n: i32) -> i32 with Mut, Panic {
+    if nclauses >= 262144 { return 0 - 1 }
+    let idx = nclauses
+    var start: i32 = 0
+    if idx > 0 { start = cstart[idx - 1] + clen[idx - 1] }
+    if (start as i64) + (n as i64) > 4194304 { return 0 - 1 }
+    cstart[idx] = start
+    clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        clits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > nvars { nvars = v }
+        i = i + 1
+    }
+    nclauses = idx + 1
+    if n >= 2 { watch_clause(idx) }
+    return idx
+}
+
+fn enqueue(lit: i64, rs: i32) with Mut, Panic {
+    let v = lit_var(lit)
+    if lit < 0 { assign[v] = 0 - 1 } else { assign[v] = 1 }
+    vlevel[v] = cur_level
+    reason[v] = rs
+    trail_lit[trail_len] = lit
+    trail_len = trail_len + 1
+}
+
+// two-watched-literal unit propagation; returns conflict clause idx or -1.
+fn propagate() -> i32 with Mut, Panic {
+    while qhead < trail_len {
+        let p = trail_lit[qhead]
+        qhead = qhead + 1
+        let f = 0 - p
+        let fi = litidx(f)
+        var prev: i32 = 0 - 1
+        var node = whead[fi]
+        while node != (0 - 1) {
+            let nextnode = wnext[node]
+            let c = node / 2
+            let s = node - 2 * c
+            let st = cstart[c]
+            let other = clits[st + (1 - s)]
+            var handled: i32 = 0
+            if litval(other) == 1 {
+                prev = node
+                handled = 1
+            }
+            if handled == 0 {
+                let ln = clen[c]
+                var found: i32 = 0 - 1
+                var k: i32 = 2
+                while k < ln {
+                    if litval(clits[st + k]) != (0 - 1) { found = k  k = ln }
+                    else { k = k + 1 }
+                }
+                if found != (0 - 1) {
+                    let tmp = clits[st + s]
+                    clits[st + s] = clits[st + found]
+                    clits[st + found] = tmp
+                    let newlit = clits[st + s]
+                    if prev == (0 - 1) { whead[fi] = nextnode } else { wnext[prev] = nextnode }
+                    let ni = litidx(newlit)
+                    wnext[node] = whead[ni]
+                    whead[ni] = node
+                    handled = 1
+                }
+            }
+            if handled == 0 {
+                if litval(other) == (0 - 1) { return c }
+                enqueue(other, c)
+                prev = node
+            }
+            node = nextnode
+        }
+    }
+    return 0 - 1
+}
+
+fn rescale() with Mut, Panic {
+    var i: i32 = 1
+    while i <= nvars { activity[i] = activity[i] / 1000000000  i = i + 1 }
+    var_inc = var_inc / 1000000000
+    if var_inc < 1 { var_inc = 1 }
+}
+fn bump(v: i32) with Mut, Panic {
+    activity[v] = activity[v] + var_inc
+    if activity[v] > 1000000000000000000 { rescale() }
+}
+
+// proof stream: ordered records, P_tag 0 = add lemma, 1 = delete clause.
+// emit_drat writes "d ..." for tag 1; the native RUP checker skips tag 1
+// records entirely (a lemma RUP w.r.t. a superset DB is still RUP -> sound).
+fn emit_proof_clause() with Mut, Panic {
+    let idx = P_n
+    if idx >= 1048576 { return }
+    let start = P_pos
+    if start + (llen as i64) > 16777216 { return }
+    P_start[idx] = start as i32
+    P_len[idx] = llen
+    P_tag[idx] = 0
+    var i: i32 = 0
+    while i < llen { P_lits[(start as i32) + i] = LEARNT[i]  i = i + 1 }
+    P_pos = start + (llen as i64)
+    P_n = idx + 1
+}
+fn emit_delete(c: i32) with Mut, Panic {
+    let idx = P_n
+    if idx >= 1048576 { return }
+    let ln = clen[c]
+    let start = P_pos
+    if start + (ln as i64) > 16777216 { return }
+    P_start[idx] = start as i32
+    P_len[idx] = ln
+    P_tag[idx] = 1
+    let st = cstart[c]
+    var k: i32 = 0
+    while k < ln { P_lits[(start as i32) + k] = clits[st + k]  k = k + 1 }
+    P_pos = start + (ln as i64)
+    P_n = idx + 1
+}
+fn emit_empty() with Mut, Panic {
+    let idx = P_n
+    if idx >= 1048576 { return }
+    P_start[idx] = P_pos as i32
+    P_len[idx] = 0
+    P_tag[idx] = 0
+    P_n = idx + 1
+}
+
+// LBD = number of distinct decision levels among the learned literals.
+fn comp_lbd() -> i32 with Mut, Panic {
+    var cnt: i32 = 0
+    var i: i32 = 0
+    while i < llen {
+        let lv = vlevel[lit_var(LEARNT[i])]
+        if lblmark[lv] == 0 { lblmark[lv] = 1  cnt = cnt + 1 }
+        i = i + 1
+    }
+    i = 0
+    while i < llen { lblmark[vlevel[lit_var(LEARNT[i])]] = 0  i = i + 1 }
+    return cnt
+}
+
+// 1-UIP analysis; LEARNT[0]=asserting UIP literal, LEARNT[1]=second watch
+// (max-level literal). Returns backjump level. Bumps VSIDS activity.
+fn analyze(confl: i32) -> i32 with Mut, Panic {
+    var pathC: i32 = 0
+    llen = 1
+    var p: i64 = 0
+    var ci: i32 = confl
+    var index: i32 = trail_len - 1
+    var go: i32 = 1
+    while go == 1 {
+        let st = cstart[ci]
+        let ln = clen[ci]
+        var k: i32 = 0
+        while k < ln {
+            let q = clits[st + k]
+            let vq = lit_var(q)
+            var skip: i32 = 0
+            if p != 0 { if vq == lit_var(p) { skip = 1 } }
+            if skip == 0 {
+                if seen[vq] == 0 {
+                    if vlevel[vq] > 0 {
+                        seen[vq] = 1
+                        bump(vq)
+                        if vlevel[vq] >= cur_level { pathC = pathC + 1 }
+                        else { LEARNT[llen] = q  llen = llen + 1 }
+                    }
+                }
+            }
+            k = k + 1
+        }
+        while seen[lit_var(trail_lit[index])] == 0 { index = index - 1 }
+        p = trail_lit[index]
+        seen[lit_var(p)] = 0
+        pathC = pathC - 1
+        if pathC <= 0 { go = 0 }
+        else { ci = reason[lit_var(p)]  index = index - 1 }
+    }
+    LEARNT[0] = 0 - p
+
+    var btlevel: i32 = 0
+    if llen >= 2 {
+        var maxi: i32 = 1
+        var maxl: i32 = vlevel[lit_var(LEARNT[1])]
+        var j2: i32 = 2
+        while j2 < llen {
+            let lv = vlevel[lit_var(LEARNT[j2])]
+            if lv > maxl { maxl = lv  maxi = j2 }
+            j2 = j2 + 1
+        }
+        let tmp = LEARNT[1]  LEARNT[1] = LEARNT[maxi]  LEARNT[maxi] = tmp
+        btlevel = maxl
+    }
+    var j: i32 = 1
+    while j < llen { seen[lit_var(LEARNT[j])] = 0  j = j + 1 }
+    var_inc = var_inc + var_inc / 20
+    if var_inc > 1000000000000000 { rescale() }
+    last_lbd = comp_lbd()
+    emit_proof_clause()
+    return btlevel
+}
+
+fn cancel_to(level: i32) with Mut, Panic {
+    if cur_level <= level { return }
+    let target = trail_lim[level + 1]
+    var i: i32 = trail_len - 1
+    while i >= target {
+        let v = lit_var(trail_lit[i])
+        if assign[v] == 1 { phase[v] = 1 } else { phase[v] = 0 }
+        assign[v] = 0
+        reason[v] = 0 - 1
+        vlevel[v] = 0
+        i = i - 1
+    }
+    trail_len = target
+    qhead = target
+    cur_level = level
+}
+
+// Clause-DB reduction, MUST be called only at decision level 0.
+// Keeps: all originals (c < n_orig), glue clauses (lbd <= LBD_KEEP), and
+// locked clauses (reason of a current level-0 unit). Deletes the rest,
+// emitting a DRUP 'd' record for each so drat-trim stays in sync. Then
+// compacts clits/cstart/clen/lbd, remaps reason[] via cmap, rebuilds the
+// watch lists, and resets qhead so propagate() restores the watch invariant.
+fn reduce_db() with Mut, Panic {
+    var c: i32 = 0
+    while c < nclauses {
+        if c < n_orig { keepf[c] = 1 }
+        else if lbd[c] <= LBD_KEEP { keepf[c] = 1 }
+        else { keepf[c] = 0 }
+        c = c + 1
+    }
+    // lock clauses that justify current (level-0) assignments
+    var t: i32 = 0
+    while t < trail_len {
+        let v = lit_var(trail_lit[t])
+        let r = reason[v]
+        if r >= 0 { keepf[r] = 1 }
+        t = t + 1
+    }
+    // emit deletions BEFORE compaction (literals still live in clits)
+    c = n_orig
+    while c < nclauses {
+        if keepf[c] == 0 { emit_delete(c)  n_deleted = n_deleted + 1 }
+        c = c + 1
+    }
+    // compact kept clauses to the front (forward copy: dest <= src, safe)
+    var newidx: i32 = 0
+    var newpos: i32 = 0
+    c = 0
+    while c < nclauses {
+        if keepf[c] == 1 {
+            let oldst = cstart[c]
+            let ln = clen[c]
+            let lb = lbd[c]
+            cmap[c] = newidx
+            var k: i32 = 0
+            while k < ln { clits[newpos + k] = clits[oldst + k]  k = k + 1 }
+            cstart[newidx] = newpos
+            clen[newidx] = ln
+            lbd[newidx] = lb
+            newpos = newpos + ln
+            newidx = newidx + 1
+        }
+        c = c + 1
+    }
+    nclauses = newidx
+    // remap reasons of the surviving (level-0) trail
+    t = 0
+    while t < trail_len {
+        let v = lit_var(trail_lit[t])
+        if reason[v] >= 0 { reason[v] = cmap[reason[v]] }
+        t = t + 1
+    }
+    // rebuild all watch lists from the compacted DB
+    var li: i32 = 0
+    while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
+    c = 0
+    while c < nclauses { if clen[c] >= 2 { watch_clause(c) }  c = c + 1 }
+    qhead = 0
+    n_reduces = n_reduces + 1
+    let learned = nclauses - n_orig
+    if learned > max_learnts - max_learnts / 4 {
+        if max_learnts < 1000000 { max_learnts = max_learnts + max_learnts / 2 }
+    }
+}
+
+fn pick() -> i32 with Mut, Panic {
+    var best: i32 = 0
+    var bestact: i64 = 0 - 1
+    var v: i32 = 1
+    while v <= nvars {
+        if assign[v] == 0 {
+            if activity[v] > bestact { bestact = activity[v]  best = v }
+        }
+        v = v + 1
+    }
+    return best
+}
+
+fn solve() -> i32 with IO, Mut, Div, Panic {
+    cur_level = 0
+    trail_lim[0] = 0
+    qhead = 0
+    // inner/outer (MiniSat-style) restarts: keep restarts frequent and
+    // well-distributed (far better for hard UNSAT than unbounded geometric).
+    var restart_inner: i64 = 100
+    var restart_outer: i64 = 100
+    var since_restart: i64 = 0
+    var rephase_flag: i32 = 0
+    var loops: i32 = 1
+    while loops == 1 {
+        let confl = propagate()
+        if confl >= 0 {
+            n_conflicts = n_conflicts + 1
+            since_restart = since_restart + 1
+            if n_conflicts % 100000 == 0 {
+                print("  [progress] conflicts="); print_dec(n_conflicts)
+                print(" lemmas="); print_dec(P_n as i64)
+                print(" clauses="); print_dec(nclauses as i64)
+                print(" reduces="); print_dec(n_reduces)
+                print(" deleted="); print_dec(n_deleted)
+                print(" restarts="); print_dec(n_restarts)
+                print(" trail="); print_dec(trail_len as i64); print("\n")
+            }
+            if n_conflicts > CONFLICT_CAP { return 2 }
+            if cur_level == 0 { emit_empty()  return 0 }
+            let bt = analyze(confl)
+            let lidx = db_add(&LEARNT, llen)
+            if lidx < 0 { return 3 }
+            lbd[lidx] = last_lbd
+            cancel_to(bt)
+            enqueue(LEARNT[0], lidx)
+            if (nclauses - n_orig) >= max_learnts {
+                cancel_to(0)
+                qhead = 0
+                since_restart = 0
+                n_restarts = n_restarts + 1
+                reduce_db()
+            } else if since_restart >= restart_inner {
+                cancel_to(0)
+                qhead = 0
+                since_restart = 0
+                n_restarts = n_restarts + 1
+                restart_inner = restart_inner + restart_inner / 10
+                if restart_inner > restart_outer {
+                    restart_inner = 100
+                    restart_outer = restart_outer + restart_outer / 10
+                }
+                // periodic rephasing to diversify saved polarities
+                if n_restarts % 128 == 0 {
+                    rephase_flag = 1 - rephase_flag
+                    var rv: i32 = 1
+                    while rv <= nvars { phase[rv] = rephase_flag  rv = rv + 1 }
+                }
+            }
+        } else {
+            let x = pick()
+            if x == 0 { return 1 }
+            n_decisions = n_decisions + 1
+            cur_level = cur_level + 1
+            trail_lim[cur_level] = trail_len
+            if phase[x] == 1 { enqueue(x as i64, 0 - 1) } else { enqueue(0 - (x as i64), 0 - 1) }
+        }
+    }
+    return 2
+}
+
+// ---- full-scan RUP checker (small instances; de Grey uses drat-trim) ----
+fn reset_assign_full() with Mut, Panic {
+    var i: i32 = 0
+    while i <= nvars { assign[i] = 0  i = i + 1 }
+}
+fn rup_add_lemma(pst: i32, pln: i32) with Mut, Panic {
+    if nclauses >= 262144 { return }
+    let idx = nclauses
+    var start: i32 = 0
+    if idx > 0 { start = cstart[idx - 1] + clen[idx - 1] }
+    if (start as i64) + (pln as i64) > 4194304 { return }
+    cstart[idx] = start
+    clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { clits[start + i] = P_lits[pst + i]  i = i + 1 }
+    nclauses = idx + 1
+}
+fn propagate_noenq() -> i32 with Mut, Panic {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < nclauses {
+            let st = cstart[c]
+            let ln = clen[c]
+            var sat: i32 = 0
+            var un: i32 = 0
+            var last: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = clits[st + k]
+                let v = lit_var(l)
+                var a = assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { un = un + 1  last = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if un == 0 { return 1 }
+                if un == 1 {
+                    let v = lit_var(last)
+                    if last < 0 { assign[v] = 0 - 1 } else { assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+fn verify(orig_nc: i32) -> i32 with Mut, Panic {
+    nclauses = orig_nc
+    var pi: i32 = 0
+    while pi < P_n {
+        if P_tag[pi] == 1 { pi = pi + 1  continue }
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        reset_assign_full()
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = P_lits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = 0 - 1
+            if l < 0 { want = 1 }
+            if assign[v] != 0 { if assign[v] != want { taut = 1 } }
+            assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 { ok = 1 } else {
+            let cf = propagate_noenq()
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return 0 - 1 }
+        if pln == 0 { return 1 }
+        rup_add_lemma(pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+fn emit_dimacs(orig_nc: i32) with IO, Mut, Div, Panic {
+    print("p cnf ")  print_dec(nvars as i64)  print(" ")  print_dec(orig_nc as i64)  print("\n")
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = cstart[c]
+        let ln = clen[c]
+        var k: i32 = 0
+        while k < ln { print_dec(clits[st + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        c = c + 1
+    }
+}
+fn emit_drat() with IO, Mut, Div, Panic {
+    var pi: i32 = 0
+    while pi < P_n {
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        if P_tag[pi] == 1 { print("d ") }
+        var k: i32 = 0
+        while k < pln { print_dec(P_lits[pst + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        pi = pi + 1
+    }
+}
+
+fn build_clique(n: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var v: i64 = 0
+    while v < n {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = v*k + c + 1  c = c + 1 }
+        let _ = db_add(&arr, k as i32)
+        v = v + 1
+    }
+    var a: i64 = 0
+    while a < n {
+        var b: i64 = a + 1
+        while b < n {
+            var c: i64 = 0
+            while c < k {
+                arr[0] = 0 - (a*k + c + 1)
+                arr[1] = 0 - (b*k + c + 1)
+                let _ = db_add(&arr, 2)
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn reset_all() with Mut, Panic {
+    // clear the full static arrays (not just up to the stale nvars) so no
+    // VSIDS/phase/reason state leaks across run_case invocations [xai-review #1]
+    var i: i32 = 0
+    while i < 8192 { assign[i]=0 vlevel[i]=0 reason[i]=0 seen[i]=0 phase[i]=0 activity[i]=0 i=i+1 }
+    var li: i32 = 0
+    while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
+    nvars=0 nclauses=0 trail_len=0 cur_level=0 qhead=0
+    P_n=0 n_conflicts=0 n_decisions=0 n_restarts=0 var_inc=1000000
+    P_pos=0 n_reduces=0 n_deleted=0 n_orig=0 max_learnts=400
+}
+
+fn run_case(n: i64) with IO, Mut, Div, Panic {
+    reset_all()
+    build_clique(n, n - 1)
+    let orig_nc = nclauses
+    n_orig = orig_nc
+    print("K_")  print_dec(n)  print("/")  print_dec(n - 1)  print("-col vars=")
+    print_dec(nvars as i64)  print(" clauses=")  print_dec(orig_nc as i64)
+    let r = solve()
+    if r == 1 { print("  SAT (UNEXPECTED)\n")  return }
+    if r >= 2 { print("  WALL/CAP code=")  print_dec(r as i64)  print("\n")  return }
+    let conf = n_conflicts
+    let lemmas = P_n
+    reset_assign_full()
+    let vr = verify(orig_nc)
+    print("  conflicts=")  print_dec(conf)  print(" decisions=")  print_dec(n_decisions)
+    print(" restarts=")  print_dec(n_restarts)  print(" reduces=")  print_dec(n_reduces)
+    print(" deleted=")  print_dec(n_deleted)  print(" lemmas=")  print_dec(lemmas as i64)
+    if vr == 1 { print("  RUP:VERIFIED\n") } else { print("  RUP:FAIL(")  print_dec(vr as i64)  print(")\n") }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== fast CDCL (2-watched + int-VSIDS + phase + restarts) : pigeonhole ===\n")
+    run_case(4)
+    run_case(5)
+    run_case(6)
+    run_case(7)
+    print("\n-- K_7/6 certificate for drat-trim (contains 'd' deletions) --\n")
+    reset_all()
+    build_clique(7, 6)
+    let onc = nclauses
+    n_orig = onc
+    let s = solve()
+    if s == 0 {
+        nclauses = onc
+        print("%%DIMACS%%\n")  emit_dimacs(onc)
+        print("%%DRAT%%\n")  emit_drat()  print("%%END%%\n")
+    }
+    return 0
+}

@@ -1,0 +1,109 @@
+---
+title: "Uncertain Measurements with Knowledge&lt;T&gt;"
+description: "用知識型<T>で不確実な測定を置き換える"
+series: "drug-dosing"
+order: 3
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-02-pk-model"]
+topic_id: "website.tutorials.ja.drug-dosing-03-knowledge"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.ja.drug-dosing-03-knowledge"
+---
+# 知識型&lt;T&gt;で不確実な測定
+
+前回の講座では、`f64`の値で正確なPKモデルを作成しました。今は、Sounioの`Knowledge<T>`タイプを使って不確実性を追跡するようにアップグレードします。
+
+## f64からKnowledge&lt;f64&gt;へ
+
+すべての臨床測定は不確実性があります。血清肌酸酐の1.2 mg/dLは「1.2くらい、標準偏差が約0.06くらい」という意味です。Sounioでは以下のようになります：
+
+```sio
+// 前: 単一の値、不確実性が不明
+let scr: f64 = 1.2
+
+// 後: 値 + 標準不確実性
+let scr: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+`measure()`コンストラクタは以下のように`Knowledge&lt;f64&gt;`を作成します:
+- **value**: 最良推奨値(1.2)
+- **uncertainty**: 標準不確実性(0.06、±5%CVを表す)
+
+## 不确定性を持つEpistemic PKモデルの構築
+
+PKパラメータを不確実性を持つように再定義しましょう。
+```sio
+構造体 EpistemicPK {
+    clearance: 知識<f64>,    // L/h ± 不確実性
+    volume: 知識<f64>,       // L ± 不確実性
+    dose: f64,                    // mg (正確に知っている — ドゥスを制御している)
+    tau: f64,                     // 時間(h) (正確に知っている — スケジュールを設定している)
+}
+```
+
+`dose` と `tau` は `f64` のままであることに注意してください。これらは **決定** ですが、測定された量のみは不確実性を持ちます。
+
+## 患者固有パラメータの作成
+
+実際の臨床シナリオでの vancomycin の投薬量の計測方法:
+
+```sio
+fn create_patient_pk() -> EpistemicPK {
+    EpistemicPK {
+        // Clearance: Cockcroft-Gault から推定
+        // 平均値 4.5 L/h ですが、30%の個人間の分散があります
+        clearance: measure(4.5, 不確実性: 1.35),
+
+        // Volume: 体重から推定
+        // 50 L ± 10% (体重に基づいた推定の誤差)
+        volume: measure(50.0, 不確実性: 5.0),
+
+        dose: 1000.0,   // 1g vancomycin (正確に知っている)
+        tau: 12.0,       // q12h (正確に知っている)
+    }
+}
+```1.35 L/h（30% CV）のクリアンスの不確さは、実際の臨床分散性を反映しています。クリアンスは肾功能、年齢、体重、遺伝性に依存しますが、特定の患者については全てのこれらの情報が正確に知られていないためです。
+
+## 知識値の算術演算
+
+`Knowledge<T>`の値で算術演算を行うと、Sounioは自動的に1階の誤差伝播（Delta法）を使用して不確さを伝播します：
+
+```sio
+// 両辺のオペランドから不確さを伝播する除算
+fn epistemic_half_life(pk: EpistemicPK) -> Knowledge<f64> {
+    0.693 * pk.volume / pk.clearance
+}
+
+// 結果は組み合わせ的不確さを持ちます：
+// σ(t½) = t½ × √((σ_V/V)² + (σ_CL/CL)²)
+```
+
+伝播公式を書く必要はありません。`Knowledge<T>`型がそれを処理します。コンパイラはすべての演算が不確さの安全なものかを確認します。
+
+## 情報の抽出
+
+`Knowledge&lt;f64&gt;`の値から情報をクエリーすることができます：
+
+```sio
+fn main() with IO {
+    let pk = create_patient_pk()
+    let t_half = epistemic_half_life(pk)
+
+    // 最良推定値にアクセス
+    let value = t_half.value        // ~7.7時間
+``````markdown
+# 標準的不確分のアクセス
+
+`t_half.uncertainty` を使用して標準的不確分を取得します。これは ~2.7 時間です。
+
+# キーポイント
+
+- `Knowledge<f64>` は値とその標準的不確分を裹み込みます
+- `measure(value, uncertainty: sigma)` を使用してエピステム的値を作成します
+- 算術演算は自動的に不確分を伝播します
+- 決定（剂量、スケジュール）は `f64` のままであり、測定値だけが不確分を持ちます
+- コンパイラは、確実な値と不確分の値を誤って混ぜることを防ぎます
+```

@@ -26,6 +26,8 @@
 // Section 1: Constants
 // ============================================================================
 
+use ir::ir::*
+use ir::normalize::*
 let DCE_MAX_INSTRS: i64 = 8192
 let DCE_MAX_BLOCKS: i64 = 512
 let DCE_MAX_REGS: i64 = 4096
@@ -34,6 +36,13 @@ let DCE_MAX_WORKLIST: i64 = 4096
 let DCE_MAX_PREDS: i64 = 8
 let DCE_MAX_SUCCS: i64 = 8
 let DCE_INVALID: i64 = 0 - 1
+
+// Detectable refusal: dce_run_impl REFUSES a function whose instr_count exceeds
+// DCE_MAX_INSTRS (a truncated liveness analysis is a wrong analysis, not a weaker
+// one). Before this counter the refusal returned empty stats SILENTLY — the driver
+// could not tell "DCE ran and removed nothing" from "DCE gave up". Incremented on
+// every refusal so the compile driver / gates can observe that DCE declined.
+pub var DCE_REFUSAL_COUNT: i64 = 0
 
 // Opcode classification constants for side-effect detection.
 // These correspond to the IrOpcode enum values but are used
@@ -206,7 +215,9 @@ fn dce_classify_opcode(op: IrOpcode) -> i64 {
     if opcodes_equal(op, IrOpcode::IrBinOp) { return DCE_OP_BINOP }
     if opcodes_equal(op, IrOpcode::IrUnaryOp) { return DCE_OP_UNARYOP }
     if opcodes_equal(op, IrOpcode::IrCall) { return DCE_OP_CALL }
+    if opcodes_equal(op, IrOpcode::IrCallSret) { return DCE_OP_CALL }
     if opcodes_equal(op, IrOpcode::IrReturn) { return DCE_OP_RETURN }
+    if opcodes_equal(op, IrOpcode::IrReturnSret) { return DCE_OP_RETURN }
     if opcodes_equal(op, IrOpcode::IrJump) { return DCE_OP_JUMP }
     if opcodes_equal(op, IrOpcode::IrBranchTrue) { return DCE_OP_BRANCH_TRUE }
     if opcodes_equal(op, IrOpcode::IrBranchFalse) { return DCE_OP_BRANCH_FALSE }
@@ -431,7 +442,7 @@ fn dce_sweep(ctx: &! DceContext, func: &! IrFunction) -> i64 with Mut, Panic, Di
         if !ctx.instrs[i as usize].is_live {
             // Do not sweep NOPs that were already NOPs
             if ctx.instrs[i as usize].opcode != DCE_OP_NOP {
-                func.instrs[i as usize] = ir_nop()
+                ir_arena_store(ir_region_slot_w(func.region, (i)), ir_nop())
                 eliminated = eliminated + 1
             }
         }
@@ -642,7 +653,7 @@ fn dce_eliminate_unreachable(ctx: &! DceContext, func: &! IrFunction) -> i64 wit
                 let idx = start + i
                 if idx >= 0 && idx < ctx.instr_count {
                     if ctx.instrs[idx as usize].opcode != DCE_OP_NOP {
-                        func.instrs[idx as usize] = ir_nop()
+                        ir_arena_store(ir_region_slot_w(func.region, (idx)), ir_nop())
                         ctx.instrs[idx as usize].opcode = DCE_OP_NOP
                         ctx.instrs[idx as usize].is_live = false
                         eliminated = eliminated + 1
@@ -709,7 +720,7 @@ fn dce_eliminate_dead_stores(ctx: &! DceContext, func: &! IrFunction) -> i64 wit
                     j = j + 1
                 }
                 if read_count == 0 {
-                    func.instrs[i as usize] = ir_nop()
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_nop())
                     ctx.instrs[i as usize].opcode = DCE_OP_NOP
                     ctx.instrs[i as usize].has_side_effect = false
                     ctx.instrs[i as usize].is_live = false
@@ -738,7 +749,7 @@ fn dce_eliminate_trivial_phis(ctx: &! DceContext, func: &! IrFunction) -> i64 wi
             let uc = ctx.instrs[i as usize].use_count
             if uc == 0 {
                 // Phi with no inputs -- dead
-                func.instrs[i as usize] = ir_nop()
+                ir_arena_store(ir_region_slot_w(func.region, (i)), ir_nop())
                 ctx.instrs[i as usize].opcode = DCE_OP_NOP
                 ctx.instrs[i as usize].is_live = false
                 eliminated = eliminated + 1
@@ -747,7 +758,7 @@ fn dce_eliminate_trivial_phis(ctx: &! DceContext, func: &! IrFunction) -> i64 wi
                 let src = ctx.instrs[i as usize].use_regs[0]
                 let dst = ctx.instrs[i as usize].def_reg
                 if dst >= 0 && src >= 0 {
-                    func.instrs[i as usize] = ir_copy(dst, src)
+                    ir_arena_store(ir_region_slot_w(func.region, (i)), ir_copy(dst, src))
                     ctx.instrs[i as usize].opcode = DCE_OP_COPY
                     eliminated = eliminated + 1
                 }
@@ -765,7 +776,7 @@ fn dce_eliminate_trivial_phis(ctx: &! DceContext, func: &! IrFunction) -> i64 wi
                 if all_same {
                     let dst = ctx.instrs[i as usize].def_reg
                     if dst >= 0 && first_src >= 0 {
-                        func.instrs[i as usize] = ir_copy(dst, first_src)
+                        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_copy(dst, first_src))
                         ctx.instrs[i as usize].opcode = DCE_OP_COPY
                         eliminated = eliminated + 1
                     }
@@ -786,7 +797,7 @@ fn dce_eliminate_trivial_phis(ctx: &! DceContext, func: &! IrFunction) -> i64 wi
 fn dce_populate(ctx: &! DceContext, func: &IrFunction) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count && i < DCE_MAX_INSTRS {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         var di = dce_extract_uses(instr)
         di.instr_idx = i
 
@@ -810,6 +821,14 @@ fn dce_populate(ctx: &! DceContext, func: &IrFunction) -> i64 with Mut, Panic, D
 // Inner implementation of the full DCE pipeline.
 // Takes already-borrowed ctx and func so all internal calls are reborrows.
 fn dce_run_impl(ctx: &! DceContext, func: &! IrFunction) -> DceStats with Mut, Panic, Div {
+    // #1649: IR_MAX_INSTRS is 16384, DceContext holds 8192. dce_populate stops at
+    // DCE_MAX_INSTRS, and a TRUNCATED liveness analysis is not a weaker analysis,
+    // it is a wrong one: a use past the cap is never recorded, so its definition
+    // looks dead and the sweep deletes live code. Refuse the function instead.
+    if (*func).instr_count > DCE_MAX_INSTRS {
+        DCE_REFUSAL_COUNT = DCE_REFUSAL_COUNT + 1
+        return dce_stats_new()
+    }
     // Phase 1: Populate context from function
     let populated = dce_populate(ctx, func)
 
@@ -864,8 +883,10 @@ fn dce_run(func: &! IrFunction) -> DceStats with Mut, Panic, Div {
 }
 
 // Convenience: run DCE on a function and return the modified function.
-fn dce_optimize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
-    var result = func
+pub(crate) fn dce_optimize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
+    // main's pub(crate); #1649's clone. `var result = func` would alias the
+    // caller's arena region instead of copying it.
+    var result = ir_function_clone(&func)
     let stats = dce_run(&! result)
     result
 }
@@ -875,43 +896,43 @@ fn dce_optimize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
 // ============================================================================
 
 // Build a test IrFunction from an instruction array and count.
-fn dce_make_test_func(instrs: [IrInstr; 128], count: i64) -> IrFunction {
-    IrFunction {
-        name: ir_empty_name(),
-        instrs: instrs,
-        instr_count: count,
-        reg_count: count + 10,
-        label_count: 0,
-        param_count: 0,
-        param_regs: [IR_INVALID_REG; 64],
-        compile_strategy: IR_STRATEGY_STANDARD,
-        prof_counter_id: -1,
-        hyper_algebra_kind: -1,
+pub(crate) fn dce_make_test_func(instrs: [IrInstr; 1024], count: i64) -> IrFunction with Mut, Panic, Div {
+    // instrs is [IrInstr; 1024] but IrFunction.instrs is [IrInstr; 4096]; a typed
+    // fixed-size array cannot be assigned across sizes, so build an empty function
+    // (its [2048] instrs come from a size-flexible fill literal) and copy in.
+    var f = ir_empty_function()
+    var i: i64 = 0
+    while i < count {
+        ir_arena_store(ir_region_slot_w(f.region, (i)), instrs[i as usize])
+        i = i + 1
     }
+    f.instr_count = count
+    f.reg_count = count + 10
+    f
 }
 
 // Check if instruction at position is a specific opcode (using IrOpcode).
-fn dce_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Div, Panic {
+fn dce_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Mut, Panic, Div {
     if pos < 0 || pos >= func.instr_count {
         return false
     }
-    let instr = func.instrs[pos as usize]
+    let instr = ir_arena_load(ir_region_slot_r(func.region, (pos)))
     opcodes_equal(instr.op, expected)
 }
 
 // Check if instruction at position is a NOP.
-fn dce_check_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+pub(crate) fn dce_check_nop(func: &IrFunction, pos: i64) -> bool with Mut, Div, Panic {
     dce_check_opcode(func, pos, IrOpcode::IrNop)
 }
 
 // Check if instruction at position is NOT a NOP (i.e., still alive).
-fn dce_check_not_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+fn dce_check_not_nop(func: &IrFunction, pos: i64) -> bool with Mut, Div, Panic {
     !dce_check_nop(func, pos)
 }
 
 // Build an empty 8192-element instruction array filled with NOPs.
-fn dce_empty_instrs() -> [IrInstr; 128] {
-    [ir_nop(); 128]
+pub(crate) fn dce_empty_instrs() -> [IrInstr; 1024] {
+    [ir_nop(); 1024]
 }
 
 // Make a phi instruction with specified inputs stored in src1/src2.
@@ -930,7 +951,7 @@ fn dce_make_phi(dst: i64, src1: i64, src2: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -1764,11 +1785,12 @@ fn test_dce_terminator_classification() -> bool with Mut, Panic, Div {
 // T42: Store classification.
 fn test_dce_store_classification() -> bool with Mut, Panic, Div {
     let fs = dce_is_store(DCE_OP_FIELD_SET)
-    let is = dce_is_store(DCE_OP_INDEX_SET)
+    // Soft-keyword: Madaros parser rejects `let is` as binding name.
+    let is_index_set = dce_is_store(DCE_OP_INDEX_SET)
     let li = !dce_is_store(DCE_OP_LOAD_IMM)
     let ca = !dce_is_store(DCE_OP_CALL)
 
-    fs && is && li && ca
+    fs && is_index_set && li && ca
 }
 
 // T43 inner: populate, set use_count, eliminate trivial phis, check zero-input phi.

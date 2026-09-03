@@ -1,4 +1,7 @@
-// tsit5.d - Tsitouras 5(4) Adaptive ODE Solver for Sounio
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// tsit5.sio — Tsitouras 5(4) Adaptive ODE Solver for Sounio
 //
 // Native implementation matching Julia's DifferentialEquations.jl Tsit5 algorithm.
 // 5th-order embedded Runge-Kutta method with 4th-order error estimation.
@@ -149,7 +152,7 @@ fn tsit5_min_f64(a: f64, b: f64) -> f64 {
 }
 
 // Compute 5th root using Newton's method
-fn fifth_root(x: f64) -> f64 {
+fn fifth_root(x: f64) -> f64 with Div, Panic {
     if x <= 0.0 { return 0.0 }
     let y = 1.0
     let y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
@@ -227,12 +230,12 @@ fn tsit5_step_exp(u_in: f64, t: f64, dt: f64) -> StepResult {
 // ERROR AND STEP SIZE CONTROL
 // ============================================================================
 
-fn error_norm(err: f64, u: f64, u_new: f64, rtol: f64, atol: f64) -> f64 {
+fn error_norm(err: f64, u: f64, u_new: f64, rtol: f64, atol: f64) -> f64 with Div, Panic {
     let scale = atol + rtol * tsit5_max_f64(tsit5_abs_f64(u), tsit5_abs_f64(u_new))
     return tsit5_abs_f64(err) / scale
 }
 
-fn optimal_step(dt: f64, err_norm: f64, safety: f64, max_growth: f64, min_shrink: f64) -> f64 {
+fn optimal_step(dt: f64, err_norm: f64, safety: f64, max_growth: f64, min_shrink: f64) -> f64 with Div, Panic {
     if err_norm <= 0.0 {
         return dt * max_growth
     }
@@ -245,7 +248,7 @@ fn optimal_step(dt: f64, err_norm: f64, safety: f64, max_growth: f64, min_shrink
 // MAIN SOLVER
 // ============================================================================
 
-fn solve_exp_decay(u0: f64, t0: f64, t_end: f64, config: ODEConfig) -> Tsit5ODESolution {
+fn solve_exp_decay(u0: f64, t0: f64, t_end: f64, config: ODEConfig) -> Tsit5ODESolution with Mut, Div, Panic {
     let u = u0
     let t = t0
 
@@ -272,7 +275,7 @@ fn solve_exp_decay(u0: f64, t0: f64, t_end: f64, config: ODEConfig) -> Tsit5ODES
 }
 
 // Helper for integration loop
-fn integrate_loop(u: f64, t: f64, dt: f64, t_end: f64, config: ODEConfig, nsteps: i64, nfeval: i64, nreject: i64) -> Tsit5ODESolution {
+fn integrate_loop(u: f64, t: f64, dt: f64, t_end: f64, config: ODEConfig, nsteps: i64, nfeval: i64, nreject: i64) -> Tsit5ODESolution with Mut, Div, Panic {
     // Simple iterative approach - run until t >= t_end or max_steps
     // Use var for variables that change across iterations
     var u_curr = u
@@ -346,4 +349,61 @@ fn tsit5_exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {
 }
 
 // ============================================================================
-// TEST / MAIN
+// TESTS
+// ============================================================================
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_tsit5() with IO, Mut, Div, Panic {
+    let cfg = default_config()
+
+    // Exponential decay: du/dt = -0.1*u, u(0)=1, t=[0,10]
+    // Exact: u(10) = exp(-1) = 0.36787944...
+    let sol = solve_exp_decay(1.0, 0.0, 10.0, cfg)
+    chk(1, if sol.success { 1 } else { 0 })
+    // Tsit5 rtol=1e-4, so expect ~1e-4 accuracy
+    chk(2, near(sol.u_final, 0.36787944117144233, 0.001))
+    // Should take reasonable number of steps
+    chk(3, if sol.nsteps > 1 && sol.nsteps < 10000 { 1 } else { 0 })
+
+    // Short integration: t=[0,1], exact u(1) = exp(-0.1) ≈ 0.90484
+    let sol2 = solve_exp_decay(1.0, 0.0, 1.0, cfg)
+    chk(4, if sol2.success { 1 } else { 0 })
+    chk(5, near(sol2.u_final, 0.9048374180359595, 0.001))
+
+    // Doubling initial condition: u(10) should double
+    let sol3 = solve_exp_decay(2.0, 0.0, 10.0, cfg)
+    chk(6, near(sol3.u_final, 0.36787944117144233 * 2.0, 0.002))
+
+    // Error estimate: fifth_root
+    chk(7, near(fifth_root(32.0), 2.0, 1e-6))
+    chk(8, near(fifth_root(1.0), 1.0, 1e-10))
+
+    // exp approximation accuracy
+    chk(9, near(tsit5_exp_approx(0.0), 1.0, 1e-12))
+    chk(10, near(tsit5_exp_approx(0.0 - 0.1), 0.9048374180359595, 1e-8))
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/ode/tsit5 tests ───\n")
+    test_tsit5()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
+}

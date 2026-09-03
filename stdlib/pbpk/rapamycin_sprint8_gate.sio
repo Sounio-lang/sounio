@@ -1,0 +1,170 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint8_gate.sio — Sprint 8 safety-margin gate
+//
+// 56 assertions proving the two routes by which the compile-time confidence
+// gate fires, and demonstrating that dose affects which route applies.
+//
+// Route A (Sprint 7): ke_var too large → conf < 800 → UNCERTAIN
+//   D=2.0mg, ke_var≥0.0025: relative std > 25%, conf=700 → UNCERTAIN
+//
+// Route B (this sprint): point estimate below floor, CI straddles → UNCERTAIN
+//   D=0.9mg, ke_var=0.001: conf=820 ≥ 800 (gate passes!), but C<floor,
+//   hi>floor → else-branch UNCERTAIN. Gate fires NOT from low confidence
+//   but from epistemic boundary proximity.
+//
+// Headline (Section D, assertions 19–22):
+//   SAME ke_var=0.001, SAME conf=820, DIFFERENT decision:
+//     D=2.0mg → THERAPEUTIC   D=0.9mg → UNCERTAIN
+//
+// Assertion map:
+//   A (1–6):   margin_above_floor pure checks
+//   B (7–13):  High dose (D=2.0) at various ke_var
+//   C (14–18): Low dose (D=0.9) at various ke_var
+//   D (19–22): Headline — same conf, different decisions (Route B)
+//   E (23–28): dose_gate_standard sweep
+//   F (29–34): dose_gate_fires parametric
+//   G (35–38): High-dose confidence scores
+//   H (39–42): Low-dose conf passes gate but decision is UNCERTAIN
+//   I (43–48): D=1.0 mg (just above floor) behavior
+//   J (49–52): Decision and conf sentinel values
+//   K (53–56): Wrapper-vs-direct cross-checks
+
+use pbpk::rapamycin_margin::{
+    margin_above_floor,
+    classify_high_dose, classify_low_dose,
+    conf_high_dose, conf_low_dose,
+    dose_gate_fires, dose_gate_standard
+}
+use pbpk::rapamycin_precision::{classify_iv_trough, conf_iv_trough}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, decision_sub, conf_clinical_min
+}
+
+var SPR8_PASS: [i64; 2] = [0; 2]
+
+fn s8_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR8_PASS[0] = SPR8_PASS[0] + 1
+    } else {
+        SPR8_PASS[1] = SPR8_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint8_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: margin_above_floor pure checks (6 assertions) ─────────────
+    // trough_floor_mg_l() = 0.004 mg/L
+
+    s8_chk(margin_above_floor(0.008) > 0.0)         // 1  (positive margin)
+    s8_chk(margin_above_floor(0.003) < 0.0)         // 2  (negative margin — below floor)
+    s8_chk(margin_above_floor(0.004) == 0.0)        // 3  (exactly at floor)
+    s8_chk(margin_above_floor(0.020) > 0.0)         // 4  (therapeutic ceiling)
+    s8_chk(margin_above_floor(0.0042) > 0.0)        // 5  (just above floor)
+    s8_chk(margin_above_floor(0.0038) < 0.0)        // 6  (just below floor)
+
+    // ── Section B: High dose D=2.0mg at various ke_var (7 assertions) ────────
+    // Route A firing: ke_var≥0.0025 → conf=700 < 800 → UNCERTAIN
+
+    s8_chk(classify_high_dose(0.0001) == decision_therapeutic())   // 7
+    s8_chk(classify_high_dose(0.001)  == decision_therapeutic())   // 8
+    s8_chk(classify_high_dose(0.002)  == decision_therapeutic())   // 9
+    s8_chk(classify_high_dose(0.0025) == decision_uncertain())     // 10
+    s8_chk(classify_high_dose(0.01)   == decision_uncertain())     // 11
+    s8_chk(classify_high_dose(0.0001) != decision_uncertain())     // 12
+    s8_chk(classify_high_dose(0.0025) != decision_therapeutic())   // 13
+
+    // ── Section C: Low dose D=0.9mg at various ke_var (5 assertions) ──────────
+    // Route B firing: C(24h)≈0.00375 < floor=0.004; CI straddles → UNCERTAIN
+    // even when conf is high. The gate fires via boundary proximity, not low conf.
+
+    s8_chk(classify_low_dose(0.0001) == decision_uncertain())      // 14
+    s8_chk(classify_low_dose(0.001)  == decision_uncertain())      // 15
+    s8_chk(classify_low_dose(0.01)   == decision_uncertain())      // 16
+    s8_chk(classify_low_dose(0.0001) != decision_therapeutic())    // 17
+    s8_chk(classify_low_dose(0.001)  != decision_therapeutic())    // 18
+
+    // ── Section D: Headline — same conf=820, different decisions (4) ──────────
+    // This is the dissertation proof: at ke_var=0.001 the confidence score is
+    // identical for both doses, yet the gate gives qualitatively different answers.
+    // A point-estimate TDM tool cannot make this distinction.
+
+    s8_chk(conf_high_dose(0.001) == conf_low_dose(0.001))          // 19 (both 820)
+    s8_chk(classify_high_dose(0.001) == decision_therapeutic())    // 20
+    s8_chk(classify_low_dose(0.001)  == decision_uncertain())      // 21
+    s8_chk(classify_high_dose(0.001) != classify_low_dose(0.001))  // 22 (gate fires)
+
+    // ── Section E: dose_gate_standard sweep (6 assertions) ───────────────────
+    // dose_gate_standard(ke_var) := (D=2.0 → THERAPEUTIC) AND (D=0.9 → UNCERTAIN)
+
+    s8_chk(dose_gate_standard(0.0001))                             // 23
+    s8_chk(dose_gate_standard(0.001))                              // 24
+    s8_chk(dose_gate_standard(0.0015))                             // 25 (mid-range)
+    s8_chk(dose_gate_standard(0.002))                              // 26
+    s8_chk(!dose_gate_standard(0.0025))                            // 27 (D=2→UNCERTAIN too)
+    s8_chk(!dose_gate_standard(0.01))                              // 28 (both UNCERTAIN)
+
+    // ── Section F: dose_gate_fires parametric (6 assertions) ─────────────────
+
+    s8_chk(dose_gate_fires(0.05, 0.0001, 70.0, 2.0, 0.9, 24.0, 1.0, 25, 24))   // 29
+    s8_chk(dose_gate_fires(0.05, 0.001,  70.0, 2.0, 0.9, 24.0, 1.0, 25, 24))   // 30
+    s8_chk(dose_gate_fires(0.05, 0.002,  70.0, 2.0, 0.9, 24.0, 1.0, 25, 24))   // 31
+    s8_chk(!dose_gate_fires(0.05, 0.0025, 70.0, 2.0, 0.9, 24.0, 1.0, 25, 24))  // 32 (D=2→UNCERTAIN)
+    s8_chk(!dose_gate_fires(0.05, 0.01,   70.0, 2.0, 0.9, 24.0, 1.0, 25, 24))  // 33 (both UNCERTAIN)
+    s8_chk(dose_gate_fires(0.05, 0.001,  70.0, 1.0, 0.9, 24.0, 1.0, 25, 24))   // 34 (D_high=1.0 still fires)
+
+    // ── Section G: High-dose confidence score values (4 assertions) ───────────
+
+    s8_chk(conf_high_dose(0.0001) == 900)                          // 35
+    s8_chk(conf_high_dose(0.001)  == 820)                          // 36
+    s8_chk(conf_high_dose(0.0025) == 700)                          // 37
+    s8_chk(conf_high_dose(0.0001) > conf_high_dose(0.001))         // 38 (900 > 820)
+
+    // ── Section H: Low-dose conf passes but UNCERTAIN via Route B (4) ─────────
+    // These assertions prove Route B is distinct from Route A:
+    // conf ≥ 800 (gate passes!), yet decision = UNCERTAIN.
+
+    s8_chk(conf_low_dose(0.0001) == 900)                           // 39
+    s8_chk(conf_low_dose(0.001)  == 820)                           // 40
+    s8_chk(conf_low_dose(0.0001) >= conf_clinical_min())           // 41 (900 ≥ 800; UNCERTAIN despite this!)
+    s8_chk(conf_low_dose(0.001)  >= conf_clinical_min())           // 42 (820 ≥ 800; UNCERTAIN despite this!)
+
+    // ── Section I: D=1.0mg (just above floor, C≈0.00417mg/L) (6 assertions) ──
+
+    s8_chk(classify_iv_trough(0.05, 0.0001, 70.0, 1.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 43
+    s8_chk(classify_iv_trough(0.05, 0.001,  70.0, 1.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 44
+    s8_chk(classify_iv_trough(0.05, 0.002,  70.0, 1.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 45
+    s8_chk(classify_iv_trough(0.05, 0.003,  70.0, 1.0, 24.0, 1.0, 25, 24) == decision_uncertain())    // 46
+    s8_chk(dose_gate_fires(0.05, 0.001, 70.0, 1.0, 0.9, 24.0, 1.0, 25, 24))                           // 47
+    s8_chk(dose_gate_fires(0.05, 0.002, 70.0, 1.0, 0.9, 24.0, 1.0, 25, 24))                           // 48
+
+    // ── Section J: Decision and conf sentinel values (4 assertions) ───────────
+
+    s8_chk(decision_therapeutic() == 1)                            // 49
+    s8_chk(decision_uncertain()   == 3)                            // 50
+    s8_chk(conf_clinical_min()    == 800)                          // 51
+    s8_chk(decision_uncertain()   != decision_therapeutic())       // 52
+
+    // ── Section K: Wrapper-vs-direct cross-checks (4 assertions) ─────────────
+
+    s8_chk(classify_high_dose(0.002) ==
+           classify_iv_trough(0.05, 0.002, 70.0, 2.0, 24.0, 1.0, 25, 24))   // 53
+    s8_chk(classify_low_dose(0.001) ==
+           classify_iv_trough(0.05, 0.001, 70.0, 0.9, 24.0, 1.0, 25, 24))   // 54
+    s8_chk(conf_high_dose(0.001) ==
+           conf_iv_trough(0.05, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))       // 55
+    s8_chk(dose_gate_standard(0.001) ==
+           dose_gate_fires(0.05, 0.001, 70.0, 2.0, 0.9, 24.0, 1.0, 25, 24)) // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint8_gate()
+    if SPR8_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

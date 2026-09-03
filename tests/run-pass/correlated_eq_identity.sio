@@ -1,0 +1,78 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// L0 acceptance for correlated equality (stdlib/epistemic/correlation.sio):
+// eq_prob_correlated computes P(|a−b|<ε) with FULL shared-source covariance,
+// so provenance-sharing operands cancel — a==a yields P=1 exactly (the identity
+// solution), deterministic offsets resolve as booleans, and partial correlation
+// is honored (independence assumption would be off by 41.5% relative on T5).
+// All expected values triple-verified (python math.erf, 10⁷ Monte Carlo, and a
+// compiled self-contained build).
+
+use epistemic::correlation::{CorrelatedValue, correlated_from_source, correlated_independent, covariance, eq_prob_correlated, add_correlated, sub_correlated, scale_correlated}
+
+fn approx(x: f64, y: f64) -> bool {
+    let d = if x > y { x - y } else { y - x }
+    d < 0.0001
+}
+
+fn main() with Mut, Div, Panic {
+    var ok = true
+    let x = correlated_from_source(10.0, 1, 2.0, 0.9)     // measurement, VarID 1, sd 2
+    let x2 = correlated_from_source(10.0, 2, 2.0, 0.9)    // independent twin, VarID 2
+
+    // T1 — IDENTITY: same provenance → Var(a−b)=0 → P=1 exactly. a==a solved.
+    if approx(eq_prob_correlated(x, x, 0.5), 1.0) { print("T1 identity a==a -> 1: PASS") }
+    else { print("T1: FAIL"); ok = false }
+
+    // T2 — independent twins: no shared sources → V=8 → fresh-draw answer
+    if approx(eq_prob_correlated(x, x2, 0.5), 0.1403162) { print("T2 indep twins -> 0.1403: PASS") }
+    else { print("T2: FAIL"); ok = false }
+
+    // T3 — deterministic offset: same VarID, mean+1 → V=0, boolean at any eps.
+    // Construct a fresh value (do not `var y = x; y.value = …`): Madaros
+    // multimodule currently aliases large struct copies, so field mutation on
+    // the copy would corrupt `x` and poison T4/T5.
+    let y = correlated_from_source(11.0, 1, 2.0, 0.9)
+    if approx(eq_prob_correlated(x, y, 0.5), 0.0) { print("T3 offset eps=0.5 -> 0: PASS") }
+    else { print("T3a: FAIL"); ok = false }
+    if approx(eq_prob_correlated(x, y, 2.0), 1.0) { print("T3 offset eps=2 -> 1: PASS") }
+    else { print("T3b: FAIL"); ok = false }
+
+    // T4 — certain vs measured (anti-footgun trio member)
+    let c = correlated_independent(10.0, 0.0, 1.0)
+    if approx(eq_prob_correlated(c, x, 0.5), 0.1974127) { print("T4 certain vs measured -> 0.1974: PASS") }
+    else { print("T4: FAIL"); ok = false }
+
+    // T5 — partial correlation: y2 = 0.5·x + w (VarID 3), cov(x,y2)=2, V=2
+    // y2 = 0.5·x + w built via the OPS — exercises combine_correlated's source
+    // merging (the right operand's source must survive into the result).
+    let w = correlated_from_source(5.0, 3, 1.0, 0.9)
+    let y2 = add_correlated(scale_correlated(x, 0.5), w)
+    if y2.source_count == 2 { print("T5 ops-built y2 has both sources: PASS") }
+    else { print("T5src: FAIL"); ok = false }
+    if approx(covariance(x, y2), 2.0) { print("T5 cov(x,y2)=2: PASS") }
+    else { print("T5cov: FAIL"); ok = false }
+    if approx(covariance(y2, w), 1.0) { print("T5 cov(y2,w)=1 (right operand tracked): PASS") }
+    else { print("T5covw: FAIL"); ok = false }
+    if approx(eq_prob_correlated(x, y2, 0.5), 0.2763264) { print("T5 partial-corr -> 0.2763: PASS") }
+    else { print("T5: FAIL"); ok = false }
+
+    // T5b — sub cancellation bookkeeping: shared-source difference keeps ZERO
+    // sources, so downstream covariance through it is honestly zero.
+    let a1 = correlated_from_source(15.0, 100, 1.0, 0.9)
+    let b1 = correlated_from_source(10.0, 100, 1.0, 0.9)
+    let dd = sub_correlated(a1, b1)
+    if dd.source_count == 0 { print("T5b sub-cancel sources=0: PASS") }
+    else { print("T5b src: FAIL"); ok = false }
+    if approx(covariance(dd, correlated_from_source(7.0, 100, 1.0, 0.9)), 0.0) { print("T5b cov(d,ref)=0: PASS") }
+    else { print("T5b cov: FAIL"); ok = false }
+
+    // T6 — residual-independent self: correlated_independent is fresh-draw BY
+    // DEFINITION (uncertainty in residual, no VarID) → V=2u², NOT identity.
+    let r = correlated_independent(10.0, 2.0, 0.9)
+    if approx(eq_prob_correlated(r, r, 0.5), 0.1403162) { print("T6 independent self = fresh-draw 0.1403: PASS") }
+    else { print("T6: FAIL"); ok = false }
+
+    if ok { print("ALL PASS") } else { print("SOME FAIL") }
+}

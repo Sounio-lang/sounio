@@ -68,22 +68,34 @@ pub struct PKFitResult {
 // To get dC/dke: seed ka.dot=0.0, ke.dot=1.0
 // Output .dot is the requested partial derivative
 
-fn pk_conc_dual(t: f64, ka: EpistemicDual, ke: EpistemicDual,
-                dose: f64, vd: f64) -> EpistemicDual with Div, Panic {
-    // num = dose * ka
+// Scalar returns only: EpistemicDual SRET (4×f64) is broken on aggregated returns.
+
+pub fn pk_conc_dual_val(t: f64, ka: EpistemicDual, ke: EpistemicDual,
+                dose: f64, vd: f64) -> f64 with Div, Panic, Mut {
     let num = edual_scale(ka, dose)
-    // denom = Vd * (ka - ke)
     let denom = edual_scale(edual_sub(ka, ke), vd)
-    // factor = dose*ka / (Vd*(ka-ke))
     let factor = edual_div(num, denom)
-    // Compute exp(-ke*t) = 1/exp(ke*t) to avoid Taylor series for negative args
-    let one = edual_const(1.0)
+    let one = edual_new(1.0, 0.0, 0.0, 0.0)
     let exp_ke_pos = edual_exp(edual_scale(ke, t))
     let exp_ka_pos = edual_exp(edual_scale(ka, t))
     let exp_ke = edual_div(one, exp_ke_pos)
     let exp_ka = edual_div(one, exp_ka_pos)
-    // C = factor * (exp(-ke*t) - exp(-ka*t))
-    edual_mul(factor, edual_sub(exp_ke, exp_ka))
+    let c = edual_mul(factor, edual_sub(exp_ke, exp_ka))
+    return c.val
+}
+
+pub fn pk_conc_dual_dot(t: f64, ka: EpistemicDual, ke: EpistemicDual,
+                dose: f64, vd: f64) -> f64 with Div, Panic, Mut {
+    let num = edual_scale(ka, dose)
+    let denom = edual_scale(edual_sub(ka, ke), vd)
+    let factor = edual_div(num, denom)
+    let one = edual_new(1.0, 0.0, 0.0, 0.0)
+    let exp_ke_pos = edual_exp(edual_scale(ke, t))
+    let exp_ka_pos = edual_exp(edual_scale(ka, t))
+    let exp_ke = edual_div(one, exp_ke_pos)
+    let exp_ka = edual_div(one, exp_ka_pos)
+    let c = edual_mul(factor, edual_sub(exp_ke, exp_ka))
+    return c.dot
 }
 
 // =============================================================================
@@ -100,6 +112,7 @@ fn pk_conc_dual(t: f64, ka: EpistemicDual, ke: EpistemicDual,
 // Analytical 2x2 inversion: det = A*D - B*B
 
 pub fn epistemic_pk_gauss_newton(
+    out: &!PKFitResult,
     obs_t: [f64; 6],
     obs_c: [f64; 6],
     obs_u: [f64; 6],
@@ -107,7 +120,7 @@ pub fn epistemic_pk_gauss_newton(
     vd: f64,
     ka_init: f64,
     ke_init: f64,
-) -> PKFitResult with Mut, Div, Panic {
+) with Mut, Div, Panic {
     let k95 = 1.96
     let max_iter = 50
     let tol = 1.0e-7
@@ -135,15 +148,13 @@ pub fn epistemic_pk_gauss_newton(
             // J_ka = dC/dka  (seed ka.dot=1, ke.dot=0)
             let ka_d_ka = edual_new(ka, 1.0, 0.0, 0.0)
             let ke_d_ka = edual_new(ke, 0.0, 0.0, 0.0)
-            let c_for_ka = pk_conc_dual(t, ka_d_ka, ke_d_ka, dose, vd)
-            let j_ka = c_for_ka.dot
-            let c_pred = c_for_ka.val
+            let c_pred = pk_conc_dual_val(t, ka_d_ka, ke_d_ka, dose, vd)
+            let j_ka = pk_conc_dual_dot(t, ka_d_ka, ke_d_ka, dose, vd)
 
             // J_ke = dC/dke  (seed ka.dot=0, ke.dot=1)
             let ka_d_ke = edual_new(ka, 0.0, 0.0, 0.0)
             let ke_d_ke = edual_new(ke, 1.0, 0.0, 0.0)
-            let c_for_ke = pk_conc_dual(t, ka_d_ke, ke_d_ke, dose, vd)
-            let j_ke = c_for_ke.dot
+            let j_ke = pk_conc_dual_dot(t, ka_d_ke, ke_d_ke, dose, vd)
 
             let r = c_pred - c_obs
 
@@ -211,14 +222,12 @@ pub fn epistemic_pk_gauss_newton(
 
         let ka_d = edual_new(ka, 1.0, 0.0, 0.0)
         let ke_d = edual_new(ke, 0.0, 0.0, 0.0)
-        let out_ka = pk_conc_dual(t, ka_d, ke_d, dose, vd)
-        let jka = out_ka.dot
-        let cpred = out_ka.val
+        let cpred = pk_conc_dual_val(t, ka_d, ke_d, dose, vd)
+        let jka = pk_conc_dual_dot(t, ka_d, ke_d, dose, vd)
 
         let ka_d2 = edual_new(ka, 0.0, 0.0, 0.0)
         let ke_d2 = edual_new(ke, 1.0, 0.0, 0.0)
-        let out_ke = pk_conc_dual(t, ka_d2, ke_d2, dose, vd)
-        let jke = out_ke.dot
+        let jke = pk_conc_dual_dot(t, ka_d2, ke_d2, dose, vd)
 
         let r = cpred - c_obs
         sum_r2 = sum_r2 + r * r
@@ -258,21 +267,19 @@ pub fn epistemic_pk_gauss_newton(
         sens_ke = last_j_ke * last_j_ke * u_ke * u_ke / u2_c * 100.0
     }
 
-    PKFitResult {
-        ka: ka,
-        u_ka: u_ka,
-        ka_lo95: ka - k95 * u_ka,
-        ka_hi95: ka + k95 * u_ka,
-        ke: ke,
-        u_ke: u_ke,
-        ke_lo95: ke - k95 * u_ke,
-        ke_hi95: ke + k95 * u_ke,
-        rms_residual: rms,
-        sens_ka_pct: sens_ka,
-        sens_ke_pct: sens_ke,
-        converged: converged,
-        iterations: max_iter,
-    }
+    out.ka = ka
+    out.u_ka = u_ka
+    out.ka_lo95 = ka - k95 * u_ka
+    out.ka_hi95 = ka + k95 * u_ka
+    out.ke = ke
+    out.u_ke = u_ke
+    out.ke_lo95 = ke - k95 * u_ke
+    out.ke_hi95 = ke + k95 * u_ke
+    out.rms_residual = rms
+    out.sens_ka_pct = sens_ka
+    out.sens_ke_pct = sens_ke
+    out.converged = converged
+    out.iterations = max_iter
 }
 
 // =============================================================================
@@ -285,10 +292,10 @@ fn test_pk_conc_dual() with Div, Panic {
     //   = 50/3 * (0.6703 - 0.3679) = 16.667 * 0.3024 ≈ 5.04 mg/L
     let ka = edual_new(0.5, 1.0, 0.0, 0.0)
     let ke = edual_new(0.2, 0.0, 0.0, 0.0)
-    let c = pk_conc_dual(2.0, ka, ke, 100.0, 10.0)
-    assert(c.val > 4.5 && c.val < 5.5)
-    // Jacobian dC/dka should be nonzero
-    assert(pk_abs(c.dot) > 0.1)
+    let c_val = pk_conc_dual_val(2.0, ka, ke, 100.0, 10.0)
+    let c_dot = pk_conc_dual_dot(2.0, ka, ke, 100.0, 10.0)
+    assert(c_val > 4.5 && c_val < 5.5)
+    assert(pk_abs(c_dot) > 0.1)
 }
 
 fn test_pk_gauss_newton_converges() with Mut, Div, Panic {
@@ -301,13 +308,26 @@ fn test_pk_gauss_newton_converges() with Mut, Div, Panic {
     let obs_c: [f64; 6] = [2.206, 3.360, 5.293, 4.971, 3.213, 1.392]
     let obs_u: [f64; 6] = [0.110, 0.177, 0.252, 0.261, 0.153, 0.073]
 
-    let result = epistemic_pk_gauss_newton(
-        obs_t, obs_c, obs_u,
+    var result: PKFitResult
+    result.ka = 0.0
+    result.u_ka = 0.0
+    result.ka_lo95 = 0.0
+    result.ka_hi95 = 0.0
+    result.ke = 0.0
+    result.u_ke = 0.0
+    result.ke_lo95 = 0.0
+    result.ke_hi95 = 0.0
+    result.rms_residual = 0.0
+    result.sens_ka_pct = 0.0
+    result.sens_ke_pct = 0.0
+    result.converged = 0
+    result.iterations = 0
+    epistemic_pk_gauss_newton(
+        &!result, obs_t, obs_c, obs_u,
         100.0, 10.0,
-        0.6, 0.25,   // initial guesses (1.2x true values)
+        0.6, 0.25,
     )
 
-    // Convergence
     assert(result.converged == 1)
 
     // Parameter recovery within 20% relative error

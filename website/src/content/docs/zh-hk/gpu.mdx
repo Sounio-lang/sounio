@@ -1,0 +1,121 @@
+---
+title: "GPU編程"
+description: "確認的GPU人工項，驗證的GPU語法，以及確認的後端狀態。"
+weight: 34
+category: "GPU"
+topic_id: "website.docs.gpu"
+authority: "雙重"
+audience: "用戶"
+last_validated: "2026-03-07"
+validated_by: "A6"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.gpu"
+---
+
+# GPU編程
+
+Sounio在這個庫快照中有兩個GPU編譯路徑：
+
+- `souc-linux-x86_64`（預設自托管的藝術品）：編譯GPU語法，運行確定性串行CPU回退，並讓`kretikos`建立預定義PTX/CUBIN藝術品模版。
+- `souc-linux-x86_64-gpu`（GPU面向藝術品）：獨立二進制，通過`build --backend gpu`發出更廣泛的PTX。
+
+## 自托管的GPU路徑（CPU回退 + 藝術品模版）
+
+預設編譯器（`bin/souc`或`bin/souc-linux-x86_64`）接受GPU核語法並運行確定性串行CPU回退。Kretikos CLI使用該編譯器來建立內部編碼的驅動器，然後寫入預定義的GPU藝術品模版：
+
+```bash
+# 發出預定義PTX模板（自托管的，無需GPU）
+kretikos emit-ptx vec_add     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_div     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kernel.ptx
+kretikos emit-ptx fma         -o /tmp/kernel.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kernel.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kernel.ptx
+
+# 發出預定義Metal/MSL模板（自托管的，無需macOS）
+kretikos emit-metal vec_add          -o /tmp/kernel.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kernel.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kernel.metal
+
+# 發出預定義CUBIN模板
+kretikos emit-cubin exit_only -o /tmp/kernel.cubin
+kretikos emit-cubin store_u32_const -o /tmp/kernel.cubin
+kretikos emit-cubin vec_add_f32 -o /tmp/kernel.cubin
+kretikos emit-cubin epistemic_dual_f32 -o /tmp/kernel.cubin
+
+# 發出結構性藝術品包：PTX，CUBIN，哈希，邊界
+kretikos bundle -o /tmp/kretikos-bundle
+
+# 可選地記錄組裝/反組裝和CUDA Driver API證據
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+```
+
+這今天證明：
+
+- 自托管的編譯器編譯`kernel fn`，`with GPU`，`GPU.launch`和`GPU.sync`。
+- CPU回退運行串行核，具有確定性的線程/塊ID。
+- Kretikos CLI包裹器從內部Sounio代碼發出預定義的PTX文本和NVIDIA CUDA ELF/CUBIN的字節模版。
+- `kretikos bundle`命令寫入機器可讀的`sounio.kretikos.bundle.v1`宣言，其中包含藝術品的哈希，結構檢查，可選的`ptxas`/`nvdisasm`和CUDA Driver API驗證，以及明確的非聲明。
+- 這條路徑尚未將任意用戶核源代碼轉換為PTX/CUBIN。
+- 組裝和運行時驗證僅對`kretikos`選擇的預定義PTX/CUBIN模板有效；它們不驗證任意用戶撰寫的核。
+
+## GPU藝術品路徑（更廣泛的PTX發出）
+
+確認的GPU藝術品是獨立二進制，具有更廣泛的模式支持：
+
+```bash
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+
+"$SOUC_GPU_BIN" info
+"$SOUC_GPU_BIN" check examples/gpu.sio
+"$SOUC_GPU_BIN" check tests/run-pass/gpu_launch_surface.sio
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
+```
+
+## 公共表層與源樹表層
+
+確認的公共GPU藝術品目前接受：
+
+- `kernel fn`
+- `with GPU`
+- `perform GPU.launch(...)`
+- `perform GPU.sync()`
+- 通過`build --backend gpu`發出PTX
+
+自托管的編譯器（`bin/souc`）也接受相同的語法，並額外路由：
+
+- 通過`kretikos emit-ptx`發出預定義PTX模板
+- 通過`kretikos emit-cubin`發出預定義CUBIN模板
+- 通過`kretikos bundle`發出結構性PTX/CUBIN藝術品包
+- 可選地通過`kretikos bundle --require-toolchain`和`kretikos bundle --require-runtime`進行失閉組裝/運行時檢查
+
+確認的公共GPU藝術品尚未解決歷史草圖中的`gpu.*`內置命名空間：
+
+- `gpu.thread_id.*`
+- `gpu.block_id.*`
+- `gpu.block_dim.*`
+- `gpu.alloc<T>(...)`
+
+這些名稱對實施故事仍然重要，但它們尚未成為推薦的公共語法。
+
+## 後端證據
+
+庫中的強大GPU證據在`artifacts/omega/`下：
+
+- `gpu_codegen_parity.v1.json`
+- `gpu_binary_attestation.v1.json`
+- `gpu_runtime_attest_gate.v1.json`
+- `gpu_public_contract.v1.json`
+
+當前證明的計算線：
+
+- CUDA：`cuda-sm80`
+- ROCm：`rocm-gfx942`
+
+## 大型GPU實現所在的位置
+
+- `self-hosted/gpu/`包含PTX，SPIR-V，Metal，運行時，張量和調優工作。
+- `docs/features/GPU_RUNTIME.md`是庫內部的當前契約解釋。
+- 自托管的樹仍然包含內部`gpu-emit`路徑，但確認的公共CLI路徑是`build --backend gpu`。

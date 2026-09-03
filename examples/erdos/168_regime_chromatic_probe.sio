@@ -1,0 +1,271 @@
+// examples/erdos/168_regime_chromatic_probe.sio
+//
+// Level-3 probe v3: PAIRED near-threshold 3-SAT design.
+//
+// Key insight from v1/v2 smoke:
+//   - All 80 e=6 twists produce IDENTICAL edge structure: (0,2)(1,2)(1,6)(3,5)(3,6)(4,5)
+//   - All 4  e=9 twists produce IDENTICAL edge structure: (0,2)(1,2)(1,5)(1,6)(2,4)(3,5)(3,6)(4,5)(4,6)
+//   So the 84 ZD primitives yield only 2 distinct graphs — comparing 80 vs 4 is not
+//   a statistical test over 84 instances; it is one comparison made 80+4 times.
+//   Near-threshold 3-SAT with a fixed seed also gives the same confl/hard for all runs.
+//
+// Paired design:
+//   For each idx in 0..83:
+//     seed = idx (unique background per pair)
+//     run 1: background(seed) + 6-edge coloring  → hardness_6
+//     run 2: background(seed) + 9-edge coloring  → hardness_9
+//     delta = hardness_9 - hardness_6
+//   Accumulate: n_pos (delta>0), n_neg (delta<0), n_zero, sum_delta
+//
+// Background: 40 random 3-clauses over vars 0..20 (LCG seeded by idx).
+// 6-edge coloring: 28 base + 18 edge = 46 clauses. Total: 86/21 = 4.10 (near threshold).
+// 9-edge coloring: 28 base + 27 edge = 55 clauses. Total: 95/21 = 4.52 (above threshold).
+//
+// Falsifiable prediction:
+//   n_pos > n_neg (adding 9 extra edge constraints raises hardness more often than lowers it).
+//
+// Connection to note §5(c):
+//   docs/research/locus-coeruleus-surgical-controller-sounio-note.md
+//   docs/research/erdos90-regime-detector-insertion-map.md §2 (Insertion Point 2)
+//
+// NO quantitative spectral claims. Math-review required before any spectral assertion:
+//   bin/llm-offload -t math-review -p xai | logged in .claude/llm_offload_log.md
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+// LCG state — set to idx at start of each pair so background is unique per idx.
+var lcg_state: i64 = 0
+
+fn lcg_next() -> i64 with Mut {
+    lcg_state = (lcg_state * 1664525 + 1013904223) & 0x7FFFFFFF
+    return lcg_state
+}
+
+fn lrand(n: i64) -> i64 with Mut {
+    return lcg_next() % n
+}
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn prf(x: f64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); prf(0.0 - x); return }
+    let ip = x as i32
+    pri(ip)
+    print(".")
+    let f0 = (x - (ip as f64)) * 10.0
+    let d0 = f0 as i32
+    let f1 = (f0 - (d0 as f64)) * 10.0
+    let d1 = f1 as i32
+    pri(d0)
+    pri(d1)
+}
+
+fn add2(ctx: &!SmtContext, a: i32, b: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    smt_add_clause(ctx, &lits, 2)
+}
+
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a
+    lits[1] = b
+    lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+// Generate n_cls random 3-clauses over vars [0, n_vars). LCG must be seeded first.
+fn add_background(ctx: &!SmtContext, n_vars: i32, n_cls: i32) with Mut, Div {
+    var i: i32 = 0
+    while i < n_cls {
+        let v0 = (lrand(n_vars as i64)) as i32
+        let s0 = (lrand(2)) as i32
+        let v1 = (lrand(n_vars as i64)) as i32
+        let s1 = (lrand(2)) as i32
+        let v2 = (lrand(n_vars as i64)) as i32
+        let s2 = (lrand(2)) as i32
+        add3(ctx, v0*2 + s0, v1*2 + s1, v2*2 + s2)
+        i = i + 1
+    }
+}
+
+// 3-coloring base (at-least-one + at-most-one) for 7 vertices, vars 0..20.
+fn add_color_base(ctx: &!SmtContext) with Mut, Div {
+    var v: i32 = 0
+    while v < 7 {
+        add3(ctx, (v*3+0)*2, (v*3+1)*2, (v*3+2)*2)
+        add2(ctx, (v*3+0)*2+1, (v*3+1)*2+1)
+        add2(ctx, (v*3+0)*2+1, (v*3+2)*2+1)
+        add2(ctx, (v*3+1)*2+1, (v*3+2)*2+1)
+        v = v + 1
+    }
+}
+
+// Add edge-conflict clauses for the 6-edge classical graph.
+// Edges: (0,2)(1,2)(1,6)(3,5)(3,6)(4,5)
+fn add_edges_6(ctx: &!SmtContext) with Mut, Div {
+    var c: i32 = 0
+    // (0,2)
+    while c < 3 { add2(ctx, (0*3+c)*2+1, (2*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (1,2)
+    while c < 3 { add2(ctx, (1*3+c)*2+1, (2*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (1,6)
+    while c < 3 { add2(ctx, (1*3+c)*2+1, (6*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (3,5)
+    while c < 3 { add2(ctx, (3*3+c)*2+1, (5*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (3,6)
+    while c < 3 { add2(ctx, (3*3+c)*2+1, (6*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (4,5)
+    while c < 3 { add2(ctx, (4*3+c)*2+1, (5*3+c)*2+1); c = c + 1 }
+}
+
+// Add edge-conflict clauses for the 9-edge surgical graph.
+// Edges: (0,2)(1,2)(1,5)(1,6)(2,4)(3,5)(3,6)(4,5)(4,6)
+fn add_edges_9(ctx: &!SmtContext) with Mut, Div {
+    var c: i32 = 0
+    // (0,2)
+    while c < 3 { add2(ctx, (0*3+c)*2+1, (2*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (1,2)
+    while c < 3 { add2(ctx, (1*3+c)*2+1, (2*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (1,5)
+    while c < 3 { add2(ctx, (1*3+c)*2+1, (5*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (1,6)
+    while c < 3 { add2(ctx, (1*3+c)*2+1, (6*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (2,4)
+    while c < 3 { add2(ctx, (2*3+c)*2+1, (4*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (3,5)
+    while c < 3 { add2(ctx, (3*3+c)*2+1, (5*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (3,6)
+    while c < 3 { add2(ctx, (3*3+c)*2+1, (6*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (4,5)
+    while c < 3 { add2(ctx, (4*3+c)*2+1, (5*3+c)*2+1); c = c + 1 }
+    c = 0
+    // (4,6)
+    while c < 3 { add2(ctx, (4*3+c)*2+1, (6*3+c)*2+1); c = c + 1 }
+}
+
+// Run one SMT instance and return regime_recent_hardness.
+fn run_one(n_bg: i32, use_9_edges: i32) -> f64 with Mut, Div {
+    var ctx = smt_new()
+    add_background(&! ctx, 21, n_bg)
+    add_color_base(&! ctx)
+    if use_9_edges == 1 {
+        add_edges_9(&! ctx)
+    } else {
+        add_edges_6(&! ctx)
+    }
+    smt_set_score_mode(&! ctx, 3)
+    smt_set_no_ple(&! ctx, 1)
+    let _r = smt_solve(&! ctx)
+    return smt_get_regime_hardness(&ctx)
+}
+
+fn main() with IO, Mut, Div, Panic {
+    print("=== 168 ZD Regime Chromatic Probe v3 (Paired) ===\n")
+    print("Background: 40 random 3-SAT clauses over 21 coloring vars, seeded by idx.\n")
+    print("6-edge: (0,2)(1,2)(1,6)(3,5)(3,6)(4,5)  — 86 cls, ratio 4.10\n")
+    print("9-edge: (0,2)(1,2)(1,5)(1,6)(2,4)(3,5)(3,6)(4,5)(4,6)  — 95 cls, ratio 4.52\n")
+    print("Prediction: n_pos > n_neg  (e=9 raises hardness more often than lowers)\n")
+    print("\n")
+    print("idx  hard6  hard9  delta  sign\n")
+    print("---- ------ ------ ------ ----\n")
+
+    var n_pos: i32 = 0
+    var n_neg: i32 = 0
+    var n_zero: i32 = 0
+    var sum_delta: f64 = 0.0
+    var sum_hard6: f64 = 0.0
+    var sum_hard9: f64 = 0.0
+
+    var idx: i32 = 0
+    while idx < 84 {
+        // Seed LCG with idx for run 1 (6-edge).
+        lcg_state = idx as i64
+        let h6 = run_one(40, 0)
+
+        // Reseed with same idx for run 2 (9-edge) — same background, different edges.
+        lcg_state = idx as i64
+        let h9 = run_one(40, 1)
+
+        let delta = h9 - h6
+        sum_delta = sum_delta + delta
+        sum_hard6 = sum_hard6 + h6
+        sum_hard9 = sum_hard9 + h9
+
+        if delta > 0.001 { n_pos = n_pos + 1 }
+        if delta < 0.0 - 0.001 { n_neg = n_neg + 1 }
+        if delta >= 0.0 - 0.001 && delta <= 0.001 { n_zero = n_zero + 1 }
+
+        pri(idx); print("  ")
+        prf(h6); print("  ")
+        prf(h9); print("  ")
+        if delta >= 0.0 { prf(delta) } else { print("-"); prf(0.0 - delta) }
+        print("  ")
+        if delta > 0.001 { print("+") }
+        if delta < 0.0 - 0.001 { print("-") }
+        if delta >= 0.0 - 0.001 && delta <= 0.001 { print("=") }
+        print("\n")
+
+        idx = idx + 1
+    }
+
+    print("\n=== Summary ===\n")
+    print("Pairs: 84  n_pos(+): "); pri(n_pos)
+    print("  n_neg(-): "); pri(n_neg)
+    print("  n_zero(=): "); pri(n_zero); print("\n")
+    print("Mean hard6: "); prf(sum_hard6 / 84.0); print("\n")
+    print("Mean hard9: "); prf(sum_hard9 / 84.0); print("\n")
+    print("Mean delta: ")
+    let md = sum_delta / 84.0
+    if md >= 0.0 { prf(md) } else { print("-"); prf(0.0 - md) }
+    print("\n\n")
+
+    print("--- Verdict ---\n")
+    if n_pos > n_neg && n_pos > 42 {
+        print("CONFIRMED: e=9 raises hardness in majority of pairs (")
+        pri(n_pos); print("/84).\n")
+        print("Adding 3 extra ZD-surgery edges increases epistemic SMT difficulty.\n")
+    } else if n_neg > n_pos && n_neg > 42 {
+        print("INVERTED: e=9 lowers hardness in majority of pairs (")
+        pri(n_neg); print("/84).\n")
+        print("Extra edge clauses aid UNSAT proof (above-threshold effect).\n")
+    } else {
+        print("NULL — no consistent direction (n_pos=")
+        pri(n_pos); print(", n_neg="); pri(n_neg); print(").\n")
+        print("Edge-count variation does not discriminate regime at this background density.\n")
+        print("Consider: (a) larger graph, (b) k-coloring with k near chi(G),\n")
+        print("          (c) MIS encoding with k near alpha(G).\n")
+    }
+
+    print("\nRegime-Chromatic Probe complete.\n")
+    print("See: docs/research/locus-coeruleus-surgical-controller-sounio-note.md §5\n")
+}
