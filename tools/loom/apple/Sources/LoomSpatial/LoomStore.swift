@@ -123,7 +123,9 @@ final class LoomStore: ObservableObject {
         baseURL: URL = URL(string: "http://127.0.0.1:8787")!,
         arguments: [String] = ProcessInfo.processInfo.arguments
     ) {
-        client = LoomFleetClient(baseURL: baseURL)
+        let kernelURL = Self.argument("--kernel-url", in: arguments)
+            .flatMap(URL.init(string:)) ?? baseURL
+        client = LoomFleetClient(baseURL: kernelURL)
         let messageURL = Self.argument("--message-url", in: arguments)
         let tokenPath = Self.argument("--message-token-file", in: arguments)
         if let messageURL, let tokenPath, let url = URL(string: messageURL),
