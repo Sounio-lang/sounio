@@ -1840,6 +1840,62 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             None => { checker_note_type_error_mut(c) return ty_error() }
         }
     }
+    // IndepKnowledge<T, A, B | Z> — conditional independence as a type. The
+    // non-inplace resolver lower_named_type_with_args handles this near
+    // check.sio:16768; the inplace resolver (the one that actually runs
+    // during `souc check`/Madaros checking) was missing it, so the claim
+    // degraded to a bare TyNamed("IndepKnowledge") and the self-independence
+    // guard (E209) never fired. Mirror the branch here, same as Hyper above.
+    if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+        match type_args {
+            None => { checker_note_type_error_mut(c) return ty_error() }
+            Some(args) => {
+                let t_expr = (*args).head
+                let rest1 = match (*args).tail {
+                    None => {
+                        checker_report_error_at_inplace(c, t_expr.span, 209, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let a_expr = rest1.head
+                let rest2 = match rest1.tail {
+                    None => {
+                        checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let b_expr = rest2.head
+
+                if a_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+                if b_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, b_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+
+                let cond_id = match rest2.tail {
+                    None => 0 - 1
+                    Some(r) => indep_cond_set_id((*r).head)
+                }
+
+                let base_ty = checker_lower_type_expr_mut(c, t_expr)
+
+                let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                if a_id == b_id {
+                    checker_report_error_at_inplace(c, b_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+
+                return ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+            }
+        }
+    }
     // Feature B: Invariant<T, G> — second type-arg G is one of the four named
     // invariance groups; lower to TyNamed "Invariant<rank>" with inner = T.
     if name_matches_str9(name, 73, 110, 118, 97, 114, 105, 97, 110, 116) {
@@ -14029,8 +14085,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 170 {
         print("   |\n   = help: add `with Epistemic` to your function signature, or use `acknowledge(k, reason)` to explicitly accept uncertainty\n")
     }
-    else if code == 174 {
+    else if code == 209 {
         print("   |\n   = help: A and B must be two different variable names; a variable is trivially dependent on itself, so the claim asserts nothing\n")
+    }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
     }
