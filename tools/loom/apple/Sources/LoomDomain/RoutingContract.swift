@@ -23,6 +23,8 @@ public enum AdapterHealth: String, Codable, CaseIterable, Hashable, Sendable {
 public enum ReceiptStatus: String, Codable, CaseIterable, Hashable, Sendable {
     case planned
     case running
+    case completed
+    case cancelled
     case committed
     case refused
     case fallback

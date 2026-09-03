@@ -70,6 +70,45 @@ type json_value =
   | Json_bool of bool
   | Json_null
 
+let rec json_render = function
+  | Json_object fields ->
+      "{" ^ String.concat ","
+        (List.map (fun (name, value) -> json_quote name ^ ":" ^ json_render value) fields)
+      ^ "}"
+  | Json_array values ->
+      "[" ^ String.concat "," (List.map json_render values) ^ "]"
+  | Json_string value -> json_quote value
+  | Json_number value -> value
+  | Json_bool value -> if value then "true" else "false"
+  | Json_null -> "null"
+
+let rec json_canonical = function
+  | Json_object fields ->
+      "{" ^ String.concat ","
+        (fields
+         |> List.sort (fun (left, _) (right, _) -> String.compare left right)
+         |> List.map (fun (name, value) ->
+                json_quote name ^ ":" ^ json_canonical value))
+      ^ "}"
+  | Json_array values ->
+      "[" ^ String.concat "," (List.map json_canonical values) ^ "]"
+  | Json_string value -> json_quote value
+  | Json_number value -> value
+  | Json_bool value -> if value then "true" else "false"
+  | Json_null -> "null"
+
+let json_object_replace name value = function
+  | Json_object fields ->
+      let found = ref false in
+      let fields =
+        List.map
+          (fun (key, previous) ->
+            if key = name then (found := true; (key, value)) else (key, previous))
+          fields
+      in
+      Json_object (if !found then fields else fields @ [ (name, value) ])
+  | _ -> failf "invalid-json:expected-object"
+
 let parse_json value =
   let length = String.length value in
   let index = ref 0 in
@@ -851,7 +890,16 @@ let routing_config_json config =
     (json_quote config.model) (json_quote config.effort) (array config.pool_order)
     (array config.adapter_order)
 
-let valid_routing_identifier label value = valid_field label 256 value
+let valid_routing_identifier label value =
+  let value = valid_field label 256 value in
+  if not
+       (String.for_all
+          (function
+            | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '.' | '_' | '-' -> true
+            | _ -> false)
+          value)
+  then failf "message-bridge-routing-%s-invalid" label;
+  value
 
 let routing_slug value =
   String.map
@@ -1299,6 +1347,48 @@ let persist_route_operation receipt_path latest_path receipt =
   write_private_file receipt_path contents;
   write_private_file latest_path contents
 
+type route_task_paths = {
+  receipt_path : string;
+  request_hash_path : string;
+  lock_path : string;
+}
+
+let route_task_paths cwd configured_state_dir task_id =
+  let receipts_dir =
+    Filename.concat (routing_state_dir cwd configured_state_dir) "receipts"
+  in
+  ensure_private_directory receipts_dir;
+  let stem = routing_slug task_id ^ "-" ^ String.sub (sha256 task_id) 0 16 in
+  { receipt_path = Filename.concat receipts_dir (stem ^ ".json");
+    request_hash_path = Filename.concat receipts_dir (stem ^ ".request.sha256");
+    lock_path = Filename.concat receipts_dir (stem ^ ".lock") }
+
+let route_operation_status operation =
+  match child_object operation "receipt" with
+  | Some receipt -> json_string_field receipt [ "status" ]
+  | None -> failf "message-bridge-routing-receipt-invalid"
+
+let route_operation_with_status operation ~status ~reason ~result =
+  match child_object operation "receipt" with
+  | None -> failf "message-bridge-routing-receipt-invalid"
+  | Some receipt ->
+      let receipt =
+        receipt
+        |> json_object_replace "status" (Json_string status)
+        |> json_object_replace "reason" (Json_string reason)
+        |> json_object_replace "result" (Json_string result)
+      in
+      operation |> json_object_replace "receipt" receipt |> json_render
+
+let terminal_route_status = function
+  | "committed" | "completed" | "cancelled" | "refused" | "failed" -> true
+  | _ -> false
+
+let audit_route_phase task_id phase =
+  Printf.eprintf "LOOM_ROUTE_PHASE task_id=%s phase=%s pid=%d epoch_ms=%.0f\n%!"
+    (routing_slug task_id) phase (Unix.getpid ())
+    (Unix.gettimeofday () *. 1000.0)
+
 let route_task cwd configured_state_dir body =
   let parsed = parse_json body in
   if json_string_field parsed [ "schema" ] <> "loom-route-task-v1" then
@@ -1308,9 +1398,22 @@ let route_task cwd configured_state_dir body =
   let prompt = json_string_field parsed [ "prompt" ] |> valid_field "routing-prompt" 12000 in
   let kind = json_string_field ~default:"review" parsed [ "kind" ] in
   let ownership_state = if kind = "review" then 1 else 2 in
-  let config_path, lock_path = routing_paths cwd configured_state_dir in
-  with_routing_lock lock_path (fun () ->
-      let config = read_routing_config config_path in
+  let config_path, config_lock_path = routing_paths cwd configured_state_dir in
+  let paths = route_task_paths cwd configured_state_dir task_id in
+  let request_sha = sha256 (json_canonical parsed) in
+  with_routing_lock paths.lock_path (fun () ->
+      audit_route_phase task_id "task-lock-acquired";
+      if Sys.file_exists paths.request_hash_path then (
+        if trim (read_file paths.request_hash_path) <> request_sha then
+          failf "message-bridge-routing-task-id-conflict";
+        if Sys.file_exists paths.receipt_path then trim (read_file paths.receipt_path)
+        else failf "message-bridge-routing-task-incomplete")
+      else (
+      write_private_file paths.request_hash_path (request_sha ^ "\n");
+      let config =
+        with_routing_lock config_lock_path (fun () -> read_routing_config config_path)
+      in
+      audit_route_phase task_id "config-snapshotted";
       let config_json = routing_config_json config in
       let config_sha = sha256 config_json in
       let authority = routing_authority_command cwd in
@@ -1359,6 +1462,7 @@ let route_task cwd configured_state_dir body =
                config.model; "--effort"; config.effort; "--json" |]
           in
           let code, output = process_output_timeout ~timeout_seconds:10 cwd loom argv in
+          audit_route_phase task_id "provider-plan-returned";
           if code = 0 then (1, output, sha256 output, session)
           else (0, output, sha256 output, session)
       in
@@ -1370,18 +1474,12 @@ let route_task cwd configured_state_dir body =
       let plan_decision, plan_reason, plan_output =
         authority_decision cwd authority plan_frame
       in
+      audit_route_phase task_id "plan-authority-returned";
       let fallback_chain =
         "[" ^ String.concat "," (List.map json_quote config.adapter_order) ^ "]"
       in
-      let receipts_dir =
-        Filename.concat (routing_state_dir cwd configured_state_dir) "receipts"
-      in
-      ensure_private_directory receipts_dir;
       let latest_path = latest_route_operation_path cwd configured_state_dir in
-      let receipt_path =
-        Filename.concat receipts_dir
-          (routing_slug task_id ^ "-" ^ String.sub (sha256 task_id) 0 16 ^ ".json")
-      in
+      let receipt_path = paths.receipt_path in
       let command_sha = sha256 provider_plan in
       match plan_decision with
       | `Deny ->
@@ -1409,6 +1507,7 @@ let route_task cwd configured_state_dir body =
           let dispatch_decision, dispatch_reason, dispatch_output =
             authority_decision cwd authority dispatch_frame
           in
+          audit_route_phase task_id "dispatch-authority-returned";
           (match dispatch_decision with
           | `Deny ->
               let receipt =
@@ -1431,10 +1530,12 @@ let route_task cwd configured_state_dir body =
                    config.model; "--effort"; config.effort |]
               in
               let code, output =
+                audit_route_phase task_id "provider-start-entered";
                 process_output_timeout
                   ~environment:(environment_with "SOUNIO_LOOM_SOVEREIGN_EXEC_REQUIRED" "1")
                   ~timeout_seconds:60 cwd loom argv
               in
+              audit_route_phase task_id "provider-start-returned";
               let launched = code = 0 in
               let receipt =
                 route_receipt_json ~task_id config
@@ -1446,7 +1547,92 @@ let route_task cwd configured_state_dir body =
                   ~result:(if launched then "provider-custody-started" else "provider-start-refused:" ^ sha256 output)
               in
               persist_route_operation receipt_path latest_path receipt;
-              receipt))
+              receipt)))
+
+let read_route_operation paths =
+  if not (Sys.file_exists paths.receipt_path) then
+    failf "message-bridge-routing-task-not-found";
+  let operation = trim (read_file paths.receipt_path) |> parse_json in
+  if json_string_field operation [ "schema" ] <> "loom-route-operation-v1" then
+    failf "message-bridge-routing-receipt-invalid";
+  operation
+
+let persist_route_status cwd configured_state_dir paths operation =
+  let receipt = json_render operation in
+  persist_route_operation paths.receipt_path
+    (latest_route_operation_path cwd configured_state_dir) receipt;
+  receipt
+
+let provider_session_state cwd task_id =
+  let loom = loom_command cwd in
+  if loom = "" then failf "message-bridge-routing-provider-runtime-missing";
+  let argv =
+    [| loom; "status"; "--agent"; "loom-route"; "--lane";
+       routing_slug task_id; "--machine" |]
+  in
+  let code, output = process_output_timeout ~timeout_seconds:4 cwd loom argv in
+  if code = 128 + Sys.sigalrm then
+    failf "message-bridge-routing-status-timeout";
+  if code = 0 then
+    table_of_fields (split_on '\n' output) |> fun fields ->
+    table_value ~default:"unknown" fields "state"
+  else
+    let list_argv = [| loom; "list"; "--cwd"; cwd |] in
+    let list_code, list_output =
+      process_output_timeout ~timeout_seconds:4 cwd loom list_argv
+    in
+    if list_code <> 0 then "unknown"
+    else
+      lines_with_prefix list_output "LOOM_SESSION "
+      |> List.find_map (fun line ->
+             let fields = fields_after_prefix line "LOOM_SESSION " in
+             if table_value fields "agent" = "loom-route"
+                && table_value fields "lane" = routing_slug task_id
+             then Some (table_value ~default:"unknown" fields "state")
+             else None)
+      |> Option.value ~default:"unknown"
+
+let route_task_status cwd configured_state_dir task_id =
+  let task_id = valid_routing_identifier "task-id" task_id in
+  let paths = route_task_paths cwd configured_state_dir task_id in
+  with_routing_lock paths.lock_path (fun () ->
+      let operation = read_route_operation paths in
+      if route_operation_status operation <> "running" then json_render operation
+      else
+        match provider_session_state cwd task_id with
+        | "exited" ->
+            route_operation_with_status operation ~status:"completed"
+              ~reason:"provider-turn-completed"
+              ~result:"provider-custody-terminal"
+            |> parse_json
+            |> persist_route_status cwd configured_state_dir paths
+        | _ -> json_render operation)
+
+let cancel_route_task cwd configured_state_dir task_id =
+  let task_id = valid_routing_identifier "task-id" task_id in
+  let paths = route_task_paths cwd configured_state_dir task_id in
+  with_routing_lock paths.lock_path (fun () ->
+      let operation = read_route_operation paths in
+      let status = route_operation_status operation in
+      if terminal_route_status status then json_render operation
+      else if status <> "running" then
+        failf "message-bridge-routing-task-not-cancellable"
+      else
+        let loom = loom_command cwd in
+        if loom = "" then failf "message-bridge-routing-provider-runtime-missing";
+        let argv =
+          [| loom; "stop"; "--agent"; "loom-route"; "--lane";
+             routing_slug task_id |]
+        in
+        let code, output = process_output_timeout ~timeout_seconds:8 cwd loom argv in
+        if code = 128 + Sys.sigalrm then
+          failf "message-bridge-routing-cancel-timeout";
+        if code <> 0 then
+          failf "message-bridge-routing-cancel-refused:%s" (sha256 output);
+        route_operation_with_status operation ~status:"cancelled"
+          ~reason:"operator-cancelled" ~result:"provider-stop-requested"
+        |> parse_json
+        |> persist_route_status cwd configured_state_dir paths)
 
 let authorized request token =
   match Hashtbl.find_opt request.http_headers "authorization" with
@@ -1463,6 +1649,83 @@ let reason_slug value =
       | _ -> '-')
     value
 
+let routing_task_target path =
+  let prefix = "/v1/routing/tasks/" in
+  if not (starts_with path prefix) then None
+  else
+    let suffix = String.sub path (String.length prefix)
+        (String.length path - String.length prefix) in
+    if suffix = "" then None
+    else if String.length suffix > 7
+            && String.sub suffix (String.length suffix - 7) 7 = "/cancel"
+    then
+      Some (`Cancel,
+        String.sub suffix 0 (String.length suffix - 7) |> percent_decode)
+    else Some (`Status, percent_decode suffix)
+
+type operation_class = Priority | Background
+
+let operation_class method_name path =
+  if starts_with path "/v1/threads" then Background
+  else if method_name = "GET" && path = "/health" then Priority
+  else Priority
+
+let operation_class_name = function Priority -> "priority" | Background -> "background"
+
+let environment_positive name default =
+  match Sys.getenv_opt name with
+  | None -> default
+  | Some value ->
+      let parsed = parse_nonnegative name value in
+      if parsed < 1 || parsed > 64 then failf "%s-out-of-range" name;
+      parsed
+
+let with_operation_slot cwd configured_state_dir operation_class action =
+  let slots =
+    match operation_class with
+    | Priority -> environment_positive "SOUNIO_LOOM_PRIORITY_WORKERS" 4
+    | Background -> environment_positive "SOUNIO_LOOM_BACKGROUND_WORKERS" 2
+  in
+  let wait_seconds = match operation_class with Priority -> 5.0 | Background -> 1.0 in
+  let state_directory =
+    if configured_state_dir <> "" then configured_state_dir
+    else
+      Filename.concat (Filename.get_temp_dir_name ())
+        (Printf.sprintf "sounio-loom-message-bridge-%d-%s"
+           (Unix.getuid ()) (String.sub (sha256 cwd) 0 16))
+  in
+  ensure_private_directory state_directory;
+  let directory = Filename.concat state_directory "admission" in
+  ensure_private_directory directory;
+  let deadline = Unix.gettimeofday () +. wait_seconds in
+  let rec acquire index =
+    if Unix.gettimeofday () >= deadline then
+      failf "message-bridge-%s-queue-timeout" (operation_class_name operation_class);
+    let slot = index mod slots in
+    let path =
+      Filename.concat directory
+        (Printf.sprintf "%s-%d.lock" (operation_class_name operation_class) slot)
+    in
+    let descriptor = Unix.openfile path [ O_RDWR; O_CREAT ] 0o600 in
+    try
+      Unix.lockf descriptor F_TLOCK 0;
+      descriptor
+    with
+    | Unix_error ((EAGAIN | EACCES), _, _) ->
+        Unix.close descriptor;
+        if slot = slots - 1 then Unix.sleepf 0.01;
+        acquire (index + 1)
+    | error -> Unix.close descriptor; raise error
+  in
+  let descriptor = acquire 0 in
+  Printf.eprintf "LOOM_MESSAGE_QUEUE class=%s event=acquired\n%!"
+    (operation_class_name operation_class);
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with Unix_error _ -> ());
+      (try Unix.close descriptor with Unix_error _ -> ()))
+    action
+
 let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
   let respond status body =
     write_all descriptor
@@ -1472,6 +1735,17 @@ let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
   try
     let request = read_http_request descriptor in
     let path, query = split_http_target request.http_target in
+    let operation_class = operation_class request.http_method path in
+    let with_admission action =
+      if path = "/health" || authorized request token then (
+        Printf.eprintf
+          "LOOM_MESSAGE_QUEUE class=%s event=enqueue sender_agent=%s sender_lane=%s\n%!"
+          (operation_class_name operation_class) sender_agent sender_lane;
+        with_operation_slot cwd routing_state_dir operation_class action
+      )
+      else action ()
+    in
+    with_admission (fun () ->
     if request.http_method = "GET" && path = "/health" then
       respond "200 OK"
         "{\"schema\":\"loom-message-bridge-v1\",\"status\":\"ready\",\"authentication\":\"bearer-capability\"}"
@@ -1526,31 +1800,64 @@ let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
         "LOOM_MESSAGE_DECISION decision=%s reason=routing-task-%s sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
         decision (reason_slug receipt_status) sender_agent sender_lane (sha256 receipt);
       respond "200 OK" receipt
-    else if request.http_method = "GET" && starts_with path "/v1/threads/" then
-      let message_id =
-        String.sub path 12 (String.length path - 12) |> percent_decode
-      in
-      let projection = thread_detail cwd sender_agent sender_lane message_id query in
-      Printf.eprintf
-        "LOOM_MESSAGE_DECISION decision=ALLOW reason=thread-detail-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
-        sender_agent sender_lane (sha256 projection);
-      respond "200 OK" projection
-    else if request.http_method = "POST" && starts_with path "/v1/messages/"
-            && String.length path > 17 && String.sub path (String.length path - 4) 4 = "/ack"
-    then
-      let message_id =
-        String.sub path 13 (String.length path - 17) |> percent_decode
-      in
-      let receipt = acknowledge_message cwd sender_agent sender_lane message_id in
-      Printf.eprintf
-        "LOOM_MESSAGE_DECISION decision=ALLOW reason=message-acknowledged sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
-        sender_agent sender_lane (sha256 receipt);
-      respond "200 OK" receipt
-    else respond "404 Not Found" "{\"error\":\"not_found\"}"
+    else if request.http_method = "GET" then
+      (match routing_task_target path with
+      | Some (`Status, task_id) ->
+          let receipt = route_task_status cwd routing_state_dir task_id in
+          Printf.eprintf
+            "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-task-status sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+            sender_agent sender_lane (sha256 receipt);
+          respond "200 OK" receipt
+      | _ ->
+          if starts_with path "/v1/threads/" then
+            let message_id =
+              String.sub path 12 (String.length path - 12) |> percent_decode
+            in
+            let projection = thread_detail cwd sender_agent sender_lane message_id query in
+            Printf.eprintf
+              "LOOM_MESSAGE_DECISION decision=ALLOW reason=thread-detail-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+              sender_agent sender_lane (sha256 projection);
+            respond "200 OK" projection
+          else respond "404 Not Found" "{\"error\":\"not_found\"}")
+    else if request.http_method = "POST" then
+      (match routing_task_target path with
+      | Some (`Cancel, task_id) ->
+          let receipt = cancel_route_task cwd routing_state_dir task_id in
+          Printf.eprintf
+            "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-task-cancelled sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+            sender_agent sender_lane (sha256 receipt);
+          respond "200 OK" receipt
+      | _ when starts_with path "/v1/messages/"
+               && String.length path > 17
+               && String.sub path (String.length path - 4) 4 = "/ack" ->
+          let message_id =
+            String.sub path 13 (String.length path - 17) |> percent_decode
+          in
+          let receipt = acknowledge_message cwd sender_agent sender_lane message_id in
+          Printf.eprintf
+            "LOOM_MESSAGE_DECISION decision=ALLOW reason=message-acknowledged sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+            sender_agent sender_lane (sha256 receipt);
+          respond "200 OK" receipt
+      | _ -> respond "404 Not Found" "{\"error\":\"not_found\"}")
+    else respond "404 Not Found" "{\"error\":\"not_found\"}")
   with
   | Bridge_error message ->
       let status =
-        if starts_with message "invalid-json:"
+        if message = "message-bridge-routing-task-not-found" then
+          "404 Not Found"
+        else if message = "message-bridge-routing-task-incomplete"
+             || starts_with message "message-bridge-routing-authority-"
+             || message = "message-bridge-routing-provider-runtime-missing"
+             || message = "message-bridge-routing-status-timeout"
+             || message = "message-bridge-routing-cancel-timeout"
+        then "503 Service Unavailable"
+        else if message = "message-bridge-routing-task-id-conflict"
+             || message = "message-bridge-routing-task-not-cancellable"
+        then "409 Conflict"
+        else if starts_with message "message-bridge-priority-queue-timeout"
+             || starts_with message "message-bridge-background-queue-timeout"
+        then "503 Service Unavailable"
+        else if starts_with message "invalid-json:"
            || starts_with message "message-bridge-target-"
            || starts_with message "message-bridge-message-"
            || starts_with message "message-bridge-routing-"
@@ -1634,13 +1941,25 @@ let serve cli =
   Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
   Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-  Sys.set_signal Sys.sigchld Sys.Signal_ignore;
+  Sys.set_signal Sys.sigchld Sys.Signal_default;
+  let max_children = environment_positive "SOUNIO_LOOM_MAX_HTTP_WORKERS" 32 in
+  let children = ref 0 in
+  let rec reap_children () =
+    match Unix.waitpid [ WNOHANG ] (-1) with
+    | 0, _ -> ()
+    | _, _ -> decr children; reap_children ()
+    | exception Unix_error (ECHILD, _, _) -> children := 0
+    | exception Unix_error (EINTR, _, _) -> reap_children ()
+  in
   Printf.printf
     "LOOM_MESSAGE_BRIDGE url=http://%s:%d schema=loom-message-bridge-v1 auth=bearer-capability sender_agent=%s sender_lane=%s\n%!"
     bind actual_port sender_agent sender_lane;
   while !running do
+    reap_children ();
     let readable, _, _ =
-      try Unix.select [ server ] [] [] 0.25
+      try
+        if !children >= max_children then (Unix.sleepf 0.01; ([], [], []))
+        else Unix.select [ server ] [] [] 0.25
       with Unix_error (EINTR, _, _) -> ([], [], [])
     in
     if readable <> [] then
@@ -1653,7 +1972,7 @@ let serve cli =
           handle cwd routing_state_dir token sender_agent sender_lane client;
           Unix.close client;
           Unix._exit 0
-      | _ -> Unix.close client
+      | _ -> incr children; Unix.close client
   done;
   Unix.close server
 

@@ -671,6 +671,20 @@ private struct RoutingConfigurationPanel: View {
                     .accessibilityIdentifier("loom-route-submit")
                     .accessibilityLabel("Route review task")
 
+                    if store.routeOperation?.receipt.status == .running {
+                        Button {
+                            Task { await store.cancelRouteTask() }
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 21, weight: .semibold))
+                                .foregroundStyle(LoomColor.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel the running routed task")
+                        .accessibilityIdentifier("loom-route-cancel")
+                        .accessibilityLabel("Cancel routed task")
+                    }
+
                     VStack(alignment: .leading, spacing: 2) {
                         Text(store.routeState.label)
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -704,13 +718,22 @@ private struct RoutingConfigurationPanel: View {
         case .deciding:
             ProgressView().controlSize(.small).tint(LoomColor.magenta)
         case let .received(operation):
-            Image(systemName: operation.receipt.status == .running
-                ? "checkmark.shield.fill" : "xmark.shield.fill")
+            Image(systemName: routeStatusIcon(operation.receipt.status))
                 .foregroundStyle(operation.receipt.status.loomColor)
         case .failed:
             Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(LoomColor.red)
         case .ready:
             Image(systemName: "shield.lefthalf.filled").foregroundStyle(LoomColor.cyan)
+        }
+    }
+
+    private func routeStatusIcon(_ status: ReceiptStatus) -> String {
+        switch status {
+        case .running: "bolt.shield.fill"
+        case .completed, .committed: "checkmark.shield.fill"
+        case .cancelled: "stop.circle.fill"
+        case .planned, .fallback: "arrow.triangle.branch"
+        case .refused, .failed: "xmark.shield.fill"
         }
     }
 

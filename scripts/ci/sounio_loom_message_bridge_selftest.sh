@@ -9,6 +9,8 @@ BRIDGE_LOG="$TEST_ROOT/bridge.log"
 BRIDGE_PID=''
 BASE_URL=''
 PROVIDER_FIXTURE_LOG="$TEST_ROOT/provider-fixture.log"
+PROVIDER_STATE_DIR="$TEST_ROOT/provider-state"
+PROVIDER_CONCURRENCY_LOG="$TEST_ROOT/provider-concurrency.log"
 CODEX_SESSIONS="$TEST_ROOT/codex-sessions"
 SECRET='4bdf72c971154463b928f6d64c8cb5cab245107657fc93dd9d9bcc50e7e7b186'
 MESSAGE='message bridge isolated acceptance canary'
@@ -92,16 +94,23 @@ grep -q 'remote message bridge bind requires --allow-remote' \
   "$TEST_ROOT/remote-bind.out" || fail 'remote bind refusal omitted its reason'
 
 mkdir -p "$CODEX_SESSIONS/2026/09/03"
+mkdir -p "$PROVIDER_STATE_DIR"
 printf '%s\n' \
   '{"timestamp":"2026-09-03T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1788479999}}}}' \
   >"$CODEX_SESSIONS/2026/09/03/route.jsonl"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
-  'case "${1:-}" in' \
+  'command="${1:-}"; shift || true' \
+  'lane=""' \
+  'while (($#)); do case "$1" in --lane) lane="$2"; shift 2 ;; *) shift ;; esac; done' \
+  'case "$command" in' \
   '  provider-status) printf '\''%s\n'\'' '\''{"schema":"loom-provider-abi-v1","status":{"provider":"codex","installed":true,"auth":"authenticated"}}'\'' ;;' \
   '  provider-plan) printf '\''%s\n'\'' '\''{"schema":"loom-provider-plan-fixture-v1","provider":"codex","role":"REVIEW_ONLY"}'\'' ;;' \
-  '  provider-start) printf '\''provider-start\n'\'' >>"$SOUNIO_LOOM_PROVIDER_FIXTURE_LOG" ;;' \
+  '  provider-start) if [[ "$lane" == parallel-* ]]; then printf '\''begin %s\n'\'' "$lane" >>"$SOUNIO_LOOM_PROVIDER_CONCURRENCY_LOG"; sleep 2; printf '\''end %s\n'\'' "$lane" >>"$SOUNIO_LOOM_PROVIDER_CONCURRENCY_LOG"; fi; printf '\''provider-start %s\n'\'' "$lane" >>"$SOUNIO_LOOM_PROVIDER_FIXTURE_LOG"; : >"$SOUNIO_LOOM_PROVIDER_STATE_DIR/$lane.active" ;;' \
+  '  status) if [[ "$lane" == route-completion && ! -f "$SOUNIO_LOOM_PROVIDER_STATE_DIR/$lane.active" ]]; then exit 1; elif [[ -f "$SOUNIO_LOOM_PROVIDER_STATE_DIR/$lane.active" ]]; then printf '\''state=active\n'\''; else printf '\''state=exited\n'\''; fi ;;' \
+  '  list) printf '\''LOOM_SESSION state=exited agent=loom-route lane=route-completion instance=fixture daemon_pid=0 harness_pid=0 cursor=0\nloom_sessions=1\n'\'' ;;' \
+  '  stop) rm -f "$SOUNIO_LOOM_PROVIDER_STATE_DIR/$lane.active"; printf '\''LOOM_STOP_REQUESTED lane=%s\n'\'' "$lane" ;;' \
   '  *) exit 64 ;;' \
   'esac' >"$TEST_ROOT/provider-fixture"
 chmod 0700 "$TEST_ROOT/provider-fixture"
@@ -109,6 +118,8 @@ chmod 0700 "$TEST_ROOT/provider-fixture"
 SOUNIO_LOOM_COMMAND="$TEST_ROOT/provider-fixture" \
 SOUNIO_LOOM_CODEX_SESSIONS_DIR="$CODEX_SESSIONS" \
 SOUNIO_LOOM_PROVIDER_FIXTURE_LOG="$PROVIDER_FIXTURE_LOG" \
+SOUNIO_LOOM_PROVIDER_STATE_DIR="$PROVIDER_STATE_DIR" \
+SOUNIO_LOOM_PROVIDER_CONCURRENCY_LOG="$PROVIDER_CONCURRENCY_LOG" \
 "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
   --routing-state-dir "$TEST_ROOT/routing-state" \
   --agent loom-ui-test --lane apple-client-test --bind 127.0.0.1 --port 0 \
@@ -283,10 +294,65 @@ grep -q '"providerRole":"REVIEW_ONLY"' "$TEST_ROOT/route-positive.json" ||
 [[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
   fail 'positive route did not launch exactly one provider fixture'
 
+status="$(route_http_status "$TEST_ROOT/route-positive-replay.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$route_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "idempotent route replay returned HTTP $status"
+cmp -s "$TEST_ROOT/route-positive.json" "$TEST_ROOT/route-positive-replay.json" ||
+  fail 'idempotent route replay changed the operation receipt'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
+  fail 'idempotent route replay launched the provider twice'
+
+route_task_whitespace='{ "prompt" : "Report risks without changing files.", "title" : "Review evidence", "kind" : "review", "taskId" : "route-positive", "schema" : "loom-route-task-v1" }'
+status="$(route_http_status "$TEST_ROOT/route-positive-canonical-replay.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$route_task_whitespace" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "canonical idempotent replay returned HTTP $status"
+cmp -s "$TEST_ROOT/route-positive.json" \
+  "$TEST_ROOT/route-positive-canonical-replay.json" ||
+  fail 'canonical idempotent replay changed the operation receipt'
+
+conflicting_task='{"schema":"loom-route-task-v1","taskId":"route-positive","kind":"review","title":"Conflicting replay","prompt":"Different payload must fail closed."}'
+status="$(route_http_status "$TEST_ROOT/route-positive-conflict.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$conflicting_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 409 ]] || fail "conflicting task id returned HTTP $status"
+grep -q 'message-bridge-routing-task-id-conflict' \
+  "$TEST_ROOT/route-positive-conflict.json" || fail 'task id conflict omitted its reason'
+
+invalid_task_id='{"schema":"loom-route-task-v1","taskId":"ambiguous/cancel","kind":"review","title":"Invalid identifier","prompt":"This must fail before routing."}'
+status="$(route_http_status "$TEST_ROOT/route-invalid-task-id.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$invalid_task_id" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 400 ]] || fail "path-ambiguous task id returned HTTP $status"
+grep -q 'message-bridge-routing-task-id-invalid' \
+  "$TEST_ROOT/route-invalid-task-id.json" || fail 'invalid task id omitted its reason'
+
+status="$(http_status "$TEST_ROOT/route-positive-status.json" \
+  --header "authorization: Bearer $SECRET" \
+  "$BASE_URL/v1/routing/tasks/route-positive")"
+[[ "$status" == 200 ]] || fail "active route status returned HTTP $status"
+grep -q '"status":"running"' "$TEST_ROOT/route-positive-status.json" ||
+  fail 'active provider did not remain running'
+
+status="$(http_status "$TEST_ROOT/route-positive-cancel.json" --request POST \
+  --header "authorization: Bearer $SECRET" \
+  "$BASE_URL/v1/routing/tasks/route-positive/cancel")"
+[[ "$status" == 200 ]] || fail "route cancellation returned HTTP $status"
+grep -q '"status":"cancelled"' "$TEST_ROOT/route-positive-cancel.json" ||
+  fail 'route cancellation did not persist cancelled state'
+status="$(http_status "$TEST_ROOT/route-positive-cancel-replay.json" --request POST \
+  --header "authorization: Bearer $SECRET" \
+  "$BASE_URL/v1/routing/tasks/route-positive/cancel")"
+[[ "$status" == 200 ]] || fail "idempotent cancellation returned HTTP $status"
+cmp -s "$TEST_ROOT/route-positive-cancel.json" \
+  "$TEST_ROOT/route-positive-cancel-replay.json" ||
+  fail 'idempotent cancellation changed the terminal receipt'
+
 status="$(http_status "$TEST_ROOT/routing-latest.json" \
   --header "authorization: Bearer $SECRET" "$BASE_URL/v1/routing/receipts/latest")"
 [[ "$status" == 200 ]] || fail "latest routing receipt returned HTTP $status"
-cmp -s "$TEST_ROOT/route-positive.json" \
+cmp -s "$TEST_ROOT/route-positive-cancel.json" \
   <(sed -e 's/^{"schema":"loom-latest-route-operation-v1","operation"://' \
          -e 's/}$//' "$TEST_ROOT/routing-latest.json") ||
   fail 'latest routing receipt drifted from the persisted Sounio operation'
@@ -327,6 +393,30 @@ grep -q 'DENY code=617 reason=language-role-forbidden' \
 [[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
   fail 'Python oracle denial launched a provider'
 
+completion_task='{"schema":"loom-route-task-v1","taskId":"route-completion","kind":"review","title":"Observe completion","prompt":"Return normally."}'
+status="$(route_http_status "$TEST_ROOT/route-completion.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$completion_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "completion route returned HTTP $status"
+grep -q '"status":"running"' "$TEST_ROOT/route-completion.json" ||
+  fail 'completion route did not enter running state'
+rm -f "$PROVIDER_STATE_DIR/route-completion.active"
+status="$(http_status "$TEST_ROOT/route-completion-status.json" \
+  --header "authorization: Bearer $SECRET" \
+  "$BASE_URL/v1/routing/tasks/route-completion")"
+[[ "$status" == 200 ]] || fail "terminal route status returned HTTP $status"
+grep -q '"status":"completed"' "$TEST_ROOT/route-completion-status.json" ||
+  fail 'exited provider was not projected as completed'
+grep -q '"providerRole":"REVIEW_ONLY"' "$TEST_ROOT/route-completion-status.json" ||
+  fail 'completion projection promoted the provider role'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 2 ]] ||
+  fail 'completion lifecycle launched an unexpected provider count'
+
+status="$(http_status "$TEST_ROOT/route-missing-status.json" \
+  --header "authorization: Bearer $SECRET" \
+  "$BASE_URL/v1/routing/tasks/not-present")"
+[[ "$status" == 404 ]] || fail "missing route status returned HTTP $status"
+
 grep -q 'LOOM_MESSAGE_DECISION decision=ALLOW' "$BRIDGE_LOG" ||
   fail 'bridge did not audit its ALLOW decision'
 [[ "$(grep -c 'LOOM_MESSAGE_DECISION decision=DENY' "$BRIDGE_LOG")" -ge 4 ]] ||
@@ -344,7 +434,13 @@ BRIDGE_PID=''
 printf '%s\n' '#!/usr/bin/env bash' 'sleep 30' >"$TEST_ROOT/stalled-coord"
 chmod 0700 "$TEST_ROOT/stalled-coord"
 SOUNIO_COORD_COMMAND="$TEST_ROOT/stalled-coord" \
+SOUNIO_LOOM_COMMAND="$TEST_ROOT/provider-fixture" \
+SOUNIO_LOOM_CODEX_SESSIONS_DIR="$CODEX_SESSIONS" \
+SOUNIO_LOOM_PROVIDER_FIXTURE_LOG="$PROVIDER_FIXTURE_LOG" \
+SOUNIO_LOOM_PROVIDER_STATE_DIR="$PROVIDER_STATE_DIR" \
+SOUNIO_LOOM_PROVIDER_CONCURRENCY_LOG="$PROVIDER_CONCURRENCY_LOG" \
   "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --routing-state-dir "$TEST_ROOT/routing-state" \
   --agent loom-ui-test --lane timeout-test --bind 127.0.0.1 --port 0 \
   >"$TEST_ROOT/timeout-bridge.log" 2>&1 &
 BRIDGE_PID=$!
@@ -367,5 +463,60 @@ grep -q 'message-bridge-runtime-timeout' "$TEST_ROOT/timeout.json" ||
   fail 'timeout refusal omitted its reason'
 grep -q 'decision=DENY reason=message-bridge-runtime-timeout' \
   "$TEST_ROOT/timeout-bridge.log" || fail 'timeout refusal was not audited'
+
+curl --silent --show-error --max-time 12 --output "$TEST_ROOT/slow-thread-1.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads" &
+slow_one=$!
+curl --silent --show-error --max-time 12 --output "$TEST_ROOT/slow-thread-2.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads" &
+slow_two=$!
+sleep 0.2
+status="$(curl --silent --show-error --max-time 3 \
+  --output "$TEST_ROOT/priority-route-under-load.json" --write-out '%{http_code}' \
+  --request POST --header 'content-type: application/json' \
+  --header "authorization: Bearer $SECRET" --data "$completion_task" \
+  "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] ||
+  fail "priority route was blocked by background polling (HTTP $status)"
+grep -q '"status":"completed"' "$TEST_ROOT/priority-route-under-load.json" ||
+  fail 'priority replay under load drifted from its terminal receipt'
+wait "$slow_one" || true
+wait "$slow_two" || true
+grep -q 'LOOM_MESSAGE_QUEUE class=background' "$TEST_ROOT/timeout-bridge.log" ||
+  fail 'background queue classification was not audited'
+grep -q 'LOOM_MESSAGE_QUEUE class=priority' "$TEST_ROOT/timeout-bridge.log" ||
+  fail 'priority queue classification was not audited'
+
+printf '%s\n' \
+  '{"timestamp":"2026-09-03T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1788479999}}}}' \
+  >"$CODEX_SESSIONS/2026/09/03/route.jsonl"
+parallel_one='{"schema":"loom-route-task-v1","taskId":"parallel-one","kind":"review","title":"Parallel one","prompt":"First concurrent turn."}'
+parallel_two='{"schema":"loom-route-task-v1","taskId":"parallel-two","kind":"review","title":"Parallel two","prompt":"Second concurrent turn."}'
+parallel_started="$(date +%s%N)"
+curl --silent --show-error --max-time 30 --output "$TEST_ROOT/parallel-one.json" \
+  --request POST --header 'content-type: application/json' \
+  --header "authorization: Bearer $SECRET" --data "$parallel_one" \
+  "$BASE_URL/v1/routing/tasks" &
+parallel_one_pid=$!
+curl --silent --show-error --max-time 30 --output "$TEST_ROOT/parallel-two.json" \
+  --request POST --header 'content-type: application/json' \
+  --header "authorization: Bearer $SECRET" --data "$parallel_two" \
+  "$BASE_URL/v1/routing/tasks" &
+parallel_two_pid=$!
+wait "$parallel_one_pid"
+wait "$parallel_two_pid"
+parallel_elapsed_ms="$(( ($(date +%s%N) - parallel_started) / 1000000 ))"
+[[ "$(sed -n '1p' "$PROVIDER_CONCURRENCY_LOG")" == begin\ parallel-* ]] ||
+  fail 'first concurrent provider did not enter its work interval'
+[[ "$(sed -n '2p' "$PROVIDER_CONCURRENCY_LOG")" == begin\ parallel-* ]] ||
+  fail "distinct task locks serialized provider starts (${parallel_elapsed_ms}ms)"
+[[ "$parallel_elapsed_ms" -lt 30000 ]] ||
+  fail "concurrent routes exceeded their operational deadline (${parallel_elapsed_ms}ms)"
+grep -q '"status":"running"' "$TEST_ROOT/parallel-one.json" ||
+  fail 'first concurrent route did not start'
+grep -q '"status":"running"' "$TEST_ROOT/parallel-two.json" ||
+  fail 'second concurrent route did not start'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 4 ]] ||
+  fail 'concurrent routes did not launch exactly two additional providers'
 
 echo "sounio-loom-message-bridge-selftest: PASS receipt=$message_id authority=durable-message-bus"

@@ -130,10 +130,11 @@ extension AdapterHealth {
 extension ReceiptStatus {
     var loomColor: Color {
         switch self {
-        case .committed: LoomColor.cyan
+        case .committed, .completed: LoomColor.cyan
         case .running: LoomColor.green
         case .fallback: LoomColor.amber
         case .planned: LoomColor.violet
+        case .cancelled: LoomColor.amber
         case .refused, .failed: LoomColor.red
         }
     }

@@ -528,4 +528,36 @@ public struct LoomMessageClient: Sendable {
         }
         return operation
     }
+
+    public func routeOperation(taskID: String) async throws -> LoomRouteOperation {
+        let operation = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/tasks/\(taskID)"),
+            as: LoomRouteOperation.self
+        )
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == taskID,
+              operation.receipt.taskId == taskID,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
+    }
+
+    public func cancelRoute(taskID: String) async throws -> LoomRouteOperation {
+        let operation = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/tasks/\(taskID)/cancel", method: "POST"),
+            as: LoomRouteOperation.self
+        )
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == taskID,
+              operation.receipt.taskId == taskID,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
+    }
 }

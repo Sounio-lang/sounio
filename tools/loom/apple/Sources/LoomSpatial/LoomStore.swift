@@ -293,7 +293,13 @@ final class LoomStore: ObservableObject {
     func refreshLatestRouteOperation() async {
         guard let messageClient, routeState != .deciding else { return }
         do {
-            guard let operation = try await messageClient.latestRouteOperation() else { return }
+            let operation: LoomRouteOperation?
+            if let current = routeOperation, current.receipt.status == .running {
+                operation = try await messageClient.routeOperation(taskID: current.receipt.taskId)
+            } else {
+                operation = try await messageClient.latestRouteOperation()
+            }
+            guard let operation else { return }
             routeOperation = operation
             dashboard = .live(operation, title: operation.receipt.taskId)
             routeState = .received(operation)
@@ -328,6 +334,21 @@ final class LoomStore: ObservableObject {
             )
             routeOperation = operation
             dashboard = .live(operation, title: title)
+            routeState = .received(operation)
+        } catch {
+            routeState = .failed(error.localizedDescription)
+        }
+    }
+
+    func cancelRouteTask() async {
+        guard let messageClient,
+              let current = routeOperation,
+              current.receipt.status == .running
+        else { return }
+        do {
+            let operation = try await messageClient.cancelRoute(taskID: current.receipt.taskId)
+            routeOperation = operation
+            dashboard = .live(operation, title: current.receipt.taskId)
             routeState = .received(operation)
         } catch {
             routeState = .failed(error.localizedDescription)

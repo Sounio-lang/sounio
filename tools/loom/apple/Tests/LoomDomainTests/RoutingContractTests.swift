@@ -173,6 +173,18 @@ final class RoutingContractTests: XCTestCase {
         XCTAssertEqual(present.operation?.receipt.languageRole, "SEMANTIC_AUTHORITY")
     }
 
+    func testOperationalTerminalStatusesDecodeWithoutAuthorityPromotion() throws {
+        for status in [ReceiptStatus.completed, .cancelled] {
+            let data = Data("""
+            {"schema":"loom-route-operation-v1","decision":{"id":"terminal-decision","taskId":"terminal","policy":"authority-first","candidateAdapterIds":["adapter-codex"],"selectedAdapterId":"adapter-codex"},"receipt":{"taskId":"terminal","policy":"authority-first","poolId":"pool-openai-team","adapterId":"adapter-codex","model":"gpt-5.6-terra","effort":"high","reason":"terminal","fallbackChain":["adapter-codex"],"status":"\(status.rawValue)","producingLanguage":"Sounio","languageRole":"SEMANTIC_AUTHORITY","operationalLanguage":"OCaml","providerRole":"REVIEW_ONLY"}}
+            """.utf8)
+            let operation = try JSONDecoder().decode(LoomRouteOperation.self, from: data)
+            XCTAssertEqual(operation.receipt.status, status)
+            XCTAssertEqual(operation.receipt.languageRole, "SEMANTIC_AUTHORITY")
+            XCTAssertEqual(operation.receipt.providerRole, "REVIEW_ONLY")
+        }
+    }
+
     private func lane(
         _ lane: String,
         presence: String,
