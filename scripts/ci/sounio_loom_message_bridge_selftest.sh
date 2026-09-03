@@ -83,6 +83,7 @@ grep -q 'remote message bridge bind requires --allow-remote' \
   "$TEST_ROOT/remote-bind.out" || fail 'remote bind refusal omitted its reason'
 
 "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --routing-state-dir "$TEST_ROOT/routing-state" \
   --agent loom-ui-test --lane apple-client-test --bind 127.0.0.1 --port 0 \
   >"$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
@@ -108,6 +109,9 @@ status="$(http_status "$TEST_ROOT/no-token.json" --request POST \
 
 status="$(http_status "$TEST_ROOT/no-token-threads.json" "$BASE_URL/v1/threads")"
 [[ "$status" == 401 ]] || fail "thread list without capability returned HTTP $status"
+
+status="$(http_status "$TEST_ROOT/no-token-routing.json" "$BASE_URL/v1/routing/config")"
+[[ "$status" == 401 ]] || fail "routing config without capability returned HTTP $status"
 
 status="$(http_status "$TEST_ROOT/wrong-token.json" --request POST \
   --header 'content-type: application/json' --header 'authorization: Bearer wrong' \
@@ -188,6 +192,46 @@ status="$(http_status "$TEST_ROOT/thread-acked.json" \
 [[ "$status" == 200 ]] || fail "acknowledged thread detail returned HTTP $status"
 grep -q '"kind":"ack"' "$TEST_ROOT/thread-acked.json" ||
   fail 'thread detail omitted the acknowledgement event'
+
+status="$(http_status "$TEST_ROOT/routing-default.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/routing/config")"
+[[ "$status" == 200 ]] || fail "default routing config returned HTTP $status"
+grep -q '"schema":"loom-routing-config-v1"' "$TEST_ROOT/routing-default.json" ||
+  fail 'default routing config omitted its schema'
+grep -q '"revision":0' "$TEST_ROOT/routing-default.json" ||
+  fail 'default routing config did not start at revision zero'
+
+routing_update='{"schema":"loom-routing-config-v1","policy":"authority-first","model":"gpt-5.6-sol","effort":"high","poolOrder":["pool-openai-team"],"adapterOrder":["adapter-codex"]}'
+status="$(http_status "$TEST_ROOT/routing-stored.json" --request PUT \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$routing_update" "$BASE_URL/v1/routing/config")"
+[[ "$status" == 200 ]] || fail "valid routing config returned HTTP $status: $(cat "$TEST_ROOT/routing-stored.json")"
+grep -q '"schema":"loom-routing-config-receipt-v1"' "$TEST_ROOT/routing-stored.json" ||
+  fail 'routing config receipt omitted its schema'
+grep -q '"revision":1' "$TEST_ROOT/routing-stored.json" ||
+  fail 'routing config receipt did not advance revision'
+grep -q '"status":"stored"' "$TEST_ROOT/routing-stored.json" ||
+  fail 'routing config receipt did not confirm persistence'
+[[ -f "$TEST_ROOT/routing-state/routing-config-v1.json" ]] ||
+  fail 'routing config did not persist in the configured private state directory'
+[[ "$(stat -c '%a' "$TEST_ROOT/routing-state/routing-config-v1.json")" == 600 ]] ||
+  fail 'routing config state file permissions are not private'
+
+status="$(http_status "$TEST_ROOT/routing-readback.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/routing/config")"
+[[ "$status" == 200 ]] || fail "stored routing config readback returned HTTP $status"
+grep -q '"model":"gpt-5.6-sol"' "$TEST_ROOT/routing-readback.json" ||
+  fail 'stored routing config did not preserve the model'
+grep -q '"revision":1' "$TEST_ROOT/routing-readback.json" ||
+  fail 'stored routing config revision drifted'
+
+status="$(http_status "$TEST_ROOT/routing-duplicate.json" --request PUT \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data '{"schema":"loom-routing-config-v1","policy":"authority-first","model":"gpt-5.6-sol","effort":"high","poolOrder":["pool-openai-team","pool-openai-team"],"adapterOrder":["adapter-codex"]}' \
+  "$BASE_URL/v1/routing/config")"
+[[ "$status" == 400 ]] || fail "duplicate routing pool returned HTTP $status"
+grep -q 'message-bridge-routing-pool-order-duplicate' "$TEST_ROOT/routing-duplicate.json" ||
+  fail 'duplicate routing pool refusal omitted its reason'
 
 grep -q 'LOOM_MESSAGE_DECISION decision=ALLOW' "$BRIDGE_LOG" ||
   fail 'bridge did not audit its ALLOW decision'

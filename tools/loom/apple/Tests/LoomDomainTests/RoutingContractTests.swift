@@ -124,6 +124,21 @@ final class RoutingContractTests: XCTestCase {
         XCTAssertEqual(thread.events.map(\.kind), ["durable_only", "timeout"])
     }
 
+    func testRoutingConfigAndStorageReceiptRemainDeclarative() throws {
+        let data = Data("""
+        {"schema":"loom-routing-config-receipt-v1","revision":4,"updatedEpoch":1788450000,"previousDigest":"old","digest":"new","status":"stored","config":{"schema":"loom-routing-config-v1","revision":4,"updatedEpoch":1788450000,"policy":"authority-first","model":"gpt-5.6-terra","effort":"high","poolOrder":["pool-openai-team"],"adapterOrder":["adapter-codex"]}}
+        """.utf8)
+        let receipt = try JSONDecoder().decode(LoomRoutingConfigReceipt.self, from: data)
+
+        XCTAssertEqual(receipt.schema, "loom-routing-config-receipt-v1")
+        XCTAssertEqual(receipt.status, "stored")
+        XCTAssertEqual(receipt.config.revision, receipt.revision)
+        XCTAssertEqual(receipt.config.update.model, "gpt-5.6-terra")
+        XCTAssertEqual(receipt.config.update.poolOrder, ["pool-openai-team"])
+        let encoded = try JSONEncoder().encode(receipt.config.update)
+        XCTAssertFalse(encoded.isEmpty)
+    }
+
     private func lane(
         _ lane: String,
         presence: String,

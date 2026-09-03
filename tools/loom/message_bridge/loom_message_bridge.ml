@@ -224,6 +224,26 @@ let json_string_field ?default object_value names =
   in
   find names
 
+let json_string_array_field object_value name =
+  match json_object_field object_value name with
+  | Some (Json_array values) ->
+      List.map
+        (function
+          | Json_string value -> value
+          | _ -> failf "invalid-json:%s-must-be-string-array" name)
+        values
+  | Some _ -> failf "invalid-json:%s-must-be-string-array" name
+  | None -> failf "invalid-json:%s-is-required" name
+
+let json_int_field object_value name =
+  match json_object_field object_value name with
+  | Some (Json_number value) -> (
+      match int_of_string_opt value with
+      | Some parsed when parsed >= 0 -> parsed
+      | _ -> failf "invalid-json:%s-must-be-nonnegative-int" name)
+  | Some _ -> failf "invalid-json:%s-must-be-nonnegative-int" name
+  | None -> failf "invalid-json:%s-is-required" name
+
 let constant_time_equal left right =
   let left_length = String.length left and right_length = String.length right in
   let length = max left_length right_length in
@@ -790,6 +810,167 @@ let acknowledge_message cwd sender_agent sender_lane message_id =
     "{\"schema\":\"loom-message-ack-v1\",\"messageId\":%s,\"status\":\"acknowledged\"}"
     (json_quote message_id)
 
+type routing_config = {
+  revision : int;
+  updated_epoch : int;
+  policy : string;
+  model : string;
+  effort : string;
+  pool_order : string list;
+  adapter_order : string list;
+}
+
+let default_routing_config =
+  { revision = 0; updated_epoch = 0; policy = "authority-first";
+    model = "gpt-5.6-terra"; effort = "high";
+    pool_order = [ "pool-openai-team" ]; adapter_order = [ "adapter-codex" ] }
+
+let routing_config_json config =
+  let array values =
+    "[" ^ String.concat "," (List.map json_quote values) ^ "]"
+  in
+  Printf.sprintf
+    "{\"schema\":\"loom-routing-config-v1\",\"revision\":%d,\"updatedEpoch\":%d,\"policy\":%s,\"model\":%s,\"effort\":%s,\"poolOrder\":%s,\"adapterOrder\":%s}"
+    config.revision config.updated_epoch (json_quote config.policy)
+    (json_quote config.model) (json_quote config.effort) (array config.pool_order)
+    (array config.adapter_order)
+
+let valid_routing_identifier label value = valid_field label 256 value
+
+let valid_routing_selector label allowed value =
+  let value = valid_routing_identifier label value in
+  if not (List.mem value allowed) then
+    failf "message-bridge-routing-%s-refused" label;
+  value
+
+let validate_routing_order label values =
+  if values = [] then failf "message-bridge-routing-%s-empty" label;
+  if List.length values > 32 then failf "message-bridge-routing-%s-too-long" label;
+  let validated = List.map (valid_routing_identifier label) values in
+  if List.length (List.sort_uniq String.compare validated) <> List.length validated
+  then failf "message-bridge-routing-%s-duplicate" label;
+  validated
+
+let routing_config_of_json ~persisted parsed =
+  let schema = json_string_field parsed [ "schema" ] in
+  if schema <> "loom-routing-config-v1" then
+    failf "message-bridge-routing-schema-refused";
+  let policy =
+    json_string_field parsed [ "policy" ]
+    |> valid_routing_selector "policy"
+         [ "authority-first"; "capacity-aware"; "latency-aware" ]
+  in
+  let model =
+    json_string_field parsed [ "model" ]
+    |> valid_routing_selector "model" [ "gpt-5.6-terra"; "gpt-5.6-sol" ]
+  in
+  let effort =
+    json_string_field parsed [ "effort" ]
+    |> valid_routing_selector "effort" [ "low"; "medium"; "high" ]
+  in
+  let pool_order =
+    json_string_array_field parsed "poolOrder" |> validate_routing_order "pool-order"
+  in
+  let adapter_order =
+    json_string_array_field parsed "adapterOrder" |> validate_routing_order "adapter-order"
+  in
+  let revision, updated_epoch =
+    if persisted then
+      (json_int_field parsed "revision", json_int_field parsed "updatedEpoch")
+    else (0, 0)
+  in
+  { revision; updated_epoch; policy; model; effort; pool_order; adapter_order }
+
+let process_git cwd arguments =
+  let argv = Array.of_list ("git" :: "-C" :: cwd :: arguments) in
+  let code, output = process_output_timeout ~timeout_seconds:4 cwd "git" argv in
+  if code <> 0 then failf "message-bridge-routing-git-refused:%s" (sha256 output);
+  trim output
+
+let routing_state_dir cwd configured =
+  if configured <> "" then (
+    if Filename.is_relative configured then
+      failf "message-bridge-routing-state-must-be-absolute";
+    configured)
+  else
+    let common_dir = process_git cwd [ "rev-parse"; "--git-common-dir" ] in
+    if common_dir = "" then failf "message-bridge-routing-git-empty";
+    let common_dir =
+      if Filename.is_relative common_dir then Filename.concat cwd common_dir else common_dir
+    in
+    Filename.concat common_dir "sounio-loom-routing-state"
+
+let rec ensure_private_directory path =
+  if Sys.file_exists path then (
+    if (Unix.lstat path).st_kind <> S_DIR then
+      failf "message-bridge-routing-state-not-directory";
+    let metadata = Unix.stat path in
+    if metadata.st_uid <> Unix.getuid () then
+      failf "message-bridge-routing-state-owner-mismatch";
+    if metadata.st_perm land 0o077 <> 0 then
+      failf "message-bridge-routing-state-permissions")
+  else
+    try Unix.mkdir path 0o700
+    with Unix_error (EEXIST, _, _) -> ensure_private_directory path
+
+let routing_paths cwd configured_state_dir =
+  let directory = routing_state_dir cwd configured_state_dir in
+  ensure_private_directory directory;
+  (Filename.concat directory "routing-config-v1.json",
+   Filename.concat directory "routing-config-v1.lock")
+
+let read_routing_config path =
+  if not (Sys.file_exists path) then default_routing_config
+  else (
+    if (Unix.lstat path).st_kind <> S_REG then
+      failf "message-bridge-routing-config-not-regular";
+    let metadata = Unix.stat path in
+    if metadata.st_uid <> Unix.getuid () then
+      failf "message-bridge-routing-config-owner-mismatch";
+    if metadata.st_perm land 0o077 <> 0 then
+      failf "message-bridge-routing-config-permissions";
+    read_file path |> parse_json |> routing_config_of_json ~persisted:true)
+
+let write_routing_config path config =
+  let temporary = path ^ ".tmp-" ^ string_of_int (Unix.getpid ()) in
+  if Sys.file_exists temporary then Unix.unlink temporary;
+  let descriptor =
+    Unix.openfile temporary [ O_WRONLY; O_CREAT; O_EXCL ] 0o600
+  in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close descriptor with Unix_error _ -> ())
+    (fun () -> write_all descriptor (routing_config_json config ^ "\n"); Unix.fsync descriptor);
+  Unix.rename temporary path
+
+let with_routing_lock lock_path action =
+  let descriptor = Unix.openfile lock_path [ O_RDWR; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close descriptor with Unix_error _ -> ())
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      Fun.protect ~finally:(fun () -> Unix.lockf descriptor F_ULOCK 0) action)
+
+let routing_config cwd configured_state_dir =
+  let config_path, _ = routing_paths cwd configured_state_dir in
+  read_routing_config config_path |> routing_config_json
+
+let update_routing_config cwd configured_state_dir body =
+  let update = parse_json body |> routing_config_of_json ~persisted:false in
+  let config_path, lock_path = routing_paths cwd configured_state_dir in
+  with_routing_lock lock_path (fun () ->
+      let previous = read_routing_config config_path in
+      let next =
+        { update with revision = previous.revision + 1;
+          updated_epoch = int_of_float (Unix.time ()) }
+      in
+      let previous_digest = sha256 (routing_config_json previous) in
+      let config_json = routing_config_json next in
+      write_routing_config config_path next;
+      Printf.sprintf
+        "{\"schema\":\"loom-routing-config-receipt-v1\",\"revision\":%d,\"updatedEpoch\":%d,\"previousDigest\":%s,\"digest\":%s,\"status\":\"stored\",\"config\":%s}"
+        next.revision next.updated_epoch (json_quote previous_digest)
+        (json_quote (sha256 config_json)) config_json)
+
 let authorized request token =
   match Hashtbl.find_opt request.http_headers "authorization" with
   | Some value when starts_with value "Bearer " ->
@@ -805,7 +986,7 @@ let reason_slug value =
       | _ -> '-')
     value
 
-let handle cwd token sender_agent sender_lane descriptor =
+let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
   let respond status body =
     write_all descriptor
       (response ~headers:[ ("X-Loom-Authority", "durable-message-bus") ]
@@ -834,6 +1015,18 @@ let handle cwd token sender_agent sender_lane descriptor =
         "LOOM_MESSAGE_DECISION decision=ALLOW reason=thread-list-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
         sender_agent sender_lane (sha256 projection);
       respond "200 OK" projection
+    else if request.http_method = "GET" && path = "/v1/routing/config" then
+      let projection = routing_config cwd routing_state_dir in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-config-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 projection);
+      respond "200 OK" projection
+    else if request.http_method = "PUT" && path = "/v1/routing/config" then
+      let receipt = update_routing_config cwd routing_state_dir request.http_body in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-config-stored sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 receipt);
+      respond "200 OK" receipt
     else if request.http_method = "GET" && starts_with path "/v1/threads/" then
       let message_id =
         String.sub path 12 (String.length path - 12) |> percent_decode
@@ -861,6 +1054,7 @@ let handle cwd token sender_agent sender_lane descriptor =
         if starts_with message "invalid-json:"
            || starts_with message "message-bridge-target-"
            || starts_with message "message-bridge-message-"
+           || starts_with message "message-bridge-routing-"
            || message = "message-bridge-kind-refused"
         then "400 Bad Request"
         else if starts_with message "message-bridge-runtime-" then
@@ -917,6 +1111,7 @@ let serve cli =
   if port > 65535 then failf "invalid-port";
   let token_path = required cli "--token-file" in
   let token = token_from_file token_path in
+  let routing_state_dir = option cli "--routing-state-dir" "" in
   let sender_agent =
     option cli "--agent" "loom-ui" |> valid_field "sender-agent" 256
   in
@@ -956,7 +1151,7 @@ let serve cli =
           Unix.close server;
           Sys.set_signal Sys.sigchld Sys.Signal_default;
           Unix.setsockopt_float client SO_RCVTIMEO 5.0;
-          handle cwd token sender_agent sender_lane client;
+          handle cwd routing_state_dir token sender_agent sender_lane client;
           Unix.close client;
           Unix._exit 0
       | _ -> Unix.close client
@@ -965,7 +1160,7 @@ let serve cli =
 
 let usage () =
   Printf.eprintf
-    "usage: sounio-loom message-serve --token-file PATH [--agent A] [--lane L] [--cwd PATH] [--bind 127.0.0.1] [--port 8789] [--allow-remote]\n"
+    "usage: sounio-loom message-serve --token-file PATH [--agent A] [--lane L] [--cwd PATH] [--routing-state-dir PATH] [--bind 127.0.0.1] [--port 8789] [--allow-remote]\n"
 
 let () =
   try

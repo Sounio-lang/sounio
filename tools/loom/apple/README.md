@@ -63,6 +63,12 @@ tools/loom/apple/validate-apple.sh
 - `POST /v1/messages`, `GET /v1/threads`, `GET /v1/threads/<request-id>`, and
   `POST /v1/messages/<response-id>/ack` exist only on the separate loopback
   message bridge.
+- `GET /v1/routing/config` and `PUT /v1/routing/config` use that same
+  authenticated loopback bridge. They store a bounded declarative policy,
+  model, effort, and pool/adapter order with an atomic revision and digest
+  receipt. The default state directory is private shared Git metadata;
+  `--routing-state-dir /absolute/private/path` selects an explicit
+  deployment-owned location.
 - The bridge fixes sender identity at startup; the UI supplies only destination,
   message text, and the bounded `request` kind.
 - A send is displayed as successful only after a durable bus receipt is decoded.
@@ -76,6 +82,8 @@ tools/loom/apple/validate-apple.sh
   labeled `DURABLE ONLY` before submission.
 - `ProviderAccount`, `QuotaPool`, and `CliAdapter` are deliberately independent.
 - The UI renders `Task -> RouteDecision -> RouteReceipt`; the backend arbitrates.
+- The Configure tab only edits `loom-routing-config-v1`. Saving it cannot run a
+  provider, choose an adapter, create a route, or promote a receipt.
 
 The Metal field is ornamental. It receives only presentation state and cannot
 produce, mutate, or promote a routing or semantic receipt.
@@ -89,6 +97,7 @@ inspected on Apple Silicon. The durable gate receipt is:
 evidence/2026-09-03-spatial-v2-native-gate.txt
 evidence/2026-09-03-message-bridge-gate.txt
 evidence/2026-09-03-delivery-aware-roundtrip-gate.txt
+evidence/2026-09-03-routing-config-gate.txt
 ```
 
 Live fleet and journal data are labeled `LIVE / READ ONLY`. The configured

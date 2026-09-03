@@ -265,6 +265,63 @@ public struct LoomMessageAcknowledgement: Codable, Equatable, Sendable {
     public let status: String
 }
 
+public struct LoomRoutingConfig: Codable, Equatable, Sendable {
+    public let schema: String
+    public let revision: Int
+    public let updatedEpoch: Int
+    public let policy: String
+    public let model: String
+    public let effort: String
+    public let poolOrder: [String]
+    public let adapterOrder: [String]
+
+    public var update: LoomRoutingConfigUpdate {
+        LoomRoutingConfigUpdate(
+            schema: schema,
+            policy: policy,
+            model: model,
+            effort: effort,
+            poolOrder: poolOrder,
+            adapterOrder: adapterOrder
+        )
+    }
+}
+
+public struct LoomRoutingConfigUpdate: Codable, Equatable, Sendable {
+    public let schema: String
+    public var policy: String
+    public var model: String
+    public var effort: String
+    public var poolOrder: [String]
+    public var adapterOrder: [String]
+
+    public init(
+        schema: String = "loom-routing-config-v1",
+        policy: String,
+        model: String,
+        effort: String,
+        poolOrder: [String],
+        adapterOrder: [String]
+    ) {
+        self.schema = schema
+        self.policy = policy
+        self.model = model
+        self.effort = effort
+        self.poolOrder = poolOrder
+        self.adapterOrder = adapterOrder
+    }
+}
+
+public struct LoomRoutingConfigReceipt: Codable, Equatable, Sendable {
+    public let schema: String
+    public let revision: Int
+    public let updatedEpoch: Int
+    public let previousDigest: String
+    public let digest: String
+    public let status: String
+    public let config: LoomRoutingConfig
+}
+
 public enum LoomMessageClientError: LocalizedError, Equatable, Sendable {
     case refused(status: Int, reason: String)
     case invalidReceipt
@@ -377,6 +434,40 @@ public struct LoomMessageClient: Sendable {
         guard receipt.schema == "loom-message-ack-v1",
               receipt.messageId == messageID,
               receipt.status == "acknowledged"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return receipt
+    }
+
+    public func routingConfig() async throws -> LoomRoutingConfig {
+        let config = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/config"),
+            as: LoomRoutingConfig.self
+        )
+        guard config.schema == "loom-routing-config-v1",
+              config.revision >= 0,
+              config.poolOrder.isEmpty == false,
+              config.adapterOrder.isEmpty == false
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return config
+    }
+
+    public func updateRoutingConfig(
+        _ update: LoomRoutingConfigUpdate
+    ) async throws -> LoomRoutingConfigReceipt {
+        var request = authorizedRequest(path: "v1/routing/config", method: "PUT")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(update)
+        let receipt = try await checkedResponse(request, as: LoomRoutingConfigReceipt.self)
+        guard receipt.schema == "loom-routing-config-receipt-v1",
+              receipt.status == "stored",
+              receipt.config.schema == "loom-routing-config-v1",
+              receipt.config.revision == receipt.revision,
+              receipt.digest.isEmpty == false,
+              receipt.previousDigest.isEmpty == false
         else {
             throw LoomMessageClientError.invalidReceipt
         }
