@@ -204,6 +204,7 @@ guard_mutation() {
     host-grant-slurm:RECOVERY_REQUIRED) actions=31 ;;
     host-grant-k8s:K8S_RESERVING) actions=32 ;;
     host-grant-k8s:K8S_OWNED) actions=32 ;;
+    keepalive:UNINITIALIZED) actions='23 24 25 26 29 30 31' ;;
     bootstrap-slurmd:UNINITIALIZED) actions=25 ;;
     resume:UNINITIALIZED) actions=26 ;;
     drain:DRAINING_SLURM) actions=2 ;;
@@ -549,6 +550,7 @@ bootstrap_freeze_migration_context() {
   local report0="$6" report1="$7" reservation_count="$8" workload_count="$9"
   local source_hash current_freeze lease_source journal_source lease_freeze journal_freeze
   local old_freeze='' prior_freeze migration_ancestor binding report report_freeze expected_node
+  local journal_step expected_mode expected_valid
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   current_freeze="$(sha256_file "$FREEZE")"
   lease_source="$(jq -r --arg key "$(policy_value "$POLICY" source_hash_annotation)" \
@@ -564,8 +566,16 @@ bootstrap_freeze_migration_context() {
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
     '.metadata.annotations[$key] // ""' <<<"$lease")" == UNINITIALIZED ]] || return 1
   lease_is_live "$lease" && return 1
-  case "$(jq -r '.data.step // ""' <<<"$journal")" in
-    FENCE_INSTALLED|HOST_FENCE_INSTALLED|BOOTSTRAP_TAKEOVER) ;;
+  journal_step="$(jq -r '.data.step // ""' <<<"$journal")"
+  case "$journal_step" in
+    FENCE_INSTALLED|HOST_FENCE_INSTALLED|BOOTSTRAP_TAKEOVER)
+      expected_mode=FENCED
+      expected_valid=0
+      ;;
+    SLURMD_GPU_BOUND|SLURM_RESUMED)
+      expected_mode=SLURM
+      expected_valid=1
+      ;;
     *) return 1 ;;
   esac
   for binding in "$lease_freeze" "$journal_freeze"; do
@@ -596,8 +606,8 @@ bootstrap_freeze_migration_context() {
         ( -n "$prior_freeze" && "$report_freeze" == "$prior_freeze" ) ||
         "$report_freeze" == "$migration_ancestor" ]] || return 1
     [[ "$(frame_field "$report" node 2>/dev/null || true)" == "$expected_node" &&
-        "$(frame_field "$report" grant_mode 2>/dev/null || true)" == FENCED &&
-        "$(frame_field "$report" grant_valid 2>/dev/null || true)" == 0 &&
+        "$(frame_field "$report" grant_mode 2>/dev/null || true)" == "$expected_mode" &&
+        "$(frame_field "$report" grant_valid 2>/dev/null || true)" == "$expected_valid" &&
         "$(frame_field "$report" source_sha256 2>/dev/null || true)" == "$source_hash" &&
         "$(frame_field "$report" device_barrier 2>/dev/null || true)" == 1 &&
         "$(frame_field "$report" device_barrier_source_sha256 2>/dev/null || true)" == \
@@ -1604,6 +1614,15 @@ renew_lease_material() {
   replace_lease <<<"$updated"
 }
 
+material_keepalive() {
+  local holder epoch receipt
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  guard_mutation keepalive "$holder" "$epoch" "$receipt"
+  renew_lease_material "$holder" "$epoch"
+}
+
 slurm_drained() {
   local nodes jobs steps
   nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)" || return 1
@@ -1613,17 +1632,22 @@ slurm_drained() {
 }
 
 drain_slurm() {
-  local holder epoch receipt key value effect
+  local holder epoch receipt key value effect state selector_key
   holder="$(arg_value --holder "$@")"
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
-  guard_mutation drain "$holder" "$epoch" "$receipt"
+  state="$(guard_mutation drain "$holder" "$epoch" "$receipt")"
   key="$(policy_value "$POLICY" spark_taint_key)"
   value="$(policy_value "$POLICY" spark_taint_value)"
   effect="$(policy_value "$POLICY" spark_taint_effect)"
   kubectl taint nodes "$(node0)" "$(node1)" "$key=$value:$effect" --overwrite >/dev/null
   slurm_exec scontrol update NodeName="$(slurm0),$(slurm1)" State=DRAIN Reason="pireus-epoch-$epoch" >/dev/null
   wait_for 'both Slurm nodes to drain' slurm_drained "$holder" "$epoch"
+  if [[ "$state" == UNINITIALIZED ]]; then
+    selector_key="$(policy_value "$POLICY" slurmd_selector_key)"
+    kubectl label nodes "$(node0)" "$(node1)" "$selector_key-" >/dev/null
+    wait_for 'bootstrap slurmd pods to terminate' slurmd_absent "$holder" "$epoch"
+  fi
 }
 
 slurmd_absent() {
@@ -2698,8 +2722,10 @@ resume_slurm() {
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
   guard_mutation resume "$holder" "$epoch" "$receipt"
-  slurm_exec scontrol update NodeName="$(slurm0),$(slurm1)" State=RESUME >/dev/null
-  wait_for 'both Slurm nodes to resume idle' slurm_resumed "$holder" "$epoch"
+  if ! slurm_resumed "$holder" "$epoch"; then
+    slurm_exec scontrol update NodeName="$(slurm0),$(slurm1)" State=RESUME >/dev/null
+    wait_for 'both Slurm nodes to resume idle' slurm_resumed "$holder" "$epoch"
+  fi
   if [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
     '.metadata.annotations[$key]' <<<"$(lease_json)")" == UNINITIALIZED ]]; then
     bootstrap_journal_step SLURM_RESUMED "$holder" "$receipt"
@@ -2772,6 +2798,7 @@ main() {
     bootstrap-migrate-freeze) bootstrap_migrate_freeze "$@" ;;
     lease-transition) lease_transition "$@" ;;
     lease-renew) lease_renew "$@" ;;
+    material-keepalive) material_keepalive "$@" ;;
     drain-slurm) drain_slurm "$@" ;;
     install-fence) install_fence "$@" ;;
     install-host-fence) install_host_fence "$@" ;;

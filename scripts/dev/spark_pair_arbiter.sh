@@ -495,21 +495,28 @@ usage() {
 }
 
 bootstrap_sequence() {
-  authorize_stay 24 UNINITIALIZED
+  bootstrap_authorize 24
   backend install-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 29 UNINITIALIZED
+  bootstrap_authorize 29
   backend install-host-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 23 UNINITIALIZED
+  bootstrap_authorize 23
   backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 30 UNINITIALIZED
+  bootstrap_authorize 30
   backend fence-host-pair --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 31 UNINITIALIZED
+  bootstrap_authorize 31
   backend grant-host-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 25 UNINITIALIZED
+  bootstrap_authorize 25
   backend install-gpu-bound-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  authorize_stay 26 UNINITIALIZED
+  bootstrap_authorize 26
   backend resume-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 1 UNINITIALIZED SLURM_OWNED
+}
+
+bootstrap_authorize() {
+  local action="$1"
+  authorize_stay "$action" UNINITIALIZED
+  backend material-keepalive --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+    --receipt "$LAST_RECEIPT" >/dev/null
 }
 
 main() {

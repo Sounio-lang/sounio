@@ -27,9 +27,27 @@ status_once() { return 0; }
 monotonic_seconds() { printf '100\n'; }
 device_barrier_attach() { return 0; }
 device_barrier_detach() { return 0; }
-device_barrier_attached() { return 0; }
-device_barrier_detached() { return 0; }
-device_barrier_relation_valid() { return 0; }
+barrier_state=attached
+device_barrier_attached() { [[ "$barrier_state" == attached ]]; }
+device_barrier_detached() { [[ "$barrier_state" == detached ]]; }
+
+printf 'mode=COMMITTING_SLURM\n' > "$GRANT_FILE"
+barrier_state=detached
+device_barrier_relation_valid || {
+  printf 'host-fence-unit: COMMITTING_SLURM rejected its detached barrier\n' >&2
+  exit 1
+}
+printf 'mode=COMMITTING_K8S\n' > "$GRANT_FILE"
+device_barrier_relation_valid || {
+  printf 'host-fence-unit: COMMITTING_K8S rejected its detached barrier\n' >&2
+  exit 1
+}
+barrier_state=attached
+if device_barrier_relation_valid; then
+  printf 'host-fence-unit: transient grant accepted an attached barrier\n' >&2
+  exit 1
+fi
+rm -f "$GRANT_FILE"
 
 systemd_root="$WORK_DIR/systemd-root"
 install -D -m 0755 "$HOST_FENCE_SCRIPT" \
@@ -195,4 +213,4 @@ fi
   exit 1
 }
 
-printf 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY\n'
+printf 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS committing_barrier=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY\n'

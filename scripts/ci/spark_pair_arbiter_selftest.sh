@@ -104,6 +104,8 @@ grep -Fq 'printf '\''1\n'\'' > "$group/cgroup.kill"' "$HOST_FENCE_SCRIPT" || \
   fail 'host fence lacks cgroup-v2 atomic workload termination'
 grep -Fq 'write_grant_record "$PREPARE_FILE" "PREPARED_$mode"' "$HOST_FENCE_SCRIPT" || \
   fail 'host fence lacks a non-authorizing prepare record'
+grep -Fq 'readonly COMMIT_TRANSITION_SECONDS=30' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence commit window is shorter than the material inspection path'
 grep -Fq 'Type=notify' "$HOST_FENCE_SCRIPT" || fail 'host fence systemd unit is not notify/watchdog bound'
 grep -Fq '/usr/bin/systemd-notify --pid="$$" WATCHDOG=1' "$HOST_FENCE_SCRIPT" || \
   fail 'host fence heartbeat is not attributed to the main watchdog PID'
@@ -115,13 +117,25 @@ grep -Fq 'bind_host_fence_daemonset_uid' "$MATERIAL_BACKEND" || \
   fail 'material backend does not bind the DaemonSet UID before activation'
 grep -Fq '.spec.template.spec.runtimeClassName = "nvidia"' "$MATERIAL_BACKEND" || \
   fail 'material backend does not bind Spark Slurmd to the NVIDIA runtime'
+grep -Fq 'if ! slurm_resumed "$holder" "$epoch"; then' "$MATERIAL_BACKEND" || \
+  fail 'material backend does not make Slurm resume idempotent'
+grep -Fq 'FENCE_INSTALLED|HOST_FENCE_INSTALLED|BOOTSTRAP_TAKEOVER)' "$MATERIAL_BACKEND" || \
+  fail 'material backend cannot recover a persisted advanced bootstrap checkpoint (fenced case)'
+grep -Fq 'SLURMD_GPU_BOUND|SLURM_RESUMED)' "$MATERIAL_BACKEND" || \
+  fail 'material backend cannot recover a persisted advanced bootstrap checkpoint (slurm case)'
+grep -Fq 'expected_mode=SLURM' "$MATERIAL_BACKEND" || \
+  fail 'material backend does not preserve the advanced bootstrap host grant mode'
+grep -Fq 'backend material-keepalive --holder "$HOLDER"' "$ARBITER" || \
+  fail 'controller does not refresh the bootstrap Lease between authorized effects'
+grep -Fq "wait_for 'bootstrap slurmd pods to terminate' slurmd_absent" "$MATERIAL_BACKEND" || \
+  fail 'bootstrap does not remove Slurmd before granting host GPU access'
 grep -Fq "object.spec.runtimeClassName == 'nvidia'" "$ADMISSION" || \
   fail 'admission does not require the NVIDIA runtime for Spark Slurmd'
 grep -Fq 'request.userInfo.username == '\''system:serviceaccount:kube-system:daemon-set-controller'\''' \
   "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml" || \
   fail 'host infrastructure admission is not bound to the DaemonSet controller identity'
 host_unit_result="$(bash "$HOST_FENCE_UNIT" "$HOST_FENCE_SCRIPT" "$work/host-unit")"
-[[ "$host_unit_result" == 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY' ]] || \
+[[ "$host_unit_result" == 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS committing_barrier=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY' ]] || \
   fail "host fence executable unit failed: $host_unit_result"
 transaction_unit_result="$(bash "$K8S_BACKEND_TRANSACTION_UNIT" "$MATERIAL_BACKEND" "$work/k8s-backend-unit")"
 [[ "$transaction_unit_result" == 'K8S_BACKEND_TRANSACTION_UNIT_PASS kill_after_commit_1=REFENCED kill_after_commit_2=REFENCED cas_conflict=REFENCED persisted_grants=PROVEN' ]] || \

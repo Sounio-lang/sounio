@@ -422,6 +422,7 @@ main() {
     delete-reservations) guard '10 15 17' "$@"; write_value reservations 0 ;;
     restore-slurmd) guard '10 18 31' "$@"; write_value slurmd_absent 0; write_value slurmd_bound 1 ;;
     resume-slurm) guard '10 19 26 31' "$@"; write_value drained 0; write_value resume_verified 1 ;;
+    material-keepalive) guard '23 24 25 26 29 30 31' "$@" ;;
     *) fail "unknown command $command" ;;
   esac
 }
