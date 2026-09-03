@@ -1840,6 +1840,62 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             None => { checker_note_type_error_mut(c) return ty_error() }
         }
     }
+    // IndepKnowledge<T, A, B | Z> — conditional independence as a type. The
+    // non-inplace resolver lower_named_type_with_args handles this near
+    // check.sio:16768; the inplace resolver (the one that actually runs
+    // during `souc check`/Madaros checking) was missing it, so the claim
+    // degraded to a bare TyNamed("IndepKnowledge") and the self-independence
+    // guard (E209) never fired. Mirror the branch here, same as Hyper above.
+    if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+        match type_args {
+            None => { checker_note_type_error_mut(c) return ty_error() }
+            Some(args) => {
+                let t_expr = (*args).head
+                let rest1 = match (*args).tail {
+                    None => {
+                        checker_report_error_at_inplace(c, t_expr.span, 209, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let a_expr = rest1.head
+                let rest2 = match rest1.tail {
+                    None => {
+                        checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let b_expr = rest2.head
+
+                if a_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+                if b_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, b_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+
+                let cond_id = match rest2.tail {
+                    None => 0 - 1
+                    Some(r) => indep_cond_set_id((*r).head)
+                }
+
+                let base_ty = checker_lower_type_expr_mut(c, t_expr)
+
+                let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                if a_id == b_id {
+                    checker_report_error_at_inplace(c, b_expr.span, 209, 0, 0, 0)
+                    return ty_error()
+                }
+
+                return ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+            }
+        }
+    }
     // Feature B: Invariant<T, G> — second type-arg G is one of the four named
     // invariance groups; lower to TyNamed "Invariant<rank>" with inner = T.
     if name_matches_str9(name, 73, 110, 118, 97, 114, 105, 97, 110, 116) {
@@ -13746,6 +13802,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
     else if code == 208 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
+    // #1758: independence-in-composition (209, 213 already taken by tuple arity)
+    else if code == 209 { print("malformed independence claim: IndepKnowledge<T, A, B | Z> needs two distinct variables") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 215 { print("EpistemicComplete violation") }
     else if code == 216 { print("infinite recursive type") }
@@ -14026,6 +14084,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     // Epistemic enforcement (170-171)
     else if code == 170 {
         print("   |\n   = help: add `with Epistemic` to your function signature, or use `acknowledge(k, reason)` to explicitly accept uncertainty\n")
+    }
+    else if code == 209 {
+        print("   |\n   = help: A and B must be two different variable names; a variable is trivially dependent on itself, so the claim asserts nothing\n")
     }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
@@ -15591,6 +15652,56 @@ fn expr_list_third(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc
     }
 }
 
+// ============================================================
+// IndepKnowledge<T, A, B | Z> — variable identity (Sprint 20 Track CI)
+// ============================================================
+//
+// A claim of independence only has to tell its variables apart, so a name
+// identity is exactly the semantics available today. It is NOT a causal-graph
+// node index: no surface syntax declares a causal graph yet, so nothing can
+// discharge the claim by d-separation. When that surface exists these ids
+// become indices into the declared graph and causal_d_separated becomes the
+// discharge. Until then the checker enforces only what it can actually know —
+// that a variable is not independent of itself.
+//
+// FNV-1a, reduced modulo a prime each step so the product cannot overflow i64.
+fn indep_var_id(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h ^ (n.buf[i as usize] as i64)
+        h = (h * 16777619) % 1073741789
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
+// Identity of the conditioning set Z. Summed rather than folded in sequence
+// because Z is a SET: {hora, plantao} and {plantao, hora} are the same claim
+// and must produce the same type.
+fn indep_cond_set_id(cond: TypeExpr) -> i64 with Mut, Panic, Div {
+    match cond.type_args {
+        None => 0 - 1
+        Some(list) => {
+            var cur = *list
+            var acc: i64 = 0
+            var more = true
+            while more {
+                let vid = indep_var_id(checker_copy_string_list_to_name(cur.head.path.segments))
+                acc = (acc + vid) % 1073741789
+                match cur.tail {
+                    Some(rest) => { cur = *rest }
+                    None => { more = false }
+                }
+            }
+            // -1 is reserved for "empty set"; a non-empty set must never collide
+            // with it, so a zero sum is nudged to a distinct sentinel.
+            if acc == 0 { 1073741788 } else { acc }
+        }
+    }
+}
+
 fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: seg.head_len }
     var i: i64 = 0
@@ -16705,6 +16816,72 @@ impl Checker {
                     te.name = name
                     te.inner = Some(Box::new(inner_ty))
                     return (c, te)
+                }
+
+                // IndepKnowledge<T, A, B | Z> — conditional independence as a type.
+                // The parser guarantees the shape [T, A, B] or [T, A, B, Tuple(Z)];
+                // a shorter list can only come from a malformed claim.
+                if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+                    let t_expr = (*args).head
+                    let rest1 = match (*args).tail {
+                        None => {
+                            let c = self.report_error_at(t_expr.span, 209, 0, 0, 0)
+                            return (c, ty_error())
+                        }
+                        Some(r) => *r
+                    }
+                    let a_expr = rest1.head
+                    let rest2 = match rest1.tail {
+                        None => {
+                            let c = self.report_error_at(a_expr.span, 209, 0, 0, 0)
+                            return (c, ty_error())
+                        }
+                        Some(r) => *r
+                    }
+                    let b_expr = rest2.head
+
+                    // A and B name variables, not types. Anything else is a claim
+                    // about something that cannot be a variable, and the checker
+                    // would otherwise silently give both the same empty identity.
+                    if a_expr.kind != TypeExprKind::TypeNamed {
+                        let c = self.report_error_at(a_expr.span, 209, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+                    if b_expr.kind != TypeExprKind::TypeNamed {
+                        let c = self.report_error_at(b_expr.span, 209, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+
+                    let cond_id = match rest2.tail {
+                        None => 0 - 1
+                        Some(r) => indep_cond_set_id((*r).head)
+                    }
+
+                    let t_pair = self.lower_type_expr(t_expr)
+                    var c = t_pair.0
+                    let base_ty = t_pair.1
+
+                    let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                    let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                    // The rule is spelled out here rather than delegated to
+                    // check_cond_indep_type in check/epistemic.sio: that module is
+                    // imported by nothing, and an unresolved name in this compiler
+                    // is a warning that compiles to zero — the guard would pass
+                    // every claim while appearing to check them.
+                    //
+                    // A variable is not independent of itself. The claim would
+                    // assert nothing, and asserting nothing is how an unfounded
+                    // quadrature gets licensed.
+                    if a_id == b_id {
+                        let c2 = c.report_error_at(b_expr.span, 209, 0, 0, 0)
+                        return (c2, ty_error())
+                    }
+
+                    // confidence unset (-1.0): the claim carries no probability
+                    // level of its own, only the structural assertion.
+                    let ci = ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+                    return (c, ci)
                 }
 
                 // Box<T> — heap pointer wrapper. Carry the element type T as

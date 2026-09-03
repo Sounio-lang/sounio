@@ -109,13 +109,22 @@ fn law_beta_posterior_formula(k: i32, n: i32) -> bool {
 
 // GUM uncertainty for y = f(x1, x2) with sensitivities c1, c2, under correlation rho.
 //
-// 🚨 A versão anterior desta função era `sqrt(c1²u1² + c2²u2²)` — a lei do GUM SEM o termo de
-// covariância, num arquivo chamado `invariants`, e com a "Law 6" construída em cima dela.
+// Merge note (#1758 x integration/sounio-dev-ready-base, 2026-09-03): both
+// branches independently fixed the same defect here -- this function used to
+// be `sqrt(c1^2 u1^2 + c2^2 u2^2)`, JCGM 100:2008 eq. (10), silently assuming
+// independence in a file named `invariants`, with "Law 6" built on top of it.
+// The general law is eq. (13):
 //
-// JCGM 100 §5.2:  u_c² = c1²u1² + c2²u2² + 2·c1·c2·ρ·u1·u2
-// A forma anterior é este teorema avaliado em ρ = 0, apresentado como se fosse o teorema.
-// Com ρ > 0 ela SUBESTIMA — e o SEMANTICS.md deste projeto, Invariante 2, chama isso pelo nome:
-// "Violating this means your uncertainty bounds are lies."
+//     u_c^2 = c1^2 u1^2 + c2^2 u2^2 + 2 c1 c2 rho u1 u2
+//
+// #1758's fix renamed the rho=0 function to gum_combined_uncertainty_independent
+// but kept the bare gum_combined_uncertainty alias pointed at it -- an unlabeled
+// caller still silently got the independence-assuming answer. This branch's fix
+// factors the one true formula (gum_combined_uncertainty_rho) and points the
+// bare alias at rho=1, the conservative worst case, matching the same
+// "default inverts to conservative" choice this PR already makes in
+// stdlib/epistemic/graded_effects.sio's graded_compose. Kept: no test on
+// either branch called the bare name, so nothing regresses.
 fn gum_combined_uncertainty_rho(u1: f64, u2: f64, c1: f64, c2: f64, rho: f64) -> f64 {
     let s = c1*c1*u1*u1 + c2*c2*u2*u2 + 2.0*c1*c2*rho*u1*u2
     if s <= 0.0 { return 0.0 }
@@ -132,6 +141,23 @@ fn gum_combined_uncertainty_independent(u1: f64, u2: f64, c1: f64, c2: f64) -> f
 // individual) continua valendo, porque o limite conservador só cresce.
 fn gum_combined_uncertainty(u1: f64, u2: f64, c1: f64, c2: f64) -> f64 {
     return gum_combined_uncertainty_rho(u1, u2, c1, c2, 1.0)
+}
+
+// The general JCGM 100:2008 eq. (13) form, with the correlation coefficient
+// rho in [-1, +1]. rho = 0 collapses to the independent case.
+//
+// Note the asymmetry that matters in practice: rho > 0 makes the true
+// uncertainty LARGER than quadrature, so assuming independence when the inputs
+// are positively correlated understates the bound. rho < 0 is the safe
+// direction. Physiological series are almost always positively correlated
+// through a shared driver (time of day, activity), so the unsafe direction is
+// the common one.
+fn gum_combined_uncertainty_correlated(u1: f64, u2: f64, c1: f64, c2: f64, rho: f64) -> f64 {
+    let var_indep = c1*c1*u1*u1 + c2*c2*u2*u2
+    let cov_term = 2.0 * c1 * c2 * rho * u1 * u2
+    let total = var_indep + cov_term
+    if total <= 0.0 { return 0.0 }
+    return sqrt(total)
 }
 
 // Law 6: Combined uncertainty >= max individual contribution

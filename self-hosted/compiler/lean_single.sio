@@ -1120,6 +1120,396 @@ fn src_range_eq(a_ns: i64, a_ne: i64, b_ns: i64, b_ne: i64) -> bool with Panic, 
     return true
 }
 
+// ============================================================
+// Causal graph declared in source (Sprint 20 Track CI)
+// ============================================================
+//
+//     causal graph corpo_ceu {
+//         hora -> hrv
+//         hora -> kp
+//         hrv  <-> fc
+//     }
+//
+// `->` is a directed cause; `<->` is an unmeasured common cause (confounding).
+//
+// This is what discharges IndepKnowledge<T, A, B | Z>. Without a graph there is
+// nothing to check a claim against and only degeneracy can be caught; with one,
+// Bayes-Ball decides, and an independence that does not hold is a compile error
+// rather than a premise the program quietly relies on.
+//
+// The block is collected immediately after lexing and its tokens are removed
+// from the stream, so no later pass needs to know this syntax exists.
+
+var CG_DECLARED: i64 = 0
+var CG_NODE_COUNT: i64 = 0
+var CG_NS: [i64; 16] = [0; 16]
+var CG_NE: [i64; 16] = [0; 16]
+var CG_EDGE_COUNT: i64 = 0
+var CG_EDGE_FROM: [i64; 64] = [0; 64]
+var CG_EDGE_TO: [i64; 64] = [0; 64]
+var CG_EDGE_DIR: [i64; 64] = [0; 64]
+var CG_ZSET: [i64; 16] = [0; 16]
+var CG_ZDESC: [i64; 16] = [0; 16]
+var CG_VISITED: [i64; 32] = [0; 32]
+var CG_QUEUE: [i64; 64] = [0; 64]
+
+// Tokens live in NINE parallel arrays, not four. Any pass that compacts the
+// stream has to move all of them together: TV/TF/TD/TX carry literal values and
+// TU the unit hash, so copying only kind/start/end/line leaves every token after
+// a deletion wearing another token's literal.
+fn tok_copy(dst: i64, src: i64) with Mut, Panic {
+    TK[dst as usize] = TK[src as usize]
+    TS[dst as usize] = TS[src as usize]
+    TE[dst as usize] = TE[src as usize]
+    TV[dst as usize] = TV[src as usize]
+    TF[dst as usize] = TF[src as usize]
+    TD[dst as usize] = TD[src as usize]
+    TX[dst as usize] = TX[src as usize]
+    TL[dst as usize] = TL[src as usize]
+    TU[dst as usize] = TU[src as usize]
+}
+
+// A punctuation token synthesised by a rewrite: it carries no literal payload,
+// so the value arrays must be cleared rather than inherited.
+fn tok_put_punct(dst: i64, kind: i64, src: i64) with Mut, Panic {
+    TK[dst as usize] = kind
+    TS[dst as usize] = TS[src as usize]
+    TE[dst as usize] = TE[src as usize]
+    TL[dst as usize] = TL[src as usize]
+    TV[dst as usize] = 0
+    TF[dst as usize] = 0
+    TD[dst as usize] = 0
+    TX[dst as usize] = 0
+    TU[dst as usize] = 0
+}
+
+fn cg_find_node(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < CG_NODE_COUNT {
+        if src_range_eq(CG_NS[i as usize], CG_NE[i as usize], ns, ne) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn cg_intern_node(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    let found = cg_find_node(ns, ne)
+    if found >= 0 { return found }
+    if CG_NODE_COUNT >= 16 { return 0 - 1 }
+    let idx = CG_NODE_COUNT
+    CG_NS[idx as usize] = ns
+    CG_NE[idx as usize] = ne
+    CG_NODE_COUNT = CG_NODE_COUNT + 1
+    return idx
+}
+
+fn cg_add_edge(a: i64, b: i64, directed: i64) with Mut, Panic {
+    if a < 0 || b < 0 { return }
+    if CG_EDGE_COUNT >= 64 { return }
+    CG_EDGE_FROM[CG_EDGE_COUNT as usize] = a
+    CG_EDGE_TO[CG_EDGE_COUNT as usize] = b
+    CG_EDGE_DIR[CG_EDGE_COUNT as usize] = directed
+    CG_EDGE_COUNT = CG_EDGE_COUNT + 1
+}
+
+// Collect every `causal graph` block and compact it out of the token stream.
+// Runs once, straight after lex_all(), so a claim can be checked no matter
+// whether the graph is declared above or below it.
+fn cg_collect() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var w: i64 = 0
+    while p < TC {
+        var handled: i64 = 0
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "causal") && p + 1 < TC && TK[(p + 1) as usize] == 3 && src_match(TS[(p + 1) as usize], TE[(p + 1) as usize] - TS[(p + 1) as usize], "graph") {
+            var q: i64 = p + 2
+            if q < TC && TK[q as usize] == 3 { q = q + 1 }
+            if q < TC && TK[q as usize] == 8 {
+                CG_DECLARED = 1
+                q = q + 1
+                while q < TC && TK[q as usize] != 9 {
+                    if TK[q as usize] == 3 {
+                        let a = cg_intern_node(TS[q as usize], TE[q as usize])
+                        var r: i64 = q + 1
+                        var dir: i64 = 0 - 1
+                        if r < TC && TK[r as usize] == 10 {
+                            dir = 1
+                            r = r + 1
+                        } else {
+                            if r + 1 < TC && TK[r as usize] == 23 && TK[(r + 1) as usize] == 10 {
+                                dir = 0
+                                r = r + 2
+                            }
+                        }
+                        if dir >= 0 && r < TC && TK[r as usize] == 3 {
+                            let b = cg_intern_node(TS[r as usize], TE[r as usize])
+                            cg_add_edge(a, b, dir)
+                            q = r + 1
+                        } else {
+                            q = q + 1
+                        }
+                    } else {
+                        q = q + 1
+                    }
+                }
+                if q < TC && TK[q as usize] == 9 { q = q + 1 }
+                p = q
+                handled = 1
+            }
+        }
+        if handled == 0 {
+            tok_copy(w, p)
+            w = w + 1
+            p = p + 1
+        }
+    }
+    TC = w
+}
+
+// A collider is opened by conditioning on it OR on any of its descendants
+// (Pearl 1988), so Z has to be closed downward before the walk starts.
+fn cg_mark_descendants(start: i64) with Mut, Panic, Div {
+    var qh: i64 = 0
+    var qt: i64 = 1
+    CG_QUEUE[0] = start
+    while qh < qt {
+        let cur = CG_QUEUE[qh as usize]
+        qh = qh + 1
+        var ei: i64 = 0
+        while ei < CG_EDGE_COUNT {
+            if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_FROM[ei as usize] == cur {
+                let nx = CG_EDGE_TO[ei as usize]
+                if CG_ZDESC[nx as usize] == 0 {
+                    CG_ZDESC[nx as usize] = 1
+                    if qt < 64 {
+                        CG_QUEUE[qt as usize] = nx
+                        qt = qt + 1
+                    }
+                }
+            }
+            ei = ei + 1
+        }
+    }
+}
+
+fn cg_push(state: i64, qt_in: i64) -> i64 with Mut, Panic {
+    if state < 0 || state >= 32 { return qt_in }
+    if CG_VISITED[state as usize] != 0 { return qt_in }
+    if qt_in >= 64 { return qt_in }
+    CG_VISITED[state as usize] = 1
+    CG_QUEUE[qt_in as usize] = state
+    return qt_in + 1
+}
+
+// Bayes-Ball (Shachter 1998). State is (node, direction of arrival): direction 0
+// means the ball came from a parent, 1 means it came from a child. Ported from
+// self-hosted/check/causal.sio, which implements the same walk over the modular
+// tree's CausalGraph.
+//
+// Reads the conditioning set from CG_ZSET. Returns true when NO active path
+// remains between x and y — that is, when the independence actually holds.
+fn cg_d_separated(x: i64, y: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        CG_VISITED[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        CG_ZDESC[i as usize] = CG_ZSET[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < CG_NODE_COUNT {
+        if CG_ZSET[i as usize] == 1 { cg_mark_descendants(i) }
+        i = i + 1
+    }
+
+    var qh: i64 = 0
+    var qt: i64 = 0
+    var reached: i64 = 0
+
+    // Seed: every edge incident to x.
+    var ei: i64 = 0
+    while ei < CG_EDGE_COUNT {
+        if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_FROM[ei as usize] == x {
+            qt = cg_push(CG_EDGE_TO[ei as usize] * 2, qt)
+        }
+        if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_TO[ei as usize] == x {
+            qt = cg_push(CG_EDGE_FROM[ei as usize] * 2 + 1, qt)
+        }
+        if CG_EDGE_DIR[ei as usize] == 0 {
+            var other: i64 = 0 - 1
+            if CG_EDGE_FROM[ei as usize] == x { other = CG_EDGE_TO[ei as usize] }
+            if CG_EDGE_TO[ei as usize] == x { other = CG_EDGE_FROM[ei as usize] }
+            if other >= 0 { qt = cg_push(other * 2, qt) }
+        }
+        ei = ei + 1
+    }
+
+    while qh < qt && reached == 0 {
+        let state = CG_QUEUE[qh as usize]
+        qh = qh + 1
+        let node = state / 2
+        let from_parent = (state % 2) == 0
+        if node == y { reached = 1 }
+        if reached == 0 {
+            if from_parent {
+                // Chain or fork: open only while the node is unconditioned.
+                if CG_ZSET[node as usize] == 0 {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_FROM[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_TO[ej as usize] * 2, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 0 {
+                            var o2: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o2 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o2 = CG_EDGE_FROM[ej as usize] }
+                            if o2 >= 0 { qt = cg_push(o2 * 2, qt) }
+                        }
+                        ej = ej + 1
+                    }
+                }
+                // Collider: opened, not blocked, by conditioning.
+                if CG_ZDESC[node as usize] == 1 {
+                    var ek: i64 = 0
+                    while ek < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ek as usize] == 1 && CG_EDGE_TO[ek as usize] == node {
+                            qt = cg_push(CG_EDGE_FROM[ek as usize] * 2 + 1, qt)
+                        }
+                        ek = ek + 1
+                    }
+                }
+            } else {
+                if CG_ZSET[node as usize] == 0 {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_TO[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_FROM[ej as usize] * 2 + 1, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_FROM[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_TO[ej as usize] * 2, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 0 {
+                            var o3: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o3 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o3 = CG_EDGE_FROM[ej as usize] }
+                            if o3 >= 0 { qt = cg_push(o3 * 2, qt) }
+                        }
+                        ej = ej + 1
+                    }
+                }
+            }
+        }
+    }
+    return reached == 0
+}
+
+// `d_separated(A, B | Z)` — the only way to obtain a proven witness.
+//
+// The arguments exist to be VERIFIED, not evaluated. This pass checks the claim
+// against the declared graph and then rewrites the call to `d_separated()`, a
+// prelude function returning 1. After it runs, the proof is a constant that
+// could only have been produced by a claim the graph actually supports.
+//
+// The forgery that would defeat this is writing `d_separated()` directly. That
+// is why a call with no arguments is an error here: the zero-argument form only
+// ever exists as this pass's output, never as something a human wrote.
+//
+// This is what ties stdlib's graded_compose_indep to the causal model. The free
+// constructor it used to accept let any caller buy the tighter uncertainty bound
+// by asserting independence; now asserting it means proving it.
+fn dsep_lower() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var w: i64 = 0
+    while p < TC {
+        var handled: i64 = 0
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "d_separated") && p + 1 < TC && TK[(p + 1) as usize] == 6 && (w == 0 || TK[(w - 1) as usize] != 1) {
+            let call_tok = p
+            var q: i64 = p + 2
+            var a_tok: i64 = 0 - 1
+            var b_tok: i64 = 0 - 1
+            if q < TC && TK[q as usize] == 3 {
+                a_tok = q
+                q = q + 1
+            }
+            if q < TC && TK[q as usize] == 28 { q = q + 1 }
+            if q < TC && TK[q as usize] == 3 {
+                b_tok = q
+                q = q + 1
+            }
+            var zi: i64 = 0
+            while zi < 16 {
+                CG_ZSET[zi as usize] = 0
+                zi = zi + 1
+            }
+            var z_bad: i64 = 0
+            if q < TC && TK[q as usize] == 45 {
+                q = q + 1
+                if q < TC && TK[q as usize] == 8 { q = q + 1 }
+                while q < TC && TK[q as usize] == 3 {
+                    if CG_DECLARED == 1 {
+                        let zid = cg_find_node(TS[q as usize], TE[q as usize])
+                        if zid < 0 {
+                            tc_indep_unknown_var(q)
+                            z_bad = 1
+                        } else {
+                            CG_ZSET[zid as usize] = 1
+                        }
+                    }
+                    q = q + 1
+                    if q < TC && TK[q as usize] == 28 { q = q + 1 }
+                }
+                if q < TC && TK[q as usize] == 9 { q = q + 1 }
+            }
+            if q < TC && TK[q as usize] == 7 {
+                if a_tok < 0 || b_tok < 0 {
+                    tc_dsep_malformed(call_tok)
+                } else {
+                    if CG_DECLARED == 0 {
+                        tc_dsep_no_graph(call_tok)
+                    } else {
+                        if z_bad == 0 {
+                            let aid = cg_find_node(TS[a_tok as usize], TE[a_tok as usize])
+                            let bid = cg_find_node(TS[b_tok as usize], TE[b_tok as usize])
+                            if aid < 0 {
+                                tc_indep_unknown_var(a_tok)
+                            } else {
+                                if bid < 0 {
+                                    tc_indep_unknown_var(b_tok)
+                                } else {
+                                    if tok_text_same(a_tok, b_tok) {
+                                        tc_indep_degenerate(b_tok)
+                                    } else {
+                                        if !cg_d_separated(aid, bid) {
+                                            tc_indep_not_dseparated(a_tok, b_tok)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Emit `d_separated` `(` `)`; the arguments have done their job.
+                tok_copy(w, call_tok)
+                w = w + 1
+                tok_put_punct(w, 6, call_tok + 1)
+                w = w + 1
+                tok_put_punct(w, 7, q)
+                w = w + 1
+                p = q + 1
+                handled = 1
+            }
+        }
+        if handled == 0 {
+            tok_copy(w, p)
+            w = w + 1
+            p = p + 1
+        }
+    }
+    TC = w
+}
+
 fn fn_param_name_matches_token(fi: i64, arg_idx: i64, tok: i64) -> bool with Mut, Panic {
     if fi < 0 || fi >= FN_COUNT { return false }
     if tok < 0 || tok >= TC { return false }
@@ -2804,6 +3194,18 @@ fn emit_lea_var_a64(slot: i64) with Mut, Panic {
     }
 }
 
+fn tok_text_same(a: i64, b: i64) -> bool with Panic, Mut {
+    let la = TE[a as usize] - TS[a as usize]
+    let lb = TE[b as usize] - TS[b as usize]
+    if la != lb { return false }
+    var i: i64 = 0
+    while i < la {
+        if sb(TS[a as usize] + i) != sb(TS[b as usize] + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
 fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     if l != str_len(kw) { return false }
     var i: i64 = 0
@@ -4360,6 +4762,87 @@ fn tc_kernel_nonvoid_return(tok: i64) with IO, Mut, Panic {
 }
 
 // Epistemic enforcement (E170/E171)
+// scan_type runs over the same annotation more than once, so every claim would
+// be reported twice. Remember which tokens already reported rather than just the
+// last one: with two claims in a file the passes interleave as 1,2,1,2 and a
+// single-slot guard lets both duplicates through.
+var INDEP_ERR_TOKS: [i64; 64] = [0 - 1; 64]
+var INDEP_ERR_COUNT: i64 = 0
+
+fn indep_already_reported(tok: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < INDEP_ERR_COUNT {
+        if INDEP_ERR_TOKS[i as usize] == tok { return true }
+        i = i + 1
+    }
+    if INDEP_ERR_COUNT < 64 {
+        INDEP_ERR_TOKS[INDEP_ERR_COUNT as usize] = tok
+        INDEP_ERR_COUNT = INDEP_ERR_COUNT + 1
+    }
+    return false
+}
+
+fn cg_print_node(tok: i64) with IO, Mut, Panic, Div {
+    var i: i64 = TS[tok as usize]
+    let e = TE[tok as usize]
+    while i < e {
+        print_char(SRC[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+// E175: the claim mentions a variable the graph does not declare. Rejected
+// rather than ignored — a claim about a variable outside the model is not a
+// claim the model can support.
+fn tc_indep_unknown_var(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E175]: `")
+    cg_print_node(tok)
+    print("` is not a node of the declared causal graph at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: add it to the `causal graph` block, or correct the name\n")
+    tc_mark_failed()
+}
+
+// E176: the graph says an active path remains open, so the independence does
+// not hold. This is the obligation actually being discharged.
+fn tc_indep_not_dseparated(a_tok: i64, b_tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(b_tok) { return }
+    print("error[E176]: `")
+    cg_print_node(a_tok)
+    print("` is not d-separated from `")
+    cg_print_node(b_tok)
+    print("` given the stated conditioning set, at line ")
+    print_int(TL[b_tok as usize])
+    print("\n   = help: an active path remains open in the declared causal graph; condition on the variables that block it, or drop the claim\n")
+    tc_mark_failed()
+}
+
+// E177: a proof was requested with no model to prove it against.
+fn tc_dsep_no_graph(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E177]: `d_separated` needs a declared causal graph at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: add a `causal graph NAME { ... }` block; without a model there is nothing that could discharge the proof\n")
+    tc_mark_failed()
+}
+
+fn tc_dsep_malformed(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E177]: `d_separated` takes two variables and an optional conditioning set, at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: write `d_separated(A, B)` or `d_separated(A, B | Z)`\n")
+    tc_mark_failed()
+}
+
+fn tc_indep_degenerate(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E209]: IndepKnowledge declares a variable independent of itself at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: A and B must name two different variables; a variable is never independent of itself, so the claim asserts nothing\n")
+    tc_mark_failed()
+}
+
 fn tc_epistemic_value_access(tok: i64) with IO, Mut, Panic {
     print("error[E170]: accessing .value on Knowledge<T> requires `with Epistemic` effect at line ")
     print_int(TL[tok as usize])
@@ -6197,6 +6680,90 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             }
             SCAN_TY = 11
             SCAN_TY_HASH = box_hash_make(inner_ty, inner_hash)
+            SCAN_TY_NEXT = p
+            return
+        }
+        // IndepKnowledge<T, A, B | Z> — conditional independence as a type.
+        //
+        // Transparent to T at runtime: the claim is checked, not represented.
+        // Without a causal graph declared in source there is no d-separation to
+        // discharge it, so this compiler enforces the one rule it can actually
+        // know — A and B must be different variables. A variable is never
+        // independent of itself, so the degenerate claim asserts nothing while
+        // still licensing the tighter uncertainty bound. That is precisely the
+        // shape of an unfounded quadrature.
+        if src_match(ns, ne - ns, "IndepKnowledge") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 28 { p = p + 1 }
+            let a_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[p as usize] == 28 { p = p + 1 }
+            let b_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[a_tok as usize] == 3 && TK[b_tok as usize] == 3 {
+                if tok_text_same(a_tok, b_tok) { tc_indep_degenerate(b_tok) }
+            }
+            // Conditioning set: `| Z`, `| {Z1, Z2}`, or `| {}` (all optional).
+            // Each variable is resolved into CG_ZSET as it is read, so the walk
+            // below sees exactly the set the programmer wrote.
+            var zi: i64 = 0
+            while zi < 16 {
+                CG_ZSET[zi as usize] = 0
+                zi = zi + 1
+            }
+            var z_bad: i64 = 0
+            if TK[p as usize] == 45 {
+                p = p + 1
+                var braced: i64 = 0
+                if TK[p as usize] == 8 { braced = 1  p = p + 1 }
+                while TK[p as usize] == 3 {
+                    if CG_DECLARED == 1 {
+                        let zid = cg_find_node(TS[p as usize], TE[p as usize])
+                        if zid < 0 {
+                            tc_indep_unknown_var(p)
+                            z_bad = 1
+                        } else {
+                            CG_ZSET[zid as usize] = 1
+                        }
+                    }
+                    p = p + 1
+                    if TK[p as usize] == 28 { p = p + 1 }
+                }
+                if braced == 1 && TK[p as usize] == 9 { p = p + 1 }
+            }
+
+            // Discharge the claim against the declared graph. With no graph
+            // there is nothing to check against, and the claim stands on the
+            // degeneracy check alone — stated, not proven.
+            if CG_DECLARED == 1 && z_bad == 0 && TK[a_tok as usize] == 3 && TK[b_tok as usize] == 3 {
+                if !tok_text_same(a_tok, b_tok) {
+                    let aid = cg_find_node(TS[a_tok as usize], TE[a_tok as usize])
+                    let bid = cg_find_node(TS[b_tok as usize], TE[b_tok as usize])
+                    if aid < 0 {
+                        tc_indep_unknown_var(a_tok)
+                    } else {
+                        if bid < 0 {
+                            tc_indep_unknown_var(b_tok)
+                        } else {
+                            if !cg_d_separated(aid, bid) {
+                                tc_indep_not_dseparated(a_tok, b_tok)
+                            }
+                        }
+                    }
+                }
+            }
+            if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = inner_ty
+            SCAN_TY_HASH = inner_hash
             SCAN_TY_NEXT = p
             return
         }
@@ -38565,6 +39132,13 @@ fn append_src_lit(s: string) with Mut, Panic, Div {
 
 fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("\n")
+    // The discharged-proof token. Reachable only as the output of dsep_lower():
+    // a hand-written `d_separated()` with no arguments is rejected there, so the
+    // zero-argument form never appears in source that a human wrote.
+    append_src_lit("pub fn d_separated() -> i64 {\n")
+    append_src_lit("    return 1\n")
+    append_src_lit("}\n\n")
+
     append_src_lit("fn __native_abs_i64(x: i64) -> i64 {\n")
     append_src_lit("    if x < 0 { return 0 - x }\n")
     append_src_lit("    x\n")
@@ -40122,6 +40696,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         }
         return 1
     }
+    // Collect `causal graph` blocks and remove them from the token stream before
+    // any pass runs, so an independence claim can be discharged regardless of
+    // whether the graph is declared above or below it.
+    cg_collect()
+    dsep_lower()
     print("tokens: "); print_int(TC); print("\n")
     var cr: i64 = 0
     if TARGET_ARCH == 1 {
