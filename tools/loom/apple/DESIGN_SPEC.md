@@ -142,6 +142,23 @@ Loom Spatial
   -> POST /v1/messages/<response-id>/ack + durable ACK event
 ```
 
+Current configuration path:
+
+```text
+Loom Spatial Configure tab
+  -> GET/PUT /v1/routing/config + bearer capability
+  -> loopback-only OCaml message bridge
+  -> atomic declarative config revision and digest receipt
+  -> private shared Git metadata or deployment-owned private state directory
+  -> future backend routing arbiter consumes inputs
+```
+
+The configuration document contains only policy, model, effort, pool order,
+and adapter order. It is not a `RouteDecision` or `RouteReceipt`; the UI does
+not execute a provider, choose a pool, or manufacture evidence. A malformed,
+duplicate, unauthorized, or unavailable update is rejected without replacing
+the last accepted configuration.
+
 The command bridge is a separate listener from the fleet read projections. It
 never posts directly to a provider CLI or injects a tmux pane. Its authenticated
 thread projection derives records only through the coordination runtime's
@@ -167,4 +184,6 @@ source-hash parity, screenshot, command-plane, and negative-test evidence are re
 `evidence/2026-09-03-message-bridge-gate.txt`. The live delivery-aware
 round-trip is recorded in
 `evidence/2026-09-03-delivery-aware-roundtrip-gate.txt`; thread-truth coverage
-is recorded in `evidence/2026-09-03-thread-truth-gate.txt`.
+is recorded in `evidence/2026-09-03-thread-truth-gate.txt`. Declarative
+routing configuration persistence and refusal coverage are recorded in
+`evidence/2026-09-03-routing-config-gate.txt`.

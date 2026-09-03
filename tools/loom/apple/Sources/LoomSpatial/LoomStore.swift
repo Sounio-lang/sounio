@@ -39,6 +39,28 @@ final class LoomStore: ObservableObject {
         }
     }
 
+    enum RoutingConfigState: Equatable {
+        case unconfigured
+        case loading
+        case ready
+        case editing
+        case saving
+        case stored(LoomRoutingConfigReceipt)
+        case failed(String)
+
+        var label: String {
+            switch self {
+            case .unconfigured: "ROUTING BRIDGE NOT CONFIGURED"
+            case .loading: "LOADING DECLARATIVE CONFIG"
+            case .ready: "CONFIG READY / BACKEND ARBITRATES"
+            case .editing: "CONFIGURATION CHANGED / NOT STORED"
+            case .saving: "STORING CONFIGURATION"
+            case .stored: "CONFIGURATION STORED"
+            case .failed: "CONFIGURATION REFUSED"
+            }
+        }
+    }
+
     @Published var scenario: DashboardScenario = .nominal {
         didSet { dashboard = .mock(scenario) }
     }
@@ -50,6 +72,16 @@ final class LoomStore: ObservableObject {
     @Published private(set) var threadRequests: [LoomBusMessage] = []
     @Published private(set) var selectedThread: LoomMessageThread?
     @Published private(set) var threadError: String?
+    @Published private(set) var routingConfigState: RoutingConfigState
+    @Published private(set) var routingConfig: LoomRoutingConfig?
+    @Published private(set) var routingDraftDirty = false
+    @Published var routingDraft = LoomRoutingConfigUpdate(
+        policy: "authority-first",
+        model: "gpt-5.6-terra",
+        effort: "high",
+        poolOrder: ["pool-openai-team"],
+        adapterOrder: ["adapter-codex"]
+    )
     @Published var selectedLaneId: String? {
         didSet {
             guard oldValue != selectedLaneId else { return }
@@ -77,6 +109,12 @@ final class LoomStore: ObservableObject {
 
     var messageBridgeConfigured: Bool { messageClient != nil }
 
+    var canSaveRoutingConfig: Bool {
+        guard messageClient != nil else { return false }
+        guard case .saving = routingConfigState else { return true }
+        return false
+    }
+
     var visibleThreadEvents: [LoomThreadEvent] { selectedThread?.events ?? [] }
 
     var visibleThreadState: String? { selectedThread?.state }
@@ -95,16 +133,20 @@ final class LoomStore: ObservableObject {
             if token.count >= 32 {
                 messageClient = LoomMessageClient(baseURL: url, capability: token)
                 messageState = .ready
+                routingConfigState = .loading
             } else {
                 messageClient = nil
                 messageState = .failed("Capability file is invalid")
+                routingConfigState = .unconfigured
             }
         } else if messageURL == nil && tokenPath == nil {
-            messageClient = nil
-            messageState = .unconfigured
+                messageClient = nil
+                messageState = .unconfigured
+                routingConfigState = .unconfigured
         } else {
-            messageClient = nil
-            messageState = .failed("Message bridge configuration is incomplete")
+                messageClient = nil
+                messageState = .failed("Message bridge configuration is incomplete")
+                routingConfigState = .unconfigured
         }
     }
 
@@ -120,6 +162,7 @@ final class LoomStore: ObservableObject {
                 eventGroups = events
             }
             await refreshThreads()
+            await refreshRoutingConfig()
         } catch {
             connection = .unavailable(error.localizedDescription)
         }
@@ -181,6 +224,64 @@ final class LoomStore: ObservableObject {
         } catch {
             threadError = error.localizedDescription
         }
+    }
+
+    func refreshRoutingConfig() async {
+        guard let messageClient else {
+            routingConfigState = .unconfigured
+            return
+        }
+        if case .saving = routingConfigState { return }
+        if routingConfig == nil { routingConfigState = .loading }
+        do {
+            let config = try await messageClient.routingConfig()
+            routingConfig = config
+            if routingDraftDirty == false {
+                routingDraft = config.update
+            }
+            switch routingConfigState {
+            case .stored, .editing:
+                // Preserve the local storage receipt or a pending local draft.
+            default:
+                routingConfigState = .ready
+            }
+        } catch {
+            routingConfigState = .failed(error.localizedDescription)
+        }
+    }
+
+    func saveRoutingConfig() async {
+        guard let messageClient else { return }
+        routingConfigState = .saving
+        do {
+            let receipt = try await messageClient.updateRoutingConfig(routingDraft)
+            routingConfig = receipt.config
+            routingDraft = receipt.config.update
+            routingDraftDirty = false
+            routingConfigState = .stored(receipt)
+        } catch {
+            routingConfigState = .failed(error.localizedDescription)
+        }
+    }
+
+    func setRoutingPolicy(_ policy: String) {
+        routingDraft.policy = policy
+        markRoutingDraftEdited()
+    }
+
+    func setRoutingModel(_ model: String) {
+        routingDraft.model = model
+        markRoutingDraftEdited()
+    }
+
+    func setRoutingEffort(_ effort: String) {
+        routingDraft.effort = effort
+        markRoutingDraftEdited()
+    }
+
+    private func markRoutingDraftEdited() {
+        routingDraftDirty = true
+        routingConfigState = .editing
     }
 
     private func refreshThread(

@@ -374,6 +374,7 @@ struct ConversationDock: View {
                 Picker("Channel", selection: $tab) {
                     Text("Conversation").tag(0)
                     Text("Evidence").tag(1)
+                    Text("Configure").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -420,55 +421,222 @@ struct ConversationDock: View {
                             }
                         }
                         .padding(12)
-                    } else {
+                    } else if tab == 1 {
                         EvidenceLedger(snapshot: store.dashboard, eventGroups: store.eventGroups)
+                            .padding(12)
+                    } else {
+                        RoutingConfigurationPanel(store: store)
                             .padding(12)
                     }
                 }
 
-                Divider().opacity(0.55)
+                if tab == 0 {
+                    Divider().opacity(0.55)
 
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(alignment: .bottom, spacing: 8) {
-                        TextField("Message selected agent", text: $store.conversationDraft, axis: .vertical)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12))
-                            .lineLimit(1...4)
-                            .padding(9)
-                            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
-                            .accessibilityIdentifier("loom-conversation-draft")
-                            .accessibilityLabel("Message selected agent")
-                        Button {
-                            Task { await store.sendMessage() }
-                        } label: {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 24))
-                                .foregroundStyle(store.canSendMessage ? LoomColor.cyan : .secondary)
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack(alignment: .bottom, spacing: 8) {
+                            TextField("Message selected agent", text: $store.conversationDraft, axis: .vertical)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12))
+                                .lineLimit(1...4)
+                                .padding(9)
+                                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                                .accessibilityIdentifier("loom-conversation-draft")
+                                .accessibilityLabel("Message selected agent")
+                            Button {
+                                Task { await store.sendMessage() }
+                            } label: {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundStyle(store.canSendMessage ? LoomColor.cyan : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!store.canSendMessage)
+                            .keyboardShortcut(.return, modifiers: [.command])
+                            .help("Send through the authenticated Loom message bridge")
+                            .accessibilityIdentifier("loom-conversation-send")
+                            .accessibilityLabel("Send durable message")
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!store.canSendMessage)
-                        .keyboardShortcut(.return, modifiers: [.command])
-                        .help("Send through the authenticated Loom message bridge")
-                        .accessibilityIdentifier("loom-conversation-send")
-                        .accessibilityLabel("Send durable message")
-                    }
 
-                    HStack(spacing: 6) {
-                        Image(systemName: messageStatusIcon)
-                            .foregroundStyle(messageStatusColor)
-                        Text(messageStatusLabel)
-                            .foregroundStyle(messageStatusColor)
-                        Spacer(minLength: 6)
-                        if let messageStatusDetail {
-                            Text(messageStatusDetail)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                        HStack(spacing: 6) {
+                            Image(systemName: messageStatusIcon)
+                                .foregroundStyle(messageStatusColor)
+                            Text(messageStatusLabel)
+                                .foregroundStyle(messageStatusColor)
+                            Spacer(minLength: 6)
+                            if let messageStatusDetail {
+                                Text(messageStatusDetail)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
                         }
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
                     }
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .padding(10)
                 }
-                .padding(10)
+            }
+        }
+    }
+}
+
+private struct RoutingConfigurationPanel: View {
+    @ObservedObject var store: LoomStore
+
+    private var policy: Binding<String> {
+        Binding(get: { store.routingDraft.policy }, set: { store.setRoutingPolicy($0) })
+    }
+
+    private var model: Binding<String> {
+        Binding(get: { store.routingDraft.model }, set: { store.setRoutingModel($0) })
+    }
+
+    private var effort: Binding<String> {
+        Binding(get: { store.routingDraft.effort }, set: { store.setRoutingEffort($0) })
+    }
+
+    private var statusColor: Color {
+        switch store.routingConfigState {
+        case .ready, .stored: LoomColor.green
+        case .editing: LoomColor.amber
+        case .loading, .saving: LoomColor.cyan
+        case .failed: LoomColor.red
+        case .unconfigured: LoomColor.amber
+        }
+    }
+
+    private var statusIcon: String {
+        switch store.routingConfigState {
+        case .ready: "checkmark.shield.fill"
+        case .stored: "checkmark.seal.fill"
+        case .editing: "pencil.and.list.clipboard"
+        case .loading, .saving: "arrow.trianglehead.2.clockwise.rotate.90"
+        case .failed: "exclamationmark.octagon.fill"
+        case .unconfigured: "cable.connector.slash"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ROUTING CONFIG")
+                        .font(.system(size: 10, weight: .black, design: .monospaced))
+                    Text("DECLARATIVE INPUT / BACKEND ARBITRATES")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await store.refreshRoutingConfig() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help("Reload the backend routing configuration")
+                .accessibilityLabel("Reload routing configuration")
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: statusIcon).foregroundStyle(statusColor)
+                Text(store.routingConfigState.label)
+                    .foregroundStyle(statusColor)
+                Spacer(minLength: 8)
+                if let config = store.routingConfig {
+                    Text("REV \(config.revision)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 8, weight: .bold, design: .monospaced))
+
+            if case let .failed(reason) = store.routingConfigState {
+                ThreadStateCard(title: "CONFIGURATION REFUSED", detail: reason, color: LoomColor.red)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Policy", selection: policy) {
+                    Text("Authority first").tag("authority-first")
+                    Text("Capacity aware").tag("capacity-aware")
+                    Text("Latency aware").tag("latency-aware")
+                }
+                .pickerStyle(.menu)
+
+                Picker("Model", selection: model) {
+                    Text("Terra").tag("gpt-5.6-terra")
+                    Text("Sol").tag("gpt-5.6-sol")
+                }
+                .pickerStyle(.menu)
+
+                Picker("Effort", selection: effort) {
+                    Text("Low").tag("low")
+                    Text("Medium").tag("medium")
+                    Text("High").tag("high")
+                }
+                .pickerStyle(.segmented)
+            }
+            .font(.system(size: 11, weight: .medium))
+
+            VStack(alignment: .leading, spacing: 7) {
+                configOrder("POOL ORDER", store.routingDraft.poolOrder, color: LoomColor.cyan)
+                configOrder("ADAPTER ORDER", store.routingDraft.adapterOrder, color: LoomColor.magenta)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await store.saveRoutingConfig() }
+                } label: {
+                    Image(systemName: "square.and.arrow.down.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(store.canSaveRoutingConfig ? LoomColor.cyan : .secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canSaveRoutingConfig)
+                .help("Store declarative routing configuration in the authenticated backend")
+                .accessibilityIdentifier("loom-routing-save")
+                .accessibilityLabel("Store routing configuration")
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CONFIGURATION IS NOT A DECISION")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    Text("Routes and receipts remain backend-produced evidence.")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if case let .stored(receipt) = store.routingConfigState {
+                HStack(spacing: 6) {
+                    Image(systemName: "number.circle.fill").foregroundStyle(LoomColor.green)
+                    Text("RECEIPT REV \(receipt.revision)")
+                    Text(String(receipt.digest.prefix(12)) + "...")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+            }
+        }
+    }
+
+    private func configOrder(_ label: String, _ values: [String], color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                HStack(spacing: 7) {
+                    Text(String(format: "%02d", index + 1))
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(color)
+                    Text(value)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 7)
+                .background(Color.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 5))
             }
         }
     }

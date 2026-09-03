@@ -42,6 +42,7 @@ bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
 bin/sounio-loom message-serve --bind 127.0.0.1 --port 8789 \
   --token-file /private/path/loom-message.cap \
+  --routing-state-dir /private/path/loom-routing-state \
   --agent founder-ui --lane loom-apple
 bin/sounio-loom export-events-arrow --out loom-events.arrow
 bin/sounio-loom verify-events-arrow --file loom-events.arrow
@@ -82,6 +83,17 @@ records the durable ACK. Runtime errors or the eight-second runtime deadline
 return a fail-closed refusal. The endpoint is loopback-only unless
 `--allow-remote` is explicit, and audit lines never contain the bearer token or
 message body.
+
+The same bridge owns a narrow configuration plane at authenticated
+`GET /v1/routing/config` and `PUT /v1/routing/config`. It persists only a
+bounded, declarative routing input: policy, model, effort, pool order, and
+adapter order. Every accepted replacement is atomically written with a
+monotonic revision and SHA-256 digest receipt; malformed and duplicate input is
+rejected before replacement. By default its private state is under the shared
+Git metadata; `--routing-state-dir` selects an absolute, private,
+deployment-owned directory. This config plane never starts a provider, selects
+a route, or emits a `RouteReceipt`: the backend arbiter remains the sole route
+authority.
 
 ## Subprocess Membrane
 
