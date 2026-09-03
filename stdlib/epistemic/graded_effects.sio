@@ -100,28 +100,43 @@ pub fn indep_unknown() -> Independence {
 
 // Structural proof: X and Y are d-separated given Z in the declared causal graph.
 //
-// `proof` must be the result of the compiler-checked form
+// `proof` must be typed `DsepProof` -- a type with no `struct DsepProof { ... }`
+// declaration anywhere in the tree, so no source text can construct one via a
+// literal, and no compatibility rule anywhere lets an i64 (or any other type)
+// stand in for it. Its ONLY producer is the compiler's own handling of
 //
 //     d_separated(A, B | Z)
 //
 // which does not compile unless the declared `causal graph` actually
-// d-separates A from B given Z. There is deliberately no zero-argument
-// constructor: the previous one handed out the tight bound to anyone willing to
-// assert independence, which is the same as not requiring it at all.
+// d-separates A from B given Z; see parser/exprs.sio (Madaros) and
+// dsep_lower() (lean_single).
 //
-// A proof that did not come from that form degrades to no witness, so the
-// conservative bound is what a forged value buys.
-pub fn indep_dsep(proof: i64) -> Independence {
-    if proof == 1 {
-        return Independence { kind: witness_d_separated(), rho: 0.0, n: 0, }
-    }
-    return indep_unknown()
+// Earlier this took `proof: i64` and compared it to the literal 1 -- which
+// meant a HAND-TYPED literal 1 was accepted identically to a discharged
+// witness, because by the time either reached here they were the same value
+// with the same type. Requiring the opaque type closes that: nothing needs
+// checking in the body any more, because a value of this type existing at all
+// already IS the proof -- there is no other way one could have gotten here.
+pub fn indep_dsep(proof: DsepProof) -> Independence {
+    return Independence { kind: witness_d_separated(), rho: 0.0, n: 0, }
 }
 
 // Empirical estimate. `n` is not decoration: a correlation from a handful of
 // pairs is not evidence of independence, and the composition below refuses to
 // treat it as such.
-pub fn indep_measured(rho: f64, n: i64) -> Independence {
+//
+// rho outside [-1, 1] is not a measurement error to shrug off: a correlation
+// coefficient cannot leave that range, so a value outside it means the input
+// was never a correlation at all -- computed wrong, or fabricated. Downstream,
+// an out-of-range rho can drive base + cov below zero in
+// graded_compose_indep's witness_measured branch, which used to read that as
+// epsilon = 0.0 -- false certainty manufactured from evidence that was never
+// valid. Refusing here, at construction, means no Independence value carrying
+// impossible evidence can exist for that branch to ever see.
+pub fn indep_measured(rho: f64, n: i64) -> Independence with Panic {
+    if rho < (0.0 - 1.0) || rho > 1.0 {
+        panic("indep_measured: rho must be in [-1, 1], a correlation coefficient cannot exceed unit magnitude")
+    }
     Independence { kind: witness_measured(), rho: rho, n: n, }
 }
 

@@ -1170,6 +1170,17 @@ var CG_EDGE_DIR: [i64; 64] = [0; 64]
 var CG_ZSET: [i64; 16] = [0; 16]
 var CG_ZDESC: [i64; 16] = [0; 16]
 var CG_VISITED: [i64; 32] = [0; 32]
+
+// Positions, in the FINAL (post-dsep_lower) token stream, of every
+// `d_separated` identifier token that dsep_lower() itself emitted as the
+// rewrite of a claim it verified true. indep_dsep's sole argument must be
+// exactly one of these -- see dsep_witness_gate(). Recorded only when the
+// claim actually held (graph declared, both variables known, distinct, and
+// genuinely d-separated): a claim that failed verification already fails the
+// build via tc_mark_failed(), so there is nothing to gain by also treating its
+// rewritten shape as a valid witness, and real reasons not to.
+var DSEP_WITNESS_COUNT: i64 = 0
+var DSEP_WITNESS_POS: [i64; 64] = [0; 64]
 var CG_QUEUE: [i64; 64] = [0; 64]
 
 // Tokens live in NINE parallel arrays, not four. Any pass that compacts the
@@ -1482,6 +1493,7 @@ fn dsep_lower() with IO, Mut, Panic, Div {
                 if q < TC && TK[q as usize] == 9 { q = q + 1 }
             }
             if q < TC && TK[q as usize] == 7 {
+                var claim_verified: i64 = 0
                 if a_tok < 0 || b_tok < 0 {
                     tc_dsep_malformed(call_tok)
                 } else {
@@ -1502,6 +1514,8 @@ fn dsep_lower() with IO, Mut, Panic, Div {
                                     } else {
                                         if !cg_d_separated(aid, bid) {
                                             tc_indep_not_dseparated(a_tok, b_tok)
+                                        } else {
+                                            claim_verified = 1
                                         }
                                     }
                                 }
@@ -1510,6 +1524,15 @@ fn dsep_lower() with IO, Mut, Panic, Div {
                     }
                 }
                 // Emit `d_separated` `(` `)`; the arguments have done their job.
+                // Record the position of THIS token, in the compacted stream,
+                // as a witness iff the claim was actually verified -- this is
+                // the only fact dsep_witness_gate() trusts later, and it is
+                // recorded before w advances so it names the identifier token
+                // itself, not the `(` that follows it.
+                if claim_verified == 1 && DSEP_WITNESS_COUNT < 64 {
+                    DSEP_WITNESS_POS[DSEP_WITNESS_COUNT as usize] = w
+                    DSEP_WITNESS_COUNT = DSEP_WITNESS_COUNT + 1
+                }
                 tok_copy(w, call_tok)
                 w = w + 1
                 tok_put_punct(w, 6, call_tok + 1)
@@ -1527,6 +1550,39 @@ fn dsep_lower() with IO, Mut, Panic, Div {
         }
     }
     TC = w
+}
+
+// Runs once, after dsep_lower() has finished rewriting every `d_separated(...)`
+// call in the file and DSEP_WITNESS_POS holds the final positions of every
+// witness it actually verified. Finds every call to `indep_dsep` and requires
+// its single argument to be exactly one of those witnesses -- token-for-token
+// `d_separated` `(` `)` at a recorded position, immediately closed by
+// indep_dsep's own `)`. Anything else (a literal, a variable, an
+// otherwise-shaped expression, or a `d_separated(...)` that failed
+// verification and so was never recorded) is rejected: the type system on
+// this engine has no opaque-type mechanism to lean on, so the check is
+// syntactic instead, over the exact shape only the compiler itself produces.
+fn dsep_witness_gate() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    while p < TC {
+        // `p > 0 && TK[p-1] == 1` excludes `fn indep_dsep(...)` itself: kind 1
+        // is the `fn` keyword, so this is indep_dsep's own parameter list, not
+        // a call to it. Without this guard the gate flags its own definition.
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "indep_dsep") && p + 1 < TC && TK[(p + 1) as usize] == 6 && (p == 0 || TK[(p - 1) as usize] != 1) {
+            let call_tok = p
+            let q = p + 2
+            var ok: i64 = 0
+            if q + 3 < TC && TK[q as usize] == 3 && src_match(TS[q as usize], TE[q as usize] - TS[q as usize], "d_separated") && TK[(q + 1) as usize] == 6 && TK[(q + 2) as usize] == 7 && TK[(q + 3) as usize] == 7 {
+                var wi: i64 = 0
+                while wi < DSEP_WITNESS_COUNT {
+                    if DSEP_WITNESS_POS[wi as usize] == q { ok = 1 }
+                    wi = wi + 1
+                }
+            }
+            if ok == 0 { tc_indep_dsep_forged(call_tok) }
+        }
+        p = p + 1
+    }
 }
 
 fn fn_param_name_matches_token(fi: i64, arg_idx: i64, tok: i64) -> bool with Mut, Panic {
@@ -3800,7 +3856,7 @@ fn call_arg_type_compatible(expected_ty: i64, expected_hash: i64, actual_ty: i64
     if (actual_ty == 6 || actual_ty == 7) && actual_hash == 0 { return true }
     // Size-hint sentinel from tuple field extraction — cannot verify struct name, accept
     if actual_ty == 6 && actual_hash >= 1000000007 && actual_hash < 1000001007 { return true }
-    // 1-slot struct from tuple destructuring is bound as i64 (ABI-identical) — accept
+    // 1-slot struct from tuple destructuring is bound as i64 (ABI-identical) — accept.
     if expected_ty == 6 && actual_ty == 1 && actual_hash == 0 { return true }
     if ty_eq(expected_ty, expected_hash, actual_ty, actual_hash) { return true }
     if type_is_slice_ref(expected_ty, expected_hash) {
@@ -4844,6 +4900,22 @@ fn tc_dsep_malformed(tok: i64) with IO, Mut, Panic, Div {
     print("error[E256]: `d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`, at line ")
     print_int(TL[tok as usize])
     print("\n   = help: write `d_separated(A, B)` or `d_separated(A, B | Z)`\n")
+    tc_mark_failed()
+}
+
+// E257: indep_dsep's argument is not a witness dsep_lower() itself produced.
+// This is what actually closes the forgery -- `indep_dsep(1)` and
+// `indep_dsep(d_separated(A, B | Z))` used to reach here as the identical
+// value 1 with no way to tell which one a human wrote, because d_separated's
+// own rewrite ALSO reduces to a bare marker. Comparing token positions
+// against DSEP_WITNESS_POS, recorded at the moment dsep_lower() verified a
+// claim true, is what a value-level check on i64 cannot do: it asks "did the
+// compiler put this here", not "does this look like the right value".
+fn tc_indep_dsep_forged(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E257]: `indep_dsep`'s argument must be a `d_separated(A, B | Z)` call the compiler itself discharged, at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: pass a `d_separated(...)` expression directly as the argument; a stored value, a literal, or any other expression cannot substitute for a discharged proof\n")
     tc_mark_failed()
 }
 
@@ -39515,6 +39587,17 @@ fn append_native_prelude() with Mut, Panic, Div {
     // The discharged-proof token. Reachable only as the output of dsep_lower():
     // a hand-written `d_separated()` with no arguments is rejected there, so the
     // zero-argument form never appears in source that a human wrote.
+    //
+    // This engine's type checker treats `DsepProof` (indep_dsep's declared
+    // parameter type in the shared stdlib source) as an unregistered name and
+    // skips the argument check entirely -- it is not the type system that
+    // makes this opaque here, so the return type below stays a plain i64.
+    // What actually rejects a forged `indep_dsep(1)` is dsep_witness_gate():
+    // it runs once after every `d_separated(...)` call has been rewritten, and
+    // requires indep_dsep's argument to be, token-for-token, one of the exact
+    // positions dsep_lower() recorded as an actually-verified witness. A bare
+    // literal, a stored variable, or any other expression shape fails that
+    // check regardless of its declared or inferred type.
     append_src_lit("pub fn d_separated() -> i64 {\n")
     append_src_lit("    return 1\n")
     append_src_lit("}\n\n")
@@ -41114,6 +41197,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     // whether the graph is declared above or below it.
     cg_collect()
     dsep_lower()
+    dsep_witness_gate()
     print("tokens: "); print_int(TC); print("\n")
     var cr: i64 = 0
     if TARGET_ARCH == 1 {
