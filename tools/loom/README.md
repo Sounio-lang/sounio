@@ -103,14 +103,18 @@ scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh
 
 ## Authenticated Message Bridge
 
-`message-serve` is a separate authenticated command plane. Its token file must
-be a regular file owned by the current user with no group/world permissions.
-The server fixes sender agent and lane at startup, accepts only `info` or
-`request`, invokes the durable coordination runtime without a shell, and
-returns `202` only after parsing the runtime's `SENT` receipt. Runtime errors or
-the eight-second runtime deadline return a fail-closed refusal. The endpoint is
-loopback-only unless `--allow-remote` is explicit, and audit lines never contain
-the bearer token or message body.
+`message-serve` is a separate authenticated command and thread-read plane. Its
+token file must be a regular file owned by the current user with no group/world
+permissions. The server fixes sender agent and lane at startup, accepts only
+`info` or `request`, invokes the durable coordination runtime without a shell,
+and returns `202` only after parsing the runtime's `SENT` receipt. Authenticated
+`GET /v1/threads` and `GET /v1/threads/<request-id>` derive a correlated stream
+of durable request, wake, response, ACK, timeout, and durable-only evidence
+through the runtime's public commands; `POST /v1/messages/<response-id>/ack`
+records the durable ACK. Runtime errors or the eight-second runtime deadline
+return a fail-closed refusal. The endpoint is loopback-only unless
+`--allow-remote` is explicit, and audit lines never contain the bearer token or
+message body.
 
 ## Subprocess Membrane
 

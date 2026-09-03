@@ -349,7 +349,7 @@ struct ConversationDock: View {
         switch store.messageState {
         case let .accepted(receipt): receipt.messageId
         case let .failed(reason): reason
-        default: nil
+        default: store.selectedThread?.request.id
         }
     }
 
@@ -391,18 +391,33 @@ struct ConversationDock: View {
                     if tab == 0 {
                         LazyVStack(spacing: 12) {
                             HStack {
-                                Text("PREVIEW THREAD")
+                                Text("THREAD TRUTH")
                                     .font(.system(size: 8, weight: .black, design: .monospaced))
-                                    .foregroundStyle(LoomColor.amber)
+                                    .foregroundStyle(store.visibleThreadState == "answered" ? LoomColor.green : LoomColor.cyan)
                                 Spacer()
-                                Text(store.messageBridgeConfigured ? "durable command bridge" : "transport disconnected")
+                                Text(store.visibleThreadState?.replacingOccurrences(of: "_", with: " ").uppercased() ?? "NO DURABLE THREAD")
                                     .font(.system(size: 8, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
-                            ForEach(store.dashboard.messages) { message in
-                                MessageBubble(message: message)
+                            if let error = store.threadError {
+                                ThreadStateCard(
+                                    title: "THREAD READ REFUSED",
+                                    detail: error,
+                                    color: LoomColor.red
+                                )
+                            } else if store.visibleThreadEvents.isEmpty {
+                                ThreadStateCard(
+                                    title: store.messageBridgeConfigured ? "NO THREAD FOR THIS LANE" : "MESSAGE BRIDGE NOT CONFIGURED",
+                                    detail: selectedLane?.deliveryReadiness == .immediate
+                                        ? "ACTIVE ENDPOINT / READY FOR A DURABLE REQUEST"
+                                        : "DURABLE BUS AVAILABLE WHEN CONFIGURED",
+                                    color: selectedLane?.deliveryReadiness == .immediate ? LoomColor.green : LoomColor.amber
+                                )
+                            } else {
+                                ForEach(store.visibleThreadEvents) { event in
+                                    ThreadEventBubble(event: event)
+                                }
                             }
-                            ReceiptEvidence(receipt: store.dashboard.receipt)
                         }
                         .padding(12)
                     } else {
@@ -421,6 +436,8 @@ struct ConversationDock: View {
                             .lineLimit(1...4)
                             .padding(9)
                             .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                            .accessibilityIdentifier("loom-conversation-draft")
+                            .accessibilityLabel("Message selected agent")
                         Button {
                             Task { await store.sendMessage() }
                         } label: {
@@ -432,6 +449,8 @@ struct ConversationDock: View {
                         .disabled(!store.canSendMessage)
                         .keyboardShortcut(.return, modifiers: [.command])
                         .help("Send through the authenticated Loom message bridge")
+                        .accessibilityIdentifier("loom-conversation-send")
+                        .accessibilityLabel("Send durable message")
                     }
 
                     HStack(spacing: 6) {
@@ -487,27 +506,57 @@ private struct LaneContextStrip: View {
     }
 }
 
-private struct MessageBubble: View {
-    let message: AgentMessage
+private struct ThreadEventBubble: View {
+    let event: LoomThreadEvent
 
     var body: some View {
         HStack {
-            if message.isLocal { Spacer(minLength: 28) }
+            if event.isLocal { Spacer(minLength: 28) }
             VStack(alignment: .leading, spacing: 5) {
-                Text(message.author.uppercased())
+                HStack(spacing: 6) {
+                    Text(event.kind.replacingOccurrences(of: "_", with: " ").uppercased())
+                    Text(event.state.uppercased())
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Text(event.utc)
+                        .foregroundStyle(.secondary)
+                }
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(message.isLocal ? LoomColor.cyan : LoomColor.magenta)
-                Text(message.body)
+                    .foregroundStyle(event.isLocal ? LoomColor.cyan : LoomColor.magenta)
+                Text(event.actor.uppercased())
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text(event.body)
                     .font(.system(size: 11))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(10)
             .background(
-                (message.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.08),
+                (event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.08),
                 in: RoundedRectangle(cornerRadius: 7)
             )
-            if !message.isLocal { Spacer(minLength: 28) }
+            if !event.isLocal { Spacer(minLength: 28) }
         }
+    }
+}
+
+private struct ThreadStateCard: View {
+    let title: String
+    let detail: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+            Text(detail)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.26)))
     }
 }
 

@@ -106,6 +106,9 @@ status="$(http_status "$TEST_ROOT/no-token.json" --request POST \
   --header 'content-type: application/json' --data '{}' "$BASE_URL/v1/messages")"
 [[ "$status" == 401 ]] || fail "missing capability returned HTTP $status"
 
+status="$(http_status "$TEST_ROOT/no-token-threads.json" "$BASE_URL/v1/threads")"
+[[ "$status" == 401 ]] || fail "thread list without capability returned HTTP $status"
+
 status="$(http_status "$TEST_ROOT/wrong-token.json" --request POST \
   --header 'content-type: application/json' --header 'authorization: Bearer wrong' \
   --data '{}' "$BASE_URL/v1/messages")"
@@ -125,7 +128,7 @@ status="$(http_status "$TEST_ROOT/bad-target.json" --request POST \
 
 status="$(http_status "$TEST_ROOT/accepted.json" --request POST \
   --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
-  --data "{\"toAgent\":\"bridge-target\",\"toLane\":\"isolated-lane\",\"kind\":\"info\",\"message\":\"$MESSAGE\"}" \
+  --data "{\"toAgent\":\"bridge-target\",\"toLane\":\"isolated-lane\",\"kind\":\"request\",\"message\":\"$MESSAGE\"}" \
   "$BASE_URL/v1/messages")"
 [[ "$status" == 202 ]] || fail "valid message returned HTTP $status: $(cat "$TEST_ROOT/accepted.json")"
 grep -q '"schema":"loom-message-receipt-v1"' "$TEST_ROOT/accepted.json" ||
@@ -139,8 +142,52 @@ message_file="$SOUNIO_COORD_DIR/messages/$message_id.message"
 grep -q '^from_agent=loom-ui-test$' "$message_file" || fail 'durable sender agent drifted'
 grep -q '^from_lane=apple-client-test$' "$message_file" || fail 'durable sender lane drifted'
 grep -q '^to_agent=bridge-target$' "$message_file" || fail 'durable destination drifted'
-grep -q '^kind=info$' "$message_file" || fail 'durable message kind drifted'
+grep -q '^kind=request$' "$message_file" || fail 'durable message kind drifted'
 grep -Fq "text=$MESSAGE" "$message_file" || fail 'durable message body drifted'
+
+status="$(http_status "$TEST_ROOT/thread-list.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads?limit=5")"
+[[ "$status" == 200 ]] || fail "thread list returned HTTP $status"
+grep -q '"schema":"loom-message-thread-list-v1"' "$TEST_ROOT/thread-list.json" ||
+  fail 'thread list omitted its schema'
+grep -q "\"id\":\"$message_id\"" "$TEST_ROOT/thread-list.json" ||
+  fail 'thread list omitted the durable request'
+
+status="$(http_status "$TEST_ROOT/thread-timeout.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads/$message_id?timeoutSeconds=0")"
+[[ "$status" == 200 ]] || fail "thread detail returned HTTP $status"
+grep -q '"schema":"loom-message-thread-v1"' "$TEST_ROOT/thread-timeout.json" ||
+  fail 'thread detail omitted its schema'
+grep -q '"kind":"durable_only"' "$TEST_ROOT/thread-timeout.json" ||
+  fail 'thread detail omitted the durable-only event'
+grep -q '"kind":"timeout"' "$TEST_ROOT/thread-timeout.json" ||
+  fail 'thread detail omitted the bus-clock timeout event'
+
+reply_output="$("$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" reply \
+  --agent bridge-target --lane isolated-lane --reply-to "$message_id" \
+  --message 'Thread Truth reply')"
+reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
+[[ -n "$reply_id" ]] || fail 'thread fixture did not create a correlated reply'
+
+status="$(http_status "$TEST_ROOT/thread-answered.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads/$message_id")"
+[[ "$status" == 200 ]] || fail "answered thread detail returned HTTP $status"
+grep -q '"kind":"response"' "$TEST_ROOT/thread-answered.json" ||
+  fail 'thread detail omitted the correlated response event'
+grep -q 'Thread Truth reply' "$TEST_ROOT/thread-answered.json" ||
+  fail 'thread detail omitted the correlated response body'
+
+status="$(http_status "$TEST_ROOT/thread-ack.json" --request POST \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/messages/$reply_id/ack")"
+[[ "$status" == 200 ]] || fail "thread acknowledgement returned HTTP $status"
+grep -q '"schema":"loom-message-ack-v1"' "$TEST_ROOT/thread-ack.json" ||
+  fail 'thread acknowledgement omitted its schema'
+
+status="$(http_status "$TEST_ROOT/thread-acked.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/threads/$message_id")"
+[[ "$status" == 200 ]] || fail "acknowledged thread detail returned HTTP $status"
+grep -q '"kind":"ack"' "$TEST_ROOT/thread-acked.json" ||
+  fail 'thread detail omitted the acknowledgement event'
 
 grep -q 'LOOM_MESSAGE_DECISION decision=ALLOW' "$BRIDGE_LOG" ||
   fail 'bridge did not audit its ALLOW decision'

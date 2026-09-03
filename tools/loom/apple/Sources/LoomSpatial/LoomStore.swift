@@ -47,11 +47,21 @@ final class LoomStore: ObservableObject {
     @Published private(set) var eventGroups: [LoomEventGroup] = []
     @Published private(set) var connection: ConnectionState = .connecting
     @Published private(set) var messageState: MessageBridgeState
-    @Published var selectedLaneId: String?
+    @Published private(set) var threadRequests: [LoomBusMessage] = []
+    @Published private(set) var selectedThread: LoomMessageThread?
+    @Published private(set) var threadError: String?
+    @Published var selectedLaneId: String? {
+        didSet {
+            guard oldValue != selectedLaneId else { return }
+            Task { await refreshThreads() }
+        }
+    }
     @Published var conversationDraft = ""
 
     private let client: LoomFleetClient
     private let messageClient: LoomMessageClient?
+    private var selectedThreadID: String?
+    private var refreshingThreads = false
 
     var selectedLane: LoomFleetSnapshot.Lane? {
         guard let selectedLaneId else { return nil }
@@ -66,6 +76,10 @@ final class LoomStore: ObservableObject {
     }
 
     var messageBridgeConfigured: Bool { messageClient != nil }
+
+    var visibleThreadEvents: [LoomThreadEvent] { selectedThread?.events ?? [] }
+
+    var visibleThreadState: String? { selectedThread?.state }
 
     init(
         baseURL: URL = URL(string: "http://127.0.0.1:8787")!,
@@ -105,6 +119,7 @@ final class LoomStore: ObservableObject {
             if let events = try? await client.events() {
                 eventGroups = events
             }
+            await refreshThreads()
         } catch {
             connection = .unavailable(error.localizedDescription)
         }
@@ -132,9 +147,61 @@ final class LoomStore: ObservableObject {
             )
             conversationDraft = ""
             messageState = .accepted(receipt)
+            selectedThreadID = receipt.messageId
+            await refreshThreads()
         } catch {
             messageState = .failed(error.localizedDescription)
         }
+    }
+
+    func refreshThreads() async {
+        guard let messageClient, !refreshingThreads else { return }
+        refreshingThreads = true
+        defer { refreshingThreads = false }
+        do {
+            let list = try await messageClient.threads()
+            threadRequests = list.threads
+            threadError = nil
+            let laneThreads = list.threads.filter { thread in
+                guard let lane = selectedLane else { return false }
+                return thread.toAgent == lane.agent && thread.toLane == lane.lane
+            }
+            if let selectedThreadID,
+               laneThreads.contains(where: { $0.id == selectedThreadID }) == false
+            {
+                self.selectedThreadID = laneThreads.first?.id
+            } else if selectedThreadID == nil {
+                selectedThreadID = laneThreads.first?.id
+            }
+            guard let selectedThreadID else {
+                selectedThread = nil
+                return
+            }
+            try await refreshThread(selectedThreadID, using: messageClient)
+        } catch {
+            threadError = error.localizedDescription
+        }
+    }
+
+    private func refreshThread(
+        _ messageID: String,
+        using messageClient: LoomMessageClient
+    ) async throws {
+        let firstRead = try await messageClient.thread(messageID)
+        selectedThread = firstRead
+        let acknowledged = Set(
+            firstRead.events
+                .filter { $0.kind == "ack" }
+                .map(\.messageId)
+        )
+        let pendingAcknowledgements = firstRead.events
+            .filter { $0.kind == "response" && !acknowledged.contains($0.messageId) }
+            .map(\.messageId)
+        guard pendingAcknowledgements.isEmpty == false else { return }
+        for responseID in pendingAcknowledgements {
+            _ = try await messageClient.acknowledge(responseID)
+        }
+        selectedThread = try await messageClient.thread(messageID)
     }
 
     private static func argument(_ name: String, in arguments: [String]) -> String? {

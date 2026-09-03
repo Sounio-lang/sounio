@@ -108,6 +108,10 @@ Commands:
           [--limit N] [--from-agent ID] [--from-lane ID] [--kind KIND]
           [--thread ID] [--since-epoch N]
                                  show unread messages for one lane
+  outbox  --agent ID --lane ID [--newest-first] [--limit N]
+          [--to-agent ID] [--to-lane ID] [--kind KIND]
+          [--thread ID] [--since-epoch N]
+                                 show durable messages sent by one lane
   injected --agent ID --lane ID --messages ID [ID ...]
                                  record that the hook surfaced messages to a lane
   ack     --agent ID --lane ID --message ID
@@ -2355,6 +2359,8 @@ print_message_line() {
         "$M_EXPERIMENT_PREREG_SHA256" "$M_EXPERIMENT_OUTCOME_SHA256"
     fi
   fi
+  printf ' to_agent=%s to_lane=%s created_epoch=%s' \
+    "${M_TO_AGENT:--}" "${M_TO_LANE:--}" "$M_CREATED_EPOCH"
   printf '\n'
 }
 
@@ -4213,6 +4219,74 @@ inbox_command() {
   printf 'inbox_omitted=%s\n' "$omitted"
 }
 
+outbox_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' newest_first=0 limit_set=0
+  local limit=0 to_agent='' to_lane='' kind='' thread_id='' since_epoch=0
+  local message_file shown=0 matching=0 omitted=0 index
+  local -a message_paths=() matching_paths=() ordered_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --newest-first) newest_first=1; shift ;;
+      --limit) require_arg "$1" "$2"; limit="$2"; limit_set=1; shift 2 ;;
+      --to-agent) require_arg "$1" "$2"; to_agent="$2"; shift 2 ;;
+      --to-lane) require_arg "$1" "$2"; to_lane="$2"; shift 2 ;;
+      --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
+      --thread) require_arg "$1" "$2"; thread_id="$2"; shift 2 ;;
+      --since-epoch) require_arg "$1" "$2"; since_epoch="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown outbox option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "outbox requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "outbox requires --lane"
+  ((limit_set == 0)) || [[ "$limit" =~ ^[1-9][0-9]*$ ]] || \
+    die "--limit must be a positive integer"
+  [[ "$since_epoch" =~ ^[0-9]+$ ]] || die "--since-epoch must be a non-negative integer"
+  [[ -z "$kind" || "$kind" =~ ^(info|request|reply|blocker|handoff)$ ]] || \
+    die "--kind must be info, request, reply, blocker, or handoff"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value to-agent "$to_agent"
+  validate_value to-lane "$to_lane"
+  validate_value thread "$thread_id"
+
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ "$M_FROM_AGENT" == "$agent" && "$M_FROM_LANE" == "$lane" ]] || continue
+    [[ -z "$to_agent" || "$M_TO_AGENT" == "$to_agent" ]] || continue
+    [[ -z "$to_lane" || "$M_TO_LANE" == "$to_lane" ]] || continue
+    [[ -z "$kind" || "$M_KIND" == "$kind" ]] || continue
+    [[ -z "$thread_id" || "$M_THREAD_ID" == "$thread_id" ]] || continue
+    ((M_CREATED_EPOCH >= since_epoch)) || continue
+    matching_paths+=("$message_file")
+  done
+
+  matching="${#matching_paths[@]}"
+  if ((newest_first)); then
+    for ((index = matching - 1; index >= 0; index--)); do
+      ordered_paths+=("${matching_paths[index]}")
+    done
+  else
+    ordered_paths=("${matching_paths[@]}")
+  fi
+
+  for message_file in "${ordered_paths[@]}"; do
+    ((limit == 0 || shown < limit)) || break
+    load_message "$message_file"
+    print_message_line
+    shown=$((shown + 1))
+  done
+  omitted=$((matching - shown))
+  printf 'outbox_messages=%s\n' "$shown"
+  printf 'outbox_matching=%s\n' "$matching"
+  printf 'outbox_omitted=%s\n' "$omitted"
+}
+
 promote_wake_submissions_for_injection() {
   local message_id="$1" agent="$2" lane="$3" submission_file receipt_file tmp_file
   local promoted=0
@@ -4410,9 +4484,10 @@ message_status_command() {
   acknowledged="${#ack_paths[@]}"
   wakes="${#wake_paths[@]}"
   wake_pending="${#submission_paths[@]}"
-  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s wake_pending=%s\n' \
+  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s wake_pending=%s created_epoch=%s\n' \
     "$message_id" "$original_kind" "$original_thread" "$request_state" "$injected" \
-    "$acknowledged" "$responses" "$latest_response" "$wakes" "$wake_pending"
+    "$acknowledged" "$responses" "$latest_response" "$wakes" "$wake_pending" \
+    "$original_epoch"
   for receipt_file in "${injection_paths[@]}"; do
     [[ -f "$receipt_file" ]] || continue
     read -r token_utc token_agent token_lane < "$receipt_file" || true
@@ -4984,6 +5059,7 @@ case "$command" in
   send) send_command "$@" ;;
   reply) send_command "$@" --kind reply ;;
   inbox) inbox_command "$@" ;;
+  outbox) outbox_command "$@" ;;
   injected) injected_command "$@" ;;
   ack) ack_command "$@" ;;
   message-status) message_status_command "$@" ;;
@@ -4993,5 +5069,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-session-close, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-session-close, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, outbox, injected, ack, message-status, wait, or prune)" ;;
 esac

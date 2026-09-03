@@ -137,10 +137,16 @@ Loom Spatial
   -> fixed sender identity + bounded destination/request payload
   -> sounio-coord durable message bus
   -> receipt after SENT
+  -> GET /v1/threads/<request-id> + bearer capability
+  -> request, wake, response, ACK, timeout, durable-only event projection
+  -> POST /v1/messages/<response-id>/ack + durable ACK event
 ```
 
-The command bridge is a separate listener from the read projections. It never
-posts directly to a provider CLI or injects a tmux pane. Missing or invalid
+The command bridge is a separate listener from the fleet read projections. It
+never posts directly to a provider CLI or injects a tmux pane. Its authenticated
+thread projection derives records only through the coordination runtime's
+`outbox`, `inbox`, `message-status`, and `ack` commands; it does not read or
+invent bus state itself. Missing or invalid
 capabilities, insecure token files, malformed fields, remote binds without an
 explicit override, runtime refusal, and runtime timeout all fail closed. Audit
 records contain ALLOW/DENY, sender identity, reason, and a receipt digest, but
@@ -151,12 +157,14 @@ never the capability or message body.
 The validated macOS slice displays real read-only fleet state and selects a
 live lane with an active endpoint before falling back to a durable-only target.
 The endpoint state and delivery expectation remain visible before submission.
-Route receipts and displayed conversation history
-remain scenario data and are visibly marked as non-authoritative. The composer
-becomes active only when its separate bridge is configured and reports durable
-acceptance independently. Native build, test, runtime, source-hash parity,
-screenshot, command-plane, and negative-test evidence are recorded in
+The Conversation tab renders the authenticated correlated thread projection:
+request, wake, response, ACK, timeout, and durable-only are distinct durable
+events. The composer becomes active only when its separate bridge is configured
+and reports durable acceptance independently. Route receipts remain scenario
+data and are visibly marked as non-authoritative. Native build, test, runtime,
+source-hash parity, screenshot, command-plane, and negative-test evidence are recorded in
 `evidence/2026-09-03-spatial-v2-native-gate.txt` and
 `evidence/2026-09-03-message-bridge-gate.txt`. The live delivery-aware
 round-trip is recorded in
-`evidence/2026-09-03-delivery-aware-roundtrip-gate.txt`.
+`evidence/2026-09-03-delivery-aware-roundtrip-gate.txt`; thread-truth coverage
+is recorded in `evidence/2026-09-03-thread-truth-gate.txt`.
