@@ -8918,6 +8918,38 @@ fn emit_min_positive_f64_bits_x86() with Mut {
     em(0x48); em(0x0f); em(0x4e); em(0xc1)
 }
 
+// R6 Correlated (bit 21, 2097152 in FN_EFFECTS -- see the "Correlated" arm of
+// the effect-name parser): mirrors check.sio's
+// checker_check_correlated_on_binary_inplace for this engine's own,
+// independent checker. Knowledge (x) Knowledge arithmetic reusing the same
+// resolved local (left_var_idx == right_var_idx, both >= 0 -- LAST_EXPR_VAR_IDX
+// is only ever set by a bare-identifier primary resolving to a Knowledge-typed
+// local, see compile_primary) needs `with Correlated` in the current function's
+// signature; independence is not assumed for `m + m`.
+//
+// No SOUNIO_FORCE_CORRELATED support here: this engine has no environment-
+// variable read at all (unlike Madaros's read_env), and the one fixture that
+// exercises FORCE (correlated_force_fires_on_independent.sio) is invoked only
+// by scripts/ci/correlated_effect_gate.sh against Madaros specifically -- it
+// is `//@ ignore`d out of the general suite this engine's checker runs under.
+fn tc_check_correlated_same_slot(op_tok: i64, left_var_idx: i64, right_var_idx: i64, left_hash: i64, right_hash: i64) with IO, Mut, Panic, Div {
+    if !(knowledge_hash_is(left_hash) || knowledge_hash_is(right_hash)) {
+        return
+    }
+    if left_var_idx < 0 || right_var_idx < 0 || left_var_idx != right_var_idx {
+        return
+    }
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2097152) == 0 {
+        // Measured 2026-09-03: a >~125-char literal here segfaults souc-host
+        // mid-call (the crash is before tc_error_hard's own first `print`, so
+        // it is in argument/constant setup, not the diagnostic body) -- a
+        // pre-existing string-literal-length bug in this bootstrap compiler,
+        // unrelated to R6. Keep this message short until that is understood
+        // and fixed on its own.
+        tc_error_hard(op_tok, "Knowledge slot-identity reuse requires with Correlated")
+    }
+}
+
 fn compile_knowledge_addsub_x86(op_tok: i64, op: i64, left_ty: i64, left_hash: i64, right_ty: i64, right_hash: i64) with IO, Mut, Panic, Div {
     let rhs_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -12313,13 +12345,26 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     si = si + 2
                 }
             } else { si = si + 1 }
-            SQW[slen as usize] = byte
-            slen = slen + 1
+            if slen >= 256 {
+                tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                slen = 0
+                si = se
+            } else {
+                SQW[slen as usize] = byte
+                slen = slen + 1
+            }
         }
         // Emit: jmp over string data; string bytes; null terminator; lea rax, [rip - N]
-        em(0xeb)  // jmp rel8
+        // jmp rel32 (not rel8): a rel8 displacement is a single signed byte
+        // (range -128..127). Any string literal whose decoded content is
+        // >= 127 bytes needs a skip distance (slen + 1) that no longer fits,
+        // so the truncated `em(slen + 1)` displacement byte wrapped negative
+        // and the jump landed inside unrelated code -- corrupting whatever
+        // executed next (segfault before the callee even runs). rel32 covers
+        // every length SQW can hold.
+        em(0xe9)  // jmp rel32
         let jmp_off = CL
-        em(slen + 1)  // skip slen + null terminator
+        em32(slen + 1)  // skip slen + null terminator
         let str_start = CL
         var bi: i64 = 0
         while bi < slen { em(SQW[bi as usize] & 0xFF); bi = bi + 1 }
@@ -17519,6 +17564,9 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // R6 Correlated: frozen before the right operand's compile overwrites it
+        // -- see tc_check_correlated_same_slot / compile_additive's twin capture.
+        let left_var_idx = LAST_EXPR_VAR_IDX
         // Gen 19: capture unit dim before push (EXPR_UNIT_DIM is global, will be overwritten)
         let left_udim = EXPR_UNIT_DIM
         // β⁴: capture LHS shadow slots and save LHS value for GUM/AD propagation
@@ -17582,6 +17630,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
         }
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_var_idx = LAST_EXPR_VAR_IDX
         let right_udim = EXPR_UNIT_DIM
         // β⁴: capture RHS shadow slots and save RHS value
         // always save rval for f64 mul — needed for b²·var(a) even when var(b)=0
@@ -17682,6 +17731,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             // (a) Knowledge<T> carrying runtime shadow-slot indices, or
             // (b) inlining scalar shadow propagation around the Knowledge
             //     multiplication — both are Phase 5 architectural work.
+            tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
             compile_knowledge_muldiv_x86(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             continue
         }
@@ -19123,6 +19173,11 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // R6 Correlated: LAST_EXPR_VAR_IDX is the resolved variable index a bare
+        // identifier primary sets (compile_primary), reset to -1 by every OTHER
+        // primary kind. Frozen here before the right operand's compile overwrites
+        // it, so left_var_idx/right_var_idx below are directly comparable.
+        let left_var_idx = LAST_EXPR_VAR_IDX
         let left_unit = EXPR_UNIT
         let left_unit_dim = EXPR_UNIT_DIM
         // PR-8: capture LHS literal state for compile-time constant folding
@@ -19178,6 +19233,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         compile_multiplicative()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_var_idx = LAST_EXPR_VAR_IDX
         let right_unit = EXPR_UNIT
         let right_unit_dim = EXPR_UNIT_DIM
         // β⁹ GTT: capture RHS channel topology before the merge resets EXPR_CH_SET.
@@ -19257,6 +19313,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
                     }
                 }
+                tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
                 compile_knowledge_addsub_x86(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             } else {
                 if left_ty != 0 && right_ty != 0 {
@@ -29725,6 +29782,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if src_match(ens, ene - ens, "Causal") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 524288; matched_builtin = 1 }
                         // NaturalityG2 = bit 20 (1048576) — homology functor F: C_dial → C_𝕆
                         if src_match(ens, ene - ens, "NaturalityG2") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 1048576; matched_builtin = 1 }
+                        // R6 Correlated = bit 21 (2097152) — see tc_check_correlated_same_slot.
+                        // Without its own bit this fell into the "unmatched" catch-all below
+                        // (bit 32), indistinguishable from any OTHER unrecognized effect name.
+                        if src_match(ens, ene - ens, "Correlated") { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 2097152; matched_builtin = 1 }
                         // Gen 21 Phase A″: Confidence(N) is a reader-friendly alias for
                         // Epistemic(N). Same bit, same FN_EPISTEMIC_MIN slot. N is an
                         // integer on the 1..1000 scale (matches Knowledge<T>.confidence).
@@ -33343,8 +33404,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     si = si + 2
                 }
             } else { si = si + 1 }
-            SQW[slen as usize] = byte
-            slen = slen + 1
+            if slen >= 256 {
+                tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                slen = 0
+                si = se
+            } else {
+                SQW[slen as usize] = byte
+                slen = slen + 1
+            }
         }
         let total_bytes = slen + 1
         let pad_len = (total_bytes + 3) / 4 * 4
@@ -35697,6 +35764,8 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // R6 Correlated: see compile_additive's twin capture.
+        let left_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
@@ -35715,6 +35784,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         compile_postfix_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_var_idx = LAST_EXPR_VAR_IDX
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
             if op == 20 { tc_error(op_tok, "division by zero") }
             else { tc_error(op_tok, "modulo by zero") }
@@ -35746,6 +35816,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                     tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
                 }
             }
+            tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
             compile_knowledge_muldiv_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             continue
         }
@@ -35889,6 +35960,8 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // R6 Correlated: see compile_additive's twin capture.
+        let left_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture LHS shadow
         let b4aa_left_vshadow = EXPR_VSHADOW
         let b4aa_left_sshadow = EXPR_SSHADOW
@@ -35900,6 +35973,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         compile_multiplicative_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture RHS shadow
         let b4aa_right_vshadow = EXPR_VSHADOW
         let b4aa_right_sshadow = EXPR_SSHADOW
@@ -35947,6 +36021,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                     tc_error(op_tok, "Knowledge arithmetic requires matching numeric operands")
                 }
             }
+            tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
             compile_knowledge_addsub_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             continue
         }

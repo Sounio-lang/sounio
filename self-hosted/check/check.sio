@@ -6291,7 +6291,95 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
     pair.1
 }
 
+// R6 Correlated, second (unconditional) exemption: `k1 + k2` for two DIFFERENT
+// Knowledge-bound locals needs no `with Correlated` at all -- the noise-symbol
+// sets are provably disjoint (checker_ns_should_refuse already stays silent,
+// unchanged here), and value'=v1+v2 / variance'=var1+var2 is the ordinary
+// independent-quadrature formula knowledge_binary_result already computes,
+// with no sign or norm-multiplicativity ambiguity the way Sub/Mul/Div carry.
+// This exists ONLY to widen the E245 lowering exemption to match
+// lower_binary_expr_ref's OpAdd arm, which handles both this and the
+// same-slot case below; it emits no diagnostic of its own.
+fn checker_is_knowledge_ident_add(e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div {
+    if e.bin_op != BinaryOp::OpAdd {
+        return false
+    }
+    if !is_knowledge_type(left_ty) || !is_knowledge_type(right_ty) {
+        return false
+    }
+    match e.left {
+        Some(lbox) => {
+            match e.right {
+                Some(rbox) => (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent,
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+// R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
+// requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
+// SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
+// Returns true exactly when this expression is the ONE case E230 and E245 are
+// taught to stand down for below: the identical ExprIdent slot-identity form
+// (not the SOUNIO_FORCE_CORRELATED reachability knob, which fires E236 on
+// ordinary independent pairs and must not also waive the anti-garbling/no-
+// lowering refusals for them), with `with Correlated` declared, on OpAdd
+// specifically -- the only Knowledge (x) Knowledge combination lower.sio's
+// lower_binary_expr_ref has a lowering for (see its R6 Correlated comment).
+fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+        || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+    if !is_arith {
+        return false
+    }
+    let know = is_knowledge_type(left_ty) || is_knowledge_type(right_ty)
+    if !know {
+        return false
+    }
+    let force = str_eq(read_env("SOUNIO_FORCE_CORRELATED"), "1")
+    var need = false
+    var same_slot_identity = false
+    var shared_name = make_name("_")
+    if force {
+        need = true
+        shared_name = make_name("force")
+    } else {
+        match e.left {
+            Some(lbox) => {
+                match e.right {
+                    Some(rbox) => {
+                        if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
+                            if name_eq((*lbox).name, (*rbox).name) {
+                                need = true
+                                same_slot_identity = true
+                                shared_name = (*lbox).name
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+    }
+    var has_effect = false
+    if need {
+        let corr_id: i64 = 29
+        has_effect = has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id)
+        if !has_effect {
+            checker_report_error_at_inplace(c, e.span, 236, 0, 0, 0)
+            print("   = shared binding ")
+            e035_print_ident(shared_name)
+            print("\n   = help: add `with Correlated` — operands share a slot; GUM independence does not hold\n")
+        }
+    }
+    same_slot_identity && has_effect && e.bin_op == BinaryOp::OpAdd
+}
+
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
@@ -6372,7 +6460,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         // lowering either. What the guard actually spares is only inners the
         // checker itself classifies as TyHyper, and that case remains unmeasured.
         let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-        if kk_both && kk_arith && !kk_hyper {
+        if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
             checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
         }
         // Third axis of anti-garbling (formal/lean4/EpistemicEffectsNSA.lean §J-§K). The
@@ -6388,14 +6476,22 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             && (left_inner.algebra_kind >= 4 || right_inner.algebra_kind >= 4) {
             checker_report_error_at_inplace(c, e.span, 251, 0, 0, 0)
         }
-        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
+        var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
         // N3: anti-garbling gate. An independence-assuming op over operands whose
         // noise-symbol sets are not provably disjoint understates variance -- E230.
-        if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) {
+        // The slot-identity case is not an independence assumption at all (it is
+        // the same measurement counted twice), so it does not belong to what this
+        // gate polices; correlated_same_slot_add also overrides the epsilon below
+        // from the independent-quadrature default to the correlated-linear one, so
+        // a static read of the result type agrees with what lowering computes.
+        if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) && !correlated_same_slot_add {
             checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
+        }
+        if correlated_same_slot_add {
+            knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
         }
         let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
@@ -15115,6 +15211,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
+    else if code == 236 { print("binary operation on Knowledge values reuses a correlated binding; independence is not assumed. Add `with Correlated` to the function signature.") }
     else if code == 247 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 215 { print("EpistemicComplete violation") }
@@ -22506,8 +22603,73 @@ impl Checker {
     // (checker_check_binary_expr_inplace) can check the OPERANDS in place and bridge here
     // for the operand-type-driven validation. This body never re-checks operands, so it
     // never recurses into check_path_expr — faithful by construction (verbatim move).
+    fn report_correlated_required(self, span: Span, shared: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 236, 0, 0, 0)
+        print("   = shared binding ")
+        e035_print_ident(shared)
+        print("\n   = help: add `with Correlated` — operands share a slot; GUM independence does not hold\n")
+        c
+    }
+
+    // Returns (Checker, bool) -- the bool is the same "correlated_same_slot_add"
+    // signal as checker_check_correlated_on_binary_inplace's return: true only
+    // for the identical-ExprIdent slot-identity form (never the FORCE knob) with
+    // `with Correlated` declared and op == OpAdd. See that function's comment.
+    fn check_correlated_on_binary(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, bool) with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+        if !is_arith {
+            return (c, false)
+        }
+        let know = is_knowledge_type(left_ty) || is_knowledge_type(right_ty)
+        if !know {
+            return (c, false)
+        }
+        let force = str_eq(read_env("SOUNIO_FORCE_CORRELATED"), "1")
+        var need = false
+        var same_slot_identity = false
+        var shared_name = make_name("_")
+        if force {
+            need = true
+            shared_name = make_name("force")
+        } else {
+            match e.left {
+                Some(lbox) => {
+                    match e.right {
+                        Some(rbox) => {
+                            if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
+                                if name_eq((*lbox).name, (*rbox).name) {
+                                    need = true
+                                    same_slot_identity = true
+                                    shared_name = (*lbox).name
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+        var has_effect = false
+        if need {
+            let corr_id: i64 = 29
+            has_effect = has_effect_id(c.current_effects, c.current_effect_count, corr_id)
+            if !has_effect {
+                c = c.report_correlated_required(e.span, shared_name)
+            }
+        }
+        (c, same_slot_identity && has_effect && e.bin_op == BinaryOp::OpAdd)
+    }
+
     fn check_binary_with_operand_types(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+
+        // R6: Correlated effect on Knowledge slot-identity arithmetic
+        let corr_pair = c.check_correlated_on_binary(e, left_ty, right_ty)
+        c = corr_pair.0
+        let correlated_same_slot_add = corr_pair.1
 
         // Observer semantics: comparing Unobserved<T> requires with Observe
         if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
@@ -22551,17 +22713,22 @@ impl Checker {
                 || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
                 || e.bin_op == BinaryOp::OpRem
             let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-            if kk_both && kk_arith && !kk_hyper {
+            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
-            let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
+            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
             // the E230 rule cannot go inert on plain named-call binary checking.
-            if checker_ns_should_refuse(c.ns_table, e.bin_op, left_ty, right_ty) {
+            // See the in-place copy's comment: slot-identity is not an
+            // independence assumption, so correlated_same_slot_add waives it.
+            if checker_ns_should_refuse(c.ns_table, e.bin_op, left_ty, right_ty) && !correlated_same_slot_add {
                 c = c.report_error_at(e.span, 230, 0, 0, 0)
+            }
+            if correlated_same_slot_add {
+                knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
             }
             // Continue with normal checking for inner type compatibility
             // The knowledge_binary_result handles epsilon propagation
