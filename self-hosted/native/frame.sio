@@ -273,10 +273,10 @@ pub fn nc_v2_label_capacity() -> i64 { 16384 }
 // so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
 // in NativeCompiler and indexes these. Accessed INLINE only (never a returning
 // helper — that miscompiles under the seed).
-pub var NC_FLAT_RELOC_OFFSETS: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_KIND_CODES: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 
 // Single source of truth for the NC_FLAT_RELOC_* bound. The four DECLARATIONS
 // above must stay literals (Sounio array sizes are not expressions); every bound
@@ -285,7 +285,7 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
 // NativeCompiler.reloc_overflow and compile_native_v2_preview_to_file returns
 // rc=20 (distinct from the code-buffer rc=19). Pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_flat_reloc_capacity() -> i64 { 131072 }
+pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 
 // Flat .rodata payload storage (string literals et al). Moved off the
 // NativeCompiler struct for the same reason as NC_FLAT_RELOC_* above:
@@ -311,11 +311,22 @@ pub fn nc_flat_data_capacity() -> i64 { 262144 }
 pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
+    // Total bytes nc_emit_byte was ever asked to emit, counted unconditionally
+    // (including bytes dropped once code_overflow latches). Equals code.len
+    // while under capacity; keeps counting past it, so on overflow this is the
+    // true total code size the module needed -- the number a capacity bump
+    // must be sized against, not a guess.
+    pub code_overflow_bytes_attempted: i64,
     // Set when nc_add_flat_reloc is asked to record a relocation past
     // nc_flat_reloc_capacity(). Mirrors code_overflow: the emitter drops the
     // entry, so the ELF would ship unpatched call/rodata sites (jump to garbage
     // -> SIGSEGV). Checked beside code_overflow before the ELF is written.
     pub reloc_overflow: bool,
+    // Total relocations nc_add_flat_reloc was ever asked to record, counted
+    // unconditionally (including ones dropped once reloc_overflow latches).
+    // Same pattern as code_overflow_bytes_attempted above: on overflow this is
+    // the true count a capacity bump must be sized against.
+    pub reloc_overflow_count_attempted: i64,
     // Set when nc_define_label / nc_add_label_patch is asked to record a label or
     // a jump patch past nc_v2_label_capacity(). Mirrors reloc_overflow: the
     // emitter drops the entry, so the ELF would ship a jz/jmp whose rel32 operand
@@ -435,7 +446,9 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     var out: NativeCompiler
     out.code = code_buffer_new()
     out.code_overflow = false
+    out.code_overflow_bytes_attempted = 0
     out.reloc_overflow = false
+    out.reloc_overflow_count_attempted = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()

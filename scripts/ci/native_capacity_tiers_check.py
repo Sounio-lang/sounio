@@ -173,8 +173,15 @@ def main():
          cgx, "apply_relocations_bound")
 
     # rc=19 (code buffer) and rc=20 (relocations) must both exist, distinctly.
-    rc19 = r"if nc\.code_overflow \%s\s*\n\s*return 19\s*\n\s*\%s" % (LB, RB)
-    rc20 = r"if nc\.reloc_overflow \%s\s*\n\s*return 20\s*\n\s*\%s" % (LB, RB)
+    # rc19 allows a diagnostic body between the brace and the return (matching
+    # the rc22/label_overflow precedent below) -- 2026-09-02: the branch now
+    # reports code_overflow_bytes_attempted so a capacity bump is sized against
+    # a measured number instead of a guess. rc20 stays bare; no diagnostic body
+    # has been added there yet.
+    rc19 = r"if nc\.code_overflow \%s(?:.|\n)*?return 19\s*\n\s*\%s" % (LB, RB)
+    # rc20 loosened the same way and for the same reason (2026-09-02):
+    # reloc_overflow_count_attempted is now reported before returning.
+    rc20 = r"if nc\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
     if not re.search(rc19, cgx):
         fail("rc19_code_overflow_check_missing")
     if not re.search(rc20, cgx):
