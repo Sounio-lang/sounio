@@ -80,6 +80,11 @@ var ONT_PROP_CNT: i64 = 0
 var PE_EXIT_CALL_OFF: i64 = -1
 
 // Shared string scratch buffer: used both as packed qwords and as decoded bytes.
+// Capacity (256) is duplicated as a literal at every site that zero-fills or
+// bounds-checks against it -- no `const` mechanism exists in this file to
+// name it once. Grep `SQW\[zi as usize\] = 0` for the zero-fill loops and
+// `slen >= 256` / `qi >= 256` for the bounds checks; all must move together
+// if this capacity ever changes.
 var SQW: [i64; 256] = [0; 256]
 
 // Function table: name start/end in source, code offset
@@ -9293,7 +9298,7 @@ fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
 }
 
 // ─── Emit print("string") ───
-fn emit_print(tok: i64) with Mut, Panic, Div {
+fn emit_print(tok: i64) with IO, Mut, Panic, Div {
     let ss = TS[tok as usize] + 1
     let se = TE[tok as usize] - 1
     var slen: i64 = 0
@@ -9332,9 +9337,23 @@ fn emit_print(tok: i64) with Mut, Panic, Div {
             }
         } else { si = si + 1 }
         let qi = slen / 8
-        let bi = slen - qi * 8
-        SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
-        slen = slen + 1
+        if qi >= 256 {
+            // SQW is [i64; 256]; this function packs 8 decoded bytes per
+            // slot, so qi (not slen) is the real bound -- overflow here
+            // needs a ~2048-byte literal, unlike the 256-byte cap in the
+            // unpacked decoders (compile_primary/emit_print_a64). Same
+            // silent-corruption class those guard against: without this,
+            // SQW[qi] would write past index 255 into FN_NS, the next
+            // global declared after SQW.
+            tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
+            TYPECHECK_FAILED = 1
+            slen = 0
+            break
+        } else {
+            let bi = slen - qi * 8
+            SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
+            slen = slen + 1
+        }
     }
     let nq = (slen + 7) / 8
     var qi: i64 = nq - 1
@@ -13011,8 +13030,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
             } else { si = si + 1 }
             if slen >= 256 {
                 tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                // tc_error_hard -> tc_mark_failed() early-returns without
+                // setting TYPECHECK_FAILED for FN_EFFECTS & 2048 (imported-
+                // module) functions. Left alone, that lets this fall through
+                // to a binary shipping the literal silently truncated to
+                // empty (slen=0) instead of failing the build. Force it
+                // directly -- same idiom as tc_unbalanced_braces (#1634).
+                TYPECHECK_FAILED = 1
                 slen = 0
-                si = se
+                break
             } else {
                 SQW[slen as usize] = byte
                 slen = slen + 1
@@ -31951,7 +31977,7 @@ fn emit_syscall6_a64(argc: i64) with Mut, Panic, Div {
 }
 
 // ─── ARM64 print("string") ───
-fn emit_print_a64(tok: i64) with Mut, Panic, Div {
+fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
     let ss = TS[tok as usize] + 1
     let se = TE[tok as usize] - 1
     var slen: i64 = 0
@@ -31989,8 +32015,19 @@ fn emit_print_a64(tok: i64) with Mut, Panic, Div {
                 si = si + 2
             }
         } else { si = si + 1 }
-        SQW[slen as usize] = byte
-        slen = slen + 1
+        if slen >= 256 {
+            // Same corruption class the call-argument decoders guard
+            // against (SQW is [i64; 256]): without this, a >=256-byte
+            // print("...") literal on arm64 would write past SQW[255]
+            // into FN_NS, the next global declared after SQW.
+            tc_error_hard(tok, "string literal exceeds maximum of 256 bytes")
+            TYPECHECK_FAILED = 1
+            slen = 0
+            break
+        } else {
+            SQW[slen as usize] = byte
+            slen = slen + 1
+        }
     }
     // Emit: b skip; string_bytes (4-byte padded); skip: adr x1, -(pad_len); ...
     let pad_len = (slen + 3) / 4 * 4
@@ -34075,8 +34112,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             } else { si = si + 1 }
             if slen >= 256 {
                 tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                // See the identical x86-64 guard in compile_primary() for why
+                // TYPECHECK_FAILED is forced directly here.
+                TYPECHECK_FAILED = 1
                 slen = 0
-                si = se
+                break
             } else {
                 SQW[slen as usize] = byte
                 slen = slen + 1
@@ -39053,6 +39093,20 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         }
         fn_idx = fn_idx + 1
     }
+
+    // Pass 2 (arm64-specific codegen, e.g. emit_print_a64/compile_primary_a64)
+    // can set TYPECHECK_FAILED on an error Pass 1's x86-64 pass never saw
+    // (different threshold, different code path) -- compile_all()'s own
+    // TYPECHECK_FAILED gate only covers Pass 1. Without this, Pass 2 falls
+    // through to patch/emit and this function returns 0 regardless, so a
+    // binary described as "typecheck: failed" is written anyway (see the
+    // emit_print_a64/compile_primary_a64 string-literal-length checks).
+    if TYPECHECK_FAILED != 0 {
+        print_limit_error()
+        print("typecheck: failed\n")
+        return 1
+    }
+
     // Patch BL instructions
     var pi: i64 = 0
     while pi < PATCH_COUNT {

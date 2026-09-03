@@ -777,3 +777,10 @@ lean_lib «SounioFoMultimodFragment» where
 -- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
 @[default_target]
 lean_lib «SounioZDChi» where
+
+-- Catalysis-mechanism suite: independent Lean4 proof oracle for two
+-- enzyme-kinetics algebraic identities (enzyme conservation, Hill
+-- half-saturation). Pure Rat-field algebra; no Mathlib, no other
+-- Sounio-lean import — see file header for the dependency rationale.
+@[default_target]
+lean_lib «SounioCatalysisKinetics» where
