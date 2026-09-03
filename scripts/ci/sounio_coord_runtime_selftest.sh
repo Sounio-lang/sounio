@@ -90,6 +90,7 @@ cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_routing_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh" \
@@ -121,6 +122,8 @@ cp "$ROOT_DIR/.claude/settings.json" "$REPO/.claude/"
 cp "$ROOT_DIR/.cursor/hooks.json" "$REPO/.cursor/"
 cp "$ROOT_DIR/.grok/hooks/loom-native.json" "$REPO/.grok/hooks/"
 cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_routing_authority_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_routing_authority_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
@@ -140,6 +143,9 @@ cp "$ROOT_DIR/tools/loom/message_bridge/dune" \
   "$REPO/tools/loom/message_bridge/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md" \
+  "$ROOT_DIR/tools/loom/routing_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/routing_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
   "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md" \
@@ -269,6 +275,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$ROOT_DIR/stdlib/coordination/loom_sovereign_material_change_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_routing_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" \
   "$REPO/stdlib/coordination/"
@@ -558,6 +566,7 @@ loom_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-
 loom_custody_transfer_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}')"
 loom_execution_outcome_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}')"
 loom_generation_reconcile_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}')"
+loom_routing_authority_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-routing-authority-runtime" | awk '{print $1}')"
 grep -qx "coord_runtime_sha256=$coord_runtime_sha" "$first_manifest" || \
   fail 'runtime manifest did not pin the coordination runtime executable'
 grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
@@ -571,6 +580,18 @@ grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
 grep -qx "loom_native_hook_generation_reconcile_runtime_sha256=$loom_generation_reconcile_sha" \
   "$first_manifest" || \
   fail 'runtime manifest did not pin frozen Sounio action 9047'
+grep -qx "loom_routing_authority_runtime_sha256=$loom_routing_authority_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin frozen Sounio routing action 9032'
+grep -q '^capability=loom-routing-authority-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted routing authority'
+[[ -f "$RUNTIME_ROOT/versions/$first_id/policy/routing-authority/tools/loom/routing_authority.freeze.v1" ]] || \
+  fail 'installed runtime omitted the routing authority policy capsule'
+outbox_output="$(SOUNIO_COORD_DIR="$STATE" \
+  "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" \
+    outbox --agent runtime-selftest --lane outbox-selftest)"
+grep -q '^outbox_messages=0$' <<< "$outbox_output" || \
+  fail "installed coordination runtime omitted working outbox: $outbox_output"
 grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted native hook generation reconciliation'
 grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \

@@ -152,6 +152,7 @@ private struct MockLaneRow: View {
 struct TopologyPanel: View {
     let snapshot: DashboardSnapshot
     let fleet: LoomFleetSnapshot?
+    let live: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -160,7 +161,7 @@ struct TopologyPanel: View {
                     HStack(spacing: 7) {
                         Text("ROUTE TOPOLOGY")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        Text("SCENARIO")
+                        Text(live ? "LIVE AUTHORITY" : "SCENARIO")
                             .font(.system(size: 8, weight: .black, design: .monospaced))
                             .foregroundStyle(LoomColor.amber)
                     }
@@ -178,7 +179,9 @@ struct TopologyPanel: View {
                     )
                 }
                 StatusPill(
-                    label: "simulated \(snapshot.receipt.status.rawValue)",
+                    label: live
+                        ? "9032 \(snapshot.receipt.status.rawValue)"
+                        : "simulated \(snapshot.receipt.status.rawValue)",
                     color: snapshot.receipt.status.loomColor
                 )
             }
@@ -190,7 +193,7 @@ struct TopologyPanel: View {
                 .accessibilityLabel("Routing topology scenario")
                 .accessibilityValue(snapshot.receipt.reason)
 
-            RouteReceiptStrip(receipt: snapshot.receipt)
+            RouteReceiptStrip(receipt: snapshot.receipt, live: live)
         }
         .background(Color.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
         .overlay(
@@ -202,6 +205,7 @@ struct TopologyPanel: View {
 
 private struct RouteReceiptStrip: View {
     let receipt: RouteReceipt
+    let live: Bool
 
     var body: some View {
         VStack(spacing: 8) {
@@ -209,7 +213,7 @@ private struct RouteReceiptStrip: View {
                 Image(systemName: receipt.status == .committed ? "checkmark.seal.fill" : "xmark.seal.fill")
                     .foregroundStyle(receipt.status.loomColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("SCENARIO RECEIPT · NOT AUTHORITY")
+                    Text(live ? "SOUNIO ROUTE RECEIPT · ACTION 9032" : "SCENARIO RECEIPT · NOT AUTHORITY")
                         .font(.system(size: 8, weight: .black, design: .monospaced))
                         .foregroundStyle(LoomColor.amber)
                     Text(receipt.reason)
@@ -228,6 +232,12 @@ private struct RouteReceiptStrip: View {
                     ReceiptField(name: "effort", value: receipt.effort)
                     ReceiptField(name: "fallbackChain", value: receipt.fallbackChain.joined(separator: " -> ").nilIfEmpty ?? "none")
                     ReceiptField(name: "status", value: receipt.status.rawValue)
+                    if let semanticsHash = receipt.semanticsHash {
+                        ReceiptField(name: "semanticsHash", value: String(semanticsHash.prefix(16)) + "...")
+                    }
+                    if let sessionId = receipt.sessionId, !sessionId.isEmpty {
+                        ReceiptField(name: "sessionId", value: sessionId)
+                    }
                 }
             }
         }
@@ -616,6 +626,91 @@ private struct RoutingConfigurationPanel: View {
                 }
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
             }
+
+            Divider().opacity(0.45)
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("ROUTE A REVIEW")
+                            .font(.system(size: 10, weight: .black, design: .monospaced))
+                        Text("TASK -> SOUNIO 9032 -> PROVIDER CUSTODY")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    routeStateIndicator
+                }
+
+                TextField("Task title", text: $store.routeTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(8)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("loom-route-title")
+
+                TextField("Review brief", text: $store.routePrompt, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .lineLimit(3...7)
+                    .padding(8)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("loom-route-prompt")
+
+                HStack(spacing: 9) {
+                    Button {
+                        Task { await store.routeTask() }
+                    } label: {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 21, weight: .semibold))
+                            .foregroundStyle(store.canRouteTask ? LoomColor.magenta : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!store.canRouteTask)
+                    .help("Submit a review task to the Sounio routing authority")
+                    .accessibilityIdentifier("loom-route-submit")
+                    .accessibilityLabel("Route review task")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.routeState.label)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(routeStateColor)
+                        Text("External models remain REVIEW_ONLY.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if case let .failed(reason) = store.routeState {
+                    ThreadStateCard(title: "ROUTING FAILED CLOSED", detail: reason, color: LoomColor.red)
+                }
+            }
+        }
+    }
+
+    private var routeStateColor: Color {
+        switch store.routeState {
+        case .ready: LoomColor.cyan
+        case .deciding: LoomColor.magenta
+        case let .received(operation): operation.receipt.status.loomColor
+        case .failed: LoomColor.red
+        }
+    }
+
+    @ViewBuilder
+    private var routeStateIndicator: some View {
+        switch store.routeState {
+        case .deciding:
+            ProgressView().controlSize(.small).tint(LoomColor.magenta)
+        case let .received(operation):
+            Image(systemName: operation.receipt.status == .running
+                ? "checkmark.shield.fill" : "xmark.shield.fill")
+                .foregroundStyle(operation.receipt.status.loomColor)
+        case .failed:
+            Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(LoomColor.red)
+        case .ready:
+            Image(systemName: "shield.lefthalf.filled").foregroundStyle(LoomColor.cyan)
         }
     }
 
@@ -736,7 +831,9 @@ private struct ReceiptEvidence: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .foregroundStyle(receipt.status.loomColor)
             VStack(alignment: .leading, spacing: 4) {
-                Text("SCENARIO RECEIPT · NOT AUTHORITY")
+                Text(receipt.producingLanguage == "Sounio"
+                    ? "LIVE SOUNIO RECEIPT · ACTION 9032"
+                    : "SCENARIO RECEIPT · NOT AUTHORITY")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text(receipt.taskId)

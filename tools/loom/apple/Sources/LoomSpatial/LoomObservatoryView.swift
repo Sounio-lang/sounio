@@ -48,7 +48,7 @@ private struct DesktopObservatory: View {
                     .frame(width: 218)
 
                 VStack(spacing: 10) {
-                    TopologyPanel(snapshot: store.dashboard, fleet: store.fleet)
+                    TopologyPanel(snapshot: store.dashboard, fleet: store.fleet, live: store.dashboardIsLive)
                     FabricSignals(snapshot: store.dashboard)
                 }
 
@@ -84,7 +84,7 @@ private struct CompactObservatory: View {
                 case 2: LaneRail(store: store)
                 default:
                     VStack(spacing: 8) {
-                        TopologyPanel(snapshot: store.dashboard, fleet: store.fleet)
+                        TopologyPanel(snapshot: store.dashboard, fleet: store.fleet, live: store.dashboardIsLive)
                         FabricSignals(snapshot: store.dashboard)
                     }
                 }
@@ -119,9 +119,11 @@ private struct ObservatoryToolbar: View {
 
             StatusPill(label: store.connection.label, color: connectionColor)
             StatusPill(
-                label: "scenario \(store.dashboard.receipt.status.rawValue)",
+                label: store.dashboardIsLive
+                    ? "Sounio \(store.dashboard.receipt.status.rawValue)"
+                    : "scenario \(store.dashboard.receipt.status.rawValue)",
                 color: store.dashboard.receipt.status.loomColor,
-                systemImage: "sparkles"
+                systemImage: store.dashboardIsLive ? "checkmark.shield.fill" : "sparkles"
             )
 
             Spacer(minLength: 8)

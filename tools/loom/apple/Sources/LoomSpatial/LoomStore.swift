@@ -61,8 +61,29 @@ final class LoomStore: ObservableObject {
         }
     }
 
+    enum RouteState: Equatable {
+        case ready
+        case deciding
+        case received(LoomRouteOperation)
+        case failed(String)
+
+        var label: String {
+            switch self {
+            case .ready: "READY FOR SOUNIO DECISION"
+            case .deciding: "SOUNIO 9032 DECIDING"
+            case let .received(operation):
+                "RECEIPT \(operation.receipt.status.rawValue.uppercased())"
+            case .failed: "ROUTE REQUEST FAILED"
+            }
+        }
+    }
+
     @Published var scenario: DashboardScenario = .nominal {
-        didSet { dashboard = .mock(scenario) }
+        didSet {
+            routeOperation = nil
+            routeState = .ready
+            dashboard = .mock(scenario)
+        }
     }
     @Published private(set) var dashboard = DashboardSnapshot.mock(.nominal)
     @Published private(set) var fleet: LoomFleetSnapshot?
@@ -74,6 +95,8 @@ final class LoomStore: ObservableObject {
     @Published private(set) var threadError: String?
     @Published private(set) var routingConfigState: RoutingConfigState
     @Published private(set) var routingConfig: LoomRoutingConfig?
+    @Published private(set) var routeState: RouteState = .ready
+    @Published private(set) var routeOperation: LoomRouteOperation?
     @Published private(set) var routingDraftDirty = false
     @Published var routingDraft = LoomRoutingConfigUpdate(
         policy: "authority-first",
@@ -89,6 +112,8 @@ final class LoomStore: ObservableObject {
         }
     }
     @Published var conversationDraft = ""
+    @Published var routeTitle = "Review current Loom evidence"
+    @Published var routePrompt = "Identify the highest operational risk in the current routing evidence. Do not change files."
 
     private let client: LoomFleetClient
     private let messageClient: LoomMessageClient?
@@ -114,6 +139,17 @@ final class LoomStore: ObservableObject {
         guard case .saving = routingConfigState else { return true }
         return false
     }
+
+    var canRouteTask: Bool {
+        guard messageClient != nil, routingDraftDirty == false else { return false }
+        guard case .deciding = routeState else {
+            return !routeTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !routePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return false
+    }
+
+    var dashboardIsLive: Bool { routeOperation != nil }
 
     var visibleThreadEvents: [LoomThreadEvent] { selectedThread?.events ?? [] }
 
@@ -264,6 +300,24 @@ final class LoomStore: ObservableObject {
             routingConfigState = .stored(receipt)
         } catch {
             routingConfigState = .failed(error.localizedDescription)
+        }
+    }
+
+    func routeTask() async {
+        guard let messageClient, canRouteTask else { return }
+        let title = routeTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = routePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskID = "ui-" + UUID().uuidString.lowercased()
+        routeState = .deciding
+        do {
+            let operation = try await messageClient.route(
+                LoomRouteTaskRequest(taskId: taskID, title: title, prompt: prompt)
+            )
+            routeOperation = operation
+            dashboard = .live(operation, title: title)
+            routeState = .received(operation)
+        } catch {
+            routeState = .failed(error.localizedDescription)
         }
     }
 

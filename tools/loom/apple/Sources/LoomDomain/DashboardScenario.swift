@@ -157,4 +157,46 @@ public struct DashboardSnapshot: Sendable {
             ]
         )
     }
+
+    public static func live(_ operation: LoomRouteOperation, title: String) -> DashboardSnapshot {
+        let receipt = operation.receipt
+        let account = ProviderAccount(
+            id: "account-live",
+            provider: "openai",
+            displayName: "Observed provider account"
+        )
+        let remaining = receipt.quotaUsedPercent.map { max(0, min(1, 1 - ($0 / 100))) }
+        let cooldown = receipt.quotaResetsAt.map { max(0, $0 - Int(Date().timeIntervalSince1970)) }
+        let pool = QuotaPool(
+            id: receipt.poolId,
+            accountId: account.id,
+            name: "Observed quota pool",
+            state: receipt.quotaState ?? .unknown,
+            health: receipt.poolHealth ?? .degraded,
+            remainingFraction: remaining,
+            cooldownSeconds: cooldown
+        )
+        let adapter = CliAdapter(
+            id: receipt.adapterId,
+            provider: "openai",
+            executable: "provider-native",
+            health: receipt.adapterHealth ?? .broken,
+            version: receipt.adapterObservationHash.map { String($0.prefix(12)) }
+        )
+        return DashboardSnapshot(
+            scenario: .nominal,
+            accounts: [account],
+            pools: [pool],
+            adapters: [adapter],
+            task: LoomTask(
+                id: receipt.taskId,
+                title: title,
+                owner: "routing-authority",
+                requiredCapabilities: ["review-only", "Sounio-9032"]
+            ),
+            decision: operation.decision,
+            receipt: receipt,
+            messages: []
+        )
+    }
 }

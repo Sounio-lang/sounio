@@ -24,6 +24,8 @@ let read_file path =
       let length = in_channel_length channel in
       really_input_string channel length)
 
+let sha256_file path = read_file path |> sha256
+
 let write_all descriptor value =
   let bytes = Bytes.unsafe_of_string value in
   let rec write offset =
@@ -424,20 +426,34 @@ let response ?(headers = []) status body =
        (List.map (fun (key, value) -> key ^ ": " ^ value) headers))
     body
 
-let process_output_timeout ~timeout_seconds cwd command arguments =
+let process_output_timeout ?(environment = Unix.environment ()) ?input
+    ~timeout_seconds cwd command arguments =
   let reader, writer = Unix.pipe () in
+  let input_pipe = Option.map (fun _ -> Unix.pipe ()) input in
   Unix.set_close_on_exec reader;
   match Unix.fork () with
   | 0 ->
       Unix.close reader;
+      Option.iter
+        (fun (input_reader, input_writer) ->
+          Unix.close input_writer;
+          Unix.dup2 input_reader Unix.stdin;
+          if input_reader <> Unix.stdin then Unix.close input_reader)
+        input_pipe;
       Unix.dup2 writer Unix.stdout;
       Unix.dup2 writer Unix.stderr;
       if writer <> Unix.stdout && writer <> Unix.stderr then Unix.close writer;
       ignore (Unix.setsid ());
-      (try Unix.chdir cwd; Unix.execve command arguments (Unix.environment ())
+      (try Unix.chdir cwd; Unix.execve command arguments environment
        with _ -> Unix._exit 127)
   | pid ->
       Unix.close writer;
+      Option.iter
+        (fun (input_reader, input_writer) ->
+          Unix.close input_reader;
+          Fun.protect ~finally:(fun () -> Unix.close input_writer) (fun () ->
+              write_all input_writer (Option.get input)))
+        input_pipe;
       let output = Buffer.create 4096 in
       let bytes = Bytes.create 16384 in
       let deadline = Unix.gettimeofday () +. float_of_int timeout_seconds in
@@ -837,6 +853,14 @@ let routing_config_json config =
 
 let valid_routing_identifier label value = valid_field label 256 value
 
+let routing_slug value =
+  String.map
+    (fun character ->
+      match character with
+      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' -> character
+      | _ -> '-')
+    value
+
 let valid_routing_selector label allowed value =
   let value = valid_routing_identifier label value in
   if not (List.mem value allowed) then
@@ -971,6 +995,441 @@ let update_routing_config cwd configured_state_dir body =
         next.revision next.updated_epoch (json_quote previous_digest)
         (json_quote (sha256 config_json)) config_json)
 
+type quota_observation = {
+  quota_state_code : int;
+  quota_state_name : string;
+  pool_health_code : int;
+  pool_health_name : string;
+  used_percent : float option;
+  resets_at : int option;
+  observed_utc : string;
+  observed_epoch : int;
+  source_path : string;
+  source_sha256 : string;
+}
+
+type adapter_observation = {
+  adapter_health_code : int;
+  adapter_health_name : string;
+  provider_status_sha256 : string;
+}
+
+let json_bool_field object_value name =
+  match json_object_field object_value name with
+  | Some (Json_bool value) -> value
+  | Some _ -> failf "invalid-json:%s-must-be-bool" name
+  | None -> failf "invalid-json:%s-is-required" name
+
+let json_float_value = function
+  | Json_number value -> float_of_string_opt value
+  | _ -> None
+
+let json_int_value = function
+  | Json_number value -> int_of_string_opt value
+  | _ -> None
+
+let child_object object_value name =
+  match json_object_field object_value name with
+  | Some (Json_object _ as value) -> Some value
+  | _ -> None
+
+let rec regular_files_under path =
+  if not (Sys.file_exists path) then []
+  else
+    match (Unix.lstat path).st_kind with
+    | S_REG -> [ path ]
+    | S_DIR ->
+        Sys.readdir path |> Array.to_list
+        |> List.filter (fun name -> name <> "." && name <> "..")
+        |> List.concat_map (fun name -> regular_files_under (Filename.concat path name))
+    | _ -> []
+
+let codex_sessions_root () =
+  match Sys.getenv_opt "SOUNIO_LOOM_CODEX_SESSIONS_DIR" with
+  | Some path when path <> "" -> path
+  | _ ->
+      let codex_home =
+        match Sys.getenv_opt "CODEX_HOME" with
+        | Some path when path <> "" -> path
+        | _ -> Filename.concat (Sys.getenv_opt "HOME" |> Option.value ~default:"/") ".codex"
+      in
+      Filename.concat codex_home "sessions"
+
+let rate_limit_from_line path file_epoch line =
+  try
+    let root = parse_json line in
+    let timestamp = json_string_field root [ "timestamp" ] in
+    let payload = child_object root "payload" |> Option.get in
+    let limits = child_object payload "rate_limits" |> Option.get in
+    let primary = child_object limits "primary" |> Option.get in
+    let used_percent =
+      Option.bind (json_object_field primary "used_percent") json_float_value
+    in
+    let resets_at =
+      Option.bind (json_object_field primary "resets_at") json_int_value
+    in
+    match used_percent with
+    | None -> None
+    | Some used ->
+        let exhausted = used >= 100.0 in
+        Some
+          { quota_state_code = 2; quota_state_name = "estimated";
+            pool_health_code = (if exhausted then 3 else 1);
+            pool_health_name = (if exhausted then "exhausted" else "healthy");
+            used_percent = Some used; resets_at; observed_utc = timestamp;
+            observed_epoch = file_epoch; source_path = path;
+            source_sha256 = sha256 line }
+  with _ -> None
+
+let quota_observation () =
+  let root = codex_sessions_root () in
+  let candidates =
+    regular_files_under root
+    |> List.filter (fun path -> Filename.check_suffix path ".jsonl")
+    |> List.map (fun path -> (int_of_float (Unix.stat path).st_mtime, path))
+    |> List.sort (fun (left, _) (right, _) -> compare right left)
+  in
+  let rec inspect = function
+    | [] -> None
+    | (epoch, path) :: tail ->
+        let observations =
+          read_file path |> split_on '\n'
+          |> List.filter_map (rate_limit_from_line path epoch)
+        in
+        (match List.rev observations with [] -> inspect tail | value :: _ -> Some value)
+  in
+  let now = int_of_float (Unix.time ()) in
+  match inspect candidates with
+  | Some observation when now - observation.observed_epoch <= 900 -> observation
+  | _ ->
+      { quota_state_code = 3; quota_state_name = "unknown";
+        pool_health_code = 1; pool_health_name = "healthy";
+        used_percent = None; resets_at = None; observed_utc = "";
+        observed_epoch = 0; source_path = root; source_sha256 = "" }
+
+let environment_with name value =
+  let prefix = name ^ "=" in
+  let base =
+    Unix.environment () |> Array.to_list
+    |> List.filter (fun entry -> not (starts_with entry prefix))
+  in
+  Array.of_list ((prefix ^ value) :: base)
+
+let first_existing paths = List.find_opt Sys.file_exists paths
+
+let installed_policy_root policy =
+  Filename.concat
+    (Filename.concat (Filename.dirname (Filename.dirname Sys.executable_name)) "policy")
+    policy
+
+let loom_command cwd =
+  match Sys.getenv_opt "SOUNIO_LOOM_COMMAND" with
+  | Some path when Sys.file_exists path -> path
+  | _ ->
+      first_existing
+        [ Filename.concat cwd "tools/loom/.runtime/sounio-loom";
+          Filename.concat cwd "tools/loom/_build/default/src/loom.exe";
+          Filename.concat (Filename.dirname Sys.executable_name) "sounio-loom" ]
+      |> Option.value ~default:""
+
+let routing_authority_command cwd =
+  match Sys.getenv_opt "SOUNIO_LOOM_ROUTING_AUTHORITY_RUNTIME" with
+  | Some path when Sys.file_exists path -> path
+  | _ ->
+      first_existing
+        [ Filename.concat cwd "tools/loom/_build/default/src/sounio-loom-routing-authority-runtime";
+          Filename.concat cwd "tools/loom/.runtime/sounio-loom-routing-authority-runtime";
+          Filename.concat (Filename.dirname Sys.executable_name)
+            "sounio-loom-routing-authority-runtime" ]
+      |> Option.value ~default:""
+
+let manifest_fields path =
+  if not (Sys.file_exists path) then failf "message-bridge-routing-manifest-missing";
+  read_file path |> split_on '\n' |> table_of_fields
+
+let verify_routing_freeze cwd authority =
+  let policy_root, freeze_path =
+    let installed = installed_policy_root "routing-authority" in
+    let installed_freeze =
+      Filename.concat installed "tools/loom/routing_authority.freeze.v1"
+    in
+    if Sys.file_exists installed_freeze then (installed, installed_freeze)
+    else (cwd, Filename.concat cwd "tools/loom/routing_authority.freeze.v1")
+  in
+  let fields = manifest_fields freeze_path in
+  let source_path = Filename.concat policy_root (table_value fields "source_path") in
+  let entrypoint_path = Filename.concat policy_root (table_value fields "entrypoint_path") in
+  if table_value fields "stage" <> "SEMANTICS_FROZEN"
+     || table_value fields "producing_language" <> "Sounio"
+     || table_value fields "language_role" <> "SEMANTIC_AUTHORITY"
+  then failf "message-bridge-routing-freeze-invalid";
+  let semantics_sha = sha256 (read_file source_path ^ read_file entrypoint_path) in
+  if semantics_sha <> table_value fields "semantics_sha256" then
+    failf "message-bridge-routing-semantics-drift";
+  if sha256_file authority <> table_value fields "executable_sha256" then
+    failf "message-bridge-routing-executable-drift";
+  (semantics_sha, sha256_file source_path, freeze_path)
+
+let verify_execution_product cwd =
+  let policy_root, product_path =
+    let installed = installed_policy_root "sovereign-execution" in
+    let installed_product =
+      Filename.concat installed
+        "tools/loom/sovereign_execution_kernel_product.runtime.v1"
+    in
+    if Sys.file_exists installed_product then (installed, installed_product)
+    else
+      (cwd,
+       Filename.concat cwd
+         "tools/loom/sovereign_execution_kernel_product.runtime.v1")
+  in
+  let fields = manifest_fields product_path in
+  let semantic_manifest =
+    Filename.concat policy_root (table_value fields "semantic_manifest_path")
+  in
+  table_value fields "stage" = "PRODUCT_EXECUTION_FROZEN"
+  && table_value fields "semantic_action" = "9042"
+  && table_value fields "production_activation" = "true"
+  && table_value fields "exec_attached" = "true"
+  && table_value fields "same_uid_peer_isolation" = "true"
+  && Sys.file_exists semantic_manifest
+  && sha256_file semantic_manifest = table_value fields "semantic_manifest_sha256"
+
+let authority_decision cwd authority fields =
+  let frame = String.concat " " (List.map string_of_int fields) ^ "\n" in
+  let code, output =
+    process_output_timeout ~input:frame ~timeout_seconds:5 cwd authority
+      [| authority |]
+  in
+  if code = 128 + Sys.sigalrm then failf "message-bridge-routing-authority-timeout";
+  if code <> 0 then failf "message-bridge-routing-authority-error:%s" (sha256 output);
+  let output = trim output in
+  if starts_with output "SOUNIO_ROUTING_AUTHORITY_ALLOW " then
+    (`Allow, "allow", output)
+  else if starts_with output "SOUNIO_ROUTING_AUTHORITY_DENY " then
+    let fields = fields_after_prefix output "SOUNIO_ROUTING_AUTHORITY_DENY " in
+    (`Deny, table_value ~default:"authority-deny" fields "reason", output)
+  else failf "message-bridge-routing-authority-invalid-output"
+
+let adapter_observation cwd loom =
+  if loom = "" then
+    { adapter_health_code = 3; adapter_health_name = "missing";
+      provider_status_sha256 = "" }
+  else
+    let code, output =
+      process_output_timeout ~timeout_seconds:8 cwd loom
+        [| loom; "provider-status"; "--provider"; "codex"; "--json" |]
+    in
+    if code <> 0 then
+      { adapter_health_code = 2; adapter_health_name = "broken";
+        provider_status_sha256 = sha256 output }
+    else
+      try
+        let parsed = parse_json (trim output) in
+        let status = child_object parsed "status" |> Option.get in
+        let installed = json_bool_field status "installed" in
+        let auth = json_string_field status [ "auth" ] in
+        if not installed then
+          { adapter_health_code = 3; adapter_health_name = "missing";
+            provider_status_sha256 = sha256 output }
+        else if auth <> "authenticated" then
+          { adapter_health_code = 4; adapter_health_name = "auth_required";
+            provider_status_sha256 = sha256 output }
+        else
+          { adapter_health_code = 1; adapter_health_name = "healthy";
+            provider_status_sha256 = sha256 output }
+      with _ ->
+        { adapter_health_code = 2; adapter_health_name = "broken";
+          provider_status_sha256 = sha256 output }
+
+let route_frame ~operation ~policy_state ~ownership_state quota adapter
+    ~model_available ~plan_bound ~plan_fresh ~plan_match ~provider_plan_bound
+    ~execution_grant ~receipt_bound =
+  [ 9032; 3; operation; policy_state; 1; 1; 1; 1; 1; 1; 0; 1; 1;
+    ownership_state; quota.quota_state_code; 1; quota.pool_health_code;
+    adapter.adapter_health_code; model_available; 9; 8; 6; 6; 0;
+    plan_bound; plan_fresh; plan_match; provider_plan_bound; execution_grant;
+    receipt_bound ]
+
+let route_receipt_json ~task_id config ~reason ~status ~fallback_chain
+    ~semantics_sha ~source_sha ~authority_output ~config_sha quota adapter
+    ~provider_plan_sha ~session_id ~command_sha ~result =
+  let optional_float = function None -> "null" | Some value -> Printf.sprintf "%.3f" value in
+  let optional_int = function None -> "null" | Some value -> string_of_int value in
+  Printf.sprintf
+    "{\"schema\":\"loom-route-operation-v1\",\"decision\":{\"schema\":\"loom-route-decision-v1\",\"id\":%s,\"taskId\":%s,\"policy\":%s,\"candidateAdapterIds\":[%s],\"selectedAdapterId\":%s,\"authority\":\"Sounio\",\"authorityOutputSha256\":%s},\"receipt\":{\"schema\":\"loom-route-receipt-v1\",\"taskId\":%s,\"policy\":%s,\"poolId\":%s,\"adapterId\":%s,\"model\":%s,\"effort\":%s,\"reason\":%s,\"fallbackChain\":%s,\"status\":%s,\"sourceHash\":%s,\"semanticsHash\":%s,\"producingLanguage\":\"Sounio\",\"languageRole\":\"SEMANTIC_AUTHORITY\",\"operationalLanguage\":\"OCaml\",\"operationalRole\":\"OPERATIONAL_REALIZATION\",\"providerRole\":\"REVIEW_ONLY\",\"toolchain\":\"frozen-sounio-action-9032\",\"hardware\":%s,\"commandSha256\":%s,\"result\":%s,\"configHash\":%s,\"authorityOutputHash\":%s,\"providerPlanHash\":%s,\"quotaState\":%s,\"poolHealth\":%s,\"adapterHealth\":%s,\"quotaUsedPercent\":%s,\"quotaResetsAt\":%s,\"quotaObservedUtc\":%s,\"quotaObservationSource\":%s,\"quotaObservationHash\":%s,\"adapterObservationHash\":%s,\"sessionId\":%s}}"
+    (json_quote (task_id ^ "-decision")) (json_quote task_id) (json_quote config.policy)
+    (String.concat "," (List.map json_quote config.adapter_order))
+    (json_quote (List.hd config.adapter_order)) (json_quote (sha256 authority_output))
+    (json_quote task_id) (json_quote config.policy)
+    (json_quote (List.hd config.pool_order)) (json_quote (List.hd config.adapter_order))
+    (json_quote config.model) (json_quote config.effort) (json_quote reason)
+    fallback_chain (json_quote status) (json_quote source_sha)
+    (json_quote semantics_sha) (json_quote (Unix.gethostname ()))
+    (json_quote command_sha) (json_quote result) (json_quote config_sha)
+    (json_quote (sha256 authority_output)) (json_quote provider_plan_sha)
+    (json_quote quota.quota_state_name) (json_quote quota.pool_health_name)
+    (json_quote adapter.adapter_health_name) (optional_float quota.used_percent)
+    (optional_int quota.resets_at) (json_quote quota.observed_utc)
+    (json_quote quota.source_path) (json_quote quota.source_sha256)
+    (json_quote adapter.provider_status_sha256) (json_quote session_id)
+
+let write_private_file path contents =
+  let temporary = path ^ ".tmp-" ^ string_of_int (Unix.getpid ()) in
+  let descriptor = Unix.openfile temporary [ O_WRONLY; O_CREAT; O_EXCL ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close descriptor with Unix_error _ -> ())
+    (fun () -> write_all descriptor contents; Unix.fsync descriptor);
+  Unix.rename temporary path
+
+let route_task cwd configured_state_dir body =
+  let parsed = parse_json body in
+  if json_string_field parsed [ "schema" ] <> "loom-route-task-v1" then
+    failf "message-bridge-routing-task-schema-refused";
+  let task_id = json_string_field parsed [ "taskId" ] |> valid_routing_identifier "task-id" in
+  let title = json_string_field parsed [ "title" ] |> valid_field "routing-title" 512 in
+  let prompt = json_string_field parsed [ "prompt" ] |> valid_field "routing-prompt" 12000 in
+  let kind = json_string_field ~default:"review" parsed [ "kind" ] in
+  let ownership_state = if kind = "review" then 1 else 2 in
+  let config_path, lock_path = routing_paths cwd configured_state_dir in
+  with_routing_lock lock_path (fun () ->
+      let config = read_routing_config config_path in
+      let config_json = routing_config_json config in
+      let config_sha = sha256 config_json in
+      let authority = routing_authority_command cwd in
+      if authority = "" then failf "message-bridge-routing-authority-missing";
+      let semantics_sha, source_sha, _ = verify_routing_freeze cwd authority in
+      let loom = loom_command cwd in
+      let quota =
+        if List.hd config.pool_order = "pool-openai-team" then quota_observation ()
+        else
+          { quota_state_code = 3; quota_state_name = "unknown";
+            pool_health_code = 2; pool_health_name = "degraded";
+            used_percent = None; resets_at = None; observed_utc = "";
+            observed_epoch = 0; source_path = "unmapped-pool"; source_sha256 = "" }
+      in
+      let adapter =
+        if List.hd config.adapter_order = "adapter-codex" then
+          adapter_observation cwd loom
+        else
+          { adapter_health_code = 3; adapter_health_name = "missing";
+            provider_status_sha256 = "" }
+      in
+      let pool_health_code =
+        if adapter.adapter_health_code = 4 then 4 else quota.pool_health_code
+      in
+      let pool_health_name =
+        if adapter.adapter_health_code = 4 then "auth_required" else quota.pool_health_name
+      in
+      let quota = { quota with pool_health_code; pool_health_name } in
+      let policy_state = if config.revision > 0 then 1 else 0 in
+      let plan_model_available, provider_plan, provider_plan_sha, session_id =
+        if loom = "" || adapter.adapter_health_code <> 1 then (0, "", "", "")
+        else
+          let seed = sha256 (task_id ^ config_sha ^ string_of_float (Unix.time ())) in
+          let session =
+            Printf.sprintf "%s-%s-%s-%s-%s"
+              (String.sub seed 0 8) (String.sub seed 8 4) (String.sub seed 12 4)
+              (String.sub seed 16 4) (String.sub seed 20 12)
+          in
+          let review_prompt =
+            "REVIEW_ONLY. Do not edit files, run commands, confirm semantic results, or claim authority.\n\n"
+            ^ title ^ "\n\n" ^ prompt
+          in
+          let argv =
+            [| loom; "provider-plan"; "--provider"; "codex"; "--session-id";
+               session; "--cwd"; cwd; "--prompt"; review_prompt; "--model";
+               config.model; "--effort"; config.effort; "--json" |]
+          in
+          let code, output = process_output_timeout ~timeout_seconds:10 cwd loom argv in
+          if code = 0 then (1, output, sha256 output, session)
+          else (0, output, sha256 output, session)
+      in
+      let plan_frame =
+        route_frame ~operation:1 ~policy_state ~ownership_state quota adapter
+          ~model_available:plan_model_available ~plan_bound:0 ~plan_fresh:0
+          ~plan_match:0 ~provider_plan_bound:0 ~execution_grant:0 ~receipt_bound:0
+      in
+      let plan_decision, plan_reason, plan_output =
+        authority_decision cwd authority plan_frame
+      in
+      let fallback_chain =
+        "[" ^ String.concat "," (List.map json_quote config.adapter_order) ^ "]"
+      in
+      let receipts_dir =
+        Filename.concat (routing_state_dir cwd configured_state_dir) "receipts"
+      in
+      ensure_private_directory receipts_dir;
+      let receipt_path =
+        Filename.concat receipts_dir
+          (routing_slug task_id ^ "-" ^ String.sub (sha256 task_id) 0 16 ^ ".json")
+      in
+      let command_sha = sha256 provider_plan in
+      match plan_decision with
+      | `Deny ->
+          let receipt =
+            route_receipt_json ~task_id config ~reason:plan_reason ~status:"refused"
+              ~fallback_chain ~semantics_sha ~source_sha ~authority_output:plan_output
+              ~config_sha quota adapter ~provider_plan_sha ~session_id ~command_sha
+              ~result:"not-launched"
+          in
+          write_private_file receipt_path (receipt ^ "\n");
+          receipt
+      | `Allow ->
+          write_private_file receipt_path "{\"schema\":\"loom-route-receipt-pending-v1\"}\n";
+          let config_unchanged =
+            sha256 (routing_config_json (read_routing_config config_path)) = config_sha
+          in
+          let execution_grant = if verify_execution_product cwd then 1 else 0 in
+          let dispatch_frame =
+            route_frame ~operation:2 ~policy_state ~ownership_state quota adapter
+              ~model_available:plan_model_available ~plan_bound:1
+              ~plan_fresh:(if config_unchanged then 1 else 0) ~plan_match:1
+              ~provider_plan_bound:(if provider_plan_sha <> "" then 1 else 0)
+              ~execution_grant ~receipt_bound:1
+          in
+          let dispatch_decision, dispatch_reason, dispatch_output =
+            authority_decision cwd authority dispatch_frame
+          in
+          (match dispatch_decision with
+          | `Deny ->
+              let receipt =
+                route_receipt_json ~task_id config ~reason:dispatch_reason
+                  ~status:"refused" ~fallback_chain ~semantics_sha ~source_sha
+                  ~authority_output:dispatch_output ~config_sha quota adapter
+                  ~provider_plan_sha ~session_id ~command_sha ~result:"not-launched"
+              in
+              write_private_file receipt_path (receipt ^ "\n");
+              receipt
+          | `Allow ->
+              let review_prompt =
+                "REVIEW_ONLY. Do not edit files, run commands, confirm semantic results, or claim authority.\n\n"
+                ^ title ^ "\n\n" ^ prompt
+              in
+              let argv =
+                [| loom; "provider-start"; "--provider"; "codex"; "--agent";
+                   "loom-route"; "--lane"; routing_slug task_id; "--session-id";
+                   session_id; "--cwd"; cwd; "--prompt"; review_prompt; "--model";
+                   config.model; "--effort"; config.effort |]
+              in
+              let code, output =
+                process_output_timeout
+                  ~environment:(environment_with "SOUNIO_LOOM_SOVEREIGN_EXEC_REQUIRED" "1")
+                  ~timeout_seconds:60 cwd loom argv
+              in
+              let launched = code = 0 in
+              let receipt =
+                route_receipt_json ~task_id config
+                  ~reason:(if launched then "authorized-adapter-launched" else "adapter-launch-failed")
+                  ~status:(if launched then "running" else "failed") ~fallback_chain
+                  ~semantics_sha ~source_sha ~authority_output:dispatch_output
+                  ~config_sha quota adapter ~provider_plan_sha ~session_id
+                  ~command_sha:(sha256 (String.concat "\000" (Array.to_list argv)))
+                  ~result:(if launched then "provider-custody-started" else "provider-start-refused:" ^ sha256 output)
+              in
+              write_private_file receipt_path (receipt ^ "\n");
+              receipt))
+
 let authorized request token =
   match Hashtbl.find_opt request.http_headers "authorization" with
   | Some value when starts_with value "Bearer " ->
@@ -1026,6 +1485,20 @@ let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
       Printf.eprintf
         "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-config-stored sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
         sender_agent sender_lane (sha256 receipt);
+      respond "200 OK" receipt
+    else if request.http_method = "POST" && path = "/v1/routing/tasks" then
+      let receipt = route_task cwd routing_state_dir request.http_body in
+      let receipt_status =
+        try json_string_field (parse_json receipt) [ "receipt"; "status" ]
+        with _ -> "invalid"
+      in
+      let decision =
+        if receipt_status = "refused" || receipt_status = "failed" then "DENY"
+        else "ALLOW"
+      in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=%s reason=routing-task-%s sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        decision (reason_slug receipt_status) sender_agent sender_lane (sha256 receipt);
       respond "200 OK" receipt
     else if request.http_method = "GET" && starts_with path "/v1/threads/" then
       let message_id =

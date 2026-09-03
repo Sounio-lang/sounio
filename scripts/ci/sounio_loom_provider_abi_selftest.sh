@@ -152,6 +152,9 @@ case "$name:${1:-}:${2:-}" in
   fake-grok:--version:)
     printf 'grok provider-abi-test\n'
     ;;
+  fake-cursor:--version:)
+    printf 'cursor-agent provider-abi-test\n'
+    ;;
   fake-grok:login:)
     printf 'FAKE_LOGIN provider=grok\n'
     ;;
@@ -171,7 +174,7 @@ case "$name:${1:-}:${2:-}" in
 esac
 FAKE
 chmod +x "$TEST_ROOT/fake-provider"
-for provider in codex claude kimi grok opencode; do
+for provider in codex claude kimi grok cursor opencode; do
   cp "$TEST_ROOT/fake-provider" "$TEST_ROOT/fake-$provider"
 done
 
@@ -179,15 +182,16 @@ export SOUNIO_LOOM_PROVIDER_CODEX="$TEST_ROOT/fake-codex"
 export SOUNIO_LOOM_PROVIDER_CLAUDE="$TEST_ROOT/fake-claude"
 export SOUNIO_LOOM_PROVIDER_KIMI="$TEST_ROOT/fake-kimi"
 export SOUNIO_LOOM_PROVIDER_GROK="$TEST_ROOT/fake-grok"
+export SOUNIO_LOOM_PROVIDER_CURSOR="$TEST_ROOT/fake-cursor"
 export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.30.42$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.31.0$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
-jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 5)' \
+jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 6)' \
   <<< "$providers" >/dev/null || fail 'provider catalog schema or cardinality changed'
 jq -e '.providers[] | select(.provider == "codex") |
   .installed == true and .auth == "authenticated" and
@@ -213,15 +217,18 @@ jq -e '.providers[] | select(.provider == "opencode") |
 secret='PROVIDER_ABI_SECRET_PROMPT'
 secret_sha="$(printf '%s' "$secret" | sha256sum | awk '{print $1}')"
 plan="$($LOOM provider-plan --provider codex --session-id "$SESSION_ID" \
-  --cwd "$TEST_ROOT" --model provider-test --prompt "$secret" --json)"
+  --cwd "$TEST_ROOT" --model provider-test --effort high --prompt "$secret" --json)"
 if grep -Fq "$secret" <<< "$plan"; then
   fail 'provider plan disclosed the raw prompt'
 fi
 jq -e --arg digest "$secret_sha" '
   .schema == "loom-provider-abi-v1" and .provider == "codex" and
   .lifecycle == "turn" and .stdin_authority == "closed" and
-  .prompt_sha256 == $digest and .prompt_bytes == 26 and
+  .prompt_sha256 == $digest and .prompt_bytes == 26 and .effort == "high" and
   .unsafe_auto == false and .context_isolation == false and
+  (.argv | index("-c")) as $effort_index |
+  $effort_index != null and
+  .argv[$effort_index + 1] == "model_reasoning_effort=\"high\"" and
   (.argv | index("--dangerously-bypass-approvals-and-sandbox") == null) and
   (.argv | index("--ephemeral") == null)' \
   <<< "$plan" >/dev/null || fail 'safe Codex plan has the wrong custody fields'

@@ -9065,6 +9065,7 @@ type provider_plan = {
   plan_session_id : string;
   plan_provider_session : string;
   plan_model : string;
+  plan_effort : string;
   plan_unsafe_auto : bool;
   plan_context_isolation : bool;
   plan_prompt_transport : string;
@@ -9288,6 +9289,15 @@ let provider_model_args spec model =
     | "claude" | "grok" | "cursor" | "opencode" -> [ "--model"; model ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
+let provider_effort_args spec effort =
+  if effort = "" then []
+  else if not (List.mem effort [ "low"; "medium"; "high"; "xhigh"; "max"; "ultra" ])
+  then failf "invalid-provider-effort:%s" effort
+  else
+    match spec.provider_id with
+    | "codex" -> [ "-c"; Printf.sprintf "model_reasoning_effort=\"%s\"" effort ]
+    | _ -> failf "provider-effort-unavailable:%s" spec.provider_id
+
 let provider_unsafe_args spec enabled =
   if not enabled then []
   else
@@ -9315,8 +9325,9 @@ let provider_context_isolation_args spec enabled =
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
 let provider_argv spec lifecycle executable mode cwd session_id provider_session
-    model unsafe_auto context_isolation prompt =
+    model effort unsafe_auto context_isolation prompt =
   let model_args = provider_model_args spec model in
+  let effort_args = provider_effort_args spec effort in
   let unsafe_args = provider_unsafe_args spec unsafe_auto in
   let context_args =
     if lifecycle = "persistent" && context_isolation then
@@ -9327,11 +9338,11 @@ let provider_argv spec lifecycle executable mode cwd session_id provider_session
   | "codex", "turn", "new" ->
       [ executable; "exec"; "--json"; "--color"; "never";
         "--skip-git-repo-check"; "-C"; cwd ]
-      @ context_args @ model_args @ unsafe_args @ [ prompt ]
+      @ context_args @ model_args @ effort_args @ unsafe_args @ [ prompt ]
   | "codex", "turn", "resume" ->
       [ executable; "exec"; "--json"; "--color"; "never";
         "--skip-git-repo-check"; "-C"; cwd ]
-      @ context_args @ model_args @ unsafe_args
+      @ context_args @ model_args @ effort_args @ unsafe_args
       @ [ "resume"; provider_session; prompt ]
   | "claude", "turn", "new" ->
       [ executable; "--print"; "--output-format"; "stream-json"; "--verbose";
@@ -9415,12 +9426,13 @@ let provider_plan cli default_lifecycle =
      && not (provider_uuid session_id)
   then failf "provider-session-id-must-be-uuid:%s" spec.provider_id;
   let model = Option.value ~default:"" (optional cli "--model") in
+  let effort = Option.value ~default:"" (optional cli "--effort") in
   let unsafe_auto = flag cli "--unsafe-auto" in
   let context_isolation = flag cli "--isolate-context" in
   let prompt = provider_prompt cli in
   let argv =
     provider_argv spec lifecycle executable mode cwd session_id provider_session
-      model unsafe_auto context_isolation prompt
+      model effort unsafe_auto context_isolation prompt
   in
   let prompt_transport =
     if lifecycle = "persistent"
@@ -9434,6 +9446,7 @@ let provider_plan cli default_lifecycle =
     plan_mode = mode; plan_executable = executable;
     plan_cwd = cwd; plan_session_id = session_id;
     plan_provider_session = provider_session; plan_model = model;
+    plan_effort = effort;
     plan_unsafe_auto = unsafe_auto; plan_context_isolation = context_isolation;
     plan_prompt_transport = prompt_transport;
     plan_prompt = prompt; plan_argv = argv }
@@ -9452,7 +9465,7 @@ let redacted_provider_argv plan =
 
 let provider_plan_json plan =
   Printf.sprintf
-    "{\"schema\":%s,\"provider\":%s,\"lifecycle\":%s,\"stdin_authority\":%s,\"prompt_transport\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
+    "{\"schema\":%s,\"provider\":%s,\"lifecycle\":%s,\"stdin_authority\":%s,\"prompt_transport\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"effort\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
     (json_quote provider_abi_schema) (json_quote plan.plan_spec.provider_id)
     (json_quote plan.plan_lifecycle) (json_quote plan.plan_stdin_authority)
     (json_quote plan.plan_prompt_transport)
@@ -9461,6 +9474,7 @@ let provider_plan_json plan =
     (json_quote plan.plan_spec.provider_session_binding)
     (json_quote plan.plan_session_id) (json_quote plan.plan_provider_session)
     (json_quote plan.plan_cwd) (json_quote plan.plan_model)
+    (json_quote plan.plan_effort)
     (if plan.plan_unsafe_auto then "true" else "false")
     (if plan.plan_context_isolation then "true" else "false")
     (String.length plan.plan_prompt) (json_quote (sha256 plan.plan_prompt))
@@ -9472,10 +9486,11 @@ let provider_plan_command cli =
   if flag cli "--json" then Printf.printf "%s\n%!" (provider_plan_json plan)
   else
     Printf.printf
-      "LOOM_PROVIDER_PLAN schema=%s provider=%s lifecycle=%s stdin_authority=%s prompt_transport=%s mode=%s stream=%s credential_authority=native session_binding=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
+      "LOOM_PROVIDER_PLAN schema=%s provider=%s lifecycle=%s stdin_authority=%s prompt_transport=%s mode=%s stream=%s credential_authority=native session_binding=%s effort=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
       provider_abi_schema plan.plan_spec.provider_id plan.plan_lifecycle
       plan.plan_stdin_authority plan.plan_prompt_transport plan.plan_mode
       plan.plan_spec.provider_stream plan.plan_spec.provider_session_binding
+      plan.plan_effort
       (String.length plan.plan_prompt) (sha256 plan.plan_prompt)
       (command_argv_digest (Array.of_list plan.plan_argv))
       (if plan.plan_unsafe_auto then "true" else "false")
@@ -10881,7 +10896,7 @@ let fleet_enroll_command cli =
       let unsafe_auto = flag cli "--unsafe-auto" in
       ignore
         (provider_argv provider "persistent" executable provider_mode cwd
-           session_id provider_session model unsafe_auto false prompt);
+           session_id provider_session model "" unsafe_auto false prompt);
       (prompt, fleet_prompt_path root slot, sha256 prompt, session_id,
        provider_mode, provider_session,
        fleet_coordination_dir cli, model, unsafe_auto))
@@ -11227,7 +11242,7 @@ let fleet_transfer_source_argv transfer =
     | None -> failf "provider-executable-not-found:%s" source.fleet_kind
   in
   provider_argv provider "persistent" executable "resume" source.fleet_cwd
-    transfer.custody_source_session transfer.custody_source_session "" false
+    transfer.custody_source_session transfer.custody_source_session "" "" false
     false ""
 
 let fleet_transfer_source_plan transfer =
@@ -11702,7 +11717,7 @@ let fleet_transfer_stage root _cwd cli =
   ignore
     (provider_argv provider "persistent" executable "resume" source.fleet_cwd
        loom_session
-       provider_session model unsafe_auto false prompt);
+       provider_session model "" unsafe_auto false prompt);
   mkdir_p (Filename.dirname paths.transfer_prompt_path);
   atomic_write paths.transfer_prompt_path prompt;
   let target =
@@ -13675,6 +13690,8 @@ let usage () =
     "  serve write mode: --bind 127.0.0.1 --write-agent A --write-lane L\n";
   Printf.eprintf
     "  provider-start accepts --wait to observe the turn until terminal state\n";
+  Printf.eprintf
+    "  provider-plan/provider-start accept --effort low|medium|high|xhigh|max|ultra\n";
   Printf.eprintf
     "  hook-generation-reconcile --cwd DIR --agent A --lane L [--apply]\n";
   Printf.eprintf

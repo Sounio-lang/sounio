@@ -134,7 +134,7 @@ extension ReceiptStatus {
         case .running: LoomColor.green
         case .fallback: LoomColor.amber
         case .planned: LoomColor.violet
-        case .refused: LoomColor.red
+        case .refused, .failed: LoomColor.red
         }
     }
 }

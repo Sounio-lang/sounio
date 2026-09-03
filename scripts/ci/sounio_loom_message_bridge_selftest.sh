@@ -8,6 +8,8 @@ TOKEN_FILE="$TEST_ROOT/token.cap"
 BRIDGE_LOG="$TEST_ROOT/bridge.log"
 BRIDGE_PID=''
 BASE_URL=''
+PROVIDER_FIXTURE_LOG="$TEST_ROOT/provider-fixture.log"
+CODEX_SESSIONS="$TEST_ROOT/codex-sessions"
 SECRET='4bdf72c971154463b928f6d64c8cb5cab245107657fc93dd9d9bcc50e7e7b186'
 MESSAGE='message bridge isolated acceptance canary'
 
@@ -32,7 +34,14 @@ trap cleanup EXIT
 http_status() {
   local output="$1"
   shift
-  curl --silent --show-error --max-time 5 --output "$output" \
+  curl --silent --show-error --max-time 15 --output "$output" \
+    --write-out '%{http_code}' "$@"
+}
+
+route_http_status() {
+  local output="$1"
+  shift
+  curl --silent --show-error --max-time 75 --output "$output" \
     --write-out '%{http_code}' "$@"
 }
 
@@ -82,6 +91,24 @@ fi
 grep -q 'remote message bridge bind requires --allow-remote' \
   "$TEST_ROOT/remote-bind.out" || fail 'remote bind refusal omitted its reason'
 
+mkdir -p "$CODEX_SESSIONS/2026/09/03"
+printf '%s\n' \
+  '{"timestamp":"2026-09-03T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1788479999}}}}' \
+  >"$CODEX_SESSIONS/2026/09/03/route.jsonl"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'case "${1:-}" in' \
+  '  provider-status) printf '\''%s\n'\'' '\''{"schema":"loom-provider-abi-v1","status":{"provider":"codex","installed":true,"auth":"authenticated"}}'\'' ;;' \
+  '  provider-plan) printf '\''%s\n'\'' '\''{"schema":"loom-provider-plan-fixture-v1","provider":"codex","role":"REVIEW_ONLY"}'\'' ;;' \
+  '  provider-start) printf '\''provider-start\n'\'' >>"$SOUNIO_LOOM_PROVIDER_FIXTURE_LOG" ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"$TEST_ROOT/provider-fixture"
+chmod 0700 "$TEST_ROOT/provider-fixture"
+
+SOUNIO_LOOM_COMMAND="$TEST_ROOT/provider-fixture" \
+SOUNIO_LOOM_CODEX_SESSIONS_DIR="$CODEX_SESSIONS" \
+SOUNIO_LOOM_PROVIDER_FIXTURE_LOG="$PROVIDER_FIXTURE_LOG" \
 "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
   --routing-state-dir "$TEST_ROOT/routing-state" \
   --agent loom-ui-test --lane apple-client-test --bind 127.0.0.1 --port 0 \
@@ -232,6 +259,58 @@ status="$(http_status "$TEST_ROOT/routing-duplicate.json" --request PUT \
 [[ "$status" == 400 ]] || fail "duplicate routing pool returned HTTP $status"
 grep -q 'message-bridge-routing-pool-order-duplicate' "$TEST_ROOT/routing-duplicate.json" ||
   fail 'duplicate routing pool refusal omitted its reason'
+
+route_task='{"schema":"loom-route-task-v1","taskId":"route-positive","kind":"review","title":"Review evidence","prompt":"Report risks without changing files."}'
+status="$(route_http_status "$TEST_ROOT/route-positive.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$route_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "positive route returned HTTP $status"
+grep -q '"schema":"loom-route-operation-v1"' "$TEST_ROOT/route-positive.json" ||
+  fail 'positive route omitted operation schema'
+grep -q '"status":"running"' "$TEST_ROOT/route-positive.json" ||
+  fail 'positive route did not confirm provider custody'
+grep -q '"producingLanguage":"Sounio"' "$TEST_ROOT/route-positive.json" ||
+  fail 'positive route did not preserve Sounio semantic authority'
+grep -q '"providerRole":"REVIEW_ONLY"' "$TEST_ROOT/route-positive.json" ||
+  fail 'positive route promoted the provider role'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
+  fail 'positive route did not launch exactly one provider fixture'
+
+rm "$CODEX_SESSIONS/2026/09/03/route.jsonl"
+unknown_task='{"schema":"loom-route-task-v1","taskId":"route-unknown","kind":"review","title":"Unknown quota","prompt":"This route must remain closed."}'
+status="$(route_http_status "$TEST_ROOT/route-unknown.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$unknown_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "unknown quota route returned HTTP $status"
+grep -q '"reason":"quota-unknown"' "$TEST_ROOT/route-unknown.json" ||
+  fail 'unknown quota did not produce Sounio DENY608'
+grep -q '"status":"refused"' "$TEST_ROOT/route-unknown.json" ||
+  fail 'unknown quota did not fail closed'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
+  fail 'unknown quota launched a provider'
+
+printf '%s\n' \
+  '{"timestamp":"2026-09-03T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1788479999}}}}' \
+  >"$CODEX_SESSIONS/2026/09/03/route.jsonl"
+ownership_task='{"schema":"loom-route-task-v1","taskId":"route-ownership","kind":"write","title":"Forbidden write","prompt":"This must never launch."}'
+status="$(route_http_status "$TEST_ROOT/route-ownership.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "$ownership_task" "$BASE_URL/v1/routing/tasks")"
+[[ "$status" == 200 ]] || fail "ownership route returned HTTP $status"
+grep -q '"reason":"ownership-block"' "$TEST_ROOT/route-ownership.json" ||
+  fail 'write-shaped route did not produce Sounio DENY607'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
+  fail 'ownership refusal launched a provider'
+
+python_frame='9032 3 1 1 1 1 1 1 1 1 0 1 1 1 1 0 1 1 1 7 8 6 6 0 0 0 0 0 0 0'
+printf '%s\n' "$python_frame" | \
+  "$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-routing-authority-runtime" \
+  >"$TEST_ROOT/python-oracle-deny.out"
+grep -q 'DENY code=617 reason=language-role-forbidden' \
+  "$TEST_ROOT/python-oracle-deny.out" ||
+  fail 'Sounio did not deny the deliberate Python oracle frame'
+[[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
+  fail 'Python oracle denial launched a provider'
 
 grep -q 'LOOM_MESSAGE_DECISION decision=ALLOW' "$BRIDGE_LOG" ||
   fail 'bridge did not audit its ALLOW decision'

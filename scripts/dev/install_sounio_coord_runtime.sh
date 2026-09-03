@@ -151,6 +151,30 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" loom_message_runtime_sha256 \
       "$version_dir/bin/sounio-loom-message-runtime"
   fi
+  if grep -q '^capability=loom-routing-authority-v1$' "$manifest"; then
+    local routing_capsule="$version_dir/policy/routing-authority"
+    local routing_freeze="$routing_capsule/tools/loom/routing_authority.freeze.v1"
+    local routing_source="$routing_capsule/stdlib/coordination/loom_routing_authority.sio"
+    local routing_entrypoint="$routing_capsule/tools/loom/routing_authority_main.sio"
+    [[ -x "$version_dir/bin/sounio-loom-routing-authority-runtime" && \
+      -f "$routing_capsule/tools/loom/routing_authority.freeze.v1" && \
+      -f "$routing_capsule/stdlib/coordination/loom_routing_authority.sio" && \
+      -f "$routing_capsule/tools/loom/routing_authority_main.sio" ]] || \
+      die "installed runtime declares routing authority but omits frozen Sounio action 9032: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_routing_authority_action)" == 9032 && \
+      "$(manifest_value "$manifest" loom_routing_authority_semantics_sha256)" == \
+        edd7944d759a398589e2c4a5f0798f1d3df79e68c514d3b0e4081a94c9c32fb1 ]] || \
+      die "installed routing authority is not bound to frozen Sounio semantics: $runtime_id"
+    [[ "$(sha256sum "$routing_freeze" | awk '{print $1}')" == \
+      "$(manifest_value "$manifest" loom_routing_authority_manifest_sha256)" && \
+      "$(sha256sum "$routing_source" | awk '{print $1}')" == \
+        "$(manifest_value "$routing_freeze" source_sha256)" && \
+      "$(sha256sum "$routing_entrypoint" | awk '{print $1}')" == \
+        "$(manifest_value "$routing_freeze" entrypoint_sha256)" ]] || \
+      die "installed routing authority policy capsule drifted: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_routing_authority_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-routing-authority-runtime"
+  fi
   if grep -q '^capability=loom-transactional-custody-transfer-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-custody-transfer-runtime" ]] || \
@@ -895,6 +919,7 @@ fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
 fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+loom_routing_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_routing_authority.sh"
 loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
 loom_native_hook_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_cutover.sh"
 loom_custody_transfer_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_custody_transfer.sh"
@@ -918,6 +943,12 @@ loom_message_dune="$loom_project/message_bridge/dune"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
 loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
+loom_routing_garden="$SOURCE_ROOT/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md"
+loom_routing_entrypoint="$SOURCE_ROOT/tools/loom/routing_authority_main.sio"
+loom_routing_module="$SOURCE_ROOT/stdlib/coordination/loom_routing_authority.sio"
+loom_routing_freeze="$SOURCE_ROOT/tools/loom/routing_authority.freeze.v1"
+loom_routing_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_selftest.sh"
+loom_routing_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_freeze_selftest.sh"
 loom_native_hook_cutover_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_cutover_authority_main.sio"
 loom_native_hook_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_cutover_authority.sio"
 loom_native_hook_cutover_freeze="$SOURCE_ROOT/tools/loom/native_hook_cutover.freeze.v1"
@@ -1093,6 +1124,8 @@ loom_change_sources=(
 [[ -x "$fleet_trace_verifier" ]] || \
   die "fleet trace verifier missing or not executable: $fleet_trace_verifier"
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
+[[ -x "$loom_routing_build_source" ]] || \
+  die "Loom routing-authority build entrypoint missing or not executable: $loom_routing_build_source"
 [[ -x "$loom_language_authority_build_source" ]] || \
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
 [[ -x "$loom_native_hook_cutover_build_source" ]] || \
@@ -1142,6 +1175,10 @@ loom_change_sources=(
   -f "$loom_language_authority_module" && \
   -f "$loom_language_authority_freeze" ]] || \
   die "Loom frozen Sounio language-authority source bundle is incomplete"
+[[ -f "$loom_routing_garden" && -f "$loom_routing_entrypoint" && \
+  -f "$loom_routing_module" && -f "$loom_routing_freeze" && \
+  -x "$loom_routing_gate" && -x "$loom_routing_freeze_gate" ]] || \
+  die "Loom frozen Sounio routing-authority source bundle is incomplete"
 [[ -f "$loom_native_hook_cutover_entrypoint" && \
   -f "$loom_native_hook_cutover_module" && \
   -f "$loom_native_hook_cutover_freeze" && \
@@ -1285,6 +1322,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_message_binary="$loom_project/_build/default/message_bridge/loom_message_bridge.exe"
+loom_routing_binary="$loom_project/_build/default/src/sounio-loom-routing-authority-runtime"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
 loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
 loom_native_hook_generation_drain_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-drain"
@@ -1309,6 +1347,15 @@ loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-ex
 loom_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-change-kernel"
 loom_material_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-material-change"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_routing_binary" ]] || \
+  die "Loom build omitted frozen Sounio routing-authority action 9032"
+loom_routing_expected_sha="$(manifest_value "$loom_routing_freeze" executable_sha256)"
+[[ "$(sha256sum "$loom_routing_binary" | awk '{print $1}')" == \
+  "$loom_routing_expected_sha" ]] || \
+  die "Loom Sounio action 9032 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_routing_binary")" == \
+  'SOUNIO_ROUTING_AUTHORITY_SELFTEST PASS cases=29' ]] || \
+  die "Loom Sounio action 9032 failed its install probe"
 [[ -x "$loom_native_hook_generation_drain_binary" ]] || \
   die "Loom build omitted frozen Sounio action 9046"
 loom_native_hook_generation_drain_expected_sha="$(
@@ -1590,6 +1637,9 @@ bundle_sources=(
   "$fleet_source" "$fleetd_source" "$fleet_model_source"
   "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
   "$loom_build_source" "$loom_language_authority_build_source"
+  "$loom_routing_build_source" "$loom_routing_garden" "$loom_routing_entrypoint"
+  "$loom_routing_module" "$loom_routing_freeze" "$loom_routing_gate"
+  "$loom_routing_freeze_gate"
   "$loom_message_source" "$loom_message_dune"
   "$loom_language_authority_entrypoint" "$loom_language_authority_module"
   "$loom_language_authority_freeze"
@@ -1722,6 +1772,8 @@ else
   mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal" \
     "$stage/policy/language-authority/tools/loom" \
     "$stage/policy/language-authority/stdlib/coordination" \
+    "$stage/policy/routing-authority/tools/loom" \
+    "$stage/policy/routing-authority/stdlib/coordination" \
     "$stage/policy/native-hook-cutover/tools/loom" \
     "$stage/policy/native-hook-cutover/stdlib/coordination" \
     "$stage/policy/native-hook-cutover/configs" \
@@ -1742,6 +1794,16 @@ else
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
+  install -m 0555 "$loom_routing_binary" \
+    "$stage/bin/sounio-loom-routing-authority-runtime"
+  install -m 0444 "$loom_routing_garden" \
+    "$stage/policy/routing-authority/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md"
+  install -m 0444 "$loom_routing_freeze" \
+    "$stage/policy/routing-authority/tools/loom/routing_authority.freeze.v1"
+  install -m 0444 "$loom_routing_entrypoint" \
+    "$stage/policy/routing-authority/tools/loom/routing_authority_main.sio"
+  install -m 0444 "$loom_routing_module" \
+    "$stage/policy/routing-authority/stdlib/coordination/loom_routing_authority.sio"
   install -m 0555 "$loom_sovereign_binary" \
     "$stage/bin/sounio-loom-sovereign-execution-kernel"
   install -m 0555 "$loom_change_binary" \
@@ -2020,6 +2082,12 @@ else
   loom_message_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-message-runtime" | awk '{print $1}'
   )"
+  loom_routing_authority_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-routing-authority-runtime" | awk '{print $1}'
+  )"
+  loom_routing_authority_manifest_sha256="$(
+    sha256sum "$stage/policy/routing-authority/tools/loom/routing_authority.freeze.v1" | awk '{print $1}'
+  )"
   loom_language_authority_policy_manifest_sha256="$(
     sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1" | awk '{print $1}'
   )"
@@ -2096,6 +2164,15 @@ else
       "$loom_language_authority_policy_source_sha256"
     printf 'loom_language_authority_policy_entrypoint_sha256=%s\n' \
       "$loom_language_authority_policy_entrypoint_sha256"
+    printf 'loom_routing_authority_language=Sounio\n'
+    printf 'loom_routing_authority_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_routing_authority_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_routing_authority_action=9032\n'
+    printf 'loom_routing_authority_semantics_sha256=edd7944d759a398589e2c4a5f0798f1d3df79e68c514d3b0e4081a94c9c32fb1\n'
+    printf 'loom_routing_authority_manifest_sha256=%s\n' \
+      "$loom_routing_authority_manifest_sha256"
+    printf 'loom_routing_authority_runtime_sha256=%s\n' \
+      "$loom_routing_authority_runtime_sha256"
     printf 'loom_native_hook_cutover_language=Sounio\n'
     printf 'loom_native_hook_cutover_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_native_hook_cutover_operational_attachment=OCaml\n'
@@ -2247,6 +2324,7 @@ else
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-authenticated-message-bridge-v1\n'
     printf 'capability=loom-thread-truth-v1\n'
+    printf 'capability=loom-routing-authority-v1\n'
     printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'

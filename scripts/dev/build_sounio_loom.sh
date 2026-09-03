@@ -200,6 +200,8 @@ SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_change_kernel.sh"
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_material_change.sh"
+SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
+  "$SCRIPT_DIR/build_sounio_loom_routing_authority.sh"
 if [[ -z "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   prepare_frozen_toolchain

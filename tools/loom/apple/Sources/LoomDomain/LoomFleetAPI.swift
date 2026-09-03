@@ -357,6 +357,16 @@ public struct LoomMessageClient: Sendable {
         return request
     }
 
+    private func authorizedRequest(
+        path: String,
+        method: String,
+        timeout: TimeInterval
+    ) -> URLRequest {
+        var request = authorizedRequest(path: path, method: method)
+        request.timeoutInterval = timeout
+        return request
+    }
+
     private func checkedResponse<T: Decodable>(
         _ request: URLRequest,
         expectedStatus: Int = 200,
@@ -472,5 +482,25 @@ public struct LoomMessageClient: Sendable {
             throw LoomMessageClientError.invalidReceipt
         }
         return receipt
+    }
+
+    public func route(_ task: LoomRouteTaskRequest) async throws -> LoomRouteOperation {
+        var request = authorizedRequest(
+            path: "v1/routing/tasks",
+            method: "POST",
+            timeout: 75
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(task)
+        let operation = try await checkedResponse(request, as: LoomRouteOperation.self)
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == task.taskId,
+              operation.receipt.taskId == task.taskId,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
     }
 }
