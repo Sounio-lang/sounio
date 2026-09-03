@@ -279,7 +279,7 @@ function inferAudienceFromSlug(slug) {
 }
 
 function defaultWebsiteValidation(collection, ownerAgent, websiteSlug) {
-  const commands = ['bash scripts/check_docs_registry.sh'];
+  const commands = ['bash scripts/dev/check_docs_registry.sh'];
 
   if (collection === 'docs') {
     commands.push('node website/scripts/check-docs-parity.mjs');
@@ -446,14 +446,14 @@ function inferRepoTopicDetails(relPath) {
 }
 
 function defaultRepoValidation(relPath, ownerAgent, authority) {
-  const commands = ['bash scripts/check_docs_registry.sh'];
+  const commands = ['bash scripts/dev/check_docs_registry.sh'];
 
   if (authority !== 'historical' && authority !== 'archived') {
-    commands.push('bash scripts/check_docs_consistency.sh');
+    commands.push('bash scripts/dev/check_docs_consistency.sh');
   }
 
   if (ownerAgent === 'A4' || ownerAgent === 'A5') {
-    commands.push('bash scripts/fast_gate.sh');
+    commands.push('bash scripts/dev/fast_gate.sh');
   }
 
   if (ownerAgent === 'A6' && relPath.startsWith('paper/')) {
@@ -970,6 +970,9 @@ export function formatAcceptanceReport(registry) {
   }
   lines.push(
     `- English-only website collections allowed by policy and marked in the registry: ${englishOnlyCollections.join('; ')}`
+  );
+  lines.push(
+    '- Locale coverage above measures file presence only, not translation freshness or quality. See `website/i18n/AUDIT-2026-04-20.md` (or its successor) for per-locale translation status.'
   );
 
   lines.push('', '## Evidence-Bearing Topics', '');

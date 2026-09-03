@@ -2,7 +2,7 @@
 
 ## Locales
 
-Configured in [astro.config.mjs](../astro.config.mjs) and [src/lib/i18n.ts](../src/lib/i18n.ts): `en` (default, unprefixed), `pt`, `el`, `zh`, `ja`, `es`.
+Configured in [astro.config.mjs](../astro.config.mjs) and [src/lib/i18n.ts](../src/lib/i18n.ts): `en` (default, unprefixed), `pt`, `el`, `zh`, `ja`, `es`, `zh-hk`.
 
 ## "Fully localized" flag
 
