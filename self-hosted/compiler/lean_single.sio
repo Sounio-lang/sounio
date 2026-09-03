@@ -2050,6 +2050,11 @@ var CONST_NE: [i64; 4096] = [0; 4096]
 var CONST_VAL: [i64; 4096] = [0; 4096]
 var CONST_TYPE: [i64; 4096] = [0; 4096]
 var CONST_TOK_IDX: [i64; 4096] = [0; 4096]
+// Sign of a module-level f64 constant. It cannot live in CONST_VAL: an f64
+// constant is rebuilt at the use site from the LITERAL TOKEN's magnitude
+// (TV/TF/TD/TX), and the token text carries no sign, so a negation recorded in
+// the integer field was silently discarded on every f64.
+var CONST_NEG: [i64; 4096] = [0; 4096]
 var CONST_COUNT: i64 = 0
 var CONST_FOUND_VAL: i64 = 0
 var CONST_FOUND_IDX: i64 = 0
@@ -7472,7 +7477,7 @@ fn cfold_expr_at(p: i64) -> i64 with Panic, Mut, Div {
     return v
 }
 
-fn scan_all_consts() with Panic, Mut, Div {
+fn scan_all_consts() with IO, Panic, Mut, Div {
     CONST_COUNT = 0
     var p: i64 = 0
     var cv: i64 = 0
@@ -7530,12 +7535,32 @@ fn scan_all_consts() with Panic, Mut, Div {
             if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
             if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
             if TK[p as usize] == 53 { cty = 2; ctok = p; p = p + 1 }
+            // `0.0 - X` is how this language writes a negative float, and it
+            // arrived here as the literal `0.0` with `- X` dropped on the floor:
+            // the constant became 0.0 and nothing said so. Recognise the idiom.
+            // (The integer folder above never sees this form -- it does not
+            // accept a float literal as a first token.)
+            if cty == 2 && ctok >= 0 && TV[ctok as usize] == 0 && TF[ctok as usize] == 0
+                && p + 1 < TC && TK[p as usize] == 18 && TK[(p + 1) as usize] == 53 {
+                p = p + 1
+                ctok = p
+                neg_c = 1
+                p = p + 1
+            }
+            // Anything still arithmetic here is an initializer this path cannot
+            // represent, and the tokens would be dropped in silence -- which is
+            // the defect this block is being fixed for. Refuse instead.
+            if cty == 2 && p < TC && (TK[p as usize] == 17 || TK[p as usize] == 18
+                || TK[p as usize] == 19 || TK[p as usize] == 20) {
+                tc_error_hard(p, "a module-level `let` of type f64 takes a literal or `0.0 - literal`; this initializer would be silently truncated")
+            }
             if neg_c != 0 { cv = 0 - cv }
             CONST_NS[CONST_COUNT as usize] = cn_ns
             CONST_NE[CONST_COUNT as usize] = cn_ne
             CONST_VAL[CONST_COUNT as usize] = cv
             CONST_TYPE[CONST_COUNT as usize] = cty
             CONST_TOK_IDX[CONST_COUNT as usize] = ctok
+            CONST_NEG[CONST_COUNT as usize] = neg_c
             CONST_COUNT = CONST_COUNT + 1
             continue
         }
@@ -16804,6 +16829,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                                 }
                             }
                             em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                            // The sign the literal token could not carry. Same
+                            // instruction the unary-minus path uses on f64.
+                            if CONST_NEG[ci as usize] != 0 {
+                                em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
+                            }
                             EXPR_TY = 2
                             EXPR_TY_HASH = 0
                             EXPR_IS_F64 = 1
@@ -35786,6 +35816,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                                     while FL_SCI_SCRATCH > 0 { em32(0x1E611800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fdiv d0, d0, d1
                                 }
                             }
+                            // Same sign fix as the x86 site, in the FP register
+                            // where a64 already has the value: fneg d0, d0 is
+                            // what the a64 unary-minus path emits.
+                            if CONST_NEG[ci as usize] != 0 { em32(0x1E614000) }
                             em32(0x9E660000)  // fmov x0, d0
                             EXPR_TY = 2; EXPR_TY_HASH = 0; EXPR_IS_F64 = 1
                         } else {
