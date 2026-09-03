@@ -2,7 +2,7 @@
 topic_id: repo.docs.internal.concepts.precision-preservation
 authority: repo_only
 audience: users
-last_validated: 2026-08-27
+last_validated: 2026-09-02
 validated_by: claude-1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.precision-preservation
 -->
@@ -60,7 +60,7 @@ double-double, and quad-double paths are scientific surfaces.
 former segmentation fault but native emission still fails closed on classified
 paths. This is a compiler frontier, not permission to demote precision.
 
-## Measured ladder (re-measured 2026-08-27 against `origin/main` @ `055825a3f9`)
+## Measured ladder (re-measured 2026-09-02 against `main` @ `27e1aef520`)
 
 `TypeKind` variants that name a width
 (`git grep -ohE '\bTy(F|I|U)[0-9]+\b' -- self-hosted/`):
@@ -69,8 +69,8 @@ paths. This is a compiler frontier, not permission to demote precision.
 
 The enum is no longer the whole integer ladder. Since PR #2054 (merged
 2026-08-20) the checker parses **arbitrary** `iN`/`uN` names — `name_wide_int_bits`
-(`self-hosted/check/compat.sio:1401`) accepts `i`/`u` followed by decimal digits,
-and `ty_wide_int` (`self-hosted/check/types.sio:386`) represents any width by
+(`self-hosted/check/compat.sio:1429`) accepts `i`/`u` followed by decimal digits,
+and `ty_wide_int` (`self-hosted/check/types.sio:394`) represents any width by
 reusing the `TyI128`/`TyU128` kind and carrying the declared bit-width in the
 otherwise-unused `clifford_p` field. A width therefore no longer needs an enum
 variant to exist.
@@ -79,7 +79,7 @@ variant to exist.
 |---|---|---|---|---|
 | signed | `i8 i32 i64 i128` · **`i256` `i512`** | any other `iN` (`N > 64`) | — | — |
 | unsigned | `u8 u32 u64 u128` | **`u256` `u512`**, and any other `uN` (`N > 64`) | — | — |
-| float | `f32 f64` | — | `f128` `f256` (`E218`) | — |
+| float | `f32 f64` | — | `f128` `f256` (`E249`) | — |
 
 What "with a witness" means for `i256`/`i512`: named binary-format descriptors
 (`numeric_format_int256_id()` = `1256`, `numeric_format_int512_id()` = `1512`,
@@ -122,5 +122,5 @@ reservation.
 - Do not claim `u256`/`u512` compute correctly. The checker accepts them; no
   fixture measures them.
 - Do not cite `f128`/`f256` as available. They are `Reserved`: every use is
-  refused with `E218`, and a refuse-fixture pair records that
+  refused with `E249`, and a refuse-fixture pair records that
   (`tests/typekind/index.tsv`).
