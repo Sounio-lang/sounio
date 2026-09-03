@@ -31,6 +31,12 @@
 #   7. the ELF LOAD BASE ADDRESS 0x400000 (4194304) was NOT rewritten as a capacity.
 #      It numerically collides with the retired 4 MiB ELF tier and must stay a
 #      plain literal argument — this clause is the regression guard for that trap.
+#   9. NC_BIG_RODATA (flat rodata: string/constant data) is fail-closed with its
+#      own rc=23. History: append sites bound-checked the write but never set an
+#      overflow flag, so self-hosted/compiler/main.sio silently truncated string
+#      data past the 256 KiB cap with no error -- the ELF still wrote and still
+#      ran, reading stale/zero BSS through pointers into the never-written tail.
+#      Measured need 963,478 bytes; raised to 2 MiB with headroom (#2393).
 #
 # Static only: it does not run the compiler. rc=20 firing end-to-end is proven in
 # the commit that introduced this gate (capacity temporarily lowered in a scratch
@@ -41,13 +47,14 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$(dirname "$SELF")")")"
 CHECKER="$ROOT/scripts/ci/native_capacity_tiers_check.py"
 
-EXPECT_CODE=8388608        # NC_BIG_CODE           8 MiB
-EXPECT_RELOC=131072        # NC_FLAT_RELOC_* x4    131,072 entries
-EXPECT_ELF=16777216        # NC_BIG_ELF            16 MiB
-EXPECT_LEGACY_ELF=16777216 # NATIVE_ELF_BUF        16 MiB
+EXPECT_CODE=134217728       # NC_BIG_CODE           128 MiB
+EXPECT_RELOC=2097152        # NC_FLAT_RELOC_* x4    2,097,152 entries
+EXPECT_ELF=167772160        # NC_BIG_ELF            160 MiB
+EXPECT_LEGACY_ELF=16777216  # NATIVE_ELF_BUF        16 MiB
 ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
 EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn
                            # (must stay >= IR_MAX_INSTRS — see clause 8)
+EXPECT_RODATA=2097152      # NC_BIG_RODATA         2 MiB (rc=23, clause 9)
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'NATIVE_CAPACITY_TIERS_FAIL reason=python3_missing\n' >&2
@@ -62,7 +69,7 @@ fi
 # one in the middle silently rotates every tier that follows it.
 python3 "$CHECKER" "$ROOT" \
   "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR" \
-  "$EXPECT_LABEL"
+  "$EXPECT_LABEL" "$EXPECT_RODATA"
 
 head_sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf not_available)"
 tree_sha="$(git -C "$ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || printf not_available)"
@@ -77,5 +84,5 @@ fi
 
 printf '%s\n' \
   'NATIVE_CAPACITY_TIERS_BOUNDARY declaration_accessor_coherence=proved fail_closed_rc=proved runtime_emission=not_claimed elf_base_addr=preserved'
-printf 'NATIVE_CAPACITY_TIERS_PASS code=%s reloc=%s elf=%s legacy_elf=%s head=%s tree=%s worktree=%s\n' \
-  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$head_sha" "$tree_sha" "$worktree_state"
+printf 'NATIVE_CAPACITY_TIERS_PASS code=%s reloc=%s elf=%s legacy_elf=%s rodata=%s head=%s tree=%s worktree=%s\n' \
+  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$EXPECT_RODATA" "$head_sha" "$tree_sha" "$worktree_state"

@@ -521,6 +521,11 @@ jobs:
       # from source was never run. ~2 s.
       - name: Canonical lean_single fixed point
         run: bash scripts/ci/canonical_compiler_gate.sh
+      # #2363: both explicit-deref nested-store lowering paths must retain the
+      # inner- and outer-struct privacy checks. Four private fixtures reject;
+      # a public nested-store control must still compile and run.
+      - name: lean_single nested private-store regression (#2363)
+        run: bash scripts/ci/lean_single_nested_private_store_gate.sh
       # Archaeology ladders. Position is derived from fixtures, not stored.
       # Measured green on origin/main 1dc0df549d before this wire.
       # effect_archaeology_gate.sh is NOT here: it is red on that SHA
@@ -737,7 +742,14 @@ jobs:
     # Raised again to 35 here because this branch adds three more sub-gates to
     # the same job (precise_stack_maps honesty, FPGA receipt staleness, and the
     # epistemic e-graph reassociation gate).
-    timeout-minutes: 35
+    # Raised again to 75: PR #2393 fixes the native codegen capacity walls
+    # (NC_BIG_CODE, NC_FLAT_RELOC_*) that previously made self-hosted/compiler/main.sio
+    # self-compiling into gen2 fail closed within seconds (rc=19/rc=20). It now
+    # actually runs the full multi-minute gen2 self-compile on every PR that
+    # reaches this gate, measured 20+ min for that step alone on a 4-core
+    # GH-hosted runner (it was previously never reached). 35 min was cancelled
+    # mid-compile with rc=0 errors=0 already achieved for the cheaper check rung.
+    timeout-minutes: 75
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -765,16 +777,13 @@ jobs:
       # that ends in a fixed point. These two size the remaining distance, and
       # both reuse the ELF above rather than building anything.
       #
-      # The capacity probe is REPORT_ONLY here on purpose. It is red by
-      # construction today — main.sio's 97-module closure declares 9404
-      # functions against IR_MAX_FUNCS=2048 — and a step that is red for a
-      # known architectural reason teaches CI readers to ignore red. Drop the
-      # flag the moment Stage 6 lands; until then the number is recorded on
-      # every run so movement is visible in the log.
-      - name: Madaros IR capacity probe (report-only until Stage 6)
+      # The closure census is now below the source-declared capacity. Keep this
+      # strict alongside the fixed-point gate's authoritative merged-count
+      # guard; declarations and generated merged functions are different
+      # measurements, and either reaching the source cap is red.
+      - name: Madaros IR capacity probe
         env:
           MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-          SOUNIO_IR_CAPACITY_PROBE_REPORT_ONLY: "1"
         run: bash scripts/ci/madaros_ir_capacity_probe.sh
       # Ratcheted, and red in BOTH directions: falling short of the recorded
       # rung is a regression, exceeding it is progress that must be written
@@ -800,6 +809,9 @@ jobs:
         env:
           MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
           SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
+          # Keep the reusable gate's local default at 40, but retain the
+          # independently reproduced progress in CI.
+          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
         run: bash scripts/ci/madaros_fixed_point_gate.sh
       - name: Run changed Madaros tests with the current-source compiler
         env:
