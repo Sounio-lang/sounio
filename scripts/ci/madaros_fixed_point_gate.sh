@@ -178,7 +178,18 @@ else
     GEN2_KIND="$(souc_banner "$GEN2")"
     echo "           banner=$GEN2_KIND"
     if [[ "$GEN2_KIND" != "madaros" ]]; then
-      FAIL_DETAIL="gen2 is an ELF but does not run as Madaros (banner=$GEN2_KIND) — the payload is wrong, not merely different"
+      # 2026-09-03: banner=unknown alone does not say WHY -- dump what
+      # souc_banner's own classifier is blind to (exit code, full stdout+stderr,
+      # ELF file(1) classification) so this failure is diagnosable from the
+      # gate log alone instead of needing a second remote round-trip.
+      GEN2_VERSION_RAW="$("$GEN2" --version 2>&1)"
+      GEN2_VERSION_RC=$?
+      echo "           raw_exit_code=$GEN2_VERSION_RC"
+      echo "           raw_output_begin"
+      printf '%s\n' "$GEN2_VERSION_RAW" | sed 's/^/             /'
+      echo "           raw_output_end"
+      echo "           file=$(file -b "$GEN2" 2>&1)"
+      FAIL_DETAIL="gen2 is an ELF but does not run as Madaros (banner=$GEN2_KIND, --version exit=$GEN2_VERSION_RC) — the payload is wrong, not merely different"
     else
       reached run
 

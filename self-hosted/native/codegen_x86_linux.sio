@@ -5218,9 +5218,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = (*nc).flat_rodata_len
     var src = src_start
     var len = (*nc).flat_rodata_len
-    while src < updated.rodata.len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
-        len = len + 1
+    while src < updated.rodata.len {
+        (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
+        if len < nc_flat_rodata_capacity() {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
+            len = len + 1
+        }
         src = src + 1
     }
     (*nc).flat_rodata_len = len
@@ -8381,12 +8384,13 @@ fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_i
     let offset = len
     var i = 0
     let name_len = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).len
-    while i < name_len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name_len + 1
+    while i < name_len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -8398,12 +8402,13 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name.len + 1
+    while i < name.len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -9562,8 +9567,9 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
         (*nc).flat_rodata_len = len
@@ -12480,6 +12486,22 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print_int(NC_V2_LABEL_OVERFLOW_FN)
         print(" (raise nc_v2_label_capacity)\n")
         return 22
+    }
+    // Flat rodata buffer (NC_BIG_RODATA) exceeded its 256 KiB capacity. Unlike
+    // code_overflow/reloc_overflow/label_overflow above, the append sites here
+    // do not set a fail-closed flag themselves -- they silently stop writing
+    // once flat_rodata_len saturates, so string/constant data past the cap is
+    // dropped with no error and the resulting ELF still gets written and still
+    // runs (badly: pointers into the never-written tail read stale/zero BSS).
+    // rodata_overflow_bytes_attempted is a true count (see frame.sio), not an
+    // estimate. Distinct rc from the other three tiers.
+    if nc.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity() {
+        print("Error: native rodata buffer overflow -- rodata_bytes_needed=")
+        print_int(nc.rodata_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_flat_rodata_capacity())
+        print(" (raise nc_flat_rodata_capacity)\n")
+        return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }

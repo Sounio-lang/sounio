@@ -292,9 +292,20 @@ pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 // keeping it in the struct capped .rodata at 8192 bytes (struct-copy cost
 // forbids growth), which silently truncated every literal past the cap —
 // programs with more than ~8KB of string data (e.g. the pure LSP server)
-// miscompiled. 256KB, accessed INLINE only; flat_rodata_len stays in the
-// struct as the cursor.
-pub var NC_BIG_RODATA: [i8; 262144] = [0; 262144]
+// miscompiled. The 256 KiB bump this comment used to describe had the exact
+// same defect at a new scale: append sites bound-checked the write but never
+// set a fail-closed flag, so self-hosted/compiler/main.sio (measured
+// 2026-09-03: needs 963,478 bytes at 13,140 functions) silently truncated
+// past 256 KiB with no error — the ELF still wrote and still ran (badly:
+// pointers into the never-written tail read stale/zero BSS). Raised to 2 MiB
+// with real headroom and a real rc=23 refusal (compile_native_v2_preview_to_file).
+// Accessed INLINE only; flat_rodata_len stays in the struct as the cursor.
+pub var NC_BIG_RODATA: [i8; 2097152] = [0; 2097152]
+
+// Single source of truth for the NC_BIG_RODATA bound. The DECLARATION above
+// must stay a literal (Sounio array sizes are not expressions); every bound
+// CHECK calls this accessor. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
+pub fn nc_flat_rodata_capacity() -> i64 { 2097152 }
 
 // Runtime metadata is also emitted into .data.  Keeping that payload in the
 // inline StringTable truncated stack maps after 8 KiB, even though the compiler
@@ -317,6 +328,15 @@ pub struct NativeCompiler {
     // true total code size the module needed -- the number a capacity bump
     // must be sized against, not a guess.
     pub code_overflow_bytes_attempted: i64,
+    // Total bytes ever attempted into the flat rodata buffer (NC_BIG_RODATA),
+    // counted unconditionally -- including bytes silently dropped once
+    // flat_rodata_len saturates at nc_flat_rodata_capacity(). Unlike
+    // code_overflow/reloc_overflow, the append sites here (native_v2_rodata_
+    // append_updated_tail, native_v2_rodata_append_byte_into) bound-check the
+    // write but do NOT set a fail-closed flag or refuse -- they just stop
+    // writing, silently truncating string/constant data with no error. This
+    // counter is what makes that overflow detectable at all.
+    pub rodata_overflow_bytes_attempted: i64,
     // Set when nc_add_flat_reloc is asked to record a relocation past
     // nc_flat_reloc_capacity(). Mirrors code_overflow: the emitter drops the
     // entry, so the ELF would ship unpatched call/rodata sites (jump to garbage
@@ -447,6 +467,7 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     out.code = code_buffer_new()
     out.code_overflow = false
     out.code_overflow_bytes_attempted = 0
+    out.rodata_overflow_bytes_attempted = 0
     out.reloc_overflow = false
     out.reloc_overflow_count_attempted = 0
     out.label_overflow = false

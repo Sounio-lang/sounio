@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "evidence_kind": "retained_build_logs_and_content_hashes",
+  "topic": "gen2 --version SIGSEGV residual, discovered while chasing BLK-20260901-gen2-40-to-123 past the rc19/rc20 capacity walls fixed in PR #2393",
+  "root_cause": {
+    "summary": "NC_BIG_RODATA (flat rodata: string/constant data), a fixed 256 KiB buffer, had zero fail-closed protection. Four append sites (native_v2_rodata_append_updated_tail, nc_rodata_add_ir_instr_name, nc_rodata_add_name_value, native_v2_rodata_append_byte_into) all bound-checked the write ('if len < 262144') but never set an overflow flag or refused -- once flat_rodata_len saturated at capacity, further string/constant bytes were silently dropped. The compiled ELF still wrote successfully and still reported success; only at runtime did pointers into the never-written tail read stale/zero BSS instead of the intended string content.",
+    "precedent": "The comment above NC_BIG_RODATA's declaration already documented one prior incident of this exact defect at a smaller scale: an earlier 8192-byte struct-embedded cap silently truncated literals for 'the pure LSP server'. The fix at that time (moving to a 256 KiB flat buffer) repeated the same missing-fail-closed-protection mistake, just delaying the next occurrence."
+  },
+  "why_it_was_never_seen_before": "self-hosted/compiler/main.sio (13,140 IR functions after the rc19/rc20 capacity fix) is the first program ever compiled by Madaros's own native_v2 backend large enough to exceed 256 KiB of accumulated string/constant data. No prior native_v2 self-compile of this program ever got far enough to produce a gen2 binary at all (rc19 fired first), so this defect was latent and unmeasured until this session.",
+  "method": "Added a true unconditional counter (rodata_overflow_bytes_attempted) mirroring code_overflow_bytes_attempted/reloc_overflow_count_attempted from the earlier rc19/rc20 fix, instrumented all four append sites, added a new fail-closed check (rc=23) in compile_native_v2_preview_to_file, then measured via a full main.sio self-compile using a gen1 rebuilt from the instrumented source (native_v2 diagnostics only take effect once the COMPILER performing the compile was itself built from source containing them).",
+  "measurement": {
+    "rodata_bytes_needed": 963478,
+    "capacity_before": 262144,
+    "overrun_ratio": 3.67,
+    "capacity_after": 2097152,
+    "headroom_ratio_after_fix": 2.18,
+    "measured_on": "self-hosted/compiler/main.sio, merged_ir_functions=13140, via gpuorangefs-r770-proxmox (32 CPU) and locally on the workspace pod (64 CPU)"
+  },
+  "fix": {
+    "declaration": "NC_BIG_RODATA: [i8; 262144] -> [i8; 2097152] (self-hosted/native/frame.sio)",
+    "accessor_added": "nc_flat_rodata_capacity() -> i64 { 2097152 } (new -- previously all four write sites used a bare 262144 literal with no shared accessor)",
+    "fail_closed_check": "compile_native_v2_preview_to_file (self-hosted/native/codegen_x86_linux.sio): if nc.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity() { print diagnostic; return 23 }",
+    "gate_extended": "scripts/ci/native_capacity_tiers_gate.sh / native_capacity_tiers_check.py now track rodata as a fifth coherence-checked tier (EXPECT_RODATA=2097152), matching the code/reloc/elf/label pattern; rc19's diagnostic-body regex relaxation was reused as precedent for rc23's check."
+  },
+  "verification": {
+    "static_gate": "bash scripts/ci/native_capacity_tiers_gate.sh -> NATIVE_CAPACITY_TIERS_PASS ... rodata=2097152",
+    "rc23_confirmed_fixed": "Re-measured full main.sio self-compile after the capacity raise: rc=0, no rc=23, ELF written cleanly (54,837,704 bytes). Rodata truncation is resolved.",
+    "typecheck": "SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc check self-hosted/compiler/main.sio -> check: OK after every edit"
+  },
+  "residual_not_fixed_by_this": {
+    "id": "gen2-version-sigsegv-after-rodata-fix",
+    "description": "gen2.elf (built with both the rc19/rc20 capacity fix AND this rodata fix applied) STILL segfaults on `gen2 --version` (exit 139). This is a DIFFERENT, third distinct bug -- confirmed via gdb that the crash signature changed after the rodata fix (different faulting address, different register contents), and rc=23 does not fire during the build that produces this crashing binary, ruling out rodata truncation as this crash's cause.",
+    "new_crash_signature": "SIGSEGV inside the same str_eq-shaped comparison loop (movzbq (%rdi),%rax; cmp (%rsi),%al; ...) as the original crash, but this time %rdi = 0x74757074756f2d2d, which decodes (little-endian) to the ASCII bytes \"--output\" -- an 8-byte string literal's raw content, not a valid pointer. %rsi = 0x379038e, a plausible rodata address. The caller chain traces back through a call at 0x343236a (presumed arg_list_get or an argv-adjacent helper) whose OWN return value already contains the packed bytes before reaching the comparison -- i.e. the corruption is upstream of the comparison itself.",
+    "ruled_out": [
+      "NOT rodata truncation (rc=23 does not fire; measured rodata now fits with headroom)",
+      "NOT a generic by-value ArgList struct-copy bug (isolated repro: 64-slot [string;64] struct passed through two function boundaries, populated via literal assignment -- ran correctly, no crash)",
+      "NOT a generic argv/get_arg builtin bug (isolated repro: arg_count()/get_arg() called directly and compared against string literals including empty-string -- ran correctly)",
+      "NOT the short-string OR-comparison pattern in isolation (isolated repro: fn check_flag(arg) { if arg == \"-o\" || arg == \"--output\" { ... } }, called with argv including exactly \"--output\", \"-o\", and a non-matching string -- all three cases ran correctly, no crash)"
+    ],
+    "working_hypothesis": "The bug appears to require the SCALE or CONTEXT of the real ~40,000-line main.sio -- three independent minimal isolations of the apparent failure pattern all ran correctly. Possible directions for a future session: (a) instrument more/all str_eq call sites across main.sio's real argument-parsing code with operand dumps (not just get_args/compiler_mode_has_flag, which were already tried and reverted) and rebuild+run against the REAL binary rather than a repro; (b) bisect main.sio itself by commenting out large unrelated sections and rebuilding, since no synthetic repro has reproduced it after three attempts; (c) investigate whether short string literals (<=8 bytes) get a different codegen path (register-packed immediate) than longer ones in some contexts, and whether some caller expects a pointer uniformly regardless of literal length.",
+    "diagnostic_tooling_left_in_place": "scripts/ci/madaros_fixed_point_gate.sh's 'run' rung now captures raw exit code + stdout/stderr on any banner mismatch (kept in this commit) -- reproduces the crash's exit code (139) and empty-output signature directly from the gate log for whoever continues this."
+  }
+}
