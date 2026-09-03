@@ -74,6 +74,55 @@ fi
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
+# ── Which compiler is under test (G8) ───────────────────────────────────────
+# A local `make build` leaves gen3.elf in the tree. It does NOT replace
+# bin/souc-lean-single-x86_64, which is what bin/souc execs for the lean_single
+# engine, so a lean_single run measures the compiler as it was BEFORE the change
+# and reports nothing about it -- silently, and with a green suite.
+#
+# This is not hypothetical. A reaction-literal feature was measured this way,
+# pronounced inert because three compile-fail fixtures compiled cleanly, and was
+# correct the whole time; run against gen3.elf directly the same fixtures gave
+# E188/E189/E190.
+#
+# Madaros does not have this hole: bin/souc already resolves a local
+# artifacts/self-hosted/madaros ahead of the committed ELF and says so. The
+# lean_single path prints no provenance at all, which is why this lives here.
+_sounio_engine_md5() {
+    if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
+}
+SOUNIO_ENGINE_KIND="madaros"
+SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
+if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+fi
+if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
+    SOUNIO_ENGINE_KIND="explicit"
+    SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+fi
+
+# Refuse to guess: a newer local build of the engine that is NOT the one about
+# to run means the result would describe the wrong compiler.
+if [[ "$SOUNIO_ENGINE_KIND" == "lean_single" \
+      && -f "$ROOT_DIR/gen3.elf" \
+      && "$ROOT_DIR/gen3.elf" -nt "$SOUNIO_ENGINE_ELF" \
+      && "${SOUNIO_TEST_ALLOW_STALE_ENGINE:-0}" != "1" ]]; then
+    echo "harness: refusing to run -- a locally built gen3.elf is newer than the" >&2
+    echo "         lean_single binary this run would use, so the result would" >&2
+    echo "         describe the committed seed, not the tree." >&2
+    echo "           would run:  $SOUNIO_ENGINE_ELF  (md5 $(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF"))" >&2
+    echo "           local build: $ROOT_DIR/gen3.elf  (md5 $(_sounio_engine_md5 "$ROOT_DIR/gen3.elf"))" >&2
+    echo "         pick one:" >&2
+    echo "           SOUNIO_TEST_SOUC_BIN=$ROOT_DIR/gen3.elf  $0 ...   # test the build" >&2
+    echo "           SOUNIO_TEST_ALLOW_STALE_ENGINE=1         $0 ...   # test the seed, on purpose" >&2
+    exit 2
+fi
+
+# Every run says what produced it, so no result can be quoted without it.
+echo "harness: engine=$SOUNIO_ENGINE_KIND elf=$SOUNIO_ENGINE_ELF md5=$(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF")"
+
 # If SOUC_BIN resolved to a raw ELF (not a shell script), route through the
 # subcommand wrapper so the harness can call `check`/`run`/`compile` correctly.
 if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
