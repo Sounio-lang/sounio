@@ -469,8 +469,21 @@ that moved only one would be suspect. They disagree:
 
 | T₀ (K) | error, d[H2O]/dt criterion | error, dT/dt criterion |
 |---|---|---|
-| 1100 | **+0.096 %** | **−2.375 %** |
+| 1100 | **+0.096 %** | **−2.374 %** |
 | 2000 | **+8.552 %** | +9.947 % |
+
+> **The dT/dt figure at 1100 K was −2.375 % until 2026-09-03, and the change
+> is a finding, not a rounding.** The Sounio harness charged its own initial
+> state from `1/(82.057·T)` while the module it cross-checks against had moved
+> to `P0/(R·T)·1e-6` with #2382 — a 5.7e-06 disagreement between the two sides
+> of a cross-check, carried in a comment that said the two were "kept
+> identical". It went on printing agreement anyway: every other number in this
+> table is insensitive to 5.7e-06 at the printed resolution, and only the
+> buggy form's dT/dt delay at 1100 K, the most ill-conditioned quantity here,
+> moved at all — 701597 ns against 701602 ns. **The agreement of a
+> cross-check is not evidence that its two sides share a state.** Both sides
+> now build the state the same way; the d[H2O]/dt anchors and every 2000 K
+> figure are unchanged.
 
 At 1100 K the sign flips. A defect that shifts the H2O-rate delay by 0.1 %
 shifts the temperature-rise delay by 2.4 % *the other way*, which says the
