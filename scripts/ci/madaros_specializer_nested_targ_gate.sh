@@ -38,4 +38,25 @@ grep -q 'SPECIALIZER_NESTED_TARG_OK' "$LOG" || {
   exit 1
 }
 
+# The refused shapes. The struct-argument one is the load-bearing case: on the
+# compiler before this guard it compiled with rc=0 and printed zeros, so a gate
+# that only checked the nested shape would not have caught the wrong code.
+REFUSAL='more than one type-argument list in a single compilation unit'
+for refused in \
+  tests/compile-fail/specializer_multi_instantiation_struct_args.sio \
+  tests/compile-fail/specializer_multi_instantiation_nonscalar.sio
+do
+  RLOG="$OUT/$(basename "$refused" .sio).log"
+  if "$SOUC" compile "$refused" -o "$OUT/refused.elf" >"$RLOG" 2>&1; then
+    echo "FAIL: $refused was accepted"
+    tail -40 "$RLOG" || true
+    exit 1
+  fi
+  grep -qF "$REFUSAL" "$RLOG" || {
+    echo "FAIL: $refused rejected for the wrong reason"
+    tail -40 "$RLOG" || true
+    exit 1
+  }
+done
+
 echo "MADAROS_SPECIALIZER_NESTED_TARG_GATE_OK"
