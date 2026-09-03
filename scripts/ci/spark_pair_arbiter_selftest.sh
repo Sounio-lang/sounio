@@ -79,14 +79,20 @@ reservation_probe_sha="$(sha256sum "$RESERVATION_PROBE_SCRIPT" | cut -d ' ' -f 1
 [[ "$(awk -F= '$1 == "host_device_barrier_configmap" { print $2 }' "$POLICY")" == \
     "pireus-spark-device-barrier-${device_barrier_sha:0:12}" ]] || \
   fail 'device barrier ConfigMap is not content addressed by its C++ source'
-[[ "$(awk -F= '$1 == "host_device_inventory_majors" { print $2 }' "$POLICY")" == \
-    '195,226,247,498,501' ]] || fail 'device inventory profile drifted'
-[[ "$(awk -F= '$1 == "host_device_barrier_majors" { print $2 }' "$POLICY")" == \
-    '498,501' ]] || fail 'compute-only device deny profile drifted'
-grep -Fq 'readonly DEVICE_INVENTORY_MAJORS=195,226,247,498,501' "$HOST_FENCE_SCRIPT" || \
-  fail 'host fence does not preserve the exact device inventory profile'
-grep -Fq 'readonly DEVICE_BARRIER_MAJORS=498,501' "$HOST_FENCE_SCRIPT" || \
-  fail 'host fence does not use the compute-only deny profile'
+[[ "$(awk -F= '$1 == "host_device_inventory_names" { print $2 }' "$POLICY")" == \
+    'nvidia,drm,dma_heap,nvidia-uvm,nvidia-caps' ]] || fail 'device inventory name profile drifted'
+[[ "$(awk -F= '$1 == "host_device_barrier_names" { print $2 }' "$POLICY")" == \
+    'nvidia-uvm,nvidia-caps' ]] || fail 'compute-only device deny name profile drifted'
+! grep -Eq '^host_device_(inventory|barrier)_majors=' "$POLICY" || \
+  fail 'policy still freezes host-specific NVIDIA major numbers'
+grep -Fq 'readonly DEVICE_INVENTORY_NAMES=nvidia,drm,dma_heap,nvidia-uvm,nvidia-caps' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not preserve the exact device inventory name profile'
+grep -Fq 'readonly DEVICE_BARRIER_NAMES=nvidia-uvm,nvidia-caps' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not use the compute-only deny name profile'
+grep -Fq 'device_majors_for_names "$DEVICE_INVENTORY_NAMES"' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not resolve the inventory profile on each host'
+grep -Fq 'device_majors_for_names "$DEVICE_BARRIER_NAMES"' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not resolve the deny profile on each host'
 [[ "$(awk -F= '$1 == "reservation_probe_configmap" { print $2 }' "$POLICY")" == \
     "pireus-spark-pair-reservation-probe-${reservation_probe_sha:0:12}" ]] || \
   fail 'reservation probe ConfigMap is not content addressed by its script'
@@ -107,11 +113,15 @@ grep -Fq 'pireus.sounio.dev/spark-pair-host-fence-bootstrap: "unbound"' "$HOST_F
   fail 'host fence DaemonSet no longer starts with an inert selector'
 grep -Fq 'bind_host_fence_daemonset_uid' "$MATERIAL_BACKEND" || \
   fail 'material backend does not bind the DaemonSet UID before activation'
+grep -Fq '.spec.template.spec.runtimeClassName = "nvidia"' "$MATERIAL_BACKEND" || \
+  fail 'material backend does not bind Spark Slurmd to the NVIDIA runtime'
+grep -Fq "object.spec.runtimeClassName == 'nvidia'" "$ADMISSION" || \
+  fail 'admission does not require the NVIDIA runtime for Spark Slurmd'
 grep -Fq 'request.userInfo.username == '\''system:serviceaccount:kube-system:daemon-set-controller'\''' \
   "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml" || \
   fail 'host infrastructure admission is not bound to the DaemonSet controller identity'
 host_unit_result="$(bash "$HOST_FENCE_UNIT" "$HOST_FENCE_SCRIPT" "$work/host-unit")"
-[[ "$host_unit_result" == 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY' ]] || \
+[[ "$host_unit_result" == 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY' ]] || \
   fail "host fence executable unit failed: $host_unit_result"
 transaction_unit_result="$(bash "$K8S_BACKEND_TRANSACTION_UNIT" "$MATERIAL_BACKEND" "$work/k8s-backend-unit")"
 [[ "$transaction_unit_result" == 'K8S_BACKEND_TRANSACTION_UNIT_PASS kill_after_commit_1=REFENCED kill_after_commit_2=REFENCED cas_conflict=REFENCED persisted_grants=PROVEN' ]] || \

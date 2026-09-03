@@ -31,11 +31,10 @@ data:
     touch /tmp/nvml-clean
     exec sleep infinity
 ---
-apiVersion: v1
-kind: ConfigMap
+apiVersion: pireus.sounio.dev/v1alpha1
+kind: PireusSparkPairParameter
 metadata:
   name: pireus-spark-pair-admission
-  namespace: beagle
 data:
   state: UNINITIALIZED
   epoch: "1"
@@ -48,12 +47,197 @@ data:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: pireus-spark-pair-host-fence
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: pireus.sounio.dev/v1alpha1
+    kind: PireusSparkPairParameter
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+  matchConditions:
+    - name: pireus-host-fence-pod
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:kube-system:daemon-set-controller' &&
+        request.namespace == 'beagle' &&
+        object.spec.serviceAccountName == 'pireus-spark-host-fence'
+  validations:
+    - expression: >-
+        object.metadata.namespace == 'beagle' &&
+        object.metadata.labels['pireus.sounio.dev/spark-pair-infrastructure'] == 'true' &&
+        has(params.data.hostFenceDaemonSetUid) &&
+        params.data.hostFenceDaemonSetUid.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') &&
+        object.metadata.ownerReferences.size() == 1 &&
+        object.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+        object.metadata.ownerReferences[0].kind == 'DaemonSet' &&
+        object.metadata.ownerReferences[0].name == 'pireus-spark-host-fence' &&
+        object.metadata.ownerReferences[0].uid == params.data.hostFenceDaemonSetUid &&
+        object.metadata.ownerReferences[0].controller == true &&
+        object.metadata.ownerReferences[0].blockOwnerDeletion == true
+      message: Host fence Pod owner or frozen admission parameter differs from the staged DaemonSet.
+      reason: Forbidden
+    - expression: >-
+        object.spec.hostPID == true &&
+        object.spec.automountServiceAccountToken == false &&
+        object.spec.nodeSelector['pireus.sounio.dev/spark-pair-host-fence'] == 'true' &&
+        object.spec.tolerations.size() == 8 &&
+        object.spec.tolerations.exists(t,
+          t.key == 'pireus.sounio.dev/spark-pair' && t.operator == 'Equal' &&
+          t.value == 'reserved' && t.effect == 'NoSchedule'
+        ) &&
+        object.spec.tolerations.exists(t,
+          t.key == 'sounio.dev/arch' && t.operator == 'Exists' &&
+          t.effect == 'NoSchedule'
+        ) &&
+        object.spec.tolerations.all(t,
+          (t.key == 'pireus.sounio.dev/spark-pair' && t.operator == 'Equal' &&
+           t.value == 'reserved' && t.effect == 'NoSchedule') ||
+          (t.key == 'sounio.dev/arch' && t.operator == 'Exists' &&
+           t.effect == 'NoSchedule') ||
+          (t.operator == 'Exists' &&
+           ((t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'] &&
+             t.effect == 'NoExecute') ||
+            (t.key in ['node.kubernetes.io/disk-pressure', 'node.kubernetes.io/memory-pressure',
+                       'node.kubernetes.io/pid-pressure', 'node.kubernetes.io/unschedulable'] &&
+             t.effect == 'NoSchedule')))
+        )
+      message: Host fence Pod scheduling or host namespace contract differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        object.spec.volumes.size() == 4 &&
+        object.spec.volumes.exists(v,
+          v.name == 'fence-script' &&
+          v.configMap.name == 'pireus-spark-host-fence-82c0ab6c680a' &&
+          v.configMap.defaultMode == 365
+        ) &&
+        object.spec.volumes.exists(v,
+          v.name == 'device-barrier-source' &&
+          v.configMap.name == 'pireus-spark-device-barrier-ac3cfa4aeb70' &&
+          v.configMap.defaultMode == 292
+        ) &&
+        object.spec.volumes.exists(v,
+          v.name == 'host-root' && v.hostPath.path == '/' &&
+          v.hostPath.type == 'Directory'
+        )
+      message: Host fence Pod volume contract differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        object.spec.volumes.exists(v,
+          v.name == 'runtime-tmp' &&
+          has(v.emptyDir) &&
+          has(dyn(v.emptyDir).sizeLimit) &&
+          string(dyn(v.emptyDir).sizeLimit) == '64Mi'
+        )
+      message: Host fence Pod requires the frozen 64Mi writable runtime volume.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers.size() == 1 &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+        object.spec.containers[0].name == 'host-fence' &&
+        object.spec.containers[0].image == 'ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517' &&
+        object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+        object.spec.containers[0].command == ['/bin/bash', '/fence/host-fence.sh', 'daemonset-agent'] &&
+        (!has(object.spec.containers[0].args) || object.spec.containers[0].args.size() == 0) &&
+        (!has(object.spec.containers[0].envFrom) || object.spec.containers[0].envFrom.size() == 0) &&
+        !has(object.spec.containers[0].lifecycle) &&
+        !has(object.spec.containers[0].livenessProbe) &&
+        !has(object.spec.containers[0].startupProbe)
+      message: Host fence container identity differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers[0].env.size() == 1 &&
+        object.spec.containers[0].env[0].name == 'NODE_NAME' &&
+        object.spec.containers[0].env[0].valueFrom.fieldRef.apiVersion == 'v1' &&
+        object.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath == 'spec.nodeName' &&
+        object.spec.containers[0].securityContext.privileged == true &&
+        object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        object.spec.containers[0].securityContext.allowPrivilegeEscalation == true &&
+        object.spec.containers[0].readinessProbe.exec.command == ['/bin/bash', '/fence/host-fence.sh', 'report']
+      message: Host fence container environment, privilege, or readiness contract differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        dyn(object.spec.containers[0].resources).requests.size() == 2 &&
+        dyn(object.spec.containers[0].resources).limits.size() == 2
+      message: Host fence container resource shape differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '25m' &&
+        string(dyn(object.spec.containers[0].resources).requests['memory']) == '32Mi'
+      message: Host fence container resource requests differ from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '1' &&
+        string(dyn(object.spec.containers[0].resources).limits['memory']) == '512Mi'
+      message: Host fence container resource limits differ from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        !('nvidia.com/gpu' in dyn(object.spec.containers[0].resources).requests) &&
+        !('nvidia.com/gpu' in dyn(object.spec.containers[0].resources).limits)
+      message: Host fence container must not request or limit a GPU.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers[0].volumeMounts.size() == 4 &&
+        object.spec.containers[0].volumeMounts.exists(v,
+          v.name == 'fence-script' && v.mountPath == '/fence' && v.readOnly == true
+        ) &&
+        object.spec.containers[0].volumeMounts.exists(v,
+          v.name == 'device-barrier-source' && v.mountPath == '/barrier' && v.readOnly == true
+        ) &&
+        object.spec.containers[0].volumeMounts.exists(v,
+          v.name == 'host-root' && v.mountPath == '/host'
+        )
+      message: Host fence container mount contract differs from the frozen manifest.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers[0].volumeMounts.exists(v,
+          v.name == 'runtime-tmp' &&
+          v.mountPath == '/tmp' &&
+          (!has(v.readOnly) || v.readOnly == false)
+        )
+      message: Host fence container requires the frozen writable runtime mount.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pireus-spark-pair-host-fence
+spec:
+  policyName: pireus-spark-pair-host-fence
+  paramRef:
+    name: pireus-spark-pair-admission
+    parameterNotFoundAction: Deny
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: pireus-spark-pair-fence
 spec:
   failurePolicy: Fail
   paramKind:
-    apiVersion: v1
-    kind: ConfigMap
+    apiVersion: pireus.sounio.dev/v1alpha1
+    kind: PireusSparkPairParameter
+  variables:
+    - name: isSparkSlurmd
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:slurm-pilot:slurm-operator' &&
+        object.metadata.namespace == 'slurm-pilot' &&
+        object.metadata.labels['app.kubernetes.io/name'] == 'slurmd' &&
+        object.metadata.labels['app.kubernetes.io/instance'] == 'slurm-pilot-worker-spark' &&
+        object.metadata.ownerReferences.size() == 1 &&
+        object.metadata.ownerReferences[0].controller == true &&
+        object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
+        object.metadata.ownerReferences[0].apiVersion == 'slinky.slurm.net/v1beta1' &&
+        object.metadata.ownerReferences[0].kind == 'NodeSet' &&
+        object.metadata.ownerReferences[0].name == 'slurm-pilot-worker-spark' &&
+        object.metadata.ownerReferences[0].uid == 'de6c8806-eaa2-4d6a-9c25-d9c202f298ba'
   matchConstraints:
     matchPolicy: Equivalent
     resourceRules:
@@ -69,10 +253,27 @@ spec:
         scope: "*"
   validations:
     - expression: >-
+        (
+          request.userInfo.username == 'system:serviceaccount:kube-system:daemon-set-controller' &&
+          object.metadata.namespace == 'beagle' &&
+          object.spec.serviceAccountName == 'pireus-spark-host-fence' &&
+          object.metadata.labels['pireus.sounio.dev/spark-pair-infrastructure'] == 'true' &&
+          has(params.data.hostFenceDaemonSetUid) &&
+          object.metadata.ownerReferences.size() == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+          object.metadata.ownerReferences[0].kind == 'DaemonSet' &&
+          object.metadata.ownerReferences[0].name == 'pireus-spark-host-fence' &&
+          object.metadata.ownerReferences[0].uid == params.data.hostFenceDaemonSetUid &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.ownerReferences[0].blockOwnerDeletion == true
+        ) ||
         !(
           (has(object.spec.nodeName) && object.spec.nodeName in ['spark-3c59', 'spark-8e54']) ||
-          (has(object.spec.tolerations) && object.spec.tolerations.exists(t,
-            (t.key == 'pireus.sounio.dev/spark-pair' || (t.key == '' && t.operator == 'Exists')) &&
+          ((!has(object.spec.nodeName) || object.spec.nodeName == '') &&
+           has(object.spec.tolerations) && object.spec.tolerations.exists(t,
+            (has(t.key) ?
+              (t.key == 'pireus.sounio.dev/spark-pair' || (t.key == '' && t.operator == 'Exists')) :
+              t.operator == 'Exists') &&
             (!has(t.effect) || t.effect == '' || t.effect == 'NoSchedule')
           )) ||
           (params.data.state == 'UNINITIALIZED' && (
@@ -197,7 +398,7 @@ spec:
           object.spec.hostPID == true &&
           object.spec.automountServiceAccountToken == false &&
           object.spec.nodeSelector['pireus.sounio.dev/spark-pair-host-fence'] == 'true' &&
-          object.spec.tolerations.size() == 2 &&
+          object.spec.tolerations.size() == 8 &&
           object.spec.tolerations.exists(t,
             t.key == 'pireus.sounio.dev/spark-pair' && t.operator == 'Equal' &&
             t.value == 'reserved' && t.effect == 'NoSchedule'
@@ -206,10 +407,22 @@ spec:
             t.key == 'sounio.dev/arch' && t.operator == 'Exists' &&
             t.effect == 'NoSchedule'
           ) &&
-          object.spec.volumes.size() == 3 &&
+          object.spec.tolerations.all(t,
+            (t.key == 'pireus.sounio.dev/spark-pair' && t.operator == 'Equal' &&
+             t.value == 'reserved' && t.effect == 'NoSchedule') ||
+            (t.key == 'sounio.dev/arch' && t.operator == 'Exists' &&
+             t.effect == 'NoSchedule') ||
+            (t.operator == 'Exists' &&
+             ((t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'] &&
+               t.effect == 'NoExecute') ||
+              (t.key in ['node.kubernetes.io/disk-pressure', 'node.kubernetes.io/memory-pressure',
+                         'node.kubernetes.io/pid-pressure', 'node.kubernetes.io/unschedulable'] &&
+               t.effect == 'NoSchedule')))
+          ) &&
+          object.spec.volumes.size() == 4 &&
           object.spec.volumes.exists(v,
             v.name == 'fence-script' &&
-            v.configMap.name == 'pireus-spark-host-fence-8d8a2b9b68fc' &&
+            v.configMap.name == 'pireus-spark-host-fence-82c0ab6c680a' &&
             v.configMap.defaultMode == 365
           ) &&
           object.spec.volumes.exists(v,
@@ -220,6 +433,12 @@ spec:
           object.spec.volumes.exists(v,
             v.name == 'host-root' && v.hostPath.path == '/' &&
             v.hostPath.type == 'Directory'
+          ) &&
+          object.spec.volumes.exists(v,
+            v.name == 'runtime-tmp' &&
+            has(v.emptyDir) &&
+            has(dyn(v.emptyDir).sizeLimit) &&
+            string(dyn(v.emptyDir).sizeLimit) == '64Mi'
           ) &&
           object.spec.containers.size() == 1 &&
           (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
@@ -243,11 +462,11 @@ spec:
           object.spec.containers[0].readinessProbe.exec.command == ['/bin/bash', '/fence/host-fence.sh', 'report'] &&
           object.spec.containers[0].resources.requests.size() == 2 &&
           object.spec.containers[0].resources.limits.size() == 2 &&
-          object.spec.containers[0].resources.requests.cpu == quantity('10m') &&
-          object.spec.containers[0].resources.requests.memory == quantity('16Mi') &&
-          object.spec.containers[0].resources.limits.cpu == quantity('250m') &&
-          object.spec.containers[0].resources.limits.memory == quantity('128Mi') &&
-          object.spec.containers[0].volumeMounts.size() == 3 &&
+          object.spec.containers[0].resources.requests.cpu == quantity('25m') &&
+          object.spec.containers[0].resources.requests.memory == quantity('32Mi') &&
+          object.spec.containers[0].resources.limits.cpu == quantity('1') &&
+          object.spec.containers[0].resources.limits.memory == quantity('512Mi') &&
+          object.spec.containers[0].volumeMounts.size() == 4 &&
           object.spec.containers[0].volumeMounts.exists(v,
             v.name == 'fence-script' && v.mountPath == '/fence' && v.readOnly == true
           ) &&
@@ -257,39 +476,15 @@ spec:
           object.spec.containers[0].volumeMounts.exists(v,
             v.name == 'host-root' && v.mountPath == '/host'
           ) &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'runtime-tmp' &&
+            v.mountPath == '/tmp' &&
+            (!has(v.readOnly) || v.readOnly == false)
+          ) &&
           !('nvidia.com/gpu' in object.spec.containers[0].resources.requests) &&
           !('nvidia.com/gpu' in object.spec.containers[0].resources.limits)
         ) ||
-        (
-          request.userInfo.username == 'system:serviceaccount:slurm-pilot:slurm-operator' &&
-          object.metadata.namespace == 'slurm-pilot' &&
-          object.metadata.labels['app.kubernetes.io/name'] == 'slurmd' &&
-          object.metadata.labels['app.kubernetes.io/instance'] == 'slurm-pilot-worker-spark' &&
-          object.spec.serviceAccountName == 'default' &&
-          object.spec.automountServiceAccountToken == false &&
-          object.metadata.ownerReferences.size() == 1 &&
-          object.metadata.ownerReferences[0].controller == true &&
-          object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
-          object.metadata.ownerReferences[0].apiVersion == 'slinky.slurm.net/v1beta1' &&
-          object.metadata.ownerReferences[0].kind == 'NodeSet' &&
-          object.metadata.ownerReferences[0].name == 'slurm-pilot-worker-spark' &&
-          object.metadata.ownerReferences[0].uid == 'de6c8806-eaa2-4d6a-9c25-d9c202f298ba' &&
-          object.spec.containers.size() == 1 &&
-          object.spec.containers[0].name == 'slurmd' &&
-          object.spec.containers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
-          !has(object.spec.containers[0].lifecycle) &&
-          object.spec.containers[0].resources.requests['nvidia.com/gpu'] == quantity('1') &&
-          object.spec.containers[0].resources.limits['nvidia.com/gpu'] == quantity('1') &&
-          object.spec.initContainers.size() == 1 &&
-          object.spec.initContainers[0].name == 'logfile' &&
-          object.spec.initContainers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
-          !has(object.spec.initContainers[0].lifecycle) &&
-          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
-          params.data.state in [
-            'UNINITIALIZED', 'SLURM_OWNED', 'DRAINING_SLURM', 'SLURM_QUIESCENT',
-            'DETACHING_SLURMD', 'SLURM_RESTORING', 'RECOVERY_REQUIRED'
-          ]
-        ) ||
+        variables.isSparkSlurmd ||
         (
           request.userInfo.username == 'system:serviceaccount:beagle:sounio-workspace-admin' &&
           object.metadata.namespace == 'beagle' &&
@@ -354,6 +549,49 @@ spec:
         )
       message: Spark GPU Pods require the current Pireus Lease epoch and an admitted material role.
       reason: Forbidden
+    - expression: >-
+        !variables.isSparkSlurmd || (
+          object.spec.runtimeClassName == 'nvidia' &&
+          object.spec.serviceAccountName == 'default' &&
+          object.spec.automountServiceAccountToken == false &&
+          object.spec.containers.size() == 1 &&
+          object.spec.containers[0].name == 'slurmd' &&
+          object.spec.containers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
+          has(object.spec.containers[0].lifecycle) &&
+          !has(object.spec.containers[0].lifecycle.postStart) &&
+          object.spec.containers[0].lifecycle.preStop.exec.command == [
+            '/usr/bin/sh',
+            '-c',
+            "scontrol update nodename=$(hostname) state=down reason='Pod is terminating' && scontrol delete nodename=$(hostname);"
+          ]
+        )
+      message: Spark Slurmd execution identity differs from the frozen operator contract.
+      reason: Forbidden
+    - expression: >-
+        !variables.isSparkSlurmd || (
+          string(object.spec.containers[0].resources.requests['nvidia.com/gpu']) == '1' &&
+          string(object.spec.containers[0].resources.limits['nvidia.com/gpu']) == '1'
+        )
+      message: Spark Slurmd must request and limit exactly one GPU.
+      reason: Forbidden
+    - expression: >-
+        !variables.isSparkSlurmd || (
+          object.spec.initContainers.size() == 1 &&
+          object.spec.initContainers[0].name == 'logfile' &&
+          object.spec.initContainers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
+          !has(object.spec.initContainers[0].lifecycle) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0)
+        )
+      message: Spark Slurmd init or ephemeral container contract differs from the frozen operator contract.
+      reason: Forbidden
+    - expression: >-
+        !variables.isSparkSlurmd ||
+          params.data.state in [
+            'UNINITIALIZED', 'SLURM_OWNED', 'DRAINING_SLURM', 'SLURM_QUIESCENT',
+            'DETACHING_SLURMD', 'SLURM_RESTORING', 'RECOVERY_REQUIRED'
+          ]
+      message: Spark Slurmd is not allowed in the current Pireus Lease state.
+      reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -363,7 +601,6 @@ spec:
   policyName: pireus-spark-pair-fence
   paramRef:
     name: pireus-spark-pair-admission
-    namespace: beagle
     parameterNotFoundAction: Deny
   validationActions: [Deny]
 ---
@@ -435,6 +672,16 @@ spec:
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["nodesets"]
         scope: "Namespaced"
+      - apiGroups: ["pireus.sounio.dev"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["pireussparkpairparameters"]
+        scope: "Cluster"
+      - apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["customresourcedefinitions"]
+        scope: "Cluster"
       - apiGroups: ["admissionregistration.k8s.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE", "DELETE"]
@@ -459,12 +706,23 @@ spec:
           request.namespace == 'beagle' &&
           request.resource.resource == 'configmaps' &&
           (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
-            'pireus-spark-pair-admission',
             'pireus-spark-pair-bootstrap-journal',
             'pireus-spark-pair-reservation-probe-bce2666d07f0',
-            'pireus-spark-host-fence-8d8a2b9b68fc',
+            'pireus-spark-host-fence-82c0ab6c680a',
             'pireus-spark-device-barrier-ac3cfa4aeb70'
           ]
+        ) ||
+        (
+          request.resource.group == 'pireus.sounio.dev' &&
+          request.resource.resource == 'pireussparkpairparameters' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) ==
+            'pireus-spark-pair-admission'
+        ) ||
+        (
+          request.resource.group == 'apiextensions.k8s.io' &&
+          request.resource.resource == 'customresourcedefinitions' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) ==
+            'pireussparkpairparameters.pireus.sounio.dev'
         ) ||
         (
           request.resource.group == '' &&
@@ -513,6 +771,7 @@ spec:
           request.resource.resource in ['validatingadmissionpolicies', 'validatingadmissionpolicybindings'] &&
           (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
             'pireus-spark-pair-fence',
+            'pireus-spark-pair-host-fence',
             'pireus-spark-pair-binding-fence',
             'pireus-spark-pair-control-fence'
           ]

@@ -27,6 +27,10 @@ sha256_file() {
   sha256sum "$1" | cut -d ' ' -f 1
 }
 
+lease_timestamp() {
+  date -u +%Y-%m-%dT%H:%M:%S.000000Z
+}
+
 repo_root() {
   printf '%s\n' "$ROOT_DIR"
 }
@@ -52,6 +56,9 @@ verify_frozen_material() {
   verify_frozen_file admission_manifest_source admission_manifest_sha256
   verify_frozen_file host_fence_manifest_source host_fence_manifest_sha256
   verify_frozen_file device_barrier_source device_barrier_source_sha256
+  verify_frozen_file dgx_material_slurm_source dgx_material_slurm_sha256
+  verify_frozen_file dgx_material_cuda_source dgx_material_cuda_sha256
+  verify_frozen_file dgx_material_header_source dgx_material_header_sha256
   [[ "$(sha256_file "$POLICY")" == "$(policy_value "$FREEZE" material_policy_sha256)" ]] || fail 'selected policy is not frozen'
   [[ "$(sha256_file "${BASH_SOURCE[0]}")" == "$(policy_value "$FREEZE" material_backend_sha256)" ]] || fail 'running backend is not frozen'
 }
@@ -134,7 +141,7 @@ slurm_states_drained() {
   while IFS= read -r token; do
     state="${token#State=}"
     IFS='+' read -r base flag <<<"$state"
-    [[ "$base" == IDLE ]] || return 1
+    [[ "$base" == IDLE || "$base" == DOWN ]] || return 1
     has_drain=0
     IFS='+' read -ra parts <<<"$state"
     for flag in "${parts[@]:1}"; do
@@ -246,12 +253,67 @@ lease_json() {
 }
 
 admission_config_json() {
-  kubectl -n "$(kube_namespace)" get configmap \
-    "$(policy_value "$POLICY" admission_configmap)" -o json
+  kubectl get "$(policy_value "$POLICY" admission_parameter_resource)" \
+    "$(policy_value "$POLICY" admission_parameter)" -o json
+}
+
+parameter_crd_manifest() {
+  cat <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: $(policy_value "$POLICY" admission_parameter_crd)
+spec:
+  group: pireus.sounio.dev
+  scope: Cluster
+  names:
+    plural: $(policy_value "$POLICY" admission_parameter_resource)
+    singular: pireussparkpairparameter
+    kind: PireusSparkPairParameter
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [state, epoch, holder, allowWorkload, sounioSourceSha256, semanticsFreezeSha256, hostFenceDaemonSetUid]
+              properties:
+                state: {type: string}
+                epoch: {type: string}
+                holder: {type: string}
+                allowWorkload: {type: string}
+                sounioSourceSha256: {type: string}
+                semanticsFreezeSha256: {type: string}
+                hostFenceDaemonSetUid: {type: string}
+EOF
+}
+
+vap_typechecking_acceptable() {
+  jq -e '
+    (.status.observedGeneration == .metadata.generation) and
+    ((.status.typeChecking.expressionWarnings // []) | length) <= 2 and
+    all(.status.typeChecking.expressionWarnings[]?;
+      (.fieldRef == "spec.validations[0].expression" or
+       .fieldRef == "spec.validations[2].expression") and
+      (.warning | type) == "string" and (.warning | length) > 0)
+  ' <<<"$1" >/dev/null
+}
+
+host_vap_typechecking_acceptable() {
+  jq -e '
+    (.status.observedGeneration == .metadata.generation) and
+    ((.status.typeChecking.expressionWarnings // []) | length) == 0
+  ' <<<"$1" >/dev/null
 }
 
 sync_admission_projection() {
   local lease="${1:-}" config state epoch holder source_hash freeze_hash updated
+  local daemonset daemonset_uid=UNBOUND
   [[ -n "$lease" ]] || lease="$(lease_json)"
   config="$(admission_config_json)"
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
@@ -259,24 +321,32 @@ sync_admission_projection() {
   holder="$(jq -r '.spec.holderIdentity // ""' <<<"$lease")"
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   freeze_hash="$(sha256_file "$FREEZE")"
+  if daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)"; then
+    daemonset_uid="$(jq -r '.metadata.uid // ""' <<<"$daemonset")"
+    [[ "$daemonset_uid" =~ ^[0-9a-f-]{36}$ ]] || return 1
+  fi
   updated="$(jq --arg state "$state" --arg epoch "$epoch" --arg holder "$holder" \
-    --arg source "$source_hash" --arg freeze "$freeze_hash" '
+    --arg source "$source_hash" --arg freeze "$freeze_hash" --arg uid "$daemonset_uid" '
       .data.state = $state |
       .data.epoch = $epoch |
       .data.holder = $holder |
       .data.allowWorkload = "false" |
       .data.sounioSourceSha256 = $source |
-      .data.semanticsFreezeSha256 = $freeze
+      .data.semanticsFreezeSha256 = $freeze |
+      .data.hostFenceDaemonSetUid = $uid
     ' <<<"$config")"
-  kubectl -n "$(kube_namespace)" replace -f - <<<"$updated" >/dev/null
+  kubectl replace -f - <<<"$updated" >/dev/null
 }
 
 admission_fail_closed() {
-  local lease policy binding binding_policy binding_binding control_policy control_binding config probe_config state epoch holder source_hash freeze_hash
-  local bound_uid daemonset daemonset_uid expected expected_policy expected_binding expected_binding_policy expected_binding_binding expected_control_policy expected_control_binding expected_probe_config expected_probe_sha manifest
+  local lease policy binding host_policy host_binding binding_policy binding_binding control_policy control_binding config probe_config parameter_crd expected_parameter_crd state epoch holder source_hash freeze_hash
+  local bound_uid daemonset daemonset_uid expected expected_policy expected_binding expected_host_policy expected_host_binding expected_binding_policy expected_binding_binding expected_control_policy expected_control_binding expected_probe_config expected_probe_sha manifest
   lease="$1"
   policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_policy)" -o json 2>/dev/null)" || return 1
   binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding)" -o json 2>/dev/null)" || return 1
+  host_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_host_policy)" -o json 2>/dev/null)" || return 1
+  host_binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_host_binding)" -o json 2>/dev/null)" || return 1
   binding_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_binding_policy)" -o json 2>/dev/null)" || return 1
   binding_binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding_binding)" -o json 2>/dev/null)" || return 1
   control_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_control_policy)" -o json 2>/dev/null)" || return 1
@@ -284,11 +354,17 @@ admission_fail_closed() {
   config="$(admission_config_json 2>/dev/null)" || return 1
   probe_config="$(kubectl -n "$(kube_namespace)" get configmap \
     "$(policy_value "$POLICY" reservation_probe_configmap)" -o json 2>/dev/null)" || return 1
+  parameter_crd="$(kubectl get crd "$(policy_value "$POLICY" admission_parameter_crd)" -o json 2>/dev/null)" || return 1
+  expected_parameter_crd="$(parameter_crd_manifest | kubectl apply --dry-run=server -f - -o json 2>/dev/null)" || return 1
   manifest="$(repo_root)/$(policy_value "$POLICY" admission_manifest)"
   expected="$(kubectl apply --dry-run=server -f "$manifest" -o json 2>/dev/null)" || return 1
   expected_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_policy)" \
     '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
   expected_binding="$(jq -c --arg name "$(policy_value "$POLICY" admission_binding)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
+  expected_host_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_host_policy)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
+  expected_host_binding="$(jq -c --arg name "$(policy_value "$POLICY" admission_host_binding)" \
     '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
   expected_binding_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_binding_policy)" \
     '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
@@ -300,7 +376,8 @@ admission_fail_closed() {
     '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
   expected_probe_config="$(jq -c --arg name "$(policy_value "$POLICY" reservation_probe_configmap)" \
     '.items[] | select(.kind == "ConfigMap" and .metadata.name == $name)' <<<"$expected")"
-  [[ -n "$expected_policy" && -n "$expected_binding" && -n "$expected_binding_policy" &&
+  [[ -n "$expected_policy" && -n "$expected_binding" && -n "$expected_host_policy" &&
+      -n "$expected_host_binding" && -n "$expected_binding_policy" &&
       -n "$expected_binding_binding" && -n "$expected_control_policy" &&
       -n "$expected_control_binding" && -n "$expected_probe_config" ]] || return 1
   expected_probe_sha="$(jq -j '.data["reservation-probe.sh"] // ""' \
@@ -309,10 +386,14 @@ admission_fail_closed() {
       "pireus-spark-pair-reservation-probe-${expected_probe_sha:0:12}" ]] || return 1
   [[ "$(jq -S -c '.spec' <<<"$policy")" == "$(jq -S -c '.spec' <<<"$expected_policy")" &&
       "$(jq -S -c '.spec' <<<"$binding")" == "$(jq -S -c '.spec' <<<"$expected_binding")" &&
+      "$(jq -S -c '.spec' <<<"$host_policy")" == "$(jq -S -c '.spec' <<<"$expected_host_policy")" &&
+      "$(jq -S -c '.spec' <<<"$host_binding")" == "$(jq -S -c '.spec' <<<"$expected_host_binding")" &&
       "$(jq -S -c '.spec' <<<"$binding_policy")" == "$(jq -S -c '.spec' <<<"$expected_binding_policy")" &&
       "$(jq -S -c '.spec' <<<"$binding_binding")" == "$(jq -S -c '.spec' <<<"$expected_binding_binding")" &&
       "$(jq -S -c '.spec' <<<"$control_policy")" == "$(jq -S -c '.spec' <<<"$expected_control_policy")" &&
       "$(jq -S -c '.spec' <<<"$control_binding")" == "$(jq -S -c '.spec' <<<"$expected_control_binding")" ]] || return 1
+  [[ "$(jq -S -c '.spec' <<<"$parameter_crd")" == \
+      "$(jq -S -c '.spec' <<<"$expected_parameter_crd")" ]] || return 1
   [[ "$(jq -S -c '{immutable,data}' <<<"$probe_config")" == \
       "$(jq -S -c '{immutable,data}' <<<"$expected_probe_config")" ]] || return 1
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
@@ -335,20 +416,35 @@ admission_fail_closed() {
   fi
   jq -e '
     .spec.failurePolicy == "Fail" and
-    .spec.paramKind.apiVersion == "v1" and
-    .spec.paramKind.kind == "ConfigMap" and
-    (.spec.validations | length) >= 1 and
-    (.status.observedGeneration == .metadata.generation) and
-    ((.status.typeChecking.expressionWarnings // []) | length) == 0
+    .spec.paramKind.apiVersion == "pireus.sounio.dev/v1alpha1" and
+    .spec.paramKind.kind == "PireusSparkPairParameter" and
+    (.spec.validations | length) >= 1
   ' <<<"$policy" >/dev/null || return 1
-  jq -e --arg name "$(policy_value "$POLICY" admission_configmap)" --arg ns "$(kube_namespace)" '
-    .spec.paramRef.name == $name and .spec.paramRef.namespace == $ns and
+  vap_typechecking_acceptable "$policy" || return 1
+  jq -e --arg name "$(policy_value "$POLICY" admission_parameter)" '
+    .spec.paramRef.name == $name and (.spec.paramRef | has("namespace") | not) and
     .spec.paramRef.parameterNotFoundAction == "Deny" and
     (.spec.validationActions == ["Deny"])
   ' <<<"$binding" >/dev/null || return 1
   jq -e '
     .spec.failurePolicy == "Fail" and
-    (.spec.validations | length) == 1 and
+    .spec.paramKind.apiVersion == "pireus.sounio.dev/v1alpha1" and
+    .spec.paramKind.kind == "PireusSparkPairParameter" and
+    (.spec.validations | length) == 12
+  ' <<<"$host_policy" >/dev/null || return 1
+  host_vap_typechecking_acceptable "$host_policy" || return 1
+  jq -e --arg name "$(policy_value "$POLICY" admission_parameter)" \
+    --arg policy "$(policy_value "$POLICY" admission_host_policy)" '
+    .spec.policyName == $policy and
+    .spec.paramRef.name == $name and (.spec.paramRef | has("namespace") | not) and
+    .spec.paramRef.parameterNotFoundAction == "Deny" and
+    (.spec.validationActions == ["Deny"])
+  ' <<<"$host_binding" >/dev/null || return 1
+  jq -e '
+    .spec.failurePolicy == "Fail" and
+    (.spec.validations | length) == 1
+  ' <<<"$binding_policy" >/dev/null || return 1
+  jq -e '
     (.status.observedGeneration == .metadata.generation) and
     ((.status.typeChecking.expressionWarnings // []) | length) == 0
   ' <<<"$binding_policy" >/dev/null || return 1
@@ -357,10 +453,9 @@ admission_fail_closed() {
   ' <<<"$binding_binding" >/dev/null || return 1
   jq -e '
     .spec.failurePolicy == "Fail" and
-    (.spec.validations | length) == 1 and
-    (.status.observedGeneration == .metadata.generation) and
-    ((.status.typeChecking.expressionWarnings // []) | length) == 0
+    (.spec.validations | length) == 1
   ' <<<"$control_policy" >/dev/null || return 1
+  vap_typechecking_acceptable "$control_policy" || return 1
   jq -e --arg policy "$(policy_value "$POLICY" admission_control_policy)" '
     .spec.policyName == $policy and .spec.validationActions == ["Deny"]
   ' <<<"$control_binding" >/dev/null || return 1
@@ -388,9 +483,12 @@ pair_taint_exact() {
 }
 
 unexpected_gpu_consumers_zero() {
-  local pods="$1" epoch="$2" holder="$3"
-  jq -e --arg n0 "$(node0)" --arg n1 "$(node1)" --arg epoch "$epoch" --arg holder "$holder" '
-    [.items[] | select(.spec.nodeName == $n0 or .spec.nodeName == $n1) | select(
+  local pods="$1" epoch="$2" holder="$3" host_fence_uid=''
+  host_fence_uid="$(admission_config_json 2>/dev/null | jq -r '.data.hostFenceDaemonSetUid // ""')" || \
+    host_fence_uid=''
+  jq -e --arg n0 "$(node0)" --arg n1 "$(node1)" --arg epoch "$epoch" --arg holder "$holder" \
+    --arg host_fence_uid "$host_fence_uid" '
+    [.items[] | select(.spec.nodeName == $n0 or .spec.nodeName == $n1) | select((
       (.metadata.namespace == "slurm-pilot" and
        .metadata.labels["app.kubernetes.io/name"] == "slurmd" and
        .metadata.labels["app.kubernetes.io/instance"] == "slurm-pilot-worker-spark") or
@@ -398,18 +496,29 @@ unexpected_gpu_consumers_zero() {
        .metadata.labels["pireus.sounio.dev/spark-pair-reservation"] == "true" and
        .metadata.labels["pireus.sounio.dev/spark-pair-epoch"] == $epoch and
        .metadata.annotations["pireus.sounio.dev/spark-pair-holder"] == $holder) or
+      (.metadata.namespace == "beagle" and
+       .spec.serviceAccountName == "pireus-spark-host-fence" and
+       .metadata.labels["pireus.sounio.dev/spark-pair-infrastructure"] == "true" and
+       $host_fence_uid != "" and
+       (.metadata.ownerReferences | length) == 1 and
+       .metadata.ownerReferences[0].apiVersion == "apps/v1" and
+       .metadata.ownerReferences[0].kind == "DaemonSet" and
+       .metadata.ownerReferences[0].name == "pireus-spark-host-fence" and
+       .metadata.ownerReferences[0].uid == $host_fence_uid and
+       .metadata.ownerReferences[0].controller == true and
+       .metadata.ownerReferences[0].blockOwnerDeletion == true) or
       (.metadata.namespace == "kube-system") or
       (.metadata.namespace == "ceph-csi-cephfs") or
       (.metadata.namespace == "ceph-csi-rbd") or
       (.metadata.namespace == "nvidia-network-operator") or
       (.metadata.namespace == "darwin-observability-system")
-    ) | not] | length == 0
+    ) | not)] | length == 0
   ' <<<"$pods" >/dev/null
 }
 
 lease_is_live() {
   local json="$1"
-  jq -e '(.spec.renewTime | fromdateiso8601) + .spec.leaseDurationSeconds > now' \
+  jq -e '(.spec.renewTime | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + .spec.leaseDurationSeconds > now' \
     <<<"$json" >/dev/null
 }
 
@@ -433,6 +542,89 @@ verify_bootstrap_journal_binding() {
     fail 'bootstrap journal Sounio source hash differs from the active freeze'
   [[ "$freeze" == "$(sha256_file "$FREEZE")" ]] || \
     fail 'bootstrap journal semantics hash differs from the active freeze'
+}
+
+bootstrap_freeze_migration_context() {
+  local lease="$1" journal="$2" slurm_nodes="$3" slurm_jobs="$4" slurm_steps="$5"
+  local report0="$6" report1="$7" reservation_count="$8" workload_count="$9"
+  local source_hash current_freeze lease_source journal_source lease_freeze journal_freeze
+  local old_freeze='' prior_freeze migration_ancestor binding report report_freeze expected_node
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  current_freeze="$(sha256_file "$FREEZE")"
+  lease_source="$(jq -r --arg key "$(policy_value "$POLICY" source_hash_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")"
+  journal_source="$(jq -r '.data.sounioSourceSha256 // ""' <<<"$journal")"
+  lease_freeze="$(jq -r --arg key "$(policy_value "$POLICY" freeze_hash_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")"
+  journal_freeze="$(jq -r '.data.semanticsFreezeSha256 // ""' <<<"$journal")"
+  prior_freeze="$(jq -r '.data.migrationFromFreezeSha256 // ""' <<<"$journal")"
+  migration_ancestor="$(policy_value "$FREEZE" bootstrap_migration_ancestor_sha256)"
+
+  [[ "$lease_source" == "$source_hash" && "$journal_source" == "$source_hash" ]] || return 1
+  [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")" == UNINITIALIZED ]] || return 1
+  lease_is_live "$lease" && return 1
+  case "$(jq -r '.data.step // ""' <<<"$journal")" in
+    FENCE_INSTALLED|HOST_FENCE_INSTALLED|BOOTSTRAP_TAKEOVER) ;;
+    *) return 1 ;;
+  esac
+  for binding in "$lease_freeze" "$journal_freeze"; do
+    [[ "$binding" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ "$binding" != "$current_freeze" ]]; then
+      if [[ -z "$old_freeze" ]]; then
+        old_freeze="$binding"
+      else
+        [[ "$binding" == "$old_freeze" ]] || return 1
+      fi
+    fi
+  done
+  [[ -n "$old_freeze" ]] || return 1
+  [[ -z "$prior_freeze" || "$prior_freeze" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$migration_ancestor" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  slurm_states_drained "$slurm_nodes" || return 1
+  [[ -z "$slurm_jobs" && -z "$slurm_steps" ]] || return 1
+  [[ "$(grep -c 'CPUAlloc=0' <<<"$slurm_nodes")" == 2 &&
+      "$(grep -c 'AllocMem=0' <<<"$slurm_nodes")" == 2 &&
+      "$(grep -c 'AllocTRES= ' <<<"$slurm_nodes")" == 2 ]] || return 1
+  [[ "$reservation_count" == 0 && "$workload_count" == 0 ]] || return 1
+
+  for report in "$report0" "$report1"; do
+    if [[ "$report" == "$report0" ]]; then expected_node="$(node0)"; else expected_node="$(node1)"; fi
+    report_freeze="$(frame_field "$report" freeze_sha256 2>/dev/null || true)"
+    [[ "$report_freeze" == "$old_freeze" ||
+        ( -n "$prior_freeze" && "$report_freeze" == "$prior_freeze" ) ||
+        "$report_freeze" == "$migration_ancestor" ]] || return 1
+    [[ "$(frame_field "$report" node 2>/dev/null || true)" == "$expected_node" &&
+        "$(frame_field "$report" grant_mode 2>/dev/null || true)" == FENCED &&
+        "$(frame_field "$report" grant_valid 2>/dev/null || true)" == 0 &&
+        "$(frame_field "$report" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report" device_barrier 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report" device_barrier_source_sha256 2>/dev/null || true)" == \
+          "$(policy_value "$FREEZE" device_barrier_source_sha256)" &&
+        "$(frame_field "$report" inventory 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report" protected 2>/dev/null || true)" == 1 ]] || return 1
+  done
+}
+
+bootstrap_freeze_migration_live_context() {
+  local lease="$1" journal="$2" slurm_nodes slurm_jobs slurm_steps report0 report1
+  local reservation_count workload_count report_dir
+  slurm_nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)" || return 1
+  slurm_jobs="$(slurm_exec squeue -h -w "$(slurm0),$(slurm1)")" || return 1
+  slurm_steps="$(slurm_exec squeue --steps -h -w "$(slurm0),$(slurm1)")" || return 1
+  report_dir="$(mktemp -d)" || return 1
+  if ! host_fence_report_pair_with_host_tmp "$report_dir/report0" "$report_dir/report1"; then
+    rm -rf "$report_dir"
+    return 1
+  fi
+  report0="$(<"$report_dir/report0")"
+  report1="$(<"$report_dir/report1")"
+  rm -rf "$report_dir"
+  reservation_count="$(reservation_pods_json | jq '.items | length')" || return 1
+  workload_count="$(workload_pods_json | jq '.items | length')" || return 1
+  bootstrap_freeze_migration_context "$lease" "$journal" "$slurm_nodes" "$slurm_jobs" \
+    "$slurm_steps" "$report0" "$report1" "$reservation_count" "$workload_count"
 }
 
 replace_lease() {
@@ -489,8 +681,45 @@ device_barrier_config_json() {
     jq '.immutable = true'
 }
 
+host_fence_manifest_script() {
+  awk '
+    /^  host-fence\.sh: \|$/ { in_script=1; next }
+    in_script && /^---$/ { exit }
+    in_script { sub(/^    /, ""); print }
+  ' "$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)"
+}
+
+host_fence_runtime_contract_exact() {
+  local daemonset="$1"
+  jq -e \
+    --arg cm "$(policy_value "$POLICY" host_fence_configmap)" \
+    --arg barrier_cm "$(policy_value "$POLICY" host_device_barrier_configmap)" '
+      (.spec.template.spec.containers | length) == 1 and
+      .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true and
+      (.spec.template.spec.containers[0].volumeMounts | length) == 4 and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "fence-script" and .mountPath == "/fence" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "device-barrier-source" and .mountPath == "/barrier" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "host-root" and .mountPath == "/host") and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "runtime-tmp" and .mountPath == "/tmp" and (.readOnly // false) == false) and
+      (.spec.template.spec.volumes | length) == 4 and
+      any(.spec.template.spec.volumes[];
+        .name == "fence-script" and .configMap.name == $cm and .configMap.defaultMode == 365) and
+      any(.spec.template.spec.volumes[];
+        .name == "device-barrier-source" and .configMap.name == $barrier_cm and .configMap.defaultMode == 292) and
+      any(.spec.template.spec.volumes[];
+        .name == "host-root" and .hostPath.path == "/" and .hostPath.type == "Directory") and
+      any(.spec.template.spec.volumes[];
+        .name == "runtime-tmp" and .emptyDir.sizeLimit == "64Mi")
+    ' <<<"$daemonset" >/dev/null
+}
+
 host_fence_pair_exact() {
   local daemonset pods config barrier_config expected_barrier expected_barrier_sha live_barrier expected_script expected_script_sha live_script daemonset_uid bound_uid expected expected_daemonset manifest selector_key selector_value
+  local require_ready="${3:-1}"
   daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
     "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)" || return 1
   config="$(kubectl -n "$(kube_namespace)" get configmap \
@@ -508,6 +737,7 @@ host_fence_pair_exact() {
   ' <<<"$expected")"
   [[ -n "$expected_daemonset" &&
       "$(jq -S -c '.spec' <<<"$daemonset")" == "$(jq -S -c '.spec' <<<"$expected_daemonset")" ]] || return 1
+  host_fence_runtime_contract_exact "$daemonset" || return 1
   expected_script="$(awk '
     /^  host-fence\.sh: \|$/ { in_script=1; next }
     in_script && /^---$/ { exit }
@@ -558,25 +788,12 @@ host_fence_pair_exact() {
       .spec.template.spec.containers[0].securityContext.privileged == true and
       .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true and
       .spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == true and
-      .spec.template.spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"] and
-      (.spec.template.spec.containers[0].volumeMounts | length) == 3 and
-      any(.spec.template.spec.containers[0].volumeMounts[];
-        .name == "fence-script" and .mountPath == "/fence" and .readOnly == true) and
-      any(.spec.template.spec.containers[0].volumeMounts[];
-        .name == "device-barrier-source" and .mountPath == "/barrier" and .readOnly == true) and
-      any(.spec.template.spec.containers[0].volumeMounts[];
-        .name == "host-root" and .mountPath == "/host") and
-      (.spec.template.spec.volumes | length) == 3 and
-      any(.spec.template.spec.volumes[];
-        .name == "fence-script" and .configMap.name == $cm and .configMap.defaultMode == 365) and
-      any(.spec.template.spec.volumes[];
-        .name == "device-barrier-source" and .configMap.name == $barrier_cm and .configMap.defaultMode == 292) and
-      any(.spec.template.spec.volumes[];
-        .name == "host-root" and .hostPath.path == "/" and .hostPath.type == "Directory")
+      .spec.template.spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"]
     ' <<<"$daemonset" >/dev/null || return 1
   jq -e --arg n0 "$(node0)" --arg n1 "$(node1)" --arg daemonset_uid "$daemonset_uid" \
     --arg sa "$(policy_value "$POLICY" host_fence_service_account)" \
-    --arg image "$(policy_value "$POLICY" host_fence_image)" '
+    --arg image "$(policy_value "$POLICY" host_fence_image)" \
+    --arg require_ready "$require_ready" '
       (.items | length) == 2 and
       ([.items[].spec.nodeName] | sort) == ([$n0, $n1] | sort) and
       all(.items[];
@@ -596,12 +813,13 @@ host_fence_pair_exact() {
         .spec.containers[0].securityContext.privileged == true and
         .spec.containers[0].securityContext.readOnlyRootFilesystem == true and
         .spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"] and
-        any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+        ($require_ready != "1" or
+          any(.status.conditions[]?; .type == "Ready" and .status == "True")))
     ' <<<"$pods" >/dev/null &&
-    jq -e '
+    jq -e --arg require_ready "$require_ready" '
       .status.desiredNumberScheduled == 2 and
-      .status.numberReady == 2 and
-      .status.numberUnavailable == 0
+      ($require_ready != "1" or
+        (.status.numberReady == 2 and (.status.numberUnavailable // 0) == 0))
     ' <<<"$daemonset" >/dev/null
 }
 
@@ -613,6 +831,92 @@ host_fence_exec() {
   [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
   kubectl -n "$(kube_namespace)" exec "$pod" -- \
     /bin/bash /fence/host-fence.sh "$@"
+}
+
+host_fence_exec_with_host_tmp() {
+  local node="$1" pod
+  shift
+  pod="$(host_fence_pods_json | jq -r --arg node "$node" \
+    '.items[] | select(.spec.nodeName == $node) | .metadata.name')"
+  [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
+  kubectl -n "$(kube_namespace)" exec "$pod" -- env TMPDIR=/host/tmp \
+    /bin/bash /fence/host-fence.sh "$@"
+}
+
+host_fence_install_current_watchdog_via_bridge() {
+  local node="$1" source_hash="$2" freeze_hash="$3" barrier_hash="$4"
+  local pod script script_sha expected_configmap
+  pod="$(host_fence_pods_json | jq -r --arg node "$node" \
+    '.items[] | select(.spec.nodeName == $node) | .metadata.name')"
+  [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
+  script="$(host_fence_manifest_script)" || return 1
+  [[ -n "$script" ]] || return 1
+  script_sha="$(sha256sum <<<"$script" | cut -d ' ' -f 1)"
+  expected_configmap="pireus-spark-host-fence-${script_sha:0:12}"
+  [[ "$(policy_value "$POLICY" host_fence_configmap)" == "$expected_configmap" ]] || return 1
+  kubectl -n "$(kube_namespace)" exec -i "$pod" -- env \
+    PIREUS_EXPECTED_SCRIPT_SHA="$script_sha" \
+    PIREUS_BIND_SOURCE_SHA="$source_hash" \
+    PIREUS_BIND_FREEZE_SHA="$freeze_hash" \
+    PIREUS_BIND_BARRIER_SHA="$barrier_hash" \
+    /bin/bash -ceu '
+      target="/host/tmp/.pireus-host-fence-current.$$"
+      trap '\''rm -f "$target"'\'' EXIT
+      cat > "$target"
+      [[ "$(sha256sum "$target" | cut -d " " -f 1)" == "$PIREUS_EXPECTED_SCRIPT_SHA" ]]
+      chmod 0700 "$target"
+      TMPDIR=/host/tmp PIREUS_HOST_FENCE_INSTALL_SOURCE="$target" \
+        /bin/bash "$target" install-watchdog \
+          "$PIREUS_BIND_SOURCE_SHA" "$PIREUS_BIND_FREEZE_SHA" "$PIREUS_BIND_BARRIER_SHA"
+    ' <<<"$script"
+}
+
+host_fence_install_current_watchdog_pair_via_bridge() {
+  local source_hash="$1" freeze_hash="$2" barrier_hash="$3"
+  local pid0 pid1 status0 status1
+  host_fence_install_current_watchdog_via_bridge "$(node0)" \
+    "$source_hash" "$freeze_hash" "$barrier_hash" &
+  pid0=$!
+  host_fence_install_current_watchdog_via_bridge "$(node1)" \
+    "$source_hash" "$freeze_hash" "$barrier_hash" &
+  pid1=$!
+  if wait "$pid0"; then status0=0; else status0=$?; fi
+  if wait "$pid1"; then status1=0; else status1=$?; fi
+  [[ "$status0" == 0 && "$status1" == 0 ]]
+}
+
+host_fence_report_with_host_tmp() {
+  local node="$1" pod
+  pod="$(host_fence_pods_json | jq -r --arg node "$node" \
+    '.items[] | select(.spec.nodeName == $node) | .metadata.name')"
+  [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
+  kubectl -n "$(kube_namespace)" exec "$pod" -- env \
+    TMPDIR=/host/tmp PIREUS_HOST_ROOT=/host \
+    PIREUS_HOST_FENCE_INSTALL_SOURCE=/host/usr/local/lib/pireus/spark-pair-host-fence \
+    /bin/bash /host/usr/local/lib/pireus/spark-pair-host-fence report
+}
+
+host_fence_report_pair_with_host_tmp() {
+  local output0="$1" output1="$2" pid0 pid1 status0 status1
+  host_fence_report_with_host_tmp "$(node0)" >"$output0" &
+  pid0=$!
+  host_fence_report_with_host_tmp "$(node1)" >"$output1" &
+  pid1=$!
+  if wait "$pid0"; then status0=0; else status0=$?; fi
+  if wait "$pid1"; then status1=0; else status1=$?; fi
+  [[ "$status0" == 0 && "$status1" == 0 ]]
+}
+
+host_fence_host_tmp_writable() {
+  local node="$1" pod
+  pod="$(host_fence_pods_json | jq -r --arg node "$node" \
+    '.items[] | select(.spec.nodeName == $node) | .metadata.name')"
+  [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
+  kubectl -n "$(kube_namespace)" exec "$pod" -- /bin/bash -ceu '
+    probe="/host/tmp/.pireus-watchdog-tmp.$$"
+    : > "$probe"
+    rm -f "$probe"
+  '
 }
 
 host_fence_report() {
@@ -832,12 +1136,18 @@ prebootstrap_facts() {
     "$authority_mask" "$slurm_mask" "$k8s_mask"
 }
 
-facts() {
+facts_impl() {
+  local binding_mode="$1"
+  shift
   local holder lease nodeset node_0 node_1 plugin_0 plugin_1 plugin_pods slurmd_pods reservations workloads all_pods slurm_nodes slurm_jobs slurm_steps
   local state epoch observed_epoch authority_mask=1 slurm_mask=0 k8s_mask=0 host_mask=0 truth current_generation lease_generation
   holder="$(arg_value --holder "$@")"
   lease="$(lease_json)"
-  verify_lease_freeze_binding "$lease"
+  if [[ "$binding_mode" == strict ]]; then
+    verify_lease_freeze_binding "$lease"
+  else
+    [[ "$binding_mode" == migration ]] || fail 'unknown facts binding mode'
+  fi
   nodeset="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o json)"
   node_0="$(kubectl get node "$(node0)" -o json)"
@@ -922,7 +1232,8 @@ facts() {
   authority_mask="$(bit_add "$authority_mask" 512 "$truth")"
 
   truth=0
-  if [[ "$(jq -r '.spec.slurmd.resources.requests["nvidia.com/gpu"] // "0"' <<<"$nodeset")" == 1 &&
+  if [[ "$(jq -r '.spec.template.spec.runtimeClassName // ""' <<<"$nodeset")" == "$(policy_value "$POLICY" slurmd_runtime_class)" &&
+        "$(jq -r '.spec.slurmd.resources.requests["nvidia.com/gpu"] // "0"' <<<"$nodeset")" == 1 &&
         "$(jq -r '.spec.slurmd.resources.limits["nvidia.com/gpu"] // "0"' <<<"$nodeset")" == 1 ]]; then
     truth=1
   fi
@@ -952,6 +1263,7 @@ facts() {
       ([.items[].spec.nodeName] | sort) == ([$n0, $n1] | sort) and
       all(.items[];
         .status.phase == "Running" and
+        .spec.runtimeClassName == "nvidia" and
         .spec.containers[0].resources.requests["nvidia.com/gpu"] == "1" and
         .spec.containers[0].resources.limits["nvidia.com/gpu"] == "1")
     ' <<<"$slurmd_pods" >/dev/null; then
@@ -1011,6 +1323,21 @@ facts() {
     "$state" "$epoch" "$observed_epoch" "$authority_mask" "$slurm_mask" "$k8s_mask" "$host_mask"
 }
 
+facts() {
+  facts_impl strict "$@"
+}
+
+bootstrap_migration_facts() {
+  local lease journal
+  lease="$(lease_json)"
+  journal="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" bootstrap_journal)" -o json)" || \
+    fail 'bootstrap migration requires the persisted journal'
+  bootstrap_freeze_migration_live_context "$lease" "$journal" || \
+    fail 'bootstrap freeze migration context is not fail-closed'
+  facts_impl migration "$@"
+}
+
 lease_acquire() {
   local holder lease state epoch duration now live_holder nodeset_generation updated
   holder="$(arg_value --holder "$@")"
@@ -1026,7 +1353,7 @@ lease_acquire() {
   [[ "$epoch" =~ ^[0-9]+$ ]] || fail 'stored Lease epoch is invalid'
   epoch=$((epoch + 1))
   duration="$(policy_value "$POLICY" lease_duration_seconds)"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   nodeset_generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
   updated="$(jq --arg holder "$holder" --arg now "$now" --arg epoch "$epoch" \
@@ -1081,7 +1408,7 @@ lease_transition() {
   if [[ "$action" != 11 ]]; then
     lease_is_live "$lease" || fail 'Lease expired before transition CAS'
   fi
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg now "$now" --arg to "$to" --arg key "$(policy_value "$POLICY" state_annotation)" '
     .spec.renewTime = $now |
     .metadata.annotations[$key] = $to |
@@ -1115,7 +1442,7 @@ lease_recovery_acquire() {
   [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || fail 'stored recovery epoch is invalid'
   next_epoch=$((epoch + 1))
   duration="$(policy_value "$POLICY" lease_duration_seconds)"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg holder "$holder" --arg now "$now" --arg epoch "$next_epoch" --argjson duration "$duration" \
     --arg epoch_key "$(policy_value "$POLICY" epoch_annotation)" \
     --arg state_key "$(policy_value "$POLICY" state_annotation)" '
@@ -1160,7 +1487,7 @@ lease_bootstrap_recovery_acquire() {
   duration="$(policy_value "$POLICY" lease_duration_seconds)"
   generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg holder "$holder" --arg now "$now" --arg epoch "$next_epoch" \
     --arg generation "$generation" --argjson duration "$duration" \
     --arg epoch_key "$(policy_value "$POLICY" epoch_annotation)" \
@@ -1178,12 +1505,57 @@ lease_bootstrap_recovery_acquire() {
   replace_lease <<<"$updated"
   kubectl annotate nodes "$(node0)" "$(node1)" \
     "$(policy_value "$POLICY" epoch_annotation)=$next_epoch" --overwrite >/dev/null
-  if kubectl -n "$(kube_namespace)" get configmap \
-    "$(policy_value "$POLICY" admission_configmap)" >/dev/null 2>&1; then
+  if kubectl get "$(policy_value "$POLICY" admission_parameter_resource)" \
+    "$(policy_value "$POLICY" admission_parameter)" >/dev/null 2>&1; then
     sync_admission_projection "$updated"
   fi
   ensure_bootstrap_journal BOOTSTRAP_TAKEOVER "$holder" "$receipt"
   printf 'epoch=%s state=UNINITIALIZED\n' "$next_epoch"
+}
+
+bootstrap_migrate_freeze() {
+  local holder epoch receipt lease journal current_freeze old_freeze receipt_hash now
+  local updated_journal updated_lease
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  verify_receipt "$receipt" 27 "$epoch"
+  lease="$(lease_json)"
+  journal="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" bootstrap_journal)" -o json)" || \
+    fail 'bootstrap migration requires the persisted journal'
+  bootstrap_freeze_migration_live_context "$lease" "$journal" || \
+    fail 'bootstrap freeze migration context changed before CAS'
+
+  current_freeze="$(sha256_file "$FREEZE")"
+  old_freeze="$(jq -r --arg key "$(policy_value "$POLICY" freeze_hash_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")"
+  if [[ "$old_freeze" == "$current_freeze" ]]; then
+    old_freeze="$(jq -r '.data.semanticsFreezeSha256 // ""' <<<"$journal")"
+  fi
+  [[ "$old_freeze" =~ ^[0-9a-f]{64}$ && "$old_freeze" != "$current_freeze" ]] || \
+    fail 'bootstrap migration old freeze is missing'
+  receipt_hash="$(sha256_file "$receipt")"
+  now="$(lease_timestamp)"
+
+  updated_journal="$(jq --arg current "$current_freeze" --arg old "$old_freeze" \
+    --arg receipt "$receipt_hash" --arg now "$now" '
+      .data.semanticsFreezeSha256 = $current |
+      .data.updatedUtc = $now |
+      .data.lastReceiptSha256 = $receipt |
+      .data.migrationFromFreezeSha256 = $old |
+      .data.migrationToFreezeSha256 = $current |
+      .data.migrationReceiptSha256 = $receipt
+    ' <<<"$journal")"
+  kubectl -n "$(kube_namespace)" replace -f - <<<"$updated_journal" >/dev/null
+
+  updated_lease="$(jq --arg current "$current_freeze" \
+    --arg key "$(policy_value "$POLICY" freeze_hash_annotation)" '
+      .metadata.annotations[$key] = $current
+    ' <<<"$lease")"
+  replace_lease <<<"$updated_lease"
+  printf 'epoch=%s state=UNINITIALIZED from_freeze=%s to_freeze=%s\n' \
+    "$epoch" "$old_freeze" "$current_freeze"
 }
 
 lease_renew() {
@@ -1198,7 +1570,7 @@ lease_renew() {
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key]' <<<"$lease")" == K8S_OWNED ]] || fail 'heartbeat outside K8S_OWNED'
   lease_is_live "$lease" || fail 'Lease expired before heartbeat'
   verify_receipt "$receipt" 7 "$epoch"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg now "$now" '.spec.renewTime = $now' <<<"$lease")"
   replace_lease <<<"$updated"
 }
@@ -1227,7 +1599,7 @@ renew_lease_material() {
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
   [[ "$state" != SLURM_OWNED ]] || fail 'material keepalive outside an active transition'
   lease_is_live "$lease" || fail 'Lease expired before material keepalive'
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg now "$now" '.spec.renewTime = $now' <<<"$lease")"
   replace_lease <<<"$updated"
 }
@@ -1386,7 +1758,7 @@ record_nvml_values() {
   [[ "$state" == K8S_RESERVING || "$state" == K8S_RELEASING || "$state" == RECOVERY_REQUIRED ]] || \
     fail 'NVML receipts are outside an admitted reservation or clean-probe state'
   lease_is_live "$lease" || fail 'Lease expired before recording NVML receipts'
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg epoch "$epoch" --arg hash0 "$hash0" --arg hash1 "$hash1" --arg now "$now" \
     --arg uuid0 "$uuid0" --arg uuid1 "$uuid1" --arg product "$product0" --arg driver "$driver0" \
     --arg memory0 "$memory0" --arg memory1 "$memory1" \
@@ -1555,7 +1927,7 @@ bootstrap_journal_step() {
   verify_bootstrap_journal_binding "$journal"
   verify_bootstrap_lease_receipt_context "$holder" "$receipt"
   receipt_hash="$(sha256_file "$receipt")"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg step "$step" --arg now "$now" --arg holder "$holder" --arg receipt "$receipt_hash" '
     .data.step = $step | .data.updatedUtc = $now | .data.holder = $holder |
     .data.lastReceiptSha256 = $receipt
@@ -1571,7 +1943,7 @@ ensure_bootstrap_journal() {
     bootstrap_journal_step "$step" "$holder" "$receipt"
     return 0
   fi
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   receipt_hash="$(sha256_file "$receipt")"
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   freeze_hash="$(sha256_file "$FREEZE")"
@@ -1620,8 +1992,17 @@ install_fence() {
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
   guard_mutation fence "$holder" "$epoch" "$receipt"
+  if kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" >/dev/null 2>&1; then
+    stage_existing_host_fence_for_bootstrap "$holder" "$epoch"
+  fi
   manifest="$(repo_root)/$(policy_value "$POLICY" admission_manifest)"
-  kubectl apply --server-side --field-manager=pireus-spark-pair -f "$manifest" >/dev/null
+  parameter_crd_manifest | kubectl apply --server-side --field-manager=pireus-spark-pair -f - >/dev/null
+  kubectl wait --for=condition=Established \
+    "crd/$(policy_value "$POLICY" admission_parameter_crd)" \
+    --timeout="$(policy_value "$POLICY" operation_timeout_seconds)s" >/dev/null
+  kubectl apply --server-side --force-conflicts \
+    --field-manager=pireus-spark-pair -f "$manifest" >/dev/null
   sync_admission_projection
   wait_for 'fail-closed Spark admission projection' admission_current "$holder" "$epoch"
   bootstrap_gpu_admission_denied || fail 'generic GPU Pod was not denied during UNINITIALIZED bootstrap'
@@ -1667,6 +2048,197 @@ host_fence_staged() {
     (.status.numberReady // 0) == 0
   ' <<<"$daemonset" >/dev/null &&
     jq -e '(.items | length) == 0' <<<"$pods" >/dev/null
+}
+
+host_fence_legacy_runtime_bridge_exact() {
+  local daemonset pods config barrier_config daemonset_uid bound_uid script_sha barrier_sha
+  local live_configmap live_barrier_configmap
+  local require_ready="${3:-1}"
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)" || return 1
+  pods="$(host_fence_pods_json 2>/dev/null)" || return 1
+  live_configmap="$(jq -r '
+    .spec.template.spec.volumes[] |
+    select(.name == "fence-script") | .configMap.name // ""
+  ' <<<"$daemonset")"
+  live_barrier_configmap="$(jq -r '
+    .spec.template.spec.volumes[] |
+    select(.name == "device-barrier-source") | .configMap.name // ""
+  ' <<<"$daemonset")"
+  [[ -n "$live_configmap" && -n "$live_barrier_configmap" ]] || return 1
+  config="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$live_configmap" -o json 2>/dev/null)" || return 1
+  barrier_config="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$live_barrier_configmap" -o json 2>/dev/null)" || return 1
+  daemonset_uid="$(jq -r '.metadata.uid // ""' <<<"$daemonset")"
+  bound_uid="$(admission_config_json 2>/dev/null | \
+    jq -r '.data.hostFenceDaemonSetUid // ""')" || return 1
+  script_sha="$(jq -j '.data["host-fence.sh"] // ""' <<<"$config" | \
+    sha256sum | cut -d ' ' -f 1)"
+  barrier_sha="$(jq -j '.data["device-barrier.cpp"] // ""' <<<"$barrier_config" | \
+    sha256sum | cut -d ' ' -f 1)"
+  [[ "$daemonset_uid" =~ ^[0-9a-f-]{36}$ && "$bound_uid" == "$daemonset_uid" &&
+      "$live_configmap" == "pireus-spark-host-fence-${script_sha:0:12}" &&
+      "$live_barrier_configmap" == \
+        "pireus-spark-device-barrier-${barrier_sha:0:12}" ]] || return 1
+  jq -e '
+    .immutable == true and (.data | keys) == ["host-fence.sh"]
+  ' <<<"$config" >/dev/null || return 1
+  jq -e '
+    .immutable == true and (.data | keys) == ["device-barrier.cpp"]
+  ' <<<"$barrier_config" >/dev/null || return 1
+  jq -e \
+    --arg sa "$(policy_value "$POLICY" host_fence_service_account)" \
+    --arg image "$(policy_value "$POLICY" host_fence_image)" \
+    --arg cm "$live_configmap" \
+    --arg barrier_cm "$live_barrier_configmap" \
+    --arg selector_key "$(policy_value "$POLICY" host_fence_selector_key)" \
+    --arg selector_value "$(policy_value "$POLICY" host_fence_selector_value)" \
+    --arg require_ready "$require_ready" '
+      .spec.selector.matchLabels == {"app.kubernetes.io/name":"pireus-spark-host-fence"} and
+      .spec.template.metadata.labels["app.kubernetes.io/name"] == "pireus-spark-host-fence" and
+      .spec.template.metadata.labels["pireus.sounio.dev/spark-pair-infrastructure"] == "true" and
+      .spec.template.spec.serviceAccountName == $sa and
+      .spec.template.spec.automountServiceAccountToken == false and
+      .spec.template.spec.hostPID == true and
+      .spec.template.spec.restartPolicy == "Always" and
+      .spec.template.spec.nodeSelector == {($selector_key): $selector_value} and
+      (.spec.template.spec.containers | length) == 1 and
+      .spec.template.spec.containers[0].name == "host-fence" and
+      .spec.template.spec.containers[0].image == $image and
+      .spec.template.spec.containers[0].command == ["/bin/bash", "/fence/host-fence.sh", "daemonset-agent"] and
+      .spec.template.spec.containers[0].securityContext.privileged == true and
+      .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true and
+      .spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == true and
+      .spec.template.spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"] and
+      ((.spec.template.spec.containers[0].volumeMounts | length) == 3 or
+        ((.spec.template.spec.containers[0].volumeMounts | length) == 4 and
+          any(.spec.template.spec.containers[0].volumeMounts[];
+            .name == "runtime-tmp" and .mountPath == "/tmp" and
+            (.readOnly // false) == false))) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "fence-script" and .mountPath == "/fence" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "device-barrier-source" and .mountPath == "/barrier" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "host-root" and .mountPath == "/host") and
+      ((.spec.template.spec.volumes | length) == 3 or
+        ((.spec.template.spec.volumes | length) == 4 and
+          any(.spec.template.spec.volumes[];
+            .name == "runtime-tmp" and .emptyDir.sizeLimit == "64Mi"))) and
+      any(.spec.template.spec.volumes[];
+        .name == "fence-script" and .configMap.name == $cm and .configMap.defaultMode == 365) and
+      any(.spec.template.spec.volumes[];
+        .name == "device-barrier-source" and .configMap.name == $barrier_cm and .configMap.defaultMode == 292) and
+      any(.spec.template.spec.volumes[];
+        .name == "host-root" and .hostPath.path == "/" and .hostPath.type == "Directory") and
+      (.status.desiredNumberScheduled // 0) == 2 and
+      ($require_ready != "1" or
+        ((.status.numberReady // 0) == 2 and
+          (.status.numberUnavailable // 0) == 0))
+    ' <<<"$daemonset" >/dev/null || return 1
+  jq -e --arg n0 "$(node0)" --arg n1 "$(node1)" \
+    --arg daemonset_uid "$daemonset_uid" \
+    --arg sa "$(policy_value "$POLICY" host_fence_service_account)" \
+    --arg image "$(policy_value "$POLICY" host_fence_image)" \
+    --arg require_ready "$require_ready" '
+      (.items | length) == 2 and
+      ([.items[].spec.nodeName] | sort) == ([$n0, $n1] | sort) and
+      all(.items[];
+        (.metadata.ownerReferences | length) == 1 and
+        .metadata.ownerReferences[0].apiVersion == "apps/v1" and
+        .metadata.ownerReferences[0].kind == "DaemonSet" and
+        .metadata.ownerReferences[0].name == "pireus-spark-host-fence" and
+        .metadata.ownerReferences[0].uid == $daemonset_uid and
+        .metadata.ownerReferences[0].controller == true and
+        .metadata.ownerReferences[0].blockOwnerDeletion == true and
+        .spec.serviceAccountName == $sa and
+        .spec.automountServiceAccountToken == false and
+        .spec.hostPID == true and
+        (.spec.containers | length) == 1 and
+        .spec.containers[0].image == $image and
+        .spec.containers[0].command == ["/bin/bash", "/fence/host-fence.sh", "daemonset-agent"] and
+        .spec.containers[0].securityContext.privileged == true and
+        .spec.containers[0].securityContext.readOnlyRootFilesystem == true and
+        ($require_ready != "1" or
+          any(.status.conditions[]?; .type == "Ready" and .status == "True")))
+    ' <<<"$pods" >/dev/null
+}
+
+host_fence_watchdogs_ready_for_staging() {
+  local report0 report1 source_hash freeze_hash barrier_hash barrier_binary0 barrier_binary1 report_dir
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  barrier_hash="$(policy_value "$FREEZE" device_barrier_source_sha256)"
+  report_dir="$(mktemp -d)" || return 1
+  if ! host_fence_report_pair_with_host_tmp "$report_dir/report0" "$report_dir/report1" \
+    2>/dev/null; then
+    rm -rf "$report_dir"
+    return 1
+  fi
+  report0="$(<"$report_dir/report0")"
+  report1="$(<"$report_dir/report1")"
+  rm -rf "$report_dir"
+  barrier_binary0="$(frame_field "$report0" device_barrier_binary_sha256 2>/dev/null || true)"
+  barrier_binary1="$(frame_field "$report1" device_barrier_binary_sha256 2>/dev/null || true)"
+  [[ "$barrier_binary0" =~ ^[0-9a-f]{64}$ && "$barrier_binary1" == "$barrier_binary0" ]] || return 1
+  local report expected_node
+  for report in "$report0" "$report1"; do
+    if [[ "$report" == "$report0" ]]; then expected_node="$(node0)"; else expected_node="$(node1)"; fi
+    [[ "$(frame_field "$report" node 2>/dev/null || true)" == "$expected_node" &&
+        "$(frame_field "$report" grant_mode 2>/dev/null || true)" == FENCED &&
+        "$(frame_field "$report" grant_valid 2>/dev/null || true)" == 0 &&
+        "$(frame_field "$report" watchdog 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report" freeze_sha256 2>/dev/null || true)" == "$freeze_hash" &&
+        "$(frame_field "$report" device_barrier 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report" device_barrier_source_sha256 2>/dev/null || true)" == "$barrier_hash" &&
+        "$(frame_field "$report" inventory 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report" protected 2>/dev/null || true)" == 1 ]] || return 1
+  done
+}
+
+stage_host_fence_daemonset() {
+  local daemonset patched bootstrap_key bootstrap_value
+  bootstrap_key="$(policy_value "$POLICY" host_fence_bootstrap_selector_key)"
+  bootstrap_value="$(policy_value "$POLICY" host_fence_bootstrap_selector_value)"
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json)"
+  patched="$(jq --arg key "$bootstrap_key" --arg value "$bootstrap_value" '
+    .spec.template.spec.nodeSelector = {($key): $value}
+  ' <<<"$daemonset")"
+  kubectl -n "$(kube_namespace)" replace -f - <<<"$patched" >/dev/null
+}
+
+stage_existing_host_fence_for_bootstrap() {
+  local holder="$1" epoch="$2" source_hash freeze_hash barrier_hash
+  host_fence_staged && return 0
+  if host_fence_pair_exact "$holder" "$epoch" 0; then
+    source_hash="$(policy_value "$FREEZE" authority_sha256)"
+    freeze_hash="$(sha256_file "$FREEZE")"
+    barrier_hash="$(policy_value "$FREEZE" device_barrier_source_sha256)"
+    host_fence_install_current_watchdog_pair_via_bridge \
+      "$source_hash" "$freeze_hash" "$barrier_hash"
+    wait_for 'rebound current Spark host watchdogs' \
+      host_fence_watchdogs_ready_for_staging "$holder" "$epoch"
+    stage_host_fence_daemonset
+    wait_for 'inert current Spark host fence DaemonSet' host_fence_staged \
+      "$holder" "$epoch"
+    return 0
+  fi
+  host_fence_legacy_runtime_bridge_exact "$holder" "$epoch" 0 || \
+    fail 'existing host fence is not the exact legacy runtime bridge'
+  host_fence_host_tmp_writable "$(node0)" && host_fence_host_tmp_writable "$(node1)" || \
+    fail 'existing host fence cannot use host /tmp for watchdog repair'
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  barrier_hash="$(policy_value "$FREEZE" device_barrier_source_sha256)"
+  host_fence_install_current_watchdog_pair_via_bridge \
+    "$source_hash" "$freeze_hash" "$barrier_hash"
+  wait_for 'rebound Spark host watchdogs' host_fence_watchdogs_ready_for_staging \
+    "$holder" "$epoch"
+  stage_host_fence_daemonset
+  wait_for 'inert legacy Spark host fence DaemonSet' host_fence_staged "$holder" "$epoch"
 }
 
 bind_host_fence_daemonset_uid() {
@@ -1715,7 +2287,8 @@ install_host_fence() {
     fail 'host fence bootstrap selector unexpectedly matches a live node'
   device_barrier_config_json | kubectl apply --server-side \
     --field-manager=pireus-spark-pair-device-barrier -f - >/dev/null
-  kubectl apply --server-side --field-manager=pireus-spark-pair-host-fence \
+  kubectl apply --server-side --force-conflicts \
+    --field-manager=pireus-spark-pair-host-fence \
     -f "$manifest" >/dev/null
   wait_for 'inert Spark host fence DaemonSet' host_fence_staged "$holder" "$epoch"
   bind_host_fence_daemonset_uid
@@ -1753,7 +2326,7 @@ install_host_fence() {
     fail 'host fence receipt digest is malformed'
   lease="$(lease_json)"
   require_lease_context "$holder" "$epoch" 'UNINITIALIZED RECOVERY_REQUIRED' >/dev/null
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg boot0 "$boot0" --arg boot1 "$boot1" \
     --arg host_receipt0 "$host_receipt0" --arg host_receipt1 "$host_receipt1" \
     --arg epoch "$epoch" --arg holder "$holder" --arg now "$now" \
@@ -1787,7 +2360,7 @@ bind_host_pair_intent() {
   [[ "$(jq -r '.metadata.uid' <<<"$lease")" == "$lease_uid" &&
       "$(jq -r '.metadata.resourceVersion' <<<"$lease")" == "$base_lease_rv" ]] || \
     fail 'Lease changed before durable host pair intent'
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg transaction "$transaction" --arg pair "$pair_digest" \
     --arg decision "$decision_sha" --arg uid "$lease_uid" --arg base_rv "$base_lease_rv" \
     --arg prepare0 "$prepare0" --arg prepare1 "$prepare1" --arg now "$now" \
@@ -2061,7 +2634,7 @@ refresh_nodeset_generation() {
   lease_is_live "$lease" || fail 'Lease expired before NodeSet generation refresh'
   generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   updated="$(jq --arg generation "$generation" --arg now "$now" \
     --arg key "$(policy_value "$POLICY" nodeset_generation_annotation)" '
       .metadata.annotations[$key] = $generation |
@@ -2071,23 +2644,20 @@ refresh_nodeset_generation() {
   sync_admission_projection "$updated"
 }
 
-install_gpu_bound_slurmd() {
-  local holder epoch receipt nodeset patched selector_key selector_value taint_key taint_value taint_effect gpu
-  holder="$(arg_value --holder "$@")"
-  epoch="$(arg_value --epoch "$@")"
-  receipt="$(arg_value --receipt "$@")"
-  guard_mutation bootstrap-slurmd "$holder" "$epoch" "$receipt"
+gpu_bound_nodeset_json() {
+  local nodeset="$1" selector_key selector_value taint_key taint_value taint_effect gpu
   selector_key="$(policy_value "$POLICY" slurmd_selector_key)"
   selector_value="$(policy_value "$POLICY" slurmd_selector_value)"
   taint_key="$(policy_value "$POLICY" spark_taint_key)"
   taint_value="$(policy_value "$POLICY" spark_taint_value)"
   taint_effect="$(policy_value "$POLICY" spark_taint_effect)"
   gpu="$(policy_value "$POLICY" slurmd_gpu_resource)"
-  nodeset="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
-    "$(policy_value "$POLICY" nodeset_name)" -o json)"
-  patched="$(jq --arg selector_key "$selector_key" --arg selector_value "$selector_value" \
+  jq --arg selector_key "$selector_key" --arg selector_value "$selector_value" \
     --arg taint_key "$taint_key" --arg taint_value "$taint_value" --arg taint_effect "$taint_effect" \
     --arg gpu "$gpu" '
+      del(.spec.slurmd.lifecycle) |
+      del(.spec.template.spec.initContainers[]?.lifecycle) |
+      .spec.template.spec.runtimeClassName = "nvidia" |
       .spec.template.spec.nodeSelector[$selector_key] = $selector_value |
       .spec.slurmd.resources.requests[$gpu] = "1" |
       .spec.slurmd.resources.limits[$gpu] = "1" |
@@ -2098,7 +2668,20 @@ install_gpu_bound_slurmd() {
         "key": $taint_key, "operator": "Equal", "value": $taint_value, "effect": $taint_effect
       }]
       end
-    ' <<<"$nodeset")"
+    ' <<<"$nodeset"
+}
+
+install_gpu_bound_slurmd() {
+  local holder epoch receipt nodeset patched selector_key selector_value
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  guard_mutation bootstrap-slurmd "$holder" "$epoch" "$receipt"
+  selector_key="$(policy_value "$POLICY" slurmd_selector_key)"
+  selector_value="$(policy_value "$POLICY" slurmd_selector_value)"
+  nodeset="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
+    "$(policy_value "$POLICY" nodeset_name)" -o json)"
+  patched="$(gpu_bound_nodeset_json "$nodeset")"
   kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" replace -f - <<<"$patched" >/dev/null
   wait_for 'NodeSet controller observation' wait_nodeset_observed "$holder" "$epoch"
   refresh_nodeset_generation "$holder" "$epoch"
@@ -2140,7 +2723,7 @@ bootstrap_lease() {
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   freeze_hash="$(sha256sum "$FREEZE" | cut -d ' ' -f 1)"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  now="$(lease_timestamp)"
   kubectl -n "$namespace" create -f - >/dev/null <<EOF
 apiVersion: coordination.k8s.io/v1
 kind: Lease
@@ -2182,9 +2765,11 @@ main() {
   case "$command" in
     prebootstrap-facts) prebootstrap_facts "$@" ;;
     facts) facts "$@" ;;
+    bootstrap-migration-facts) bootstrap_migration_facts "$@" ;;
     lease-acquire) lease_acquire "$@" ;;
     lease-recovery-acquire) lease_recovery_acquire "$@" ;;
     lease-bootstrap-recovery-acquire) lease_bootstrap_recovery_acquire "$@" ;;
+    bootstrap-migrate-freeze) bootstrap_migrate_freeze "$@" ;;
     lease-transition) lease_transition "$@" ;;
     lease-renew) lease_renew "$@" ;;
     drain-slurm) drain_slurm "$@" ;;

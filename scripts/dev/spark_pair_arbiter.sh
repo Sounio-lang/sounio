@@ -101,6 +101,9 @@ verify_frozen_authority() {
   verify_frozen_file live_gate_source live_gate_sha256
   verify_frozen_file ci_workflow_source ci_workflow_sha256
   verify_frozen_file parity_open_source parity_open_sha256
+  verify_frozen_file dgx_material_slurm_source dgx_material_slurm_sha256
+  verify_frozen_file dgx_material_cuda_source dgx_material_cuda_sha256
+  verify_frozen_file dgx_material_header_source dgx_material_header_sha256
 
   if [[ ! -x "$AUTHORITY" ]]; then
     SOUNIO_SPARK_PAIR_OUTPUT="$AUTHORITY" "$BUILD" >/dev/null
@@ -487,7 +490,7 @@ on_exit() {
 }
 
 usage() {
-  printf 'Usage: %s verify | bootstrap-init | bootstrap | bootstrap-recover | status | hold SECONDS | recover\n' "$0" >&2
+  printf 'Usage: %s verify | bootstrap-init | bootstrap | bootstrap-recover | bootstrap-migrate-recover | status | hold SECONDS | recover\n' "$0" >&2
   exit 64
 }
 
@@ -510,7 +513,7 @@ bootstrap_sequence() {
 }
 
 main() {
-  local command="${1:-}" seconds frame state
+  local command="${1:-}" seconds frame state migration_needed
   verify_runtime_root
   configure_command_timeout
   verify_frozen_authority
@@ -551,6 +554,27 @@ main() {
       CURRENT_EPOCH="$(frame_field "$frame" epoch)"
       bootstrap_sequence
       printf 'SPARK_PAIR_BOOTSTRAP_RECOVERY_PASS epoch=%s\n' "$CURRENT_EPOCH"
+      ;;
+    bootstrap-migrate-recover)
+      migration_needed=0
+      if frame="$(backend bootstrap-migration-facts --holder "$HOLDER" 2>/dev/null)"; then
+        migration_needed=1
+      else
+        frame="$(observe)"
+      fi
+      state="$(frame_field "$frame" state)"
+      [[ "$state" == UNINITIALIZED ]] || fail "bootstrap migration requires UNINITIALIZED, observed $state"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      admit_frame 27 UNINITIALIZED UNINITIALIZED "$frame"
+      if [[ "$migration_needed" == 1 ]]; then
+        backend bootstrap-migrate-freeze --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+          --receipt "$LAST_RECEIPT" >/dev/null
+      fi
+      frame="$(backend lease-bootstrap-recovery-acquire --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+        --receipt "$LAST_RECEIPT")"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      bootstrap_sequence
+      printf 'SPARK_PAIR_BOOTSTRAP_MIGRATION_RECOVERY_PASS epoch=%s\n' "$CURRENT_EPOCH"
       ;;
     status)
       frame="$(observe)"

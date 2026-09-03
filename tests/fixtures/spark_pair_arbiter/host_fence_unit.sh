@@ -131,6 +131,38 @@ printf '%s\n' '{"items":[]}' > "$sandbox_json"
   exit 1
 }
 
+# A PID may exit after enumeration. Accept that race, but keep a live unknown
+# process fail-closed.
+mkdir -p "$HOST_ROOT/proc/7001" "$HOST_ROOT/proc/7002"
+pid_is_admitted_gpu_consumer() {
+  local pid="$1"
+  [[ "$pid" != 7001 ]] || rm -rf "$HOST_ROOT/proc/$pid"
+  return 1
+}
+host_ns() {
+  if [[ "$1" == /usr/bin/nvidia-smi ]]; then
+    printf '7001\n'
+    return 0
+  fi
+  return 1
+}
+external_compute_processes_absent || {
+  printf 'host-fence-unit: vanished compute PID was rejected\n' >&2
+  exit 1
+}
+host_ns() {
+  if [[ "$1" == /usr/bin/nvidia-smi ]]; then
+    printf '7002\n'
+    return 0
+  fi
+  return 1
+}
+if external_compute_processes_absent; then
+  printf 'host-fence-unit: live unknown compute PID was accepted\n' >&2
+  exit 1
+fi
+rm -rf "$HOST_ROOT/proc/7002"
+
 protected_snapshot() {
   printf 'boot_id=%s\n' "$(cat "$HOST_ROOT/proc/sys/kernel/random/boot_id")"
 }
@@ -163,4 +195,4 @@ fi
   exit 1
 }
 
-printf 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY\n'
+printf 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY pid_exit_race=PASS live_unknown_pid=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY\n'
