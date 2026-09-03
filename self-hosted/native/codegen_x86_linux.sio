@@ -47,10 +47,14 @@ var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 var NATIVE_ELF_OFF: i64 = 0
 // Set when nc_elf_put_u8 is asked to store past native_elf_buf_capacity_bytes().
 // The legacy writer (compile_native_finalize_and_write_ref) used to have NO bound
-// check at all; with NC_BIG_CODE raised to 8 MiB a large module can now push the
-// assembled image at this 16 MiB buffer, so the store is bounded and the writer
-// refuses to emit rather than shipping a truncated ELF. i64 (0/1) rather than
-// bool: module-global bool init is not exercised elsewhere in this backend.
+// check at all; a large module can push the assembled image past this legacy
+// 16 MiB buffer (measured 2026-09-02: self-hosted/compiler/main.sio needs
+// 53,515,198 code bytes at merged_ir_functions=13140, so NC_BIG_CODE -- the
+// native_v2 code tier this legacy path shares -- was raised to 128 MiB; this
+// legacy ELF buffer was left at 16 MiB since the legacy writer is not on that
+// path), so the store is bounded and the writer refuses to emit rather than
+// shipping a truncated ELF. i64 (0/1) rather than bool: module-global bool
+// init is not exercised elsewhere in this backend.
 var NATIVE_ELF_OVERFLOW: i64 = 0
 // Which function is being emitted right now, so nc_note_label_overflow can name
 // it. Per-function state, set beside nc_v2_reset_label_state; the surviving
@@ -73,13 +77,13 @@ fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
 // hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
 // the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
-var NC_BIG_ELF: [i8; 16777216] = [0; 16777216]
+var NC_BIG_ELF: [i8; 167772160] = [0; 167772160]
 // Single source of truth for the NC_BIG_ELF bound. The DECLARATION above must
 // stay a literal; every bound CHECK calls this accessor. NOTE: this value must
 // never be confused with the ELF LOAD BASE ADDRESS 0x400000 (4194304), which is
 // passed as the `base_addr` argument at several call sites and is unrelated to
 // buffer capacity. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
-fn nc_elf_capacity_bytes() -> i64 { 16777216 }
+fn nc_elf_capacity_bytes() -> i64 { 167772160 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -1791,6 +1795,7 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
+    (*nc).code_overflow_bytes_attempted = (*nc).code_overflow_bytes_attempted + 1
     if len >= 0 && len < nc_code_capacity_bytes() {
         NC_BIG_CODE[len as usize] = low8(b) as i8
         (*nc).code.len = len + 1
@@ -2053,6 +2058,7 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
+    (*nc).reloc_overflow_count_attempted = (*nc).reloc_overflow_count_attempted + 1
     if idx >= 0 && idx < nc_flat_reloc_capacity() {
         NC_FLAT_RELOC_OFFSETS[idx as usize] = patch_offset
         NC_FLAT_RELOC_KIND_CODES[idx as usize] = kind_code
@@ -5212,9 +5218,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = (*nc).flat_rodata_len
     var src = src_start
     var len = (*nc).flat_rodata_len
-    while src < updated.rodata.len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
-        len = len + 1
+    while src < updated.rodata.len {
+        (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
+        if len < nc_flat_rodata_capacity() {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
+            len = len + 1
+        }
         src = src + 1
     }
     (*nc).flat_rodata_len = len
@@ -8375,12 +8384,13 @@ fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_i
     let offset = len
     var i = 0
     let name_len = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).len
-    while i < name_len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name_len + 1
+    while i < name_len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -8392,12 +8402,13 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name.len + 1
+    while i < name.len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -9556,8 +9567,9 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
         (*nc).flat_rodata_len = len
@@ -12429,17 +12441,30 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let entry = trampoline_offset(&nc)
     nc.bss_total_size = (*module).bss_total_size
     if nc.bss_total_size < 8 { nc.bss_total_size = 8 }
-    // Machine code exceeded the 2MB NC_BIG_CODE buffer. nc_emit_byte drops
-    // further bytes and sets code_overflow, which would leave a truncated ELF.
-    // Fail with a distinct rc instead of writing a binary that crashes.
+    // Machine code exceeded the NC_BIG_CODE buffer (nc_code_capacity_bytes()).
+    // nc_emit_byte drops further bytes and sets code_overflow, which would
+    // leave a truncated ELF. Fail with a distinct rc instead of writing a
+    // binary that crashes. code_overflow_bytes_attempted is a true count (see
+    // frame.sio), not an estimate, so a capacity bump can be sized against it.
     if nc.code_overflow {
+        print("Error: native code buffer overflow -- code_bytes_needed=")
+        print_int(nc.code_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_code_capacity_bytes())
+        print(" (raise nc_code_capacity_bytes)\n")
         return 19
     }
     // Relocation table exceeded nc_flat_reloc_capacity(). nc_add_flat_reloc
     // dropped further entries and set reloc_overflow, so the ELF would carry
     // unpatched call/rodata sites. Distinct rc from the code-buffer overflow
-    // above so callers can tell the two tiers apart.
+    // above so callers can tell the two tiers apart. reloc_overflow_count_attempted
+    // is a true count (see frame.sio), not an estimate.
     if nc.reloc_overflow {
+        print("Error: native relocation table overflow -- relocs_needed=")
+        print_int(nc.reloc_overflow_count_attempted)
+        print(" capacity=")
+        print_int(nc_flat_reloc_capacity())
+        print(" (raise nc_flat_reloc_capacity)\n")
         return 20
     }
     // The OTHER relocation table. nc_add_flat_reloc guards the flat table above;
@@ -12461,6 +12486,22 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print_int(NC_V2_LABEL_OVERFLOW_FN)
         print(" (raise nc_v2_label_capacity)\n")
         return 22
+    }
+    // Flat rodata buffer (NC_BIG_RODATA) exceeded its 256 KiB capacity. Unlike
+    // code_overflow/reloc_overflow/label_overflow above, the append sites here
+    // do not set a fail-closed flag themselves -- they silently stop writing
+    // once flat_rodata_len saturates, so string/constant data past the cap is
+    // dropped with no error and the resulting ELF still gets written and still
+    // runs (badly: pointers into the never-written tail read stale/zero BSS).
+    // rodata_overflow_bytes_attempted is a true count (see frame.sio), not an
+    // estimate. Distinct rc from the other three tiers.
+    if nc.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity() {
+        print("Error: native rodata buffer overflow -- rodata_bytes_needed=")
+        print_int(nc.rodata_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_flat_rodata_capacity())
+        print(" (raise nc_flat_rodata_capacity)\n")
+        return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }
