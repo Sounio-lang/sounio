@@ -8,11 +8,17 @@ use gpu::ptx::*
 
 // Lower a complete GPU kernel IR to PTX
 pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    gpu_lower_to_ptx_for_target(kernel, false)
+}
+
+pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
     // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
     // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
-    if gpu_has_wmma_tile(kernel) {
+    if dgx_sm121 {
+        buf = ptx_emit_dgx_sm121_header(buf)
+    } else if gpu_has_wmma_tile(kernel) {
         buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
     } else {
         buf = ptx_emit_header(buf)
@@ -2835,7 +2841,19 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
         GpuOpcode::GpuRsqrt => gpu_refuse_unlowered(buf, "GpuRsqrt"),
         GpuOpcode::GpuSetpGt => gpu_refuse_unlowered(buf, "GpuSetpGt"),
         GpuOpcode::GpuSetpNe => gpu_refuse_unlowered(buf, "GpuSetpNe"),
-        GpuOpcode::GpuShflBfly => gpu_refuse_unlowered(buf, "GpuShflBfly"),
+        GpuOpcode::GpuShflBfly => {
+            var out = buf
+            out = ptx_push_str(out, "    shfl.sync.bfly.b32 ")
+            out = ptx_push_str(out, gpu_reg_u32(op.dst_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, gpu_reg_u32(op.src_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+            out = ptx_push_str(out, ", 15, ")
+            out = ptx_push_str(out, i64_to_string(op.mask))
+            out = ptx_push_str(out, ";\n")
+            out
+        },
         GpuOpcode::GpuShflIdx => gpu_refuse_unlowered(buf, "GpuShflIdx"),
         GpuOpcode::GpuShflUp => gpu_refuse_unlowered(buf, "GpuShflUp"),
         GpuOpcode::GpuShl => gpu_refuse_unlowered(buf, "GpuShl"),
