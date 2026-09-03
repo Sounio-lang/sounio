@@ -1089,10 +1089,45 @@ impl Parser {
             }
         }
 
+        // Detect "causal graph NAME {" declarations when both `causal` and
+        // `graph` are treated as identifiers (neither is a reserved
+        // keyword, same reasoning as "module"/"claim" above). Unlike those,
+        // the SECOND word's text also has to match ("graph"), not just its
+        // kind, since `graph` alone is a common enough identifier that a
+        // kind-only check would misfire on `causal something_else`.
+        var is_causal_graph_decl = false
+        if item_kind == TokenKind::Ident {
+            let causal_probe = p.current_name()
+            if causal_probe.len == 6
+                && causal_probe.buf[0] == (99 as i8)
+                && causal_probe.buf[1] == (97 as i8)
+                && causal_probe.buf[2] == (117 as i8)
+                && causal_probe.buf[3] == (115 as i8)
+                && causal_probe.buf[4] == (97 as i8)
+                && causal_probe.buf[5] == (108 as i8) {
+                if parser_peek_ahead(p, 1) == TokenKind::Ident {
+                    let graph_probe = p.advance().current_name()
+                    if graph_probe.len == 5
+                        && graph_probe.buf[0] == (103 as i8)
+                        && graph_probe.buf[1] == (114 as i8)
+                        && graph_probe.buf[2] == (97 as i8)
+                        && graph_probe.buf[3] == (112 as i8)
+                        && graph_probe.buf[4] == (104 as i8) {
+                        if parser_peek_ahead(p, 2) == TokenKind::Ident
+                            && parser_peek_ahead(p, 3) == TokenKind::LBrace {
+                            is_causal_graph_decl = true
+                        }
+                    }
+                }
+            }
+        }
+
         if is_module_decl {
             p.parse_module_item(visibility)
         } else if is_claim_decl {
             parse_claim_item(p, visibility)
+        } else if is_causal_graph_decl {
+            parse_causal_graph_item(p, visibility)
         } else if item_kind == TokenKind::Fn {
             p.parse_fn_item(visibility, is_kernel)
         } else if item_kind == TokenKind::Struct {
@@ -5784,6 +5819,103 @@ fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
 
     (pa, Item {
         kind: ItemKind::ItemClaim,
+        span: span,
+        visibility: visibility,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: None,
+    })
+}
+
+// `causal graph NAME { A -> B   C <-> D }` — declares a causal DAG (directed
+// edges) with optional unmeasured-confounding edges (bidirected `<->`).
+// Same shape as parse_claim_item: dropped from the item stream after
+// recording into the ast::causal-graph registry (ast.sio's CG_* globals),
+// which is what lets check.sio's IndepKnowledge<T, A, B | Z> lowering
+// discharge a claim by Bayes-Ball d-separation instead of only checking
+// A != B. `->` lexes as a single Arrow token; `<->` does not (there is no
+// 3-char operator for it) and lexes as LeftArrow ("<-") immediately
+// followed by Gt (">").
+fn parse_causal_graph_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'causal'
+    pa = pa.advance()     // skip 'graph'
+
+    var name = empty_name()
+    if parser_peek(pa) == TokenKind::Ident {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
+    pa = pa.expect(TokenKind::LBrace)
+
+    ast_reset_causal_graph()
+    CG_DECLARED = true
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline || pa.peek() == TokenKind::Comma {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+        if parser_peek(pa) != TokenKind::Ident {
+            // Unknown token in the graph body: skip it (error recovery,
+            // same as parse_claim_item's fallthrough).
+            pa = pa.advance()
+        } else {
+            let a_name = pa.current_name()
+            pa = pa.advance()
+            var directed = true
+            var have_edge = true
+            if pa.peek() == TokenKind::Arrow {
+                pa = pa.advance()
+            } else if pa.peek() == TokenKind::LeftArrow && parser_peek_ahead(pa, 1) == TokenKind::Gt {
+                directed = false
+                pa = pa.advance()  // consume "<-"
+                pa = pa.advance()  // consume ">"
+            } else {
+                have_edge = false
+            }
+            if have_edge && parser_peek(pa) == TokenKind::Ident {
+                let b_name = pa.current_name()
+                pa = pa.advance()
+                let a_idx = ast_causal_graph_intern_node(a_name)
+                let b_idx = ast_causal_graph_intern_node(b_name)
+                ast_causal_graph_add_edge(a_idx, b_idx, directed)
+            }
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    (pa, Item {
+        kind: ItemKind::ItemCausalGraph,
         span: span,
         visibility: visibility,
         name: name,

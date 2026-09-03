@@ -1842,7 +1842,7 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
     }
     // IndepKnowledge<T, A, B | Z> — conditional independence as a type. The
     // non-inplace resolver lower_named_type_with_args handles this near
-    // check.sio:16768; the inplace resolver (the one that actually runs
+    // check.sio:17102; the inplace resolver (the one that actually runs
     // during `souc check`/Madaros checking) was missing it, so the claim
     // degraded to a bare TyNamed("IndepKnowledge") and the self-independence
     // guard (E209) never fired. Mirror the branch here, same as Hyper above.
@@ -1859,6 +1859,20 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                     Some(r) => *r
                 }
                 let a_expr = rest1.head
+                // Snapshot A's and B's names right where each TypeExpr is
+                // captured. The actual root cause of the false-positive E209
+                // on every DISTINCT-variable IndepKnowledge claim (found while
+                // adding the causal-graph discharge below) turned out to be
+                // upstream, in the parser: parse_indep_knowledge_args
+                // (parser/types.sio) held the (Parser, TypeExpr) tuples for
+                // A and B alive across each other's p.parse_type() call, and
+                // Madaros's native backend aliases consecutive same-shaped
+                // return values to one buffer, so A's TypeExpr silently
+                // became a copy of B's before check.sio ever saw it. Fixed
+                // there (boxing each parsed arg immediately); the extraction
+                // order here no longer matters but stays close to each
+                // expr's origin for clarity.
+                let a_name = checker_copy_string_list_to_name(a_expr.path.segments)
                 let rest2 = match rest1.tail {
                     None => {
                         checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
@@ -1867,6 +1881,7 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                     Some(r) => *r
                 }
                 let b_expr = rest2.head
+                let b_name = checker_copy_string_list_to_name(b_expr.path.segments)
 
                 if a_expr.kind != TypeExprKind::TypeNamed {
                     checker_report_error_at_inplace(c, a_expr.span, 209, 0, 0, 0)
@@ -1877,19 +1892,51 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                     return ty_error()
                 }
 
-                let cond_id = match rest2.tail {
+                let z_clause_opt = rest2.tail
+                let cond_id = match z_clause_opt {
                     None => 0 - 1
                     Some(r) => indep_cond_set_id((*r).head)
                 }
 
                 let base_ty = checker_lower_type_expr_mut(c, t_expr)
 
-                let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
-                let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+                let a_id = indep_var_id(a_name)
+                let b_id = indep_var_id(b_name)
 
                 if a_id == b_id {
                     checker_report_error_at_inplace(c, b_expr.span, 209, 0, 0, 0)
                     return ty_error()
+                }
+
+                // Discharge the claim against the declared causal graph
+                // (E232/E233). With no graph declared there is nothing to
+                // check against, and the claim stands on the degeneracy
+                // check alone — stated, not proven.
+                if CG_DECLARED {
+                    let a_idx = ast_causal_graph_node_index(a_name)
+                    let b_idx = ast_causal_graph_node_index(b_name)
+                    if a_idx < 0 {
+                        checker_report_indep_var_not_in_graph_inplace(c, a_expr.span, a_name)
+                        return ty_error()
+                    }
+                    if b_idx < 0 {
+                        checker_report_indep_var_not_in_graph_inplace(c, b_expr.span, b_name)
+                        return ty_error()
+                    }
+                    var z_set: [bool; 16] = [false; 16]
+                    let z_result = match z_clause_opt {
+                        None => (true, empty_name())
+                        Some(r) => cg_build_z_set((*r).head, &! z_set)
+                    }
+                    let z_ok = z_result.0
+                    if !z_ok {
+                        checker_report_indep_var_not_in_graph_inplace(c, b_expr.span, z_result.1)
+                        return ty_error()
+                    }
+                    if !cg_d_separated_registry(a_idx, b_idx, z_set) {
+                        checker_report_indep_not_dseparated_inplace(c, b_expr.span, a_name, b_name)
+                        return ty_error()
+                    }
                 }
 
                 return ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
@@ -5963,7 +6010,15 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // Skip the generic types_compatible mismatch, which would otherwise reject two hyper values
     // with a spurious E004 "cannot be combined" before hyper dispatch runs.
     let both_hyper = left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper
-    if !both_hyper && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // IndepKnowledge<T, A, B | Z> is "transparent to T at runtime: it is
+    // checked, not represented" (tests/run-pass/indep_knowledge_grammar.sio)
+    // — the independence claim is discharged (or rejected) once, at the
+    // type-annotation site, and does not constrain which OTHER IndepKnowledge
+    // values (possibly over different A/B/Z) it may be combined with
+    // arithmetically. Skip the strict identity-matching types_compatible
+    // check here the same way both_hyper does, and unwrap to T below.
+    let either_cond_indep = is_cond_indep_type(left_ty) || is_cond_indep_type(right_ty)
+    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -5972,6 +6027,13 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if is_arith || is_cmp {
             checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
         }
+    }
+    if either_cond_indep {
+        let ci_result = cond_indep_binary_result(e.bin_op, left_ty, right_ty)
+        if ci_result.kind == TypeKind::TyError {
+            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+        }
+        return ci_result
     }
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
@@ -13810,6 +13872,15 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    // #1758: causal-graph declaration + d-separation discharge for
+    // IndepKnowledge<T, A, B | Z>. Would naturally be E175/E176 (matching
+    // the lean_single-only original, commit 8d7dccec05) but 175 and 176 are
+    // already taken here by the visibility diagnostics above (175 = private
+    // function, 176 = private struct constructor) — renumbered the same way
+    // cdc4169ebe renumbered the colliding IndepKnowledge self-independence
+    // code 174 -> 209.
+    else if code == 232 { print("independence claim mentions a variable the declared `causal graph` does not name") }
+    else if code == 233 { print("independence claim is not established: an active path remains open in the declared `causal graph` given the stated conditioning set") }
     else { print("unknown error") }
 }
 
@@ -14099,6 +14170,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 219 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
+    }
+    else if code == 232 {
+        print("   |\n   = help: add the variable to the `causal graph` block, or correct the name\n")
+    }
+    else if code == 233 {
+        print("   |\n   = help: an active path remains open in the declared `causal graph`; condition on the variables that block it, or drop the claim\n")
     }
     else {
         // No help available for unknown errors
@@ -15657,12 +15734,15 @@ fn expr_list_third(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc
 // ============================================================
 //
 // A claim of independence only has to tell its variables apart, so a name
-// identity is exactly the semantics available today. It is NOT a causal-graph
-// node index: no surface syntax declares a causal graph yet, so nothing can
-// discharge the claim by d-separation. When that surface exists these ids
-// become indices into the declared graph and causal_d_separated becomes the
-// discharge. Until then the checker enforces only what it can actually know —
-// that a variable is not independent of itself.
+// identity is exactly what indep_var_id/indep_cond_set_id give the TypeEntry
+// below. It is NOT a causal-graph node index — those are separate, assigned
+// by ast::ast_causal_graph_intern_node when a `causal graph { ... }` block is
+// parsed (ast.sio), and looked up by ast_causal_graph_node_index/
+// cg_d_separated_registry below to actually discharge the claim by Bayes-Ball
+// d-separation (E232/E233), in both the by-value and *mut IndepKnowledge
+// lowering sites. With no graph declared there is nothing to discharge
+// against, and the checker enforces only what it can know regardless —
+// that a variable is not independent of itself (E209).
 //
 // FNV-1a, reduced modulo a prime each step so the product cannot overflow i64.
 fn indep_var_id(n: Name) -> i64 with Mut, Panic, Div {
@@ -15710,6 +15790,312 @@ fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Di
         i = i + 1
     }
     n
+}
+
+// Transparent-to-T binary result for IndepKnowledge<T, A, B | Z>, mirroring
+// knowledge_binary_result (check/epistemic.sio) but with no epsilon to
+// combine: "the claim is transparent to T at runtime -- it is checked, not
+// represented" (tests/run-pass/indep_knowledge_grammar.sio), so arithmetic
+// on an IndepKnowledge value is just arithmetic on T, and the result is T
+// itself, not re-wrapped -- the independence claim was already discharged
+// (or rejected) at the type-annotation site and does not propagate through
+// expressions. Never called by itself before this change: the modular
+// checker had no let-binding/binary-op path that reached a real TyCondIndep
+// value (every distinct-variable claim false-positived on E209 first, from
+// the parser bug fixed in parse_indep_knowledge_args), so this gap was
+// invisible until that bug was fixed.
+fn cond_indep_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let left_is_ci = is_cond_indep_type(left_ty)
+    let right_is_ci = is_cond_indep_type(right_ty)
+    if !left_is_ci && !right_is_ci {
+        return ty_error()
+    }
+    let left_inner = if left_is_ci {
+        match left_ty.inner {
+            Some(b) => *b
+            None => ty_error()
+        }
+    } else {
+        left_ty
+    }
+    let right_inner = if right_is_ci {
+        match right_ty.inner {
+            Some(b) => *b
+            None => ty_error()
+        }
+    } else {
+        right_ty
+    }
+    if !types_compatible(left_inner, right_inner) {
+        return ty_error()
+    }
+    binary_result_type(op, left_inner, right_inner)
+}
+
+// ============================================================
+// Causal-graph discharge for IndepKnowledge<T, A, B | Z> (#1758 modular port)
+// ============================================================
+//
+// Reads the ast::causal-graph registry (ast.sio's CG_DECLARED/CG_NODE_*/
+// CG_EDGE_* globals, populated by parse_causal_graph_item when a source file
+// declares `causal graph NAME { ... }`) and runs Bayes-Ball (Shachter 1998)
+// to actually discharge a claim instead of only checking A != B (E209).
+// Ported from self-hosted/compiler/lean_single.sio's cg_d_separated (commit
+// 8d7dccec05, verified there case-by-case against Pearl: chain/fork/collider/
+// descendant/confounded), adapted to walk the flat registry directly rather
+// than a CausalGraph struct value — see ast.sio's registry comment for why
+// (causal_graph_add_node's (CausalGraph, i64) tuple return is untested under
+// Madaros and has the same large-struct-copy shape as the class of bug this
+// whole feature exists to close).
+//
+// Conditioning-set membership vector for a discharge check. Every name in
+// `cond`'s type_args (the `| Z` clause) must be a declared graph node; on
+// the first one that is not, returns ok=false and bad=that name so the
+// caller can report E232 against it. `out_z_set` is written in place rather
+// than returned in the tuple (a fixed-size array as one element of a 3-tuple
+// alongside scalars hit "tuple index out of bounds" on the later fields
+// under Madaros's native backend — an out-param sidesteps it entirely).
+// Otherwise pure — no Checker needed — so it is shared verbatim by both the
+// by-value and *mut IndepKnowledge resolvers.
+fn cg_build_z_set(cond: TypeExpr, out_z_set: &! [bool; 16]) -> (bool, Name) with Mut, Panic, Div {
+    match cond.type_args {
+        None => (true, empty_name())
+        Some(list) => {
+            var cur = *list
+            var more = true
+            var ok = true
+            var bad = empty_name()
+            while more {
+                let zname = checker_copy_string_list_to_name(cur.head.path.segments)
+                let zidx = ast_causal_graph_node_index(zname)
+                if zidx < 0 {
+                    ok = false
+                    bad = zname
+                    more = false
+                } else {
+                    out_z_set[zidx as usize] = true
+                    match cur.tail {
+                        Some(rest) => { cur = *rest }
+                        None => { more = false }
+                    }
+                }
+            }
+            (ok, bad)
+        }
+    }
+}
+
+// D-separation test over the ast::causal-graph registry: is node x
+// independent of node y given conditioning set z_set? Bayes-Ball, state =
+// node*2 + direction (0 = ball arrived from a parent, 1 = from a child).
+// Returns true when NO active path remains between x and y — i.e. when the
+// independence actually holds.
+fn cg_d_separated_registry(x: i64, y: i64, z_set: [bool; 16]) -> bool with Mut, Panic, Div {
+    // Close Z downward: a collider is opened by conditioning on it OR any
+    // descendant of it (Pearl 1988), so descendants have to join the active
+    // set before the walk starts.
+    var z_or_desc: [bool; 16] = z_set
+    var dq: [i64; 16] = [0 - 1; 16]
+    var dq_head: i64 = 0
+    var dq_tail: i64 = 0
+    var zi: i64 = 0
+    while zi < CG_NODE_COUNT {
+        if z_set[zi as usize] {
+            dq[dq_tail as usize] = zi
+            dq_tail = dq_tail + 1
+        }
+        zi = zi + 1
+    }
+    while dq_head < dq_tail {
+        let cur = dq[dq_head as usize]
+        dq_head = dq_head + 1
+        var edi: i64 = 0
+        while edi < CG_EDGE_COUNT {
+            if CG_EDGE_DIRECTED[edi as usize] && CG_EDGE_FROM[edi as usize] == cur {
+                let nx = CG_EDGE_TO[edi as usize]
+                if !z_or_desc[nx as usize] {
+                    z_or_desc[nx as usize] = true
+                    if dq_tail < 16 {
+                        dq[dq_tail as usize] = nx
+                        dq_tail = dq_tail + 1
+                    }
+                }
+            }
+            edi = edi + 1
+        }
+    }
+
+    var visited: [bool; 32] = [false; 32]
+    var queue: [i64; 64] = [0 - 1; 64]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var reached: bool = false
+
+    // Seed: every edge incident to x.
+    var ei: i64 = 0
+    while ei < CG_EDGE_COUNT {
+        if CG_EDGE_DIRECTED[ei as usize] && CG_EDGE_FROM[ei as usize] == x {
+            let s = CG_EDGE_TO[ei as usize] * 2 + 0
+            if !visited[s as usize] {
+                visited[s as usize] = true
+                queue[q_tail as usize] = s
+                q_tail = q_tail + 1
+            }
+        }
+        if CG_EDGE_DIRECTED[ei as usize] && CG_EDGE_TO[ei as usize] == x {
+            let s = CG_EDGE_FROM[ei as usize] * 2 + 1
+            if !visited[s as usize] {
+                visited[s as usize] = true
+                queue[q_tail as usize] = s
+                q_tail = q_tail + 1
+            }
+        }
+        if !CG_EDGE_DIRECTED[ei as usize] {
+            var other: i64 = 0 - 1
+            if CG_EDGE_FROM[ei as usize] == x { other = CG_EDGE_TO[ei as usize] }
+            if CG_EDGE_TO[ei as usize] == x { other = CG_EDGE_FROM[ei as usize] }
+            if other >= 0 {
+                let s = other * 2 + 0
+                if !visited[s as usize] {
+                    visited[s as usize] = true
+                    queue[q_tail as usize] = s
+                    q_tail = q_tail + 1
+                }
+            }
+        }
+        ei = ei + 1
+    }
+
+    while q_head < q_tail && !reached {
+        let state = queue[q_head as usize]
+        q_head = q_head + 1
+        let node = state / 2
+        let from_parent = (state % 2) == 0
+        if node == y { reached = true }
+        if !reached {
+            if from_parent {
+                // Chain or fork: open only while the node is unconditioned.
+                if !z_set[node as usize] {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIRECTED[ej as usize] && CG_EDGE_FROM[ej as usize] == node {
+                            let s2 = CG_EDGE_TO[ej as usize] * 2 + 0
+                            if !visited[s2 as usize] {
+                                visited[s2 as usize] = true
+                                queue[q_tail as usize] = s2
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if !CG_EDGE_DIRECTED[ej as usize] {
+                            var o2: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o2 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o2 = CG_EDGE_FROM[ej as usize] }
+                            if o2 >= 0 {
+                                let s2 = o2 * 2 + 0
+                                if !visited[s2 as usize] {
+                                    visited[s2 as usize] = true
+                                    queue[q_tail as usize] = s2
+                                    q_tail = q_tail + 1
+                                }
+                            }
+                        }
+                        ej = ej + 1
+                    }
+                }
+                // Collider: opened, not blocked, by conditioning (on it or a
+                // descendant of it).
+                if z_or_desc[node as usize] {
+                    var ek: i64 = 0
+                    while ek < CG_EDGE_COUNT {
+                        if CG_EDGE_DIRECTED[ek as usize] && CG_EDGE_TO[ek as usize] == node {
+                            let s3 = CG_EDGE_FROM[ek as usize] * 2 + 1
+                            if !visited[s3 as usize] {
+                                visited[s3 as usize] = true
+                                queue[q_tail as usize] = s3
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        ek = ek + 1
+                    }
+                }
+            } else {
+                if !z_set[node as usize] {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIRECTED[ej as usize] && CG_EDGE_TO[ej as usize] == node {
+                            let s4 = CG_EDGE_FROM[ej as usize] * 2 + 1
+                            if !visited[s4 as usize] {
+                                visited[s4 as usize] = true
+                                queue[q_tail as usize] = s4
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if CG_EDGE_DIRECTED[ej as usize] && CG_EDGE_FROM[ej as usize] == node {
+                            let s5 = CG_EDGE_TO[ej as usize] * 2 + 0
+                            if !visited[s5 as usize] {
+                                visited[s5 as usize] = true
+                                queue[q_tail as usize] = s5
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if !CG_EDGE_DIRECTED[ej as usize] {
+                            var o3: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o3 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o3 = CG_EDGE_FROM[ej as usize] }
+                            if o3 >= 0 {
+                                let s6 = o3 * 2 + 0
+                                if !visited[s6 as usize] {
+                                    visited[s6 as usize] = true
+                                    queue[q_tail as usize] = s6
+                                    q_tail = q_tail + 1
+                                }
+                            }
+                        }
+                        ej = ej + 1
+                    }
+                }
+            }
+        }
+    }
+    !reached
+}
+
+// Report wrappers, mirrored between the by-value and *mut Checker (same
+// pattern as checker_report_private_fn_inplace / report_error_at throughout
+// this file): the fixed diagnostic text comes from print_error_message/
+// print_error_help via code 232/233; these append the offending name(s).
+fn checker_report_indep_var_not_in_graph(c: Checker, span: Span, bad_name: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+    let c2 = c.report_error_at(span, 232, 0, 0, 0)
+    print("   = variable `")
+    e035_print_ident(bad_name)
+    print("` is not declared as a node of the `causal graph`\n")
+    c2
+}
+
+fn checker_report_indep_var_not_in_graph_inplace(c: *mut Checker, span: Span, bad_name: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 232, 0, 0, 0)
+    print("   = variable `")
+    e035_print_ident(bad_name)
+    print("` is not declared as a node of the `causal graph`\n")
+}
+
+fn checker_report_indep_not_dseparated(c: Checker, span: Span, a_name: Name, b_name: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+    let c2 = c.report_error_at(span, 233, 0, 0, 0)
+    print("   = `")
+    e035_print_ident(a_name)
+    print("` is not d-separated from `")
+    e035_print_ident(b_name)
+    print("` given the stated conditioning set, against the declared `causal graph`\n")
+    c2
+}
+
+fn checker_report_indep_not_dseparated_inplace(c: *mut Checker, span: Span, a_name: Name, b_name: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 233, 0, 0, 0)
+    print("   = `")
+    e035_print_ident(a_name)
+    print("` is not d-separated from `")
+    e035_print_ident(b_name)
+    print("` given the stated conditioning set, against the declared `causal graph`\n")
 }
 
 fn checker_copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
@@ -16549,14 +16935,25 @@ fn checker_float_literal_magnitude(e: Expr) -> f64 {
 // CARDINAL: only LITERALS coerce, and never out of range. A float literal wider
 // than f32 max must still REJECT -- the literal-holes round found `let x: f32 =
 // 1e300` being accepted once the coercion was added without this guard.
-fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
+fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if actual_ty.kind != TypeKind::TyF64 {
         return false
     }
-    if !is_float_type(expected_ty) {
+    // IndepKnowledge<T, A, B | Z> is transparent to T for a literal
+    // initializer too (`let a: IndepKnowledge<f64, hrv, kp | hora> = 1.0`):
+    // unwrap to the inner type before the float-literal check below, same
+    // reasoning as cond_indep_binary_result above.
+    var eff_expected = expected_ty
+    if eff_expected.kind == TypeKind::TyCondIndep {
+        eff_expected = match eff_expected.inner {
+            Some(b) => *b
+            None => eff_expected
+        }
+    }
+    if !is_float_type(eff_expected) {
         return false
     }
-    if expected_ty.kind == TypeKind::TyF64 {
+    if eff_expected.kind == TypeKind::TyF64 {
         return true
     }
     checker_float_literal_magnitude(e) <= 3.4028235e38
@@ -16852,7 +17249,8 @@ impl Checker {
                         return (c, ty_error())
                     }
 
-                    let cond_id = match rest2.tail {
+                    let z_clause_opt = rest2.tail
+                    let cond_id = match z_clause_opt {
                         None => 0 - 1
                         Some(r) => indep_cond_set_id((*r).head)
                     }
@@ -16861,8 +17259,10 @@ impl Checker {
                     var c = t_pair.0
                     let base_ty = t_pair.1
 
-                    let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
-                    let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+                    let a_name = checker_copy_string_list_to_name(a_expr.path.segments)
+                    let b_name = checker_copy_string_list_to_name(b_expr.path.segments)
+                    let a_id = indep_var_id(a_name)
+                    let b_id = indep_var_id(b_name)
 
                     // The rule is spelled out here rather than delegated to
                     // check_cond_indep_type in check/epistemic.sio: that module is
@@ -16876,6 +17276,38 @@ impl Checker {
                     if a_id == b_id {
                         let c2 = c.report_error_at(b_expr.span, 209, 0, 0, 0)
                         return (c2, ty_error())
+                    }
+
+                    // Discharge the claim against the declared causal graph
+                    // (E232/E233) — see the *mut mirror of this branch (near
+                    // check.sio:1843) for the full rationale. With no graph
+                    // declared there is nothing to check against, and the
+                    // claim stands on the degeneracy check alone.
+                    if CG_DECLARED {
+                        let a_idx = ast_causal_graph_node_index(a_name)
+                        let b_idx = ast_causal_graph_node_index(b_name)
+                        if a_idx < 0 {
+                            let c3 = checker_report_indep_var_not_in_graph(c, a_expr.span, a_name)
+                            return (c3, ty_error())
+                        }
+                        if b_idx < 0 {
+                            let c3 = checker_report_indep_var_not_in_graph(c, b_expr.span, b_name)
+                            return (c3, ty_error())
+                        }
+                        var z_set: [bool; 16] = [false; 16]
+                        let z_result = match z_clause_opt {
+                            None => (true, empty_name())
+                            Some(r) => cg_build_z_set((*r).head, &! z_set)
+                        }
+                        let z_ok = z_result.0
+                        if !z_ok {
+                            let c3 = checker_report_indep_var_not_in_graph(c, b_expr.span, z_result.1)
+                            return (c3, ty_error())
+                        }
+                        if !cg_d_separated_registry(a_idx, b_idx, z_set) {
+                            let c3 = checker_report_indep_not_dseparated(c, b_expr.span, a_name, b_name)
+                            return (c3, ty_error())
+                        }
                     }
 
                     // confidence unset (-1.0): the claim carries no probability
@@ -20385,6 +20817,8 @@ impl Checker {
             ItemKind::ItemAlgebra => self  // Already handled in collect pass
             ItemKind::ItemStudy => self  // Already handled in collect pass
             ItemKind::ItemOntology => self  // Already handled in collect pass
+            ItemKind::ItemClaim => self  // Metadata; dropped before parse finishes, never reaches here
+            ItemKind::ItemCausalGraph => self  // Metadata; dropped before parse finishes, never reaches here
         }
     }
 

@@ -949,6 +949,7 @@ pub enum ItemKind {
     ItemStudy,
     ItemOntology,
     ItemClaim,
+    ItemCausalGraph,
 }
 
 // ============================================================================
@@ -1777,6 +1778,102 @@ pub fn ast_claim_field_kind(name: Name, field: Name) -> i64 with Div {
         i = i + 1
     }
     CLAIM_VALUE_NONE
+}
+
+// ============================================================
+// Causal graph declaration (#1758 modular port)
+// ============================================================
+//
+// Syntax: `causal graph NAME { A -> B   C <-> D }`. `->` is a directed
+// (causal) edge; `<->` is bidirected (unmeasured confounding). This is what
+// discharges IndepKnowledge<T, A, B | Z> by Bayes-Ball d-separation instead
+// of only checking A != B (E209) — see check.sio's IndepKnowledge lowering
+// (both the by-value and *mut resolvers) for the discharge itself.
+//
+// Landed first in self-hosted/compiler/lean_single.sio only (commit
+// 8d7dccec05), never in this modular tree — Madaros (the real self-hosted
+// binary built from self-hosted/) had no `causal graph` surface at all, so
+// every IndepKnowledge claim it checked degraded to the self-independence
+// guard alone, same failure shape as the IndepKnowledge *mut mirror gap
+// fixed in cdc4169ebe.
+//
+// Compile-time metadata, same as claim above: parse_causal_graph_item
+// records the graph here and the parse driver (parser::mod) drops
+// ItemKind::ItemCausalGraph from the item stream, so resolve/check-item-
+// dispatch/lower/codegen never observe it — only the checker's IndepKnowledge
+// lowering reads this registry, directly, by calling into ast::*.
+//
+// Flat scalar arrays, not a CausalGraph struct value or a global struct
+// array: global struct-array initializers are not supported (see the CLAIM_*
+// registry's own comment above), and threading (CausalGraph, i64) tuple
+// returns through causal_graph_add_node — a large by-value struct-in-tuple —
+// is exactly the shape of code most likely to hit the native-backend
+// large-struct-copy miscompilation this codebase works around everywhere
+// else (Checker's own *mut split; see cdc4169ebe). Untested, so unused here.
+// Nodes are identified by ast_name_hash so a lookup from check.sio (given a
+// variable's Name) needs no access to the graph's declaration-time bytes.
+pub const CG_MAX_NODES: i64 = 16
+pub const CG_MAX_EDGES: i64 = 32
+
+pub var CG_DECLARED: bool = false
+pub var CG_NODE_COUNT: i64 = 0
+pub var CG_NODE_HASHES: [i64; 16] = [0; 16]
+pub var CG_EDGE_COUNT: i64 = 0
+pub var CG_EDGE_FROM: [i64; 32] = [0; 32]
+pub var CG_EDGE_TO: [i64; 32] = [0; 32]
+pub var CG_EDGE_DIRECTED: [bool; 32] = [true; 32]
+
+pub fn ast_reset_causal_graph() with Mut {
+    CG_DECLARED = false
+    CG_NODE_COUNT = 0
+    CG_EDGE_COUNT = 0
+}
+
+// Declared node index for `n`, or -1 when it is not a node of the declared
+// graph (or no graph is declared at all — CG_NODE_COUNT is then 0). Lookup
+// only: never interns, so an unknown variable stays unknown (that is the
+// point — E232 fires on it rather than the graph silently growing to fit).
+pub fn ast_causal_graph_node_index(n: Name) -> i64 with Div {
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < CG_NODE_COUNT {
+        if CG_NODE_HASHES[i as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Parse-time only: declare a node, interning by name (idempotent — the same
+// name mentioned on two edges is one node). Returns its index, or -1 if the
+// graph is already at CG_MAX_NODES.
+pub fn ast_causal_graph_intern_node(n: Name) -> i64 with Mut, Div {
+    let existing = ast_causal_graph_node_index(n)
+    if existing >= 0 {
+        return existing
+    }
+    if CG_NODE_COUNT >= CG_MAX_NODES {
+        return 0 - 1
+    }
+    let idx = CG_NODE_COUNT
+    CG_NODE_HASHES[idx as usize] = ast_name_hash(n)
+    CG_NODE_COUNT = CG_NODE_COUNT + 1
+    idx
+}
+
+pub fn ast_causal_graph_add_edge(from_idx: i64, to_idx: i64, directed: bool) with Mut {
+    if from_idx < 0 || to_idx < 0 {
+        return
+    }
+    if CG_EDGE_COUNT >= CG_MAX_EDGES {
+        return
+    }
+    let idx = CG_EDGE_COUNT
+    CG_EDGE_FROM[idx as usize] = from_idx
+    CG_EDGE_TO[idx as usize] = to_idx
+    CG_EDGE_DIRECTED[idx as usize] = directed
+    CG_EDGE_COUNT = CG_EDGE_COUNT + 1
 }
 
 // ============================================================

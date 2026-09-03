@@ -436,23 +436,40 @@ impl Parser {
     // Encoding, chosen so no new TypeExprKind is needed: the returned list is
     // [T, A, B] when Z is empty, and [T, A, B, Tuple(Z...)] otherwise. Lowering
     // reads the optional fourth element as the conditioning set.
+    // Every parsed TypeExpr is boxed (Box::new) IMMEDIATELY after its
+    // p.parse_type() call returns, before parsing the next one: under
+    // Madaros's native backend, two (Parser, TypeExpr) return values in a
+    // row alias the SAME underlying return buffer, so holding e.g. `a_pair`
+    // alive across the LATER `p.parse_type()` call for B silently overwrites
+    // a_pair.1 with B's result. Confirmed empirically — for
+    // `IndepKnowledge<f64, alpha, beta>`, printing a_pair.1's name right
+    // after parsing A showed "alpha" correctly, but re-reading that SAME
+    // a_pair.1 after parsing B showed "beta" for BOTH, so every non-
+    // degenerate claim (any two DIFFERENT variable names) false-positived
+    // on the self-independence guard (E209) — this is a parser bug, not a
+    // checker bug, and predates the causal-graph discharge this change also
+    // adds. Box::new performs an actual copy, which breaks the aliasing as
+    // long as it happens before the next same-shaped call — same reasoning
+    // applies to the Z-set loop below, one variable at a time.
     fn parse_indep_knowledge_args(self) -> (Parser, TypeExprList) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip <
 
         let t_pair = p.parse_type()
         p = t_pair.0
+        let t_box = Box::new(t_pair.1)
+
         p = p.expect(TokenKind::Comma)
         let a_pair = p.parse_type()
         p = a_pair.0
+        let a_box = Box::new(a_pair.1)
+
         p = p.expect(TokenKind::Comma)
         let b_pair = p.parse_type()
         p = b_pair.0
+        let b_box = Box::new(b_pair.1)
 
-        // rev_list is built head-first and reversed once at the end, matching
-        // parse_type_args — the list constructors prepend.
-        var rev_list = TypeExprList { head: t_pair.1, tail: None }
-        rev_list = TypeExprList { head: a_pair.1, tail: Some(Box::new(rev_list)) }
-        rev_list = TypeExprList { head: b_pair.1, tail: Some(Box::new(rev_list)) }
+        var has_cond = false
+        var cond_expr = dummy_type_expr()
 
         if parser_peek(p) == TokenKind::Pipe {
             let bar_span = p.current_span()
@@ -480,10 +497,14 @@ impl Parser {
                     p = p.advance()
                     let zn = p.parse_type()
                     p = zn.0
+                    // Box the list-so-far BEFORE the next parse_type() call
+                    // (for the following Z variable) can overwrite zn.1's
+                    // shared return buffer — same hazard as T/A/B above.
                     rev_z = TypeExprList { head: zn.1, tail: Some(Box::new(rev_z)) }
                 }
                 let z_list = reverse_type_expr_list(rev_z)
-                let cond_expr = TypeExpr {
+                has_cond = true
+                cond_expr = TypeExpr {
                     kind: TypeExprKind::TypeTuple,
                     span: bar_span,
                     path: empty_path(),
@@ -494,7 +515,6 @@ impl Parser {
                     knowledge_info: None,
                     refinement_info: None,
                 }
-                rev_list = TypeExprList { head: cond_expr, tail: Some(Box::new(rev_list)) }
             }
 
             if braced {
@@ -503,7 +523,19 @@ impl Parser {
         }
 
         p = p.expect(TokenKind::Gt)
-        (p, reverse_type_expr_list(rev_list))
+
+        // Build the list forward (innermost-out: cond, then B, then A, then T)
+        // directly from the already-boxed (independently copied) elements —
+        // nothing left to alias, so no reversal needed for this fixed T/A/B/
+        // optional-Z shape.
+        var tail_opt: Option<Box<TypeExprList> > = None
+        if has_cond {
+            tail_opt = Some(Box::new(TypeExprList { head: cond_expr, tail: None }))
+        }
+        let list_b = TypeExprList { head: *b_box, tail: tail_opt }
+        let list_a = TypeExprList { head: *a_box, tail: Some(Box::new(list_b)) }
+        let list_t = TypeExprList { head: *t_box, tail: Some(Box::new(list_a)) }
+        (p, list_t)
     }
 
     // ============================================================
