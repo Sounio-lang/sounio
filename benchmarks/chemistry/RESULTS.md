@@ -469,8 +469,21 @@ that moved only one would be suspect. They disagree:
 
 | T₀ (K) | error, d[H2O]/dt criterion | error, dT/dt criterion |
 |---|---|---|
-| 1100 | **+0.096 %** | **−2.375 %** |
+| 1100 | **+0.096 %** | **−2.374 %** |
 | 2000 | **+8.552 %** | +9.947 % |
+
+> **The dT/dt figure at 1100 K was −2.375 % until 2026-09-03, and the change
+> is a finding, not a rounding.** The Sounio harness charged its own initial
+> state from `1/(82.057·T)` while the module it cross-checks against had moved
+> to `P0/(R·T)·1e-6` with #2382 — a 5.7e-06 disagreement between the two sides
+> of a cross-check, carried in a comment that said the two were "kept
+> identical". It went on printing agreement anyway: every other number in this
+> table is insensitive to 5.7e-06 at the printed resolution, and only the
+> buggy form's dT/dt delay at 1100 K, the most ill-conditioned quantity here,
+> moved at all — 701597 ns against 701602 ns. **The agreement of a
+> cross-check is not evidence that its two sides share a state.** Both sides
+> now build the state the same way; the d[H2O]/dt anchors and every 2000 K
+> figure are unchanged.
 
 At 1100 K the sign flips. A defect that shifts the H2O-rate delay by 0.1 %
 shifts the temperature-rise delay by 2.4 % *the other way*, which says the
@@ -487,11 +500,37 @@ and no definition of the quantity it measures.
 Verified against the oracle rather than by inspection — all 29 net rates of
 progress against `Cantera.net_rates_of_progress`, radical-loaded state:
 
-| | worst relative deviation |
-|---|---|
-| shipped reverse path | **7.877e-07** (the R_cal residual of §1.5, since closed) |
-| `reac - nu` | **1.838e+00** (184%) |
-| R16 specifically | shipped 2.860e-08, bug 5.046e-01 |
+```sh
+python3 benchmarks/chemistry/rep_prodfix.py
+```
+
+| | worst relative deviation, published regime | after #2382 |
+|---|---|---|
+| shipped reverse path | **7.877e-07** (the R_cal residual of §1.5) | **8.442e-15** |
+| `reac - nu` | **1.838e+00** (184%) | **1.838e+00**, unchanged |
+| R16 specifically | shipped **2.860e-08**, bug 5.046e-01 | shipped **4.134e-15**, bug 5.046e-01 |
+
+> **Re-measured 2026-09-03, and the second column is new.** The first column
+> was measured before the gas constant was aligned; #2382 has since merged, so
+> the producer no longer runs in that regime and the numbers cannot be left
+> standing unqualified. Re-running it now gives the second column: the shipped
+> path collapses to the double-precision floor, and the defect's magnitude does
+> not move at all — 1.838e+00 and 5.046e-01 to four figures in both regimes.
+> That contrast is the section's point. **The defect is a property of the
+> stoichiometry; the floor beneath it was a property of the constant.**
+>
+> The published-regime figures are reproducible on demand rather than trusted:
+> setting `R_CAL = 1.9872041` in `gri30_h2_python_replica.py` and re-running
+> returns R16's shipped deviation to exactly **2.860e-08**, which is how the
+> first column was attributed rather than assumed.
+>
+> One further correction, found by the snapshot verifier and not by any gate
+> here: this producer built its radical-loaded state from `1/(82.057·T)` while
+> every sibling had moved to `P0/(R·T)·1e-6`. It is aligned in the same commit.
+> The change is 5.7e-06 in the state and moves the shipped floor from 9.204e-15
+> to 8.442e-15; the buggy column does not move by a single bit, because R16's
+> forward term depends only on the fixed radical seeds, which the molar volume
+> does not touch.
 
 ## 3. Standard-state reference pressure — no defect present
 
@@ -1790,6 +1829,72 @@ band these differences sit in. A difference of a few ULP has no stable ratio.
 > self-difference is ≤ 3.465e-14, three orders below the residual, so **the
 > replica contributes nothing measurable to the 2.074e-11**, and that line of
 > the table stands.
+
+> **Resolved 2026-09-02 with a second integrator, in Sounio.** The label
+> *unexplained* above was owed to the absence of an independent instrument:
+> a self-difference cannot say which of the two runs is wrong. There is now a
+> second method — Gragg-Bulirsch-Stoer, the modified midpoint rule with
+> Richardson extrapolation in `h²`, sharing this replica's right-hand side
+> verbatim so that only the time stepping differs:
+>
+> ```sh
+> SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/gbs_oracle.sio
+> ```
+>
+> **The oracle is characterised before it is used**, because Richardson
+> extrapolation divides by `((n_k/n_j)² − 1)` and so amplifies roundoff as the
+> depth grows. Sweeping depth against subdivision sequence (self-difference
+> between macro-steps `H = 1e-6` and `5e-7`, worst over species):
+>
+> | depth | order | seq 2,4,6,8,10,12,14,16 | seq 2,4,6,8,12,16,24,32 |
+> |---|---|---|---|
+> | 3 | 6 | 5.730e-09 | 5.730e-09 |
+> | 4 | 8 | 8.413e-11 | 8.413e-11 |
+> | 5 | 10 | 8.942e-13 | 6.257e-13 |
+> | 6 | 12 | **5.734e-14** | **1.421e-14** |
+> | 7 | 14 | 3.066e-13 | 2.314e-14 |
+> | 8 | 16 | 2.581e-13 | 1.556e-14 |
+>
+> Both sequences bottom out at depth 6 and rise afterwards: that minimum **is**
+> the truncation-to-roundoff crossover of the extrapolation, measured in place.
+> The wider sequence bottoms out four times lower, so the instrument used below
+> is depth 6 with 2,4,6,8,12,16,24,32, resolution **1.421e-14** worst over
+> species, and per species: H2 6.198e-15, H 1.421e-14, O 3.702e-15,
+> O2 5.007e-15, OH 5.910e-15, H2O 1.334e-14, HO2 2.273e-15, H2O2 3.107e-15.
+>
+> **The halving ladder against that independent method**, relative distance
+> ×1e18, each species readable against its own resolution above:
+>
+> | dt | H2 | H | O | O2 | OH | H2O | HO2 | H2O2 |
+> |---|---|---|---|---|---|---|---|---|
+> | 1e-8 | 10755 | 4904 | 4841 | 357 | 16380 | 5898 | 2652 | 32629 |
+> | 5e-9 | 10573 | 7442 | 1851 | 2861 | 3546 | 5618 | 757 | 1709 |
+> | 2.5e-9 | 8385 | 40254 | 30185 | 2146 | 29552 | 45365 | 1705 | 24083 |
+> | 1.25e-9 | 729 | 63257 | 78596 | 13056 | 77005 | 60955 | 14212 | 73805 |
+>
+> At `dt = 5e-9` seven of eight distances sit **below** the oracle's own
+> per-species resolution: there the replica agrees with an independent method
+> to within the oracle's noise. At `dt = 1.25e-9`, four steps of refinement
+> later, seven of eight are **above** it, by 2.6× to 24×. **The replica's
+> distance to an external reference has a minimum and then grows as the step
+> shrinks.** Growth measured against a different method cannot be truncation
+> being resolved, and cannot be an artefact of comparing a run with itself.
+>
+> So the 12–140× of the table above is no longer unexplained: it is the
+> **right-hand branch of the total-error curve of a fixed-step method**, where
+> accumulation over 10⁴ to 8×10⁴ steps overtakes a truncation term that is
+> already spent. **What is still owed is the exponent, not the mechanism.**
+> Per halving the observed factors are 2.1× to 6.6× (from the 4.6×–43× above
+> over two halvings), and a systematic accumulation predicts 2×; the fastest
+> species exceed that and no model here derives 6.6×. The location of the
+> minimum is bracketed between `1e-8` and `2.5e-9` and is **not** pinned,
+> because the `5e-9` row is at the instrument's floor.
+>
+> The bound that the residual line depends on is unchanged and now has
+> independent support: at `dt = 1e-8` the replica is 3.263e-14 from the second
+> method, three orders below the 2.074e-11 residual, so **the replica still
+> contributes nothing measurable to it**. It also follows that `dt = 1e-8` was
+> a fortunate choice: refining it does not improve this replica, it degrades it.
 
 ### The honest statement of the central result
 

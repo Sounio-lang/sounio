@@ -116,6 +116,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dce-silent-truncation-census-2026-08-19 | repo_only | docs/audit/DCE_SILENT_TRUNCATION_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dimensional-typing-gap-2026-09-02 | repo_only | docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-epistemic-fabrication-sweep-2026-08-18 | repo_only | docs/audit/DISSERTATION_EPISTEMIC_FABRICATION_SWEEP_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-hessian-e175-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_HESSIAN_E175_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

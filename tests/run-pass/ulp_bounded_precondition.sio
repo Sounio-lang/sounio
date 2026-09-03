@@ -1,0 +1,75 @@
+//@ run-pass
+//@ description: ulp() of examples/chemistry/rep_stagnation.sio terminates on every f64 bit pattern and is exact on the powers-of-two grid
+//@ expect-stdout: ULP_FINITE_OK 9
+//@ expect-stdout: ULP_INF_RETURNED
+//@ expect-stdout: ULP_NAN_RETURNED
+// Witness for the precondition fix of 2026-09-02 (#2386 review): the first
+// ulp() looped forever on x == 0 and x == inf and underflowed on subnormals.
+// NaN/inf results are not compared or printed -- see #2389 -- only that the
+// call returns.  The body of ulp() is a verbatim copy of the probe's.
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Unit in the last place of x, for FINITE x.  Zero and subnormals return the
+// subnormal spacing 2^-1074 (the grid they lie on).  inf and NaN return NaN.
+// Precondition fix (2026-09-02): the first version scaled |x| into [1,2) with
+// two unbounded loops, so x == 0 and x == inf never returned and a subnormal
+// underflowed to 0.  The loops are now bounded (2200 > 1074 + 1023 doublings
+// and halvings) so every bit pattern terminates.  NaN cannot be detected by
+// comparison on either engine (measured 2026-09-02: `nan != nan` is false and
+// `nan < 1.0` is true), so it is caught by the range check after the loops.
+fn ulp(x: f64) -> f64 with Mut, Div, Panic {
+    var m: f64 = fabs(x)
+    if m > 1.7976931348623157e308 { return m - m }
+    var dmin: f64 = 1.0
+    var dsub: f64 = 1.0
+    var j: i64 = 0
+    while j < (1022 as i64) { dmin = dmin * 0.5; j = j + 1 }
+    j = 0
+    while j < (1074 as i64) { dsub = dsub * 0.5; j = j + 1 }
+    if m < dmin { return dsub }
+    var u: f64 = 1.0
+    var n: i64 = 0
+    while m >= 2.0 && n < (2200 as i64) { m = m * 0.5; u = u * 2.0; n = n + 1 }
+    while m < 1.0 && n < (2200 as i64) { m = m * 2.0; u = u * 0.5; n = n + 1 }
+    if m >= 1.0 && m < 2.0 {
+        // 2^-52 by 52 exact halvings
+        var eps: f64 = 1.0
+        var k: i64 = 0
+        while k < (52 as i64) { eps = eps * 0.5; k = k + 1 }
+        let r: f64 = u * eps
+        if r < dsub { dsub } else { r }
+    } else {
+        m
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var p52: f64 = 1.0
+    var i: i64 = 0
+    while i < (52 as i64) { p52 = p52 * 0.5; i = i + 1 }
+    var dmin: f64 = 1.0
+    i = 0
+    while i < (1022 as i64) { dmin = dmin * 0.5; i = i + 1 }
+    var dsub: f64 = 1.0
+    i = 0
+    while i < (1074 as i64) { dsub = dsub * 0.5; i = i + 1 }
+    var ok: i64 = 0
+    if ulp(1.0) == p52 { ok = ok + 1 } else { println("FAIL ulp(1)") }
+    if ulp(1.5) == p52 { ok = ok + 1 } else { println("FAIL ulp(1.5)") }
+    if ulp(3.0) == p52 * 2.0 { ok = ok + 1 } else { println("FAIL ulp(3)") }
+    if ulp(0.75) == p52 * 0.5 { ok = ok + 1 } else { println("FAIL ulp(0.75)") }
+    if ulp(-1.0) == p52 { ok = ok + 1 } else { println("FAIL ulp(-1)") }
+    if ulp(0.0) == dsub { ok = ok + 1 } else { println("FAIL ulp(0)") }
+    if ulp(dsub) == dsub { ok = ok + 1 } else { println("FAIL ulp(2^-1074)") }
+    if ulp(dmin) == dsub { ok = ok + 1 } else { println("FAIL ulp(2^-1022)") }
+    if ulp(dmin * 2.0) == dsub * 2.0 { ok = ok + 1 } else { println("FAIL ulp(2^-1021)") }
+    print("ULP_FINITE_OK ")
+    println(ok)
+    let inf: f64 = 1.0 / 0.0
+    let r1: f64 = ulp(inf)
+    println("ULP_INF_RETURNED")
+    let r2: f64 = ulp(inf - inf)
+    println("ULP_NAN_RETURNED")
+    0
+}
