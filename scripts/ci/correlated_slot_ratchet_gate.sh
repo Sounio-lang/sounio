@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FROZEN="$ROOT/scripts/ci/correlated_slot_ratchet.frozen"
 cd "$ROOT"
+. "$ROOT/scripts/lib/gate_assert.sh"
+gate_name "correlated_slot_ratchet"
 
 python3 - <<'PY'
 import re
@@ -85,7 +87,9 @@ print(len(filtered))
 PY
 )
 
+require_nonempty "$COUNT" "the live slot-identity scan produced no count — the extraction broke, this is not a measured zero"
 FROZEN_TOTAL=$(awk -F= '/^total=/{print $2}' "$FROZEN")
+require_nonempty "$FROZEN_TOTAL" "no total= line in $FROZEN — the frozen baseline is unreadable, not zero"
 echo "correlated_slot_ratchet: live=$COUNT frozen=$FROZEN_TOTAL"
 if [[ "$COUNT" -gt "$FROZEN_TOTAL" ]]; then
   echo "FAIL: slot-identity Knowledge debt rose ($COUNT > $FROZEN_TOTAL). Migrate or raise only with founder leave." >&2
