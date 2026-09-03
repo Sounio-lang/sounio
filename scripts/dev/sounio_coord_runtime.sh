@@ -3447,7 +3447,7 @@ coord_obligation_supervisor_owned_executable() {
 }
 
 coord_obligation_supervisor_owned_pids() {
-  local proc pid owner ppid value index observed_state_dir script_path runtime_root local_runtime
+  local proc pid ppid value index observed_state_dir script_path runtime_root local_runtime
   local expected_state_dir env_value
   local -a argv=()
   expected_state_dir="$(readlink -f "$STATE_DIR" 2>/dev/null || true)"
@@ -3458,15 +3458,20 @@ coord_obligation_supervisor_owned_pids() {
   for proc in /proc/[1-9]*; do
     [[ -d "$proc" ]] || continue
     pid="${proc##*/}"
-    owner="$(stat -c %u "$proc" 2>/dev/null || true)"
-    [[ "$owner" == "$(id -u)" ]] || continue
-    ppid="$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/status" 2>/dev/null || true)"
-    [[ "$ppid" == 1 ]] || continue
     argv=()
     while IFS= read -r -d '' value; do
       argv+=("$value")
-    done < "$proc/cmdline"
+    done < "$proc/cmdline" 2>/dev/null
     [[ "${argv[2]:-}" == obligation-supervise ]] || continue
+    [[ -O "$proc" ]] || continue
+    ppid=''
+    while read -r value observed_state_dir; do
+      if [[ "$value" == PPid: ]]; then
+        ppid="$observed_state_dir"
+        break
+      fi
+    done < "$proc/status" 2>/dev/null
+    [[ "$ppid" == 1 ]] || continue
     script_path="$(readlink -f "${argv[1]:-}" 2>/dev/null || true)"
     [[ -n "$script_path" ]] || continue
     if [[ -n "$runtime_root" ]]; then
