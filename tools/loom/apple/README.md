@@ -60,10 +60,17 @@ tools/loom/apple/validate-apple.sh
 - `LoomSpatial` contains SwiftUI, the Metal ambient field, topology, and agent
   conversation dock.
 - `/api/fleet`, `/api/events`, and `/api/snapshot` remain read-only projections.
-- `POST /v1/messages` exists only on the separate loopback message bridge.
+- `POST /v1/messages`, `GET /v1/threads`, `GET /v1/threads/<request-id>`, and
+  `POST /v1/messages/<response-id>/ack` exist only on the separate loopback
+  message bridge.
 - The bridge fixes sender identity at startup; the UI supplies only destination,
   message text, and the bounded `request` kind.
 - A send is displayed as successful only after a durable bus receipt is decoded.
+- The Conversation tab is an authenticated, correlated projection of durable
+  bus records. It renders request, wake, response, acknowledgement, timeout,
+  and durable-only events rather than a locally invented transcript. The UI
+  issues an ACK only through the bridge and then reloads the resulting durable
+  ACK event.
 - Initial selection prefers a live lane with an active delivery endpoint. A
   stale or missing endpoint remains addressable through the durable bus, but is
   labeled `DURABLE ONLY` before submission.
@@ -86,7 +93,8 @@ evidence/2026-09-03-delivery-aware-roundtrip-gate.txt
 
 Live fleet and journal data are labeled `LIVE / READ ONLY`. The configured
 composer can publish a durable coordination request through the authenticated
-bridge, while route receipts and the displayed conversation history remain
-explicitly labeled scenarios. The authenticated OCaml message bridge is present
+bridge, and the Conversation tab follows its correlated durable lifecycle.
+Route receipts remain explicitly labeled scenarios because the UI neither
+arbitrates nor promotes them. The authenticated OCaml message bridge is present
 in the promoted shared runtime, and the delivery-aware SwiftUI slice has a live
 request/reply/ack receipt.

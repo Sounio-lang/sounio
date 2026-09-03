@@ -1399,6 +1399,7 @@ else
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-authenticated-message-bridge-v1\n'
+    printf 'capability=loom-thread-truth-v1\n'
     printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'

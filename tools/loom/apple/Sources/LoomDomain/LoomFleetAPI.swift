@@ -212,6 +212,59 @@ public struct LoomMessageReceipt: Codable, Equatable, Sendable {
     public let wakeStatus: String
 }
 
+public struct LoomBusMessage: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public let utc: String
+    public let createdEpoch: Int
+    public let fromAgent: String
+    public let fromLane: String
+    public let toAgent: String
+    public let toLane: String
+    public let kind: String
+    public let text: String
+    public let threadId: String
+    public let replyTo: String
+}
+
+public struct LoomThreadEvent: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public let utc: String
+    public let kind: String
+    public let state: String
+    public let messageId: String
+    public let actor: String
+    public let body: String
+
+    public var isLocal: Bool { kind == "request" || kind == "ack" }
+}
+
+public struct LoomMessageThread: Codable, Equatable, Sendable {
+    public let schema: String
+    public let request: LoomBusMessage
+    public let state: String
+    public let delivery: String
+    public let injected: Int
+    public let acknowledged: Int
+    public let responseCount: Int
+    public let wakeCount: Int
+    public let wakePending: Int
+    public let timeoutSeconds: Int
+    public let events: [LoomThreadEvent]
+}
+
+public struct LoomMessageThreadList: Codable, Equatable, Sendable {
+    public let schema: String
+    public let senderAgent: String
+    public let senderLane: String
+    public let threads: [LoomBusMessage]
+}
+
+public struct LoomMessageAcknowledgement: Codable, Equatable, Sendable {
+    public let schema: String
+    public let messageId: String
+    public let status: String
+}
+
 public enum LoomMessageClientError: LocalizedError, Equatable, Sendable {
     case refused(status: Int, reason: String)
     case invalidReceipt
@@ -237,30 +290,93 @@ public struct LoomMessageClient: Sendable {
         self.capability = capability
     }
 
-    public func send(_ message: LoomMessageRequest) async throws -> LoomMessageReceipt {
-        let url = baseURL.appending(path: "v1/messages")
+    private func authorizedRequest(path: String, method: String = "GET") -> URLRequest {
+        let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 12
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(capability)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(message)
+        return request
+    }
 
+    private func checkedResponse<T: Decodable>(
+        _ request: URLRequest,
+        expectedStatus: Int = 200,
+        as type: T.Type
+    ) async throws -> T {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw LoomMessageClientError.invalidReceipt
         }
-        guard http.statusCode == 202 else {
+        guard http.statusCode == expectedStatus else {
             let reason = (try? JSONDecoder().decode(ErrorEnvelope.self, from: data).error)
                 ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             throw LoomMessageClientError.refused(status: http.statusCode, reason: reason)
         }
-        let receipt = try JSONDecoder().decode(LoomMessageReceipt.self, from: data)
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    public func send(_ message: LoomMessageRequest) async throws -> LoomMessageReceipt {
+        var request = authorizedRequest(path: "v1/messages", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(message)
+        let receipt = try await checkedResponse(request, expectedStatus: 202, as: LoomMessageReceipt.self)
         guard receipt.schema == "loom-message-receipt-v1",
               receipt.status == "accepted",
               receipt.messageId.isEmpty == false,
               receipt.threadId.isEmpty == false
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return receipt
+    }
+
+    public func threads(limit: Int = 40) async throws -> LoomMessageThreadList {
+        let bounded = min(max(limit, 1), 100)
+        var components = URLComponents(url: baseURL.appending(path: "v1/threads"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(bounded))]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 12
+        request.setValue("Bearer \(capability)", forHTTPHeaderField: "Authorization")
+        let list = try await checkedResponse(request, as: LoomMessageThreadList.self)
+        guard list.schema == "loom-message-thread-list-v1" else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return list
+    }
+
+    public func thread(_ messageID: String, timeoutSeconds: Int = 60) async throws -> LoomMessageThread {
+        let bounded = min(max(timeoutSeconds, 0), 86_400)
+        var components = URLComponents(
+            url: baseURL.appending(path: "v1/threads/\(messageID)"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "timeoutSeconds", value: String(bounded))]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 12
+        request.setValue("Bearer \(capability)", forHTTPHeaderField: "Authorization")
+        let thread = try await checkedResponse(request, as: LoomMessageThread.self)
+        guard thread.schema == "loom-message-thread-v1", thread.request.id == messageID else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return thread
+    }
+
+    public func acknowledge(_ messageID: String) async throws -> LoomMessageAcknowledgement {
+        let receipt = try await checkedResponse(
+            authorizedRequest(path: "v1/messages/\(messageID)/ack", method: "POST"),
+            as: LoomMessageAcknowledgement.self
+        )
+        guard receipt.schema == "loom-message-ack-v1",
+              receipt.messageId == messageID,
+              receipt.status == "acknowledged"
         else {
             throw LoomMessageClientError.invalidReceipt
         }

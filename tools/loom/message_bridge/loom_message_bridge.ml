@@ -280,6 +280,52 @@ let find_string value needle start =
   in
   loop start
 
+let find_last_string value needle start =
+  let rec loop index found =
+    match find_string value needle index with
+    | None -> found
+    | Some next -> loop (next + 1) (Some next)
+  in
+  loop start None
+
+let percent_decode value =
+  let output = Buffer.create (String.length value) in
+  let rec loop index =
+    if index < String.length value then
+      match value.[index] with
+      | '%' when index + 2 < String.length value ->
+          let decoded = (hex_value value.[index + 1] lsl 4) lor hex_value value.[index + 2] in
+          Buffer.add_char output (Char.chr decoded);
+          loop (index + 3)
+      | '+' -> Buffer.add_char output ' '; loop (index + 1)
+      | character -> Buffer.add_char output character; loop (index + 1)
+  in
+  loop 0;
+  Buffer.contents output
+
+let split_http_target target =
+  match String.index_opt target '?' with
+  | None -> (target, [])
+  | Some index ->
+      let path = String.sub target 0 index in
+      let query =
+        String.sub target (index + 1) (String.length target - index - 1)
+        |> split_on '&'
+        |> List.filter_map (fun pair ->
+               match String.index_opt pair '=' with
+               | None when pair <> "" -> Some (percent_decode pair, "")
+               | None -> None
+               | Some separator ->
+                   Some
+                     ( percent_decode (String.sub pair 0 separator),
+                       percent_decode
+                         (String.sub pair (separator + 1)
+                            (String.length pair - separator - 1)) ))
+      in
+      (path, query)
+
+let query_value query name = List.assoc_opt name query
+
 type http_request = {
   http_method : string;
   http_target : string;
@@ -429,6 +475,135 @@ let coordination_command cwd =
         if Sys.file_exists launcher then launcher
         else failf "message-bridge-runtime-missing"
 
+let run_coord cwd arguments =
+  let command = coordination_command cwd in
+  let argv = Array.of_list (command :: arguments) in
+  let code, output = process_output_timeout ~timeout_seconds:8 cwd command argv in
+  if code = 128 + Sys.sigalrm then failf "message-bridge-runtime-timeout";
+  if code <> 0 then failf "message-bridge-runtime-refused:%s" (sha256 output);
+  output
+
+type bus_message = {
+  id : string;
+  utc : string;
+  created_epoch : int;
+  from_agent : string;
+  from_lane : string;
+  to_agent : string;
+  to_lane : string;
+  kind : string;
+  text : string;
+  thread_id : string;
+  reply_to : string;
+}
+
+type bus_status = {
+  request_state : string;
+  injected : int;
+  acknowledged : int;
+  responses : int;
+  wakes : int;
+  wake_pending : int;
+  created_epoch : int;
+  injection_utc : string;
+  acknowledgement_utc : string;
+  wake_utc : string;
+}
+
+let lines_with_prefix output prefix =
+  output |> split_on '\n' |> List.filter (fun line -> starts_with line prefix)
+
+let fields_after_prefix line prefix =
+  if not (starts_with line prefix) then failf "message-bridge-runtime-invalid-record";
+  String.sub line (String.length prefix) (String.length line - String.length prefix)
+  |> split_on ' ' |> table_of_fields
+
+let table_value ?(default = "") fields name =
+  Hashtbl.find_opt fields name |> Option.value ~default
+
+let bus_message_of_line line =
+  if not (starts_with line "MESSAGE ") then
+    failf "message-bridge-runtime-invalid-message";
+  let text_marker = " text=" and thread_marker = " thread=" in
+  let text_at =
+    find_string line text_marker 0
+    |> Option.value ~default:(-1)
+  in
+  if text_at < 0 then failf "message-bridge-runtime-invalid-message";
+  let body_start = text_at + String.length text_marker in
+  let thread_at =
+    find_last_string line thread_marker body_start
+    |> Option.value ~default:(-1)
+  in
+  if thread_at < body_start then failf "message-bridge-runtime-invalid-message";
+  let header = String.sub line 8 (text_at - 8) |> split_on ' ' in
+  let tail =
+    String.sub line (thread_at + 1) (String.length line - thread_at - 1)
+    |> split_on ' '
+  in
+  let fields = table_of_fields (header @ tail) in
+  let required name =
+    let value = table_value fields name in
+    if value = "" then failf "message-bridge-runtime-invalid-message";
+    value
+  in
+  let optional name =
+    match table_value ~default:"-" fields name with "-" -> "" | value -> value
+  in
+  { id = required "id"; utc = required "utc";
+    created_epoch = parse_nonnegative "created-epoch" (required "created_epoch");
+    from_agent = required "from_agent"; from_lane = required "from_lane";
+    to_agent = optional "to_agent"; to_lane = optional "to_lane";
+    kind = required "kind";
+    text = String.sub line body_start (thread_at - body_start);
+    thread_id = required "thread"; reply_to = optional "reply_to" }
+
+let bus_messages output =
+  lines_with_prefix output "MESSAGE " |> List.map bus_message_of_line
+
+let first_record_utc output prefix =
+  match lines_with_prefix output prefix with
+  | line :: _ -> table_value (fields_after_prefix line prefix) "utc"
+  | [] -> ""
+
+let bus_status_of_output output =
+  let line =
+    match lines_with_prefix output "MESSAGE_STATUS " with
+    | line :: _ -> line
+    | [] -> failf "message-bridge-runtime-invalid-status"
+  in
+  let fields = fields_after_prefix line "MESSAGE_STATUS " in
+  let count name = parse_nonnegative name (table_value ~default:"0" fields name) in
+  { request_state = table_value ~default:"unknown" fields "request_state";
+    injected = count "injected"; acknowledged = count "acknowledged";
+    responses = count "responses"; wakes = count "wakes";
+    wake_pending = count "wake_pending";
+    created_epoch = count "created_epoch";
+    injection_utc = first_record_utc output "INJECTION ";
+    acknowledgement_utc = first_record_utc output "ACKNOWLEDGEMENT ";
+    wake_utc = first_record_utc output "WAKE_RECEIPT " }
+
+let message_json message =
+  Printf.sprintf
+    "{\"id\":%s,\"utc\":%s,\"createdEpoch\":%d,\"fromAgent\":%s,\"fromLane\":%s,\"toAgent\":%s,\"toLane\":%s,\"kind\":%s,\"text\":%s,\"threadId\":%s,\"replyTo\":%s}"
+    (json_quote message.id) (json_quote message.utc) message.created_epoch
+    (json_quote message.from_agent) (json_quote message.from_lane)
+    (json_quote message.to_agent) (json_quote message.to_lane)
+    (json_quote message.kind) (json_quote message.text)
+    (json_quote message.thread_id) (json_quote message.reply_to)
+
+let event_json ~id ~utc ~kind ~state ~message_id ~actor ~body =
+  Printf.sprintf
+    "{\"id\":%s,\"utc\":%s,\"kind\":%s,\"state\":%s,\"messageId\":%s,\"actor\":%s,\"body\":%s}"
+    (json_quote id) (json_quote utc) (json_quote kind) (json_quote state)
+    (json_quote message_id) (json_quote actor) (json_quote body)
+
+let status_for cwd sender_agent sender_lane message_id =
+  run_coord cwd
+    [ "message-status"; "--agent"; sender_agent; "--lane"; sender_lane;
+      "--message"; message_id ]
+  |> bus_status_of_output
+
 let sent_receipt output =
   let line =
     output |> split_on '\n'
@@ -460,15 +635,12 @@ let send_message cwd sender_agent sender_lane body =
   let kind = json_string_field ~default:"request" parsed [ "kind" ] in
   if not (List.mem kind [ "info"; "request" ]) then
     failf "message-bridge-kind-refused";
-  let command = coordination_command cwd in
-  let arguments =
-    [| command; "send"; "--agent"; sender_agent; "--lane"; sender_lane;
-       "--to-agent"; target_agent; "--to-lane"; target_lane; "--kind"; kind;
-       "--message"; message |]
+  let output =
+    run_coord cwd
+      [ "send"; "--agent"; sender_agent; "--lane"; sender_lane;
+        "--to-agent"; target_agent; "--to-lane"; target_lane; "--kind"; kind;
+        "--message"; message ]
   in
-  let code, output = process_output_timeout ~timeout_seconds:8 cwd command arguments in
-  if code = 128 + Sys.sigalrm then failf "message-bridge-runtime-timeout";
-  if code <> 0 then failf "message-bridge-runtime-refused:%s" (sha256 output);
   let message_id, thread_id = sent_receipt output in
   let wake_status =
     if output |> split_on '\n'
@@ -479,6 +651,144 @@ let send_message cwd sender_agent sender_lane body =
     "{\"schema\":\"loom-message-receipt-v1\",\"messageId\":%s,\"threadId\":%s,\"toAgent\":%s,\"toLane\":%s,\"kind\":%s,\"status\":\"accepted\",\"wakeStatus\":%s}"
     (json_quote message_id) (json_quote thread_id) (json_quote target_agent)
     (json_quote target_lane) (json_quote kind) (json_quote wake_status)
+
+let list_threads cwd sender_agent sender_lane query =
+  let limit =
+    query_value query "limit" |> Option.value ~default:"20"
+    |> parse_nonnegative "limit"
+  in
+  if limit < 1 || limit > 100 then failf "message-bridge-limit-invalid";
+  let target_agent =
+    query_value query "toAgent" |> Option.value ~default:""
+  in
+  let target_lane =
+    query_value query "toLane" |> Option.value ~default:""
+  in
+  if target_agent <> "" then ignore (valid_field "target-agent" 256 target_agent);
+  if target_lane <> "" then ignore (valid_field "target-lane" 512 target_lane);
+  let arguments =
+    [ "outbox"; "--agent"; sender_agent; "--lane"; sender_lane;
+      "--newest-first"; "--limit"; string_of_int limit; "--kind"; "request" ]
+    @ (if target_agent = "" then [] else [ "--to-agent"; target_agent ])
+    @ (if target_lane = "" then [] else [ "--to-lane"; target_lane ])
+  in
+  let messages = run_coord cwd arguments |> bus_messages in
+  Printf.sprintf
+    "{\"schema\":\"loom-message-thread-list-v1\",\"senderAgent\":%s,\"senderLane\":%s,\"threads\":[%s]}"
+    (json_quote sender_agent) (json_quote sender_lane)
+    (messages |> List.map message_json |> String.concat ",")
+
+let thread_detail cwd sender_agent sender_lane message_id query =
+  let message_id = valid_field "message-id" 256 message_id in
+  if not (starts_with message_id "msg-") then failf "message-bridge-message-id-invalid";
+  let timeout_seconds =
+    query_value query "timeoutSeconds" |> Option.value ~default:"60"
+    |> parse_nonnegative "timeout-seconds"
+  in
+  if timeout_seconds > 86400 then failf "message-bridge-timeout-seconds-invalid";
+  let outbound =
+    run_coord cwd
+      [ "outbox"; "--agent"; sender_agent; "--lane"; sender_lane;
+        "--thread"; message_id ]
+    |> bus_messages
+  in
+  let request =
+    match List.find_opt (fun message -> message.id = message_id) outbound with
+    | Some message -> message
+    | None -> failf "message-bridge-thread-not-visible"
+  in
+  if request.kind <> "request" then failf "message-bridge-thread-not-request";
+  let request_status = status_for cwd sender_agent sender_lane message_id in
+  let responses =
+    run_coord cwd
+      [ "inbox"; "--agent"; sender_agent; "--lane"; sender_lane; "--all";
+        "--directed-only"; "--thread"; request.thread_id ]
+    |> bus_messages
+  in
+  let response_statuses =
+    List.map
+      (fun message -> (message, status_for cwd sender_agent sender_lane message.id))
+      responses
+  in
+  let timed_out =
+    request_status.request_state = "open"
+    && int_of_float (Unix.time ()) >= request_status.created_epoch + timeout_seconds
+  in
+  let state = if timed_out then "timed_out" else request_status.request_state in
+  let delivery =
+    if request_status.wakes > 0 then "wake_received"
+    else if request_status.wake_pending > 0 then "wake_pending"
+    else if request_status.injected > 0 then "injected"
+    else "durable_only"
+  in
+  let events = ref [] in
+  let add event = events := event :: !events in
+  add
+    (event_json ~id:("request:" ^ request.id) ~utc:request.utc ~kind:"request"
+       ~state:"accepted" ~message_id:request.id ~actor:sender_agent ~body:request.text);
+  if delivery = "durable_only" then
+    add
+      (event_json ~id:("durable:" ^ request.id) ~utc:request.utc
+         ~kind:"durable_only" ~state:"stored" ~message_id:request.id
+         ~actor:"loom-bus" ~body:"No immediate delivery receipt; request remains durable.")
+  else if delivery = "wake_pending" then
+    add
+      (event_json ~id:("wake-pending:" ^ request.id) ~utc:request.utc
+         ~kind:"wake" ~state:"pending" ~message_id:request.id
+         ~actor:"loom-delivery" ~body:"Immediate delivery was submitted and remains pending.")
+  else if delivery = "wake_received" then
+    add
+      (event_json ~id:("wake:" ^ request.id)
+         ~utc:(if request_status.wake_utc = "" then request.utc else request_status.wake_utc)
+         ~kind:"wake" ~state:"received" ~message_id:request.id
+         ~actor:"loom-delivery" ~body:"The delivery endpoint recorded the wake.")
+  else ();
+  if request_status.injected > 0 then
+    add
+      (event_json ~id:("injection:" ^ request.id)
+         ~utc:(if request_status.injection_utc = "" then request.utc else request_status.injection_utc)
+         ~kind:"injection" ~state:"injected" ~message_id:request.id
+         ~actor:(request.to_agent ^ "/" ^ request.to_lane)
+         ~body:"The target harness surfaced the request.");
+  List.iter
+    (fun (message, status) ->
+      add
+        (event_json ~id:("response:" ^ message.id) ~utc:message.utc
+           ~kind:"response" ~state:message.kind ~message_id:message.id
+           ~actor:(message.from_agent ^ "/" ^ message.from_lane) ~body:message.text);
+      if status.acknowledged > 0 then
+        add
+          (event_json ~id:("ack:" ^ message.id)
+             ~utc:(if status.acknowledgement_utc = "" then message.utc else status.acknowledgement_utc)
+             ~kind:"ack" ~state:"acknowledged" ~message_id:message.id
+             ~actor:(sender_agent ^ "/" ^ sender_lane)
+             ~body:"The Loom client acknowledged the response."))
+    response_statuses;
+  if timed_out then
+    add
+      (event_json ~id:("timeout:" ^ request.id) ~utc:request.utc ~kind:"timeout"
+         ~state:"elapsed" ~message_id:request.id ~actor:"loom-clock"
+         ~body:(Printf.sprintf "No correlated response within %d seconds." timeout_seconds));
+  Printf.sprintf
+    "{\"schema\":\"loom-message-thread-v1\",\"request\":%s,\"state\":%s,\"delivery\":%s,\"injected\":%d,\"acknowledged\":%d,\"responseCount\":%d,\"wakeCount\":%d,\"wakePending\":%d,\"timeoutSeconds\":%d,\"events\":[%s]}"
+    (message_json request) (json_quote state) (json_quote delivery)
+    request_status.injected request_status.acknowledged request_status.responses
+    request_status.wakes request_status.wake_pending timeout_seconds
+    (!events |> List.rev |> String.concat ",")
+
+let acknowledge_message cwd sender_agent sender_lane message_id =
+  let message_id = valid_field "message-id" 256 message_id in
+  if not (starts_with message_id "msg-") then failf "message-bridge-message-id-invalid";
+  let output =
+    run_coord cwd
+      [ "ack"; "--agent"; sender_agent; "--lane"; sender_lane;
+        "--message"; message_id ]
+  in
+  if not (lines_with_prefix output "ACKED " <> []) then
+    failf "message-bridge-runtime-invalid-ack";
+  Printf.sprintf
+    "{\"schema\":\"loom-message-ack-v1\",\"messageId\":%s,\"status\":\"acknowledged\"}"
+    (json_quote message_id)
 
 let authorized request token =
   match Hashtbl.find_opt request.http_headers "authorization" with
@@ -503,21 +813,47 @@ let handle cwd token sender_agent sender_lane descriptor =
   in
   try
     let request = read_http_request descriptor in
-    if request.http_method = "GET" && request.http_target = "/health" then
+    let path, query = split_http_target request.http_target in
+    if request.http_method = "GET" && path = "/health" then
       respond "200 OK"
         "{\"schema\":\"loom-message-bridge-v1\",\"status\":\"ready\",\"authentication\":\"bearer-capability\"}"
-    else if request.http_method = "POST" && request.http_target = "/v1/messages" then
-      if not (authorized request token) then (
-        Printf.eprintf
-          "LOOM_MESSAGE_DECISION decision=DENY reason=invalid-capability sender_agent=%s sender_lane=%s\n%!"
-          sender_agent sender_lane;
-        respond "401 Unauthorized" "{\"error\":\"unauthorized\"}")
-      else
-        let receipt = send_message cwd sender_agent sender_lane request.http_body in
-        Printf.eprintf
-          "LOOM_MESSAGE_DECISION decision=ALLOW reason=durable-bus-accepted sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
-          sender_agent sender_lane (sha256 receipt);
-        respond "202 Accepted" receipt
+    else if not (authorized request token) then (
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=DENY reason=invalid-capability sender_agent=%s sender_lane=%s\n%!"
+        sender_agent sender_lane;
+      respond "401 Unauthorized" "{\"error\":\"unauthorized\"}")
+    else if request.http_method = "POST" && path = "/v1/messages" then
+      let receipt = send_message cwd sender_agent sender_lane request.http_body in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=durable-bus-accepted sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 receipt);
+      respond "202 Accepted" receipt
+    else if request.http_method = "GET" && path = "/v1/threads" then
+      let projection = list_threads cwd sender_agent sender_lane query in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=thread-list-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 projection);
+      respond "200 OK" projection
+    else if request.http_method = "GET" && starts_with path "/v1/threads/" then
+      let message_id =
+        String.sub path 12 (String.length path - 12) |> percent_decode
+      in
+      let projection = thread_detail cwd sender_agent sender_lane message_id query in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=thread-detail-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 projection);
+      respond "200 OK" projection
+    else if request.http_method = "POST" && starts_with path "/v1/messages/"
+            && String.length path > 17 && String.sub path (String.length path - 4) 4 = "/ack"
+    then
+      let message_id =
+        String.sub path 13 (String.length path - 17) |> percent_decode
+      in
+      let receipt = acknowledge_message cwd sender_agent sender_lane message_id in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=message-acknowledged sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 receipt);
+      respond "200 OK" receipt
     else respond "404 Not Found" "{\"error\":\"not_found\"}"
   with
   | Bridge_error message ->
