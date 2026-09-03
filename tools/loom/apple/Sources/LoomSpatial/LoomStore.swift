@@ -242,6 +242,7 @@ final class LoomStore: ObservableObject {
             switch routingConfigState {
             case .stored, .editing:
                 // Preserve the local storage receipt or a pending local draft.
+                break
             default:
                 routingConfigState = .ready
             }
