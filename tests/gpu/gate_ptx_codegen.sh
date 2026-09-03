@@ -194,6 +194,20 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T9d/T9e: explicit Pireus sedenion XOR-convolution ABI and 16-lane f64 lowering
+check_souc \
+    "T9d_pireus_xor_convolution_source" \
+    "tests/gpu/pireus_sed_xor_convolution_f64.sio"
+
+{
+    result="$(run_souc_tail self-hosted/gpu/pireus_xor_convolution_f64_codegen.sio)"
+    if [ "$result" = "PIREUS_XOR_CONV_F64_CODEGEN_PASS" ]; then
+        pass "T9e_pireus_xor_convolution_codegen"
+    else
+        fail "T9e_pireus_xor_convolution_codegen" "$result"
+    fi
+}
+
 # T10: Epistemic SPIR-V wired — structural check
 {
     TOTAL=$((TOTAL + 1))

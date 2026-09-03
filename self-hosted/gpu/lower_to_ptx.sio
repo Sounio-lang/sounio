@@ -16,7 +16,7 @@ pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxB
 
     // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
     // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
-    if dgx_sm121 {
+    if dgx_sm121 || gpu_has_xor_convolution_f64(kernel) {
         buf = ptx_emit_dgx_sm121_header(buf)
     } else if gpu_has_wmma_tile(kernel) {
         buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
@@ -65,6 +65,9 @@ pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxB
         let fdim = gpu_step_f64_dim(kernel)
         let fbits = if fdim == 16 { 4 } else { 3 }
         buf = ptx_push_str(buf, gpu_emit_cell_sign_table(fdim, fbits))
+    }
+    if gpu_has_xor_convolution_f64(kernel) {
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(16, 4))
     }
     // f64 tensor-core tile: ossm_Lsgn σ(k⊕j,j) for the f64 L(a) build.
     if gpu_has_oct_batch_f64(kernel) {
@@ -197,9 +200,10 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_assoc_bwd_dh(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
     let readout = gpu_has_oct_readout(kernel)
     let stepf64 = gpu_has_oct_step_f64(kernel)
+    let xorconv64 = gpu_has_xor_convolution_f64(kernel)
     let tc64 = gpu_has_oct_batch_f64(kernel)
     let matvec = gpu_has_oct_matvec(kernel)
-    let stage_or_pa = stage || postadd || cell || readout || stepf64 || tc64 || matvec
+    let stage_or_pa = stage || postadd || cell || readout || stepf64 || xorconv64 || tc64 || matvec
 
     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
     var pred_count = kernel.max_reg_pred
@@ -216,6 +220,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     if cell && b32_count < 12 { b32_count = 12 }
     if readout && b32_count < 6 { b32_count = 6 }
     if stepf64 && b32_count < 12 { b32_count = 12 }
+    if xorconv64 && b32_count < 12 { b32_count = 12 }
     if tc64 && b32_count < 12 { b32_count = 12 }
     if matvec && b32_count < 12 { b32_count = 12 }
     if b32_count > 0 {
@@ -228,7 +233,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
     // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
-    if (cell || postadd || readout || stepf64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
+    if (cell || postadd || readout || stepf64 || xorconv64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -243,6 +248,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     var f32_count = kernel.max_reg_f32
     if postadd && f32_count < 4 { f32_count = 4 }
     if stepf64 && f32_count < 1 { f32_count = 1 }
+    if xorconv64 && f32_count < 1 { f32_count = 1 }
     if tc64 && f32_count < 1 { f32_count = 1 }
     if matvec && f32_count < 2 { f32_count = 2 }
     if cell && f32_count < 8 { f32_count = 8 }
@@ -255,7 +261,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
     var f64_count = kernel.max_reg_f64
     if stage && f64_count < 2 { f64_count = 2 }
-    if (postadd || cell || readout || stepf64) && f64_count < 3 { f64_count = 3 }
+    if (postadd || cell || readout || stepf64 || xorconv64) && f64_count < 3 { f64_count = 3 }
     if tc64 && f64_count < 14 { f64_count = 14 }
     if matvec && f64_count < 3 { f64_count = 3 }
     if f64_count > 0 {
@@ -1253,6 +1259,38 @@ fn gpu_step_f64_dim(kernel: GpuKernelIr) -> i64 {
     8
 }
 
+fn gpu_has_xor_convolution_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// One sedenion component per lane. Lane d computes the serially ordered sum
+// r[d] = Σ_j σ(d⊕j,j)·a[d⊕j]·b[j]. b[j] arrives from lane j via bfly(d⊕j).
+fn gpu_emit_xor_convolution_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCDONE;\n"
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), pbR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mov.b64 {%r2, %r3}, %fd2;\n")
+    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCJ:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
+    t = str_concat(t, "    shfl.sync.bfly.b32 %r4, %r2, %r9, 15, 65535;\n")
+    t = str_concat(t, "    shfl.sync.bfly.b32 %r5, %r3, %r9, 15, 65535;\n")
+    t = str_concat(t, "    mov.b64 %fd2, {%r4, %r5};\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCJ;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCDONE:\n")
+    t
+}
+
 // FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
 // (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
 // read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
@@ -2024,6 +2062,10 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
             // Full-f64 O-SSM step. Pointers: pA=lhs, pB=rhs, px=addr, pH=src, pout=shared_addr.
             let fdim = if op.rhs_imm == 16 { 16 } else { 8 }
             ptx_push_str(buf, gpu_emit_oct_step_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), fdim))
+        }
+
+        GpuOpcode::GpuXorConvolutionF64 => {
+            ptx_push_str(buf, gpu_emit_xor_convolution_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
         }
 
         GpuOpcode::GpuOctBatchF64 => {
