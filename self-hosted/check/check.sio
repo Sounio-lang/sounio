@@ -18,6 +18,7 @@ use check::hyper::{check_hyper_binary}
 use check::compat::*
 use check::invariance::*
 use check::epistemic::*
+use check::causal::*
 use check::noise_sets::*
 use check::effects::*
 use check::ontology_side_table_cache::{
@@ -386,8 +387,10 @@ pub struct Checker {
     // SEPARATE from ns_table's interned SET count: many distinct sources can
     // union into fewer distinct interned sets, so the two counters diverge on
     // real programs. Reset to 0 in checker_new/checker_init_in_place;
-    // saturates to unknown via ns_singleton's own src>63 guard once 64
-    // sources have been issued (the issuer does not duplicate that cap).
+    // saturates to unknown via ns_singleton's own src >= ns_source_cap() guard
+    // once 256 sources have been issued (the issuer does not duplicate that
+    // cap, but it DOES report E178 at the offending measure() site so the
+    // saturation is never silent -- W4).
     ns_source_issued: i64,
     // Scratch set during checker_check_call_args_inplace to the noise_set_id
     // of the most recently seen Knowledge-typed call argument (parametric
@@ -1846,6 +1849,97 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
     // and demand the enclosing `with` clause.
     if name_matches_str11(name, 70, 111, 114, 103, 101, 116, 116, 97, 98, 108, 101) {
         return checker_lower_zd_named_mut(c, type_args, span, 200)
+    }
+
+    // IndepKnowledge<T, A, B | Z> -- conditional independence as a type.
+    //
+    // This is the PRODUCTION spine. The by-value lower_named_type_with_args
+    // carries the same rule, but nothing outside tests/ calls it, so a guard
+    // that lives only there passes every claim while appearing to check them.
+    if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+        match type_args {
+            None => {
+                checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                return ty_error()
+            }
+            Some(args) => {
+                let t_expr = (*args).head
+                let rest1 = match (*args).tail {
+                    None => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let a_expr = rest1.head
+                let rest2 = match rest1.tail {
+                    None => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let b_expr = rest2.head
+
+                // A and B name variables, not types.
+                if a_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, a_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+                if b_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, b_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+
+                let cond_id = match rest2.tail {
+                    None => 0 - 1
+                    Some(r) => indep_cond_set_id((*r).head)
+                }
+                let base_ty = checker_lower_type_expr_mut(c, t_expr)
+                let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                // A variable is not independent of itself; the claim asserts
+                // nothing, and asserting nothing is how an unfounded quadrature
+                // gets licensed.
+                if a_id == b_id {
+                    checker_report_error_at_inplace(c, b_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+
+                // With a graph declared in source the claim becomes an
+                // obligation discharged by d-separation. Without one, only the
+                // degeneracy rule above can be known.
+                if CG_DECLARED == 1 {
+                    let a_node = ast_cg_find_node(a_id)
+                    if a_node < 0 {
+                        checker_report_error_at_inplace(c, a_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let b_node = ast_cg_find_node(b_id)
+                    if b_node < 0 {
+                        checker_report_error_at_inplace(c, b_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let cond_args = match rest2.tail {
+                        None => None
+                        Some(zr) => (*zr).head.type_args
+                    }
+                    let zpair = checker_cg_zset(cond_args)
+                    if !zpair.0 {
+                        checker_report_error_at_inplace(c, b_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let g = checker_cg_build()
+                    if !causal_d_separated(g, a_node, b_node, zpair.1) {
+                        checker_report_error_at_inplace(c, b_expr.span, 255, 0, 0, 0)
+                        return ty_error()
+                    }
+                }
+
+                return ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+            }
+        }
     }
     if name_matches_str14(name, 69, 120, 97, 99, 116, 108, 121, 80, 114, 105, 118, 97, 116, 101) {
         return checker_lower_exactly_private_named_mut(c, type_args, span)
@@ -4136,11 +4230,11 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                     }
                     ri = ri + 1
                 }
-                // E072: a missing return annotation lowers to TyUnknown and is
+                // E253: a missing return annotation lowers to TyUnknown and is
                 // implicitly unit for a void kernel — accept it; only an EXPLICIT
                 // non-unit return type is an error. (Mirrors the collect_fn_def site.)
                 if ret_ty.kind != TypeKind::TyUnit && ret_ty.kind != TypeKind::TyUnknown {
-                    checker_report_error_at_inplace(c, (*fd).span, 72, 0, 0, 0)
+                    checker_report_error_at_inplace(c, (*fd).span, 253, 0, 0, 0)
                 }
             }
 
@@ -6422,7 +6516,14 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // Skip the generic types_compatible mismatch, which would otherwise reject two hyper values
     // with a spurious E004 "cannot be combined" before hyper dispatch runs.
     let both_hyper = left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper
-    if !both_hyper && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // Same exemption, same reason, for IndepKnowledge. Two claims over the same
+    // base type are deliberately INCOMPATIBLE as types -- `a ⊥ b | Z` is not
+    // `c ⊥ d` and neither may be assigned to the other -- but both erase to T
+    // under an operator, and binary_result_type unwraps them. Without this the
+    // generic identity check rejects `a + b` between two different claims over
+    // the same f64 before the unwrap ever runs.
+    let either_cond_indep = left_ty.kind == TypeKind::TyCondIndep || right_ty.kind == TypeKind::TyCondIndep
+    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -6479,6 +6580,12 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+        }
+        // W4: the union above may have exhausted the interning table. That
+        // saturates to unknown, which is sound but turns every later E230 into
+        // an unexplained refusal -- so say it out loud, once per overflow event.
+        if ns_table_overflow_take(&!(*(*c).ns_table)) {
+            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
         }
         // N3: anti-garbling gate. An independence-assuming op over operands whose
         // noise-symbol sets are not provably disjoint understates variance -- E230.
@@ -8457,7 +8564,18 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     if !checker_ns_sabotage() {
         let src = (*c).ns_source_issued
         (*c).ns_source_issued = src + 1
+        // W4: overflow must be LOUD. ns_singleton still saturates the handle to
+        // unknown (sound), but a silent saturation makes every downstream E230
+        // fire for a reason the user cannot see -- or, worse, makes an
+        // uncertainty band wrong without saying so. Report it here, at the
+        // measure() site that actually exceeded the cap.
+        if src >= ns_source_cap() {
+            checker_report_error_at_inplace(c, e.span, 178, 0, 0, 0)
+        }
         result.noise_set_id = ns_singleton(&!(*(*c).ns_table), src)
+        if ns_table_overflow_take(&!(*(*c).ns_table)) {
+            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+        }
     }
     checker_ns_trace_emit("measure", result.noise_set_id)
     result
@@ -9719,24 +9837,51 @@ pub fn checker_ns_disable() -> bool with IO, Mut, Panic, Div {
 // binary-op checking paths (the *mut Checker in-place path and the value path)
 // so the rule cannot go inert on one of them.
 //
-// An independence-assuming operator (OpAdd, OpMul) over two Knowledge operands
-// whose sources are not provably disjoint CAN understate the propagated variance
-// (it drops the covariance term). For Add the assumed a^2+b^2 vs true (a+b)^2 on a
-// shared symbol understates iff the coefficient product ab>0 and OVERstates iff
-// ab<0; refusing every non-disjoint pair is therefore CONSERVATIVE (it never
-// admits an understatement, though it also refuses the ab<0 pairs that were safe).
-// ns_disjoint fails closed: unknown (-1) and any unrepresentable set are NEVER
-// disjoint. A non-Knowledge operand carries no source of its own and never
-// triggers the rule (both operands must be Knowledge to reach the disjointness
-// test). Sub/Div are NOT gated here -- a SCOPE decision, not a safety one: the
-// SAME-sign correlated case of subtraction overstates (safe), but an OPPOSITE-sign
-// shared source makes Sub (and Div, sign-dependent) a genuine ungated anti-garbling
-// (math-review, zai, 2026-08-25). A full sign-of-covariance treatment of Sub/Div is
-// future work; today they pass unrefused.
+// An independence-assuming operator over two Knowledge operands whose sources are
+// not provably disjoint CAN understate the propagated variance, because it drops
+// the covariance term. Which SIGN of covariance is dangerous depends on the op:
+//
+//   Var(x + y) = Var x + Var y + 2 Cov      naive drops +2Cov -> unsafe iff Cov > 0
+//   Var(x - y) = Var x + Var y - 2 Cov      naive drops -2Cov -> unsafe iff Cov < 0
+//   Mul/Div use the GUM relative shortcut, whose dropped term is
+//   +/- 2 Cov / (xy) -- its sign depends on Cov AND on the sign of the product
+//   of the two VALUES, which this domain does not track.
+//
+// W4 closes the Sub/Div scope hole the N3 comment recorded (math-review, zai,
+// 2026-08-25) with the narrowest sound rule the domain can actually certify:
+//
+//   Add, Mul  refuse every non-disjoint pair. UNCHANGED from N3. Conservative:
+//             it never admits an understatement, though it still refuses the
+//             Cov < 0 pairs that were safe. Deliberately NOT relaxed by the new
+//             sign information -- this change only ever adds refusals.
+//   Sub       refuse a non-disjoint pair UNLESS Cov >= 0 is PROVEN
+//             (ns_cov_nonneg: every shared source carries a non-negative
+//             coefficient product). Then the naive variance OVERSTATES, which is
+//             safe. This is what keeps `x - x` compiling while catching
+//             `(p - a) - a`, where `a` enters with opposite signs.
+//   Div       refuse every non-disjoint pair. The sign of the dropped term needs
+//             sign(xy) as well as sign(Cov), and the NS domain carries no value
+//             signs, so the sign CANNOT be established: fail closed, exactly as
+//             ns_disjoint already does for the unknown handle (-1).
+//   Rem       still ungated AT THIS SITE, and safe to be: its uncertainty
+//             propagation is not modelled at all (epsilon_combine_independent is
+//             a placeholder), so a refusal here would not be backed by a variance
+//             argument. What makes leaving it ungated sound is that its RESULT is
+//             opaque -- knowledge_binary_result sends every operator that is not
+//             Add or Sub through ns_union_opaque, so Rem's sources are all
+//             sign-unknown and no later Sub can certify Cov >= 0 through them.
+//             Ungated is not the same as invisible.
+//
+// ns_disjoint and ns_cov_nonneg both fail closed: unknown (-1), any
+// unrepresentable set, and any source of unknown SIGN are never certified. A
+// non-Knowledge operand carries no source of its own and never triggers the rule
+// (both operands must be Knowledge to reach the query).
 fn checker_ns_should_refuse(table: *mut NoiseSetTable, bin_op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with IO, Mut, Panic, Div {
     if checker_ns_disable() { return false }
-    let is_indep_op = bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
-    if !is_indep_op { return false }
+    let is_add_lane = bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
+    let is_sub_lane = bin_op == BinaryOp::OpSub
+    let is_div_lane = bin_op == BinaryOp::OpDiv
+    if !is_add_lane && !is_sub_lane && !is_div_lane { return false }
     if !is_knowledge_type(left_ty) { return false }
     if !is_knowledge_type(right_ty) { return false }
     let a = left_ty.noise_set_id
@@ -9749,7 +9894,10 @@ fn checker_ns_should_refuse(table: *mut NoiseSetTable, bin_op: BinaryOp, left_ty
     // `deterministic + anything` (e.g. the N2 `x + w` witnesses where x is top).
     if a == ns_empty() { return false }
     if b == ns_empty() { return false }
-    !ns_disjoint(&(*table), a, b)
+    if ns_disjoint(&(*table), a, b) { return false }
+    // Not provably disjoint. Only the subtractive lane has an escape hatch.
+    if is_sub_lane { return !ns_cov_nonneg(&(*table), a, b) }
+    true
 }
 
 fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
@@ -10906,6 +11054,7 @@ pub fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, ite
     // ever lands on the hot path, so the layout-sensitive stale-stack
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
     checker_check_items_inplace(c, items)
+    checker_verify_dsep_claims_mut(c)
     checker_flush_unemitted_type_errors_mut(c)
     if (*c).had_error {
         1
@@ -15174,10 +15323,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 139 { print("do-calculus Rule 1 violated: observation is not d-separated from outcome given intervention") }
     else if code == 140 { print("do-calculus Rule 2 violated: action cannot be replaced by observation in this graph") }
     else if code == 141 { print("do-calculus Rule 3 violated: action cannot be deleted from this graph") }
-    // GPU kernel constraints (70-72)
+    // GPU kernel constraints (70-71; kernel-return is 253)
     else if code == 70 { print("kernel function cannot have IO, Mut, or Alloc effect") }
     else if code == 71 { print("kernel function parameter type is not GPU-compatible") }
-    else if code == 72 { print("kernel function must return unit type") }
+    else if code == 253 { print("kernel function must return unit type") }
     // Ontology type errors (150-152)
     else if code == 150 { print("value does not have an ontology class type") }
     else if code == 151 { print("ontology classes are disjoint and cannot be substituted") }
@@ -15200,6 +15349,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    // NS capacity enforcement (178-179) -- W4. Both are LOUD replacements for a
+    // silent saturation to the unknown noise-set handle.
+    else if code == 178 { print("noise-source capacity exceeded: this checker run has issued more independent measurement sources than the noise-symbol domain can represent, so correlation between them can no longer be tracked") }
+    else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
@@ -15223,6 +15376,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else if code == 230 { print("independence-assuming operation over correlated uncertainty") }
+    else if code == 72 { print("malformed conditional-independence claim: IndepKnowledge<T, A, B | Z> needs two distinct variables") }
+    else if code == 254 { print("is not a node of the declared causal graph") }
+    else if code == 255 { print("is not d-separated from the other variable given the stated conditioning set: an active path remains open") }
+    else if code == 256 { print("`d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
@@ -15461,14 +15618,14 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 68 {
         print("   |\n   = help: condition on an observed set Z that blocks all non-causal paths from cause to effect\n")
     }
-    // GPU kernel constraints (70-72)
+    // GPU kernel constraints (70-71; kernel-return is 253)
     else if code == 70 {
         print("   |\n   = help: kernel functions can only use GPU, Panic, and Div effects\n")
     }
     else if code == 71 {
         print("   |\n   = help: kernel parameters must be scalar types (i32, i64, f32, f64) or references to scalar arrays\n")
     }
-    else if code == 72 {
+    else if code == 253 {
         print("   |\n   = help: kernel functions execute on GPU and cannot return values; use &![T] output parameters instead\n")
     }
     else if code == 137 {
@@ -15476,6 +15633,27 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 174 {
         print("   |\n   = help: use a comparison or boolean expression in assert(...)\n")
+    }
+    else if code == 178 {
+        print("   |\n   = help: the noise-symbol domain represents 256 independent measurement")
+        print("\n   =       sources per checker run (ns_source_cap()). Past that the checker")
+        print("\n   =       cannot tell whether two values share a source, so this source and")
+        print("\n   =       everything derived from it become `unknown` -- and E230 then")
+        print("\n   =       refuses every later combination involving them. Those refusals")
+        print("\n   =       are a CONSEQUENCE of this message, not independent findings:")
+        print("\n   =       fix this one first and they go away.")
+        print("\n   =")
+        print("\n   =       Split the model across separate compilation units, or raise")
+        print("\n   =       ns_words() in self-hosted/check/noise_sets.sio and the four")
+        print("\n   =       constants that must move with it: ns_source_cap() (ns_words()*64),")
+        print("\n   =       the [i64; N] widths of NoiseSetTable.pos/neg (ns_cap()*ns_words()),")
+        print("\n   =       ns_table_bytes(), and the literal in ns_table_alloc().\n")
+    }
+    else if code == 179 {
+        print("   |\n   = help: the noise-symbol interning table holds 4096 distinct source-sets")
+        print("\n   =       per checker run. Past that the checker cannot name which sources a")
+        print("\n   =       value carries. Raise ns_cap() in self-hosted/check/noise_sets.sio")
+        print("\n   =       (and ns_table_bytes()/ns_table_alloc() with it).\n")
     }
     // Sprint 29: Do-calculus type checking (138-141)
     else if code == 138 {
@@ -15499,6 +15677,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     // Epistemic enforcement (170-171)
     else if code == 170 {
         print("   |\n   = help: add `with Epistemic` to your function signature, or use `acknowledge(k, reason)` to explicitly accept uncertainty\n")
+    }
+    else if code == 72 {
+        print("   |\n   = help: A and B must be two different variable names; a variable is trivially dependent on itself, so the claim asserts nothing\n")
     }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
@@ -15528,7 +15709,13 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       precision.")
         print("\n   =")
         print("\n   =       Prove the sources disjoint, or use a correlation-aware operator")
-        print("\n   =       that takes the covariance explicitly instead of assuming zero.\n")
+        print("\n   =       that takes the covariance explicitly instead of assuming zero.")
+        print("\n   =")
+        print("\n   =       Per operator: `+` and `*` refuse any shared source; `-` is allowed")
+        print("\n   =       when every shared source is provably same-signed in both operands")
+        print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
+        print("\n   =       any shared source, because its dropped term also depends on the sign")
+        print("\n   =       of the product of the operand values, which is not tracked.\n")
     }
     else {
         // No help available for unknown errors
@@ -17243,6 +17430,198 @@ fn expr_list_third(opt: Option<Box<ExprList> >) -> Option<Box<Expr> > with Alloc
     }
 }
 
+// ============================================================
+// IndepKnowledge<T, A, B | Z> — variable identity (Sprint 20 Track CI)
+// ============================================================
+//
+// A claim of independence only has to tell its variables apart, so a name
+// identity is exactly the semantics available today. It is NOT a causal-graph
+// node index: no surface syntax declares a causal graph yet, so nothing can
+// discharge the claim by d-separation. When that surface exists these ids
+// become indices into the declared graph and causal_d_separated becomes the
+// discharge. Until then the checker enforces only what it can actually know —
+// that a variable is not independent of itself.
+//
+// FNV-1a, reduced modulo a prime each step so the product cannot overflow i64.
+fn indep_var_id(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h ^ (n.buf[i as usize] as i64)
+        h = (h * 16777619) % 1073741789
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
+// Identity of the conditioning set Z. Summed rather than folded in sequence
+// because Z is a SET: {hora, plantao} and {plantao, hora} are the same claim
+// and must produce the same type.
+fn indep_cond_set_id(cond: TypeExpr) -> i64 with Mut, Panic, Div {
+    match cond.type_args {
+        None => 0 - 1
+        Some(list) => {
+            var cur = *list
+            var acc: i64 = 0
+            var more = true
+            while more {
+                let vid = indep_var_id(checker_copy_string_list_to_name(cur.head.path.segments))
+                acc = (acc + vid) % 1073741789
+                match cur.tail {
+                    Some(rest) => { cur = *rest }
+                    None => { more = false }
+                }
+            }
+            // -1 is reserved for "empty set"; a non-empty set must never collide
+            // with it, so a zero sum is nudged to a distinct sentinel.
+            if acc == 0 { 1073741788 } else { acc }
+        }
+    }
+}
+
+// Rebuild the declared graph from the CG_* registry the parser filled. Node
+// names are not carried: causal_d_separated works on indices, and the indices
+// here are the registry's own, so a name would be a second source of truth.
+fn checker_cg_build() -> CausalGraph with Mut, Panic, Div {
+    var g = causal_graph_new()
+    var i: i64 = 0
+    while i < CG_NODE_COUNT && i < 16 {
+        let pair = causal_graph_add_node(g, Name { buf: [0; 128], len: 0 }, true)
+        g = pair.0
+        i = i + 1
+    }
+    var e: i64 = 0
+    while e < CG_EDGE_COUNT && e < 32 {
+        if CG_EDGE_DIRECTED[e as usize] == 1 {
+            g = causal_graph_add_edge(g, CG_EDGE_FROM[e as usize], CG_EDGE_TO[e as usize])
+        } else {
+            g = causal_graph_add_confound(g, CG_EDGE_FROM[e as usize], CG_EDGE_TO[e as usize])
+        }
+        e = e + 1
+    }
+    g
+}
+
+// The conditioning set as node indices. `ok` is false when Z names a variable
+// the graph does not declare -- which must be rejected, not treated as an empty
+// conditioning set: silently dropping an unknown Z would turn a conditioned
+// claim into a marginal one and d-separate pairs the author never claimed.
+fn checker_cg_zset(cond_args: Option<Box<TypeExprList>>) -> (bool, [bool; 16]) with Mut, Panic, Div {
+    var z_set: [bool; 16] = [false; 16]
+    match cond_args {
+        None => (true, z_set)
+        Some(zl) => {
+            var cur = *zl
+            var more = true
+            var ok = true
+            while more {
+                let zh = indep_var_id(checker_copy_string_list_to_name(cur.head.path.segments))
+                let zn = ast_cg_find_node(zh)
+                if zn < 0 {
+                    ok = false
+                    more = false
+                } else {
+                    z_set[zn as usize] = true
+                    match cur.tail {
+                        Some(rest) => { cur = *rest }
+                        None => { more = false }
+                    }
+                }
+            }
+            (ok, z_set)
+        }
+    }
+}
+
+// Verify every d_separated(A, B | Z) the parser recorded and rewrote to the
+// proof token. Deferred to here, after all items are parsed, so a graph declared
+// below its use still counts -- the parser cannot know the whole graph yet.
+//
+// A claim that fails is an error at the call site; the token it produced stays a
+// 1, but the compilation does not succeed, so no proof escapes a failed check.
+// The *mut spine's copy. Every driver that checks a program routes through
+// checker_check_items_inner_store_return_had_error_mut, so this is where the
+// verification actually runs; the by-value one below serves
+// check_program_with_artifacts.
+pub fn checker_verify_dsep_claims_mut(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < DSEP_COUNT && i < 64 {
+        // A multi-module check runs this once per module. Mark each claim
+        // instead of clearing the registry: clearing on the first module wiped
+        // claims belonging to a module not yet checked, and they vanished.
+        if DSEP_DONE[i as usize] == 1 {
+            i = i + 1
+            continue
+        }
+        DSEP_DONE[i as usize] = 1
+        let sp = Span {
+            file_id: DSEP_SPAN_FILE[i as usize] as i32,
+            start: DSEP_SPAN_START[i as usize],
+            end: DSEP_SPAN_END[i as usize],
+        }
+        if DSEP_FORM_OK[i as usize] == 0 || CG_DECLARED == 0 {
+            checker_report_error_at_inplace(c, sp, 256, 0, 0, 0)
+        } else {
+            let a_node = ast_cg_find_node(DSEP_A[i as usize])
+            let b_node = ast_cg_find_node(DSEP_B[i as usize])
+            var z_node: i64 = 0 - 1
+            var z_known = true
+            if DSEP_Z[i as usize] >= 0 {
+                z_node = ast_cg_find_node(DSEP_Z[i as usize])
+                if z_node < 0 { z_known = false }
+            }
+            if a_node < 0 || b_node < 0 || !z_known {
+                checker_report_error_at_inplace(c, sp, 254, 0, 0, 0)
+            } else {
+                var z_set: [bool; 16] = [false; 16]
+                if z_node >= 0 { z_set[z_node as usize] = true }
+                let g = checker_cg_build()
+                if !causal_d_separated(g, a_node, b_node, z_set) {
+                    checker_report_error_at_inplace(c, sp, 255, 0, 0, 0)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn checker_verify_dsep_claims(c: Checker) -> Checker with Mut, Panic, Div, Alloc, IO {
+    var out = c
+    var i: i64 = 0
+    while i < DSEP_COUNT && i < 64 {
+        let sp = Span {
+            file_id: DSEP_SPAN_FILE[i as usize] as i32,
+            start: DSEP_SPAN_START[i as usize],
+            end: DSEP_SPAN_END[i as usize],
+        }
+        if DSEP_FORM_OK[i as usize] == 0 || CG_DECLARED == 0 {
+            out = out.report_error_at(sp, 256, 0, 0, 0)
+        } else {
+            let a_node = ast_cg_find_node(DSEP_A[i as usize])
+            let b_node = ast_cg_find_node(DSEP_B[i as usize])
+            var z_node: i64 = 0 - 1
+            var z_known = true
+            if DSEP_Z[i as usize] >= 0 {
+                z_node = ast_cg_find_node(DSEP_Z[i as usize])
+                if z_node < 0 { z_known = false }
+            }
+            if a_node < 0 || b_node < 0 || !z_known {
+                out = out.report_error_at(sp, 254, 0, 0, 0)
+            } else {
+                var z_set: [bool; 16] = [false; 16]
+                if z_node >= 0 { z_set[z_node as usize] = true }
+                let g = checker_cg_build()
+                if !causal_d_separated(g, a_node, b_node, z_set) {
+                    out = out.report_error_at(sp, 255, 0, 0, 0)
+                }
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
 fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: seg.head_len }
     var i: i64 = 0
@@ -18375,6 +18754,104 @@ impl Checker {
                     return (c, te)
                 }
 
+                // IndepKnowledge<T, A, B | Z> — conditional independence as a type.
+                // The parser guarantees the shape [T, A, B] or [T, A, B, Tuple(Z)];
+                // a shorter list can only come from a malformed claim.
+                if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+                    let t_expr = (*args).head
+                    let rest1 = match (*args).tail {
+                        None => {
+                            let c = self.report_error_at(t_expr.span, 72, 0, 0, 0)
+                            return (c, ty_error())
+                        }
+                        Some(r) => *r
+                    }
+                    let a_expr = rest1.head
+                    let rest2 = match rest1.tail {
+                        None => {
+                            let c = self.report_error_at(a_expr.span, 72, 0, 0, 0)
+                            return (c, ty_error())
+                        }
+                        Some(r) => *r
+                    }
+                    let b_expr = rest2.head
+
+                    // A and B name variables, not types. Anything else is a claim
+                    // about something that cannot be a variable, and the checker
+                    // would otherwise silently give both the same empty identity.
+                    if a_expr.kind != TypeExprKind::TypeNamed {
+                        let c = self.report_error_at(a_expr.span, 72, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+                    if b_expr.kind != TypeExprKind::TypeNamed {
+                        let c = self.report_error_at(b_expr.span, 72, 0, 0, 0)
+                        return (c, ty_error())
+                    }
+
+                    let cond_id = match rest2.tail {
+                        None => 0 - 1
+                        Some(r) => indep_cond_set_id((*r).head)
+                    }
+
+                    let t_pair = self.lower_type_expr(t_expr)
+                    var c = t_pair.0
+                    let base_ty = t_pair.1
+
+                    let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                    let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                    // The rule is spelled out here rather than delegated to
+                    // check_cond_indep_type in check/epistemic.sio: that module is
+                    // imported by nothing, and an unresolved name in this compiler
+                    // is a warning that compiles to zero — the guard would pass
+                    // every claim while appearing to check them.
+                    //
+                    // A variable is not independent of itself. The claim would
+                    // assert nothing, and asserting nothing is how an unfounded
+                    // quadrature gets licensed.
+                    if a_id == b_id {
+                        let c2 = c.report_error_at(b_expr.span, 72, 0, 0, 0)
+                        return (c2, ty_error())
+                    }
+
+                    // With a graph declared in source, the claim stops being an
+                    // assertion and becomes an obligation: A and B must name
+                    // nodes of that graph, and the graph must d-separate them
+                    // given Z. Without a declared graph nothing can discharge
+                    // it, and only the degeneracy rule above applies.
+                    if CG_DECLARED == 1 {
+                        let a_node = ast_cg_find_node(a_id)
+                        if a_node < 0 {
+                            let c3 = c.report_error_at(a_expr.span, 254, 0, 0, 0)
+                            return (c3, ty_error())
+                        }
+                        let b_node = ast_cg_find_node(b_id)
+                        if b_node < 0 {
+                            let c4 = c.report_error_at(b_expr.span, 254, 0, 0, 0)
+                            return (c4, ty_error())
+                        }
+                        let cond_args = match rest2.tail {
+                            None => None
+                            Some(zr) => (*zr).head.type_args
+                        }
+                        let zpair = checker_cg_zset(cond_args)
+                        if !zpair.0 {
+                            let c5 = c.report_error_at(b_expr.span, 254, 0, 0, 0)
+                            return (c5, ty_error())
+                        }
+                        let g = checker_cg_build()
+                        if !causal_d_separated(g, a_node, b_node, zpair.1) {
+                            let c6 = c.report_error_at(b_expr.span, 255, 0, 0, 0)
+                            return (c6, ty_error())
+                        }
+                    }
+
+                    // confidence unset (-1.0): the claim carries no probability
+                    // level of its own, only the structural assertion.
+                    let ci = ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+                    return (c, ci)
+                }
+
                 let tmpl_idx = struct_table_find(self.structs, name)
                 if tmpl_idx >= 0 {
                     let tmpl = struct_table_get(self.structs, tmpl_idx)
@@ -19396,6 +19873,9 @@ impl Checker {
             // Claim metadata is removed from the item stream by the parse
             // driver, so collection has no work to perform for this variant.
             ItemKind::ItemClaim => self
+            // Same for a causal graph: the parse driver drops it, and the graph
+            // itself is already in the CG_* registry by the time we get here.
+            ItemKind::ItemCausalGraph => self
         }
     }
 
@@ -20738,12 +21218,12 @@ impl Checker {
                         ri = ri + 1
                     }
 
-                    // E072: Kernel must return unit type. A missing return
+                    // E253: Kernel must return unit type. A missing return
                     // annotation lowers to TyUnknown (lower_opt_return_type's
                     // None case), which is implicitly unit for a void kernel —
                     // accept it; only an EXPLICIT non-unit return type is an error.
                     if ret_ty.kind != TypeKind::TyUnit && ret_ty.kind != TypeKind::TyUnknown {
-                        c = c.report_error_at((*fd).span, 72, 0, 0, 0)
+                        c = c.report_error_at((*fd).span, 253, 0, 0, 0)
                     }
                 }
 
@@ -21915,6 +22395,9 @@ impl Checker {
             // The arm exists so the match is exhaustive — without it the build
             // prints `error: match must be exhaustive` and still exits 0.
             ItemKind::ItemClaim => self
+            // Same for a causal graph: the parse driver drops it, and the graph
+            // itself is already in the CG_* registry by the time we get here.
+            ItemKind::ItemCausalGraph => self
         }
     }
 
@@ -22719,6 +23202,11 @@ impl Checker {
             var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
+            }
+            // W4: mirror of the in-place spine -- interning-table exhaustion is
+            // reported (E179), never silently degraded to "unknown".
+            if ns_table_overflow_take(&!(*c.ns_table)) {
+                c = c.report_error_at(e.span, 179, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
             // the E230 rule cannot go inert on plain named-call binary checking.

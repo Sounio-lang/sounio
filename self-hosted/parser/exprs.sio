@@ -1335,6 +1335,81 @@ impl Parser {
             p = p.expect(TokenKind::RParen)
         }
         let span = p.span_from(start)
+
+        // d_separated(A, B) / d_separated(A, B | Z): the only way to obtain a
+        // proven independence witness. A, B and Z name nodes of the declared
+        // causal graph, not variables, so the call is recorded for the checker
+        // to verify and replaced here by the proof token -- the literal 1, which
+        // is what indep_dsep consumes. See ast_record_dsep.
+        if callee.kind == ExprKind::ExprIdent
+            && callee.name.len == 11
+            && callee.name.buf[0] == (100 as i8)
+            && callee.name.buf[1] == (95 as i8)
+            && callee.name.buf[2] == (115 as i8)
+            && callee.name.buf[3] == (101 as i8)
+            && callee.name.buf[4] == (112 as i8)
+            && callee.name.buf[5] == (97 as i8)
+            && callee.name.buf[6] == (114 as i8)
+            && callee.name.buf[7] == (97 as i8)
+            && callee.name.buf[8] == (116 as i8)
+            && callee.name.buf[9] == (101 as i8)
+            && callee.name.buf[10] == (100 as i8) {
+            var d_a: i64 = 0
+            var d_b: i64 = 0
+            var d_z: i64 = 0 - 1
+            var form_ok: i64 = 0
+            match args_opt {
+                None => {}
+                Some(l1) => {
+                    let a_e = (*l1).head
+                    match (*l1).tail {
+                        None => {}
+                        Some(l2) => {
+                            let b_e = (*l2).head
+                            // Exactly two arguments; a third is not the form.
+                            match (*l2).tail {
+                                Some(_) => {}
+                                None => {
+                                    if a_e.kind == ExprKind::ExprIdent {
+                                        d_a = ast_indep_name_hash(a_e.name)
+                                        if b_e.kind == ExprKind::ExprIdent {
+                                            d_b = ast_indep_name_hash(b_e.name)
+                                            form_ok = 1
+                                        } else if b_e.kind == ExprKind::ExprBinary && b_e.bin_op == BinaryOp::OpBitOr {
+                                            // `B | Z` parses as a bitwise-or; the
+                                            // bar is the conditioning bar of
+                                            // P(A ⊥ B | Z), and both sides must
+                                            // still be plain names.
+                                            match b_e.left {
+                                                None => {}
+                                                Some(bl) => {
+                                                    match b_e.right {
+                                                        None => {}
+                                                        Some(br) => {
+                                                            if (*bl).kind == ExprKind::ExprIdent && (*br).kind == ExprKind::ExprIdent {
+                                                                d_b = ast_indep_name_hash((*bl).name)
+                                                                d_z = ast_indep_name_hash((*br).name)
+                                                                form_ok = 1
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ast_record_dsep(d_a, d_b, d_z, form_ok, span.file_id as i64, span.start, span.end)
+            var proof = mk_expr(ExprKind::ExprIntLit, span)
+            proof.int_val = 1
+            parser_store_expr_box(Box::new(proof))
+            return p
+        }
+
         var e = mk_expr(ExprKind::ExprCall, span)
         e.type_args = callee.type_args
         e.left = Some(callee)
