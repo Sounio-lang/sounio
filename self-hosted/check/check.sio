@@ -8124,6 +8124,24 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 // checker_release_call_arg_borrows_inplace / checker_report_error_at_inplace). Faithful: the
 // pure helpers (name_matches_*, knowledge_inner, ty_*) are unchanged.
 fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // A reference receiver resolves its methods on the pointee. `impl S { fn
+    // get(self: &S) ... }` already declares the borrow on self, so a caller
+    // holding `s: &S` writing `s.get()` is the ordinary shape for a function
+    // that does not own its argument -- it used to fall through every branch
+    // below and report E019 ("method calls are not supported for this type").
+    // Only TyNamed pointees are unwrapped: references to arrays, slices and
+    // strings keep their existing paths, including len_method_supported, which
+    // does its own unwrapping and never matches a TyNamed pointee anyway.
+    if base_ty.kind == TypeKind::TyRef || base_ty.kind == TypeKind::TyRefMut {
+        match base_ty.inner {
+            None => {}
+            Some(inner_ty) => {
+                if (*inner_ty).kind == TypeKind::TyNamed {
+                    return checker_check_method_call_with_base_ty_inplace(c, e, *inner_ty)
+                }
+            }
+        }
+    }
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
