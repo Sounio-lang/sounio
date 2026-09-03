@@ -121,7 +121,14 @@ if [[ "$SOUNIO_ENGINE_KIND" == "lean_single" \
 fi
 
 # Every run says what produced it, so no result can be quoted without it.
-echo "harness: engine=$SOUNIO_ENGINE_KIND elf=$SOUNIO_ENGINE_ELF md5=$(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF")"
+# stderr, not stdout: run_ontology_validation.sh captures this script's
+# stdout under --list-tests as a literal test-path list (build_validated_harness_list
+# reads every line as a fixture). A confirmation line on stdout was treated as
+# a selected test and rejected as "non-kernel fixture" -- measured on CI,
+# 2026-09-03, PR #2394. stdout here must be ONLY the test list or the JSON a
+# caller asked for; every human-facing status line belongs on stderr, as the
+# refusal branch above it already does.
+echo "harness: engine=$SOUNIO_ENGINE_KIND elf=$SOUNIO_ENGINE_ELF md5=$(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF")" >&2
 
 # If SOUC_BIN resolved to a raw ELF (not a shell script), route through the
 # subcommand wrapper so the harness can call `check`/`run`/`compile` correctly.
