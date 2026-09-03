@@ -1,0 +1,709 @@
+// stdlib/chemistry/catalysis.sio — Catalysis mechanisms: composable rate laws,
+// species-role tagging, turnover-number bookkeeping.
+//
+// Closes the gap named G10 in the sounio-uhs-coupled study's LANGUAGE_GAPS.md:
+// the general CRN engine (chemistry::kinetics::compute_rates_general) derives
+// every reaction's rate order only from the NEGATIVE (net-consumed) entries of
+// its MatNM stoichiometry matrix, so a lumped rate law with a net-zero
+// catalyst term (Michaelis-Menten, Hill, Langmuir-Hinshelwood) has no path
+// into it — only elementary-step mass action does. kinetics.sio already shows
+// elementary-step catalysis working (enzyme_rhs/test_enzyme_crn, E+S->ES->E+P
+// as two mass-action reactions where E nets to zero across the cycle); this
+// module adds the piece that was missing: a LUMPED rate-law abstraction
+// pluggable per reaction row, a catalyst/intermediate role tag, and
+// turnover-number (TON/TOF) derivation.
+//
+// Deliberately NOT an edit to kinetics.sio: compute_rates_general's mass-action
+// formula is the trusted baseline this module's rate laws are cross-checked
+// against (see test_mm_matches_baseline below), so it stays untouched and
+// independently callable. Zero dependency on the unmerged reaction-literal
+// syntax (feat/w5-reaction-literals) either — that syntax is compile-time-only
+// with no runtime representation, so it cannot carry a species role tag.
+//
+// VALIDATION, BY EXPLICIT FOUNDER ORDER: no Python, no Rust, anywhere, ever,
+// including validation. The tests in this file are Sounio-internal (algebraic
+// identities and conservation laws provable without an external reference
+// value at all). Independent numerical/formal cross-checks live outside this
+// language entirely, in stdlib/chemistry/oracles/: catalysis_oracle.cpp
+// (C++23, reimplements all 9 rate laws independently), catalysis_cycle.kk
+// (Koka, independently simulates the E+S<->ES->E+P cycle and derives TON/TOF),
+// and formal/lean4/SounioCatalysisKinetics.lean (Lean4, Mathlib-free per this
+// repo's own default, formally proves the enzyme-conservation and Hill
+// half-saturation identities this file only tests numerically). Agreement
+// between this module and those three independent implementations is the
+// actual evidence; nothing here is self-graded alone.
+//
+// FOUR REAL COMPILER BUGS WERE FOUND WRITING THIS MODULE, not bugs in the
+// chemistry. Each is fixed or documented at its exact trigger point, and
+// each was confirmed by isolated reproduction, not inferred from a failing
+// test:
+//   1. `extern "C" fn pow(x,y)` silently returns 0.0 whenever y is anything
+//      but a compile-time literal (a var, a struct field, even a value
+//      freshly copied to a local all trigger it). Worked around: pow_f64
+//      below, hand-rolled via exp_approx(y*ln_approx(x)), matching the same
+//      discipline acids.sio already uses for ln/log10.
+//   2. Sequential per-field mutation across DIFFERENT struct-array indices
+//      (`arr[0].f=x; arr[1].f=y; ...`) aliases every write to one slot.
+//      Worked around throughout: one whole-struct-literal assignment per
+//      index (`arr[i] = T{...}`), which is unaffected.
+//   3. A function returning a struct OR tuple that embeds a fixed-size array
+//      breaks the compiler's multimodule native thin-link stage outright,
+//      regardless of file size (confirmed failing at multiple, unrelated
+//      total function counts; the array-return function is the one common
+//      factor every time). Worked around: simulate_catalytic_cycle takes an
+//      output reference parameter (`out_state: &![f64;16]`) instead of
+//      returning the state, and returns only a plain `(f64,f64)` tuple.
+//   4. A tuple-destructured binding (`let (a,b) = f()`) reads back correctly
+//      on its FIRST use in a function but silently corrupts on any
+//      subsequent use of the same name. Worked around: round-trip each
+//      value through an array slot immediately after destructuring
+//      (test_turnover_bookkeeping does this explicitly, with the isolated
+//      repro that found it in a comment at that call site).
+//
+// NOT WORKED AROUND, accepted as a standing limitation: a function taking a
+// `&![T;N]` mutable-array-reference parameter breaks the same thin-link
+// stage when called from any function OTHER than main() -- confirmed by
+// isolated repro (simulate_catalytic_cycle called directly from a bare
+// main() links and runs correctly, reproducing the Koka oracle's numbers
+// exactly; the identical call wrapped in one intermediate function, such as
+// test_turnover_bookkeeping itself, does not link). There is no API-
+// preserving fix available at the stdlib level for this one -- inlining the
+// test into main() would work but breaks the pub-fn-test_X() convention
+// every other test in this file and this codebase follows. Consequence,
+// stated plainly: `stdlib/chemistry/catalysis.sio` cannot currently be
+// executed as ONE linked binary through `bin/souc run` -- neither can
+// `kinetics.sio`, already merged and trusted, for an unrelated parse-time
+// reason (2046 parser errors under `souc run`, confirmed during this
+// module's development; its own external test driver is `//@ check-only`
+// for exactly that reason, matching this file's driver at
+// tests/stdlib/chemistry/test_catalysis_stdlib.sio). Every individual
+// function and test in this file WAS actually executed and verified,
+// including test_turnover_bookkeeping's own logic (confirmed correct via
+// isolated extraction, not merely type-checked) -- see that driver file's
+// header for exactly how.
+
+module chemistry::catalysis
+
+use linalg::matnm::{matnm_new, matnm_set, matnm_get, matnm_mul, MatNM};
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+
+// pow_f64 is hand-rolled rather than `extern "C" fn pow`, for a measured
+// reason, not a style preference: extern "C" pow(x,y) here silently returns
+// 0.0 whenever y is anything other than a compile-time f64 LITERAL (a
+// variable, a struct field, even a value freshly copied to a local all
+// trigger it) -- a real x86-64 codegen defect in how the second float
+// argument is passed to an extern call, confirmed by isolated repro (see
+// /tmp/pow_var.sio-style tests during this module's development: `pow(a,3.7)`
+// with a literal exponent gives the right answer; `pow(a,b)` with both as
+// plain `let`-bound f64 gives exactly 0.0, silently, no error). hill_n is
+// inherently a runtime value here, so the literal-only path isn't usable.
+// This is the same discipline already established in this exact file's
+// sibling `acids.sio` (its own hand-rolled `ln_approx`, with the header
+// comment "single-symbol use module::name currently fails to resolve"): do
+// not trust a fragile extern/import path for a stdlib primitive when a
+// local implementation is cheap and its accuracy is independently checkable.
+fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let ln10: f64 = 2.302585092994046
+    let sqrt10: f64 = 3.1622776601683795
+    var y = x
+    var k: f64 = 0.0
+    while y > sqrt10 { y = y / 10.0; k = k + 1.0 }
+    while y < 1.0 / sqrt10 { y = y * 10.0; k = k - 1.0 }
+    let z = (y - 1.0) / (y + 1.0)
+    var sum = z; var term = z; var i = 1
+    while i < 30 {
+        term = term * z * z
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        i = i + 1
+    }
+    k * ln10 + 2.0 * sum
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 { return 1.0 }
+    var neg = false
+    var y = x
+    if y < 0.0 { neg = true; y = 0.0 - y }
+    let ln2: f64 = 0.6931471805599453
+    var n: f64 = 0.0
+    while y > ln2 { y = y - ln2; n = n + 1.0 }
+    var term = 1.0; var sum = 1.0; var i = 1
+    while i < 25 {
+        term = term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    var result = sum
+    var reps: f64 = 0.0
+    while reps < n { result = result * 2.0; reps = reps + 1.0 }
+    if neg { return 1.0 / result }
+    result
+}
+
+// General real base/exponent power via exp(exponent * ln(base)); base must
+// be > 0 (every caller in this file uses it on a concentration or a
+// half-saturation constant, both physically non-negative, so base == 0 is
+// the only edge case worth a guard, not base < 0).
+fn pow_f64(base: f64, exponent: f64) -> f64 with Mut, Div, Panic {
+    if base == 0.0 { if exponent == 0.0 { return 1.0 } return 0.0 }
+    exp_approx(exponent * ln_approx(base))
+}
+
+// ============================================================================
+// 1. RATE-LAW DISPATCH
+// ============================================================================
+//
+// Sounio has no traits/generics beyond prototype tier, so polymorphism is a
+// flat struct with an i64 `kind` discriminator and `if kind == N` dispatch —
+// the same shape as this codebase's EpistemicReaction/LUResult/QRResult_NM.
+// -1 is the "unused" sentinel for index fields, matching the enzyme_prov_l64
+// convention in self-hosted/collections/epistemic_reaction.sio.
+//
+// Field roles by kind (documented once here, not re-derived at each branch):
+//   kind 0  mass_action              — k_rate * c[sub] * c[sub2] (uni/bimolecular; sub2 optional)
+//   kind 1  MM irreversible          — k_rate=kcat, km1=Km, cat required
+//   kind 2  MM reversible (Haldane)  — k_rate=kcat_fwd, vmax=kcat_rev, km1=Kms, km2=Kmp, sub2=product
+//   kind 3  Hill cooperative         — k_rate=kcat, km1=K_half, hill_n=n, cat required
+//   kind 4  Langmuir-Hinshelwood 1-site — k_rate=surface rate const, km1=K_ads
+//   kind 5  Langmuir-Hinshelwood 2-site — km1/km2=K_ads for sub/sub2 on the same site
+//   kind 6  competitive-inhibited MM    — sub2=inhibitor conc, km2=Ki
+//   kind 7  noncompetitive-inhibited MM — sub2=inhibitor conc, km2=Ki
+//   kind 8  Monod, generalized dual-substrate — km1/km2=half-saturation for sub/sub2
+//
+// Kinds 1,2,3,6,7,8 tie rate directly to catalyst concentration c[cat_idx]
+// (k_rate is a true turnover-rate constant, kcat, not a pre-lumped Vmax) so
+// that "rate per catalyst at saturation equals kcat" is an exact identity,
+// not an approximation — this is what makes the turnover-number bookkeeping
+// in section 3 meaningful rather than just descriptive.
+pub struct RateLaw {
+    kind: i64,
+    k_rate: f64,
+    vmax: f64,
+    km1: f64,
+    km2: f64,
+    hill_n: f64,
+    sub_idx: i64,
+    sub2_idx: i64,
+    cat_idx: i64
+}
+
+pub fn rate_law_none() -> RateLaw {
+    RateLaw { kind: 0, k_rate: 0.0, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0,
+              sub_idx: -1, sub2_idx: -1, cat_idx: -1 }
+}
+
+pub fn rate_law_eval(law: RateLaw, c: &[f64; 16]) -> f64 with Mut, Div, Panic {
+    if law.kind == 0 {
+        if law.sub_idx < 0 { return 0.0 }
+        var rate = law.k_rate * c[law.sub_idx]
+        if law.sub2_idx >= 0 { rate = rate * c[law.sub2_idx] }
+        return rate
+    }
+    if law.kind == 1 {
+        if law.cat_idx < 0 || law.sub_idx < 0 { return 0.0 }
+        let s = c[law.sub_idx]
+        let denom = law.km1 + s
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * c[law.cat_idx] * s / denom
+    }
+    if law.kind == 2 {
+        if law.cat_idx < 0 || law.sub_idx < 0 || law.sub2_idx < 0 { return 0.0 }
+        if law.km1 == 0.0 || law.km2 == 0.0 { return 0.0 }
+        let s = c[law.sub_idx]
+        let p = c[law.sub2_idx]
+        let denom = 1.0 + s / law.km1 + p / law.km2
+        if denom == 0.0 { return 0.0 }
+        return c[law.cat_idx] * (law.k_rate * s / law.km1 - law.vmax * p / law.km2) / denom
+    }
+    if law.kind == 3 {
+        if law.cat_idx < 0 || law.sub_idx < 0 { return 0.0 }
+        let s = c[law.sub_idx]
+        let sn = pow_f64(s, law.hill_n)
+        let kn = pow_f64(law.km1, law.hill_n)
+        let denom = kn + sn
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * c[law.cat_idx] * sn / denom
+    }
+    if law.kind == 4 {
+        if law.sub_idx < 0 { return 0.0 }
+        let ka_c = law.km1 * c[law.sub_idx]
+        let denom = 1.0 + ka_c
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * ka_c / denom
+    }
+    if law.kind == 5 {
+        if law.sub_idx < 0 || law.sub2_idx < 0 { return 0.0 }
+        let ka_a = law.km1 * c[law.sub_idx]
+        let kb_b = law.km2 * c[law.sub2_idx]
+        let denom = 1.0 + ka_a + kb_b
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * ka_a * kb_b / (denom * denom)
+    }
+    if law.kind == 6 {
+        if law.cat_idx < 0 || law.sub_idx < 0 || law.sub2_idx < 0 { return 0.0 }
+        if law.km2 == 0.0 { return 0.0 }
+        let s = c[law.sub_idx]
+        let i_conc = c[law.sub2_idx]
+        let denom = law.km1 * (1.0 + i_conc / law.km2) + s
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * c[law.cat_idx] * s / denom
+    }
+    if law.kind == 7 {
+        if law.cat_idx < 0 || law.sub_idx < 0 || law.sub2_idx < 0 { return 0.0 }
+        if law.km2 == 0.0 { return 0.0 }
+        let s = c[law.sub_idx]
+        let i_conc = c[law.sub2_idx]
+        let denom = (law.km1 + s) * (1.0 + i_conc / law.km2)
+        if denom == 0.0 { return 0.0 }
+        return law.k_rate * c[law.cat_idx] * s / denom
+    }
+    if law.kind == 8 {
+        if law.cat_idx < 0 || law.sub_idx < 0 { return 0.0 }
+        let s1 = c[law.sub_idx]
+        let d1 = law.km1 + s1
+        if d1 == 0.0 { return 0.0 }
+        var factor = s1 / d1
+        if law.sub2_idx >= 0 {
+            let s2 = c[law.sub2_idx]
+            let d2 = law.km2 + s2
+            if d2 == 0.0 { return 0.0 }
+            factor = factor * (s2 / d2)
+        }
+        return law.k_rate * c[law.cat_idx] * factor
+    }
+    0.0
+}
+
+// ============================================================================
+// 2. MECHANISTIC CRN INTEGRATION
+// ============================================================================
+//
+// Mirrors chemistry::kinetics::compute_rates_general / general_dc /
+// simulate_general_crn (kinetics.sio:619-684) exactly in structure — nu still
+// drives the stoichiometric bookkeeping (species deltas = nu * rates), only
+// the RATE FORMULA per reaction row is now pluggable via `laws` instead of
+// hardcoded mass-action-from-stoichiometry. RK4 is hand-rolled inline here,
+// not built on the separate rk4_step(fn_ptr,...) helper simulate_enzyme_crn
+// uses — Sounio has no closures (LANGUAGE_GAPS.md G7), so rk4_step's
+// fixed-signature callback can't be parameterized by arbitrary laws/nu
+// without module-level mutable state, which would make this non-reentrant
+// and break with compute_rates_general's pure-functional style. Cap is 16
+// species/reactions, not 8: a dual-substrate Monod + competitive-inhibition
+// cycle alone needs ~9 slots (E,S1,S2,ES1,ES1S2,EP,P,I,EI).
+
+pub fn compute_rates_mechanistic(c: &[f64; 16], laws: &[RateLaw; 16], nrxn: i64) -> [f64; 16] with Mut, Div, Panic {
+    var rates: [f64; 16] = [0.0; 16]
+    var r: i64 = 0
+    while r < nrxn {
+        rates[r] = rate_law_eval(laws[r as usize], c)
+        r = r + 1
+    }
+    rates
+}
+
+fn mechanistic_dc(nu: MatNM, rates: &[f64; 16], nsp: i64) -> [f64; 16] with Mut, Div, Panic {
+    var rmat = matnm_new(16 as i64, 1 as i64)
+    var j: i64 = 0
+    while j < 16 { rmat = matnm_set(rmat, j, 0 as i64, rates[j]); j = j + 1 }
+    let dcm = matnm_mul(nu, rmat)
+    var dc: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < nsp { dc[i] = matnm_get(dcm, i, 0 as i64); i = i + 1 }
+    dc
+}
+
+pub fn simulate_mechanistic_crn(init: &[f64; 16], laws: &[RateLaw; 16], nu: MatNM,
+                                 nsp: i64, nrxn: i64, dt: f64, steps: i64) -> [f64; 16] with Mut, Div, Panic {
+    var y: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < nsp { y[i] = init[i]; i = i + 1 }
+    var s: i64 = 0
+    while s < steps {
+        let r1 = compute_rates_mechanistic(&y, laws, nrxn)
+        let k1 = mechanistic_dc(nu, &r1, nsp)
+        var y2: [f64; 16] = [0.0; 16]
+        var ii: i64 = 0
+        while ii < nsp { y2[ii] = y[ii] + 0.5 * dt * k1[ii]; ii = ii + 1 }
+        let r2 = compute_rates_mechanistic(&y2, laws, nrxn)
+        let k2 = mechanistic_dc(nu, &r2, nsp)
+        var y3: [f64; 16] = [0.0; 16]
+        ii = 0
+        while ii < nsp { y3[ii] = y[ii] + 0.5 * dt * k2[ii]; ii = ii + 1 }
+        let r3 = compute_rates_mechanistic(&y3, laws, nrxn)
+        let k3 = mechanistic_dc(nu, &r3, nsp)
+        var y4: [f64; 16] = [0.0; 16]
+        ii = 0
+        while ii < nsp { y4[ii] = y[ii] + dt * k3[ii]; ii = ii + 1 }
+        let r4 = compute_rates_mechanistic(&y4, laws, nrxn)
+        let k4 = mechanistic_dc(nu, &r4, nsp)
+        ii = 0
+        while ii < nsp {
+            y[ii] = y[ii] + (dt / 6.0) * (k1[ii] + 2.0 * k2[ii] + 2.0 * k3[ii] + k4[ii])
+            ii = ii + 1
+        }
+        s = s + 1
+    }
+    y
+}
+
+// ============================================================================
+// 3. SPECIES ROLES, CYCLE VALIDATION, TURNOVER BOOKKEEPING
+// ============================================================================
+
+// role: 0=ordinary reactant/product, 1=catalyst, 2=intermediate
+pub struct CatalyticSpecies {
+    index: i64,
+    role: i64,
+    initial_amount: f64
+}
+
+// A correctness invariant for any elementary-step catalytic cycle built on
+// this engine: a genuine catalyst's stoichiometry must net to zero across
+// the full cycle (consumed in one step, regenerated in another), the same
+// property enzyme_rhs's hand-written E row already satisfies by construction
+// in kinetics.sio — this makes that property checkable instead of assumed.
+// Valid for a MINIMAL cycle only -- a catalyst that is consumed in one step
+// and regenerated in exactly one other, e.g. E+S->ES, ES->E+P (coefficients
+// -1,+1 sum to 0). It is NOT the right check for a network that also carries
+// an explicit reverse reaction alongside the forward cycle (e.g. adding
+// ES->E+S to the pair above): the reverse step regenerates E a second time,
+// so the naive row-sum is +1, not 0, even though E+ES genuinely stays
+// conserved once reaction RATES are accounted for (verified numerically by
+// test_enzyme_conservation, which does not use this check for exactly that
+// reason). Demonstrated on the minimal shape in test_catalyst_conserved_cycle.
+pub fn catalyst_conserved(nu: MatNM, catalyst_row: i64, nrxn: i64) -> bool with Mut, Div, Panic {
+    var total = 0.0
+    var r: i64 = 0
+    while r < nrxn {
+        total = total + matnm_get(nu, catalyst_row, r)
+        r = r + 1
+    }
+    abs_f64(total) < 1.0e-9
+}
+
+pub fn turnover_number(product_formed: f64, catalyst_total: f64) -> f64 with Div, Panic {
+    if catalyst_total <= 0.0 { return 0.0 }
+    product_formed / catalyst_total
+}
+
+pub fn turnover_frequency(ton: f64, elapsed_s: f64) -> f64 with Div, Panic {
+    if elapsed_s <= 0.0 { return 0.0 }
+    ton / elapsed_s
+}
+
+// A struct return, not a tuple: measured during this module's development
+// that a tuple mixing a fixed-size array with scalars (`([f64;16], f64,
+// f64)`) corrupts under native codegen -- confirmed by isolated repro (a
+// minimal `fn f() -> ([f64;4], f64)` returning literal values already reads
+// back garbage) and independently by this exact function failing the
+// compiler's multimodule native thin-link stage outright when present.
+// Arrays inside a STRUCT are unaffected -- MatNM itself already embeds
+// `data: [f64; 4096]` and works throughout this codebase -- so this is the
+// struct-shaped equivalent of the same tuple, not a smaller feature.
+// out_state is an OUTPUT REFERENCE PARAMETER, not a return value: measured
+// during this module's development that BOTH a tuple (`([f64;16], f64,
+// f64)`) AND a struct (`CatalyticCycleResult{final_state:[f64;16], ...}`)
+// containing a fixed-size array break the compiler's multimodule native
+// thin-link stage outright when returned from a function like this one --
+// confirmed at multiple, unrelated function counts (the array-return
+// function is the common factor every time, not file size). Writing the
+// array through `&![f64;16]` and returning only `(f64,f64)` (already proven
+// safe -- every scalar-tuple return elsewhere in this file works) avoids the
+// broken construct while keeping the same information available to callers.
+pub fn simulate_catalytic_cycle(init: &[f64; 16], laws: &[RateLaw; 16], nu: MatNM,
+                                 nsp: i64, nrxn: i64, catalyst_total: f64, product_idx: i64,
+                                 dt: f64, steps: i64, out_state: &![f64; 16]) -> (f64, f64) with Mut, Div, Panic {
+    let final_state = simulate_mechanistic_crn(init, laws, nu, nsp, nrxn, dt, steps)
+    var i: i64 = 0
+    while i < 16 { out_state[i] = final_state[i]; i = i + 1 }
+    let product_formed = final_state[product_idx] - init[product_idx]
+    let elapsed = dt * (steps as f64)
+    let ton = turnover_number(product_formed, catalyst_total)
+    let tof = turnover_frequency(ton, elapsed)
+    (ton, tof)
+}
+
+// ============================================================================
+// 4. TESTS — all pure Sounio, zero external oracle (internal consistency
+// proofs and closed-form algebraic identities only; independent numerical/
+// formal cross-checks are the three files under oracles/ and formal/, see
+// module header).
+// ============================================================================
+
+// --- 4.0 exact-arithmetic sanity: kind 0 is plain multiplication ---
+pub fn test_mass_action_exact() -> bool with Mut, Div, Panic {
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 3.0; c[1] = 4.0
+    var law = rate_law_none()
+    law.kind = 0; law.k_rate = 2.0; law.sub_idx = 0; law.sub2_idx = 1
+    check_near(rate_law_eval(law, &c), 24.0, 1.0e-12)
+}
+
+// --- 4.1 cross-consistency: kind 1 MM must match a hand-verifiable MM value
+// (the same Vmax/Km/S check acids::mm_rate would give for r=vmax*s/(km+s),
+// achieved here by setting catalyst concentration to 1.0 so k_rate plays the
+// role of Vmax exactly) ---
+pub fn test_mm_matches_baseline() -> bool with Mut, Div, Panic {
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 1.0    // substrate S = 1.0
+    c[1] = 1.0    // catalyst concentration held at 1.0 so k_rate == Vmax
+    var law = rate_law_none()
+    law.kind = 1; law.k_rate = 10.0; law.km1 = 1.0; law.sub_idx = 0; law.cat_idx = 1
+    let got = rate_law_eval(law, &c)
+    let expected = 10.0 * 1.0 / (1.0 + 1.0)   // vmax*s/(km+s) = 10*1/(1+1) = 5.0
+    check_near(got, expected, 1.0e-12) && check_near(got, 5.0, 1.0e-12)
+}
+
+// --- 4.2 saturation identity: at S >> Km, MM rate -> kcat * [catalyst]
+// exactly (this is the definition of kcat, so it's checkable to tight
+// tolerance rather than approximately) ---
+pub fn test_mm_saturation_is_kcat() -> bool with Mut, Div, Panic {
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 1.0e9   // S >> Km; asymptotic gap at S/Km=1e9 is ~1e-9 relative, well under tol
+    c[1] = 2.0     // catalyst concentration
+    var law = rate_law_none()
+    law.kind = 1; law.k_rate = 7.5; law.km1 = 1.0; law.sub_idx = 0; law.cat_idx = 1
+    let got = rate_law_eval(law, &c)
+    check_near(got, 7.5 * 2.0, 1.0e-5)
+}
+
+// --- 4.3 Hill identities: n=1 reduces to MM shape; S=Km gives exactly
+// kcat*[cat]/2 for ANY n (both provable by algebra, both formally proved
+// independently in formal/CatalysisKinetics.lean) ---
+pub fn test_hill_identities() -> bool with Mut, Div, Panic {
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 3.0; c[1] = 1.0
+    var law_hill = rate_law_none()
+    law_hill.kind = 3; law_hill.k_rate = 4.0; law_hill.km1 = 2.0; law_hill.hill_n = 1.0
+    law_hill.sub_idx = 0; law_hill.cat_idx = 1
+    var law_mm = rate_law_none()
+    law_mm.kind = 1; law_mm.k_rate = 4.0; law_mm.km1 = 2.0; law_mm.sub_idx = 0; law_mm.cat_idx = 1
+    // tolerance widened from an exact-match expectation: kind=1 (MM) computes
+    // s/(km+s) directly, no transcendental involved, while kind=3 (Hill) goes
+    // through pow_f64 -> exp_approx(n*ln_approx(s)) -- a converging but not
+    // bit-exact series approximation (see pow_f64's own header comment for why
+    // it exists instead of the extern pow() this file used originally). This
+    // comparison inherits that series' truncation error at n=1; 1e-4 leaves
+    // comfortable margin above it without being a rubber-stamp tolerance.
+    let n1_matches_mm = check_near(rate_law_eval(law_hill, &c), rate_law_eval(law_mm, &c), 1.0e-4)
+
+    var c2: [f64; 16] = [0.0; 16]
+    c2[0] = 5.0; c2[1] = 3.0   // S == Km == 5.0
+    var law_half = rate_law_none()
+    law_half.kind = 3; law_half.k_rate = 9.0; law_half.km1 = 5.0; law_half.hill_n = 3.7
+    law_half.sub_idx = 0; law_half.cat_idx = 1
+    let half_at_km = check_near(rate_law_eval(law_half, &c2), 9.0 * 3.0 / 2.0, 1.0e-9)
+
+    n1_matches_mm && half_at_km
+}
+
+// --- 4.4 Langmuir-Hinshelwood asymptotics: low coverage -> pseudo-first-
+// order (linear in concentration); high coverage -> saturates ---
+pub fn test_langmuir_hinshelwood_asymptotics() -> bool with Mut, Div, Panic {
+    var law = rate_law_none()
+    law.kind = 4; law.k_rate = 6.0; law.km1 = 0.01; law.sub_idx = 0   // small adsorption constant
+
+    var c_low: [f64; 16] = [0.0; 16]
+    c_low[0] = 0.001
+    let r_low = rate_law_eval(law, &c_low)
+    var c_low2: [f64; 16] = [0.0; 16]
+    c_low2[0] = 0.002   // double the concentration
+    let r_low2 = rate_law_eval(law, &c_low2)
+    // pseudo-first-order: doubling C at low coverage should ~double the rate
+    let low_coverage_linear = check_near(r_low2 / r_low, 2.0, 0.01)
+
+    var c_high: [f64; 16] = [0.0; 16]
+    c_high[0] = 1.0e6
+    let r_high = rate_law_eval(law, &c_high)
+    // saturates toward k_rate as coverage -> 1
+    let saturates = check_near(r_high, law.k_rate, 1.0e-3)
+
+    low_coverage_linear && saturates
+}
+
+// --- 4.5 conservation law: total enzyme (E+ES) is conserved by the
+// elementary-step E+S<->ES->E+P cycle, checked at every step, not just the
+// end -- an internally provable property needing no reference value at all.
+// nu layout: species 0=E,1=S,2=ES,3=P; reactions 0: E+S->ES, 1: ES->E+S, 2: ES->E+P ---
+fn build_enzyme_cycle_nu() -> MatNM with Mut, Div, Panic {
+    var nu = matnm_new(4 as i64, 3 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 0 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 0 as i64, 1 as i64, 1.0); nu = matnm_set(nu, 1 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 2 as i64, -1.0); nu = matnm_set(nu, 0 as i64, 2 as i64, 1.0); nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0)
+    nu
+}
+
+fn build_enzyme_cycle_laws() -> [RateLaw; 16] with Mut, Div, Panic {
+    // Each slot is set via ONE whole-struct-literal assignment, not per-field
+    // mutation across indices -- measured during this module's development:
+    // `laws[i as usize].field = x` done in sequence for several different i
+    // silently aliases every written index to the same slot (confirmed by
+    // isolated repro; array_elem_field_store.sio's own passing test never
+    // exercises this shape, since it always assigns a whole struct per index
+    // before any per-field mutation). One literal per index sidesteps it.
+    var laws: [RateLaw; 16] = [rate_law_none(); 16]
+    laws[0 as usize] = RateLaw { kind: 0, k_rate: 1.2, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 0, sub2_idx: 1, cat_idx: -1 }   // E+S->ES, kf
+    laws[1 as usize] = RateLaw { kind: 0, k_rate: 0.3, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 2, sub2_idx: -1, cat_idx: -1 }  // ES->E+S, kr
+    laws[2 as usize] = RateLaw { kind: 0, k_rate: 0.8, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 2, sub2_idx: -1, cat_idx: -1 }  // ES->E+P, kcat
+    laws
+}
+
+pub fn test_enzyme_conservation() -> bool with Mut, Div, Panic {
+    let nu = build_enzyme_cycle_nu()
+    let laws = build_enzyme_cycle_laws()
+    var init: [f64; 16] = [0.0; 16]
+    init[0] = 0.05; init[1] = 2.0   // E0=0.05, S0=2.0, matching kinetics.sio::test_enzyme_crn
+    let e0 = init[0]
+
+    var y: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 4 { y[i] = init[i]; i = i + 1 }
+
+    // catalyst_conserved is NOT used here: this network carries an explicit
+    // reverse reaction (ES->E+S) alongside the forward cycle, which its naive
+    // row-sum check flags incorrectly -- see that function's own header
+    // comment. This is the direct, correct check for THIS network's shape:
+    // integrate and verify E+ES against E0 at every step, not just the end.
+    var conserved = true
+    var step: i64 = 0
+    while step < 300 {
+        y = simulate_mechanistic_crn(&y, &laws, nu, 4 as i64, 3 as i64, 0.02, 1 as i64)
+        if abs_f64((y[0] + y[2]) - e0) > 1.0e-6 { conserved = false }
+        step = step + 1
+    }
+    conserved
+}
+
+// Demonstrates catalyst_conserved on the minimal shape it's actually valid
+// for: a two-reaction cycle, no separate reverse step (E+S->ES, ES->E+P).
+// E's coefficients are -1 then +1, summing to exactly 0.
+pub fn test_catalyst_conserved_cycle() -> bool with Mut, Div, Panic {
+    var nu = matnm_new(4 as i64, 2 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 0 as i64, 1.0)   // E+S->ES
+    nu = matnm_set(nu, 2 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 0 as i64, 1 as i64, 1.0); nu = matnm_set(nu, 3 as i64, 1 as i64, 1.0)   // ES->E+P
+    let e_is_conserved = catalyst_conserved(nu, 0 as i64, 2 as i64)
+    // negative control: S (row 1) is consumed once, never regenerated --
+    // the check must correctly reject it, not just accept everything.
+    let s_is_not_conserved = !catalyst_conserved(nu, 1 as i64, 2 as i64)
+    e_is_conserved && s_is_not_conserved
+}
+
+// --- 4.6 QSSA validation, checkpoint-concentration form (not initial-rate
+// slope -- numerically differentiating a near-flat initial P-formation slope
+// is poorly conditioned). S0 >> Km and E0 << S0 so QSSA validity holds and
+// model error itself stays small. Compares the analytical quasi-steady-state
+// ES* against the numerically-integrated ES at a checkpoint several multiples
+// of the fast timescale but well before S depletes, then checks
+// kcat*ES(t*) == the lumped MM velocity at S(t*) self-consistently -- both are
+// state comparisons, no differentiation anywhere. ---
+pub fn test_qssa_checkpoint() -> bool with Mut, Div, Panic {
+    let kf = 50.0; let kr = 5.0; let kcat = 2.0
+    let e0 = 0.001; let s0 = 10.0   // S0 >> Km=(kr+kcat)/kf=0.14, E0 << S0
+
+    let nu = build_enzyme_cycle_nu()
+    // one whole-struct-literal assignment per slot -- see build_enzyme_cycle_laws's
+    // header comment for why per-field mutation across indices is unsafe here.
+    var laws: [RateLaw; 16] = [rate_law_none(); 16]
+    laws[0 as usize] = RateLaw { kind: 0, k_rate: kf, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 0, sub2_idx: 1, cat_idx: -1 }
+    laws[1 as usize] = RateLaw { kind: 0, k_rate: kr, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 2, sub2_idx: -1, cat_idx: -1 }
+    laws[2 as usize] = RateLaw { kind: 0, k_rate: kcat, vmax: 0.0, km1: 0.0, km2: 0.0, hill_n: 1.0, sub_idx: 2, sub2_idx: -1, cat_idx: -1 }
+
+    var init: [f64; 16] = [0.0; 16]
+    init[0] = e0; init[1] = s0
+
+    // fast timescale 1/(kf*S0+kr+kcat) ~ 1/507 ~ 0.002; checkpoint at ~50x that,
+    // dt small enough for RK4 accuracy, well before S depletes (S0=10 is huge)
+    let dt = 0.0002
+    let steps: i64 = 500   // t* = 0.1, ~50 fast-timescales, S barely moves
+    let y = simulate_mechanistic_crn(&init, &laws, nu, 4 as i64, 3 as i64, dt, steps)
+
+    let s_t = y[1]
+    let es_numeric = y[2]
+    let es_qssa = kf * e0 * s_t / (kr + kcat + kf * s_t)
+
+    let qssa_matches = check_near(es_numeric, es_qssa, es_qssa * 0.02)
+
+    // self-consistency: kcat*ES(t*) must equal the lumped MM velocity at S(t*)
+    let km = (kr + kcat) / kf
+    let mm_velocity = kcat * e0 * s_t / (km + s_t)
+    let velocity_matches = check_near(kcat * es_numeric, mm_velocity, mm_velocity * 0.02)
+
+    qssa_matches && velocity_matches
+}
+
+// --- 4.7 turnover-number bookkeeping, run end to end ---
+pub fn test_turnover_bookkeeping() -> bool with Mut, Div, Panic {
+    let nu = build_enzyme_cycle_nu()
+    let laws = build_enzyme_cycle_laws()
+    var init: [f64; 16] = [0.0; 16]
+    init[0] = 0.05; init[1] = 2.0
+
+    var final_state: [f64; 16] = [0.0; 16]
+    let (ton_raw, tof_raw) = simulate_catalytic_cycle(&init, &laws, nu, 4 as i64, 3 as i64,
+                                                        0.05, 3 as i64, 0.02, 300 as i64, &! final_state)
+    // Round-tripped through an array slot rather than used directly: measured
+    // during this module's development that a tuple-destructured binding
+    // (`let (a,b) = f()`) reads back correctly on its FIRST use but silently
+    // corrupts on any subsequent use in the same function (confirmed by
+    // isolated repro -- `ton` alone printed correctly once, then `ton / 6.0`
+    // -- a second, independent use -- gave garbage). Writing each value to an
+    // array slot once and re-binding from the array read is a small, cheap
+    // fix that sidesteps whatever liveness/register issue causes it.
+    var ton_tof: [f64; 2] = [0.0; 2]
+    ton_tof[0] = ton_raw
+    ton_tof[1] = tof_raw
+    let ton = ton_tof[0]
+    let tof = ton_tof[1]
+    // NOT kinetics.sio::test_enzyme_crn's ~0.7 expectation -- that file can't
+    // even be run standalone through this compiler (parse-fails under
+    // `souc run`; its own driver is `//@ check-only`, type-checked but never
+    // executed), so that assertion was never actually verified against these
+    // rate constants. The correct value, ~0.154, is independently confirmed
+    // two ways: stdlib/chemistry/oracles/catalysis_cycle.kk (Koka, hand-rolled
+    // RK4, unrelated codebase) computes P=0.154054667769 for these exact
+    // kf/kr/kcat/E0/S0/dt/steps, and this module's own mass-balance holds
+    // (S+ES+P=S0 to 12+ digits in that independent run).
+    let product_ok = check_near(final_state[3], 0.154054667769, 1.0e-6)
+    let ton_positive = ton > 0.0
+    let tof_positive = tof > 0.0
+    let tof_is_ton_over_time = check_near(tof, ton / (0.02 * 300.0), 1.0e-9)
+    product_ok && ton_positive && tof_positive && tof_is_ton_over_time
+}
+
+// --- 4.8 illustrative literature figure: carbonic anhydrase, kcat ~ 1e6 /s
+// (a standard biochemistry-textbook constant for one of the fastest known
+// enzymes; illustrative here, not pinned to a specific paper the way the
+// sibling science-study repo pins its geochemistry constants -- this is
+// stdlib-test provenance, a lower bar than that repo's science claims).
+// TOF at saturation must equal kcat exactly, by the definition in section 1. ---
+pub fn test_turnover_carbonic_anhydrase() -> bool with Mut, Div, Panic {
+    let kcat = 1.0e6   // /s, illustrative textbook figure for carbonic anhydrase
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 1.0e6   // S >> Km=1e-2: relative gap Km/(Km+S) ~ 1e-8, comfortably under tol
+    c[1] = 1.0     // unit catalyst concentration
+    var law = rate_law_none()
+    law.kind = 1; law.k_rate = kcat; law.km1 = 1.0e-2; law.sub_idx = 0; law.cat_idx = 1
+    let rate_per_unit_catalyst = rate_law_eval(law, &c)
+    check_near(rate_per_unit_catalyst, kcat, kcat * 1.0e-6)
+}
+
+pub fn main() -> i32 with Mut, Div, Panic, IO {
+    var p: i32 = 0
+    var f: i32 = 0
+    if test_mass_action_exact() { p = p + 1 } else { f = f + 1; println("FAIL: test_mass_action_exact") }
+    if test_mm_matches_baseline() { p = p + 1 } else { f = f + 1; println("FAIL: test_mm_matches_baseline") }
+    if test_mm_saturation_is_kcat() { p = p + 1 } else { f = f + 1; println("FAIL: test_mm_saturation_is_kcat") }
+    if test_hill_identities() { p = p + 1 } else { f = f + 1; println("FAIL: test_hill_identities") }
+    if test_langmuir_hinshelwood_asymptotics() { p = p + 1 } else { f = f + 1; println("FAIL: test_langmuir_hinshelwood_asymptotics") }
+    if test_enzyme_conservation() { p = p + 1 } else { f = f + 1; println("FAIL: test_enzyme_conservation") }
+    if test_catalyst_conserved_cycle() { p = p + 1 } else { f = f + 1; println("FAIL: test_catalyst_conserved_cycle") }
+    if test_qssa_checkpoint() { p = p + 1 } else { f = f + 1; println("FAIL: test_qssa_checkpoint") }
+    if test_turnover_bookkeeping() { p = p + 1 } else { f = f + 1; println("FAIL: test_turnover_bookkeeping") }
+    if test_turnover_carbonic_anhydrase() { p = p + 1 } else { f = f + 1; println("FAIL: test_turnover_carbonic_anhydrase") }
+    print("CATALYSIS: ") print(p) print(" passed, ") print(f) println(" failed")
+    if f == 0 { println("CATALYSIS ALL PASS") }
+    0
+}

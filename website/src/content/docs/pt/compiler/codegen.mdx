@@ -13,35 +13,81 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.c
 
 # Geração de Código (*Codegen*)
 
-A geração de código é a área onde o Sounio evidencia de forma mais clara a coexistência de múltiplos perfis de compilação. Atualmente, a descrição correta abandonou o antigo pressuposto de que existe apenas um caminho de geração; o repositório distribui agora artefactos separados e estáveis para JIT e GPU, com contratos de backend perfeitamente discriminados.
+A geração de código é onde o Sounio evidencia de forma mais clara a existência de múltiplos perfis reais de compilação. O **workflow público padrão** é o caminho nativo self-hosted verificado por trás do `bin/souc`. Artefatos omega separados expõem perfis opcionais de Cranelift JIT e de GPU, com contratos de backend diferentes.
 
-## Mapeamento Atual do Código-Fonte
+## Mapeamento atual do código-fonte
 
-- `self-hosted/native/` – Responsável pelo rebaixamento nativo (*lowering*), codificação de instruções, ABI, alocação de registadores e formatos de ficheiros objeto.
-- `self-hosted/wasm/` – Abrange o *lowering*, codificação de opcodes e estruturação de módulos WebAssembly (WASM).
-- `self-hosted/gpu/` – Suporte para PTX, SPIR-V, Metal, operações tensoriais e geração de kernels para GPU.
-- `self-hosted/llvm/` – Subárvore dedicada à integração com a infraestrutura LLVM.
+- `self-hosted/native/` cobre o lowering nativo, a codificação de instruções, o tratamento de ABI, a alocação de registradores, os formatos de objeto e as suítes de teste.
+- `self-hosted/wasm/` cobre o lowering, a codificação e a construção de módulos, além do código de driver para o caminho WASM.
+- `self-hosted/gpu/` cobre PTX, SPIR-V, Metal, trabalho voltado a tensores e os caminhos de lowering para GPU.
+- `self-hosted/llvm/` continua presente como uma subárvore separada voltada a esse backend.
 
-## Capacidades Provadas pelos Artefactos
+## O que os artefatos verificados provam
 
-- **Perfil JIT (Onboarding Padrão):** Ativa a compilação em tempo de execução via Cranelift JIT, mantendo os geradores de código LLVM e GPU desativados por omissão para acelerar a inicialização.
-- **Perfil GPU (Omega):** Disponibiliza a geração de kernels GPU e a emissão de código intermédio PTX diretamente através do comando `build --backend gpu`.
-- **Estratégia de Documentação:** Diferencie claramente o comportamento padrão (JIT) das extensões avançadas para GPU e das amplas capacidades estruturais presentes na árvore de código-fonte.
+- **Launcher padrão (`bin/souc`)**: geração de código nativa self-hosted para ELF/Mach-O; veja `artifacts/omega/selfhost_verification_report.v1.json` e `docs/guide/MINIMUM_VIABLE_SOUNIO.md`.
+- **Perfil JIT opcional**: Cranelift JIT habilitado em um artefato verificado separado — não é o caminho padrão de onboarding.
+- **Perfil GPU**: geração de código para GPU habilitada; JIT desabilitado; emissão de PTX disponível via
+  `build --backend gpu`.
+- **Templates self-hosted de GPU**: o compilador padrão (`bin/souc`) compila sintaxe de GPU e executa em modo de fallback via CPU. A CLI `kretikos` constrói pequenos drivers de emissão in-tree para templates predefinidos de PTX/CUBIN: `kretikos emit-ptx` (a partir de
+  `self-hosted/gpu/ptx.sio`) e `kretikos emit-cubin` (a partir de
+  `self-hosted/gpu/nvidia_bare.sio`). `kretikos bundle` agrupa esses artefatos
+  com hashes, verificações estruturais, validação opcional de toolchain/runtime e
+  fronteiras explícitas.
+- A documentação deve, portanto, distinguir o comportamento do perfil padrão,
+  o comportamento do perfil de GPU, o comportamento dos templates self-hosted e
+  a amplitude de implementação presente na árvore de código-fonte.
 
-## Roteiro Nativo: Preview v2
+## Faixa de preview do nativo v2
 
-O repositório disponibiliza uma via de testes pública `native-v2`, focada no desenvolvimento de um gerador de código autónomo. O antigo intermediário de transição `native-v2-shadow` foi oficialmente descontinuado. Esta via não se destina a utilização em produção, mas sim a consolidar a infraestrutura de baixo nível:
+O repositório também mantém uma faixa pública de preview `native-v2` para o
+programa de soberania de backend. O antigo alias de compatibilidade
+`native-v2-shadow` já foi descontinuado. Esta não é uma nova backend estável
+para usuários finais.
 
-- **Propósito:** Validar as definições do `RuntimeContext`, as regras de alocação de registadores por arquitetura de destino (*target*) e o comportamento do Machine IR (Representação Intermédia ao nível da máquina).
-- **Mecanismos Ativos (x86-64):** Utiliza um fluxo completo de Machine IR e etapas de legalização de tipos, emite ficheiros ELF nativos com o núcleo escalar (`scalar_core`), expõe o estado do coletor de lixo (`gc_state`) e a tabela de descritores de objetos geridos pelo `RuntimeContext`. O acesso ao heap nativo é feito por tabelas estruturadas de apontadores para operações de alocação e indexação, suportado por um modelo rigoroso de Garbage Collection do tipo *mark-compact*.
-- **AArch64:** A especificação da arquitetura AArch64 já está mapeada no contrato, mas o emissor nativo correspondente ainda não foi promovido para o perfil de distribuição estável.
+- Ela existe para fixar o `RuntimeContext`, a política de registradores do
+  target e as expectativas do Machine IR em um artefato legível por máquina.
+- O artefato agora distingue o conjunto x86 callee-saved alocável
+  (`r12`..`r15`) da ordem de alocação real consumida pelo regalloc e pelo
+  lowering (`r15`, `r14`, `r13`, `r12`).
+- A faixa de preview atual do `x86-64` agora passa por um caminho real de
+  Machine IR + legalização, emite ELFs nativos de núcleo escalar estritos na
+  shell self-hosted, publica metadados reais de stack-map/deopt mais um bloco
+  concreto de `gc_state` e uma tabela de descritores de objetos gerenciados via
+  `RuntimeContext`, emite o esquema de stack-map v2 de root-map/deopt-id/
+  elegibilidade-OSR, roteia objetos de heap do native-v2 por uma tabela de
+  handles de capacidade fixa para acesso a `alloc`/campo/índice, compila
+  overflow de alocação em um trap real de slow-path em runtime, e agora carrega
+  um modelo executável de GC mark/compact orientado por descritores, com
+  varredura precisa de slots de ponteiro e regras de realocação conscientes de
+  pinning; famílias de opcode não suportadas falham de forma fechada (fail
+  closed).
+- O `AArch64` agora emite o mesmo contrato de preview de núcleo escalar que a
+  saída Mach-O, mas ainda é preview apenas-compilação, e não uma faixa nativa
+  atestada em runtime.
 
-## Comandos de Verificação dos Backends
+## Confirme o conjunto de backends ativo
 
 ```bash
 export SOUC_BIN="$(pwd)/bin/souc"
 "$SOUC_BIN" info
 
+# Templates de artefato self-hosted de GPU
+kretikos emit-ptx vec_add     -o /tmp/kretikos_vec_add.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kretikos_vec_sub.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kretikos_vec_mul.ptx
+kretikos emit-ptx vec_div     -o /tmp/kretikos_vec_div.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kretikos_vec_add_f64.ptx
+kretikos emit-ptx fma         -o /tmp/kretikos_fma.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kretikos_fma_f64.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kretikos_store_u32.ptx
+kretikos emit-metal vec_add          -o /tmp/kretikos_vec_add.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kretikos_ossm.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kretikos_sedenion.metal
+kretikos emit-cubin vec_add_f32 -o /tmp/kretikos_vec_add.cubin
+kretikos bundle -o /tmp/kretikos-bundle
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+
+# Artefato de GPU (suporte mais amplo de padrões)
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
 "$SOUC_GPU_BIN" info
 "$SOUC_GPU_BIN" build examples/kernel_vec_add.sio --backend gpu -o /tmp/kernel_vec_add.ptx
@@ -50,4 +96,12 @@ export SOUNIO_NATIVE_V2_CONTRACT_PATH=/tmp/native_backend_v2_contract.v1.json
 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --self-test
 ```
 
-O ficheiro de validação formal destas regras reside em `artifacts/omega/native_backend_v2_contract.v1.json`.
+O artefato canônico com respaldo de gate é `artifacts/omega/native_backend_v2_contract.v1.json`.
+
+## Como escrever docs de codegen que não fiquem desatualizados
+
+- Descreva os diretórios de backend ao discutir a arquitetura de implementação.
+- Descreva o artefato JIT verificado ao discutir a experiência padrão do usuário.
+- Descreva o artefato de GPU verificado ao discutir a geração de código pública para GPU.
+- Descreva apenas caminhos de execução de backend que você validou com o
+  artefato e o comando exatos que está documentando.
