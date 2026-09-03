@@ -13,86 +13,108 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.gpu"
 
 # Programação em GPU
 
-O ecossistema Sounio disponibiliza dois perfis de execução distintos e validados neste repositório:
+O Sounio tem dois caminhos de compilador para GPU neste snapshot do repositório:
 
-- `souc-linux-x86_64` – Perfil nativo padrão para execução e compilação genérica CPU.
-- `souc-linux-x86_64-gpu` – Perfil dedicado a computação de alto desempenho em GPU.
+- `souc-linux-x86_64` (o artefato self-hosted padrão): compila sintaxe de GPU, executa um fallback serial em CPU e permite que o `kretikos` construa modelos predefinidos de artefatos PTX/CUBIN.
+- `souc-linux-x86_64-gpu` (o artefato voltado para GPU): binário separado com emissão de PTX mais ampla via `build --backend gpu`.
 
-## Compilação de GPU Self-Hosted
+## Caminho de GPU self-hosted (fallback em CPU + modelos de artefato)
 
-O compilador *self-hosted* padrão (`bin/souc`) aceita a sintaxe e a semântica nativas para especificação de kernels GPU, permitindo que a ferramenta `kretikos` emita modelos de código predefinidos de forma autónoma:
+O compilador padrão (`bin/souc` ou `bin/souc-linux-x86_64`) aceita sintaxe de kernel GPU e executa um fallback serial determinístico em CPU. A CLI do Kretikos usa esse compilador para construir pequenos drivers de emissor dentro da própria árvore de código e, em seguida, grava modelos predefinidos de artefato de GPU:
 
 ```bash
-# Emitir o modelo PTX predefinido para vec_add
+# Emitir modelos PTX predefinidos (self-hosted, sem necessidade de GPU)
 kretikos emit-ptx vec_add     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_sub     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_mul     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_div     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_add_f64 -o /tmp/kernel.ptx
 kretikos emit-ptx fma         -o /tmp/kernel.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kernel.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kernel.ptx
 
-# Emitir o modelo Metal Shading Language (MSL) para macOS/iOS
+# Emitir modelos predefinidos de Metal/MSL (self-hosted, sem necessidade de macOS)
 kretikos emit-metal vec_add          -o /tmp/kernel.metal
 kretikos emit-metal ossm_oct_step    -o /tmp/kernel.metal
 kretikos emit-metal sedenion_cd_step -o /tmp/kernel.metal
 
-# Emitir o modelo CUBIN otimizado para NVIDIA
+# Emitir modelos CUBIN predefinidos
+kretikos emit-cubin exit_only -o /tmp/kernel.cubin
+kretikos emit-cubin store_u32_const -o /tmp/kernel.cubin
 kretikos emit-cubin vec_add_f32 -o /tmp/kernel.cubin
+kretikos emit-cubin epistemic_dual_f32 -o /tmp/kernel.cubin
 
-# Emitir PTX, CUBIN e o respetivo manifesto estruturado do pacote
+# Emitir um pacote estrutural de artefatos: PTX, CUBIN, hashes, limites
 kretikos bundle -o /tmp/kretikos-bundle
+
+# Opcionalmente, registrar evidência do assembler/disassembler e da CUDA Driver API
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
 ```
 
-## Verificação de Suporte no Ambiente
+O que isso comprova hoje:
 
-Para validar as capacidades de GPU no seu ambiente de trabalho, pode recorrer ao utilitário de GPU integrado:
+- O compilador self-hosted compila `kernel fn`, `with GPU`, `GPU.launch` e `GPU.sync`.
+- O fallback em CPU executa kernels de forma serial, com IDs determinísticos de thread/bloco.
+- O wrapper de CLI `kretikos` emite modelos de texto PTX predefinidos e modelos de bytes ELF/CUBIN da CUDA da NVIDIA predefinidos a partir de código Sounio presente na própria árvore.
+- O comando `kretikos bundle` grava um manifesto legível por máquina `sounio.kretikos.bundle.v1`, com hashes de artefatos, verificações estruturais, validação opcional via `ptxas`/`nvdisasm` e da CUDA Driver API, e não-afirmações explícitas.
+- Este caminho ainda não converte código-fonte arbitrário de kernel escrito pelo usuário em PTX/CUBIN.
+- A validação de toolchain e runtime se aplica apenas aos modelos predefinidos de PTX/CUBIN selecionados pelo `kretikos`; ela não valida kernels arbitrários escritos pelo usuário.
+
+## Caminho do artefato de GPU (emissão de PTX mais ampla)
+
+O artefato de GPU verificado é um binário separado com suporte mais amplo a padrões:
 
 ```bash
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-# Exibe informações do compilador GPU ativo
 "$SOUC_GPU_BIN" info
-
-# Efetua a verificação estática de ficheiros com sintaxe GPU
 "$SOUC_GPU_BIN" check examples/gpu.sio
 "$SOUC_GPU_BIN" check tests/run-pass/gpu_launch_surface.sio
-
-# Compila e emite o kernel PTX correspondente
 "$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-Estes testes comprovam as seguintes premissas:
+## Superfície pública versus superfície da árvore de código-fonte
 
-1. A geração de código para GPU está perfeitamente operacional no perfil GPU distribuído.
-2. O canal estável para emissão de código de baixo nível PTX assenta no comando `build --backend gpu`.
-3. As diretivas e construtores `kernel fn`, `with GPU`, `GPU.launch` e `GPU.sync` são suportadas pelo compilador.
+O artefato de GPU público verificado atualmente aceita:
 
-## Funcionalidades e Cobertura Pública
+- `kernel fn`
+- `with GPU`
+- `perform GPU.launch(...)`
+- `perform GPU.sync()`
+- Emissão de PTX via `build --backend gpu`
 
-**Segmento Estável e Validado:**
+O compilador self-hosted (`bin/souc`) também aceita a mesma sintaxe e, além disso, direciona:
+- modelos PTX predefinidos via `kretikos emit-ptx`
+- modelos CUBIN predefinidos via `kretikos emit-cubin`
+- pacotes estruturais de artefatos PTX/CUBIN via `kretikos bundle`
+- verificações opcionais fail-closed de toolchain/runtime via `kretikos bundle --require-toolchain` e `kretikos bundle --require-runtime`
 
-- Definição de funções aceleradas através de `kernel fn`.
-- Declaração explícita de efeitos paralelos com `with GPU`.
-- Execução assíncrona de kernels recorrendo a `perform GPU.launch(...)`.
-- Barreiras de sincronização globais via `perform GPU.sync()`.
-- Emissão de código de baixo nível PTX recorrendo à flag `--backend gpu`.
+O artefato de GPU público verificado ainda não resolve o antigo namespace intrínseco `gpu.*`, proveniente de esboços históricos:
 
-**Segmento em Desenvolvimento (Roadmap):**
+- `gpu.thread_id.*`
+- `gpu.block_id.*`
+- `gpu.block_dim.*`
+- `gpu.alloc<T>(...)`
 
-- Variáveis intrínsecas de indexação local e global (`gpu.thread_id.*`, `gpu.block_id.*`, `gpu.block_dim.*`).
-- Alocação explícita de memória partilhada e unificada no dispositivo (`gpu.alloc<T>(...)`).
+Esses nomes ainda importam para a história de implementação, mas ainda não são a sintaxe pública recomendada.
 
-## Artefactos e Validação Técnica
+## Evidência de backend
 
-Os ficheiros de conformidade técnica e especificações formais residem no diretório `artifacts/omega/`:
+A evidência de GPU mais forte no repositório está em `artifacts/omega/`:
 
 - `gpu_codegen_parity.v1.json`
 - `gpu_binary_attestation.v1.json`
 - `gpu_runtime_attest_gate.v1.json`
 - `gpu_public_contract.v1.json`
 
-Vias e plataformas de hardware com suporte e validação garantidos:
+Trilhas de computação atestadas atualmente:
 
-- **NVIDIA CUDA:** Compatibilidade verificada com arquitetura `cuda-sm80`.
-- **AMD ROCm:** Compatibilidade verificada com arquitetura `rocm-gfx942`.
+- CUDA: `cuda-sm80`
+- ROCm: `rocm-gfx942`
+
+## Onde vive a implementação maior de GPU
+
+- `self-hosted/gpu/` contém o trabalho de PTX, SPIR-V, Metal, runtime, tensores e ajuste (tuning).
+- `docs/features/GPU_RUNTIME.md` é a explicação nativa do repositório para o contrato atual.
+- A árvore self-hosted ainda contém um caminho interno `gpu-emit`, mas o caminho público verificado via CLI é `build --backend gpu`.
