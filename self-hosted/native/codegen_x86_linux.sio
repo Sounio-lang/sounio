@@ -1308,6 +1308,11 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_heap_free(*name) { return 24 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
+    if name_is_arena_mark(*name) { return 56 }
+    if name_is_arena_reset(*name) { return 57 }
+    if name_is_panic(*name) { return 58 }
+    if name_is_untracked_counter(*name) { return 59 }
+    if name_is_read_byte(*name) { return 55 }
     if name_is_getpid(*name) { return 28 }
     if name_is_getppid(*name) { return 29 }
     if name_is_exit(*name) { return 30 }
@@ -1386,6 +1391,13 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_slice3((*func).name) { return 54 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
+    // The refusal path asks THIS function, not the by-name one: an empty stub
+    // is what reaches the backend, so a builtin only exists if it is named here.
+    if name_is_arena_mark((*func).name) { return 56 }
+    if name_is_arena_reset((*func).name) { return 57 }
+    if name_is_panic((*func).name) { return 58 }
+    if name_is_untracked_counter((*func).name) { return 59 }
+    if name_is_read_byte((*func).name) { return 55 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
     if name_is_file_size((*func).name) { return 13 }
@@ -4154,6 +4166,42 @@ fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // EXECUTION witnesses (not just "no longer E250") gate this in CI.
 // ============================================================================
 
+// Intrinsics the checker binds as import-unknown (check.sio) and lean_single
+// emits inline. Without a backend they reached a body-less function and were
+// refused with ud2 -- including __arena_mark/__arena_reset, which are the
+// module pipeline's ONLY memory reclamation.
+fn name_is_arena_mark(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_mark")) }
+fn name_is_arena_reset(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_reset")) }
+fn name_is_panic(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("panic")) }
+
+// Counters Madaros does not keep. Its arena never refills (hitting heap_limit
+// requests a GC) and it tracks no mmap tally, so there is no honest number to
+// return -- see emit_builtin_untracked_counter_into for why the answer is -1
+// and not 0.
+fn name_is_untracked_counter(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("__arena_refill_bytes")) { return true }
+    if name_eq(n, make_name("__arena_unmap_bytes")) { return true }
+    if name_eq(n, make_name("__pool_mark")) { return true }
+    if name_eq(n, make_name("__pool_refill_bytes")) { return true }
+    if name_eq(n, make_name("__rtmmap_count")) { return true }
+    if name_eq(n, make_name("__rtmmap_bytes")) { return true }
+    false
+}
+
+fn name_is_read_byte(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 114 as i8 { return false }  // 'r'
+    if n.buf[1] != 101 as i8 { return false }  // 'e'
+    if n.buf[2] != 97 as i8 { return false }   // 'a'
+    if n.buf[3] != 100 as i8 { return false }  // 'd'
+    if n.buf[4] != 95 as i8 { return false }   // '_'
+    if n.buf[5] != 98 as i8 { return false }   // 'b'
+    if n.buf[6] != 121 as i8 { return false }  // 'y'
+    if n.buf[7] != 116 as i8 { return false }  // 't'
+    if n.buf[8] != 101 as i8 { return false }  // 'e'
+    true
+}
+
 fn name_is_getpid(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 6 { return false }
     if n.buf[0] != 103 as i8 { return false }  // 'g'
@@ -4346,6 +4394,95 @@ fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 
 // getpid()/getppid(): raw syscalls 39/110; result in rax per the Sounio
 // integer-return convention.
+// read_byte() -> i64: one byte from stdin, -1 at EOF. The checker binds the
+// name as an import-unknown and lean_single emits it inline, so a call reached
+// a body-less function here and the backend refused it with ud2. Mirrors
+// lean_single's emit_read_byte_x86 byte for byte.
+// __arena_mark() -> i64: the Box-arena bump cursor, read straight out of the
+// RuntimeContext. Read-only, so nothing can go wrong here.
+fn emit_builtin_arena_mark_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_ret(nc)
+}
+
+// __arena_reset(m): put the cursor back. This reclaims BYTES and not handles --
+// handle_count is untouched, so the handle table keeps growing. The call sites
+// guard themselves: module_frontend runs mf_arebox_scan and only resets when it
+// reports no live Box in the window, then re-boxes; codegen's per-function
+// window is audited in a comment at its call site as reaching no Box at all.
+// Without this the reset was a refusal and the arena churn accumulated across
+// the whole module -- the call site records +11.5 GiB VmSize measured before it
+// existed.
+fn emit_builtin_arena_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_ret(nc)
+}
+
+// panic(...) does not return. lean_single routes it to emit_assert_fail, whose
+// Madaros equivalent is the failure half of emit_builtin_assert_into: exit(1).
+fn emit_builtin_panic_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_exit_code(nc, 1)
+}
+
+// A counter this runtime does not keep answers -1, not 0.
+//
+// Zero is a claim: no refills happened, no bytes were unmapped, no mmap was
+// made. For __rtmmap_count that claim is simply false -- heap_alloc mmaps on
+// every call. -1 cannot be mistaken for a tally, so whoever turns on
+// SOUNIO_NV2_ARENA_TRACE reads "unavailable" rather than a comfortable zero.
+fn emit_builtin_untracked_counter_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, 0 - 1)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_read_byte_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xec)
+    nc_emit_byte(nc, 0x08)  // sub rsp, 8
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xff)  // xor rdi, rdi  (fd = 0)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x34)
+    nc_emit_byte(nc, 0x24)  // lea rsi, [rsp]
+    nc_emit_byte(nc, 0xba)
+    nc_emit_byte(nc, 0x01)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)  // mov edx, 1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xc0)  // xor rax, rax  (SYS_read)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x05)  // syscall
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc0)  // test rax, rax
+    nc_emit_byte(nc, 0x7e)
+    nc_emit_byte(nc, 0x06)  // jle +6 -> the -1 store below
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xb6)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x24)  // movzx eax, byte [rsp]
+    nc_emit_byte(nc, 0xeb)
+    nc_emit_byte(nc, 0x07)  // jmp +7 -> past the -1 store
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xc7)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)  // mov rax, -1  (EOF)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc4)
+    nc_emit_byte(nc, 0x08)  // add rsp, 8
+    nc_emit_ret(nc)
+}
+
 fn emit_builtin_getpid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rax_imm(nc, 39)
     nc_emit_syscall(nc)
@@ -7586,6 +7723,11 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
+    if builtin_id == 56 { emit_builtin_arena_mark_into(nc); return }
+    if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
+    if builtin_id == 58 { emit_builtin_panic_into(nc); return }
+    if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
+    if builtin_id == 55 { emit_builtin_read_byte_into(nc); return }
     if builtin_id == 28 { emit_builtin_getpid_into(nc); return }
     if builtin_id == 29 { emit_builtin_getppid_into(nc); return }
     if builtin_id == 30 { emit_builtin_exit_into(nc); return }

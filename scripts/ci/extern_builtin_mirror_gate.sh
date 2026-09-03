@@ -83,6 +83,26 @@ awk '
 # Detected from the predicate's own body -- it compares a byte against 46, the
 # dot -- rather than from its comment, so a renamed helper or a reworded
 # comment does not change the answer.
+#
+# A second, hand-maintained exclusion: five plain arms added alongside
+# arena_mark/arena_reset/panic/read_byte/untracked_counter (the intrinsics
+# that had no backend until 2026-09-01) are internal-only in a different way
+# -- each is ALSO bound checker_bind_import_unknown_inplace, arity-unchecked,
+# and mirroring them into name_is_native_backend_builtin (arity-STRICT: an
+# `extern "C"` reaches the backend as a fixed-id stub) put every differently
+# -arited call to the double-bound name into E010. Measured 2026-09-02:
+# mirroring "panic" alone -- called with a varying argument count all over
+# the tree -- broke 132 call sites across main.sio, interop/protocol.sio,
+# parser/parser.sio and more. That is not a fixable comment: dozens of OTHER
+# names here are also double-bound and are fine, because their arity happens
+# to agree everywhere they are called. Whether a given name's call sites
+# agree with the backend's fixed arity isn't something this gate -- or
+# check.sio's own predicate naming -- can derive; it can only be measured by
+# actually building Madaros and self-typechecking, which is what surfaced
+# this. So: name, not structure. None of the five is source-spellable via
+# `extern "C"` in the first place (they are compiler-internal), so excluding
+# them from the extern mirror costs nothing real.
+_INTERNAL_ONLY_NOT_MIRRORED="arena_mark arena_reset panic read_byte untracked_counter"
 : > "$WORK/backend_all.txt"
 while read -r _n; do
   _pred=""
@@ -95,6 +115,12 @@ while read -r _n; do
     echo "[extern-mirror] internal-only builtin (dotted name, not source-spellable): $_n" >&2
     continue
   fi
+  for _internal in $_INTERNAL_ONLY_NOT_MIRRORED; do
+    if [[ "$_n" == "$_internal" ]]; then
+      echo "[extern-mirror] internal-only builtin (double-bound import-unknown, not extern-mirrored): $_n" >&2
+      continue 2
+    fi
+  done
   printf '%s\n' "$_n"
 done < "$WORK/backend_raw.txt" | sort -u > "$WORK/backend_all.txt"
 

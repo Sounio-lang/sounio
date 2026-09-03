@@ -1366,16 +1366,23 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     return ""
 }
 
-// Returns the Nth (0-based) positional (non-flag, non -o-value) argument after
-// flag_index, or fallback if there are fewer than N+1 positionals. Lets the
-// source-compile modes accept `<src.sio> <out.elf>` (out as 2nd positional)
-// in addition to `-o <out>`, matching the documented `mc src.sio out.elf` form.
-fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+// Scans for the Nth (0-based) positional argument after flag_index and returns
+// "" when there are fewer than N+1 of them. A positional is a non-empty
+// argument that does not start with `-` and is not the VALUE of a
+// value-carrying flag; `-o`, `--output` and `--to` each consume the token that
+// follows them. "" can never be a positional here (str_len(arg) > 0 is
+// required), so it is a safe not-found marker for the two wrappers below.
+//
+// The union of the three flags is deliberate. Before this was unified there
+// were two bodies of `compiler_mode_positional_arg`: the live one skipped
+// `-o`/`--output` only, so in `--ontology-map --to TARGET CURIE` the value
+// TARGET was taken as positional 0; the dead one skipped `--to` only.
+fn compiler_mode_positional_scan(args: ArgList, flag_index: i64, which: i64) -> string with Mut, Panic, Div {
     var i: i64 = flag_index + 1
     var seen: i64 = 0
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--to" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             if seen == which {
@@ -1387,7 +1394,31 @@ fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fall
             i = i + 1
         }
     }
+    return ""
+}
+
+// OPTIONAL positional: returns `fallback` when absent. Lets the source-compile
+// modes accept `<src.sio> <out.elf>` (out as 2nd positional) in addition to
+// `-o <out>`, matching the documented `mc src.sio out.elf` form.
+fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+    let found = compiler_mode_positional_scan(args, flag_index, which)
+    if str_len(found) > 0 {
+        return found
+    }
     return fallback
+}
+
+// REQUIRED positional: panics naming the mode when absent. The ontology modes
+// have no defensible default for a CURIE or a query, and before this split they
+// were calling the optional form with the mode name in the fallback slot, so a
+// missing argument became the mode name and the command exited 0.
+fn compiler_mode_required_positional(args: ArgList, flag_index: i64, position: i64, mode_name: string) -> string with Mut, Panic, Div {
+    let found = compiler_mode_positional_scan(args, flag_index, position)
+    if str_len(found) > 0 {
+        return found
+    }
+    panic(mode_name + ": missing positional argument")
+    return ""
 }
 
 fn compiler_mode_has_flag(args: ArgList, needle: string) -> bool with Mut, Panic, Div {
@@ -1414,27 +1445,6 @@ fn compiler_mode_option_string(args: ArgList, short_flag: string, long_flag: str
         i = i + 1
     }
     fallback
-}
-
-fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, position: i64, mode_name: string) -> string with Mut, Panic, Div {
-    var found: i64 = 0
-    var i: i64 = flag_index + 1
-    while i < args.len {
-        let arg = arg_list_get(args, i)
-        if arg == "--to" {
-            i = i + 2
-        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
-            if found == position {
-                return arg
-            }
-            found = found + 1
-            i = i + 1
-        } else {
-            i = i + 1
-        }
-    }
-    panic(mode_name + ": missing positional argument")
-    return ""
 }
 
 fn compiler_check_ok_message() -> string {
@@ -2465,26 +2475,26 @@ fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
 }
 
 fn run_ontology_resolve_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-resolve")
+    let curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-resolve")
     let term = ontology_resolve_curie(curie)
     ontology_print_term(term)
 }
 
 fn run_ontology_search_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let query = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-search")
+    let query = compiler_mode_required_positional(args, flag_index, 0, "--ontology-search")
     let results = ontology_search_text(query)
     ontology_print_search_results(results)
 }
 
 fn run_ontology_ancestors_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-ancestors")
+    let curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-ancestors")
     let results = ontology_ancestor_terms(curie)
     ontology_print_search_results(results)
 }
 
 fn run_ontology_is_subclass_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let child = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-is-subclass")
-    let parent = compiler_mode_positional_arg(args, flag_index, 1, "--ontology-is-subclass")
+    let child = compiler_mode_required_positional(args, flag_index, 0, "--ontology-is-subclass")
+    let parent = compiler_mode_required_positional(args, flag_index, 1, "--ontology-is-subclass")
     if ontology_is_subclass_of(child, parent) {
         println("true")
     } else {
@@ -2493,7 +2503,7 @@ fn run_ontology_is_subclass_mode(args: ArgList, flag_index: i64) with IO, Mut, P
 }
 
 fn run_ontology_map_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let source_curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-map")
+    let source_curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-map")
     let target_ontology = compiler_mode_option_string(args, "", "--to", "")
     if str_len(target_ontology) <= 0 {
         panic("--ontology-map: missing --to <ontology>")
@@ -2797,26 +2807,26 @@ fn run_ontology_cli(args: ArgList, command_index: i64) with IO, Mut, Panic, Div,
 
     let subcommand = arg_list_get(args, command_index + 1)
     if subcommand == "resolve" {
-        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology resolve")
+        let curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology resolve")
         let term = ontology_resolve_curie(curie)
         ontology_print_term(term)
         return
     }
     if subcommand == "search" {
-        let query = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology search")
+        let query = compiler_mode_required_positional(args, command_index + 1, 0, "ontology search")
         let results = ontology_search_text(query)
         ontology_print_search_results(results)
         return
     }
     if subcommand == "ancestors" {
-        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology ancestors")
+        let curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology ancestors")
         let results = ontology_ancestor_terms(curie)
         ontology_print_search_results(results)
         return
     }
     if subcommand == "is-subclass" {
-        let child = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology is-subclass")
-        let parent = compiler_mode_positional_arg(args, command_index + 1, 1, "ontology is-subclass")
+        let child = compiler_mode_required_positional(args, command_index + 1, 0, "ontology is-subclass")
+        let parent = compiler_mode_required_positional(args, command_index + 1, 1, "ontology is-subclass")
         if ontology_is_subclass_of(child, parent) {
             println("true")
         } else {
@@ -2825,7 +2835,7 @@ fn run_ontology_cli(args: ArgList, command_index: i64) with IO, Mut, Panic, Div,
         return
     }
     if subcommand == "map" {
-        let source_curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology map")
+        let source_curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology map")
         let target_ontology = compiler_mode_option_string(args, "", "--to", "")
         if str_len(target_ontology) <= 0 {
             panic("ontology map: missing --to <ontology>")
