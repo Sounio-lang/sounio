@@ -295,6 +295,29 @@ impl Parser {
             TokenKind::Eof
         }
 
+        // IndepKnowledge<T, A, B | Z> — the only generic head whose argument list
+        // admits a `|`. Handled here rather than as its own TypeExprKind so the
+        // pipe stays local to this head and no other type position becomes
+        // ambiguous. Same precedent as Hyper<Algebra, T>, which is likewise a
+        // named generic given special meaning during lowering.
+        if p1_peek_kind == TokenKind::Lt && path_is_indep_knowledge(path) {
+            let pair_ik = p1.parse_indep_knowledge_args()
+            let pik = pair_ik.0
+            let pik_end: i64 = if pik.pos < pik.token_count { PT_END[pik.pos as usize] } else { start.end }
+            let span_ik = Span { file_id: start.file_id, start: start.start, end: pik_end }
+            return (pair_ik.0, TypeExpr {
+                kind: TypeExprKind::TypeNamed,
+                span: span_ik,
+                path: path,
+                type_args: Some(Box::new(pair_ik.1)),
+                inner: None,
+                array_size: None,
+                effects: None,
+                knowledge_info: None,
+                refinement_info: None,
+            })
+        }
+
         // Check for generic arguments <T, U>
         if p1_peek_kind == TokenKind::Lt {
             let pair2 = p1.parse_type_args()
@@ -411,6 +434,93 @@ impl Parser {
             let segs = reverse_string_list(rev_segs)
             (p, AstPath { segments: segs, seg_count: count })
         }
+    }
+
+    // ============================================================
+    // IndepKnowledge<T, A, B | Z> — conditional independence as a type
+    // ============================================================
+    //
+    // Reads "T, known independent of B given Z". The `|` is the conditioning
+    // bar of P(A ⊥ B | Z), not a union or a pattern alternative; it is accepted
+    // only after this head.
+    //
+    // Accepted forms:
+    //   IndepKnowledge<f64, hrv, kp>              marginal: Z is empty
+    //   IndepKnowledge<f64, hrv, kp | {}>         marginal, stated explicitly
+    //   IndepKnowledge<f64, hrv, kp | hora>       conditioned on one variable
+    //   IndepKnowledge<f64, hrv, kp | {hora, plantao}>   conditioned on a set
+    //
+    // Encoding, chosen so no new TypeExprKind is needed: the returned list is
+    // [T, A, B] when Z is empty, and [T, A, B, Tuple(Z...)] otherwise. Lowering
+    // reads the optional fourth element as the conditioning set.
+    fn parse_indep_knowledge_args(self) -> (Parser, TypeExprList) with Mut, IO, Panic, Div, Alloc {
+        var p = self.advance()  // skip <
+
+        let t_pair = p.parse_type()
+        p = t_pair.0
+        p = p.expect(TokenKind::Comma)
+        let a_pair = p.parse_type()
+        p = a_pair.0
+        p = p.expect(TokenKind::Comma)
+        let b_pair = p.parse_type()
+        p = b_pair.0
+
+        // rev_list is built head-first and reversed once at the end, matching
+        // parse_type_args — the list constructors prepend.
+        var rev_list = TypeExprList { head: t_pair.1, tail: None }
+        rev_list = TypeExprList { head: a_pair.1, tail: Some(Box::new(rev_list)) }
+        rev_list = TypeExprList { head: b_pair.1, tail: Some(Box::new(rev_list)) }
+
+        if parser_peek(p) == TokenKind::Pipe {
+            let bar_span = p.current_span()
+            p = p.advance()  // skip |
+
+            var braced = false
+            if parser_peek(p) == TokenKind::LBrace {
+                braced = true
+                p = p.advance()
+            }
+
+            // `| {}` and `| >` both mean the empty conditioning set, which is
+            // the same claim as omitting the bar entirely: marginal independence.
+            let empty_now = if braced {
+                parser_peek(p) == TokenKind::RBrace
+            } else {
+                parser_peek(p) == TokenKind::Gt
+            }
+
+            if !empty_now {
+                let z0 = p.parse_type()
+                p = z0.0
+                var rev_z = TypeExprList { head: z0.1, tail: None }
+                while parser_peek(p) == TokenKind::Comma {
+                    p = p.advance()
+                    let zn = p.parse_type()
+                    p = zn.0
+                    rev_z = TypeExprList { head: zn.1, tail: Some(Box::new(rev_z)) }
+                }
+                let z_list = reverse_type_expr_list(rev_z)
+                let cond_expr = TypeExpr {
+                    kind: TypeExprKind::TypeTuple,
+                    span: bar_span,
+                    path: empty_path(),
+                    type_args: Some(Box::new(z_list)),
+                    inner: None,
+                    array_size: None,
+                    effects: None,
+                    knowledge_info: None,
+                    refinement_info: None,
+                }
+                rev_list = TypeExprList { head: cond_expr, tail: Some(Box::new(rev_list)) }
+            }
+
+            if braced {
+                p = p.expect(TokenKind::RBrace)
+            }
+        }
+
+        p = p.expect(TokenKind::Gt)
+        (p, reverse_type_expr_list(rev_list))
     }
 
     // ============================================================
@@ -1556,6 +1666,31 @@ impl Parser {
 // ============================================================
 // Linked-list helpers for type parsing
 // ============================================================
+
+// Single-segment path spelled exactly "IndepKnowledge". Compared byte by byte,
+// like path_first_is_kaxi in exprs.sio — the parser has no interned symbols at
+// this point, so there is nothing cheaper to compare against.
+fn path_is_indep_knowledge(path: AstPath) -> bool {
+    if path.seg_count != 1 {
+        return false
+    }
+    let seg = path.segments
+    seg.head_len == 14 &&
+    seg.head_buf[0] == 73 as i8 &&   // I
+    seg.head_buf[1] == 110 as i8 &&  // n
+    seg.head_buf[2] == 100 as i8 &&  // d
+    seg.head_buf[3] == 101 as i8 &&  // e
+    seg.head_buf[4] == 112 as i8 &&  // p
+    seg.head_buf[5] == 75 as i8 &&   // K
+    seg.head_buf[6] == 110 as i8 &&  // n
+    seg.head_buf[7] == 111 as i8 &&  // o
+    seg.head_buf[8] == 119 as i8 &&  // w
+    seg.head_buf[9] == 108 as i8 &&  // l
+    seg.head_buf[10] == 101 as i8 && // e
+    seg.head_buf[11] == 100 as i8 && // d
+    seg.head_buf[12] == 103 as i8 && // g
+    seg.head_buf[13] == 101 as i8    // e
+}
 
 fn reverse_type_expr_list(list: TypeExprList) -> TypeExprList with Mut, Alloc {
     reverse_type_expr_list_loop(list, None)

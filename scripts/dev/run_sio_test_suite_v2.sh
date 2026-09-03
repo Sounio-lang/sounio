@@ -424,13 +424,39 @@ run_test() {
             # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
             # Madaros-based test job sets it). Tracked: Madaros-official migration.
             madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: lean_single` — the mirror of the above: the feature lives
+            # only in the lean_single bootstrap, so the test must NOT run on the
+            # Madaros job. Refinement subtyping is the case that needed this:
+            # lean_single evaluates the predicate and emits E208/E209, while
+            # Madaros carries the diagnostic (E042, "value does not satisfy the
+            # refinement predicate") but never reaches it, because it relates a
+            # refinement type to its base in NEITHER direction -- measured
+            # 2026-09-03: `fn f(x: Positive) -> i32 { x }` is E008 and
+            # `let p: Positive = 0` is E001, a bare type mismatch where the
+            # predicate should have spoken. Without this arm such a test would
+            # fail on the Madaros job for a reason unrelated to what it asserts.
+            lean_single)
+                # Gated on what will ACTUALLY run, not on a declaration. The
+                # madaros arm above trusts SOUNIO_MADAROS_AVAILABLE, which is a
+                # statement of intent; a local checkout with a built Madaros and
+                # that variable unset runs Madaros anyway, and the test would
+                # then fail with "missing error: ..." as though the compiler were
+                # wrong instead of the test being inapplicable. Second clause is
+                # bin/souc's own rule, restated once: it picks Madaros when a
+                # local artifact exists and no explicit engine was handed in.
+                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] \
+                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] && [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; }; then
+                    echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac

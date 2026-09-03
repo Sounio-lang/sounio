@@ -957,6 +957,7 @@ pub enum ItemKind {
     ItemStudy,
     ItemOntology,
     ItemClaim,
+    ItemCausalGraph,
 }
 
 // ============================================================================
@@ -1112,7 +1113,7 @@ pub struct FnDef {
     is_kernel: bool,
     // #1547: true for `extern "C" fn` declarations (no body; lowered as an
     // instr_count == 0 stub so builtin dispatch applies). Distinct from
-    // is_kernel, which the checker treats as a GPU kernel (E070/E072).
+    // is_kernel, which the checker treats as a GPU kernel (E070/E253).
     is_extern: bool,
 }
 
@@ -1662,6 +1663,135 @@ pub var CLAIM_FIELD_VALUE_END: [i64; 1024] = [0; 1024]
 
 pub fn ast_reset_claims() with Mut {
     CLAIM_COUNT = 0
+}
+
+// ============================================================
+// Causal graph declared in source (Madaros side of Sprint 20 Track CI)
+// ============================================================
+//
+// Flat, compile-unit-global, and dropped from the item stream exactly like a
+// claim: the graph is metadata about the whole unit, not a definition anything
+// resolves against, so it never reaches resolve/.
+//
+// Nodes are identified by the SAME FNV-1a hash the checker's indep_var_id
+// computes over a variable name, so a claim's ids are already node ids and no
+// second resolution step can drift from the first.
+//
+// Capacity mirrors CausalGraph in check/causal.sio: 16 nodes, 32 edges. Both
+// are hard caps and both fail closed -- an edge past the cap is refused loudly
+// by the parser rather than dropped, because a graph silently missing an edge
+// would d-separate pairs that the author's graph does not.
+pub var CG_DECLARED: i64 = 0
+pub var CG_NODE_COUNT: i64 = 0
+pub var CG_NODE_HASHES: [i64; 16] = [0; 16]
+pub var CG_EDGE_COUNT: i64 = 0
+pub var CG_EDGE_FROM: [i64; 32] = [0; 32]
+pub var CG_EDGE_TO: [i64; 32] = [0; 32]
+pub var CG_EDGE_DIRECTED: [i64; 32] = [0; 32]
+pub var CG_OVERFLOW: i64 = 0
+
+pub fn ast_reset_causal_graph() with Mut {
+    CG_DECLARED = 0
+    CG_NODE_COUNT = 0
+    CG_EDGE_COUNT = 0
+    CG_OVERFLOW = 0
+    DSEP_COUNT = 0
+    DSEP_OVERFLOW = 0
+}
+
+// Intern a node by hash. Returns its index, or -1 when the 16-node cap is full.
+pub fn ast_cg_intern_node(h: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < CG_NODE_COUNT {
+        if CG_NODE_HASHES[i as usize] == h { return i }
+        i = i + 1
+    }
+    if CG_NODE_COUNT >= 16 {
+        CG_OVERFLOW = 1
+        return 0 - 1
+    }
+    CG_NODE_HASHES[CG_NODE_COUNT as usize] = h
+    CG_NODE_COUNT = CG_NODE_COUNT + 1
+    CG_NODE_COUNT - 1
+}
+
+// Look a node up WITHOUT interning: a claim naming a variable the graph does
+// not declare must be rejected, not silently added to the graph.
+pub fn ast_cg_find_node(h: i64) -> i64 {
+    var i: i64 = 0
+    while i < CG_NODE_COUNT {
+        if CG_NODE_HASHES[i as usize] == h { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// The name hash shared by the graph registry, the checker's indep_var_id and the
+// d_separated rewrite. One definition, so the three cannot drift apart.
+pub fn ast_indep_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h ^ (n.buf[i as usize] as i64)
+        h = (h * 16777619) % 1073741789
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
+// ============================================================
+// d_separated(A, B | Z) claims pending verification
+// ============================================================
+//
+// The arguments exist to be VERIFIED, not evaluated: A, B and Z name graph
+// nodes, not variables in scope. The parser records the claim here and rewrites
+// the call to the literal 1 -- the proof token -- so nothing downstream ever
+// sees identifiers that do not resolve.
+//
+// Verification is deferred to the checker rather than done here, so a graph
+// declared BELOW its use still counts; the parser has no complete graph yet.
+//
+// Rewriting to a literal, rather than to a zero-argument d_separated() as the
+// lean_single pass does, removes the forgeable surface entirely: there is no
+// function a human could call to mint a proof.
+pub var DSEP_COUNT: i64 = 0
+pub var DSEP_A: [i64; 64] = [0; 64]
+pub var DSEP_B: [i64; 64] = [0; 64]
+pub var DSEP_Z: [i64; 64] = [0; 64]
+pub var DSEP_FORM_OK: [i64; 64] = [0; 64]
+pub var DSEP_SPAN_FILE: [i64; 64] = [0; 64]
+pub var DSEP_SPAN_START: [i64; 64] = [0; 64]
+pub var DSEP_SPAN_END: [i64; 64] = [0; 64]
+pub var DSEP_DONE: [i64; 64] = [0; 64]
+pub var DSEP_OVERFLOW: i64 = 0
+
+pub fn ast_reset_dsep_claims() with Mut {
+    DSEP_COUNT = 0
+    DSEP_OVERFLOW = 0
+}
+
+pub fn ast_record_dsep(a: i64, b: i64, z: i64, form_ok: i64, fid: i64, st: i64, en: i64) with Mut {
+    if DSEP_COUNT >= 64 { DSEP_OVERFLOW = 1; return }
+    let i = DSEP_COUNT
+    DSEP_A[i as usize] = a
+    DSEP_B[i as usize] = b
+    DSEP_Z[i as usize] = z
+    DSEP_FORM_OK[i as usize] = form_ok
+    DSEP_DONE[i as usize] = 0
+    DSEP_SPAN_FILE[i as usize] = fid
+    DSEP_SPAN_START[i as usize] = st
+    DSEP_SPAN_END[i as usize] = en
+    DSEP_COUNT = DSEP_COUNT + 1
+}
+
+pub fn ast_cg_add_edge(from: i64, to: i64, directed: i64) with Mut {
+    if from < 0 || to < 0 { CG_OVERFLOW = 1; return }
+    if CG_EDGE_COUNT >= 32 { CG_OVERFLOW = 1; return }
+    CG_EDGE_FROM[CG_EDGE_COUNT as usize] = from
+    CG_EDGE_TO[CG_EDGE_COUNT as usize] = to
+    CG_EDGE_DIRECTED[CG_EDGE_COUNT as usize] = directed
+    CG_EDGE_COUNT = CG_EDGE_COUNT + 1
 }
 
 pub fn ast_record_claim(decl: ClaimDecl) with Mut, Div {
