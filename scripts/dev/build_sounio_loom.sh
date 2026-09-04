@@ -195,6 +195,9 @@ SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   SOUNIO_LOOM_NATIVE_HOOK_GENERATION_RECONCILE_OUTPUT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-generation-reconcile" \
   "$SCRIPT_DIR/build_sounio_loom_native_hook_generation_reconcile.sh"
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
+  SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OUTPUT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-generation-pinned-cutover" \
+  "$SCRIPT_DIR/build_sounio_loom_generation_pinned_cutover.sh"
+SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_execution_kernel.sh"
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_change_kernel.sh"

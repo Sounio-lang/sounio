@@ -1,6 +1,7 @@
 open Unix
 
 exception Error of string
+exception Forwarded of int
 
 let pinned_manifest_sha256 =
   "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
@@ -2145,6 +2146,19 @@ let run arguments =
     let raw_session_id = string_field ~default:"unknown" event "session_id" in
     lane := "session-" ^ safe_token raw_session_id;
     event_name := string_field ~default:"unknown" event "hook_event_name";
+    let pid, pid_start, boot_id, pid_namespace, host = process_identity () in
+    (match
+       Loom_hook_generation_pin.dispatch ~source_root:current_root
+         ~git_common:(git_common_dir current_root) ~agent:!agent ~lane:!lane
+         ~session_id:raw_session_id ~harness:(harness_of_agent !agent)
+         ~worktree:current_root ~host ~boot_id ~pid_namespace ~pid ~pid_start
+         ~raw_event ~arguments
+     with
+     | None -> ()
+     | Some result ->
+         print_string result.Loom_hook_generation_pin.output;
+         flush Stdlib.stdout;
+         raise (Forwarded result.Loom_hook_generation_pin.code));
     let tool_name = string_field ~default:"none" event "tool_name" in
     let command =
       let base =
@@ -2176,6 +2190,10 @@ let run arguments =
     (match hook_output with Some output -> print_endline (json_string output) | None -> ());
     0
   with
+  | Forwarded code -> code
+  | Loom_hook_generation_pin.Error message ->
+      Printf.eprintf "sounio generation pin refused: %s\n%!" message;
+      2
   | Error message
   | Loom_exec.Error message
   | Loom_sovereign_exec.Error message

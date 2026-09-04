@@ -46,7 +46,7 @@ verify_manifest_binary_sha256() {
 
 require_native_cutover_admission() {
   local previous_bundle="$1" version_dir="$2" manifest="$3"
-  local runtime_id admission_output admission_rc
+  local runtime_id previous_runtime_id admission_output admission_rc
   [[ -n "$previous_bundle" ]] || return 0
   [[ -e "$previous_bundle/hooks/sounio_coord_agent_hook_runtime.py" || \
     -e "$previous_bundle/hooks/sounio_coord_agent_hook.py" ]] || return 0
@@ -65,6 +65,25 @@ require_native_cutover_admission() {
     die "legacy-to-native activation requires --cutover-root and a CUTOVER_READY receipt"
   [[ "$(git -C "$CUTOVER_ROOT" rev-parse --show-toplevel 2>/dev/null || true)" == \
     "$CUTOVER_ROOT" ]] || die "cutover root is not a Git worktree: $CUTOVER_ROOT"
+  if grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest"; then
+    previous_runtime_id="$(basename "$previous_bundle")"
+    set +e
+    admission_output="$(
+      SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
+        "$version_dir/bin/sounio-loom-runtime" hook-generation-pin-seal \
+          --source-root "$CUTOVER_ROOT" --git-common "$GIT_COMMON_DIR" \
+          --old-runtime "$previous_runtime_id" --candidate-runtime "$runtime_id" \
+          9>&- 2>&1
+    )"
+    admission_rc=$?
+    set -e
+    ((admission_rc == 0)) &&
+      grep -q '^SOUNIO_GENERATION_PINNED_CUTOVER CUTOVER_READY semantic_authority=Sounio action=9048$' \
+        <<< "$admission_output" ||
+      die "Sounio action 9048 refused generation-pinned activation: $admission_output"
+    printf '%s\n' "$admission_output"
+    return 0
+  fi
   set +e
   admission_output="$(
     SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
@@ -256,6 +275,20 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_reconcile_manifest_sha256 \
       "$reconcile_capsule/tools/loom/native_hook_generation_reconcile.freeze.v1"
+  fi
+  if grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest"; then
+    local pin_capsule="$version_dir/policy/generation-pinned-cutover"
+    [[ -x "$version_dir/bin/sounio-loom-generation-pinned-cutover" && \
+      -f "$pin_capsule/tools/loom/generation_pinned_cutover.freeze.v1" ]] || \
+      die "installed runtime declares generation pinning without frozen Sounio action 9048: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_generation_pinned_cutover_semantics_sha256)" == \
+      "9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549" && \
+      "$(manifest_value "$manifest" loom_generation_pinned_cutover_manifest_sha256)" == \
+      "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d" ]] || \
+      die "installed generation pinning is not bound to frozen Sounio action 9048: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_generation_pinned_cutover_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-generation-pinned-cutover"
   fi
   if grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest"; then
     local drain_capsule="$version_dir/policy/native-hook-generation-drain"
@@ -520,6 +553,7 @@ activate_runtime() {
       drain_source_path:drain_source_sha256 \
       guardian_source_path:guardian_source_sha256 \
       reconcile_source_path:reconcile_source_sha256 \
+      generation_pin_source_path:generation_pin_source_sha256 \
       c_stub_path:c_stub_sha256 \
       provider_fixture_path:provider_fixture_sha256 \
       dune_path:dune_sha256 \
@@ -529,6 +563,7 @@ activate_runtime() {
       canary_gate_path:canary_gate_sha256 \
       guardian_gate_path:guardian_gate_sha256 \
       reconcile_gate_path:reconcile_gate_sha256 \
+      generation_pin_gate_path:generation_pin_gate_sha256 \
       operational_gate_path:operational_gate_sha256 \
       ci_entrypoint_path:ci_entrypoint_sha256; do
       change_path_key="${change_pair%%:*}"
@@ -992,6 +1027,25 @@ loom_native_hook_generation_reconcile_capsule_relpaths=(
   "bin/souc"
   "bin/souc-lean-single-x86_64"
 )
+loom_generation_pinned_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh"
+loom_generation_pinned_cutover_entrypoint="$SOURCE_ROOT/tools/loom/generation_pinned_cutover_authority_main.sio"
+loom_generation_pinned_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
+loom_generation_pinned_cutover_freeze="$SOURCE_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
+loom_generation_pinned_cutover_capsule_relpaths=(
+  "tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V1.md"
+  "stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
+  "tools/loom/generation_pinned_cutover_authority_main.sio"
+  "scripts/dev/build_sounio_loom_generation_pinned_cutover.sh"
+  "scripts/ci/sounio_loom_generation_pinned_cutover_selftest.sh"
+  "scripts/ci/sounio_loom_generation_pinned_cutover_freeze_selftest.sh"
+  "tools/loom/generation_pinned_cutover.first.v1"
+  "tools/loom/evidence/loom-generation-pinned-cutover-first-v1-20260904.txt"
+  "tools/loom/evidence/loom-generation-pinned-cutover-frozen-v1-20260904.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
+  "tools/loom/native_hook_generation_reconcile.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
 loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
 loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
 loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v1"
@@ -1105,11 +1159,13 @@ loom_change_sources=(
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_drain.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_guardian.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_reconcile.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_pin.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_ui.ml"
   "$SOURCE_ROOT/tools/loom/src/dune"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_generation_pinned_cutover_ocaml_selftest.sh"
 )
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
@@ -1134,6 +1190,8 @@ loom_change_sources=(
   die "Loom native-hook generation-drain build entrypoint missing or not executable: $loom_native_hook_generation_drain_build_source"
 [[ -x "$loom_native_hook_generation_reconcile_build_source" ]] || \
   die "Loom native-hook generation-reconcile build entrypoint missing or not executable: $loom_native_hook_generation_reconcile_build_source"
+[[ -x "$loom_generation_pinned_cutover_build_source" ]] || \
+  die "Loom generation-pinned cutover build entrypoint missing or not executable: $loom_generation_pinned_cutover_build_source"
 [[ -x "$loom_custody_transfer_build_source" ]] || \
   die "Loom custody-transfer build entrypoint missing or not executable: $loom_custody_transfer_build_source"
 [[ -x "$loom_execution_outcome_build_source" ]] || \
@@ -1195,6 +1253,10 @@ loom_change_sources=(
   -f "$loom_native_hook_generation_reconcile_module" && \
   -f "$loom_native_hook_generation_reconcile_freeze" ]] || \
   die "Loom frozen Sounio native-hook generation-reconcile bundle is incomplete"
+[[ -f "$loom_generation_pinned_cutover_entrypoint" && \
+  -f "$loom_generation_pinned_cutover_module" && \
+  -f "$loom_generation_pinned_cutover_freeze" ]] || \
+  die "Loom frozen Sounio generation-pinned cutover bundle is incomplete"
 [[ -f "$loom_custody_transfer_entrypoint" && \
   -f "$loom_custody_transfer_module" && \
   -f "$loom_custody_transfer_freeze" ]] || \
@@ -1287,6 +1349,7 @@ done
   -f "$loom_project/src/loom_exec_ingress.ml" && \
   -f "$loom_project/src/loom_hook.ml" && \
   -f "$loom_project/src/loom_hook_generation_reconcile.ml" && \
+  -f "$loom_project/src/loom_hook_generation_pin.ml" && \
   -f "$loom_project/src/loom_change.ml" && \
   -f "$loom_project/src/loom_change_stubs.c" && \
   -f "$loom_project/src/loom_sovereign_exec.ml" && \
@@ -1327,6 +1390,7 @@ loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-auth
 loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
 loom_native_hook_generation_drain_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-drain"
 loom_native_hook_generation_reconcile_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-reconcile"
+loom_generation_pinned_cutover_binary="$loom_project/.runtime/sounio-loom-generation-pinned-cutover"
 loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
 loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
@@ -1375,6 +1439,17 @@ loom_native_hook_generation_reconcile_expected_sha="$(
 [[ "$(printf '0\n' | "$loom_native_hook_generation_reconcile_binary")" == \
   'SOUNIO_NATIVE_HOOK_GENERATION_RECONCILE_SELFTEST PASS cases=13' ]] || \
   die "Loom Sounio action 9047 failed its install probe"
+[[ -x "$loom_generation_pinned_cutover_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9048"
+loom_generation_pinned_cutover_expected_sha="$(
+  manifest_value "$loom_generation_pinned_cutover_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_generation_pinned_cutover_binary" | awk '{print $1}')" == \
+  "$loom_generation_pinned_cutover_expected_sha" ]] || \
+  die "Loom Sounio action 9048 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_generation_pinned_cutover_binary")" == \
+  'SOUNIO_GENERATION_PINNED_CUTOVER_SELFTEST PASS cases=16' ]] || \
+  die "Loom Sounio action 9048 failed its install probe"
 [[ -x "$loom_sovereign_binary" ]] || \
   die "Loom build omitted frozen Sounio action 9042"
 [[ -x "$loom_change_binary" && -x "$loom_material_change_binary" ]] ||
@@ -1652,6 +1727,10 @@ bundle_sources=(
   "$loom_native_hook_generation_reconcile_entrypoint"
   "$loom_native_hook_generation_reconcile_module"
   "$loom_native_hook_generation_reconcile_freeze"
+  "$loom_generation_pinned_cutover_build_source"
+  "$loom_generation_pinned_cutover_entrypoint"
+  "$loom_generation_pinned_cutover_module"
+  "$loom_generation_pinned_cutover_freeze"
   "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
   "$loom_custody_transfer_module" "$loom_custody_transfer_freeze"
   "$loom_execution_outcome_build_source" "$loom_execution_outcome_entrypoint"
@@ -1728,6 +1807,10 @@ for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@
   bundle_sources+=("$SOURCE_ROOT/$relative_path")
 done
 bundle_sources+=("$loom_native_hook_generation_reconcile_freeze")
+for relative_path in "${loom_generation_pinned_cutover_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_generation_pinned_cutover_freeze")
 
 source_sha=unknown
 source_state=unversioned
@@ -1778,6 +1861,7 @@ else
     "$stage/policy/native-hook-cutover/stdlib/coordination" \
     "$stage/policy/native-hook-cutover/configs" \
     "$stage/policy/native-hook-generation-drain" \
+    "$stage/policy/generation-pinned-cutover" \
     "$stage/policy/product-activation/tools/loom" \
     "$stage/policy/product-activation/stdlib/coordination" \
     "$stage/policy/product-activation/scripts/dev" \
@@ -1841,6 +1925,16 @@ else
   mkdir -p "$stage/policy/native-hook-generation-reconcile/tools/loom"
   install -m 0444 "$loom_native_hook_generation_reconcile_freeze" \
     "$stage/policy/native-hook-generation-reconcile/tools/loom/native_hook_generation_reconcile.freeze.v1"
+  install -m 0555 "$loom_generation_pinned_cutover_binary" \
+    "$stage/bin/sounio-loom-generation-pinned-cutover"
+  for relative_path in "${loom_generation_pinned_cutover_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/generation-pinned-cutover/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/generation-pinned-cutover/$relative_path"
+  done
+  mkdir -p "$stage/policy/generation-pinned-cutover/tools/loom"
+  install -m 0444 "$loom_generation_pinned_cutover_freeze" \
+    "$stage/policy/generation-pinned-cutover/tools/loom/generation_pinned_cutover.freeze.v1"
   install -m 0444 "$loom_native_hook_cutover_freeze" \
     "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1"
   install -m 0444 "$loom_native_hook_cutover_entrypoint" \
@@ -2119,6 +2213,9 @@ else
   loom_native_hook_generation_reconcile_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}'
   )"
+  loom_generation_pinned_cutover_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-generation-pinned-cutover" | awk '{print $1}'
+  )"
   loom_custody_transfer_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
   )"
@@ -2206,6 +2303,11 @@ else
     printf 'loom_native_hook_generation_reconcile_manifest_sha256=a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7\n'
     printf 'loom_native_hook_generation_reconcile_runtime_sha256=%s\n' \
       "$loom_native_hook_generation_reconcile_runtime_sha256"
+    printf 'loom_generation_pinned_cutover_action=9048\n'
+    printf 'loom_generation_pinned_cutover_semantics_sha256=9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549\n'
+    printf 'loom_generation_pinned_cutover_manifest_sha256=0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d\n'
+    printf 'loom_generation_pinned_cutover_runtime_sha256=%s\n' \
+      "$loom_generation_pinned_cutover_runtime_sha256"
     printf 'loom_custody_transfer_language=Sounio\n'
     printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
@@ -2331,6 +2433,7 @@ else
     printf 'capability=loom-native-hook-cutover-v1\n'
     printf 'capability=loom-native-hook-generation-drain-v1\n'
     printf 'capability=loom-native-hook-generation-reconcile-v1\n'
+    printf 'capability=loom-generation-pinned-cutover-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'
     printf 'capability=loom-sovereign-execution-kernel-product-v1\n'
