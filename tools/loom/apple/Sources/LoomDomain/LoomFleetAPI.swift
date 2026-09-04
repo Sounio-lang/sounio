@@ -147,7 +147,7 @@ public struct LoomFleetClient: Sendable {
         let url = baseURL.appending(path: "api/fleet")
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 4
+        request.timeoutInterval = 12
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)

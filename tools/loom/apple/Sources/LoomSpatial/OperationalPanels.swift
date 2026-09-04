@@ -210,7 +210,7 @@ private struct RouteReceiptStrip: View {
     var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: receipt.status == .committed ? "checkmark.seal.fill" : "xmark.seal.fill")
+                Image(systemName: receiptIcon)
                     .foregroundStyle(receipt.status.loomColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(live ? "SOUNIO ROUTE RECEIPT · ACTION 9032" : "SCENARIO RECEIPT · NOT AUTHORITY")
@@ -242,6 +242,16 @@ private struct RouteReceiptStrip: View {
             }
         }
         .padding(12)
+    }
+
+    private var receiptIcon: String {
+        switch receipt.status {
+        case .committed, .completed: "checkmark.seal.fill"
+        case .running: "bolt.shield.fill"
+        case .planned, .fallback: "arrow.triangle.branch"
+        case .cancelled: "stop.circle.fill"
+        case .refused, .failed: "xmark.seal.fill"
+        }
     }
 }
 
@@ -368,8 +378,8 @@ struct ConversationDock: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("AGENT CHANNEL")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        Text("CONVERSATION")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
                         Text(selectedLane.map { "\($0.agent) / \($0.lane)" } ?? "No live lane selected")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundStyle(.secondary)
@@ -382,9 +392,9 @@ struct ConversationDock: View {
                 .padding(12)
 
                 Picker("Channel", selection: $tab) {
-                    Text("Conversation").tag(0)
+                    Text("Chat").tag(0)
                     Text("Evidence").tag(1)
-                    Text("Configure").tag(2)
+                    Text("Routing").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -398,45 +408,54 @@ struct ConversationDock: View {
                     Divider().opacity(0.35)
                 }
 
-                ScrollView {
-                    if tab == 0 {
-                        LazyVStack(spacing: 12) {
-                            HStack {
-                                Text("THREAD TRUTH")
-                                    .font(.system(size: 8, weight: .black, design: .monospaced))
-                                    .foregroundStyle(store.visibleThreadState == "answered" ? LoomColor.green : LoomColor.cyan)
-                                Spacer()
-                                Text(store.visibleThreadState?.replacingOccurrences(of: "_", with: " ").uppercased() ?? "NO DURABLE THREAD")
-                                    .font(.system(size: 8, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let error = store.threadError {
-                                ThreadStateCard(
-                                    title: "THREAD READ REFUSED",
-                                    detail: error,
-                                    color: LoomColor.red
-                                )
-                            } else if store.visibleThreadEvents.isEmpty {
-                                ThreadStateCard(
-                                    title: store.messageBridgeConfigured ? "NO THREAD FOR THIS LANE" : "MESSAGE BRIDGE NOT CONFIGURED",
-                                    detail: selectedLane?.deliveryReadiness == .immediate
-                                        ? "ACTIVE ENDPOINT / READY FOR A DURABLE REQUEST"
-                                        : "DURABLE BUS AVAILABLE WHEN CONFIGURED",
-                                    color: selectedLane?.deliveryReadiness == .immediate ? LoomColor.green : LoomColor.amber
-                                )
-                            } else {
-                                ForEach(store.visibleThreadEvents) { event in
-                                    ThreadEventBubble(event: event)
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        if tab == 0 {
+                            LazyVStack(spacing: 12) {
+                                HStack {
+                                    Text("DURABLE TIMELINE")
+                                        .font(.system(size: 8, weight: .black, design: .monospaced))
+                                        .foregroundStyle(store.visibleThreadState == "active" ? LoomColor.green : LoomColor.cyan)
+                                    Spacer()
+                                    Text(store.visibleThreadEvents.isEmpty
+                                        ? "NO MESSAGES"
+                                        : "\(store.visibleThreadEvents.count) TURNS · \(store.visibleThreadState?.uppercased() ?? "STORED")")
+                                        .font(.system(size: 8, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let error = store.threadError {
+                                    ThreadStateCard(
+                                        title: "THREAD READ REFUSED",
+                                        detail: error,
+                                        color: LoomColor.red
+                                    )
+                                } else if store.visibleThreadEvents.isEmpty {
+                                    ThreadStateCard(
+                                        title: store.messageBridgeConfigured ? "START A CONVERSATION" : "MESSAGE BRIDGE NOT CONFIGURED",
+                                        detail: selectedLane?.deliveryReadiness == .immediate
+                                            ? "This agent is present and can receive a live turn."
+                                            : "Messages remain durable while the agent is away.",
+                                        color: selectedLane?.deliveryReadiness == .immediate ? LoomColor.green : LoomColor.amber
+                                    )
+                                } else {
+                                    ForEach(store.visibleThreadEvents) { event in
+                                        ThreadEventBubble(event: event)
+                                            .id(event.id)
+                                    }
                                 }
                             }
+                            .padding(12)
+                        } else if tab == 1 {
+                            EvidenceLedger(snapshot: store.dashboard, eventGroups: store.eventGroups)
+                                .padding(12)
+                        } else {
+                            RoutingConfigurationPanel(store: store)
+                                .padding(12)
                         }
-                        .padding(12)
-                    } else if tab == 1 {
-                        EvidenceLedger(snapshot: store.dashboard, eventGroups: store.eventGroups)
-                            .padding(12)
-                    } else {
-                        RoutingConfigurationPanel(store: store)
-                            .padding(12)
+                    }
+                    .onChange(of: store.visibleThreadEvents.last?.id) { _, eventID in
+                        guard tab == 0, let eventID else { return }
+                        scrollProxy.scrollTo(eventID, anchor: .bottom)
                     }
                 }
 
@@ -445,12 +464,21 @@ struct ConversationDock: View {
 
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(alignment: .bottom, spacing: 8) {
-                            TextField("Message selected agent", text: $store.conversationDraft, axis: .vertical)
+                            TextField(
+                                selectedLane.map { "Message \($0.agent)" } ?? "Select an agent to begin",
+                                text: $store.conversationDraft,
+                                axis: .vertical
+                            )
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 12))
-                                .lineLimit(1...4)
-                                .padding(9)
-                                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                                .font(.system(size: 13))
+                                .lineLimit(1...6)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(selectedLaneColor.opacity(0.18), lineWidth: 0.8)
+                                )
                                 .accessibilityIdentifier("loom-conversation-draft")
                                 .accessibilityLabel("Message selected agent")
                             Button {
@@ -800,29 +828,39 @@ private struct ThreadEventBubble: View {
             if event.isLocal { Spacer(minLength: 28) }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(event.kind.replacingOccurrences(of: "_", with: " ").uppercased())
-                    Text(event.state.uppercased())
-                        .foregroundStyle(.secondary)
+                    Text(event.isLocal ? "YOU" : displayActor)
                     Spacer(minLength: 0)
-                    Text(event.utc)
+                    Text(shortTime)
                         .foregroundStyle(.secondary)
                 }
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(event.isLocal ? LoomColor.cyan : LoomColor.magenta)
-                Text(event.actor.uppercased())
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
                 Text(event.body)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(10)
+            .padding(11)
             .background(
-                (event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 7)
+                (event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.10),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke((event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.16), lineWidth: 0.7)
             )
             if !event.isLocal { Spacer(minLength: 28) }
         }
+    }
+
+    private var shortTime: String {
+        guard let marker = event.utc.lastIndex(of: "T") else { return event.utc }
+        return String(event.utc[event.utc.index(after: marker)...].prefix(8))
+    }
+
+    private var displayActor: String {
+        event.actor.split(separator: "/", maxSplits: 1).first
+            .map { String($0).uppercased() } ?? event.actor.uppercased()
     }
 }
 

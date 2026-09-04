@@ -91,6 +91,7 @@ final class LoomStore: ObservableObject {
     @Published private(set) var connection: ConnectionState = .connecting
     @Published private(set) var messageState: MessageBridgeState
     @Published private(set) var threadRequests: [LoomBusMessage] = []
+    @Published private(set) var conversationThreads: [LoomMessageThread] = []
     @Published private(set) var selectedThread: LoomMessageThread?
     @Published private(set) var threadError: String?
     @Published private(set) var routingConfigState: RoutingConfigState
@@ -106,19 +107,37 @@ final class LoomStore: ObservableObject {
         adapterOrder: ["adapter-codex"]
     )
     @Published var selectedLaneId: String? {
+        willSet {
+            guard let selectedLaneId else { return }
+            draftsByLane[selectedLaneId] = conversationDraft
+        }
         didSet {
             guard oldValue != selectedLaneId else { return }
+            conversationDraft = selectedLaneId.flatMap { draftsByLane[$0] } ?? ""
+            conversationThreads = []
+            selectedThread = nil
+            selectedThreadID = nil
+            threadError = nil
             Task { await refreshThreads() }
         }
     }
-    @Published var conversationDraft = ""
+    @Published var conversationDraft = "" {
+        didSet {
+            guard let selectedLaneId else { return }
+            draftsByLane[selectedLaneId] = conversationDraft
+        }
+    }
     @Published var routeTitle = "Review current Loom evidence"
     @Published var routePrompt = "Identify the highest operational risk in the current routing evidence. Do not change files."
 
     private let client: LoomFleetClient
     private let messageClient: LoomMessageClient?
+    private let requestedLaneAgent: String?
+    private let requestedLaneName: String?
+    private var draftsByLane: [String: String] = [:]
     private var selectedThreadID: String?
     private var refreshingThreads = false
+    private var appliedRequestedLane = false
 
     var selectedLane: LoomFleetSnapshot.Lane? {
         guard let selectedLaneId else { return nil }
@@ -151,20 +170,44 @@ final class LoomStore: ObservableObject {
 
     var dashboardIsLive: Bool { routeOperation != nil }
 
-    var visibleThreadEvents: [LoomThreadEvent] { selectedThread?.events ?? [] }
+    var visibleThreadEvents: [LoomThreadEvent] {
+        conversationThreads
+            .flatMap(\.events)
+            .filter { $0.kind == "request" || $0.kind == "response" }
+            .reduce(into: [String: LoomThreadEvent]()) { events, event in
+                events[event.id] = event
+            }
+            .values
+            .sorted {
+                if $0.utc != $1.utc { return $0.utc < $1.utc }
+                return $0.id < $1.id
+            }
+    }
 
-    var visibleThreadState: String? { selectedThread?.state }
+    var visibleThreadState: String? {
+        guard conversationThreads.isEmpty == false else { return nil }
+        if conversationThreads.contains(where: { $0.state == "open" }) { return "active" }
+        if conversationThreads.contains(where: { $0.state == "answered" }) { return "answered" }
+        return conversationThreads.first?.state
+    }
 
     init(
-        baseURL: URL = URL(string: "http://127.0.0.1:8787")!,
+        baseURL: URL = URL(string: "http://127.0.0.1:8793")!,
         arguments: [String] = ProcessInfo.processInfo.arguments
     ) {
+        requestedLaneAgent = Self.argument("--selected-agent", in: arguments)
+        requestedLaneName = Self.argument("--selected-lane", in: arguments)
         let kernelURL = Self.argument("--kernel-url", in: arguments)
             .flatMap(URL.init(string:)) ?? baseURL
         client = LoomFleetClient(baseURL: kernelURL)
+        let defaultTokenPath = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Loom/message-bridge.token")
+            .path
         let messageURL = Self.argument("--message-url", in: arguments)
+            ?? "http://127.0.0.1:8792"
         let tokenPath = Self.argument("--message-token-file", in: arguments)
-        if let messageURL, let tokenPath, let url = URL(string: messageURL),
+            ?? defaultTokenPath
+        if let url = URL(string: messageURL),
            let rawToken = try? String(contentsOfFile: tokenPath, encoding: .utf8)
         {
             let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,14 +220,10 @@ final class LoomStore: ObservableObject {
                 messageState = .failed("Capability file is invalid")
                 routingConfigState = .unconfigured
             }
-        } else if messageURL == nil && tokenPath == nil {
-                messageClient = nil
-                messageState = .unconfigured
-                routingConfigState = .unconfigured
         } else {
-                messageClient = nil
-                messageState = .failed("Message bridge configuration is incomplete")
-                routingConfigState = .unconfigured
+            messageClient = nil
+            messageState = .failed("Message bridge capability is unavailable")
+            routingConfigState = .unconfigured
         }
     }
 
@@ -193,6 +232,16 @@ final class LoomStore: ObservableObject {
             let snapshot = try await client.fleet()
             fleet = snapshot
             connection = .connected
+            if !appliedRequestedLane {
+                appliedRequestedLane = true
+                if let requestedLaneAgent, let requestedLaneName,
+                   let requested = snapshot.lanes.first(where: {
+                       $0.agent == requestedLaneAgent && $0.lane == requestedLaneName
+                   })
+                {
+                    selectedLaneId = requested.id
+                }
+            }
             if selectedLaneId == nil || !snapshot.lanes.contains(where: { $0.id == selectedLaneId }) {
                 selectedLaneId = LoomFleetSnapshot.Lane.preferredDeliveryLane(in: snapshot.lanes)?.id
             }
@@ -204,6 +253,8 @@ final class LoomStore: ObservableObject {
             await refreshThreads()
         } catch {
             connection = .unavailable(error.localizedDescription)
+            let detail = "LOOM_FLEET_UNAVAILABLE: \(String(reflecting: error))\n"
+            FileHandle.standardError.write(Data(detail.utf8))
         }
     }
 
@@ -248,6 +299,12 @@ final class LoomStore: ObservableObject {
                 guard let lane = selectedLane else { return false }
                 return thread.toAgent == lane.agent && thread.toLane == lane.lane
             }
+            guard laneThreads.isEmpty == false else {
+                selectedThreadID = nil
+                selectedThread = nil
+                conversationThreads = []
+                return
+            }
             if let selectedThreadID,
                laneThreads.contains(where: { $0.id == selectedThreadID }) == false
             {
@@ -255,11 +312,21 @@ final class LoomStore: ObservableObject {
             } else if selectedThreadID == nil {
                 selectedThreadID = laneThreads.first?.id
             }
-            guard let selectedThreadID else {
-                selectedThread = nil
-                return
+            var loadedThreads: [LoomMessageThread] = []
+            var lastReadError: Error?
+            for request in laneThreads.prefix(12) {
+                do {
+                    loadedThreads.append(try await readAndAcknowledgeThread(request.id, using: messageClient))
+                } catch {
+                    lastReadError = error
+                }
             }
-            try await refreshThread(selectedThreadID, using: messageClient)
+            conversationThreads = loadedThreads
+            selectedThread = loadedThreads.first { $0.request.id == selectedThreadID }
+                ?? loadedThreads.first
+            if loadedThreads.isEmpty, let lastReadError {
+                throw lastReadError
+            }
         } catch {
             threadError = error.localizedDescription
         }
@@ -375,12 +442,11 @@ final class LoomStore: ObservableObject {
         routingConfigState = .editing
     }
 
-    private func refreshThread(
+    private func readAndAcknowledgeThread(
         _ messageID: String,
         using messageClient: LoomMessageClient
-    ) async throws {
+    ) async throws -> LoomMessageThread {
         let firstRead = try await messageClient.thread(messageID)
-        selectedThread = firstRead
         let acknowledged = Set(
             firstRead.events
                 .filter { $0.kind == "ack" }
@@ -389,11 +455,11 @@ final class LoomStore: ObservableObject {
         let pendingAcknowledgements = firstRead.events
             .filter { $0.kind == "response" && !acknowledged.contains($0.messageId) }
             .map(\.messageId)
-        guard pendingAcknowledgements.isEmpty == false else { return }
+        guard pendingAcknowledgements.isEmpty == false else { return firstRead }
         for responseID in pendingAcknowledgements {
             _ = try await messageClient.acknowledge(responseID)
         }
-        selectedThread = try await messageClient.thread(messageID)
+        return try await messageClient.thread(messageID)
     }
 
     private static func argument(_ name: String, in arguments: [String]) -> String? {

@@ -1,6 +1,6 @@
-# Loom Spatial Observatory
+# Loom Native Workbench
 
-Status: implementation slice v1, native Apple client validated on macOS 27
+Status: Alpha implementation, native Apple client validated on macOS 27
 
 Figma source: <https://www.figma.com/design/wVSqacgCCyTRGtltZChNXk>
 
@@ -9,7 +9,7 @@ Figma source: <https://www.figma.com/design/wVSqacgCCyTRGtltZChNXk>
 
 ## Product role
 
-Loom Spatial is the heavy-use interface for macOS 27 and the review companion
+Loom Native Workbench is the heavy-use interface for macOS 27 and the review companion
 for iOS 27. The web cockpit remains a useful remote read surface. Neither UI is
 the owner of session custody, routing outcomes, or semantic truth.
 
@@ -20,6 +20,20 @@ The primary interaction is a spatial operational fabric:
 3. inspect the backend-produced receipt;
 4. keep the agent conversation beside the evidence;
 5. configure policy inputs without computing the decision in the UI.
+
+## Conversation contract
+
+Conversation is the primary human interaction, not a routing form. The user
+writes naturally to the selected agent with a multiline composer and sees one
+continuous chronological transcript for that lane. Each outbound turn still
+creates a durable, auditable Loom request, but request IDs, wake state, ACKs,
+timeouts, routing choices, and receipts stay progressively disclosed as
+operational evidence instead of interrupting the dialogue.
+
+Changing lanes changes conversations without discarding drafts or durable
+history. The UI may aggregate correlated request/response threads into the
+human transcript, but it must never merge, synthesize, or invent their backend
+records. Delivery metadata remains inspectable in the Evidence surface.
 
 ## Integration contract
 

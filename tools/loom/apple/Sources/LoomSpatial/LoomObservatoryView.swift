@@ -45,7 +45,7 @@ private struct DesktopObservatory: View {
             ObservatoryToolbar(store: store)
             HStack(spacing: 10) {
                 LaneRail(store: store)
-                    .frame(width: 218)
+                    .frame(width: 226)
 
                 VStack(spacing: 10) {
                     TopologyPanel(snapshot: store.dashboard, fleet: store.fleet, live: store.dashboardIsLive)
@@ -53,7 +53,7 @@ private struct DesktopObservatory: View {
                 }
 
                 ConversationDock(store: store)
-                    .frame(width: 342)
+                    .frame(width: 410)
             }
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
@@ -110,7 +110,7 @@ private struct ObservatoryToolbar: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("LOOM")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                Text("SPATIAL OBSERVATORY")
+                Text("NATIVE WORKBENCH")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
