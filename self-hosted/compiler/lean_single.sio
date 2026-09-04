@@ -34664,6 +34664,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 }
                 try_apply_call_arg_refinement(call_tok)
+                // Observation boundary: passing Unobserved<T> to a non-Unobserved
+                // parameter (mirror of compile_primary). The a64 mirror had only
+                // the IO/FFI variant below, not this one.
+                if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(SCAN_TY) && SCAN_TY != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to non-Unobserved parameter")
+                }
                 // Mark a struct variable moved when it is passed by value. Only
                 // linear/affine structs move; the rest are implicitly copied.
                 // The a64 pass never set LAST_EXPR_VAR_IDX, so nothing on this
@@ -36160,6 +36166,8 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        let left_unit_a = EXPR_UNIT
+        let left_unit_dim_a = EXPR_UNIT_DIM
         // PR-8: capture the LHS literal before the RHS overwrites the globals.
         let left_is_literal_a = LAST_IS_LITERAL
         let left_literal_val_a = LAST_LITERAL_VAL
@@ -36174,6 +36182,8 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         compile_multiplicative_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_unit_a = EXPR_UNIT
+        let right_unit_dim_a = EXPR_UNIT_DIM
         // β⁴: capture RHS shadow
         let b4aa_right_vshadow = EXPR_VSHADOW
         let b4aa_right_sshadow = EXPR_SSHADOW
@@ -36198,6 +36208,18 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_TY_HASH = 0
             continue
         }
+        // Gen 19: named units must match exactly for additive arithmetic, and
+        // packed dimensions must agree (so g + kg is fine, m + kg is not).
+        // Mirror of compile_additive; the a64 pass captured neither operand's
+        // unit and ran neither check.
+        if left_unit_a != 0 && right_unit_a != 0 && left_unit_a != right_unit_a {
+            tc_linear_violation(op_tok, "unit mismatch")
+        }
+        if left_unit_dim_a != 0 && right_unit_dim_a != 0 && left_unit_dim_a != right_unit_dim_a {
+            tc_linear_violation(op_tok, "unit dimension mismatch")
+        }
+        // Inherit the left unit name and dim for the result.
+        if left_unit_a != 0 { EXPR_UNIT = left_unit_a; EXPR_UNIT_DIM = left_unit_dim_a }
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if left_has_knowledge || right_has_knowledge {
@@ -36723,6 +36745,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
             }
+                // Observation boundary: Unobserved<T> assigned to a non-Unobserved
+                // binding (mirror of compile_stmt).
+                if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(decl_ty) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(EP - 1, "cannot assign Unobserved<T> to non-Unobserved binding")
+                }
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
@@ -37588,6 +37615,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         // PR-5: enforce refinement predicate on return value (a64 mirror)
         try_apply_return_refinement(EP - 1)
+        // Observation boundary: returning Unobserved<T> from a non-Observe
+        // function (mirror of compile_stmt).
+        if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(CURRENT_RET_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+            tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+        }
         if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
         }
@@ -38774,6 +38806,12 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                     stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
                 }
+            // Observation boundary: implicit tail return of Unobserved<T> as a
+            // non-Unobserved type (mirror of compile_all). The `return` statement
+            // path is covered separately; this is the bare tail expression.
+            if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+            }
             }
             // Restore sp from the frame pointer so any transient expression-stack
             // imbalance cannot make the epilogue pop x29/x30 from the wrong address.
