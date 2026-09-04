@@ -34749,6 +34749,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
+                // The three effects carried above the & 1023 mask are checked
+                // individually on the x86 path and were absent here, so a call
+                // needing Approx, Causal or NaturalityG2 from a caller that does
+                // not declare it compiled on aarch64.
+                if (FN_EFFECTS[fi as usize] & 262144) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 262144) == 0 {
+                    tc_effect_call_violation(call_tok, 262144, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                if (FN_EFFECTS[fi as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
+                    tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                if (FN_EFFECTS[fi as usize] & 1048576) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 1048576) == 0 {
+                    tc_effect_call_violation(call_tok, 1048576, FN_EFFECTS[CURRENT_FN as usize])
+                }
                 // β⁵ a64: store argument variance values into global BSS array
                 var b5a_pvi: i64 = 0
                 while b5a_pvi < B5_ARG_VCOUNT && b5a_pvi < 16 {
@@ -35944,9 +35957,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             if found == 0 {
                 if TK[EP as usize] == 6 {
-                    tc_error(method_tok, "unknown method")
+                    tc_error_hard(method_tok, "unknown method")
                 } else {
-                    tc_error(method_tok, "unknown field access")
+                    tc_error_hard(method_tok, "unknown field access")
                 }
                 em32(0xD2800000)
             }
@@ -36073,6 +36086,28 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         // left EXPR_TY_HASH holding the RHS's hash, so `distance / time` was
         // typed `s` and a `velocity` parameter rejected it as E001.
         EXPR_TY_HASH = 0
+        // Hessian AD over a non-associative algebra needs the opt-in
+        // `reassociate: fano_selective` (formal/NonAssocHessian.lean). Mirror of
+        // compile_multiplicative. The a64 pass has no left Hessian-shadow capture,
+        // so the fourth disjunct of the x86 guard (left_hsh_00 >= 0) has no
+        // counterpart here and this condition is narrower by that one term.
+        if (op == 19 || op == 20) && left_ty != 0 && right_ty != 0 {
+            let left_is_algebra_a = al_is_algebra(left_ty, left_hash) as i64
+            let right_is_algebra_a = al_is_algebra(right_ty, right_hash) as i64
+            if left_is_algebra_a == 1 || right_is_algebra_a == 1 {
+                if al_mul_is_associative(left_hash) == false {
+                    if b4am_left_sshadow >= 0 || EXPR_SSHADOW >= 0 || EXPR_HSHADOW_00 >= 0 {
+                        if al_reassoc_mode(left_hash) != 2 {
+                            print("error[E212]: ")
+                            print("Hessian AD over a non-associative algebra — `reassociate: fano_selective` required (formal/NonAssocHessian.lean) at line ")
+                            print_int(TL[op_tok as usize])
+                            print("\n")
+                            tc_mark_failed()
+                        }
+                    }
+                }
+            }
+        }
         // Gen 19: propagate unit dimension through * and / (mirror of the x86
         // compile_multiplicative site). Without this a derived quantity --
         // distance / time -- lost its composed dimension on the a64 path, so a
