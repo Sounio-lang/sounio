@@ -20,7 +20,7 @@ salloc --partition=gpu-orangefs --nodes=2 --ntasks=2 --ntasks-per-node=1 \
   sbcast --force '$frozen' /tmp/pireus-xor-semantics.txt
   srun --ntasks=2 --ntasks-per-node=1 --kill-on-bad-exit=1 --label \\
     --bcast=/tmp/pireus-xor-loader '$loader' /tmp/pireus-sedenion-xor.ptx \\
-    /tmp/pireus-xor-semantics.txt '$source_sha' '$semantics_sha'
+    sedenion_xor_product /tmp/pireus-xor-semantics.txt '$source_sha' '$semantics_sha' 1
 " >"$output" 2>&1
 [[ "$(grep -c 'result=PASS lanes=16' "$output")" -eq 2 ]]||{ cat "$output" >&2;fail 'both DGX Spark ranks did not pass';}
 job_id="$(sed -n 's/^salloc: Granted job allocation \([0-9][0-9]*\)$/\1/p' "$output"|tail -1)"

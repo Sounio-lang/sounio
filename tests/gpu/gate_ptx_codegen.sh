@@ -199,6 +199,10 @@ check_souc \
     "T9d_pireus_xor_convolution_source" \
     "tests/gpu/pireus_sed_xor_convolution_f64.sio"
 
+check_souc \
+    "T9d2_pireus_xor_convolution_global_source" \
+    "tests/gpu/pireus_sed_xor_convolution_global_f64.sio"
+
 {
     result="$(run_souc_tail self-hosted/gpu/pireus_xor_convolution_f64_codegen.sio)"
     if [ "$result" = "PIREUS_XOR_CONV_F64_CODEGEN_PASS" ]; then

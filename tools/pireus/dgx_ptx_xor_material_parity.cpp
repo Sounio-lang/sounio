@@ -1,6 +1,7 @@
 // C++ is MATERIAL_PARITY only. Expected values come from frozen Sounio output.
 #include <dlfcn.h>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -37,8 +38,10 @@ static std::vector<double> read_expected(const char* path){
 }
 
 int main(int argc,char** argv){
-    if(argc!=5){std::fprintf(stderr,"usage: %s PTX FROZEN SOURCE_SHA SEMANTICS_SHA\n",argv[0]);return 64;}
-    const auto ptx=read_all(argv[1]); const auto expected=read_expected(argv[2]);
+    if(argc!=7){std::fprintf(stderr,"usage: %s PTX KERNEL FROZEN SOURCE_SHA SEMANTICS_SHA ITERATIONS\n",argv[0]);return 64;}
+    const auto ptx=read_all(argv[1]); const auto expected=read_expected(argv[3]);
+    char* end=nullptr; const long iterations=std::strtol(argv[6],&end,10);
+    if(end==argv[6]||*end!='\0'||iterations<1||iterations>10000000) fail("iterations_range");
     double a[16],b[16],out[16]{}; for(int i=0;i<16;++i){a[i]=i+1;b[i]=17-i;}
     void* lib=dlopen("libcuda.so.1",RTLD_NOW); if(!lib)fail("dlopen_libcuda");
     auto init=symbol<cuInit_t>(lib,"cuInit"); auto device_get=symbol<cuDeviceGet_t>(lib,"cuDeviceGet");
@@ -53,15 +56,20 @@ int main(int argc,char** argv){
     CUdeviceptr da=0,db=0,dout=0; CUresult rc=0;
 #define CUDA_OK(call,stage) do{rc=(call);if(rc!=0)fail(stage,rc);}while(0)
     CUDA_OK(init(0),"cuInit"); CUDA_OK(device_get(&device,0),"cuDeviceGet"); CUDA_OK(ctx_create(&context,0,device),"cuCtxCreate");
-    CUDA_OK(module_load(&module,ptx.c_str()),"cuModuleLoadData"); CUDA_OK(function_get(&function,module,"sedenion_xor_product"),"cuModuleGetFunction");
+    CUDA_OK(module_load(&module,ptx.c_str()),"cuModuleLoadData"); CUDA_OK(function_get(&function,module,argv[2]),"cuModuleGetFunction");
     CUDA_OK(alloc(&da,sizeof(a)),"cuMemAlloc_a"); CUDA_OK(alloc(&db,sizeof(b)),"cuMemAlloc_b"); CUDA_OK(alloc(&dout,sizeof(out)),"cuMemAlloc_output");
     CUDA_OK(htod(da,a,sizeof(a)),"cuMemcpyHtoD_a"); CUDA_OK(htod(db,b,sizeof(b)),"cuMemcpyHtoD_b");
-    void* params[]={&da,&db,&dout}; CUDA_OK(launch(function,1,1,1,16,1,1,0,nullptr,params,nullptr),"cuLaunchKernel");
+    void* params[]={&da,&db,&dout};
+    for(int i=0;i<100;++i) CUDA_OK(launch(function,1,1,1,16,1,1,0,nullptr,params,nullptr),"cuLaunchKernel_warmup");
+    CUDA_OK(sync(),"cuCtxSynchronize_warmup");
+    const auto start=std::chrono::steady_clock::now();
+    for(long i=0;i<iterations;++i) CUDA_OK(launch(function,1,1,1,16,1,1,0,nullptr,params,nullptr),"cuLaunchKernel_measure");
     CUDA_OK(sync(),"cuCtxSynchronize"); CUDA_OK(dtoh(out,dout,sizeof(out)),"cuMemcpyDtoH");
+    const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
     for(int i=0;i<16;++i)if(out[i]!=expected[static_cast<std::size_t>(i)]){
         std::fprintf(stderr,"result=FAIL lane=%d expected=%.17g actual=%.17g\n",i,expected[i],out[i]);return 1;
     }
     char name[128]{};int major=-1,minor=-1;(void)device_name(name,sizeof(name),device);(void)device_cc(&major,&minor,device);
-    std::printf("result=PASS lanes=16 device=%s cc=%d.%d sounio_source_sha256=%s frozen_semantics_sha256=%s\n",name,major,minor,argv[3],argv[4]);
+    std::printf("result=PASS candidate=%s lanes=16 iterations=%ld elapsed_ns=%lld ns_per_launch=%lld device=%s cc=%d.%d sounio_source_sha256=%s frozen_semantics_sha256=%s\n",argv[2],iterations,static_cast<long long>(elapsed),static_cast<long long>(elapsed/iterations),name,major,minor,argv[4],argv[5]);
     (void)free_device(dout);(void)free_device(db);(void)free_device(da);(void)module_unload(module);(void)ctx_destroy(context);dlclose(lib);return 0;
 }

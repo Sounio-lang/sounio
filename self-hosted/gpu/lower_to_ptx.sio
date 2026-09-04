@@ -1291,6 +1291,26 @@ fn gpu_emit_xor_convolution_f64(paR: string, pbR: string, poutR: string) -> stri
     t
 }
 
+// Foundry candidate 1: preserve the same lane/output and serial accumulation order,
+// but obtain b[j] through a direct global load rather than a two-half warp shuffle.
+fn gpu_emit_xor_convolution_global_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCGDONE;\n"
+    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCGJ:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), pbR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCGJ;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCGDONE:\n")
+    t
+}
+
 // FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
 // (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
 // read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
@@ -2065,7 +2085,11 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, 
         }
 
         GpuOpcode::GpuXorConvolutionF64 => {
-            ptx_push_str(buf, gpu_emit_xor_convolution_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
+            if op.byte_offset == 1 {
+                ptx_push_str(buf, gpu_emit_xor_convolution_global_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
+            } else {
+                ptx_push_str(buf, gpu_emit_xor_convolution_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
+            }
         }
 
         GpuOpcode::GpuOctBatchF64 => {
