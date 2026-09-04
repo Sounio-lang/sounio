@@ -550,9 +550,15 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
       let selector =
         Filename.concat (Filename.concat runtimes "generation-selectors-v2") target.id
       in
-      if not (Sys.file_exists selector)
-         || Unix.realpath (Filename.concat selector "current") <> target.directory
-      then failf "generation-pin-selector-missing:%s" target.id;
+      if not (Sys.file_exists selector) then
+        failf "generation-pin-selector-missing:%s" target.id;
+      let selected = selector_runtime selector "current" in
+      if selected.id <> target.id
+         || selected.manifest_sha256 <> target.manifest_sha256
+         || selected.loom_sha256 <> target.loom_sha256
+         || selected.coord_sha256 <> target.coord_sha256
+         || selected.source_sha <> target.source_sha
+      then failf "generation-pin-selector-drift:%s" target.id;
       let inherited =
         Unix.environment () |> Array.to_list
         |> List.filter (fun value ->

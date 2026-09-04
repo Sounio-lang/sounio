@@ -38,6 +38,8 @@ advance runtime-b | grep -q 'action=9049 epoch=1'
 PRIVATE_A="$R/generation-selectors-v2/runtime-a/versions/runtime-a"
 [[ "$(readlink -f "$R/generation-selectors-v2/runtime-a/current")" == "$PRIVATE_A" ]] || fail 'pinned runtime current selector missing'
 [[ "$(readlink -f "$R/generation-selectors-v2/runtime-a/native-next")" == "$PRIVATE_A" ]] || fail 'pinned runtime native-next selector missing'
+[[ "$(readlink -f "$R/generation-selectors-v2/runtime-a/current")" != "$(readlink -f "$R/versions/runtime-a")" ]] || fail 'private selector aliases the global runtime path'
+[[ "$(sha256sum "$PRIVATE_A/manifest"|cut -d' ' -f1)" == "$(sha256sum "$R/versions/runtime-a/manifest"|cut -d' ' -f1)" ]] || fail 'private selector manifest drift'
 [[ "$(sha256sum "$PRIVATE_A/bin/sounio-loom-runtime"|cut -d' ' -f1)" == "$(sha256sum "$R/versions/runtime-a/bin/sounio-loom-runtime"|cut -d' ' -f1)" ]] || fail 'private selector runtime drift'
 rm "$R/current"; ln -s versions/runtime-b "$R/current"
 advance runtime-c | grep -q 'action=9049 epoch=2'
