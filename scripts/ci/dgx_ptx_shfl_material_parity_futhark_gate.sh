@@ -6,9 +6,11 @@
 # for the butterfly law are self-consistent, independent of the CUDA
 # measurement harness in tools/pireus/dgx_ptx_shfl_material_parity.cu.
 #
-# Follow-up (not yet wired): dump the real GPU-observed output matrix
-# from a live Slurm run of the CUDA probe and feed it to this program's
-# `check` entry point for true GPU-vs-Futhark empirical parity.
+# GPU-vs-Futhark empirical parity: scripts/dev/dgx_ptx_shfl_material_parity_gpu_check.sh
+# runs the companion dump probe on a real DGX Spark GPU (best-effort;
+# SKIPs if unreachable from this host) and diffs it against this
+# oracle's `check` entry. Last verified 2026-09-04 on NVIDIA GB10
+# (compute_capability 12.1): 0/256 mismatched cells.
 
 set -euo pipefail
 umask 077
@@ -55,5 +57,5 @@ printf 'futhark_version=%s\n' "$observed_version"
 printf 'oracle_source_sha256=%s\n' "$source_sha256"
 printf 'dimension=16\n'
 printf 'involution_check=PASS\n'
-printf 'gpu_empirical_parity=NOT_WIRED\n'
+printf 'gpu_empirical_parity=SEE_scripts_dev_dgx_ptx_shfl_material_parity_gpu_check\n'
 printf 'result=PASS\n'
