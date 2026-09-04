@@ -1,0 +1,228 @@
+//@ run-pass
+//@ expect-stdout: GRAPH_CONFIGURATION_OK
+// Exercises graph::nulls::configuration after the Seq migration. The module
+// held its collections in struct FIELDS -- ConfigurationModel.adj was
+// [[usize]] and .degree_sequence was [usize] -- and grew both with .push,
+// which a fixed-length slice rejects (E019). Both fields, and every adjacency
+// parameter, are Seq now, taken by value: reading a Seq through a reference
+// parameter is broken (BLK-20260904-seq-f64-element-scalar-kind).
+//
+// Asserts the property the configuration model exists to have -- the generated
+// graph carries the ORIGINAL degree sequence, node by node, and is simple
+// (no self-loop, no repeated neighbour, symmetric) -- rather than asserting
+// that the module type-checks.
+//
+// Every local holding an imported Seq return carries an explicit type, and
+// every Seq element is bound to a typed local before it is printed or
+// compared: without that the scalar kind is unresolved and lowering refuses.
+use graph::nulls::configuration::*;
+
+// The 4-node graph 0-1, 0-2, 1-2, 1-3. Degrees: 2, 3, 2, 1 (total 8, even, so
+// the stub-matching precondition holds). Rows are grown, never written as a
+// nested array literal -- `[[1,2],[0]]` compiles to an empty stub that traps.
+fn fixture() -> Seq<Seq<usize>> with Mut, Panic {
+    var g: Seq<Seq<usize>> = create_empty_adjacency(4)
+    var r0: Seq<usize> = g.get(0); r0.push(1); r0.push(2)
+    var r1: Seq<usize> = g.get(1); r1.push(0); r1.push(2); r1.push(3)
+    var r2: Seq<usize> = g.get(2); r2.push(0); r2.push(1)
+    var r3: Seq<usize> = g.get(3); r3.push(1)
+    g
+}
+
+// Two disjoint edges 0-1 and 2-3: the smallest graph on which a degree-
+// preserving edge swap has somewhere to go.
+fn two_disjoint_edges() -> Seq<Seq<usize>> with Mut, Panic {
+    var g: Seq<Seq<usize>> = create_empty_adjacency(4)
+    var r0: Seq<usize> = g.get(0); r0.push(1)
+    var r1: Seq<usize> = g.get(1); r1.push(0)
+    var r2: Seq<usize> = g.get(2); r2.push(3)
+    var r3: Seq<usize> = g.get(3); r3.push(2)
+    g
+}
+
+fn degree_of(g: Seq<Seq<usize>>, u: usize) -> i64 with Mut, Panic, Epistemic {
+    let row: Seq<usize> = g.get(u)
+    row.len().unwrap("row")
+}
+
+fn neighbour(g: Seq<Seq<usize>>, u: usize, j: usize) -> usize with Mut, Panic, Epistemic {
+    let row: Seq<usize> = g.get(u)
+    row.get(j)
+}
+
+fn has_neighbour(g: Seq<Seq<usize>>, u: usize, v: usize) -> bool with Mut, Panic, Epistemic {
+    let d: i64 = degree_of(g, u)
+    var j: i64 = 0
+    while j < d {
+        let w: usize = neighbour(g, u, j as usize)
+        if w == v { return true }
+        j = j + 1
+    }
+    false
+}
+
+// Simple = no self-loop, no repeated neighbour, and every adjacency mirrored.
+// A stub-matching bug shows up here first: a duplicated push or a lost mirror
+// leaves the degree sequence right and the graph wrong.
+fn is_simple_undirected(g: Seq<Seq<usize>>) -> bool with Mut, Panic, Epistemic {
+    let n: i64 = g.len().unwrap("g")
+    var u: i64 = 0
+    while u < n {
+        let d: i64 = degree_of(g, u as usize)
+        var j: i64 = 0
+        while j < d {
+            let v: usize = neighbour(g, u as usize, j as usize)
+            if v == (u as usize) { return false }          // self-loop
+            if (v as i64) >= n { return false }            // out of range
+            if !has_neighbour(g, v, u as usize) { return false }  // not mirrored
+            var k: i64 = j + 1
+            while k < d {
+                let w: usize = neighbour(g, u as usize, k as usize)
+                if w == v { return false }                 // repeated neighbour
+                k = k + 1
+            }
+            j = j + 1
+        }
+        u = u + 1
+    }
+    true
+}
+
+// Endpoint total; each undirected edge is counted from both ends.
+fn endpoint_total(g: Seq<Seq<usize>>) -> i64 with Mut, Panic, Epistemic {
+    let n: i64 = g.len().unwrap("g")
+    var total: i64 = 0
+    var u: i64 = 0
+    while u < n {
+        total = total + degree_of(g, u as usize)
+        u = u + 1
+    }
+    total
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    var original: Seq<Seq<usize>> = fixture()
+
+    // --- the degree sequence the model has to preserve -------------------
+    let degs: Seq<usize> = extract_degree_sequence(original)
+    let nd: i64 = degs.len().unwrap("degs")
+    if nd != 4 { println("FAIL degree sequence length"); return 1 }
+    let d0: usize = degs.get(0)
+    let d1: usize = degs.get(1)
+    let d2: usize = degs.get(2)
+    let d3: usize = degs.get(3)
+    if d0 != 2 || d1 != 3 || d2 != 2 || d3 != 1 {
+        println("FAIL degree sequence values")
+        return 1
+    }
+
+    // --- stub matching ----------------------------------------------------
+    let model = configuration_model(original, 42, 100)
+    if !model.success { println("FAIL configuration_model did not converge"); return 1 }
+
+    var generated: Seq<Seq<usize>> = model.adj
+    let gn: i64 = generated.len().unwrap("generated")
+    if gn != 4 { println("FAIL generated node count"); return 1 }
+
+    // The point of the whole module: degrees carried over node by node.
+    if degree_of(generated, 0) != 2 { println("FAIL generated degree 0"); return 1 }
+    if degree_of(generated, 1) != 3 { println("FAIL generated degree 1"); return 1 }
+    if degree_of(generated, 2) != 2 { println("FAIL generated degree 2"); return 1 }
+    if degree_of(generated, 3) != 1 { println("FAIL generated degree 3"); return 1 }
+    if !verify_degree_sequence(original, generated) {
+        println("FAIL verify_degree_sequence on generated graph")
+        return 1
+    }
+
+    // No self-loops, no multi-edges, symmetric adjacency.
+    if !is_simple_undirected(generated) { println("FAIL generated graph not simple"); return 1 }
+
+    // 8 endpoints = 4 undirected edges, as many as the original has.
+    if endpoint_total(generated) != 8 { println("FAIL generated edge count"); return 1 }
+    if endpoint_total(original) != 8 { println("FAIL original mutated"); return 1 }
+
+    // The struct field survives the round trip through the Seq handle.
+    var kept: Seq<usize> = model.degree_sequence
+    let kn: i64 = kept.len().unwrap("kept")
+    if kn != 4 { println("FAIL model.degree_sequence length"); return 1 }
+    let k0: usize = kept.get(0)
+    let k1: usize = kept.get(1)
+    let k3: usize = kept.get(3)
+    if k0 != 2 || k1 != 3 || k3 != 1 { println("FAIL model.degree_sequence values"); return 1 }
+
+    // The original is an input, not a scratch buffer: Seq shares storage, so
+    // an accidental write through the parameter handle would show up here.
+    if !has_neighbour(original, 0, 1) || !has_neighbour(original, 1, 3) {
+        println("FAIL original adjacency mutated")
+        return 1
+    }
+
+    // --- edge swap --------------------------------------------------------
+    // One swap on two disjoint edges must actually rewire: 0-1 and 2-3 become
+    // 0-3 and 1-2, all four degrees still 1. Removal is a rebuild-and-set now;
+    // the pre-Seq code could not shrink a row at all, so a "removed" edge
+    // stayed and this assertion would fail.
+    var pair: Seq<Seq<usize>> = two_disjoint_edges()
+    var swapped: Seq<Seq<usize>> = edge_swap_configuration(pair, 1, 3)
+    if !verify_degree_sequence(pair, swapped) { println("FAIL edge swap degrees"); return 1 }
+    if !is_simple_undirected(swapped) { println("FAIL swapped graph not simple"); return 1 }
+    if endpoint_total(swapped) != 4 { println("FAIL swapped edge count"); return 1 }
+    if has_neighbour(swapped, 0, 1) { println("FAIL edge swap was a no-op"); return 1 }
+    if !has_neighbour(swapped, 0, 3) || !has_neighbour(swapped, 1, 2) {
+        println("FAIL edge swap did not produce the crossed pair")
+        return 1
+    }
+
+    // A swap run on the 4-node fixture preserves its degree sequence too.
+    var swapped4: Seq<Seq<usize>> = edge_swap_configuration(original, 25, 7)
+    if !verify_degree_sequence(original, swapped4) { println("FAIL edge swap fixture degrees"); return 1 }
+    if !is_simple_undirected(swapped4) { println("FAIL swapped fixture not simple"); return 1 }
+
+    // --- ensemble ---------------------------------------------------------
+    // Stub matching abandons an attempt on the first colliding pair, so on a
+    // graph this small some seeds never converge; the ensemble reports that
+    // per member. Every member that DID converge must preserve the degrees.
+    var ensemble: Seq<ConfigurationModel> = configuration_ensemble(original, 6, 11)
+    let en: i64 = ensemble.len().unwrap("ensemble")
+    if en != 6 { println("FAIL ensemble size"); return 1 }
+    var converged: i64 = 0
+    var i: i64 = 0
+    while i < en {
+        let member: ConfigurationModel = ensemble.get(i as usize)
+        if member.success {
+            var madj: Seq<Seq<usize>> = member.adj
+            if !verify_degree_sequence(original, madj) {
+                println("FAIL ensemble member degrees")
+                return 1
+            }
+            if !is_simple_undirected(madj) { println("FAIL ensemble member not simple"); return 1 }
+            converged = converged + 1
+        }
+        i = i + 1
+    }
+    if converged == 0 { println("FAIL ensemble produced no graph at all"); return 1 }
+
+    // --- null model statistics -------------------------------------------
+    // [1,2,3,4]: mean 2.5, population sd sqrt(1.25) = 1.118034,
+    // z for an observed 6.0 is 3.1305.
+    let vals: [f64; 4] = [1.0, 2.0, 3.0, 4.0]
+    let stats = null_model_significance(6.0, &vals)
+    if stats.mean_metric < 2.499 || stats.mean_metric > 2.501 {
+        println("FAIL null model mean"); return 1
+    }
+    if stats.std_metric < 1.117 || stats.std_metric > 1.119 {
+        println("FAIL null model std"); return 1
+    }
+    if stats.z_score < 3.129 || stats.z_score > 3.132 {
+        println("FAIL null model z-score"); return 1
+    }
+    if stats.observed_metric < 5.999 || stats.observed_metric > 6.001 {
+        println("FAIL null model observed"); return 1
+    }
+
+    // --- the module's own battery ----------------------------------------
+    if !run_configuration_tests() { println("FAIL run_configuration_tests"); return 1 }
+
+    println("GRAPH_CONFIGURATION_OK")
+    0
+}
