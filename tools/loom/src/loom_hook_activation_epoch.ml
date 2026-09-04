@@ -87,10 +87,12 @@ let pin_inventory pin_dir =
 let pinned_runtime_ids pin_dir =
   Sys.readdir pin_dir |> Array.to_list |> List.sort_uniq String.compare
   |> List.filter (fun n -> Filename.check_suffix n ".pin")
-  |> List.map (fun n ->
+  |> List.filter_map (fun n ->
        let p=Filename.concat pin_dir n in
        let f=fields "generation-pin" (governed p) in
-       safe_id (required "generation-pin" f "runtime_id"))
+       if required "generation-pin" f "selection" = "capability" then
+         Some (safe_id (required "generation-pin" f "runtime_id"))
+       else None)
   |> List.sort_uniq String.compare
 
 let ensure_symlink path target expected =

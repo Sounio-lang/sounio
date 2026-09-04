@@ -29,7 +29,7 @@ printf '%s\n' 'schema=loom-generation-pin-set-v1' 'state=SEALED' \
   'inventory_sha256=initial' 'pin_count=1' 'semantic_authority=Sounio' \
   'action=9048' 'semantics_sha256=9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549' \
   'freeze_sha256=0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d' >"$P/activation.v1"
-printf '%s\n' 'schema=loom-generation-runtime-pin-v1' 'runtime_id=runtime-a' >"$P/test.pin"
+printf '%s\n' 'schema=loom-generation-runtime-pin-v1' 'selection=capability' 'runtime_id=runtime-a' >"$P/test.pin"
 chmod 600 "$P/activation.v1" "$P/test.pin"
 INITIAL_SHA="$(sha256sum "$P/activation.v1"|cut -d' ' -f1)"; PIN_SHA="$(sha256sum "$P/test.pin"|cut -d' ' -f1)"
 advance(){ SOUNIO_COORD_RUNTIME_DIR="$R" SOUNIO_COORD_DIR="$S" "$LOOM" hook-activation-epoch-advance --source-root "$ROOT" --git-common "$WORK" --next-runtime "$1"; }
