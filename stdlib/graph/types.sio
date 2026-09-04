@@ -48,16 +48,20 @@ impl Edge {
 // Graph Type - adjacency list representation
 pub struct Graph {
     n: Count,
-    adj: [[NodeId]],
+    // Seq, not [[NodeId]]: slices are fixed-length, and this adjacency is built
+    // by growing. Seq.get returns a handle that shares storage, so pushing into
+    // an inner row is visible through the outer Seq.
+    adj: Seq<Seq<NodeId>>,
     m: Count,
 }
 
 impl Graph {
-    pub fn new(n: Count) -> Graph {
-        var adj: [[NodeId]] = []
+    pub fn new(n: Count) -> Graph with Mut, Panic {
+        var adj: Seq<Seq<NodeId>> = seq_new()
         var i: usize = 0
         while i < n {
-            adj.push([])
+            var row: Seq<NodeId> = seq_new()
+            adj.push(row)
             i = i + 1
         }
         Graph { n: n, adj: adj, m: 0 }
@@ -66,41 +70,51 @@ impl Graph {
     pub fn num_nodes(self: &Graph) -> Count { self.n }
     pub fn num_edges(self: &Graph) -> Count { self.m }
 
-    pub fn add_edge(self: &!Graph, u: NodeId, v: NodeId) {
+    pub fn add_edge(self: &!Graph, u: NodeId, v: NodeId) with Mut, Panic {
         if u < self.n && v < self.n && u != v {
-            self.adj[u].push(v)
-            self.adj[v].push(u)
+            var row_u: Seq<NodeId> = self.adj.get(u)
+            row_u.push(v)
+            var row_v: Seq<NodeId> = self.adj.get(v)
+            row_v.push(u)
             self.m = self.m + 1
         }
     }
 
-    pub fn degree(self: &Graph, u: NodeId) -> Degree {
-        if u < self.n { self.adj[u].len() } else { 0 }
+    pub fn degree(self: &Graph, u: NodeId) -> Degree with Mut, Panic, Epistemic {
+        if u < self.n {
+            let row: Seq<NodeId> = self.adj.get(u)
+            let k: i64 = row.len().unwrap("degree")
+            k as usize
+        } else { 0 }
     }
 
-    pub fn neighbors(self: &Graph, u: NodeId) -> &[NodeId] {
-        &self.adj[u]
+    // Returns the row itself. Seq is handle-based, so this shares storage with
+    // the graph rather than copying, which is what the old `&[NodeId]` gave.
+    pub fn neighbors(self: &Graph, u: NodeId) -> Seq<NodeId> with Mut, Panic {
+        self.adj.get(u)
     }
 
-    pub fn has_edge(self: &Graph, u: NodeId, v: NodeId) -> bool {
+    pub fn has_edge(self: &Graph, u: NodeId, v: NodeId) -> bool with Mut, Panic, Epistemic {
         if u >= self.n || v >= self.n { return false }
-        let neighbors = &self.adj[u]
-        var i: usize = 0
-        while i < neighbors.len() {
-            if neighbors[i] == v { return true }
+        let neighbors: Seq<NodeId> = self.adj.get(u)
+        let k: i64 = neighbors.len().unwrap("has_edge")
+        var i: i64 = 0
+        while i < k {
+            if neighbors.get(i as usize) == v { return true }
             i = i + 1
         }
         false
     }
 
-    pub fn edges(self: &Graph) -> [Edge] {
-        var result: [Edge] = []
+    pub fn edges(self: &Graph) -> Seq<Edge> with Mut, Panic, Epistemic {
+        var result: Seq<Edge> = seq_new()
         var u: NodeId = 0
         while u < self.n {
-            let neighbors = &self.adj[u]
-            var i: usize = 0
-            while i < neighbors.len() {
-                let v = neighbors[i]
+            let neighbors: Seq<NodeId> = self.adj.get(u)
+            let k: i64 = neighbors.len().unwrap("edges")
+            var i: i64 = 0
+            while i < k {
+                let v = neighbors.get(i as usize)
                 if u < v { result.push(Edge::new(u, v)) }
                 i = i + 1
             }
@@ -152,32 +166,35 @@ impl NetworkStats {
 // Probability Measure for optimal transport
 pub struct ProbabilityMeasure {
     pub nodes: [NodeId],
-    pub probs: [Probability],
+    // Grown by `uniform`, so Seq rather than a fixed slice.
+    pub probs: Seq<Probability>,
 }
 
 impl ProbabilityMeasure {
-    pub fn empty() -> ProbabilityMeasure {
-        ProbabilityMeasure { nodes: [], probs: [] }
+    pub fn empty() -> ProbabilityMeasure with Mut, Panic {
+        var probs: Seq<Probability> = seq_new()
+        ProbabilityMeasure { nodes: [], probs: probs }
     }
 
-    pub fn uniform(nodes: [NodeId]) -> ProbabilityMeasure {
+    pub fn uniform(nodes: [NodeId]) -> ProbabilityMeasure with Mut, Panic, Div {
         let n = nodes.len()
         if n == 0 { return ProbabilityMeasure::empty() }
         let p = 1.0 / (n as f64)
-        var probs: [Probability] = []
+        var probs: Seq<Probability> = seq_new()
         var i: usize = 0
         while i < n {
             probs.push(p)
             i = i + 1
         }
-        ProbabilityMeasure { nodes, probs }
+        ProbabilityMeasure { nodes: nodes, probs: probs }
     }
 
-    pub fn total(self: &ProbabilityMeasure) -> Probability {
+    pub fn total(self: &ProbabilityMeasure) -> Probability with Mut, Panic, Epistemic {
         var sum: f64 = 0.0
-        var i: usize = 0
-        while i < self.probs.len() {
-            sum = sum + self.probs[i]
+        let k: i64 = self.probs.len().unwrap("total")
+        var i: i64 = 0
+        while i < k {
+            sum = sum + self.probs.get(i as usize)
             i = i + 1
         }
         sum
@@ -187,7 +204,7 @@ impl ProbabilityMeasure {
 }
 
 // Tests
-pub fn test_graph_creation() -> bool {
+pub fn test_graph_creation() -> bool with Mut, Panic {
     var g = Graph::new(5)
     g.add_edge(0, 1)
     g.add_edge(1, 2)
@@ -197,7 +214,7 @@ pub fn test_graph_creation() -> bool {
     g.num_nodes() == 5 && g.num_edges() == 5
 }
 
-pub fn test_degree() -> bool {
+pub fn test_degree() -> bool with Mut, Panic, Epistemic {
     var g = Graph::new(4)
     g.add_edge(0, 1)
     g.add_edge(0, 2)
@@ -205,6 +222,6 @@ pub fn test_degree() -> bool {
     g.degree(0) == 3 && g.degree(1) == 1
 }
 
-pub fn run_types_tests() -> bool {
+pub fn run_types_tests() -> bool with Mut, Panic, Epistemic {
     test_graph_creation() && test_degree()
 }
