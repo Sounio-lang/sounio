@@ -483,8 +483,6 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
   let state = state_root git_common in
   let activation = Filename.concat (pin_directory state) "activation.v1" in
   if not (Sys.file_exists activation) then None
-  else if Sys.getenv_opt "SOUNIO_LOOM_GENERATION_PIN_FORWARDED" = Some "1" then
-    failf "generation-pin-recursive-forward"
   else
     let authority = load_authority source_root in
     let runtimes = runtime_root git_common in
@@ -537,13 +535,22 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     let executing = Unix.realpath Sys.executable_name in
     let target_executable = Filename.concat target.directory "bin/sounio-loom-runtime" in
     let same = executing = Unix.realpath target_executable in
+    let forwarded_target =
+      Sys.getenv_opt "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET"
+    in
+    (match forwarded_target with
+     | Some runtime_id when runtime_id <> target.id ->
+         failf "generation-pin-forward-target-drift"
+     | _ -> ());
     let decision = if same then "CONTINUE" else "FORWARD" in
     authority_decide state authority ~command:"hook-generation-pin-resolve" (if same then 3 else 4) 33550335
       (identity_digest identity) target.manifest_sha256 (sha256 pin)
       (Printf.sprintf "SOUNIO_GENERATION_PINNED_CUTOVER %s semantic_authority=Sounio action=9048" decision);
     if same then None
+    else if forwarded_target <> None then failf "generation-pin-recursive-forward"
     else
-      let environment = Array.append [| "SOUNIO_LOOM_GENERATION_PIN_FORWARDED=1" |]
+      let environment = Array.append
+          [| "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=" ^ target.id |]
           (Unix.environment ()) in
       Some (run_process ~input:raw_event ~environment target_executable ("agent-hook" :: arguments)))
 

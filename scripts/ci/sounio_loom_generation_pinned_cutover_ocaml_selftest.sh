@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 GIT_COMMON="$(git -C "$ROOT_DIR" rev-parse --git-common-dir)"
-RUNTIME_ROOT="$GIT_COMMON/sounio-coord-runtime"
+SHARED_RUNTIME_ROOT="$GIT_COMMON/sounio-coord-runtime"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-generation-pin.XXXXXX")"
 CHILDREN=()
 
@@ -47,9 +47,27 @@ cp "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v1" \
   "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
 chmod 600 "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
 
-OLD_RUNTIME="$(basename "$(readlink -f "$RUNTIME_ROOT/current")")"
-CANDIDATE_RUNTIME="$(basename "$(readlink -f "$RUNTIME_ROOT/native-next")")"
-[[ "$OLD_RUNTIME" != "$CANDIDATE_RUNTIME" ]] || fail 'cutover fixture selectors already converge'
+OLD_RUNTIME="$(basename "$(readlink -f "$SHARED_RUNTIME_ROOT/current")")"
+CANDIDATE_RUNTIME="$(basename "$(readlink -f "$SHARED_RUNTIME_ROOT/native-next")")"
+if [[ "$OLD_RUNTIME" == "$CANDIDATE_RUNTIME" ]]; then
+  CANDIDATE_RUNTIME="$OLD_RUNTIME"
+  OLD_RUNTIME=""
+  for pin in "$GIT_COMMON/sounio-coord-state/generation-runtime-pins"/*.pin; do
+    [[ -f "$pin" ]] || continue
+    pinned_runtime="$(sed -n 's/^runtime_id=//p' "$pin")"
+    if [[ -n "$pinned_runtime" && "$pinned_runtime" != "$CANDIDATE_RUNTIME" &&
+          -d "$SHARED_RUNTIME_ROOT/versions/$pinned_runtime" ]]; then
+      OLD_RUNTIME="$pinned_runtime"
+      break
+    fi
+  done
+  [[ -n "$OLD_RUNTIME" ]] || fail 'no installed pinned runtime differs from current'
+fi
+RUNTIME_ROOT="$WORK/runtime"
+mkdir -p "$RUNTIME_ROOT"
+ln -s "$SHARED_RUNTIME_ROOT/versions" "$RUNTIME_ROOT/versions"
+ln -s "versions/$OLD_RUNTIME" "$RUNTIME_ROOT/current"
+ln -s "versions/$CANDIDATE_RUNTIME" "$RUNTIME_ROOT/native-next"
 
 sleep 300 &
 LIVE_PID=$!
@@ -146,4 +164,16 @@ wait "$LOCK_PID"
 CHILDREN=("$LIVE_PID")
 
 [[ ! -s "$WORK/forbidden.log" ]] || fail 'a disposable oracle executed'
-printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=7 python_oracle_executed=false semantic_authority=Sounio action=9048\n'
+grep -q 'SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
+  fail 'forward target marker is absent'
+! grep -q 'SOUNIO_LOOM_GENERATION_PIN_FORWARDED=1' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
+  fail 'legacy boolean forward marker breaks immutable target compatibility'
+grep -q 'generation-pin-forward-target-drift' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
+  fail 'forward target drift is not fail-closed'
+grep -q 'generation-pin-recursive-forward' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
+  fail 'recursive forward is not fail-closed'
+printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=11 python_oracle_executed=false semantic_authority=Sounio action=9048\n'
