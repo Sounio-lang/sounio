@@ -46,7 +46,7 @@ let validate_runtime root id =
   verify "loom_runtime_sha256" "bin/sounio-loom-runtime"; verify "coord_runtime_sha256" "bin/sounio-coord-runtime";
   if Sys.file_exists (Filename.concat dir "hooks/sounio_coord_agent_hook_runtime.py") || Sys.file_exists (Filename.concat dir "hooks/sounio_coord_agent_hook.py") then failf "next-runtime-python-bridge";
   let manifest=governed mp in
-  if not (String.contains manifest '\n') || not (List.mem "capability=loom-generation-pinned-cutover-v1" (String.split_on_char '\n' manifest)) || not (List.mem "capability=loom-activation-epoch-v1" (String.split_on_char '\n' manifest)) then failf "next-runtime-capability-missing";
+  if not (String.contains manifest '\n') || not (List.mem "capability=loom-generation-pinned-cutover-v1" (String.split_on_char '\n' manifest)) then failf "next-runtime-capability-missing";
   (dir, sha256_file mp)
 
 let load_authority source_root =
@@ -99,8 +99,9 @@ let advance ~source_root ~git_common ~next_runtime =
     let old=governed head and hf=fields "activation-head" (governed head) in
     if required "activation-head" hf "schema" <> "loom-generation-pin-set-v1" || required "activation-head" hf "action" <> "9048" then failf "activation-head-invalid";
     let named=required "activation-head" hf "candidate_runtime_id" in
-    if named <> current then failf "activation-head-current-mismatch";
-    if next_runtime=current then failf "activation-epoch-noop";
+    let recovery = named <> current in
+    if recovery && next_runtime <> current then failf "activation-epoch-skipped-recovery";
+    if not recovery && next_runtime=current then failf "activation-epoch-noop";
     let before=pin_inventory pin_dir and old_sha=sha256 old in
     let base=Filename.concat pin_dir "activation-epochs" in let heads=Filename.concat base "heads" and epochs=Filename.concat base "epochs" in mkdir_p heads; mkdir_p epochs;
     let archive=Filename.concat heads (old_sha^".activation.v1") in if Sys.file_exists archive then (if governed archive<>old then failf "predecessor-archive-drift") else atomic_write ~exclusive:true archive old;
@@ -114,7 +115,7 @@ let advance ~source_root ~git_common ~next_runtime =
     let frame=Printf.sprintf "9049 1 3 262143 %s %s %s %s %d %d\n" (digest_u60 old_sha 0) (digest_u60 next_manifest 0) (digest_u60 before 0) (digest_u60 tx 0) epoch previous_epoch in
     run_authority exe frame;
     if pin_inventory pin_dir <> before then failf "pin-inventory-drift";
-    let receipt=String.concat "\n" ["schema=loom-activation-epoch-v1";"epoch="^string_of_int epoch;"previous_epoch="^string_of_int previous_epoch;"previous_head_sha256="^old_sha;"next_head_sha256="^new_sha;"previous_runtime_id="^current;"next_runtime_id="^next_runtime;"next_runtime_manifest_sha256="^next_manifest;"pin_inventory_sha256="^before;"semantic_authority=Sounio";"producing_language=Sounio";"language_role=SEMANTIC_AUTHORITY";"action=9049";"semantics_sha256="^semantics_sha256;"freeze_sha256="^freeze_sha256;"projection_language=OCaml";"projection_role=OPERATIONAL_PARITY";"command=hook-activation-epoch-advance";"result=ADVANCE";""] in
+    let receipt=String.concat "\n" ["schema=loom-activation-epoch-v1";"epoch="^string_of_int epoch;"previous_epoch="^string_of_int previous_epoch;"previous_head_sha256="^old_sha;"next_head_sha256="^new_sha;"previous_runtime_id="^named;"observed_current_runtime_id="^current;"recovery_epoch="^string_of_bool recovery;"next_runtime_id="^next_runtime;"next_runtime_manifest_sha256="^next_manifest;"pin_inventory_sha256="^before;"semantic_authority=Sounio";"producing_language=Sounio";"language_role=SEMANTIC_AUTHORITY";"action=9049";"semantics_sha256="^semantics_sha256;"freeze_sha256="^freeze_sha256;"projection_language=OCaml";"projection_role=OPERATIONAL_PARITY";"command=hook-activation-epoch-advance";"result=ADVANCE";""] in
     let ep=Filename.concat epochs (Printf.sprintf "%020d.epoch.v1" epoch) in atomic_write ~exclusive:true ep receipt;
     atomic_write head new_head;
     Printf.printf "SOUNIO_ACTIVATION_EPOCH ADVANCE semantic_authority=Sounio action=9049 epoch=%d previous_runtime=%s next_runtime=%s predecessor_sha256=%s pin_inventory_sha256=%s\n%!" epoch current next_runtime old_sha before)
