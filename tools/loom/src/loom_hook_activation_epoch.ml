@@ -36,7 +36,7 @@ let atomic_write ?(exclusive=false) p s =
 let runtime_root git_common = match Sys.getenv_opt "SOUNIO_COORD_RUNTIME_DIR" with Some p when p<>"" -> Unix.realpath p | _ -> Filename.concat git_common "sounio-coord-runtime"
 let state_root git_common = match Sys.getenv_opt "SOUNIO_COORD_DIR" with Some p when p<>"" -> p | _ -> Filename.concat git_common "sounio-coord-state"
 let safe_id id = String.iter (function 'a'..'z'|'A'..'Z'|'0'..'9'|'.'|'_'|'-' -> () | _ -> failf "unsafe-runtime-id") id; id
-let validate_runtime root id =
+let validate_runtime ?(require_generation=true) root id =
   let versions=Unix.realpath (Filename.concat root "versions") in
   let dir=Unix.realpath (Filename.concat versions (safe_id id)) in
   if Filename.dirname dir <> versions then failf "runtime-path-escape";
@@ -46,7 +46,10 @@ let validate_runtime root id =
   verify "loom_runtime_sha256" "bin/sounio-loom-runtime"; verify "coord_runtime_sha256" "bin/sounio-coord-runtime";
   if Sys.file_exists (Filename.concat dir "hooks/sounio_coord_agent_hook_runtime.py") || Sys.file_exists (Filename.concat dir "hooks/sounio_coord_agent_hook.py") then failf "next-runtime-python-bridge";
   let manifest=governed mp in
-  if not (String.contains manifest '\n') || not (List.mem "capability=loom-generation-pinned-cutover-v1" (String.split_on_char '\n' manifest)) then failf "next-runtime-capability-missing";
+  if require_generation &&
+     (not (String.contains manifest '\n') ||
+      not (List.mem "capability=loom-generation-pinned-cutover-v1" (String.split_on_char '\n' manifest)))
+  then failf "next-runtime-capability-missing";
   (dir, sha256_file mp)
 
 let load_authority source_root =
@@ -105,7 +108,7 @@ let materialize_pin_selectors runtime_root pin_dir =
   let selector_root=Filename.concat runtime_root "generation-selectors" in
   mkdir_p selector_root;
   pinned_runtime_ids pin_dir |> List.iter (fun runtime_id ->
-    let runtime_dir,_=validate_runtime runtime_root runtime_id in
+    let runtime_dir,_=validate_runtime ~require_generation:false runtime_root runtime_id in
     let selector=Filename.concat selector_root runtime_id in
     mkdir_p selector;
     ensure_symlink (Filename.concat selector "versions") "../../versions"
