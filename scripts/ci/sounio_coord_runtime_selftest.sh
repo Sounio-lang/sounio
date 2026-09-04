@@ -96,6 +96,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_activation_epoch.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
@@ -139,6 +140,9 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src" "$REPO/tools/loom/message_bridge"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
@@ -164,6 +168,10 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v1" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover.first.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_ACTIVATION_EPOCH_V1.md" \
+  "$ROOT_DIR/tools/loom/activation_epoch_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/activation_epoch.freeze.v1" \
+  "$ROOT_DIR/tools/loom/activation_epoch.first.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
@@ -273,6 +281,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_guardian.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_reconcile.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_activation_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \
@@ -312,6 +321,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_drain_authority.si
 cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_generation_pinned_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_activation_epoch_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
   "$REPO/stdlib/coordination/"

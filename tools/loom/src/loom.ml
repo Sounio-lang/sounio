@@ -13787,6 +13787,8 @@ let main () =
       Loom_hook_generation_reconcile.run (arguments_after_command ())
     else if command = "hook-generation-pin-seal" then
       Loom_hook_generation_pin.run_seal (arguments_after_command ())
+    else if command = "hook-activation-epoch-advance" then
+      Loom_hook_activation_epoch.run (arguments_after_command ())
     else if command = "exec-capability" then
       Loom_exec.run (arguments_after_command ())
     else

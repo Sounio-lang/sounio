@@ -198,6 +198,9 @@ SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OUTPUT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-generation-pinned-cutover" \
   "$SCRIPT_DIR/build_sounio_loom_generation_pinned_cutover.sh"
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
+  SOUNIO_LOOM_ACTIVATION_EPOCH_OUTPUT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-activation-epoch" \
+  "$SCRIPT_DIR/build_sounio_loom_activation_epoch.sh"
+SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_execution_kernel.sh"
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$SCRIPT_DIR/build_sounio_loom_sovereign_change_kernel.sh"
