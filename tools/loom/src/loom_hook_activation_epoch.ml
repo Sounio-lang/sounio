@@ -51,10 +51,11 @@ let validate_runtime root id =
 
 let load_authority source_root =
   let installed=Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name)) "sounio-loom-activation-epoch" in
-  let fallback=Filename.concat source_root "tools/loom/_build/default/src/sounio-loom-activation-epoch" in
+  let runtime_fallback=Filename.concat source_root "tools/loom/.runtime/sounio-loom-activation-epoch" in
+  let build_fallback=Filename.concat source_root "tools/loom/_build/default/src/sounio-loom-activation-epoch" in
   let installed_policy=Filename.concat (Filename.dirname (Filename.dirname (Unix.realpath Sys.executable_name))) "policy/activation-epoch/tools/loom/activation_epoch.freeze.v1" in
   let use_installed=Sys.file_exists installed && Sys.file_exists installed_policy in
-  let exe=if use_installed then installed else fallback in
+  let exe=if use_installed then installed else if Sys.file_exists runtime_fallback then runtime_fallback else build_fallback in
   if sha256_file exe <> executable_sha256 then failf "action-9049-executable-drift";
   let policy=if use_installed then installed_policy else Filename.concat source_root "tools/loom/activation_epoch.freeze.v1" in
   if sha256_file policy <> freeze_sha256 then failf "action-9049-freeze-drift";
