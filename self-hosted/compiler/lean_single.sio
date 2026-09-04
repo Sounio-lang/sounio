@@ -32444,6 +32444,17 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
+    // A fresh primary must clear the unit brand, name AND dimension, exactly as
+    // compile_primary does. The a64 mirror never cleared either: the only
+    // producer on this path is the global read below, so a brand set once
+    // survived into every later expression, and unit_call_arg_mismatch --
+    // which accepts whenever expr_dim equals param_dim -- then rejected
+    // arguments that never carried a unit at all. Measured on
+    // tests/run-pass/unit_param_forwarded_to_param.sio and three others: clean
+    // under x86, spurious "unit mismatch in call argument" under
+    // --target aarch64-linux.
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -34643,6 +34654,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_add_sp_bytes_a64(a64_dargs_drop)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                // The result of a call carries the unit of its RETURN type, not
+                // of its last argument (mirror of the x86 site). Without this the
+                // brand of the final argument outlived the call and stood in for
+                // the result.
+                expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // β⁹ GTT a64: union of argument channel sets becomes the return
                 // value's topology (mirror of x86 compile_primary at ~10313).
@@ -35104,6 +35120,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_CH_SET = 0
                 EXPR_PARAM_USED = 0
             }
+            // Track unit for dimension checking at + and - (mirror of the x86
+            // ident-load site). The a64 pass read no brand off a local at all,
+            // so only globals ever carried one.
+            if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
+            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // A derived quantity carries a dimension with no name, which
+            // unit_lookup_dim cannot recover from a zero hash.
+            if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
+                EXPR_UNIT_DIM = VAR_UNIT_DIM[vi as usize]
+            }
             var_mark_used(ns, ne)
         } else {
             let gi = gl_find(ns, ne)
@@ -35264,6 +35290,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             EXPR_TY = cast_ty
             EXPR_TY_HASH = cast_hash
+            // A cast sets the brand from the target type: `raw as molal`
+            // enters the unit world (mirror of the x86 cast site).
+            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -35497,6 +35526,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     emit_add_sp_bytes_a64(a64_margs_drop)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    // The result of a method call carries the unit of its RETURN
+                    // type, not of its last argument (mirror of the x86 site).
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
@@ -35812,6 +35844,8 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // Gen 19: capture unit dim before push (EXPR_UNIT_DIM is global).
+        let left_udim_a = EXPR_UNIT_DIM
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
@@ -35830,6 +35864,8 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         compile_postfix_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        // Gen 19: capture unit dim of the RHS before it is overwritten.
+        let right_udim_a = EXPR_UNIT_DIM
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
             if op == 20 { tc_error(op_tok, "division by zero") }
             else { tc_error(op_tok, "modulo by zero") }
@@ -35882,6 +35918,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if op == 20 { emit_f64_binop_a64(0x1E611800) }
             if op == 29 { em32(0x9B007C20) }
             EXPR_IS_F64 = 1
+            EXPR_TY = 2
         } else {
             if op == 19 { em32(0x9B007C20) }  // mul x0, x1, x0
             if op == 20 { em32(0x9AC00C20) }  // sdiv x0, x1, x0
@@ -35889,7 +35926,20 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                 em32(0x9AC00C00 | (0 << 16) | (1 << 5) | 9)
                 em32(0x9B008000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
             }
+            EXPR_TY = 1
         }
+        // An arithmetic result is a fresh number: its type is the operand kind
+        // and it carries no named type (mirror of the x86 site). The a64 pass
+        // left EXPR_TY_HASH holding the RHS's hash, so `distance / time` was
+        // typed `s` and a `velocity` parameter rejected it as E001.
+        EXPR_TY_HASH = 0
+        // Gen 19: propagate unit dimension through * and / (mirror of the x86
+        // compile_multiplicative site). Without this a derived quantity --
+        // distance / time -- lost its composed dimension on the a64 path, so a
+        // `velocity` parameter rejected the very value that produced it.
+        if op == 19 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_add(left_udim_a, right_udim_a) }
+        else if op == 20 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_sub(left_udim_a, right_udim_a) }
+        else { EXPR_UNIT = 0; EXPR_UNIT_DIM = 0 }
         // β⁴: GUM variance propagation through *
         // Save result first — shadow computation overwrites x0
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -36621,6 +36671,20 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
+                // Set unit hash for unit-typed bindings (mirror of the x86 let
+                // site). The a64 pass stored no brand at a binding, so
+                // `let m: molal = 2.5` produced an unbranded local and the very
+                // next call rejected it as a mismatch.
+                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                    VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
+                } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
+                    VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
+                }
+                // A derived quantity has no unit NAME to store: distance / time
+                // composes m/s, which no declared unit names.
+                if VAR_UNIT[(VAR_COUNT - 1) as usize] == 0 && EXPR_UNIT_DIM != 0 {
+                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = EXPR_UNIT_DIM
+                }
                 // β⁴/β⁵: capture variance/sensitivity shadow into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
                 if decl_is_mut == 1 && EXPR_IS_F64 == 1 {
@@ -38288,6 +38352,13 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     if pslot >= 0 {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        // A unit-typed parameter carries its brand, exactly as the
+                        // x86 param scan does. Without this the a64 pass erased the
+                        // unit at every function boundary, so a parameter forwarded
+                        // to another parameter arrived unbranded.
+                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                            VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                         // fn-type (SCAN_TY==9) parameters arrive as tagged fn-refs (bit 0 set);
                         // mark them closure so the call site untags via the tbnz dispatch (Path A)
