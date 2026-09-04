@@ -119,7 +119,7 @@ let advance ~source_root ~git_common ~next_runtime =
     let receipt=String.concat "\n" ["schema=loom-activation-epoch-v1";"epoch="^string_of_int epoch;"previous_epoch="^string_of_int previous_epoch;"previous_head_sha256="^old_sha;"next_head_sha256="^new_sha;"previous_runtime_id="^named;"observed_current_runtime_id="^current;"recovery_epoch="^string_of_bool recovery;"next_runtime_id="^next_runtime;"next_runtime_manifest_sha256="^next_manifest;"pin_inventory_sha256="^before;"semantic_authority=Sounio";"producing_language=Sounio";"language_role=SEMANTIC_AUTHORITY";"action=9049";"semantics_sha256="^semantics_sha256;"freeze_sha256="^freeze_sha256;"projection_language=OCaml";"projection_role=OPERATIONAL_PARITY";"command=hook-activation-epoch-advance";"result=ADVANCE";""] in
     let ep=Filename.concat epochs (Printf.sprintf "%020d.epoch.v1" epoch) in atomic_write ~exclusive:true ep receipt;
     atomic_write head new_head;
-    Printf.printf "SOUNIO_ACTIVATION_EPOCH ADVANCE semantic_authority=Sounio action=9049 epoch=%d previous_runtime=%s next_runtime=%s predecessor_sha256=%s pin_inventory_sha256=%s\n%!" epoch current next_runtime old_sha before)
+    Printf.printf "SOUNIO_ACTIVATION_EPOCH ADVANCE semantic_authority=Sounio action=9049 epoch=%d previous_runtime=%s observed_current=%s next_runtime=%s predecessor_sha256=%s pin_inventory_sha256=%s\n%!" epoch named current next_runtime old_sha before)
 
 let run arguments =
   let rec parse sr gc nr = function []->sr,gc,nr | "--source-root"::v::xs->parse v gc nr xs | "--git-common"::v::xs->parse sr v nr xs | "--next-runtime"::v::xs->parse sr gc v xs | _->failf "usage: hook-activation-epoch-advance --source-root ROOT --git-common DIR --next-runtime ID" in
