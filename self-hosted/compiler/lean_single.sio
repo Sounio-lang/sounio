@@ -33304,6 +33304,42 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         EXPR_IS_F64 = 0
         EXPR_TY = 10
+        // Borrow conflict detection and tracking (mirror of
+        // compile_borrow_primary_x86). The arm64 mirror had no VAR_BORROW_COUNT
+        // or VAR_BORROW_EXCL site at all, so no borrow was ever recorded and no
+        // conflict could ever be reported on this target.
+        let bvi_a = var_find_idx(rns, rne)
+        if bvi_a >= 0 {
+            // Reborrow through a reference is always safe: exclusivity is already
+            // guaranteed by the existing reference.
+            let bvi_a_is_ref = VAR_TY[bvi_a as usize] == 10
+            if bvi_a_is_ref == false {
+                if want_mut != 0 {
+                    if VAR_BORROW_COUNT[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
+                    }
+                    if VAR_BORROW_EXCL[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "Cannot borrow as mutable: exclusive borrow already active")
+                    }
+                    VAR_BORROW_EXCL[bvi_a as usize] = VAR_BORROW_EXCL[bvi_a as usize] + 1
+                    if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                        CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi_a
+                        CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
+                        CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                    }
+                } else {
+                    if VAR_BORROW_EXCL[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable")
+                    }
+                    VAR_BORROW_COUNT[bvi_a as usize] = VAR_BORROW_COUNT[bvi_a as usize] + 1
+                    if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                        CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi_a
+                        CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 0
+                        CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                    }
+                }
+            }
+        }
         if var_find_idx(rns, rne) >= 0 {
             var inner_ty_b = VAR_TY[var_find_idx(rns, rne) as usize]
             var inner_hash_b = VAR_TY_HASH[var_find_idx(rns, rne) as usize]
@@ -34585,6 +34621,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
+                // Mark that we are inside a call argument list so borrows taken
+                // here are tracked, and save the previous depth so nested calls
+                // do not clobber our records.
+                let prev_in_call_args_a = IN_CALL_ARGS
+                let prev_borrow_n_a = CALL_ARG_BORROW_N
+                IN_CALL_ARGS = 1
             var abi_argc: i64 = 0
             B5_ARG_VCOUNT = 0
             B9_ARG_CH_COUNT = 0
@@ -34654,6 +34696,10 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
+            // Restore call-arg tracking state and release the borrows taken in
+            // this argument list (mirror of compile_primary).
+            IN_CALL_ARGS = prev_in_call_args_a
+            release_call_arg_borrows(prev_borrow_n_a)
             if fi >= 0 {
                 // Hard, as the x86 general-call site is: a call whose argument
                 // count does not match the resolved definition is a genuine
