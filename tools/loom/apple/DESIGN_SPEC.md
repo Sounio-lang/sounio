@@ -1,11 +1,13 @@
 # Loom Native Workbench
 
-Status: Alpha implementation, native Apple client validated on macOS 27
+Status: Beta refinement in progress. The macOS 27 baseline was validated on Apple
+Silicon; the current conversation-first refinement awaits a fresh native gate.
 
-Figma source: <https://www.figma.com/design/wVSqacgCCyTRGtltZChNXk>
+Figma source: <https://www.figma.com/design/kXOVfoBejagrX2GdHACg6G>
 
-- Page `06 - Spatial Glass Observatory`: macOS command center
-- Page `07 - Material + Motion Spec`: material, motion, and accessibility
+- Frame `Conversation Space / Native Workbench` (`19:2`): approved primary surface
+- Frame `Conversation Space / Native Workbench Beta Review` (`33:137`): protected
+  refinement with lane search/scope, backend authority, and linear receipt context
 
 ## Product role
 
@@ -13,12 +15,14 @@ Loom Native Workbench is the heavy-use interface for macOS 27 and the review com
 for iOS 27. The web cockpit remains a useful remote read surface. Neither UI is
 the owner of session custody, routing outcomes, or semantic truth.
 
-The primary interaction is a spatial operational fabric:
+The primary interaction is the Conversation Space. The spatial operational fabric
+is a supporting mode, never a prerequisite for speaking naturally with an agent:
 
-1. inspect quota pools, CLI adapters, models, lanes, and authority;
-2. follow one selected route through the fabric;
-3. inspect the backend-produced receipt;
-4. keep the agent conversation beside the evidence;
+1. choose a real, published lane through search and `All / Ready / Watch` scope;
+2. continue a natural conversation with a durable transcript and per-lane draft;
+3. keep the live delivery state and backend-produced receipt close but quiet;
+4. move to spatial evidence or policy configuration only when that changes the
+   next decision;
 5. configure policy inputs without computing the decision in the UI.
 
 ## Conversation contract
@@ -67,11 +71,16 @@ Adapter health is exactly one of:
 healthy | broken | missing | auth_required
 ```
 
-`RouteReceipt` contains exactly the integration fields:
+`RouteReceipt` always contains these routing-identity fields:
 
 ```text
 taskId policy poolId adapterId model effort reason fallbackChain status
 ```
+
+It may carry additive, backend-produced provenance fields such as semantic
+source hashes, toolchain, hardware, quota observations, and language roles.
+Those fields are evidence only: their presence does not give the UI, a parity
+language, or an LLM authority to create or promote a routing outcome.
 
 The native client decodes the existing read-only Loom projections. Backend
 code arbitrates. A visual filament, animation, shader, LLM opinion, or parity
@@ -187,6 +196,8 @@ never the capability or message body.
 
 The validated macOS slice displays real read-only fleet state and selects a
 live lane with an active endpoint before falling back to a durable-only target.
+The Beta lane rail never replaces an empty live fleet with sample agents; it
+shows the explicit empty or non-matching state instead.
 The endpoint state and delivery expectation remain visible before submission.
 The Conversation tab renders the authenticated correlated thread projection:
 request, wake, response, ACK, timeout, and durable-only are distinct durable
@@ -201,3 +212,7 @@ round-trip is recorded in
 is recorded in `evidence/2026-09-03-thread-truth-gate.txt`. Declarative
 routing configuration persistence and refusal coverage are recorded in
 `evidence/2026-09-03-routing-config-gate.txt`.
+The visual Beta review is recorded in
+`evidence/2026-09-04-native-workbench-beta-refinement-gate.txt`; its native
+revalidation remains intentionally unclaimed until the Apple endpoint is
+reachable.
