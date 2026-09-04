@@ -28,10 +28,12 @@ struct ConversationSpaceView: View {
 
     private var conversationHeader: some View {
         HStack(alignment: .center, spacing: 12) {
-            Circle()
-                .fill(accent)
-                .frame(width: 10, height: 10)
-                .shadow(color: accent.opacity(0.8), radius: 7)
+            ConversationPresenceBeacon(
+                color: accent,
+                isLive: selectedLane?.deliveryReadiness == .immediate
+            )
+            .frame(width: 34, height: 34)
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(selectedLane?.agent ?? "CONVERSATION")
@@ -256,7 +258,7 @@ struct ConversationContextDrawer: View {
                         .foregroundStyle(LoomColor.cyan)
                 }
 
-                ContextCard(
+                ContextSection(
                     title: "WORKING WITH",
                     detail: store.selectedLane?.agent ?? "No selected lane",
                     accent: LoomColor.cyan
@@ -267,7 +269,9 @@ struct ConversationContextDrawer: View {
                         .lineLimit(2)
                 }
 
-                ContextCard(
+                Divider().opacity(0.30)
+
+                ContextSection(
                     title: "ROUTE RECEIPT",
                     detail: store.dashboard.receipt.status.rawValue.uppercased(),
                     accent: store.dashboard.receipt.status.loomColor
@@ -278,7 +282,9 @@ struct ConversationContextDrawer: View {
                     ReceiptLine(label: "effort", value: store.dashboard.receipt.effort)
                 }
 
-                ContextCard(
+                Divider().opacity(0.30)
+
+                ContextSection(
                     title: "FLEET SIGNAL",
                     detail: fleetDetail,
                     accent: fleetColor
@@ -290,6 +296,8 @@ struct ConversationContextDrawer: View {
                 }
 
                 Spacer(minLength: 0)
+
+                Divider().opacity(0.30)
 
                 Label("System activity stays out of the conversation unless it changes your next move.", systemImage: "eye.slash")
                     .font(.system(size: 10, weight: .medium))
@@ -410,7 +418,7 @@ private struct ConversationStateCard: View {
     }
 }
 
-private struct ContextCard<Content: View>: View {
+private struct ContextSection<Content: View>: View {
     let title: String
     let detail: String
     let accent: Color
@@ -427,9 +435,56 @@ private struct ContextCard<Content: View>: View {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.10)))
+    }
+}
+
+private struct ConversationPresenceBeacon: View {
+    let color: Color
+    let isLive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1 / 30)) { timeline in
+            let phase = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, size in
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                let outer = min(size.width, size.height) / 2 - 1
+                let ringColor = color.opacity(isLive ? 0.45 : 0.22)
+
+                context.stroke(
+                    Path(ellipseIn: CGRect(
+                        x: center.x - outer,
+                        y: center.y - outer,
+                        width: outer * 2,
+                        height: outer * 2
+                    )),
+                    with: .color(ringColor),
+                    style: StrokeStyle(lineWidth: 0.8, dash: [2, 4], dashPhase: phase * -9)
+                )
+
+                let orbit = outer * 0.64
+                let angle = phase * (isLive ? 1.65 : 0.45)
+                let traveler = CGPoint(
+                    x: center.x + cos(angle) * orbit,
+                    y: center.y + sin(angle) * orbit
+                )
+                context.drawLayer { glow in
+                    glow.addFilter(.blur(radius: 4))
+                    glow.fill(
+                        Path(ellipseIn: CGRect(x: traveler.x - 4, y: traveler.y - 4, width: 8, height: 8)),
+                        with: .color(color.opacity(isLive ? 0.7 : 0.3))
+                    )
+                }
+                context.fill(
+                    Path(ellipseIn: CGRect(x: center.x - 3.5, y: center.y - 3.5, width: 7, height: 7)),
+                    with: .color(color)
+                )
+                context.fill(
+                    Path(ellipseIn: CGRect(x: traveler.x - 1.6, y: traveler.y - 1.6, width: 3.2, height: 3.2)),
+                    with: .color(.white)
+                )
+            }
+        }
     }
 }
 

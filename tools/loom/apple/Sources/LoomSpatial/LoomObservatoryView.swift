@@ -159,17 +159,26 @@ private struct ObservatoryToolbar: View {
             .frame(width: 280)
             .accessibilityIdentifier("loom-workbench-mode")
 
-            Menu {
-                Picker("Scenario", selection: $store.scenario) {
-                    ForEach(DashboardScenario.allCases) { scenario in
-                        Text(scenario.title).tag(scenario)
+            if store.connection == .connected {
+                Label("Kernel decides", systemImage: "lock.shield")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(LoomColor.green)
+                    .help("The backend owns routing decisions. Scenario previews are unavailable while live data is connected.")
+                    .accessibilityIdentifier("loom-live-authority-indicator")
+            } else {
+                Menu {
+                    Picker("Scenario", selection: $store.scenario) {
+                        ForEach(DashboardScenario.allCases) { scenario in
+                            Text(scenario.title).tag(scenario)
+                        }
                     }
+                } label: {
+                    Label(store.scenario.title, systemImage: "switch.2")
+                        .font(.system(size: 11, weight: .semibold))
                 }
-            } label: {
-                Label(store.scenario.title, systemImage: "switch.2")
-                    .font(.system(size: 11, weight: .semibold))
+                .help("Preview an operational state while the live kernel is unavailable")
+                .accessibilityIdentifier("loom-scenario-preview")
             }
-            .help("Preview operational state")
 
             Button {
                 Task { await store.refreshFleet() }

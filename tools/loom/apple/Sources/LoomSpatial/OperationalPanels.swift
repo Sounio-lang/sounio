@@ -3,8 +3,10 @@ import LoomDomain
 
 struct LaneRail: View {
     @ObservedObject var store: LoomStore
+    @State private var query = ""
+    @State private var scope: LaneScope = .all
 
-    private var lanes: [LoomFleetSnapshot.Lane] {
+    private var allLanes: [LoomFleetSnapshot.Lane] {
         (store.fleet?.lanes ?? []).sorted {
             let lhsRank = $0.displayRank
             let rhsRank = $1.displayRank
@@ -14,21 +16,71 @@ struct LaneRail: View {
         }
     }
 
+    private var lanes: [LoomFleetSnapshot.Lane] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return allLanes.filter { lane in
+            guard scope.includes(lane) else { return false }
+            guard normalizedQuery.isEmpty == false else { return true }
+            return lane.agent.localizedCaseInsensitiveContains(normalizedQuery)
+                || lane.lane.localizedCaseInsensitiveContains(normalizedQuery)
+                || lane.harness.localizedCaseInsensitiveContains(normalizedQuery)
+        }
+    }
+
     var body: some View {
         GlassSurface {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text("ACTIVE LANES")
+                    Text(scope.label.uppercased())
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(String(lanes.count))
+                    Text(lanes.count == allLanes.count ? String(lanes.count) : "\(lanes.count)/\(allLanes.count)")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundStyle(LoomColor.cyan)
                 }
                 .padding(12)
 
                 Divider().opacity(0.55)
+
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(LoomColor.cyan)
+                    TextField("Find agent, lane, or CLI", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .accessibilityIdentifier("loom-lane-search")
+                    if query.isEmpty == false {
+                        Button {
+                            query = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear lane search")
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+
+                Picker("Lane visibility", selection: $scope) {
+                    ForEach(LaneScope.allCases) { scope in
+                        Text(scope.shortLabel).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("loom-lane-scope")
+
+                Divider().opacity(0.35)
 
                 ScrollView {
                     LazyVStack(spacing: 2) {
@@ -51,6 +103,8 @@ struct LaneRail: View {
                                 state: "unresponsive",
                                 selected: false
                             )
+                        } else if lanes.isEmpty {
+                            LaneSearchEmptyState(query: query, scope: scope)
                         } else {
                             ForEach(lanes) { lane in
                                 Button {
@@ -81,6 +135,69 @@ struct LaneRail: View {
                 .padding(12)
             }
         }
+    }
+}
+
+private enum LaneScope: String, CaseIterable, Identifiable {
+    case all
+    case reachable
+    case attention
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .all: "All lanes"
+        case .reachable: "Reachable now"
+        case .attention: "Needs attention"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .all: "All"
+        case .reachable: "Ready"
+        case .attention: "Watch"
+        }
+    }
+
+    func includes(_ lane: LoomFleetSnapshot.Lane) -> Bool {
+        switch self {
+        case .all:
+            true
+        case .reachable:
+            lane.hasLivePresence || lane.hasActiveEndpoint
+        case .attention:
+            ["unresponsive", "orphaned", "lost"].contains(lane.displayState)
+        }
+    }
+}
+
+private struct LaneSearchEmptyState: View {
+    let query: String
+    let scope: LaneScope
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Image(systemName: "scope")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(LoomColor.amber)
+            Text("Nothing matches")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+            Text(detail)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+    }
+
+    private var detail: String {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "No \(scope.label.lowercased()) are published by the live fleet."
+        }
+        return "Try another agent, lane, or CLI name."
     }
 }
 
