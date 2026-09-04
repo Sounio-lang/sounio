@@ -85,25 +85,6 @@ struct LaneRail: View {
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         if lanes.isEmpty {
-                            MockLaneRow(
-                                agent: "codex-3",
-                                lane: "loom-material",
-                                state: "live",
-                                selected: true
-                            )
-                            MockLaneRow(
-                                agent: "claude-2",
-                                lane: "compiler-parity",
-                                state: "claimed",
-                                selected: false
-                            )
-                            MockLaneRow(
-                                agent: "grok-cli2",
-                                lane: "hostile-review",
-                                state: "unresponsive",
-                                selected: false
-                            )
-                        } else if lanes.isEmpty {
                             LaneSearchEmptyState(query: query, scope: scope)
                         } else {
                             ForEach(lanes) { lane in
@@ -206,7 +187,7 @@ private struct LaneRow: View {
     let selected: Bool
 
     var body: some View {
-        MockLaneRow(
+        LaneRowBody(
             agent: lane.agent,
             lane: lane.lane,
             state: lane.displayState,
@@ -215,7 +196,7 @@ private struct LaneRow: View {
     }
 }
 
-private struct MockLaneRow: View {
+private struct LaneRowBody: View {
     let agent: String
     let lane: String
     let state: String
