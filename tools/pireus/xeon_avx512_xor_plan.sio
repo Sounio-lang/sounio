@@ -1,0 +1,129 @@
+// Sounio executable authority for the Xeon AVX-512 two-ZMM lowering plan.
+// Each displacement uses two register-indexed VPERMPD instructions. The low
+// three displacement bits select lanes within a ZMM; bit 3 selects the source
+// half. Sign masks retain the Cayley-Dickson twist before horizontal reduction.
+fn cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sign(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sign(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sign(a_lo, 0, bits - 1) }
+        return 0 - cd_sign(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sign(0, a_lo, bits - 1) }
+    cd_sign(b_lo, a_lo, bits - 1)
+}
+
+fn source_index(out_half: i64, lane: i64, displacement: i64) -> i64 {
+    let swap = (displacement >> 3) & 1
+    let source_half = out_half ^ swap
+    let source_lane = lane ^ (displacement & 7)
+    source_half * 8 + source_lane
+}
+
+fn sign_mask_for_half(displacement: i64, out_half: i64) -> i64 {
+    var mask: i64 = 0
+    var lane: i64 = 0
+    while lane < 8 {
+        let i = out_half * 8 + lane
+        let j = source_index(out_half, lane, displacement)
+        if cd_sign(i, j, 4) < 0 { mask = mask | (1 << lane) }
+        lane = lane + 1
+    }
+    mask
+}
+
+fn plan_term(a_basis: i64, b_basis: i64, displacement: i64) -> i64 {
+    let out_half = a_basis >> 3
+    let lane = a_basis & 7
+    let selected_b = source_index(out_half, lane, displacement)
+    if selected_b != b_basis { return 0 }
+    let mask = sign_mask_for_half(displacement, out_half)
+    if ((mask >> lane) & 1) == 1 { 0 - 1 } else { 1 }
+}
+
+fn semantic_term(a_basis: i64, b_basis: i64, displacement: i64) -> i64 {
+    if (a_basis ^ displacement) != b_basis { return 0 }
+    cd_sign(a_basis, b_basis, 4)
+}
+
+fn main() -> i32 with IO {
+    var selection_failures: i64 = 0
+    var sign_failures: i64 = 0
+    var negative_mask_bits: i64 = 0
+    var control_checksum: i64 = 0
+    var displacement: i64 = 0
+
+    print("schema=pireus-xeon-avx512-xor-plan-v1\n")
+    print("producer_language=Sounio\n")
+    print("producer_role=SEMANTIC_AUTHORITY\n")
+    print("operator=XorConvolution bits=4 twist=CayleyDicksonSign\n")
+    print("instruction=VPERMPD encoding=EVEX.66.0F38.W1.16/r lanes=8\n")
+    while displacement < 16 {
+        let lane_xor = displacement & 7
+        let swap = (displacement >> 3) & 1
+        let lo_source_half = swap
+        let hi_source_half = 1 ^ swap
+        let lo_sign_mask = sign_mask_for_half(displacement, 0)
+        let hi_sign_mask = sign_mask_for_half(displacement, 1)
+        print("shift="); print_int(displacement)
+        print(" lane_xor="); print_int(lane_xor)
+        print(" swap_halves="); print_int(swap)
+        print(" lo_source_half="); print_int(lo_source_half)
+        print(" hi_source_half="); print_int(hi_source_half)
+        print(" lo_sign_mask="); print_int(lo_sign_mask)
+        print(" hi_sign_mask="); print_int(hi_sign_mask)
+        print("\n")
+
+        var lane: i64 = 0
+        while lane < 8 {
+            control_checksum = control_checksum + (displacement + 1) * (lane + 1) * ((lane ^ lane_xor) + 1)
+            lane = lane + 1
+        }
+        var bit: i64 = 0
+        while bit < 8 {
+            negative_mask_bits = negative_mask_bits + ((lo_sign_mask >> bit) & 1)
+            negative_mask_bits = negative_mask_bits + ((hi_sign_mask >> bit) & 1)
+            bit = bit + 1
+        }
+        displacement = displacement + 1
+    }
+
+    var a: i64 = 0
+    while a < 16 {
+        var b: i64 = 0
+        while b < 16 {
+            var d: i64 = 0
+            while d < 16 {
+                let got = plan_term(a, b, d)
+                let expected = semantic_term(a, b, d)
+                if (got == 0) != (expected == 0) { selection_failures = selection_failures + 1 }
+                if got != expected { sign_failures = sign_failures + 1 }
+                d = d + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    print("shift_plans=16\n")
+    print("basis_pairs=256\n")
+    print("vpermpd_per_shift=2\n")
+    print("vpermpd_total=32\n")
+    print("negative_mask_bits="); print_int(negative_mask_bits); print("\n")
+    print("control_checksum="); print_int(control_checksum); print("\n")
+    print("selection_failures="); print_int(selection_failures); print("\n")
+    print("sign_failures="); print_int(sign_failures); print("\n")
+    if selection_failures == 0 && sign_failures == 0 && negative_mask_bits == 120 {
+        print("PIREUS_XEON_AVX512_XOR_PLAN_PASS\n")
+        return 0
+    }
+    print("PIREUS_XEON_AVX512_XOR_PLAN_FAIL\n")
+    1
+}
