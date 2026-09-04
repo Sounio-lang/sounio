@@ -3653,11 +3653,26 @@ coord_wake_reconcile_command() {
 }
 
 coord_obligation_supervisor_stop_children() {
-  local child
-  local -a children=()
+  local child attempt proc_tail proc_state
+  local -a children=() remaining=()
   mapfile -t children < <(jobs -pr)
   for child in "${children[@]}"; do
     kill "$child" 2>/dev/null || true
+  done
+  for attempt in {1..10}; do
+    remaining=()
+    for child in "${children[@]}"; do
+      if kill -0 "$child" 2>/dev/null; then
+        proc_tail="$(sed 's/^[^)]*) //' "/proc/$child/stat" 2>/dev/null || true)"
+        proc_state="${proc_tail%% *}"
+        [[ -z "$proc_tail" || "$proc_state" == Z ]] || remaining+=("$child")
+      fi
+    done
+    ((${#remaining[@]} == 0)) && break
+    sleep 0.1
+  done
+  for child in "${remaining[@]}"; do
+    kill -KILL "$child" 2>/dev/null || true
   done
   for child in "${children[@]}"; do
     wait "$child" 2>/dev/null || true
@@ -3718,15 +3733,15 @@ coord_obligation_supervisor_owned_pids() {
   for proc in /proc/[1-9]*; do
     [[ -d "$proc" ]] || continue
     pid="${proc##*/}"
+    argv=()
+    while IFS= read -r -d '' value; do
+      argv+=("$value")
+    done < "$proc/cmdline" 2>/dev/null || true
+    [[ "${argv[2]:-}" == obligation-supervise ]] || continue
     owner="$(stat -c %u "$proc" 2>/dev/null || true)"
     [[ "$owner" == "$(id -u)" ]] || continue
     ppid="$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/status" 2>/dev/null || true)"
     [[ "$ppid" == 1 ]] || continue
-    argv=()
-    while IFS= read -r -d '' value; do
-      argv+=("$value")
-    done < "$proc/cmdline"
-    [[ "${argv[2]:-}" == obligation-supervise ]] || continue
     script_path="$(readlink -f "${argv[1]:-}" 2>/dev/null || true)"
     [[ -n "$script_path" ]] || continue
     if [[ -n "$runtime_root" ]]; then
