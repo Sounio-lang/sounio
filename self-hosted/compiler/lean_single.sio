@@ -32640,6 +32640,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_LINEAR = 0
     LAST_EXPR_VAR_IDX = -1
     LAST_EXPR_IS_AFFINE = 0
+    // β⁹ GTT: a fresh primary expression starts with empty channel topology
+    // (mirror of compile_primary). Without this reset the a64 pass carried the
+    // previous expression's channel set into the next one, so every union
+    // downstream was an over-approximation of an already-wrong set.
+    EXPR_CH_SET = 0
+    EXPR_PARAM_USED = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -35007,9 +35013,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let pw_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_x_slot_a)
+                // β⁹ GTT: capture x's topology before the y arg overwrites EXPR_CH_SET.
+                let pw_x_ch_set_a = EXPR_CH_SET
+                let pw_x_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let pw_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_y_slot_a)
+                // β⁹ GTT: y's topology. pow(x, y) depends on both → union.
+                let pw_y_ch_set_a = EXPR_CH_SET
+                let pw_y_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 {
                     tc_wrong_arity(name_tok, 2, 3)
                     while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -35027,6 +35039,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
+                // β⁹ GTT: pow(x, y) depends on both x and y.
+                EXPR_CH_SET = pw_x_ch_set_a | pw_y_ch_set_a
+                EXPR_PARAM_USED = pw_x_param_used_a | pw_y_param_used_a
                 return
             }
             // atan2(y, x) — same shape, same omission of the AD shadow propagation.
@@ -35034,9 +35049,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let a2_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_y_slot_a)
+                // β⁹ GTT: capture y's topology before the x arg overwrites EXPR_CH_SET.
+                let a2_y_ch_set_a = EXPR_CH_SET
+                let a2_y_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let a2_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_x_slot_a)
+                // β⁹ GTT: x's topology. atan2(y, x) depends on both → union.
+                let a2_x_ch_set_a = EXPR_CH_SET
+                let a2_x_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 {
                     tc_wrong_arity(name_tok, 2, 3)
                     while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
@@ -35050,6 +35071,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
+                // β⁹ GTT: atan2(y, x) depends on both y and x.
+                EXPR_CH_SET = a2_y_ch_set_a | a2_x_ch_set_a
+                EXPR_PARAM_USED = a2_y_param_used_a | a2_x_param_used_a
                 return
             }
             if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos")) {
@@ -36466,50 +36490,136 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if (FN_EFFECTS[CURRENT_FN as usize] & 512) == 0 {
                         tc_epistemic_value_access(method_tok)
                     }
-                    // β⁴: save ptr, load variance shadow, restore ptr, load .value
-                    // x0 = Knowledge ptr: [x0+0]=value, [x0+8]=variance
-                    let b4a_ptr_slot = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_ptr_slot)         // save ptr
-                    em32(0xF9400400)                          // ldr x0, [x0, #8] (variance)
-                    let b4a_vseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_vseed)             // store variance shadow
-                    // β¹⁰: bind σ² to FO channel (parity with x86 path)
-                    if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
-                        CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
+                    // β⁴/β⁵ covariance: save variance/sensitivity shadow before loading .value.
+                    // x0 = Knowledge ptr: [x0+0]=value, [x0+8]=variance, [x0+16]=confidence.
+                    //
+                    // β⁵: reuse vseed/sseed for the same Knowledge<T> variable so that
+                    // left_vshadow == right_vshadow in x.value - x.value → Var=0 at the
+                    // subtraction. Mirror of compile_postfix_tail; the a64 pass had no cache
+                    // and allocated a fresh channel on every read, so the SECOND read of one
+                    // variable landed on a different channel than the first, and past the
+                    // eighth read on a bit outside [0,8) entirely.
+                    var b4a_vseed: i64 = -1
+                    var b4a_sseed: i64 = -1
+                    var b4a_sseed_1: i64 = -1
+                    var b4a_sseed_2: i64 = -1
+                    var b4a_sseed_3: i64 = -1
+                    var b4a_sseed_4: i64 = -1
+                    var b4a_sseed_5: i64 = -1
+                    var b4a_sseed_6: i64 = -1
+                    var b4a_sseed_7: i64 = -1
+                    var km_cached_a: i64 = 0
+                    if LAST_EXPR_VAR_IDX >= 0 {
+                        var cia: i64 = 0
+                        while cia < KM_CACHE_COUNT {
+                            if KM_CACHE_VI[cia as usize] == LAST_EXPR_VAR_IDX {
+                                b4a_vseed = KM_CACHE_VS[cia as usize]
+                                b4a_sseed = KM_CACHE_SS[cia as usize]
+                                b4a_sseed_1 = KM_CACHE_SS_1[cia as usize]
+                                b4a_sseed_2 = KM_CACHE_SS_2[cia as usize]
+                                b4a_sseed_3 = KM_CACHE_SS_3[cia as usize]
+                                b4a_sseed_4 = KM_CACHE_SS4[cia as usize]
+                                b4a_sseed_5 = KM_CACHE_SS_5[cia as usize]
+                                b4a_sseed_6 = KM_CACHE_SS_6[cia as usize]
+                                b4a_sseed_7 = KM_CACHE_SS_7[cia as usize]
+                                km_cached_a = 1
+                                cia = KM_CACHE_COUNT
+                            }
+                            cia = cia + 1
+                        }
                     }
-                    emit_load_var_a64(b4a_ptr_slot)           // restore ptr
-                    em32(0xF9400000)                          // ldr x0, [x0] (.value)
+                    if km_cached_a == 1 {
+                        // Slots already populated: just load .value.
+                        em32(0xF9400000)                      // ldr x0, [x0]
+                    } else {
+                        let b4a_ptr_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_ptr_slot)      // save ptr
+                        em32(0xF9400400)                      // ldr x0, [x0, #8] (variance)
+                        b4a_vseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_vseed)         // store variance shadow
+                        // β¹⁰: bind σ² to FO channel (parity with x86 path)
+                        if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
+                            CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
+                        }
+                        emit_load_var_a64(b4a_ptr_slot)       // restore ptr
+                        em32(0xF9400000)                      // ldr x0, [x0] (.value)
+                        // Save .value before the sensitivity seeds (emit_imm64_a64 overwrites x0)
+                        let b4a_valsave = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_valsave)
+                        // Sensitivity seeds ch0-ch7: 1.0 for the matching Knowledge access,
+                        // else 0.0. The a64 pass seeded only ch0-ch3; an expression over more
+                        // than four measured inputs lost its four upper channels silently.
+                        b4a_sseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 0 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed)
+                        b4a_sseed_1 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 1 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_1)
+                        b4a_sseed_2 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 2 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_2)
+                        b4a_sseed_3 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 3 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_3)
+                        b4a_sseed_4 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 4 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_4)
+                        b4a_sseed_5 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 5 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_5)
+                        b4a_sseed_6 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 6 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_6)
+                        b4a_sseed_7 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 7 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_7)
+                        MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
+                        // Restore .value (emit_imm64_a64 overwrote x0 with the last seed)
+                        emit_load_var_a64(b4a_valsave)
+                        // Register in cache for future reuse
+                        if LAST_EXPR_VAR_IDX >= 0 && KM_CACHE_COUNT < 32 {
+                            KM_CACHE_VI[KM_CACHE_COUNT as usize] = LAST_EXPR_VAR_IDX
+                            KM_CACHE_VS[KM_CACHE_COUNT as usize] = b4a_vseed
+                            KM_CACHE_SS[KM_CACHE_COUNT as usize] = b4a_sseed
+                            KM_CACHE_SS_1[KM_CACHE_COUNT as usize] = b4a_sseed_1
+                            KM_CACHE_SS_2[KM_CACHE_COUNT as usize] = b4a_sseed_2
+                            KM_CACHE_SS_3[KM_CACHE_COUNT as usize] = b4a_sseed_3
+                            KM_CACHE_SS4[KM_CACHE_COUNT as usize] = b4a_sseed_4
+                            KM_CACHE_SS_5[KM_CACHE_COUNT as usize] = b4a_sseed_5
+                            KM_CACHE_SS_6[KM_CACHE_COUNT as usize] = b4a_sseed_6
+                            KM_CACHE_SS_7[KM_CACHE_COUNT as usize] = b4a_sseed_7
+                            KM_CACHE_COUNT = KM_CACHE_COUNT + 1
+                        }
+                    }
                     EXPR_VSHADOW = b4a_vseed
-                    // Save .value before emitting sensitivity seed (emit_imm64_a64 overwrites x0)
-                    let b4a_valsave = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_valsave)
-                    // Sensitivity seeds ch0-ch3: 1.0 for the matching Knowledge access, else 0.0
-                    let b4a_sseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 0 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed)
-                    let b4a_sseed_1 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 1 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_1)
-                    let b4a_sseed_2 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 2 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_2)
-                    let b4a_sseed_3 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 3 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_3)
                     EXPR_SSHADOW = b4a_sseed
                     EXPR_SSHADOW_1 = b4a_sseed_1
                     EXPR_SSHADOW_2 = b4a_sseed_2
                     EXPR_SSHADOW_3 = b4a_sseed_3
-                    MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
-                    // Restore .value (emit_imm64_a64 overwrote x0 with sensitivity seed)
-                    emit_load_var_a64(b4a_valsave)
+                    EXPR_SSHADOW_4 = b4a_sseed_4
+                    EXPR_SSHADOW_5 = b4a_sseed_5
+                    EXPR_SSHADOW_6 = b4a_sseed_6
+                    EXPR_SSHADOW_7 = b4a_sseed_7
+                    // β⁹ GTT: this .value access seeds channel (MEAS_KNOW_IDX - 1),
+                    // since MEAS_KNOW_IDX was just incremented above. The topology of the
+                    // resulting scalar is the singleton {just-seeded channel}. This is the
+                    // ONE line the a64 pass was missing that made b7h_ch_set always 0, so
+                    // the GTT refusal below it -- already mirrored, already correct -- could
+                    // never fire. EXPR_PARAM_USED is intentionally preserved from the base
+                    // variable load: the scalar still depends on the same caller parameter
+                    // whose Knowledge<T> we just extracted.
+                    EXPR_CH_SET = 1 << (MEAS_KNOW_IDX - 1)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -36659,6 +36769,10 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let left_hash = EXPR_TY_HASH
         // Gen 19: capture unit dim before push (EXPR_UNIT_DIM is global).
         let left_udim_a = EXPR_UNIT_DIM
+        // β⁹ GTT: capture LHS channel topology before the RHS compiles (which
+        // resets EXPR_CH_SET at compile_primary_a64's entry).
+        let left_ch_set_m = EXPR_CH_SET
+        let left_param_used_m = EXPR_PARAM_USED
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
         let b4am_left_vshadow = EXPR_VSHADOW
         let b4am_left_sshadow = EXPR_SSHADOW
@@ -36713,6 +36827,10 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             compile_knowledge_muldiv_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             continue
         }
+        // β⁹ GTT: capture RHS channel topology before the shadow work below
+        // reaches back into compile_*_a64 and overwrites EXPR_CH_SET.
+        let right_ch_set_m = EXPR_CH_SET
+        let right_param_used_m = EXPR_PARAM_USED
         // β⁴: capture RHS shadow + save RHS f64 value
         let b4am_right_vshadow = EXPR_VSHADOW
         let b4am_right_sshadow = EXPR_SSHADOW
@@ -36875,6 +36993,11 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         }
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
+        // β⁹ GTT: channel topology of a·b, a/b is the union of operand topologies
+        // (mirror of compile_multiplicative). The Knowledge branch above `continue`s
+        // before reaching here, exactly as the x86 twin does.
+        EXPR_CH_SET = left_ch_set_m | right_ch_set_m
+        EXPR_PARAM_USED = left_param_used_m | right_param_used_m
         lhs_end_line = TL[(EP - 1) as usize]
     }
 }
@@ -36894,6 +37017,9 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // PR-8: capture the LHS literal before the RHS overwrites the globals.
         let left_is_literal_a = LAST_IS_LITERAL
         let left_literal_val_a = LAST_LITERAL_VAL
+        // β⁹ GTT: capture LHS channel topology before the RHS compiles.
+        let left_ch_set_a = EXPR_CH_SET
+        let left_param_used_a = EXPR_PARAM_USED
         // β⁴: capture LHS shadow
         let b4aa_left_vshadow = EXPR_VSHADOW
         let b4aa_left_sshadow = EXPR_SSHADOW
@@ -36907,6 +37033,9 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let right_hash = EXPR_TY_HASH
         let right_unit_a = EXPR_UNIT
         let right_unit_dim_a = EXPR_UNIT_DIM
+        // β⁹ GTT: capture RHS channel topology before the merge below.
+        let right_ch_set_a = EXPR_CH_SET
+        let right_param_used_a = EXPR_PARAM_USED
         // β⁴: capture RHS shadow
         let b4aa_right_vshadow = EXPR_VSHADOW
         let b4aa_right_sshadow = EXPR_SSHADOW
@@ -37045,6 +37174,11 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         }
+        // β⁹ GTT: channel topology of a + b, a - b is the union of operand
+        // topologies (mirror of compile_additive). The string-concat and
+        // Knowledge branches above `continue` before reaching here.
+        EXPR_CH_SET = left_ch_set_a | right_ch_set_a
+        EXPR_PARAM_USED = left_param_used_a | right_param_used_a
     }
 }
 
@@ -37896,6 +38030,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     VAR_SSHADOW_2[ty_vi as usize] = EXPR_SSHADOW_2
                     VAR_SSHADOW_3[ty_vi as usize] = EXPR_SSHADOW_3
                 }
+                // β⁹ GTT: update channel topology on var reassignment, mirroring
+                // the let-declaration path (a64 twin of compile_stmt). Without it
+                // a reassigned variable kept the topology of its FIRST binding.
+                VAR_CH_SET[ty_vi as usize] = EXPR_CH_SET
+                VAR_PARAM_USED[ty_vi as usize] = EXPR_PARAM_USED
             }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
@@ -38806,6 +38945,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         compile_or_a64()
         let cbz_off = CL
         em32(0xB4000000)
@@ -38814,6 +38955,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel = (loop_top - CL) / 4
         em32(0x14000000 | (rel & 0x3FFFFFF))
+        // β⁹ GTT loop fixed-point: union post-body topology with the pre-loop
+        // snapshot, so a zero-iteration loop cannot narrow a variable's topology.
+        gtt_loop_union()
         patch_branch_a64(cbz_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
@@ -38859,6 +39003,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         let iter_slot = saved_next_a
         let end_slot = saved_next_a + 1
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         // For-loop: b cond; incr: iter++; cond: cmp; cbz end; body; b incr; end:
         let jmp_cond_a = CL; em32(0x14000000)  // b cond (patched below)
         let incr_addr_a = CL
@@ -38877,6 +39023,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel_bi = (incr_addr_a - CL) / 4
         em32(0x14000000 | (rel_bi & 0x3FFFFFF))
+        // β⁹ GTT loop fixed-point: union post-body topology with the pre-loop snapshot
+        gtt_loop_union()
         patch_branch_a64(cbz_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }

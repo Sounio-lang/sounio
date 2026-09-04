@@ -75,7 +75,11 @@ find tests/compile-fail -name '*.sio' -print0 \
   | xargs -0 -P "$JOBS" -I{} bash -c 'probe "$@"' _ {} \
   | sort > "$WORK_DIR/diverged.txt"
 
-grep -vE '^\s*(#|$)' "$BASELINE" | sort > "$WORK_DIR/baseline.txt"
+# `|| true`: an EMPTY baseline is the goal state, and grep exits 1 when it
+# matches nothing. Under `set -e` that killed the gate before it could
+# report -- an all-comments baseline made the gate exit 1 with no verdict
+# line, which reads as a failure and is in fact total success.
+grep -vE '^\s*(#|$)' "$BASELINE" | sort > "$WORK_DIR/baseline.txt" || true
 
 n_div="$(wc -l < "$WORK_DIR/diverged.txt" | tr -d ' ')"
 n_base="$(wc -l < "$WORK_DIR/baseline.txt" | tr -d ' ')"
