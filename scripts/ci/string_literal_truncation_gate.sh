@@ -8,7 +8,7 @@
 #   content <= 128 prints full; content >= 129 silently prints 128; rc=0.
 # Positive control: 127 and 128 print full length.
 # Fix witness: 129 and 200 print full length (Name capacity 384).
-# Honesty: oversize literal must error[E220], never shorten quietly.
+# Honesty: oversize literal must error[E258], never shorten quietly.
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -65,8 +65,8 @@ run_expect_len() {
   local ch="${4:-A}"
   local log="$TMP/${label}.log"
   if ! "$SOUC" run "$ROOT/$src" >"$log" 2>&1; then
-    if grep -Fq 'error[E220]' "$log"; then
-      fail "$label: unexpected E220 (literal should fit Name cap)"
+    if grep -Fq 'error[E258]' "$log"; then
+      fail "$label: unexpected E258 (literal should fit Name cap)"
       tail -15 "$log" >&2 || true
       return
     fi
@@ -78,7 +78,7 @@ run_expect_len() {
   got="$(count_pure_line "$log" "$ch")"
   if [[ "$got" != "$expect" ]]; then
     fail "$label: printed_len=$got expected=$expect (silent truncation?)"
-    rg -n "${ch}{20,}|TRUNCATED|E220|PASS " "$log" | head -20 >&2 || true
+    rg -n "${ch}{20,}|TRUNCATED|E258|PASS " "$log" | head -20 >&2 || true
     return
   fi
   if ! grep -Eq "PASS string_literal_len" "$log"; then
@@ -88,7 +88,7 @@ run_expect_len() {
   pass "$label:printed_len=$got"
 }
 
-run_expect_e220() {
+run_expect_e258() {
   local src="$1"
   local label="$2"
   local log="$TMP/${label}.log"
@@ -96,14 +96,14 @@ run_expect_e220() {
   "$SOUC" check "$ROOT/$src" >"$log" 2>&1
   local rc=$?
   set -e
-  if grep -Fq 'error[E220]' "$log"; then
-    pass "$label:E220"
+  if grep -Fq 'error[E258]' "$log"; then
+    pass "$label:E258"
     return
   fi
   if [[ "$rc" -eq 0 ]]; then
-    fail "$label: compiled OK without E220 (must refuse oversize)"
+    fail "$label: compiled OK without E258 (must refuse oversize)"
   else
-    fail "$label: failed without error[E220]"
+    fail "$label: failed without error[E258]"
   fi
   tail -25 "$log" >&2 || true
 }
@@ -117,7 +117,7 @@ run_expect_len tests/run-pass/string_literal_len129_print.sio 129 string_literal
 run_expect_len tests/run-pass/string_literal_len200_print.sio 200 string_literal_len200_print B
 
 # Honesty: refuse rather than truncate past Name capacity
-run_expect_e220 tests/compile-fail/string_literal_oversize_e220.sio string_literal_oversize_e220
+run_expect_e258 tests/compile-fail/string_literal_oversize_e258.sio string_literal_oversize_e258
 
 echo "---"
 echo "PASS_COUNT=$PASS FAIL_COUNT=$FAIL"
