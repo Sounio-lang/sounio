@@ -32455,6 +32455,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     // --target aarch64-linux.
     EXPR_UNIT = 0
     EXPR_UNIT_DIM = 0
+    // Every refinement check opens with `if LAST_IS_LITERAL != 1 { return }`.
+    // The a64 pass tracked no literal at all -- not one site in the whole
+    // mirror -- so try_apply_call_arg_refinement, try_apply_return_refinement
+    // and the let-binding check returned immediately on this target, and the
+    // nineteen refinement compile-fail cases were accepted.
+    LAST_IS_LITERAL = 0
+    LAST_IS_LITERAL_F64 = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -32464,6 +32471,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         EXPR_IS_F64 = 0
         EXPR_TY = 1
+        LAST_IS_LITERAL = 1
+        LAST_LITERAL_VAL = v
         EXPR_TY_HASH = 0
         return
     }
@@ -32507,6 +32516,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         em32(0x9E660000)  // fmov x0, d0
         EXPR_IS_F64 = 1
         EXPR_TY = 2
+        // PR-7: track the f64 literal for compile-time predicate checking.
+        LAST_IS_LITERAL_F64 = 1
+        LAST_LITERAL_F64_INT = fl_int
+        LAST_LITERAL_F64_FRAC = fl_frac
+        LAST_LITERAL_F64_DENOM = fl_denom
         EXPR_TY_HASH = 0
         return
     }
@@ -33403,6 +33417,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             em32(0x9E670000); em32(0x1E614000); em32(0x9E660000)
         } else {
             em32(0xCB0003E0)  // neg x0, x0
+            // Track negation in the literal value so compile-time refinement
+            // checks see -N, not N.
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
         }
         return
     }
@@ -35057,6 +35074,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
                 if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                // PR-4: propagate the tracked literal value so cross-binding
+                // refinement checks fire on `let x = -5; takes_pos(x)`.
+                if VAR_LIT_DATA[(vi * 2 + 0) as usize] == 1 {
+                    LAST_IS_LITERAL = 1
+                    LAST_LITERAL_VAL = VAR_LIT_DATA[(vi * 2 + 1) as usize]
+                }
                 // β⁴: propagate variance/sensitivity shadow for this variable
                 EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
                 EXPR_SSHADOW = VAR_SSHADOW[vi as usize]
@@ -36058,6 +36081,9 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // PR-8: capture the LHS literal before the RHS overwrites the globals.
+        let left_is_literal_a = LAST_IS_LITERAL
+        let left_literal_val_a = LAST_LITERAL_VAL
         // β⁴: capture LHS shadow
         let b4aa_left_vshadow = EXPR_VSHADOW
         let b4aa_left_sshadow = EXPR_SSHADOW
@@ -36187,6 +36213,12 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         } else {
             if op == 17 { em32(0x8B000020) }
             if op == 18 { em32(0xCB000020) }
+            // PR-8: constant fold if both operands are known literals; otherwise
+            // clear (mirror of compile_additive).
+            if left_is_literal_a == 1 && LAST_IS_LITERAL == 1 {
+                if op == 17 { LAST_LITERAL_VAL = left_literal_val_a + LAST_LITERAL_VAL }
+                if op == 18 { LAST_LITERAL_VAL = left_literal_val_a - LAST_LITERAL_VAL }
+            } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         }
     }
@@ -36688,6 +36720,108 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 // composes m/s, which no declared unit names.
                 if VAR_UNIT[(VAR_COUNT - 1) as usize] == 0 && EXPR_UNIT_DIM != 0 {
                     VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = EXPR_UNIT_DIM
+                }
+                // Compile-time refinement predicate at a let binding, plus the
+                // per-variable literal tracking that cross-binding checks read.
+                // Verbatim from compile_stmt: this is target-independent logic, and
+                // the a64 pass simply never ran it. The x86 runtime bound-check
+                // emission that follows it there is NOT mirrored here -- that is
+                // machine code, and it needs its own aarch64 encoding.
+                // PR-4: track per-variable literal value for cross-binding refinement
+                // checks (let x = -5; takes_pos(x)). Only for immutable integer bindings.
+                if LAST_IS_LITERAL == 1 && decl_is_mut == 0 && (decl_ty == 0 || decl_ty == 1) {
+                    VAR_LIT_DATA[(vix * 2 + 0) as usize] = 1
+                    VAR_LIT_DATA[(vix * 2 + 1) as usize] = LAST_LITERAL_VAL
+                }
+                // Refinement predicate: compile-time check for constant literals.
+                if SCAN_HAS_PRED == 1 && LAST_IS_LITERAL == 1 && SCAN_PRED_IS_F64 == 0 {
+                    let cv = LAST_LITERAL_VAL; let bv = SCAN_PRED_BOUND; var violated: i64 = 0
+                    if SCAN_PRED_OP == 26 && cv < bv { violated = 1 }  // >= : violated if cv < bv
+                    if SCAN_PRED_OP == 24 && cv <= bv { violated = 1 } // >  : violated if cv <= bv
+                    if SCAN_PRED_OP == 25 && cv > bv { violated = 1 }  // <= : violated if cv > bv
+                    if SCAN_PRED_OP == 23 && cv >= bv { violated = 1 } // <  : violated if cv >= bv
+                    if SCAN_PRED_OP == 21 && cv != bv { violated = 1 } // == : violated if cv != bv
+                    if SCAN_PRED_OP == 22 && cv == bv { violated = 1 } // != : violated if cv == bv
+                    // PR-6: AND compound — check second independently; OR — second pred can clear violation
+                    if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        let bv2 = SCAN_PRED_BOUND2
+                        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                            if SCAN_PRED_OP2 == 26 && cv < bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 24 && cv <= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 25 && cv > bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 23 && cv >= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 21 && cv != bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 22 && cv == bv2 { violated = 1 }
+                        } else {
+                            if violated == 1 {
+                                var ok2: i64 = 0
+                                if SCAN_PRED_OP2 == 26 && cv >= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 24 && cv > bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 25 && cv <= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 23 && cv < bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 21 && cv == bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 22 && cv != bv2 { ok2 = 1 }
+                                if ok2 == 1 { violated = 0 }
+                            }
+                        }
+                    }
+                    if violated == 1 {
+                        print("error[E208]: refinement type violation — value ")
+                        print_int(cv)
+                        print(" does not satisfy predicate at line ")
+                        print_int(TL[(EP - 1) as usize])
+                        print("\n")
+                        tc_mark_failed()
+                        SCAN_HAS_PRED = 0
+                    }
+                }
+                // PR-9: f64 literal predicate check at let-binding site
+                if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 1 && LAST_IS_LITERAL_F64 == 1 {
+                    let cv9_int = LAST_LITERAL_F64_INT
+                    let cv9_frac = LAST_LITERAL_F64_FRAC
+                    let cv9_denom = LAST_LITERAL_F64_DENOM
+                    let bv9_int = SCAN_PRED_BOUND
+                    let bv9_frac = SCAN_PRED_BOUND_FRAC
+                    let bv9_denom = SCAN_PRED_BOUND_DENOM
+                    let lhs9 = (cv9_int * cv9_denom + cv9_frac) * bv9_denom
+                    let rhs9 = (bv9_int * bv9_denom + bv9_frac) * cv9_denom
+                    let op9 = SCAN_PRED_OP
+                    var f64_viol9: i64 = 0
+                    if op9 == 26 && lhs9 < rhs9 { f64_viol9 = 1 }
+                    if op9 == 24 && lhs9 <= rhs9 { f64_viol9 = 1 }
+                    if op9 == 25 && lhs9 > rhs9 { f64_viol9 = 1 }
+                    if op9 == 23 && lhs9 >= rhs9 { f64_viol9 = 1 }
+                    if SCAN_HAS_PRED2 == 1 {
+                        let bv2_int9 = SCAN_PRED_BOUND2
+                        let bv2_frac9 = SCAN_PRED_BOUND2_FRAC
+                        let bv2_denom9 = SCAN_PRED_BOUND2_DENOM
+                        let lhs9b = (cv9_int * cv9_denom + cv9_frac) * bv2_denom9
+                        let rhs9b = (bv2_int9 * bv2_denom9 + bv2_frac9) * cv9_denom
+                        let op9b = SCAN_PRED_OP2
+                        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                            if op9b == 26 && lhs9b < rhs9b { f64_viol9 = 1 }
+                            if op9b == 24 && lhs9b <= rhs9b { f64_viol9 = 1 }
+                            if op9b == 25 && lhs9b > rhs9b { f64_viol9 = 1 }
+                            if op9b == 23 && lhs9b >= rhs9b { f64_viol9 = 1 }
+                        } else {
+                            if f64_viol9 == 1 {
+                                var ok9b: i64 = 0
+                                if op9b == 26 && lhs9b >= rhs9b { ok9b = 1 }
+                                if op9b == 24 && lhs9b > rhs9b { ok9b = 1 }
+                                if op9b == 25 && lhs9b <= rhs9b { ok9b = 1 }
+                                if op9b == 23 && lhs9b < rhs9b { ok9b = 1 }
+                                if ok9b == 1 { f64_viol9 = 0 }
+                            }
+                        }
+                    }
+                    if f64_viol9 == 1 {
+                        print("error[E209]: refinement type violation — f64 value violates let-binding predicate at line ")
+                        print_int(TL[(EP - 1) as usize])
+                        print("\n")
+                        tc_mark_failed()
+                    }
+                    SCAN_HAS_PRED = 0
+                    SCAN_HAS_PRED2 = 0
                 }
                 // β⁴/β⁵: capture variance/sensitivity shadow into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
