@@ -37351,6 +37351,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // if/else  (with Phase 1.3 if-let support)
     if k == 13 {
+        let if_tok_a = EP
         EP = EP + 1
 
         // ── Phase 1.3: if let <pattern> = <expr> { ... } (AArch64) ──
@@ -37505,6 +37506,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        // Snapshot VAR_USED + VAR_MOVED for linear branch tracking
+        // (mirror of x86 compile_stmt).
+        var lsnap_a: i64 = 0
+        while lsnap_a < VAR_COUNT {
+            CL_SAVE_USED[lsnap_a as usize] = VAR_USED[lsnap_a as usize]
+            CL_SAVE_MUT[lsnap_a as usize] = VAR_MOVED[lsnap_a as usize]
+            lsnap_a = lsnap_a + 1
+        }
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
@@ -37521,6 +37530,18 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let b_end_off = CL
             em32(0x14000000)
             patch_branch_a64(cbz_off, CL)
+            // Save then-branch state, restore pre-branch snapshot for else
+            // (mirror of x86 compile_stmt).
+            var lthen_a: i64 = 0
+            while lthen_a < VAR_COUNT {
+                let then_used_a = VAR_USED[lthen_a as usize]
+                let then_moved_a = VAR_MOVED[lthen_a as usize]
+                VAR_USED[lthen_a as usize] = CL_SAVE_USED[lthen_a as usize]
+                VAR_MOVED[lthen_a as usize] = CL_SAVE_MUT[lthen_a as usize]
+                CL_SAVE_USED[lthen_a as usize] = then_used_a
+                CL_SAVE_MUT[lthen_a as usize] = then_moved_a
+                lthen_a = lthen_a + 1
+            }
             if TK[EP as usize] == 13 { compile_stmt_a64() }
             else {
                 LAST_STMT_HAS_VALUE = 0
@@ -37532,6 +37553,30 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
             let if_else_ch_set_a = EXPR_CH_SET
+            // Linear branch asymmetry check + merge (mirror of x86 compile_stmt).
+            // Without this the a64 pass counted a linear value consumed in BOTH
+            // arms as two uses and reported "used more than once" on a program
+            // the x86 pass accepts.
+            var lchk_a: i64 = 0
+            while lchk_a < VAR_COUNT {
+                if VAR_LINEAR[lchk_a as usize] == 1 {
+                    let then_u_a = CL_SAVE_USED[lchk_a as usize]
+                    let else_u_a = VAR_USED[lchk_a as usize]
+                    if then_u_a > 0 && else_u_a == 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in then-branch but not else-branch")
+                    }
+                    if then_u_a == 0 && else_u_a > 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in else-branch but not then-branch")
+                    }
+                    if then_u_a > else_u_a { VAR_USED[lchk_a as usize] = then_u_a }
+                }
+                if VAR_LINEAR[lchk_a as usize] == 1 || VAR_AFFINE[lchk_a as usize] == 1 {
+                    if CL_SAVE_MUT[lchk_a as usize] == 1 || VAR_MOVED[lchk_a as usize] == 1 {
+                        VAR_MOVED[lchk_a as usize] = 1
+                    }
+                }
+                lchk_a = lchk_a + 1
+            }
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
@@ -37556,6 +37601,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 LAST_STMT_TY_HASH = 0
             }
         } else {
+            // Linear tracking, no-else arm (mirror of x86 compile_stmt).
+            var lne_a: i64 = 0
+            while lne_a < VAR_COUNT {
+                if VAR_LINEAR[lne_a as usize] == 1 {
+                    if VAR_USED[lne_a as usize] > 0 && CL_SAVE_USED[lne_a as usize] == 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in if-branch with no else — not consumed on all paths")
+                    }
+                }
+                lne_a = lne_a + 1
+            }
             patch_branch_a64(cbz_off, CL)
             // FALL-THROUGH FIX (a64 mirror of x86 em(0x90) at if-without-else): a then-branch
             // ending in `ret` (0xD65F03C0) would make the implicit-return guard skip the
