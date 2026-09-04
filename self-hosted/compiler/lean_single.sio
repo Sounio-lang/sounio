@@ -36786,6 +36786,16 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_left_sshadow_1 = EXPR_SSHADOW_1
         let b4am_left_sshadow_2 = EXPR_SSHADOW_2
         let b4am_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: park the LHS second-order state; compiling the RHS re-enters here.
+        let b7_prev_m = B7_TOP
+        var b7_l_m = B7_TOP
+        if B7_TOP + B7_FRAME * 3 > 8192 {
+            tc_error_hard(op_tok, "expression nesting too deep for second-order shadows")
+            b7_l_m = 8192 - B7_FRAME * 3
+        } else {
+            B7_TOP = B7_TOP + B7_FRAME
+        }
+        b7_save_a64(b7_l_m)
         // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -36832,6 +36842,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                 }
             }
             compile_knowledge_muldiv_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            B7_TOP = b7_prev_m
             continue
         }
         // β⁹ GTT: capture RHS channel topology before the shadow work below
@@ -36844,6 +36855,10 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         let b4am_right_sshadow_2 = EXPR_SSHADOW_2
         let b4am_right_sshadow_3 = EXPR_SSHADOW_3
+        let b7_r_m = b7_l_m + B7_FRAME
+        if b7_l_m + B7_FRAME * 3 <= 8192 { B7_TOP = b7_r_m + B7_FRAME }
+        b7_save_a64(b7_r_m)
+        let b7_o_m = b7_r_m + B7_FRAME
         var b4am_rval_slot: i64 = -1
         if left_f64 == 1 {
             b4am_rval_slot = NEXT_SLOT
@@ -36904,7 +36919,14 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         // Save result first — shadow computation overwrites x0
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         var b4am_result_slot: i64 = -1
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0) || (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0) || (b4am_left_sshadow_2 >= 0 || b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_3 >= 0 || b4am_right_sshadow_3 >= 0)) {
+        var b7_any_m: i64 = 0
+        var b7q_m: i64 = 0
+        while b7q_m < B7_FRAME {
+            if B7F[(b7_l_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
+            if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
+            b7q_m = b7q_m + 1
+        }
+        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -36934,70 +36956,31 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(b4am_vres)
             EXPR_VSHADOW = b4am_vres
         }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0) {
-            // sens(a*b) = a·sens(b) + b·sens(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow >= 0 { emit_load_var_a64(b4am_right_sshadow) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // a·sens(b)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow >= 0 { emit_load_var_a64(b4am_left_sshadow) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // b·sens(a)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // sum
-            let b4am_sres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres)
-            EXPR_SSHADOW = b4am_sres
+        // β⁵/β⁷ through · , as loops over the frames. The product's own
+        // second-order state starts empty -- without the clear, the RHS's
+        // entries leaked out as if they were the product's.
+        var b7t_m: i64 = 0
+        while b7t_m < B7_FRAME { B7F[(b7_o_m + b7t_m) as usize] = -1; b7t_m = b7t_m + 1 }
+        if left_f64 == 1 && op == 19 {
+            var b7c_m: i64 = 0
+            while b7c_m < 8 {
+                B7F[(b7_o_m + 36 + b7c_m) as usize] = emit_s_mul_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_m) as usize], B7F[(b7_r_m + 36 + b7c_m) as usize])
+                b7c_m = b7c_m + 1
+            }
+            var b7j_m: i64 = 0
+            var b7i_m: i64 = 0
+            while b7j_m < 8 {
+                var b7k_m: i64 = b7j_m
+                while b7k_m < 8 {
+                    B7F[(b7_o_m + b7i_m) as usize] = emit_h_mul_a64(B7F[(b7_l_m + b7i_m) as usize], B7F[(b7_r_m + b7i_m) as usize], b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7j_m) as usize], B7F[(b7_r_m + 36 + b7k_m) as usize], B7F[(b7_l_m + 36 + b7k_m) as usize], B7F[(b7_r_m + 36 + b7j_m) as usize])
+                    b7i_m = b7i_m + 1
+                    b7k_m = b7k_m + 1
+                }
+                b7j_m = b7j_m + 1
+            }
         }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0) {
-            // sens_ch1(a*b) = a·sens_ch1(b) + b·sens_ch1(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_1 >= 0 { emit_load_var_a64(b4am_right_sshadow_1) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_1 >= 0 { emit_load_var_a64(b4am_left_sshadow_1) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres1)
-            EXPR_SSHADOW_1 = b4am_sres1
-        }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_2 >= 0 || b4am_right_sshadow_2 >= 0) {
-            // sens_ch2(a*b) = a·sens_ch2(b) + b·sens_ch2(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_2 >= 0 { emit_load_var_a64(b4am_right_sshadow_2) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_2 >= 0 { emit_load_var_a64(b4am_left_sshadow_2) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres2)
-            EXPR_SSHADOW_2 = b4am_sres2
-        }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_3 >= 0 || b4am_right_sshadow_3 >= 0) {
-            // sens_ch3(a*b) = a·sens_ch3(b) + b·sens_ch3(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_3 >= 0 { emit_load_var_a64(b4am_right_sshadow_3) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_3 >= 0 { emit_load_var_a64(b4am_left_sshadow_3) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres3)
-            EXPR_SSHADOW_3 = b4am_sres3
-        }
+        b7_restore_a64(b7_o_m)
+        B7_TOP = b7_prev_m
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
         // β⁹ GTT: channel topology of a·b, a/b is the union of operand topologies
@@ -37007,6 +36990,208 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         EXPR_PARAM_USED = left_param_used_m | right_param_used_m
         lhs_end_line = TL[(EP - 1) as usize]
     }
+}
+
+
+// ─── ARM64 β⁷/β⁵ second-order shadow frames ───
+//
+// The a64 pass had NO producer for EXPR_HSHADOW_* anywhere: those globals were
+// only ever set to -1 or copied to and from VAR_HSHADOW_*. hessian_of() always
+// resolved to slot -1 and emitted a literal 0.0, so every Hessian entry the x86
+// target computes came back as 0.000000 in a binary that exited 0. Measured on
+// an arm64 node, 2026-09-04, before this change:
+//   epistemic_hessian_of       x86 1.0 2.0 10.0     a64 0.0 0.0 0.0
+//   epistemic_hessian_8inputs  x86 1.0 7.0 1.0 2.0  a64 0.0 0.0 0.0 0.0
+//
+// The x86 pass writes each of the 36 (j,k) entries out inline, twice per
+// operator, which is where most of compile_multiplicative's bulk comes from.
+// Doing that here would have cost ~29 KB of source, and lean_single.sio has to
+// stay inside the SEED compiler's own 2 MiB prelude bound (see the SRC_CAP
+// commit) or the committed seed can no longer rebuild the tree. So the operand
+// state goes into an explicit frame and the rules run as loops.
+//
+// A frame is 44 entries: 36 Hessian slots in (j,k) lexicographic order, then
+// the 8 first-order sensitivity slots. Frames are stacked because these
+// functions recurse -- additive calls multiplicative calls postfix calls
+// primary, which can re-enter additive -- so plain globals would be clobbered
+// by the operand that is compiled second.
+var B7F:     [i64; 8192] = [-1; 8192]
+var B7_TOP:  i64 = 0
+var B7_FRAME: i64 = 44
+
+fn b7_save_a64(base: i64) with Mut {
+    B7F[(base + 0) as usize] = EXPR_HSHADOW_00
+    B7F[(base + 1) as usize] = EXPR_HSHADOW_01
+    B7F[(base + 2) as usize] = EXPR_HSHADOW_02
+    B7F[(base + 3) as usize] = EXPR_HSHADOW_03
+    B7F[(base + 4) as usize] = EXPR_HSHADOW_04
+    B7F[(base + 5) as usize] = EXPR_HSHADOW_05
+    B7F[(base + 6) as usize] = EXPR_HSHADOW_06
+    B7F[(base + 7) as usize] = EXPR_HSHADOW_07
+    B7F[(base + 8) as usize] = EXPR_HSHADOW_11
+    B7F[(base + 9) as usize] = EXPR_HSHADOW_12
+    B7F[(base + 10) as usize] = EXPR_HSHADOW_13
+    B7F[(base + 11) as usize] = EXPR_HSHADOW_14
+    B7F[(base + 12) as usize] = EXPR_HSHADOW_15
+    B7F[(base + 13) as usize] = EXPR_HSHADOW_16
+    B7F[(base + 14) as usize] = EXPR_HSHADOW_17
+    B7F[(base + 15) as usize] = EXPR_HSHADOW_22
+    B7F[(base + 16) as usize] = EXPR_HSHADOW_23
+    B7F[(base + 17) as usize] = EXPR_HSHADOW_24
+    B7F[(base + 18) as usize] = EXPR_HSHADOW_25
+    B7F[(base + 19) as usize] = EXPR_HSHADOW_26
+    B7F[(base + 20) as usize] = EXPR_HSHADOW_27
+    B7F[(base + 21) as usize] = EXPR_HSHADOW_33
+    B7F[(base + 22) as usize] = EXPR_HSHADOW_34
+    B7F[(base + 23) as usize] = EXPR_HSHADOW_35
+    B7F[(base + 24) as usize] = EXPR_HSHADOW_36
+    B7F[(base + 25) as usize] = EXPR_HSHADOW_37
+    B7F[(base + 26) as usize] = EXPR_HSHADOW_44
+    B7F[(base + 27) as usize] = EXPR_HSHADOW_45
+    B7F[(base + 28) as usize] = EXPR_HSHADOW_46
+    B7F[(base + 29) as usize] = EXPR_HSHADOW_47
+    B7F[(base + 30) as usize] = EXPR_HSHADOW_55
+    B7F[(base + 31) as usize] = EXPR_HSHADOW_56
+    B7F[(base + 32) as usize] = EXPR_HSHADOW_57
+    B7F[(base + 33) as usize] = EXPR_HSHADOW_66
+    B7F[(base + 34) as usize] = EXPR_HSHADOW_67
+    B7F[(base + 35) as usize] = EXPR_HSHADOW_77
+    B7F[(base + 36) as usize] = EXPR_SSHADOW
+    B7F[(base + 37) as usize] = EXPR_SSHADOW_1
+    B7F[(base + 38) as usize] = EXPR_SSHADOW_2
+    B7F[(base + 39) as usize] = EXPR_SSHADOW_3
+    B7F[(base + 40) as usize] = EXPR_SSHADOW_4
+    B7F[(base + 41) as usize] = EXPR_SSHADOW_5
+    B7F[(base + 42) as usize] = EXPR_SSHADOW_6
+    B7F[(base + 43) as usize] = EXPR_SSHADOW_7
+}
+
+fn b7_restore_a64(base: i64) with Mut {
+    EXPR_HSHADOW_00 = B7F[(base + 0) as usize]
+    EXPR_HSHADOW_01 = B7F[(base + 1) as usize]
+    EXPR_HSHADOW_02 = B7F[(base + 2) as usize]
+    EXPR_HSHADOW_03 = B7F[(base + 3) as usize]
+    EXPR_HSHADOW_04 = B7F[(base + 4) as usize]
+    EXPR_HSHADOW_05 = B7F[(base + 5) as usize]
+    EXPR_HSHADOW_06 = B7F[(base + 6) as usize]
+    EXPR_HSHADOW_07 = B7F[(base + 7) as usize]
+    EXPR_HSHADOW_11 = B7F[(base + 8) as usize]
+    EXPR_HSHADOW_12 = B7F[(base + 9) as usize]
+    EXPR_HSHADOW_13 = B7F[(base + 10) as usize]
+    EXPR_HSHADOW_14 = B7F[(base + 11) as usize]
+    EXPR_HSHADOW_15 = B7F[(base + 12) as usize]
+    EXPR_HSHADOW_16 = B7F[(base + 13) as usize]
+    EXPR_HSHADOW_17 = B7F[(base + 14) as usize]
+    EXPR_HSHADOW_22 = B7F[(base + 15) as usize]
+    EXPR_HSHADOW_23 = B7F[(base + 16) as usize]
+    EXPR_HSHADOW_24 = B7F[(base + 17) as usize]
+    EXPR_HSHADOW_25 = B7F[(base + 18) as usize]
+    EXPR_HSHADOW_26 = B7F[(base + 19) as usize]
+    EXPR_HSHADOW_27 = B7F[(base + 20) as usize]
+    EXPR_HSHADOW_33 = B7F[(base + 21) as usize]
+    EXPR_HSHADOW_34 = B7F[(base + 22) as usize]
+    EXPR_HSHADOW_35 = B7F[(base + 23) as usize]
+    EXPR_HSHADOW_36 = B7F[(base + 24) as usize]
+    EXPR_HSHADOW_37 = B7F[(base + 25) as usize]
+    EXPR_HSHADOW_44 = B7F[(base + 26) as usize]
+    EXPR_HSHADOW_45 = B7F[(base + 27) as usize]
+    EXPR_HSHADOW_46 = B7F[(base + 28) as usize]
+    EXPR_HSHADOW_47 = B7F[(base + 29) as usize]
+    EXPR_HSHADOW_55 = B7F[(base + 30) as usize]
+    EXPR_HSHADOW_56 = B7F[(base + 31) as usize]
+    EXPR_HSHADOW_57 = B7F[(base + 32) as usize]
+    EXPR_HSHADOW_66 = B7F[(base + 33) as usize]
+    EXPR_HSHADOW_67 = B7F[(base + 34) as usize]
+    EXPR_HSHADOW_77 = B7F[(base + 35) as usize]
+    EXPR_SSHADOW = B7F[(base + 36) as usize]
+    EXPR_SSHADOW_1 = B7F[(base + 37) as usize]
+    EXPR_SSHADOW_2 = B7F[(base + 38) as usize]
+    EXPR_SSHADOW_3 = B7F[(base + 39) as usize]
+    EXPR_SSHADOW_4 = B7F[(base + 40) as usize]
+    EXPR_SSHADOW_5 = B7F[(base + 41) as usize]
+    EXPR_SSHADOW_6 = B7F[(base + 42) as usize]
+    EXPR_SSHADOW_7 = B7F[(base + 43) as usize]
+}
+
+// s(a ± b) = s(a) ± s(b).  -1 in, -1 out: an absent sensitivity is absent, not
+// a known zero.
+fn emit_s_addsub_a64(op: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64()
+    if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+    emit_store_var_a64(res)
+    return res
+}
+
+// s(a·b) = a·s(b) + b·s(a)
+fn emit_s_mul_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a ± b) = H_jk(a) ± H_jk(b)
+fn emit_h_addsub_a64(op: i64, lh: i64, rh: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64()
+    if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b) + s_k(a)·s_j(b) + a·H_jk(b)
+// (the x86 inline rule in compile_multiplicative). On the diagonal the caller
+// passes saj == sak and sbj == sbk, giving the 2·s_j(a)·s_j(b) cross term.
+fn emit_h_mul_a64(lh: i64, rh: i64, lval: i64, rval: i64, saj: i64, sbk: i64, sak: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (saj < 0 || sbk < 0) && (sak < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
 }
 
 // ─── ARM64 additive ───
@@ -37033,6 +37218,17 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let b4aa_left_sshadow_1 = EXPR_SSHADOW_1
         let b4aa_left_sshadow_2 = EXPR_SSHADOW_2
         let b4aa_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: the LHS's 36 Hessian slots and 8 sensitivity slots, parked in a
+        // frame because compiling the RHS below re-enters this function.
+        let b7_prev_a = B7_TOP
+        var b7_l_a = B7_TOP
+        if B7_TOP + B7_FRAME * 3 > 8192 {
+            tc_error_hard(op_tok, "expression nesting too deep for second-order shadows")
+            b7_l_a = 8192 - B7_FRAME * 3
+        } else {
+            B7_TOP = B7_TOP + B7_FRAME
+        }
+        b7_save_a64(b7_l_a)
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         emit_push_a64()
         compile_multiplicative_a64()
@@ -37049,6 +37245,10 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let b4aa_right_sshadow_1 = EXPR_SSHADOW_1
         let b4aa_right_sshadow_2 = EXPR_SSHADOW_2
         let b4aa_right_sshadow_3 = EXPR_SSHADOW_3
+        let b7_r_a = b7_l_a + B7_FRAME
+        if b7_l_a + B7_FRAME * 3 <= 8192 { B7_TOP = b7_r_a + B7_FRAME }
+        b7_save_a64(b7_r_a)
+        let b7_o_a = b7_r_a + B7_FRAME
         // String `+` concatenation (a64 twin of compile_additive :~18549). Without
         // this branch the else path below emits `add x0, x1, x0` — ADDING the two
         // string POINTERS as integers, yielding a garbage address that prints junk.
@@ -37065,6 +37265,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 0
             EXPR_TY = 3
             EXPR_TY_HASH = 0
+            B7_TOP = b7_prev_a
             continue
         }
         // Gen 19: named units must match exactly for additive arithmetic, and
@@ -37103,6 +37304,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 }
             }
             compile_knowledge_addsub_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            B7_TOP = b7_prev_a
             continue
         }
         emit_pop_x1_a64()
@@ -37127,48 +37329,21 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_vres)
                 EXPR_VSHADOW = b4aa_vres
             }
-            if b4aa_left_sshadow >= 0 || b4aa_right_sshadow >= 0 {
-                // sens(a+b)=sens(a)+sens(b); sens(a-b)=sens(a)-sens(b)
-                if b4aa_left_sshadow >= 0 { emit_load_var_a64(b4aa_left_sshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow >= 0 { emit_load_var_a64(b4aa_right_sshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres)
-                EXPR_SSHADOW = b4aa_sres
+            // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
+            // inline copies. Channels 4-7 had no a64 site at all before this:
+            // an expression over more than four measured inputs lost its four
+            // upper sensitivity channels at the first `+`.
+            var b7c_a: i64 = 0
+            while b7c_a < 8 {
+                B7F[(b7_o_a + 36 + b7c_a) as usize] = emit_s_addsub_a64(op, B7F[(b7_l_a + 36 + b7c_a) as usize], B7F[(b7_r_a + 36 + b7c_a) as usize])
+                b7c_a = b7c_a + 1
             }
-            if b4aa_left_sshadow_1 >= 0 || b4aa_right_sshadow_1 >= 0 {
-                // sens_ch1(a+b)=sens_ch1(a)+sens_ch1(b); sens_ch1(a-b)=sens_ch1(a)-sens_ch1(b)
-                if b4aa_left_sshadow_1 >= 0 { emit_load_var_a64(b4aa_left_sshadow_1) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_1 >= 0 { emit_load_var_a64(b4aa_right_sshadow_1) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres1)
-                EXPR_SSHADOW_1 = b4aa_sres1
+            var b7i_a: i64 = 0
+            while b7i_a < 36 {
+                B7F[(b7_o_a + b7i_a) as usize] = emit_h_addsub_a64(op, B7F[(b7_l_a + b7i_a) as usize], B7F[(b7_r_a + b7i_a) as usize])
+                b7i_a = b7i_a + 1
             }
-            if b4aa_left_sshadow_2 >= 0 || b4aa_right_sshadow_2 >= 0 {
-                if b4aa_left_sshadow_2 >= 0 { emit_load_var_a64(b4aa_left_sshadow_2) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_2 >= 0 { emit_load_var_a64(b4aa_right_sshadow_2) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres2)
-                EXPR_SSHADOW_2 = b4aa_sres2
-            }
-            if b4aa_left_sshadow_3 >= 0 || b4aa_right_sshadow_3 >= 0 {
-                if b4aa_left_sshadow_3 >= 0 { emit_load_var_a64(b4aa_left_sshadow_3) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_3 >= 0 { emit_load_var_a64(b4aa_right_sshadow_3) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres3)
-                EXPR_SSHADOW_3 = b4aa_sres3
-            }
+            b7_restore_a64(b7_o_a)
             if b4aa_result_slot >= 0 { emit_load_var_a64(b4aa_result_slot) }
         } else {
             if op == 17 { em32(0x8B000020) }
@@ -37181,6 +37356,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         }
+        B7_TOP = b7_prev_a
         // β⁹ GTT: channel topology of a + b, a - b is the union of operand
         // topologies (mirror of compile_additive). The string-concat and
         // Knowledge branches above `continue` before reaching here.
