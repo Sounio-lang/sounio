@@ -5,7 +5,7 @@ cd "$ROOT_DIR"
 SOUC="${SOUC:-bin/souc}"
 SOURCE="tools/pireus/xeon_avx512_xor_plan.sio"
 FROZEN="tools/pireus/xeon_avx512_xor_plan.values.v1"
-EXPECTED_SOURCE_HASH="d90943bff2dbee3862772e43867eb09f1f27692296ded253f366ebc5ca51f9ad"
+EXPECTED_SOURCE_HASH="22f017c8b2ac268389985f4583dd832ffe11ef949d4c31590ea8859d1f084367"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 fail() { printf 'PIREUS_XEON_AVX512_XOR_PLAN_GATE_FAIL: %s\n' "$*" >&2; exit 1; }
@@ -24,5 +24,6 @@ fi
 grep -q '^selection_failures=[1-9]' "$TMP_DIR/forged.log" || fail "negative control did not expose selection failures"
 grep -q '^vpermpd_total=32$' "$FROZEN" || fail "two-ZMM permute count is not frozen"
 grep -q '^negative_mask_bits=120$' "$FROZEN" || fail "Cayley-Dickson sign population is not preserved"
+grep -q '^i=15 dst_lo_sign_mask=179 dst_hi_sign_mask=50$' "$FROZEN" || fail "vertical destination sign table is not frozen"
 grep -q '^PIREUS_XEON_AVX512_XOR_PLAN_PASS$' "$FROZEN" || fail "Sounio authority did not pass"
 printf 'PIREUS_XEON_AVX512_XOR_PLAN_GATE_PASS\n'

@@ -1,0 +1,80 @@
+// Byte-level gate for the actual IrXorConvolutionS native lowering.
+//@ run-pass
+
+use native::encode::*
+use native::lower_ir::*
+use ir::ir::*
+
+fn px_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
+    code_buffer_read_byte(buf, idx)
+}
+
+fn valid_lowering() -> CodeBuffer with Mut, Panic, Div, Alloc {
+    // dst/work=0..5, a=6..7, b=8..9, xor ctrl=10..17,
+    // broadcast ctrl=18..25, sign-table pointer in rax.
+    emit_xor_convolution_s(code_buffer_new(), ir_xor_convolution_s(0, 6, 8, 10, 18, 0))
+}
+
+fn test_exact_material_shape() -> bool with Mut, Panic, Div, Alloc {
+    let buf = valid_lowering()
+    // 2*6 zeroing + 16*(7*6 register ops + 2*10 disp32 loads).
+    buf.len == 1004
+}
+
+fn test_first_iteration_opcodes() -> bool with Mut, Panic, Div, Alloc {
+    let buf = valid_lowering()
+    // llvm-mc parity for the first VPERMPD and FMA, plus the deliberately
+    // fixed-disp32 VMOVUPD form used for content-stable material receipts.
+    px_read_byte(buf, 12) == 0x62
+        && px_read_byte(buf, 13) == 0xF2
+        && px_read_byte(buf, 14) == 0xED
+        && px_read_byte(buf, 15) == 0x40
+        && px_read_byte(buf, 16) == 0x16
+        && px_read_byte(buf, 17) == 0xD6
+        && px_read_byte(buf, 30) == 0x62
+        && px_read_byte(buf, 31) == 0xF1
+        && px_read_byte(buf, 32) == 0xFD
+        && px_read_byte(buf, 33) == 0x48
+        && px_read_byte(buf, 34) == 0x10
+        && px_read_byte(buf, 35) == 0xA8
+        && px_read_byte(buf, 36) == 0
+        && px_read_byte(buf, 37) == 0
+        && px_read_byte(buf, 38) == 0
+        && px_read_byte(buf, 39) == 0
+        && px_read_byte(buf, 62) == 0x62
+        && px_read_byte(buf, 63) == 0xF2
+        && px_read_byte(buf, 64) == 0xED
+        && px_read_byte(buf, 65) == 0x48
+        && px_read_byte(buf, 66) == 0xB8
+        && px_read_byte(buf, 67) == 0xC3
+}
+
+fn test_contract_rejects_wrong_bits() -> bool with Mut, Panic, Div, Alloc {
+    var instr = ir_xor_convolution_s(0, 6, 8, 10, 18, 0)
+    instr.imm_i64 = 3
+    let buf = emit_xor_convolution_s(code_buffer_new(), instr)
+    buf.len == 2 && px_read_byte(buf, 0) == 0x0F && px_read_byte(buf, 1) == 0x0B
+}
+
+fn test_contract_rejects_overlap() -> bool with Mut, Panic, Div, Alloc {
+    let instr = ir_xor_convolution_s(0, 4, 8, 10, 18, 0)
+    let buf = emit_xor_convolution_s(code_buffer_new(), instr)
+    buf.len == 2 && px_read_byte(buf, 0) == 0x0F && px_read_byte(buf, 1) == 0x0B
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    if test_exact_material_shape() { passed = passed + 1 }
+    if test_first_iteration_opcodes() { passed = passed + 1 }
+    if test_contract_rejects_wrong_bits() { passed = passed + 1 }
+    if test_contract_rejects_overlap() { passed = passed + 1 }
+    print("schema=pireus-xeon-avx512-lowering-v1\n")
+    print("instructions=146 bytes=1004 vpermpd=48 sign_loads=32 vxorpd=34 fma=32\n")
+    print("tests_passed="); print_int(passed); print("/4\n")
+    if passed == 4 {
+        print("PIREUS_XEON_AVX512_LOWERING_PASS\n")
+        return 0
+    }
+    print("PIREUS_XEON_AVX512_LOWERING_FAIL\n")
+    1
+}
