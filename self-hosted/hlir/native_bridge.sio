@@ -1,0 +1,50 @@
+// Typed HLIR to native IR bridge for Pireus algebraic operators.
+module hlir::native_bridge
+
+use hlir::ir::*
+use ir::ir::*
+
+pub struct HlirXorNativeLayout {
+    pub dst_zmm: i64,
+    pub lhs_zmm: i64,
+    pub rhs_zmm: i64,
+    pub xor_ctrl_zmm: i64,
+    pub broadcast_ctrl_zmm: i64,
+    pub sign_table_gpr: i64,
+}
+
+pub struct HlirNativeBridgeResult {
+    pub accepted: bool,
+    pub reason: i64,
+    pub instr: IrInstr,
+}
+
+pub fn hlir_xor_native_layout_xeon() -> HlirXorNativeLayout {
+    HlirXorNativeLayout {
+        dst_zmm: 0, lhs_zmm: 6, rhs_zmm: 8, xor_ctrl_zmm: 10,
+        broadcast_ctrl_zmm: 18, sign_table_gpr: 0,
+    }
+}
+
+// Refusal reasons: 1=not operator, 2=bits, 3=twist, 4=candidate, 5=arity.
+// The callee name is intentionally not inspected: semantic selection comes
+// only from the typed operator metadata frozen in HLIR.
+pub fn hlir_xor_convolution_to_native_ir(h: HlirInstr, layout: HlirXorNativeLayout) -> HlirNativeBridgeResult {
+    var out = HlirNativeBridgeResult {
+        accepted: false, reason: 1, instr: ir_instr_new(IrOpcode::IrNop),
+    }
+    if h.operator_kind != HLIR_OPERATOR_XOR_CONVOLUTION { return out }
+    if h.xor_bits != 4 { out.reason = 2; return out }
+    if h.xor_twist != HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN { out.reason = 3; return out }
+    if h.xor_candidate != HLIR_XOR_CANDIDATE_AUTO
+        && h.xor_candidate != HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE {
+        out.reason = 4
+        return out
+    }
+    if h.call_arg_count != 3 { out.reason = 5; return out }
+    out.accepted = true
+    out.reason = 0
+    out.instr = ir_xor_convolution_s(layout.dst_zmm, layout.lhs_zmm, layout.rhs_zmm,
+        layout.xor_ctrl_zmm, layout.broadcast_ctrl_zmm, layout.sign_table_gpr)
+    out
+}
