@@ -1540,6 +1540,59 @@ native_hook_bundle_is_selected() {
   return 0
 }
 
+# A live provider session is allowed to remain bound to the immutable runtime
+# generation it started with.  A newer selected coordinator may deliver a wake
+# for that session only when the sealed generation pin and its private selector
+# still bind every identity and executable digest in the capability record.
+native_hook_capability_bundle_is_pinned() {
+  local runtime_root="$1" bundle="$2" agent="$3" lane="$4" pin_path
+  local selector expected_bundle manifest manifest_sha
+  pin_path="$STATE_DIR/generation-runtime-pins/$(claim_id_for "$agent" "$lane").pin"
+  [[ -f "$pin_path" && ! -L "$pin_path" ]] || return 1
+  manifest="$bundle/manifest"
+  [[ -r "$manifest" ]] || return 1
+  manifest_sha="$(sha256sum "$manifest" | awk '{print $1}')"
+  [[ "$(manifest_field "$pin_path" schema)" == loom-generation-runtime-pin-v1 && \
+    "$(manifest_field "$pin_path" state)" == SEALED && \
+    "$(manifest_field "$pin_path" agent)" == "$agent" && \
+    "$(manifest_field "$pin_path" lane)" == "$lane" && \
+    "$(manifest_field "$pin_path" session_id)" == "$HC_SESSION_ID" && \
+    "$(manifest_field "$pin_path" harness)" == "$HC_HARNESS" && \
+    "$(manifest_field "$pin_path" worktree)" == "$HC_WORKTREE" && \
+    "$(manifest_field "$pin_path" boot_id)" == "$HC_PRESENCE_BOOT_ID" && \
+    "$(manifest_field "$pin_path" pid_namespace)" == "$HC_PRESENCE_PID_NAMESPACE" && \
+    "$(manifest_field "$pin_path" pid)" == "$HC_PRESENCE_PID" && \
+    "$(manifest_field "$pin_path" pid_start)" == "$HC_PRESENCE_PID_START" && \
+    "$(manifest_field "$pin_path" selection)" == capability && \
+    "$(manifest_field "$pin_path" runtime_id)" == "$HC_RUNTIME_ID" && \
+    "$(manifest_field "$pin_path" runtime_manifest_sha256)" == "$manifest_sha" && \
+    "$(manifest_field "$pin_path" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
+    "$(manifest_field "$pin_path" coord_runtime_sha256)" == "$HC_COORD_SHA256" && \
+    "$(manifest_field "$pin_path" runtime_source_sha)" == "$HC_SOURCE_SHA" && \
+    "$(manifest_field "$pin_path" action)" == 9048 && \
+    "$(manifest_field "$pin_path" semantic_authority)" == Sounio ]] || return 1
+
+  selector="$runtime_root/generation-selectors-v2/$HC_RUNTIME_ID"
+  expected_bundle="$(readlink -f "$selector/current" 2>/dev/null || true)"
+  [[ -n "$expected_bundle" && "$bundle" == "$expected_bundle" && \
+    "$bundle" == "$selector/versions/$HC_RUNTIME_ID" ]] || return 1
+  [[ "$(manifest_field "$manifest" runtime_id)" == "$HC_RUNTIME_ID" && \
+    "$(manifest_field "$manifest" source_sha)" == "$HC_SOURCE_SHA" && \
+    "$(manifest_field "$manifest" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
+    "$(manifest_field "$manifest" coord_runtime_sha256)" == "$HC_COORD_SHA256" ]] || return 1
+  return 0
+}
+
+native_hook_capability_bundle_is_admitted() {
+  local runtime_root="$1" bundle="$2" agent="$3" lane="$4" runtime_self current_bundle
+  runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
+  [[ -n "$runtime_self" && -n "$current_bundle" && \
+    "$runtime_self" == "$current_bundle/bin/sounio-coord-runtime" ]] || return 1
+  native_hook_bundle_is_selected "$runtime_root" "$bundle" || \
+    native_hook_capability_bundle_is_pinned "$runtime_root" "$bundle" "$agent" "$lane"
+}
+
 native_hook_runtime_parent_identity() {
   local parent_pid="$PPID" runtime_self local_runtime local_loom
   local runtime_root parent_bundle runtime_bundle manifest runtime_version expected_parent_sha expected_coord_sha
@@ -1808,8 +1861,8 @@ hook_capability_binding_is_current() {
     runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
     bundle="$(readlink -f "$(dirname "$HC_PRODUCER_EXECUTABLE")/.." 2>/dev/null || true)"
     manifest="$bundle/manifest"
-    if [[ "$runtime_self" != "$HC_COORD_EXECUTABLE" || ! -r "$manifest" ]] ||
-      ! native_hook_bundle_is_selected "$runtime_root" "$bundle" ||
+    if [[ ! -r "$manifest" ]] ||
+      ! native_hook_capability_bundle_is_admitted "$runtime_root" "$bundle" "$agent" "$lane" ||
       [[ "$(manifest_field "$manifest" runtime_id)" != "$HC_RUNTIME_ID" ||
         "$(manifest_field "$manifest" source_sha)" != "$HC_SOURCE_SHA" ||
         "$(manifest_field "$manifest" loom_runtime_sha256)" != "$HC_PRODUCER_SHA256" ||
