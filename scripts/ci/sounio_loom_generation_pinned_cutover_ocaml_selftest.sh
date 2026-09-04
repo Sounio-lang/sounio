@@ -176,4 +176,7 @@ grep -q 'generation-pin-forward-target-drift' \
 grep -q 'generation-pin-recursive-forward' \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
   fail 'recursive forward is not fail-closed'
-printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=11 python_oracle_executed=false semantic_authority=Sounio action=9048\n'
+! grep -q 'generation-pin-current-selector-drift' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
+  fail 'sealed first-cutover pair incorrectly blocks later immutable current generations'
+printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=12 python_oracle_executed=false semantic_authority=Sounio action=9048\n'

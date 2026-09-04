@@ -506,8 +506,6 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     ignore (validate_runtime runtimes old_runtime_id);
     ignore (validate_runtime runtimes candidate_runtime_id);
     let current_runtime_id = (selector_runtime runtimes "current").id in
-    if current_runtime_id <> old_runtime_id && current_runtime_id <> candidate_runtime_id then
-      failf "generation-pin-current-selector-drift";
     let provisional = identity_from_caller ~agent ~lane ~session_id ~generation:"1" ~harness
         ~worktree ~host ~boot_id ~pid_namespace ~pid ~pid_start in
     let path = pin_path state provisional in
