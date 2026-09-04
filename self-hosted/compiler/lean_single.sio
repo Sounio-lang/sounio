@@ -1663,11 +1663,10 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
 fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
     if fi < 0 || fi >= FN_COUNT { return 0 }
     var saw_gpu_tid: i64 = 0
-    var saw_tid: i64 = 0
-    var saw_n: i64 = 0
-    var saw_a: i64 = 0
-    var saw_b: i64 = 0
-    var saw_c: i64 = 0
+    var saw_extent: i64 = 0
+    var saw_lhs: i64 = 0
+    var saw_rhs: i64 = 0
+    var saw_out: i64 = 0
     var saw_add: i64 = 0
     var p: i64 = body_start
     var depth: i64 = 1
@@ -1676,18 +1675,17 @@ fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 
         if TK[p as usize] == 9 { depth = depth - 1 }
         if TK[p as usize] == 3 {
             if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "c") { saw_c = 1 }
+            if fn_param_name_matches_token(fi, 0, p) { saw_extent = 1 }
+            if fn_param_name_matches_token(fi, 1, p) && token_is_index_assignment_target(p) == false { saw_lhs = 1 }
+            if fn_param_name_matches_token(fi, 2, p) && token_is_index_assignment_target(p) == false { saw_rhs = 1 }
+            if fn_param_name_matches_token(fi, 3, p) && token_is_index_assignment_target(p) { saw_out = 1 }
         }
         if TK[p as usize] == 17 { saw_add = 1 }
         p = p + 1
     }
     if saw_gpu_tid == 0 { return 0 }
-    if saw_tid == 0 || saw_n == 0 { return 0 }
-    if saw_a == 0 || saw_b == 0 || saw_c == 0 { return 0 }
+    if saw_extent == 0 { return 0 }
+    if saw_lhs == 0 || saw_rhs == 0 || saw_out == 0 { return 0 }
     if saw_add == 0 { return 0 }
     return 1
 }
@@ -1698,7 +1696,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     if FN_ARITY[fi as usize] != 4 { return }
     if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
     if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
+    let rhs_kind = fn_param_kind(fi, 2)
+    if rhs_kind != gpu_param_kind_slice_in_f64() && rhs_kind != gpu_param_kind_slice_out_f64() { return }
     if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
     if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
 
@@ -1709,7 +1708,7 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     let start_off = PTX_LEN
     FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
     FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = rhs_kind
     FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
 
     ptx_emit_string(".version 7.0\n")
@@ -2157,11 +2156,24 @@ fn emit_load_call_arg_to_rax_x86(argc: i64, arg_idx: i64) with Mut {
     emit_load_stack_qword_to_rax_x86((argc - 1 - arg_idx) * 8)
 }
 
+fn emit_load_call_arg_to_rax_shift_x86(argc: i64, arg_idx: i64, shift_slots: i64) with Mut {
+    emit_load_stack_qword_to_rax_x86((shift_slots + argc - 1 - arg_idx) * 8)
+}
+
 fn emit_call_rax_x86(argc: i64) with Mut {
+    let extra = call_extra_stack_args_x86(argc, 6)
+    var align_pad: i64 = 0
+    if ((argc + extra) & 1) != 0 { align_pad = 1 }
+    // Argument setup may use rax as scratch when stack arguments are present.
+    // Keep the indirect C-call target in caller-saved r11 until the call.
+    em(0x49); em(0x89); em(0xc3)
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
-    em(0xff); em(0xd0)
-    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+    if align_pad != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+    }
+    em(0x41); em(0xff); em(0xd3)
+    emit_drop_call_args_x86(argc + extra + align_pad)
 }
 
 fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
@@ -2454,7 +2466,7 @@ fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
 }
 
 fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
-    if argc > regc + 1 { return argc - regc }
+    if argc > regc { return argc - regc }
     return 0
 }
 
@@ -2473,7 +2485,7 @@ fn emit_sret_destination_x86(ret_slots: i64) with Mut, Panic, Div {
 
 fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
     let extra = call_extra_stack_args_x86(argc, regc)
-    if extra <= 1 { return }
+    if extra <= 0 { return }
     let scratch_bytes = extra * 8
     if scratch_bytes < 128 {
         em(0x48); em(0x83); em(0xec); em(scratch_bytes)
@@ -8629,6 +8641,70 @@ fn find_matching_body_close(open_tok: i64) -> i64 with Panic, Mut {
         q = q + 1
     }
     return TC
+}
+
+fn find_fn_body_open_after_name(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
+    var p = name_tok + 1
+    if TK[p as usize] == 6 {
+        p = p + 1
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 43 {
+                    p = p + 1
+                    scan_type(p)
+                    p = SCAN_TY_NEXT
+                }
+            } else {
+                p = p + 1
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+    }
+    if TK[p as usize] == 10 {
+        p = p + 1
+        scan_type(p)
+        p = SCAN_TY_NEXT
+    }
+    p = skip_signature_where_clause(p)
+    if TK[p as usize] == 38 {
+        p = p + 1
+        while TK[p as usize] == 3 || TK[p as usize] == 28 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 6 {
+                    p = p + 1
+                    while TK[p as usize] != 7 && TK[p as usize] != 0 { p = p + 1 }
+                    if TK[p as usize] == 7 { p = p + 1 }
+                }
+            } else {
+                p = p + 1
+            }
+        }
+    }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
+    return p
+}
+
+fn skip_trait_decl_at(p0: i64) -> i64 with Panic, Mut {
+    if p0 < 0 || p0 >= TC { return p0 }
+    if TK[p0 as usize] != 75 { return p0 }
+    var p = p0 + 1
+    if p < TC && TK[p as usize] == 3 { p = p + 1 }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 {
+        p = p + 1
+    }
+    if p < TC && TK[p as usize] == 8 {
+        var depth: i64 = 1
+        p = p + 1
+        while p < TC && depth > 0 {
+            if TK[p as usize] == 8 { depth = depth + 1 }
+            if TK[p as usize] == 9 { depth = depth - 1 }
+            p = p + 1
+        }
+    }
+    return p
 }
 
 fn ep_before_body_close() -> bool {
@@ -20562,6 +20638,11 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     }
 
     NEEDS_GPU_RUNTIME_DYNLINK = 1
+    var entry_pad_slots: i64 = 0
+    if (abi_argc & 1) != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+        entry_pad_slots = 1
+    }
     emit_try_gpu_runtime_init_x86()
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x84)
@@ -20588,18 +20669,21 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // Stack slots grow toward lower addresses. Allocate the pointer-vector
+    // slots in reverse so &paddr0 is a C-contiguous kernelParams array:
+    // [ &param0, &param1, &param2, &param3 ].
     let paddr3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
 
-    emit_load_call_arg_to_rax_x86(abi_argc, 0); emit_store_var(n_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 1); emit_store_var(a_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 2); emit_store_var(a_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 3); emit_store_var(b_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 4); emit_store_var(b_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 5); emit_store_var(c_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 6); emit_store_var(c_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 0, entry_pad_slots); emit_store_var(n_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 1, entry_pad_slots); emit_store_var(a_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 2, entry_pad_slots); emit_store_var(a_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 3, entry_pad_slots); emit_store_var(b_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 4, entry_pad_slots); emit_store_var(b_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 5, entry_pad_slots); emit_store_var(c_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 6, entry_pad_slots); emit_store_var(c_len_slot)
 
     emit_load_var(a_len_slot)
     em(0x48); em(0xc1); em(0xe0); em(3)
@@ -20695,7 +20779,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
     emit_load_var(dptr_c_slot); em(0x50)
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
-    emit_drop_call_args_x86(abi_argc)
+    emit_drop_call_args_x86(abi_argc + entry_pad_slots)
     em(0x31); em(0xc0)
     em(0xe9)
     let done = CL
@@ -20714,6 +20798,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     patch32(gpu_fail_k, CL)
     emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
     patch32(cpu_fallback, CL)
+    emit_drop_call_args_x86(entry_pad_slots)
     emit_kernel_cpu_direct_call_x86(fi, abi_argc)
     patch32(done, CL)
 }
@@ -30240,9 +30325,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
-            var q: i64 = p + 1
-            if TK[q as usize] == 6 { q = q + 1 }
-            while q < TC && TK[q as usize] != 8 { q = q + 1 }
+            var q: i64 = find_fn_body_open_after_name(p)
             if FN_RET_TY[ret_fi as usize] == 8 && arr_hash_alen(FN_RET_HASH[ret_fi as usize]) == 0 {
                 let ret_esiz = arr_hash_esiz(FN_RET_HASH[ret_fi as usize])
                 let ret_elem_ty = arr_hash_elem_ty(FN_RET_HASH[ret_fi as usize])
