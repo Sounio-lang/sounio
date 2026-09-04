@@ -227,6 +227,48 @@ for g in $GATES; do
       echo "REMOTE: witness_gate rc=\$wit_rc"
       if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
       ;;
+    pireus-operator)
+      echo "REMOTE: --- Pireus source operator IR ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      out=/tmp/pireus-sedenion-operator-\$\$.elf
+      SOUNIO_PIREUS_OPERATOR_TRACE=1 "\$W/madaros.elf" build \
+        tests/native/pireus_sedenion_operator.sio -o "\$out" \
+        >"\$W/pireus-operator.log" 2>&1
+      op_rc=\$?
+      sed 's/^/REMOTE: /' "\$W/pireus-operator.log" | tail -60
+      echo "REMOTE: pireus_operator_build rc=\$op_rc"
+      if [ \$op_rc -ne 0 ]; then exit \$op_rc; fi
+      if ! grep -q '^PIREUS_IR_EMIT opcode=IrXorConvolutionS bits=4 twist=CayleyDicksonSign candidate=auto abi=ptr3$' \
+        "\$W/pireus-operator.log"; then
+        echo "REMOTE: PIREUS_OPERATOR_FAIL missing typed IR trace"
+        exit 1
+      fi
+      if [ ! -s "\$out" ]; then
+        echo "REMOTE: PIREUS_OPERATOR_FAIL missing public native artifact"
+        exit 1
+      fi
+      if ! grep -q '^PIREUS_NATIVE_EMIT opcode=IrXorConvolutionS candidate=two_zmm_indexed_permute kernel_bytes=1004 abi=ptr3$' \
+        "\$W/pireus-operator.log"; then
+        echo "REMOTE: PIREUS_OPERATOR_FAIL missing native materialization receipt"
+        exit 1
+      fi
+      chmod +x "\$out"
+      "\$out" >"\$W/pireus-operator.runtime.log" 2>&1
+      run_rc=\$?
+      sed 's/^/REMOTE: /' "\$W/pireus-operator.runtime.log"
+      echo "REMOTE: pireus_operator_run rc=\$run_rc"
+      if [ \$run_rc -ne 0 ] || ! grep -q '^PIREUS_SEDENION_OPERATOR_RUNTIME_PASS basis_pairs=256 components=4096$' \
+        "\$W/pireus-operator.runtime.log"; then
+        echo "REMOTE: PIREUS_OPERATOR_FAIL runtime basis gate"
+        exit 1
+      fi
+      source_sha=\$(sha256sum tests/native/pireus_sedenion_operator.sio | cut -d' ' -f1)
+      artifact_sha=\$(sha256sum "\$out" | cut -d' ' -f1)
+      cpu_model=\$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)
+      echo "REMOTE: PIREUS_OPERATOR_IR_PASS artifact_bytes=\$(stat -c%s "\$out") kernel_bytes=1004"
+      echo "REMOTE: PIREUS_OPERATOR_RECEIPT source_sha256=\$source_sha artifact_sha256=\$artifact_sha hardware=\$cpu_model"
+      ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
 done
@@ -236,7 +278,7 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*|*pireus-operator*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \

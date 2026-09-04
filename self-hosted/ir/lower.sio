@@ -16138,6 +16138,61 @@ impl Lowerer {
     }
 
     fn lower_assign_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Preserve a typed wide product as one pointer-level semantic operation.
+        // Lowering either dereference first would retain only the first 64-bit
+        // component in Core IR and make native materialization impossible.
+        if s.assign_op == AssignOp::AssignEq {
+            match s.target {
+                Some(target_expr_xor) => match s.expr {
+                    Some(rhs_expr_xor) => {
+                        if (*target_expr_xor).kind == ExprKind::ExprUnary
+                            && (*target_expr_xor).un_op == UnaryOp::OpDeref
+                            && (*rhs_expr_xor).kind == ExprKind::ExprBinary
+                            && (*rhs_expr_xor).bin_op == BinaryOp::OpMul {
+                            let hyper_expr_id = lowerer_find_hyper_expr_id_for_span_ref(&self, (*rhs_expr_xor).span)
+                            if hyper_expr_id >= 0 && hyper_expr_id < (*self.module).epistemic.hyper_expr_count {
+                                let info = (*self.module).epistemic.hyper_exprs[hyper_expr_id as usize]
+                                match (*target_expr_xor).left {
+                                    Some(dst_ptr_expr) => match (*rhs_expr_xor).left {
+                                        Some(lhs_deref_expr) => match (*rhs_expr_xor).right {
+                                            Some(rhs_deref_expr) => {
+                                                if info.op_kind == 1 && info.algebra_tag == 4
+                                                    && (*lhs_deref_expr).kind == ExprKind::ExprUnary
+                                                    && (*lhs_deref_expr).un_op == UnaryOp::OpDeref
+                                                    && (*rhs_deref_expr).kind == ExprKind::ExprUnary
+                                                    && (*rhs_deref_expr).un_op == UnaryOp::OpDeref {
+                                                    match (*lhs_deref_expr).left {
+                                                        Some(lhs_ptr_expr) => match (*rhs_deref_expr).left {
+                                                            Some(rhs_ptr_expr) => {
+                                                                let dst_pair = self.lower_expr_ref(&(*dst_ptr_expr))
+                                                                let lhs_pair = dst_pair.0.lower_expr_ref(&(*lhs_ptr_expr))
+                                                                let rhs_pair = lhs_pair.0.lower_expr_ref(&(*rhs_ptr_expr))
+                                                                let lo_xor = rhs_pair.0.emit(ir_xor_convolution_s_virtual_ptr3(dst_pair.1, lhs_pair.1, rhs_pair.1))
+                                                                if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+                                                                    print("PIREUS_IR_EMIT opcode=IrXorConvolutionS bits=4 twist=CayleyDicksonSign candidate=auto abi=ptr3\n")
+                                                                }
+                                                                return (lo_xor, dst_pair.1)
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        _ => {}
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                _ => {}
+            }
+        }
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
@@ -18850,6 +18905,13 @@ impl Lowerer {
                 let info = (*lo3.module).epistemic.hyper_exprs[hyper_expr_id as usize]
                 if info.op_kind == 1 && info.algebra_tag == 3 {
                     let lo4_h = lo3.emit(ir_hyper_mul_o(dst, lhs, rhs))
+                    return (lo4_h, dst)
+                }
+                if info.op_kind == 1 && info.algebra_tag == 4 {
+                    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+                        print("PIREUS_IR_EMIT opcode=IrXorConvolutionS bits=4 twist=CayleyDicksonSign candidate=auto\n")
+                    }
+                    let lo4_h = lo3.emit(ir_xor_convolution_s_virtual(dst, lhs, rhs))
                     return (lo4_h, dst)
                 }
             }

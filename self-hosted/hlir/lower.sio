@@ -109,6 +109,14 @@ pub struct HlirLowerState {
     oct_keys: [i64; 128],
     oct_comps: [i64; 2048],
     oct_dims: [i64; 128],
+    // Pointer provenance and deferred algebraic operator operands. A loaded
+    // Hyper value keeps its source pointer; a Sedenion product keeps the two
+    // source pointers until the destination store makes the three-pointer ABI
+    // explicit. This prevents the frontend from erasing the operator into 256
+    // scalar products before target selection.
+    oct_ptrs: [i64; 128],
+    oct_xor_lhs_ptrs: [i64; 128],
+    oct_xor_rhs_ptrs: [i64; 128],
     oct_count: i64,
 }
 
@@ -140,6 +148,9 @@ pub fn hlir_lower_state_new() -> HlirLowerState with Div, Mut, Panic {
         oct_keys: [0 - 1; 128],
         oct_comps: [0; 2048],
         oct_dims: [0; 128],
+        oct_ptrs: [HLIR_INVALID_VALUE; 128],
+        oct_xor_lhs_ptrs: [HLIR_INVALID_VALUE; 128],
+        oct_xor_rhs_ptrs: [HLIR_INVALID_VALUE; 128],
         oct_count: 0,
     }
 }
@@ -184,6 +195,39 @@ fn hlir_oct_record(state: HlirLowerState, comps: [i64; 16], dim: i64) -> (HlirLo
         s.oct_count = s.oct_count + 1
     }
     (s, repr)
+}
+
+fn hlir_oct_find(state: HlirLowerState, repr: i64) -> i64 {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr { return k }
+        k = k + 1
+    }
+    0 - 1
+}
+
+fn hlir_oct_record_pointer(state: HlirLowerState, repr: i64, ptr: i64) -> HlirLowerState {
+    var s = state
+    let k = hlir_oct_find(s, repr)
+    if k >= 0 { s.oct_ptrs[k as usize] = ptr }
+    s
+}
+
+fn hlir_oct_pointer(state: HlirLowerState, repr: i64) -> i64 {
+    let k = hlir_oct_find(state, repr)
+    if k < 0 { return HLIR_INVALID_VALUE }
+    state.oct_ptrs[k as usize]
+}
+
+fn hlir_oct_record_deferred_xor(state: HlirLowerState, lhs_ptr: i64, rhs_ptr: i64) -> (HlirLowerState, i64) with Mut, Panic {
+    let recorded = hlir_oct_record(state, [HLIR_INVALID_VALUE; 16], 16)
+    var s = recorded.0
+    let k = hlir_oct_find(s, recorded.1)
+    if k >= 0 {
+        s.oct_xor_lhs_ptrs[k as usize] = lhs_ptr
+        s.oct_xor_rhs_ptrs[k as usize] = rhs_ptr
+    }
+    (s, recorded.1)
 }
 
 // Is value_id a recorded hypercomplex repr?
@@ -239,7 +283,8 @@ fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerSta
         comps[c as usize] = load_pair.1
         c = c + 1
     }
-    hlir_oct_record(s, comps, dim)
+    let recorded = hlir_oct_record(s, comps, dim)
+    (hlir_oct_record_pointer(recorded.0, recorded.1, ptr_val), recorded.1)
 }
 
 // Twisted XOR convolution for the Cayley-Dickson sign function:
@@ -251,6 +296,14 @@ fn hlir_xor_convolution(state: HlirLowerState, a_repr: i64, b_repr: i64, contrac
     var s = state
     let dim = contract.dimension
     let bits = contract.bits
+    if bits == 4 && dim == 16 {
+        let lhs_ptr = hlir_oct_pointer(s, a_repr)
+        let rhs_ptr = hlir_oct_pointer(s, b_repr)
+        if lhs_ptr == HLIR_INVALID_VALUE || rhs_ptr == HLIR_INVALID_VALUE {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        return hlir_oct_record_deferred_xor(s, lhs_ptr, rhs_ptr)
+    }
     let a = hlir_oct_lookup(s, a_repr)
     let b = hlir_oct_lookup(s, b_repr)
     var r: [i64; 16] = [0 - 1; 16]
@@ -286,6 +339,17 @@ fn hlir_xor_convolution(state: HlirLowerState, a_repr: i64, b_repr: i64, contrac
 // Store a repr's `dim` components through a hypercomplex pointer value.
 fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
+    let repr_idx = hlir_oct_find(s, repr)
+    if repr_idx >= 0 && s.oct_xor_lhs_ptrs[repr_idx as usize] != HLIR_INVALID_VALUE {
+        var args: [i64; 64] = [HLIR_INVALID_VALUE; 64]
+        args[0] = s.oct_xor_lhs_ptrs[repr_idx as usize]
+        args[1] = s.oct_xor_rhs_ptrs[repr_idx as usize]
+        args[2] = ptr_val
+        let lowered = hlir_lower_xor_convolution_call(
+            s, hlir_empty_name(), args, 3, hlir_type_void(),
+            hlir_cayley_dickson_xor_convolution(4), HLIR_XOR_CANDIDATE_AUTO)
+        return lowered.0
+    }
     let comps = hlir_oct_lookup(s, repr)
     let dim = hlir_oct_dim(s, repr)
     var c: i64 = 0
