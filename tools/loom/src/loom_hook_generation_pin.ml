@@ -565,7 +565,25 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
           [| "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=" ^ target.id;
              "SOUNIO_COORD_RUNTIME_DIR=" ^ selector |]
           inherited in
-      Some (run_process ~input:raw_event ~environment target_executable ("agent-hook" :: arguments)))
+      let input_path =
+        Filename.concat (pin_directory state)
+          (Printf.sprintf ".forward-input.%d.%s" (Unix.getpid ()) (sha256 raw_event))
+      in
+      let input_fd = Unix.openfile input_path [ O_RDWR; O_CREAT; O_EXCL ] 0o600 in
+      (try
+         write_all input_fd raw_event;
+         ignore (Unix.lseek input_fd 0 SEEK_SET);
+         Unix.unlink input_path;
+         Unix.dup2 input_fd Unix.stdin;
+         Unix.close input_fd;
+         let argv =
+           Array.of_list (target_executable :: "agent-hook" :: arguments)
+         in
+         Unix.execve target_executable argv environment
+       with error ->
+         (try Unix.close input_fd with _ -> ());
+         (try Unix.unlink input_path with _ -> ());
+         raise error))
 
 let run_seal arguments =
   let rec parse source_root git_common old_runtime candidate = function
