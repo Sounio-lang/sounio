@@ -35104,6 +35104,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         tc_wrong_arity(name_tok, 1, 2)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
+                    // β⁶/β⁷ chain rule: park u and the argument's own channel
+                    // state. Without this the a64 pass left the ARGUMENT's
+                    // sensitivities on the result, i.e. it behaved as if
+                    // f'(u) == 1 for every transcendental.
+                    let m_arg_a = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(m_arg_a)
+                    let m_prev_a = B7_TOP
+                    var m_u_a = B7_TOP
+                    if B7_TOP + B7_FRAME * 2 > 8192 {
+                        tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                        m_u_a = 8192 - B7_FRAME * 2
+                    } else {
+                        B7_TOP = B7_TOP + B7_FRAME
+                    }
+                    b7_save_a64(m_u_a)
+                    let m_out_a = m_u_a + B7_FRAME
+                    emit_load_var_a64(m_arg_a)
                     emit_push_a64()
                     var math_fi: i64 = fn_find_lit("__native_sqrt_f64")
                     if src_match(ns, ne - ns, "sin") { math_fi = fn_find_lit("__native_sin_f64") }
@@ -35122,6 +35140,56 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         em32(0xD2800000)
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
+                    var m_kind_a: i64 = 0
+                    if src_match(ns, ne - ns, "sin") { m_kind_a = 1 }
+                    if src_match(ns, ne - ns, "cos") { m_kind_a = 2 }
+                    if src_match(ns, ne - ns, "exp") { m_kind_a = 3 }
+                    if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") { m_kind_a = 4 }
+                    if src_match(ns, ne - ns, "tan") { m_kind_a = 5 }
+                    if src_match(ns, ne - ns, "atan") { m_kind_a = 6 }
+                    if src_match(ns, ne - ns, "tanh") { m_kind_a = 7 }
+                    if src_match(ns, ne - ns, "asin") { m_kind_a = 8 }
+                    if src_match(ns, ne - ns, "acos") { m_kind_a = 9 }
+                    let m_res_a = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(m_res_a)
+                    var m_t_a: i64 = 0
+                    while m_t_a < B7_FRAME { B7F[(m_out_a + m_t_a) as usize] = -1; m_t_a = m_t_a + 1 }
+                    var m_any_a: i64 = 0
+                    var m_q_a: i64 = 0
+                    while m_q_a < B7_FRAME {
+                        if B7F[(m_u_a + m_q_a) as usize] >= 0 { m_any_a = 1 }
+                        m_q_a = m_q_a + 1
+                    }
+                    if m_any_a == 1 {
+                        let m_d1_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
+                        emit_store_var_a64(m_d1_a)
+                        let m_d2_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 1, m_arg_a, m_res_a, m_d1_a)
+                        emit_store_var_a64(m_d2_a)
+                        var m_c_a: i64 = 0
+                        while m_c_a < 8 {
+                            B7F[(m_out_a + 36 + m_c_a) as usize] = emit_s_chain_a64(m_d1_a, B7F[(m_u_a + 36 + m_c_a) as usize])
+                            m_c_a = m_c_a + 1
+                        }
+                        var m_j_a: i64 = 0
+                        var m_i_a: i64 = 0
+                        while m_j_a < 8 {
+                            var m_k_a: i64 = m_j_a
+                            while m_k_a < 8 {
+                                B7F[(m_out_a + m_i_a) as usize] = emit_h_chain_a64(m_d1_a, m_d2_a, B7F[(m_u_a + m_i_a) as usize], B7F[(m_u_a + 36 + m_j_a) as usize], B7F[(m_u_a + 36 + m_k_a) as usize])
+                                m_i_a = m_i_a + 1
+                                m_k_a = m_k_a + 1
+                            }
+                            m_j_a = m_j_a + 1
+                        }
+                        emit_load_var_a64(m_res_a)
+                    }
+                    b7_restore_a64(m_out_a)
+                    B7_TOP = m_prev_a
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
@@ -37200,6 +37268,146 @@ fn emit_h_mul_a64(lh: i64, rh: i64, lval: i64, rval: i64, saj: i64, sbk: i64, sa
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
     emit_store_var_a64(res)
     return res
+}
+
+
+// fneg d0, d0 -- exact sign flip, so -0.0 stays -0.0 (x86 XORs the sign bit).
+fn emit_f64_neg_a64() with Mut {
+    em32(0x9E670000)
+    em32(0x1E614000)
+    em32(0x9E660000)
+}
+
+fn emit_native1_a64(nm: string) with IO, Mut, Panic, Div {
+    let fi = fn_find_lit(nm)
+    if fi >= 0 { emit_direct_fn_call_a64(fi, 1) } else { emit_imm64_a64(0) }
+}
+
+// f'(u) when second == 0, f''(u) when second == 1, into x0. Kinds:
+// 0 sqrt 1 sin 2 cos 3 exp 4 ln/log 5 tan 6 atan 7 tanh 8 asin 9 acos.
+// arg holds u, res holds f(u), d1 holds f'(u) (read only when second == 1).
+// Same formulas as the inline x86 block in compile_primary. 1.0 and 2.0 are
+// 4607182418800017408 and 4611686018427387904 as IEEE-754 bit patterns.
+fn emit_math_deriv_a64(kind: i64, second: i64, arg: i64, res: i64, d1: i64) with IO, Mut, Panic, Div {
+    if second == 0 {
+        if kind == 0 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 1 {
+            emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_cos_f64")
+        } else if kind == 2 {
+            emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_sin_f64")
+            emit_f64_neg_a64()
+        } else if kind == 3 {
+            emit_load_var_a64(res)
+        } else if kind == 4 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 5 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+        } else if kind == 6 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 7 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+        } else {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+            emit_push_a64(); emit_native1_a64("__native_sqrt_f64")
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+            if kind == 9 { emit_f64_neg_a64() }
+        }
+        return
+    }
+    if kind == 0 {
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        emit_f64_neg_a64()
+    } else if kind == 1 {
+        emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_sin_f64")
+        emit_f64_neg_a64()
+    } else if kind == 2 {
+        emit_load_var_a64(res); emit_f64_neg_a64()
+    } else if kind == 3 {
+        emit_load_var_a64(res)
+    } else if kind == 4 {
+        emit_imm64_a64(4607182418800017408); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        emit_f64_neg_a64()
+    } else if kind == 5 || kind == 7 {
+        emit_imm64_a64(4611686018427387904); emit_push_a64()
+        emit_load_var_a64(res); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        if kind == 7 { emit_f64_neg_a64() }
+    } else if kind == 6 {
+        emit_imm64_a64(4611686018427387904); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_f64_neg_a64()
+    } else {
+        // asin and acos share f''(x) = arg·f'(x)^3; for acos f' is negative, so
+        // the cube already carries the sign (mirror of the x86 comment).
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    }
+}
+
+// s_j(f(u)) = f'(u)·s_j(u)
+fn emit_s_chain_a64(d1: i64, sv: i64) -> i64 with IO, Mut, Panic, Div {
+    if sv < 0 { return -1 }
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(d1); emit_push_a64()
+    emit_load_var_a64(sv); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_store_var_a64(r)
+    return r
+}
+
+// H_jk(f(u)) = f''(u)·s_j(u)·s_k(u) + f'(u)·H_jk(u)
+fn emit_h_chain_a64(d1: i64, d2: i64, h: i64, sj: i64, sk: i64) -> i64 with IO, Mut, Panic, Div {
+    if h < 0 && (sj < 0 || sk < 0) { return -1 }
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(d2); emit_push_a64()
+    if sj >= 0 { emit_load_var_a64(sj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sk >= 0 { emit_load_var_a64(sk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(d1); emit_push_a64()
+    if h >= 0 { emit_load_var_a64(h) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(r)
+    return r
 }
 
 // ─── ARM64 additive ───
