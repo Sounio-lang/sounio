@@ -280,6 +280,10 @@ var MAIN_SRC_END: i64 = 0
 // ─── Phase 6a: Unit tracking (compile-time only) ───
 // Unit hash per local variable (0 = no unit)
 var VAR_UNIT: [i64; 2048] = [0; 2048]
+// Dimension of a variable whose unit was derived by arithmetic and so has no
+// declared name. VAR_UNIT holds a unit NAME, from which the dimension is looked
+// up; a composed dimension has no name, so it needs to be stored directly.
+var VAR_UNIT_DIM: [i64; 2048] = [0; 2048]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
@@ -7609,6 +7613,7 @@ fn local_meta_add(
     VAR_IS_CLOSURE[idx as usize] = is_closure
     VAR_MUT[idx as usize] = is_mut
     VAR_UNIT[idx as usize] = unit_hash
+    VAR_UNIT_DIM[idx as usize] = 0
     VAR_LINEAR[idx as usize] = is_linear
     VAR_AFFINE[idx as usize] = 0
     VAR_MOVED[idx as usize] = 0
@@ -16069,6 +16074,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
             EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // A variable holding a derived quantity carries a dimension with no
+            // name, which unit_lookup_dim cannot recover from a zero hash. Named
+            // units keep the value computed on the line above; this fills in only
+            // the anonymous case, so nothing that worked before changes.
+            if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
+                EXPR_UNIT_DIM = VAR_UNIT_DIM[vi as usize]
+            }
             var_mark_used(ns, ne)
             // Linear variable consumed inside a loop — would be consumed multiple times
             if vi >= 0 && VAR_LINEAR[vi as usize] == 1 && LOOP_DEPTH > 0 {
@@ -23831,6 +23843,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
+                }
+                // A derived quantity has no unit NAME to store: distance / time
+                // composes the dimension m/s, but no declared unit is named by
+                // that composition, so the branches above store nothing and the
+                // brand dies at the binding. Keep the composed dimension.
+                if VAR_UNIT[(VAR_COUNT - 1) as usize] == 0 && EXPR_UNIT_DIM != 0 {
+                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = EXPR_UNIT_DIM
                 }
                 // β⁴/β⁵: capture variance and sensitivity shadow slots into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
