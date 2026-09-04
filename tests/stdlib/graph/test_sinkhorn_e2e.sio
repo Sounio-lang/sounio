@@ -1,0 +1,49 @@
+//@ run-pass
+//@ expect-stdout: GRAPH_SINKHORN_OK
+// Covers graph::sinkhorn after the Seq migration. ProbMeasure.weights and
+// CostMatrix.data were [f64] built with slice .push (E019) and are Seq<f64>
+// now, as are the scaling vectors inside the algorithm.
+//
+// Scoped to what the migration touched. run_sinkhorn_tests() is NOT called: two
+// of its four cases fail on pre-existing numerics unrelated to containers --
+// test_exp_approx, whose Taylor/squaring approximation misses exp(1) by more
+// than its own 0.01 tolerance, and test_sinkhorn_simple, which depends on it.
+// The module never compiled before, so neither had ever run.
+use graph::sinkhorn::*;
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // Measures: built by growing, read back through a &ProbMeasure receiver.
+    let mu = ProbMeasure::uniform(4)
+    let total: f64 = mu.total()
+    if total < 0.9999999 || total > 1.0000001 {
+        println("FAIL uniform total")
+        return 1
+    }
+    if mu.size() != 4 {
+        println("FAIL uniform size")
+        return 1
+    }
+
+    // Cost matrix: n*m runtime length, set then read through both receivers.
+    var cost = CostMatrix::new(2, 3)
+    cost.set(0, 0, 1.5)
+    cost.set(1, 2, 2.5)
+    let c00: f64 = cost.get(0, 0)
+    let c12: f64 = cost.get(1, 2)
+    let c01: f64 = cost.get(0, 1)
+    if c00 < 1.49 || c00 > 1.51 { println("FAIL cost get(0,0)"); return 1 }
+    if c12 < 2.49 || c12 > 2.51 { println("FAIL cost get(1,2)"); return 1 }
+    if c01 > 0.0001 { println("FAIL cost default"); return 1 }
+
+    // Out of range reads stay clamped rather than reading past the row.
+    let oob: f64 = cost.get(5, 5)
+    if oob > 0.0001 { println("FAIL cost out of range"); return 1 }
+
+    if !test_sinkhorn_identity() {
+        println("FAIL sinkhorn identity")
+        return 1
+    }
+
+    println("GRAPH_SINKHORN_OK")
+    0
+}
