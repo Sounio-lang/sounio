@@ -131,6 +131,17 @@ for forbidden in python python3 pypy pypy3 cargo rustc; do
 done
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+grep -Fq 'let coordination_process_timeout_seconds = 25.0' \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" ||
+  fail 'native coordination deadline drifted from the bounded 25s contract'
+for provider_config in \
+  "$ROOT_DIR/.codex/hooks.json" \
+  "$ROOT_DIR/.claude/settings.json" \
+  "$ROOT_DIR/.cursor/hooks.json" \
+  "$ROOT_DIR/.grok/hooks/loom-native.json"; do
+  grep -Eq '"timeout"[[:space:]]*:[[:space:]]*30' "$provider_config" ||
+    fail "provider hook does not preserve the 30s outer deadline: $provider_config"
+done
 frozen_executable_commit="$(sed -n 's/^sounio_executable_commit=//p' "$AUTHORITY_MANIFEST")"
 [[ -n "$frozen_executable_commit" ]] || fail 'language-authority manifest omitted its executable commit'
 mkdir -p "$TOOLCHAIN_ROOT"
@@ -666,7 +677,7 @@ grep -q "^WAKE_STARTED message_id=$wake_message .*address=$tmux_pane .*generatio
 message_status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   "$ROOT_DIR/bin/sounio-coord" message-status --agent sender \
   --lane native-tmux-fixture --message "$wake_message")"
-grep -q 'injected=1 .*wakes=1 wake_pending=0$' <<<"$message_status" ||
+grep -Eq 'injected=1 .*wakes=1 wake_pending=0( |$)' <<<"$message_status" ||
   fail "native tmux wake did not close its durable handshake: $message_status"
 grep -q "MESSAGE id=$wake_message " "$TMUX_LOG" ||
   fail 'native prompt hook did not read the durable message body after the metadata wake'
@@ -707,8 +718,8 @@ for _ in $(seq 1 200); do
 done
 [[ "$process_exit_retirement_pending" -eq 1 ]] ||
   fail "native process-exit supervisor violated the action 9047 retirement boundary: $(cat "$PROCESS_EXIT_LOG")"
-grep -Fq $'action=PROCESS_EXIT_RECONCILE_PENDING\tagent=codex\tlane='"$PROCESS_EXIT_LANE"$'\tsession_id_sha256=' \
-  "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
+wait_for_log_pattern "$COORD_DIR/hook-session-lifecycle/events.tsv" \
+  $'action=PROCESS_EXIT_RECONCILE_PENDING\tagent=codex\tlane='"$PROCESS_EXIT_LANE"$'\tsession_id_sha256=' ||
   fail 'native process-exit supervisor omitted its reconciliation-pending receipt'
 watcher_closed=0
 for _ in $(seq 1 200); do

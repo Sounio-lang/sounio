@@ -10,7 +10,9 @@ let pinned_native_hook_cutover_manifest_sha256 =
 
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
-let coordination_process_timeout_seconds = 15.0
+(* Provider hook contracts allow 30 seconds. Keep a bounded five-second margin
+   while admitting supervisor recovery observed above 15 seconds under load. *)
+let coordination_process_timeout_seconds = 25.0
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
