@@ -20531,13 +20531,44 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
 // ptr_slot holds the SRET pointer (x0 from the call).  tup_hash encodes the
 // element types/sizes via the standard format.  Currently handles flat 2-element tuples only.
 fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
-    let tup_first_slots = (tup_hash % 1000000) / 1000
-    let tup_total_slots = tup_hash % 1000
+    // This mirrored the two-element model: tup_first_* / tup_last_*, selected by
+    // `elem_idx == 0`. For a tuple of three or more, every element past the first
+    // took the LAST element's type AND the same byte offset, so `let (a,b,c,d) = f()`
+    // bound only `a` and the rest came out as unknown identifiers on aarch64.
+    // Same root cause as docs/audit/LEAN_SINGLE_NARY_TUPLE_MIDDLE_ELEMENT_2026-07-05.md,
+    // which fixed the x86 side; this is that fix, mirrored.
+    var tup_first_slots: i64 = (tup_hash % 1000000) / 1000
+    var tup_total_slots: i64 = tup_hash % 1000
+    var tup_first_f64: i64 = (tup_hash / 10000000) % 10
+    var tup_last_f64: i64 = (tup_hash / 1000000) % 10
+    var tup_first_ty: i64 = 1
+    var tup_first_ty_hash: i64 = 0
+    var tup_last_ty: i64 = 1
+    var tup_last_ty_hash: i64 = 0
+    let tup_ci = tup_cache_lookup(tup_hash)
+    var have_full: i64 = 0
+    if tup_ci >= 0 {
+        tup_first_ty = TUP_CACHE_FIRST_TY[tup_ci as usize]
+        tup_first_ty_hash = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+        tup_last_ty = TUP_CACHE_LAST_TY[tup_ci as usize]
+        tup_last_ty_hash = TUP_CACHE_LAST_HASH[tup_ci as usize]
+        let fs = ty_slot_count(tup_first_ty, tup_first_ty_hash)
+        let ls = ty_slot_count(tup_last_ty, tup_last_ty_hash)
+        if fs > 0 { tup_first_slots = fs }
+        if tup_first_ty == 2 { tup_first_f64 = 1 } else { tup_first_f64 = 0 }
+        if tup_last_ty == 2 { tup_last_f64 = 1 } else { tup_last_f64 = 0 }
+        if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+            have_full = 1
+            let es = tup_elem_slots_sum(tup_ci)
+            if es > 0 { tup_total_slots = es }
+        } else if fs > 0 && ls > 0 {
+            tup_total_slots = fs + ls
+        }
+    }
     let tup_last_slots = tup_total_slots - tup_first_slots
-    let tup_first_f64 = (tup_hash / 10000000) % 10
-    let tup_last_f64 = (tup_hash / 1000000) % 10
     var pp = pat_start + 1
     var elem_idx: i64 = 0
+    var byte_off_acc: i64 = 0
     while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
@@ -20545,24 +20576,50 @@ fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         let pne = TE[pp as usize]
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         pp = pp + 1
-        let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
-        let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
-        let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+        var elem_is_f64: i64 = 0
+        var elem_slots: i64 = 0
+        var byte_off: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_ty_hash: i64 = 0
+        if have_full == 1 && elem_idx < TUP_CACHE_TCOUNT[tup_ci as usize] {
+            elem_ty = TUP_CACHE_ELEM_TY[(tup_ci * 16 + elem_idx) as usize]
+            elem_ty_hash = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + elem_idx) as usize]
+            elem_slots = ty_slot_count(elem_ty, elem_ty_hash)
+            elem_is_f64 = if elem_ty == 2 { 1 } else { 0 }
+            byte_off = byte_off_acc
+        } else {
+            elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+            elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
+            byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+            elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
+            elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        }
         if is_wild == 0 {
-            if elem_slots == 1 {
-                emit_load_var_a64(ptr_slot)
-                if byte_off > 0 {
-                    // add x0, x0, #byte_off  (imm12 in bits [21:10])
+            emit_load_var_a64(ptr_slot)
+            if byte_off > 0 {
+                // ADD immediate carries imm12: anything wider has to go through a
+                // register, or the offset would silently wrap.
+                if byte_off < 4096 {
                     em32(0x91000000 | (byte_off << 10))
+                } else {
+                    emit_imm64_reg_a64(9, byte_off)
+                    em32(0x8B090000)  // add x0, x0, x9
                 }
-                // ldr x0, [x0]
-                em32(0xF9400000)
+            }
+            if elem_slots == 1 {
+                em32(0xF9400000)  // ldr x0, [x0]
                 if elem_is_f64 == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 }
                 else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
                 EXPR_TY_HASH = 0
-                tuple_bind_leaf_a64(pns, pne)
+            } else {
+                // Aggregate element: bind as a pointer into the SRET buffer.
+                EXPR_IS_F64 = 0
+                EXPR_TY = elem_ty
+                EXPR_TY_HASH = elem_ty_hash
             }
+            tuple_bind_leaf_a64(pns, pne)
         }
+        byte_off_acc = byte_off_acc + elem_slots * 8
         elem_idx = elem_idx + 1
     }
 }
