@@ -104,15 +104,32 @@ let ensure_symlink path target expected =
     if Unix.realpath path <> Unix.realpath expected then failf "activation-selector-drift:%s" path)
   else Unix.symlink target path
 
+let path_exists path =
+  try ignore (Unix.lstat path); true with Unix.Unix_error (Unix.ENOENT,_,_) -> false
+
+let rec hardlink_tree source destination =
+  match (Unix.lstat source).st_kind with
+  | S_DIR ->
+      if not (path_exists destination) then Unix.mkdir destination 0o700;
+      Sys.readdir source |> Array.to_list |> List.sort String.compare
+      |> List.iter (fun name ->
+           hardlink_tree (Filename.concat source name) (Filename.concat destination name))
+  | S_REG -> if not (path_exists destination) then Unix.link source destination
+  | S_LNK ->
+      if not (path_exists destination) then Unix.symlink (Unix.readlink source) destination
+  | _ -> failf "activation-selector-unsupported-file:%s" source
+
 let materialize_pin_selectors runtime_root pin_dir =
-  let selector_root=Filename.concat runtime_root "generation-selectors" in
+  let selector_root=Filename.concat runtime_root "generation-selectors-v2" in
   mkdir_p selector_root;
   pinned_runtime_ids pin_dir |> List.iter (fun runtime_id ->
-    let runtime_dir,_=validate_runtime ~require_generation:false runtime_root runtime_id in
+    let source_runtime,_=validate_runtime ~require_generation:false runtime_root runtime_id in
     let selector=Filename.concat selector_root runtime_id in
-    mkdir_p selector;
-    ensure_symlink (Filename.concat selector "versions") "../../versions"
-      (Filename.concat runtime_root "versions");
+    let versions=Filename.concat selector "versions" in
+    let private_runtime=Filename.concat versions runtime_id in
+    mkdir_p versions;
+    hardlink_tree source_runtime private_runtime;
+    let runtime_dir,_=validate_runtime ~require_generation:false selector runtime_id in
     ensure_symlink (Filename.concat selector "current") ("versions/"^runtime_id)
       runtime_dir;
     ensure_symlink (Filename.concat selector "native-next") ("versions/"^runtime_id)

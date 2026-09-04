@@ -548,7 +548,7 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     else if forwarded_target <> None then failf "generation-pin-recursive-forward"
     else
       let selector =
-        Filename.concat (Filename.concat runtimes "generation-selectors") target.id
+        Filename.concat (Filename.concat runtimes "generation-selectors-v2") target.id
       in
       if not (Sys.file_exists selector)
          || Unix.realpath (Filename.concat selector "current") <> target.directory
@@ -565,6 +565,13 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
           [| "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=" ^ target.id;
              "SOUNIO_COORD_RUNTIME_DIR=" ^ selector |]
           inherited in
+      let selector_executable =
+        Filename.concat
+          (Filename.concat (Filename.concat selector "versions") target.id)
+          "bin/sounio-loom-runtime"
+      in
+      if sha256_file selector_executable <> target.loom_sha256 then
+        failf "generation-pin-selector-executable-drift:%s" target.id;
       let input_path =
         Filename.concat (pin_directory state)
           (Printf.sprintf ".forward-input.%d.%s" (Unix.getpid ()) (sha256 raw_event))
@@ -577,9 +584,9 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
          Unix.dup2 input_fd Unix.stdin;
          Unix.close input_fd;
          let argv =
-           Array.of_list (target_executable :: "agent-hook" :: arguments)
+           Array.of_list (selector_executable :: "agent-hook" :: arguments)
          in
-         Unix.execve target_executable argv environment
+         Unix.execve selector_executable argv environment
        with error ->
          (try Unix.close input_fd with _ -> ());
          (try Unix.unlink input_path with _ -> ());
