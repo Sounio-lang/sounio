@@ -2365,7 +2365,8 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     var linear_flag: i64 = 0
-    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize] }
+    var affine_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
@@ -2373,6 +2374,7 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
         NEXT_SLOT = NEXT_SLOT - 1
         return
     }
+    VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
     em32(0xAA0003EA)  // mov x10, x0
     if spill {
         emit_image_addr_a64(spill_addr)
@@ -32430,6 +32432,8 @@ fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_VAR_IDX = -1
+    LAST_EXPR_IS_AFFINE = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -34618,6 +34622,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 }
                 try_apply_call_arg_refinement(call_tok)
+                // Mark a struct variable moved when it is passed by value. Only
+                // linear/affine structs move; the rest are implicitly copied.
+                // The a64 pass never set LAST_EXPR_VAR_IDX, so nothing on this
+                // target was ever marked moved and the use-after-move check
+                // above could not fire.
+                if EXPR_TY == 6 && LAST_EXPR_VAR_IDX >= 0 {
+                    if VAR_LINEAR[LAST_EXPR_VAR_IDX as usize] == 1 || VAR_AFFINE[LAST_EXPR_VAR_IDX as usize] == 1 {
+                        if VAR_BORROW_COUNT[LAST_EXPR_VAR_IDX as usize] > 0 {
+                            tc_linear_violation(call_tok, "cannot move while borrowed")
+                        }
+                        VAR_MOVED[LAST_EXPR_VAR_IDX as usize] = 1
+                    }
+                }
                 // Observation boundary: passing Unobserved<T> to an IO or FFI-imported function
                 // requires the caller to have `with Observe` — IO collapses epistemic uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -34949,6 +34966,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 6
                 EXPR_TY_HASH = sh
                 LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
+                LAST_EXPR_IS_AFFINE = ST_AFFINE[si as usize]
                 return
             }
         }
@@ -35074,6 +35092,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
                 if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                // Use-after-move, for linear/affine struct variables only.
+                if vi >= 0 && VAR_MOVED[vi as usize] == 1 && (VAR_LINEAR[vi as usize] == 1 || VAR_AFFINE[vi as usize] == 1) {
+                    tc_linear_violation(EP - 1, "use of moved value")
+                // Track the variable index so the call site can mark it moved.
+                if vi >= 0 && (VAR_TY[vi as usize] == 6 || VAR_TY[vi as usize] == 12 || knowledge_hash_is(VAR_TY_HASH[vi as usize])) { LAST_EXPR_VAR_IDX = vi }
+                }
                 // PR-4: propagate the tracked literal value so cross-binding
                 // refinement checks fire on `let x = -5; takes_pos(x)`.
                 if VAR_LIT_DATA[(vi * 2 + 0) as usize] == 1 {
@@ -35158,6 +35182,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_UNIT_DIM = VAR_UNIT_DIM[vi as usize]
             }
             var_mark_used(ns, ne)
+            // Linear value consumed inside a loop -- it would be consumed more
+            // than once (mirror of the x86 ident-load site).
+            if vi >= 0 && VAR_LINEAR[vi as usize] == 1 && LOOP_DEPTH > 0 {
+                tc_linear_violation(EP - 1, "linear value consumed in loop body")
+            }
+            // Affine value used more than once.
+            if vi >= 0 && VAR_AFFINE[vi as usize] == 1 && VAR_USED[vi as usize] > 1 {
+                tc_linear_violation(EP - 1, "affine value used more than once")
+            }
         } else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
@@ -36707,6 +36740,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
+                VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
                 // Set unit hash for unit-typed bindings (mirror of the x86 let
                 // site). The a64 pass stored no brand at a binding, so
                 // `let m: molal = 2.5` produced an unbranded local and the very
@@ -37026,6 +37060,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 }
                 if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
+                }
+                // Linear reassignment: the old value must be consumed before it
+                // is overwritten (mirror of compile_stmt).
+                if VAR_LINEAR[ty_vi as usize] == 1 {
+                    if VAR_USED[ty_vi as usize] == 0 {
+                        tc_linear_violation(name_tok, "linear value not consumed")
+                    }
+                    VAR_USED[ty_vi as usize] = 0
                 }
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
@@ -37502,6 +37544,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         try_apply_return_refinement(EP - 1)
         if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
+        }
+        // Linear check at an early return: any unconsumed linear var is an
+        // error (mirror of compile_stmt).
+        var lce_a: i64 = 0
+        while lce_a < VAR_COUNT {
+            if VAR_LINEAR[lce_a as usize] == 1 && VAR_USED[lce_a as usize] == 0 {
+                tc_linear_violation(EP - 1, "linear value not consumed")
+            }
+            lce_a = lce_a + 1
         }
         // β⁵: store return variance to global BSS for inter-procedural propagation
         if EXPR_IS_F64 == 1 {
@@ -38513,6 +38564,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                         } else if SCAN_TY == 8 {
                             VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                             VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
+                        // Mark the parameter linear/affine when its type is a
+                        // linear/affine struct (mirror of the x86 param scan). The
+                        // a64 pass left VAR_LINEAR at 0 for every parameter, so the
+                        // end-of-function "not consumed" check in this very function
+                        // could never fire for one.
+                        let lin_si_a = st_find(SCAN_TY_HASH)
+                        if lin_si_a >= 0 && knowledge_hash_is(SCAN_TY_HASH) == false {
+                            VAR_LINEAR[(VAR_COUNT - 1) as usize] = ST_LINEAR[lin_si_a as usize]
+                            VAR_AFFINE[(VAR_COUNT - 1) as usize] = ST_AFFINE[lin_si_a as usize]
                         }
                     }
                     p = SCAN_TY_NEXT
