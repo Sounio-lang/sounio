@@ -547,9 +547,24 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     if same then None
     else if forwarded_target <> None then failf "generation-pin-recursive-forward"
     else
+      let selector =
+        Filename.concat (Filename.concat runtimes "generation-selectors") target.id
+      in
+      if not (Sys.file_exists selector)
+         || Unix.realpath (Filename.concat selector "current") <> target.directory
+      then failf "generation-pin-selector-missing:%s" target.id;
+      let inherited =
+        Unix.environment () |> Array.to_list
+        |> List.filter (fun value ->
+             let prefix = "SOUNIO_COORD_RUNTIME_DIR=" in
+             String.length value < String.length prefix
+             || String.sub value 0 (String.length prefix) <> prefix)
+        |> Array.of_list
+      in
       let environment = Array.append
-          [| "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=" ^ target.id |]
-          (Unix.environment ()) in
+          [| "SOUNIO_LOOM_GENERATION_PIN_FORWARD_TARGET=" ^ target.id;
+             "SOUNIO_COORD_RUNTIME_DIR=" ^ selector |]
+          inherited in
       Some (run_process ~input:raw_event ~environment target_executable ("agent-hook" :: arguments)))
 
 let run_seal arguments =

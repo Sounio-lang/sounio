@@ -35,6 +35,9 @@ INITIAL_SHA="$(sha256sum "$P/activation.v1"|cut -d' ' -f1)"; PIN_SHA="$(sha256su
 advance(){ SOUNIO_COORD_RUNTIME_DIR="$R" SOUNIO_COORD_DIR="$S" "$LOOM" hook-activation-epoch-advance --source-root "$ROOT" --git-common "$WORK" --next-runtime "$1"; }
 advance runtime-b | grep -q 'action=9049 epoch=1'
 [[ "$(sha256sum "$P/activation-epochs/heads/$INITIAL_SHA.activation.v1"|cut -d' ' -f1)" == "$INITIAL_SHA" ]] || fail 'initial receipt not preserved'
+[[ "$(readlink -f "$R/generation-selectors/runtime-a/current")" == "$R/versions/runtime-a" ]] || fail 'pinned runtime current selector missing'
+[[ "$(readlink -f "$R/generation-selectors/runtime-a/native-next")" == "$R/versions/runtime-a" ]] || fail 'pinned runtime native-next selector missing'
+[[ "$(readlink -f "$R/generation-selectors/runtime-a/versions")" == "$R/versions" ]] || fail 'pinned runtime versions selector missing'
 rm "$R/current"; ln -s versions/runtime-b "$R/current"
 advance runtime-c | grep -q 'action=9049 epoch=2'
 [[ "$(find "$P/activation-epochs/epochs" -type f -name '*.epoch.v1'|wc -l)" == 2 ]] || fail 'epoch chain length'

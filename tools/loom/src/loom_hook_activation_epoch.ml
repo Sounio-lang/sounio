@@ -84,6 +84,35 @@ let pin_inventory pin_dir =
   |> List.map (fun n -> let p=Filename.concat pin_dir n in regular p; n^"="^sha256_file p)
   |> String.concat "\n" |> sha256
 
+let pinned_runtime_ids pin_dir =
+  Sys.readdir pin_dir |> Array.to_list |> List.sort_uniq String.compare
+  |> List.filter (fun n -> Filename.check_suffix n ".pin")
+  |> List.map (fun n ->
+       let p=Filename.concat pin_dir n in
+       let f=fields "generation-pin" (governed p) in
+       safe_id (required "generation-pin" f "runtime_id"))
+  |> List.sort_uniq String.compare
+
+let ensure_symlink path target expected =
+  if Sys.file_exists path || (try ignore (Unix.lstat path); true with _ -> false) then (
+    if (Unix.lstat path).st_kind <> S_LNK then failf "activation-selector-not-symlink:%s" path;
+    if Unix.realpath path <> Unix.realpath expected then failf "activation-selector-drift:%s" path)
+  else Unix.symlink target path
+
+let materialize_pin_selectors runtime_root pin_dir =
+  let selector_root=Filename.concat runtime_root "generation-selectors" in
+  mkdir_p selector_root;
+  pinned_runtime_ids pin_dir |> List.iter (fun runtime_id ->
+    let runtime_dir,_=validate_runtime runtime_root runtime_id in
+    let selector=Filename.concat selector_root runtime_id in
+    mkdir_p selector;
+    ensure_symlink (Filename.concat selector "versions") "../../versions"
+      (Filename.concat runtime_root "versions");
+    ensure_symlink (Filename.concat selector "current") ("versions/"^runtime_id)
+      runtime_dir;
+    ensure_symlink (Filename.concat selector "native-next") ("versions/"^runtime_id)
+      runtime_dir)
+
 let digest_u60 d offset = Int64.to_string (Int64.logand (Int64.of_string ("0x"^String.sub d offset 15)) 0x0fffffffffffffffL)
 
 let advance ~source_root ~git_common ~next_runtime =
@@ -111,6 +140,7 @@ let advance ~source_root ~git_common ~next_runtime =
     let epoch=previous_epoch+1 in
     let new_head=replace_candidate old next_runtime in
     let new_sha=sha256 new_head in
+    materialize_pin_selectors rr pin_dir;
     let tx=sha256 (old_sha^next_manifest^before^new_sha^string_of_int epoch) in
     let exe=load_authority source_root in
     let frame=Printf.sprintf "9049 1 3 262143 %s %s %s %s %d %d\n" (digest_u60 old_sha 0) (digest_u60 next_manifest 0) (digest_u60 before 0) (digest_u60 tx 0) epoch previous_epoch in
