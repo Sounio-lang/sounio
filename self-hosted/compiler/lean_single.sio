@@ -32122,6 +32122,130 @@ fn compile_measure_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
 }
 
+// ─── Seq (a64) ───
+// Layout, identical to the x86 twins: [0]=len [8]=capacity [16]=elem_size
+// [24]=len_variance [32]=len_confidence, payload from +40. Every encoding below
+// was checked by disassembly before it was written, and the emitted code was
+// executed on a real aarch64 node -- these are not mirrored on faith.
+fn emit_seq_new_a64() with Mut, Panic {
+    emit_imm64_a64(72)                       // 40 header + 4 slots * 8
+    emit_heap_alloc_a64()                    // x0 = user ptr
+    em32(0xD2800001)                         // movz x1, #0
+    em32(0xF9000001)                         // str x1, [x0]        len = 0
+    em32(0xD2800081)                         // movz x1, #4
+    em32(0xF9000401)                         // str x1, [x0, #8]    capacity = 4
+    em32(0xD2800101)                         // movz x1, #8
+    em32(0xF9000801)                         // str x1, [x0, #16]   elem_size = 8
+    em32(0xD2800001)                         // movz x1, #0
+    em32(0xF9000C01)                         // str x1, [x0, #24]   len_variance = 0
+    emit_imm64_reg_a64(1, 4607182418800017408)  // 1.0
+    em32(0xF9001001)                         // str x1, [x0, #32]   len_confidence = 1.0
+}
+
+fn seq_materialize_push_value_a64(seq_hash: i64, tok: i64) -> i64 with IO, Mut, Panic, Div {
+    if seq_hash_is(seq_hash) == false { return 0 }
+    let in_ty = seq_hash_inner_ty(seq_hash)
+    let in_hash = seq_hash_inner_hash(seq_hash)
+    if in_ty == 6 || in_ty == 7 || type_is_struct_like(in_ty, in_hash) {
+        // materialize_struct_value_x86 has no a64 twin. Refusing is the only
+        // honest option: emitting the push without materialising the struct
+        // would store a stale pointer and the program would be wrong at runtime
+        // with no diagnostic.
+        tc_error_hard(tok, "Seq<T> with struct elements is not supported on the aarch64 target yet")
+        return 1
+    }
+    0
+}
+
+
+fn emit_seq_push_slots_a64(slot_s: i64, slot_v: i64) with Mut, Panic {
+    let slot_newcap = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]        len
+    em32(0xF9400402)                         // ldr x2, [x0, #8]    capacity
+    em32(0xEB02003F)                         // cmp x1, x2
+    let p_nogrow = CL
+    em32(0x54000001)                         // b.ne no_grow        (patched)
+    // grow: new_cap = capacity * 2
+    em32(0x8B020040)                         // add x0, x2, x2
+    emit_store_var_a64(slot_newcap)
+    emit_load_var_a64(slot_s)                // x0 = old P
+    em32(0xAA0003EA)                         // mov x10, x0         realloc takes it here
+    emit_load_var_a64(slot_newcap)           // x0 = new_cap   (clobbers x9/x0 only)
+    em32(0xD37DF000)                         // lsl x0, x0, #3      new_cap * 8
+    em32(0x9100A000)                         // add x0, x0, #40     + header
+    emit_heap_realloc_a64()                  // x0 = new user ptr
+    emit_store_var_a64(slot_s)               // the pointer moved: write it back
+    emit_load_var_a64(slot_newcap)           // x0 = new_cap
+    em32(0xAA0003E1)                         // mov x1, x0
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9000401)                         // str x1, [x0, #8]    capacity = new_cap
+    patch_branch_a64(p_nogrow, CL)           // no_grow:
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]        len
+    em32(0x9100A002)                         // add x2, x0, #40     payload base
+    emit_load_var_a64(slot_v)                // x0 = value (x1/x2 survive: only x9/x0 clobbered)
+    em32(0xF8217840)                         // str x0, [x2, x1, lsl #3]
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]
+    em32(0x91000421)                         // add x1, x1, #1
+    em32(0xF9000001)                         // str x1, [x0]        len++
+}
+
+
+fn emit_seq_count_a64(slot_s: i64) with Mut, Panic {
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+}
+
+fn emit_seq_len_a64(slot_s: i64) with Mut, Panic {
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+    emit_store_var_a64(base + 2)
+    emit_load_var_a64(slot_s)
+    em32(0xF9400C00)                         // ldr x0, [x0, #24]   variance
+    emit_store_var_a64(base + 1)
+    emit_load_var_a64(slot_s)
+    em32(0xF9401000)                         // ldr x0, [x0, #32]   confidence
+    emit_store_var_a64(base)
+    emit_lea_var_a64(base + 2)
+}
+
+fn emit_seq_bounds_check_a64(slot_s: i64, slot_idx: i64) with Mut, Panic {
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0          idx
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+    em32(0xEB00003F)                         // cmp x1, x0
+    let p_ok = CL
+    em32(0x54000003)                         // b.lo <in_bounds>    (patched)
+    emit_assert_fail_a64()
+    patch_branch_a64(p_ok, CL)
+}
+
+fn emit_seq_get_slots_a64(slot_s: i64, slot_idx: i64) with Mut, Panic {
+    emit_seq_bounds_check_a64(slot_s, slot_idx)
+    emit_load_var_a64(slot_s)
+    em32(0x9100A002)                         // add x2, x0, #40     payload base
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0          idx
+    em32(0xF8617840)                         // ldr x0, [x2, x1, lsl #3]
+}
+
+fn emit_seq_set_slots_a64(slot_s: i64, slot_idx: i64, slot_v: i64) with Mut, Panic {
+    emit_seq_bounds_check_a64(slot_s, slot_idx)
+    emit_load_var_a64(slot_s)
+    em32(0x9100A002)                         // add x2, x0, #40
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0
+    emit_load_var_a64(slot_v)
+    em32(0xF8217840)                         // str x0, [x2, x1, lsl #3]
+}
+
+
 fn emit_heap_alloc_a64() with Mut {
     // x0 = requested size. Allocate size+8 via mmap, write header, return user ptr.
     em32(0x91002000)               // add x0, x0, #8 (total = size + header)
@@ -34755,6 +34879,125 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
             let extern_c_math_stub_a64 = extern_stub_matches_src(ns, ne)
+            // ── Seq<T> free functions, a64 (mirror of the compile_primary blocks) ──
+            // seq_push / seq_push_uncertain are NOT here yet: they need the grow path,
+            // which is a separate change.
+            if src_match(ns, ne - ns, "seq_new") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 } else {
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                emit_seq_new_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 12
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_push") {
+                EP = EP + 1
+                let vns = TS[EP as usize]
+                let vne = TE[EP as usize]
+                var slot_s: i64 = 0 - 1
+                if TK[EP as usize] == 3 { slot_s = var_find(vns, vne) }
+                let lvi = var_find_idx(vns, vne)
+                if slot_s < 0 || lvi < 0 || VAR_TY[lvi as usize] != 12 {
+                    tc_error_hard(name_tok, "seq_push requires a local Seq variable as first argument")
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 5
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                EP = EP + 1
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity_hard(name_tok, 2, 1) }
+                let slot_v = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()
+                seq_materialize_push_value_a64(VAR_TY_HASH[lvi as usize], name_tok)
+                emit_store_var_a64(slot_v)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_slots_a64(slot_s, slot_v)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_get") {
+                EP = EP + 1
+                let slot_sg = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_ig = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr → rax
+                let sh = EXPR_TY_HASH
+                emit_store_var_a64(slot_sg)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                compile_or_a64()  // index → rax
+                emit_store_var_a64(slot_ig)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_get_slots_a64(slot_sg, slot_ig)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(sh) {
+                    EXPR_TY = seq_hash_inner_ty(sh)
+                    EXPR_TY_HASH = seq_hash_inner_hash(sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
+                return
+            }
+            if src_match(ns, ne - ns, "seq_set") {
+                EP = EP + 1
+                let slot_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_is = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_vs = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_ss)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 1) }
+                compile_or_a64()  // index
+                emit_store_var_a64(slot_is)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 2) }
+                compile_or_a64()  // value
+                emit_store_var_a64(slot_vs)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_set_slots_a64(slot_ss, slot_is, slot_vs)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_len") {
+                EP = EP + 1
+                let slot_sl = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_sl)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_len_a64(slot_sl)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
+                return
+            }
+            if src_match(ns, ne - ns, "seq_count") {
+                EP = EP + 1
+                let slot_sc = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_sc)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_count_a64(slot_sc)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
             // pow(x, y) = exp(y * ln(x)), composed from the prelude helpers exactly as
             // compile_primary does. The x86 block additionally propagates first- and
             // second-order AD shadows through the two arguments; this does not, so a
