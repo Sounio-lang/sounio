@@ -1428,6 +1428,49 @@ fn ir_test_33_module_function_table_chunks() -> bool with Mut, Panic, Div, Alloc
         ir_fn_get(&module, IR_MAX_FUNCS - 1).name.buf[0] == 101 as i8
 }
 
+// T34: a corrupt or forward-version opcode wire tag must refuse the whole
+// module, not silently decode as IrNop (#878). Serialize a valid module,
+// overwrite the first instruction's opcode byte with an unassigned tag;
+// deserialize must return an empty module, increment SOIR_DESER_REFUSAL_COUNT,
+// and leave SOIR_READ_FAILED latched. The uncorrupted fixture is decoded first
+// as a positive control, so a broken writer or a dropped flag reset also
+// fails this test.
+//
+// Wire offset of the first opcode byte: 8 header + 8 fn_count + 136 name
+// + 32 counts + 512 param_regs + 8 compile_strategy + 8 prof_counter_id
+// + 8 hyper_algebra_kind = 720.
+fn ir_test_34_serialize_refuses_corrupt_opcode() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 1
+
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(99 as i8, 102 as i8, 116 as i8, 0 as i8, 3)
+    func.instr_count = 2
+    func.reg_count = 1
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 42))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
+    ir_fn_set(&! module, 0, func)
+
+    let pair = serialize_ir_module(module)
+    var buf = pair.0
+    let len = pair.1
+
+    let control = deserialize_ir_module(buf, len)
+    if control.fn_count != 1 {
+        return false
+    }
+    if SOIR_READ_FAILED {
+        return false
+    }
+
+    buf[720] = 127 as i8
+    let before = SOIR_DESER_REFUSAL_COUNT
+    let restored = deserialize_ir_module(buf, len)
+    restored.fn_count == 0 &&
+        SOIR_DESER_REFUSAL_COUNT == before + 1 &&
+        SOIR_READ_FAILED
+}
+
 fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -1504,6 +1547,8 @@ fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if ir_test_32_serialize_refuses_oversized() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32\n") }
     total = total + 1
     if ir_test_33_module_function_table_chunks() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33\n") }
+    total = total + 1
+    if ir_test_34_serialize_refuses_corrupt_opcode() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34\n") }
 
     if passed == total { print("\n✅ IR tests: all passed\n") } else { print("\n❌ IR tests: suite fail\n") }
 
