@@ -83,4 +83,16 @@ run_case "legacy row admits it has no fix" fail "$W/c_drift" "$W/empty_baseline"
 cat "$W/hdr" > "$W/c_empty"
 run_case "empty table fails" fail "$W/c_empty" "$W/empty_baseline" "zero rows" || exit 1
 
-echo "MEASURED_CLAIM_GATE_SELFTEST_OK: 9 controls, 6 of them RED, each behaved as stated"
+# GREEN — a sha256 digest claim that agrees must pass (#2391).
+{ cat "$W/hdr"; printf 'agree_sha\thashes match\techo b898328ab69e108367b18af5368cbee76433a6329063406220774e23db0f2c40\techo b898328ab69e108367b18af5368cbee76433a6329063406220774e23db0f2c40\n'; } > "$W/c_agree_sha"
+run_case "agreeing sha256 claim passes" pass "$W/c_agree_sha" "$W/empty_baseline" "ok        agree_sha" || exit 1
+
+# RED — a sha256 digest claim that drifts must fail (#2391).
+{ cat "$W/hdr"; printf 'drift_sha\thashes drift\techo 1111111111111111111111111111111111111111111111111111111111111111\techo 2222222222222222222222222222222222222222222222222222222222222222\n'; } > "$W/c_drift_sha"
+run_case "drifted sha256 claim fails" fail "$W/c_drift_sha" "$W/empty_baseline" "claimed 1111111111111111111111111111111111111111111111111111111111111111" || exit 1
+
+# RED — an invalid non-number non-sha256 claim must fail (#2391).
+{ cat "$W/hdr"; printf 'invalid\tnot numeric or sha256\techo foo_bar\techo foo_bar\n'; } > "$W/c_invalid"
+run_case "non-numeric non-sha256 claim fails" fail "$W/c_invalid" "$W/empty_baseline" "neither a number nor a sha256 digest" || exit 1
+
+echo "MEASURED_CLAIM_GATE_SELFTEST_OK: 12 controls, 8 of them RED, each behaved as stated"
