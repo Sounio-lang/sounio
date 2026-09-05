@@ -101,7 +101,9 @@ and is stale. Recorded in `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ## Correction, 2026-09-05 — Repro 2 is closed
 
-`tests/known-gaps/units/derived_unit_dropped_by_inference.sio` no longer passes.
+`derived_unit_dropped_by_inference.sio` no longer passes, and has moved out of
+`tests/known-gaps/` to `tests/compile-fail/unit_quotient_keeps_dimension.sio`,
+where the a64 parity gate walks it with the rest of the corpus.
 On both targets, lean_single now reports
 
 ```
@@ -131,4 +133,6 @@ still not a compile error, and re-typing the kinetic path is still compiler work
 rather than a probe port.
 
 scripts/ci/language_gap_ratchet_gate.sh now asserts the refusal, so the closure
-cannot silently reopen: the ratchet is red in both directions.
+cannot silently reopen: the ratchet is red in both directions. The test suite
+holds it a second way, as a compile-fail case that must be refused on both
+targets.

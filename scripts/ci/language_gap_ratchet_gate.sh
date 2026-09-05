@@ -45,7 +45,7 @@ expect "control: direct unit mismatch caught by lean_single" "1" "$([[ $(rc lean
 # which the refreshed seed now ships. The rung moves up: a gap that closed is
 # progress, and the ratchet is red in both directions, so this line is what
 # stops it reopening.
-expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean check $UNITS/derived_unit_dropped_by_inference.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_quotient_keeps_dimension.sio) -ne 0 ]] && echo 1 || echo 0)"
 # #2388 (3) -- still open: K still enters an f64 parameter unchecked.
 expect "unit lost at call boundary (lean_single accepts)" "0" "$(rc lean check $UNITS/unit_lost_at_call_boundary.sio)"
 
