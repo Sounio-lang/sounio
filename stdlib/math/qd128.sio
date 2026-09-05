@@ -249,7 +249,13 @@ pub fn qd_add(a: Qd128, b: Qd128) -> Qd128 with Mut, Panic {
         }
         i = i + 1
     }
-    if k < 4 {
+    // The `!= 0.0` guards match the emission rule inside the loop above.
+    // Without them a residue of the shape (u, v) = (0.0, eps) spends the last
+    // of the four output slots on the zero and then silently drops eps, which
+    // is a REAL loss: u + v is the exact unemitted remainder. Witnessed at
+    // 1.05e-49 relative (6.9e14 qd ulps) on qd_add(2u, u*u) inside qd_exp,
+    // and covered by tests/stdlib/math/test_qd128_transcendental.sio.
+    if k < 4 && u != 0.0 {
         if k == 0 { c0 = u } else {
             if k == 1 { c1 = u } else {
                 if k == 2 { c2 = u } else { c3 = u }
@@ -257,7 +263,7 @@ pub fn qd_add(a: Qd128, b: Qd128) -> Qd128 with Mut, Panic {
         }
         k = k + 1
     }
-    if k < 4 {
+    if k < 4 && v != 0.0 {
         if k == 0 { c0 = v } else {
             if k == 1 { c1 = v } else {
                 if k == 2 { c2 = v } else { c3 = v }
@@ -443,4 +449,305 @@ pub fn qd_eq(a: Qd128, b: Qd128) -> bool {
 
 pub fn qd_lt(a: Qd128, b: Qd128) -> bool {
     qd_cmp(a, b) < 0
+}
+
+// =============================================================================
+// Transcendentals — exp / log / pow / log10 (finite domain)
+// =============================================================================
+//
+// Reference: Hida, Li & Bailey (2001) §5 (the qd library's exp/log), i.e.
+// k*ln2 + r reduction with a Taylor core for exp, and Newton on exp for log.
+//
+// Same scope discipline as qd_sqrt above: this module is finite-domain and
+// deliberately does not signal NaN (lean_single's comparisons are NaN-unsound,
+// so x != x is inert here). Out-of-domain inputs return qd zero, and rejecting
+// them is the CALLER's responsibility:
+//   qd_log(a),   a.x0 <= 0.0                    -> qd_zero()
+//   qd_log10(a), a.x0 <= 0.0                    -> qd_zero()
+//   qd_pow(a,b), a.x0 <= 0.0, b non-integral    -> qd_zero()
+// Overflow/underflow of exp is NOT trapped either: the 2^k scaling is a plain
+// f64 multiply, so |x| past the binary64 exponent range degrades the way
+// binary64 does. Callers that need a decision must range-check first.
+//
+// Two ACCURACY CAVEATS that are properties of the quad-double format, not of
+// these routines, and that the corpus in tests/vectors/qd128_transcendental
+// measures rather than hides:
+//
+// 1. Denormal tail. A Qd128 needs ~159 bits of exponent room BELOW its leading
+//    limb to carry all 212 bits. For |result| < 2^-916 (~1e-276) the low limbs
+//    fall into the binary64 subnormals and the format itself can only hold
+//    about (1074 - |log2 result|) bits. exp(-700) = 2^-1010 therefore carries
+//    ~64 bits, not 212 — measured 6.8e43 qd ulps, which is ~1 ulp of what the
+//    format can actually represent there.
+//
+// 2. log near 1. qd_log carries ABSOLUTE quad-double accuracy in y = log(a):
+//    the Newton residual a*exp(-y) - 1 is formed near 1, so for a -> 1 the
+//    relative accuracy of the (tiny) result degrades exactly like log() vs
+//    log1p() in binary64. There is no qd_log1p here; do not use qd_log when
+//    |a - 1| << 1 and you need relative accuracy.
+
+// Exact limb reconstruction: m * 2^e, |m| < 2^53, no subnormal intermediate.
+//
+// This exists because souc's decimal literal parser is NOT correctly rounded:
+// writing the low limbs of ln2 as decimal literals lands 1-3 ulp off, which
+// silently caps every constant-driven result at double-double (~1e-32) accuracy
+// instead of quad-double. i64 -> f64 conversion is exact for |m| < 2^53 and the
+// halving/doubling chain is exact, so this route is parser-independent.
+fn qd_limb(m: i64, e: i64) -> f64 with Mut {
+    var r = m as f64
+    var n = e
+    while n < 0 {
+        r = r * 0.5
+        n = n + 1
+    }
+    while n > 0 {
+        r = r * 2.0
+        n = n - 1
+    }
+    r
+}
+
+// ln 2 and ln 10 as non-overlapping 4-limb expansions.
+//
+// Produced with mpmath (greedy nearest-f64 limb split, each limb then decomposed
+// with math.frexp into an exact m * 2^e). These limbs are constants of this
+// module: they are NOT emitted by the corpus generator in
+// tests/vectors/qd128_transcendental/gen/, which builds test vectors only.
+//
+// Re-verified 2026-09-02 against mpmath at mp.prec = 600. Residual of the
+// 4-limb sum minus the reference, relative:
+//     ln2   +1.9507685e-66
+//     ln10  -8.3771042e-66
+// i.e. ~0.013 and ~0.055 of the quad-double ulp 2^-212 = 1.5192908e-64.
+pub fn qd_ln2() -> Qd128 with Mut {
+    Qd128 {
+        x0: qd_limb(6243314768165359, 0 - 53),
+        x1: qd_limb(7525737178955839, 0 - 108),
+        x2: qd_limb(6673460182522164, 0 - 163),
+        x3: qd_limb(0 - 7545482916914641, 0 - 217)
+    }
+}
+
+pub fn qd_ln10() -> Qd128 with Mut {
+    Qd128 {
+        x0: qd_limb(5184960683398422, 0 - 51),
+        x1: qd_limb(0 - 8805633374462953, 0 - 105),
+        x2: qd_limb(0 - 7296007962371596, 0 - 159),
+        x3: qd_limb(0 - 5296362421624049, 0 - 213)
+    }
+}
+
+// Cody-Waite split of ln2. ln2_hi keeps only 42 mantissa bits, so k * ln2_hi is
+// EXACT in binary64 for |k| <= 2048 — which covers the whole binary64 range of
+// exp (|k| <= 1075). Without this split the reduction x - k*ln2 inherits the
+// quad-double representation error of k*ln2, i.e. |k*ln2| * 2^-212, which shows
+// up as ~|x|/ln2 ulps of relative error in the result (measured 19 ulps at
+// x = 500 before the split, 0.15 ulps after).
+fn qd_ln2_hi() -> f64 with Mut {
+    qd_limb(6243314768164864, 0 - 53)
+}
+
+// ln2 - ln2_hi ~ 5.4979e-14, to 4 limbs (residual 1.36e-80 relative to ln2).
+fn qd_ln2_lo() -> Qd128 with Mut {
+    Qd128 {
+        x0: qd_limb(8711806768342832, 0 - 97),
+        x1: qd_limb(8892529970223641, 0 - 155),
+        x2: qd_limb(7259400309188660, 0 - 210),
+        x3: qd_limb(6574579891448808, 0 - 264)
+    }
+}
+
+// 2^k as an exact f64 for |k| <= 1023; outside that the binary64 exponent range
+// decides (overflow to inf, or gradual underflow through the subnormals).
+fn qd_pow2_f64(k: i64) -> f64 with Mut {
+    var n = k
+    var step = 2.0
+    if n < 0 {
+        n = 0 - n
+        step = 0.5
+    }
+    var r = 1.0
+    var i = 0
+    while i < n {
+        r = r * step
+        i = i + 1
+    }
+    r
+}
+
+// Limb-wise scaling by an exact power of two. qd_mul_f64 cannot be used for
+// this at the top of the exponent range: its two_prod does a Veltkamp split
+// (a * (2^27 + 1)), which overflows to inf for |a| > ~2^996, so exp(709) came
+// back NaN. Multiplying each limb by a power of two is exact anyway, so this
+// is both safer and cheaper than routing through the EFT.
+fn qd_scale_pow2(a: Qd128, s: f64) -> Qd128 {
+    Qd128 { x0: a.x0 * s, x1: a.x1 * s, x2: a.x2 * s, x3: a.x3 * s }
+}
+
+// Round-half-away-from-zero: `as i64` truncates toward zero on this backend.
+fn qd_round_f64(x: f64) -> i64 {
+    if x < 0.0 { (x - 0.5) as i64 } else { (x + 0.5) as i64 }
+}
+
+// floor(log2(|x|)) for finite nonzero x, by exact power-of-two scaling.
+fn qd_ilog2_f64(x: f64) -> i64 with Mut {
+    var m = qd_mag(x)
+    var e = 0
+    while m >= 2.0 {
+        m = m * 0.5
+        e = e + 1
+    }
+    while m < 1.0 {
+        m = m * 2.0
+        e = e - 1
+    }
+    e
+}
+
+// exp via HLB §5 reduction: x = k*ln2 + r with |r| <= ln2/2, then w = r/64 so
+// that |w| <= 5.42e-3.
+//
+// The Taylor core accumulates expm1(w) rather than exp(w), so the leading 1
+// never absorbs the series; the six doublings then use the cancellation-free
+// identity expm1(2w) = expm1(w) * (2 + expm1(w)). Its derivative ratio
+// (2+2u)/(2+u) is ~1, so the unrolling is relative-error neutral instead of the
+// ~2x-per-squaring amplification of squaring exp(w) directly. Term 25 of the
+// series is ~1e-79, far under the 1.53e-64 quad-double ulp.
+pub fn qd_exp(a: Qd128) -> Qd128 with Mut, Div, Panic {
+    if a.x0 == 0.0 { return qd_from_f64(1.0) }
+
+    let k = qd_round_f64(qd_to_f64(a) / 0.6931471805599453)
+    let kf = k as f64
+    // kf * ln2_hi is exact, so qd_add_f64 here is an exact two_sum chain and
+    // the cancellation of the leading digits costs nothing.
+    var r = qd_add_f64(a, 0.0 - kf * qd_ln2_hi())
+    r = qd_sub(r, qd_mul_f64(qd_ln2_lo(), kf))
+
+    // Exact: 1/64 is a power of two, so every limb scales without rounding.
+    let w = qd_mul_f64(r, 0.015625)
+
+    var term = w
+    var u = w
+    var i = 2
+    while i <= 25 {
+        term = qd_div(qd_mul(term, w), qd_from_f64(i as f64))
+        u = qd_add(u, term)
+        i = i + 1
+    }
+
+    var j = 0
+    while j < 6 {
+        u = qd_mul(u, qd_add_f64(u, 2.0))
+        j = j + 1
+    }
+
+    let er = qd_add_f64(u, 1.0)
+    qd_scale_pow2(er, qd_pow2_f64(k))
+}
+
+// Self-contained f64 log seed (no libm dependency, matching the style of
+// qd128_sqrt_f64 / dd64_sqrt_f64): x = m*2^e with m in [1,2), then
+// log(m) = 2*atanh((m-1)/(m+1)) with |z| <= 1/3, so z^59 <= 1e-28.
+fn qd128_log_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 {
+        m = m * 0.5
+        e = e + 1
+    }
+    while m < 1.0 {
+        m = m * 2.0
+        e = e - 1
+    }
+    let z = (m - 1.0) / (m + 1.0)
+    let z2 = z * z
+    var term = z
+    var sum = z
+    var i = 1
+    while i < 30 {
+        term = term * z2
+        sum = sum + term / ((2 * i + 1) as f64)
+        i = i + 1
+    }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// log via Newton on exp (HLB §5): y_{n+1} = y_n + m*exp(-y_n) - 1, seeded from
+// the f64 log. Quadratic: 1e-16 -> 5e-33 -> 1.3e-65, so three iterations clear
+// the 212-bit target.
+//
+// The argument is first scaled to m in [1,2) by EXACT powers of two and the
+// e*ln2 term added back afterwards. Running Newton on the raw argument instead
+// would evaluate exp(-y) at, for a = 1e300, y ~ 690 — i.e. at 1e-300, where the
+// low limbs are subnormal and the residual only carries ~77 bits. That measured
+// 6.6e36 qd ulps; scaling first brings the same case to 0.16 ulps.
+pub fn qd_log(a: Qd128) -> Qd128 with Mut, Div, Panic {
+    if a.x0 <= 0.0 { return qd_zero() }
+    if a.x0 == 1.0 && a.x1 == 0.0 && a.x2 == 0.0 && a.x3 == 0.0 { return qd_zero() }
+
+    let e = qd_ilog2_f64(a.x0)
+    // Split the scaling in two so that 2^(-e) itself never overflows for a
+    // subnormal leading limb (|e| can reach 1074).
+    let e1 = e / 2
+    let e2 = e - e1
+    var m = qd_scale_pow2(a, qd_pow2_f64(0 - e1))
+    m = qd_scale_pow2(m, qd_pow2_f64(0 - e2))
+
+    var y = qd_from_f64(qd128_log_f64(qd_to_f64(m)))
+    var i = 0
+    while i < 3 {
+        let corr = qd_sub(qd_mul(m, qd_exp(qd_neg(y))), qd_from_f64(1.0))
+        y = qd_add(y, corr)
+        i = i + 1
+    }
+
+    // Cody-Waite again: (e as f64) * ln2_hi is exact for |e| <= 2048.
+    let ef = e as f64
+    let t = qd_add(y, qd_mul_f64(qd_ln2_lo(), ef))
+    qd_add_f64(t, ef * qd_ln2_hi())
+}
+
+// Binary exponentiation: an exact integer exponent must NOT go through the
+// log/exp round trip (that loses the bits log() cannot recover near a = 1, and
+// throws away negative bases entirely).
+pub fn qd_powi(a: Qd128, n: i64) -> Qd128 with Mut, Div, Panic {
+    if n == 0 { return qd_from_f64(1.0) }
+    var e = n
+    if e < 0 { e = 0 - e }
+    var base = a
+    var acc = qd_from_f64(1.0)
+    while e > 0 {
+        if e % 2 == 1 {
+            acc = qd_mul(acc, base)
+        }
+        e = e / 2
+        // Guarded: squaring past the last needed power would overflow a large
+        // base to inf and poison acc on the final multiply.
+        if e > 0 {
+            base = qd_mul(base, base)
+        }
+    }
+    if n < 0 {
+        return qd_div(qd_from_f64(1.0), acc)
+    }
+    acc
+}
+
+pub fn qd_pow(a: Qd128, b: Qd128) -> Qd128 with Mut, Div, Panic {
+    if b.x1 == 0.0 && b.x2 == 0.0 && b.x3 == 0.0 {
+        if qd_mag(b.x0) <= 1.0e15 {
+            let n = b.x0 as i64
+            if (n as f64) == b.x0 {
+                return qd_powi(a, n)
+            }
+        }
+    }
+    if a.x0 <= 0.0 { return qd_zero() }
+    qd_exp(qd_mul(b, qd_log(a)))
+}
+
+pub fn qd_log10(a: Qd128) -> Qd128 with Mut, Div, Panic {
+    if a.x0 <= 0.0 { return qd_zero() }
+    qd_div(qd_log(a), qd_ln10())
 }
