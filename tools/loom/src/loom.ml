@@ -1581,7 +1581,17 @@ let guardian_handle_request guardian client line =
             let rows = parse_nonnegative "rows" rows in
             if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
               failf "invalid-terminal-size";
-            set_winsize guardian.guardian_master_fd cols rows;
+            (* set_winsize takes (fd, rows, cols) -- see its call at fork
+               time above and the C stub sounio_loom_set_winsize, which
+               stores its second argument into ws_row and third into
+               ws_col. The RESIZE wire message carries [cols; rows] (see
+               resize_request/guardian_resize_request), so the arguments
+               must be swapped here to avoid setting ws_row=cols and
+               ws_col=rows -- which is exactly what silently made every
+               live resize (including this session's new attach-time
+               sync_winsize) collapse rendering width down to the
+               terminal's row count instead of widening it. *)
+            set_winsize guardian.guardian_master_fd rows cols;
             ignore
               (append_event guardian.guardian_journal "RESIZE"
                  (Printf.sprintf "%d:%d" cols rows));
