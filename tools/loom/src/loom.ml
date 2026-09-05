@@ -15,6 +15,7 @@ let max_exec_capability_payload_bytes = 512 * 1024
 
 external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
+external get_winsize : file_descr -> int * int = "sounio_loom_get_winsize"
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
@@ -1580,7 +1581,7 @@ let guardian_handle_request guardian client line =
             let rows = parse_nonnegative "rows" rows in
             if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
               failf "invalid-terminal-size";
-            set_winsize guardian.guardian_master_fd cols rows;
+            set_winsize guardian.guardian_master_fd rows cols;
             ignore
               (append_event guardian.guardian_journal "RESIZE"
                  (Printf.sprintf "%d:%d" cols rows));
@@ -4601,11 +4602,72 @@ let load_cursor paths instance =
 let save_cursor paths instance cursor =
   atomic_write paths.cursor_path (Printf.sprintf "%s\t%d\n" instance cursor)
 
+let terminal_raw_settings original =
+  {
+    original with
+    c_ignbrk = false;
+    c_brkint = false;
+    c_parmrk = false;
+    c_istrip = false;
+    c_inlcr = false;
+    c_igncr = false;
+    c_icrnl = false;
+    c_ixon = false;
+    c_csize = 8;
+    c_parenb = false;
+    c_isig = false;
+    c_icanon = false;
+    c_echo = false;
+    c_echonl = false;
+    c_vmin = 1;
+    c_vtime = 0;
+  }
+
 let set_terminal_raw descriptor =
   let original = Unix.tcgetattr descriptor in
-  let raw = { original with c_icanon = false; c_echo = false; c_vmin = 1; c_vtime = 0 } in
+  let raw = terminal_raw_settings original in
   Unix.tcsetattr descriptor TCSANOW raw;
   original
+
+let terminal_dimensions descriptor =
+  try
+    let rows, cols = get_winsize descriptor in
+    if rows > 0 && rows <= 1000 && cols > 0 && cols <= 1000 then
+      Some (cols, rows)
+    else None
+  with Failure _ | Unix_error _ -> None
+
+let terminal_raw_probe_command cli =
+  if not (Unix.isatty Unix.stdin) then failf "terminal-raw-probe-requires-tty";
+  let original = set_terminal_raw Unix.stdin in
+  Fun.protect
+    ~finally:(fun () -> Unix.tcsetattr Unix.stdin TCSANOW original)
+    (fun () ->
+      let actual = Unix.tcgetattr Unix.stdin in
+      if actual.c_icrnl || actual.c_inlcr || actual.c_igncr then
+        failf "terminal-raw-probe-cr-translation-active";
+      if actual.c_isig then failf "terminal-raw-probe-signals-active";
+      if actual.c_ixon then failf "terminal-raw-probe-flow-control-active";
+      if actual.c_icanon || actual.c_echo || actual.c_echonl then
+        failf "terminal-raw-probe-line-discipline-active";
+      if actual.c_opost <> original.c_opost then
+        failf "terminal-raw-probe-output-processing-changed";
+      let byte =
+        if flag cli "--read-byte" then (
+          let bytes = Bytes.create 1 in
+          if Unix.read Unix.stdin bytes 0 1 <> 1 then
+            failf "terminal-raw-probe-input-eof";
+          Printf.sprintf "%02x" (Char.code (Bytes.get bytes 0)))
+        else "none"
+      in
+      let dimensions =
+        match terminal_dimensions Unix.stdin with
+        | Some (cols, rows) -> Printf.sprintf "%dx%d" cols rows
+        | None -> "unknown"
+      in
+      Printf.printf
+        "LOOM_TERMINAL_RAW state=pass icrnl=false isig=false ixon=false icanon=false echo=false opost=preserved dimensions=%s byte=%s\n%!"
+        dimensions byte)
 
 let stream_command cli interactive =
   let _, paths = session_locator cli in
@@ -4618,6 +4680,18 @@ let stream_command cli interactive =
     | Some value -> parse_nonnegative "cursor" value
   in
   let token = trim (read_file paths.token_path) in
+  let terminal_input = interactive && Unix.isatty Unix.stdin in
+  let terminal_size = ref None in
+  let sync_terminal_size () =
+    if terminal_input then
+      match terminal_dimensions Unix.stdin with
+      | Some dimensions when Some dimensions <> !terminal_size ->
+          let cols, rows = dimensions in
+          ignore (resize_request paths cols rows);
+          terminal_size := Some dimensions
+      | _ -> ()
+  in
+  sync_terminal_size ();
   let socket = connect paths in
   let mode = if interactive then "interactive" else "observe" in
   write_all socket (request_line token "ATTACH" [ mode; string_of_int cursor ]);
@@ -4628,7 +4702,7 @@ let stream_command cli interactive =
   in
   let cursor = ref start_cursor in
   let terminal =
-    if interactive && Unix.isatty Unix.stdin && not (flag cli "--no-raw") then
+    if terminal_input && not (flag cli "--no-raw") then
       Some (set_terminal_raw Unix.stdin)
     else None
   in
@@ -4640,7 +4714,8 @@ let stream_command cli interactive =
     (fun () ->
       while !running do
         let read_fds = if interactive then [ socket; Unix.stdin ] else [ socket ] in
-        let readable, _, _ = Unix.select read_fds [] [] (-1.0) in
+        let timeout = if terminal_input then 0.25 else -1.0 in
+        let readable, _, _ = Unix.select read_fds [] [] timeout in
         List.iter
           (fun descriptor ->
             if descriptor = socket then (
@@ -4662,7 +4737,8 @@ let stream_command cli interactive =
                 | Some index ->
                     if index > 0 then write_all socket (String.sub value 0 index);
                     running := false)
-          readable
+          readable;
+        sync_terminal_size ()
       done)
 
 let offline_snapshot paths cursor limit =
@@ -13793,7 +13869,7 @@ let main () =
       Loom_exec.run (arguments_after_command ())
     else
       let booleans =
-        [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
+        [ "--no-raw"; "--read-byte"; "--meta"; "--machine"; "--allow-remote"; "--apply";
           "--replace"; "--adopt-active"; "--json"; "--once"; "--unsafe-auto";
           "--isolate-context"; "--service-enabled"; "--wait" ]
       in
@@ -13855,6 +13931,7 @@ let main () =
     | "journal-authority-serve" -> journal_authority_serve_command cli; 0
     | "journal-authority-status" -> journal_authority_status_command cli; 0
     | "stop" -> stop_command cli; 0
+    | "terminal-raw-probe" -> terminal_raw_probe_command cli; 0
     | "attach" -> stream_command cli true; 0
     | "observe" -> stream_command cli false; 0
     | "snapshot" -> snapshot_command cli; 0
