@@ -353,7 +353,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md). Quick start:
 2. Create a feature branch
 3. Make your changes
 4. Run tests: `cargo test --workspace`
-5. Run fast gate: `./scripts/fast_gate.sh`
+5. Run fast gate: `./scripts/dev/fast_gate.sh`
 6. Submit pull request
 
 ### Do you accept papers/citations?

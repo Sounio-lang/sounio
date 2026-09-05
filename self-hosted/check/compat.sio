@@ -95,6 +95,16 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return true
     }
 
+    // DsepProof: compatible ONLY with itself, and deliberately checked before
+    // the primitive/struct rules below. It carries no payload to compare --
+    // its opacity comes entirely from there being no OTHER way to produce a
+    // TypeEntry of this kind, so kind equality alone is the whole rule. No
+    // rule anywhere may make this compatible with TyI64 or anything else;
+    // that is the property indep_dsep's signature depends on.
+    if a.kind == TypeKind::TyDsepProof && b.kind == TypeKind::TyDsepProof {
+        return true
+    }
+
     // Primitives: kind must match
     if a.kind == TypeKind::TyI8 && b.kind == TypeKind::TyI8 {
         return true
@@ -584,6 +594,27 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return types_compatible_inner(a.inner, b.inner)
     }
 
+    // Introduction: a value of the base type T initialises an
+    // IndepKnowledge<T, A, B | Z> binding. The claim is a statement ABOUT that
+    // value carried in its type, and there is no separate constructor -- the
+    // corpus writes `let a: IndepKnowledge<f64, hrv, kp | hora> = 1.0`, and the
+    // obligation was already discharged against the declared graph when the
+    // annotation was lowered.
+    //
+    // Both orders, because callers disagree on which side is expected:
+    // checker_check_let_stmt_inplace passes (init, annotation) while
+    // checker_check_call_args and others pass (expected, actual). Erasing the
+    // claim is harmless in either direction -- what makes the claim mean
+    // something is not this rule but the d-separation obligation discharged
+    // when the annotation was lowered, which a value can neither create nor
+    // escape.
+    if a.kind == TypeKind::TyCondIndep && b.kind != TypeKind::TyCondIndep {
+        return types_compatible_inner(a.inner, Some(Box::new(b)))
+    }
+    if b.kind == TypeKind::TyCondIndep && a.kind != TypeKind::TyCondIndep {
+        return types_compatible_inner(Some(Box::new(a)), b.inner)
+    }
+
     // PotentialOutcome (Sprint 20 PO): same policy and compatible inner
     if a.kind == TypeKind::TyPotentialOutcome && b.kind == TypeKind::TyPotentialOutcome {
         if a.fn_sig_id != b.fn_sig_id { return false }
@@ -928,6 +959,25 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             None => {},
         }
     }
+    // IndepKnowledge<T, A, B | Z> is transparent to T under every operator: the
+    // claim is an obligation on the PROGRAM, discharged against the declared
+    // causal graph when the annotation was lowered, not a value the program
+    // carries around. Same shape as the Invariant unwrap above, and for the same
+    // reason -- an opaque wrapper is not numeric, so without this every use of a
+    // claimed value is a false E004.
+    if left.kind == TypeKind::TyCondIndep {
+        match left.inner {
+            Some(li) => return binary_result_type(op, *li, right),
+            None => {},
+        }
+    }
+    if right.kind == TypeKind::TyCondIndep {
+        match right.inner {
+            Some(ri) => return binary_result_type(op, left, *ri),
+            None => {},
+        }
+    }
+
 
     match op {
         // Arithmetic: both numeric, result = left type
@@ -1385,6 +1435,15 @@ pub fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i6
 // "i8" = [105, 56]
 pub fn name_is_i8(n: Name) -> bool with Panic, Div {
     name_matches_str2(n, 105, 56)
+}
+
+// "DsepProof" — the discharged-d-separation credential. Recognised generically
+// wherever a type name is scanned, exactly like i8/i32/... above, but NOT a
+// declared struct anywhere: nothing in any struct table resolves this name, so
+// no `DsepProof { ... }` literal exists to write. Producible only where the
+// checker stamps it directly onto a `d_separated(A, B | Z)` expression.
+pub fn name_is_dsep_proof(n: Name) -> bool with Panic, Div {
+    name_matches_str9(n, 68, 115, 101, 112, 80, 114, 111, 111, 102)
 }
 
 // "i32" = [105, 51, 50]

@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box, parser_name_at}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -1158,6 +1158,31 @@ impl Parser {
             let vis_pair = p.parse_pub_visibility()
             p = vis_pair.0
             visibility = vis_pair.1
+        }
+
+        // `causal graph <name> { ... }` -- contextual, so it is matched by
+        // bytes rather than by keyword, and only when BOTH words are present.
+        // A variable or function named `causal` keeps working.
+        if parser_peek(p) == TokenKind::Ident {
+            let cg_w1 = p.current_name()
+            if cg_w1.len == 6
+                && cg_w1.buf[0] == (99 as i8)
+                && cg_w1.buf[1] == (97 as i8)
+                && cg_w1.buf[2] == (117 as i8)
+                && cg_w1.buf[3] == (115 as i8)
+                && cg_w1.buf[4] == (97 as i8)
+                && cg_w1.buf[5] == (108 as i8)
+                && parser_peek_ahead(p, 1) == TokenKind::Ident {
+                let cg_w2 = parser_name_at(p, p.pos + 1)
+                if cg_w2.len == 5
+                    && cg_w2.buf[0] == (103 as i8)
+                    && cg_w2.buf[1] == (114 as i8)
+                    && cg_w2.buf[2] == (97 as i8)
+                    && cg_w2.buf[3] == (112 as i8)
+                    && cg_w2.buf[4] == (104 as i8) {
+                    return parse_causal_graph_item(p, visibility)
+                }
+            }
         }
 
         // Handle optional 'linear' or 'affine' modifier
@@ -5511,6 +5536,122 @@ fn parse_study_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
 }
 
 // ============================================================
+// ============================================================
+// causal graph declaration parser (Madaros side of Sprint 20 Track CI)
+// ============================================================
+//
+//     causal graph mundo {
+//         hora -> hrv        // a directed cause
+//         fc  <-> hrv        // an unmeasured common cause
+//     }
+//
+// `causal` and `graph` are contextual: neither is a keyword, so no existing
+// program that uses either as an identifier changes meaning. The block records
+// itself into the CG_* registry in parser/ast.sio and the Item is dropped from
+// the stream, exactly as a claim is -- nothing resolves against a graph.
+fn parse_causal_graph_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()
+    pa = pa.advance()
+    var name = empty_name()
+    if parser_peek(pa) == TokenKind::Ident {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
+    pa = pa.expect(TokenKind::LBrace)
+    CG_DECLARED = 1
+    var guard: i64 = 0
+    while parser_peek(pa) != TokenKind::RBrace && !parser_at_eof(pa) && guard < 4096 {
+        guard = guard + 1
+        if parser_peek(pa) == TokenKind::Newline || parser_peek(pa) == TokenKind::Semi || parser_peek(pa) == TokenKind::Comma {
+            pa = pa.advance()
+            continue
+        }
+        if parser_peek(pa) != TokenKind::Ident {
+            pa = pa.advance()
+            continue
+        }
+        let a_name = pa.current_name()
+        let a = ast_cg_intern_node(parser_cg_name_hash(a_name))
+        pa = pa.advance()
+        // `->` is one token. `<->` is not: the lexer splits it, and which way it
+        // splits depends on whether `<-` won the longest match, so both shapes
+        // are accepted rather than assuming one.
+        var directed: i64 = 0 - 1
+        if parser_peek(pa) == TokenKind::Arrow {
+            directed = 1
+            pa = pa.advance()
+        } else if parser_peek(pa) == TokenKind::LeftArrow && parser_peek_ahead(pa, 1) == TokenKind::Gt {
+            directed = 0
+            pa = pa.advance()
+            pa = pa.advance()
+        } else if parser_peek(pa) == TokenKind::Lt && parser_peek_ahead(pa, 1) == TokenKind::Arrow {
+            directed = 0
+            pa = pa.advance()
+            pa = pa.advance()
+        }
+        if directed >= 0 && parser_peek(pa) == TokenKind::Ident {
+            let b_name = pa.current_name()
+            let b = ast_cg_intern_node(parser_cg_name_hash(b_name))
+            ast_cg_add_edge(a, b, directed)
+            pa = pa.advance()
+        }
+    }
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    (pa, Item {
+        kind: ItemKind::ItemCausalGraph,
+        span: span,
+        visibility: visibility,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: None,
+    })
+}
+
+// FNV-1a, reduced modulo a prime each step. This MUST stay byte-identical to
+// indep_var_id in check/check.sio: a claim's variable ids are produced there and
+// looked up against the node ids produced here, and two hashes that agree today
+// but drift later would silently stop matching -- every claim would then name a
+// variable "not in the graph" instead of being discharged.
+pub fn parser_cg_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 2166136261
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h ^ (n.buf[i as usize] as i64)
+        h = (h * 16777619) % 1073741789
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
 // Ontology declaration parser
 // ============================================================
 // Parses: ontology Name { class A; class B subclass_of A; disjoint X, Y }

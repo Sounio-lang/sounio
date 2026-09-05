@@ -47,10 +47,14 @@ var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 var NATIVE_ELF_OFF: i64 = 0
 // Set when nc_elf_put_u8 is asked to store past native_elf_buf_capacity_bytes().
 // The legacy writer (compile_native_finalize_and_write_ref) used to have NO bound
-// check at all; with NC_BIG_CODE raised to 8 MiB a large module can now push the
-// assembled image at this 16 MiB buffer, so the store is bounded and the writer
-// refuses to emit rather than shipping a truncated ELF. i64 (0/1) rather than
-// bool: module-global bool init is not exercised elsewhere in this backend.
+// check at all; a large module can push the assembled image past this legacy
+// 16 MiB buffer (measured 2026-09-02: self-hosted/compiler/main.sio needs
+// 53,515,198 code bytes at merged_ir_functions=13140, so NC_BIG_CODE -- the
+// native_v2 code tier this legacy path shares -- was raised to 128 MiB; this
+// legacy ELF buffer was left at 16 MiB since the legacy writer is not on that
+// path), so the store is bounded and the writer refuses to emit rather than
+// shipping a truncated ELF. i64 (0/1) rather than bool: module-global bool
+// init is not exercised elsewhere in this backend.
 var NATIVE_ELF_OVERFLOW: i64 = 0
 // Which function is being emitted right now, so nc_note_label_overflow can name
 // it. Per-function state, set beside nc_v2_reset_label_state; the surviving
@@ -73,13 +77,13 @@ fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
 // hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
 // the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
-var NC_BIG_ELF: [i8; 16777216] = [0; 16777216]
+var NC_BIG_ELF: [i8; 167772160] = [0; 167772160]
 // Single source of truth for the NC_BIG_ELF bound. The DECLARATION above must
 // stay a literal; every bound CHECK calls this accessor. NOTE: this value must
 // never be confused with the ELF LOAD BASE ADDRESS 0x400000 (4194304), which is
 // passed as the `base_addr` argument at several call sites and is unrelated to
 // buffer capacity. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
-fn nc_elf_capacity_bytes() -> i64 { 16777216 }
+fn nc_elf_capacity_bytes() -> i64 { 167772160 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -1304,6 +1308,11 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_heap_free(*name) { return 24 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
+    if name_is_arena_mark(*name) { return 56 }
+    if name_is_arena_reset(*name) { return 57 }
+    if name_is_panic(*name) { return 58 }
+    if name_is_untracked_counter(*name) { return 59 }
+    if name_is_read_byte(*name) { return 55 }
     if name_is_getpid(*name) { return 28 }
     if name_is_getppid(*name) { return 29 }
     if name_is_exit(*name) { return 30 }
@@ -1382,6 +1391,13 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_slice3((*func).name) { return 54 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
+    // The refusal path asks THIS function, not the by-name one: an empty stub
+    // is what reaches the backend, so a builtin only exists if it is named here.
+    if name_is_arena_mark((*func).name) { return 56 }
+    if name_is_arena_reset((*func).name) { return 57 }
+    if name_is_panic((*func).name) { return 58 }
+    if name_is_untracked_counter((*func).name) { return 59 }
+    if name_is_read_byte((*func).name) { return 55 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
     if name_is_file_size((*func).name) { return 13 }
@@ -1779,6 +1795,7 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
+    (*nc).code_overflow_bytes_attempted = (*nc).code_overflow_bytes_attempted + 1
     if len >= 0 && len < nc_code_capacity_bytes() {
         NC_BIG_CODE[len as usize] = low8(b) as i8
         (*nc).code.len = len + 1
@@ -2041,6 +2058,7 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
+    (*nc).reloc_overflow_count_attempted = (*nc).reloc_overflow_count_attempted + 1
     if idx >= 0 && idx < nc_flat_reloc_capacity() {
         NC_FLAT_RELOC_OFFSETS[idx as usize] = patch_offset
         NC_FLAT_RELOC_KIND_CODES[idx as usize] = kind_code
@@ -4148,6 +4166,42 @@ fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // EXECUTION witnesses (not just "no longer E250") gate this in CI.
 // ============================================================================
 
+// Intrinsics the checker binds as import-unknown (check.sio) and lean_single
+// emits inline. Without a backend they reached a body-less function and were
+// refused with ud2 -- including __arena_mark/__arena_reset, which are the
+// module pipeline's ONLY memory reclamation.
+fn name_is_arena_mark(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_mark")) }
+fn name_is_arena_reset(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_reset")) }
+fn name_is_panic(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("panic")) }
+
+// Counters Madaros does not keep. Its arena never refills (hitting heap_limit
+// requests a GC) and it tracks no mmap tally, so there is no honest number to
+// return -- see emit_builtin_untracked_counter_into for why the answer is -1
+// and not 0.
+fn name_is_untracked_counter(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("__arena_refill_bytes")) { return true }
+    if name_eq(n, make_name("__arena_unmap_bytes")) { return true }
+    if name_eq(n, make_name("__pool_mark")) { return true }
+    if name_eq(n, make_name("__pool_refill_bytes")) { return true }
+    if name_eq(n, make_name("__rtmmap_count")) { return true }
+    if name_eq(n, make_name("__rtmmap_bytes")) { return true }
+    false
+}
+
+fn name_is_read_byte(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 114 as i8 { return false }  // 'r'
+    if n.buf[1] != 101 as i8 { return false }  // 'e'
+    if n.buf[2] != 97 as i8 { return false }   // 'a'
+    if n.buf[3] != 100 as i8 { return false }  // 'd'
+    if n.buf[4] != 95 as i8 { return false }   // '_'
+    if n.buf[5] != 98 as i8 { return false }   // 'b'
+    if n.buf[6] != 121 as i8 { return false }  // 'y'
+    if n.buf[7] != 116 as i8 { return false }  // 't'
+    if n.buf[8] != 101 as i8 { return false }  // 'e'
+    true
+}
+
 fn name_is_getpid(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 6 { return false }
     if n.buf[0] != 103 as i8 { return false }  // 'g'
@@ -4340,6 +4394,95 @@ fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 
 // getpid()/getppid(): raw syscalls 39/110; result in rax per the Sounio
 // integer-return convention.
+// read_byte() -> i64: one byte from stdin, -1 at EOF. The checker binds the
+// name as an import-unknown and lean_single emits it inline, so a call reached
+// a body-less function here and the backend refused it with ud2. Mirrors
+// lean_single's emit_read_byte_x86 byte for byte.
+// __arena_mark() -> i64: the Box-arena bump cursor, read straight out of the
+// RuntimeContext. Read-only, so nothing can go wrong here.
+fn emit_builtin_arena_mark_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_ret(nc)
+}
+
+// __arena_reset(m): put the cursor back. This reclaims BYTES and not handles --
+// handle_count is untouched, so the handle table keeps growing. The call sites
+// guard themselves: module_frontend runs mf_arebox_scan and only resets when it
+// reports no live Box in the window, then re-boxes; codegen's per-function
+// window is audited in a comment at its call site as reaching no Box at all.
+// Without this the reset was a refusal and the arena churn accumulated across
+// the whole module -- the call site records +11.5 GiB VmSize measured before it
+// existed.
+fn emit_builtin_arena_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_ret(nc)
+}
+
+// panic(...) does not return. lean_single routes it to emit_assert_fail, whose
+// Madaros equivalent is the failure half of emit_builtin_assert_into: exit(1).
+fn emit_builtin_panic_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_exit_code(nc, 1)
+}
+
+// A counter this runtime does not keep answers -1, not 0.
+//
+// Zero is a claim: no refills happened, no bytes were unmapped, no mmap was
+// made. For __rtmmap_count that claim is simply false -- heap_alloc mmaps on
+// every call. -1 cannot be mistaken for a tally, so whoever turns on
+// SOUNIO_NV2_ARENA_TRACE reads "unavailable" rather than a comfortable zero.
+fn emit_builtin_untracked_counter_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, 0 - 1)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_read_byte_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xec)
+    nc_emit_byte(nc, 0x08)  // sub rsp, 8
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xff)  // xor rdi, rdi  (fd = 0)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x34)
+    nc_emit_byte(nc, 0x24)  // lea rsi, [rsp]
+    nc_emit_byte(nc, 0xba)
+    nc_emit_byte(nc, 0x01)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)  // mov edx, 1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xc0)  // xor rax, rax  (SYS_read)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x05)  // syscall
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc0)  // test rax, rax
+    nc_emit_byte(nc, 0x7e)
+    nc_emit_byte(nc, 0x06)  // jle +6 -> the -1 store below
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xb6)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x24)  // movzx eax, byte [rsp]
+    nc_emit_byte(nc, 0xeb)
+    nc_emit_byte(nc, 0x07)  // jmp +7 -> past the -1 store
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xc7)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)  // mov rax, -1  (EOF)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc4)
+    nc_emit_byte(nc, 0x08)  // add rsp, 8
+    nc_emit_ret(nc)
+}
+
 fn emit_builtin_getpid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rax_imm(nc, 39)
     nc_emit_syscall(nc)
@@ -5075,9 +5218,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = (*nc).flat_rodata_len
     var src = src_start
     var len = (*nc).flat_rodata_len
-    while src < updated.rodata.len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
-        len = len + 1
+    while src < updated.rodata.len {
+        (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
+        if len < nc_flat_rodata_capacity() {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
+            len = len + 1
+        }
         src = src + 1
     }
     (*nc).flat_rodata_len = len
@@ -7580,6 +7726,11 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
+    if builtin_id == 56 { emit_builtin_arena_mark_into(nc); return }
+    if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
+    if builtin_id == 58 { emit_builtin_panic_into(nc); return }
+    if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
+    if builtin_id == 55 { emit_builtin_read_byte_into(nc); return }
     if builtin_id == 28 { emit_builtin_getpid_into(nc); return }
     if builtin_id == 29 { emit_builtin_getppid_into(nc); return }
     if builtin_id == 30 { emit_builtin_exit_into(nc); return }
@@ -8233,12 +8384,13 @@ fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_i
     let offset = len
     var i = 0
     let name_len = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).len
-    while i < name_len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name_len + 1
+    while i < name_len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -8250,12 +8402,13 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name.len + 1
+    while i < name.len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -9414,8 +9567,9 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
         (*nc).flat_rodata_len = len
@@ -12287,17 +12441,30 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let entry = trampoline_offset(&nc)
     nc.bss_total_size = (*module).bss_total_size
     if nc.bss_total_size < 8 { nc.bss_total_size = 8 }
-    // Machine code exceeded the 2MB NC_BIG_CODE buffer. nc_emit_byte drops
-    // further bytes and sets code_overflow, which would leave a truncated ELF.
-    // Fail with a distinct rc instead of writing a binary that crashes.
+    // Machine code exceeded the NC_BIG_CODE buffer (nc_code_capacity_bytes()).
+    // nc_emit_byte drops further bytes and sets code_overflow, which would
+    // leave a truncated ELF. Fail with a distinct rc instead of writing a
+    // binary that crashes. code_overflow_bytes_attempted is a true count (see
+    // frame.sio), not an estimate, so a capacity bump can be sized against it.
     if nc.code_overflow {
+        print("Error: native code buffer overflow -- code_bytes_needed=")
+        print_int(nc.code_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_code_capacity_bytes())
+        print(" (raise nc_code_capacity_bytes)\n")
         return 19
     }
     // Relocation table exceeded nc_flat_reloc_capacity(). nc_add_flat_reloc
     // dropped further entries and set reloc_overflow, so the ELF would carry
     // unpatched call/rodata sites. Distinct rc from the code-buffer overflow
-    // above so callers can tell the two tiers apart.
+    // above so callers can tell the two tiers apart. reloc_overflow_count_attempted
+    // is a true count (see frame.sio), not an estimate.
     if nc.reloc_overflow {
+        print("Error: native relocation table overflow -- relocs_needed=")
+        print_int(nc.reloc_overflow_count_attempted)
+        print(" capacity=")
+        print_int(nc_flat_reloc_capacity())
+        print(" (raise nc_flat_reloc_capacity)\n")
         return 20
     }
     // The OTHER relocation table. nc_add_flat_reloc guards the flat table above;
@@ -12319,6 +12486,22 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print_int(NC_V2_LABEL_OVERFLOW_FN)
         print(" (raise nc_v2_label_capacity)\n")
         return 22
+    }
+    // Flat rodata buffer (NC_BIG_RODATA) exceeded its 256 KiB capacity. Unlike
+    // code_overflow/reloc_overflow/label_overflow above, the append sites here
+    // do not set a fail-closed flag themselves -- they silently stop writing
+    // once flat_rodata_len saturates, so string/constant data past the cap is
+    // dropped with no error and the resulting ELF still gets written and still
+    // runs (badly: pointers into the never-written tail read stale/zero BSS).
+    // rodata_overflow_bytes_attempted is a true count (see frame.sio), not an
+    // estimate. Distinct rc from the other three tiers.
+    if nc.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity() {
+        print("Error: native rodata buffer overflow -- rodata_bytes_needed=")
+        print_int(nc.rodata_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_flat_rodata_capacity())
+        print(" (raise nc_flat_rodata_capacity)\n")
+        return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }

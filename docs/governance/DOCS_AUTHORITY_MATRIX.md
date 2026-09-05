@@ -110,11 +110,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.concept-corpus-cross-check-2026-08-19 | repo_only | docs/audit/CONCEPT_CORPUS_CROSS_CHECK_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.concept-status-gate-2026-08-19 | repo_only | docs/audit/CONCEPT_STATUS_GATE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.context-dependent-red-gates-2026-08-17 | repo_only | docs/audit/CONTEXT_DEPENDENT_RED_GATES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.correlated-effect-r6-2026-08-20 | repo_only | docs/audit/CORRELATED_EFFECT_R6_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-concepts-2026-08-19 | repo_only | docs/audit/CROSS_CONCEPTS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-engine-runpass-census-2026-08-17 | repo_only | docs/audit/CROSS_ENGINE_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dce-silent-truncation-census-2026-08-19 | repo_only | docs/audit/DCE_SILENT_TRUNCATION_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dimensional-typing-gap-2026-09-02 | repo_only | docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-epistemic-fabrication-sweep-2026-08-18 | repo_only | docs/audit/DISSERTATION_EPISTEMIC_FABRICATION_SWEEP_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-hessian-e175-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_HESSIAN_E175_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -247,6 +249,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.lean-single-println-str-ref-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_PRINTLN_STR_REF_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-scalar-ref-deref-store-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_SCALAR_REF_DEREF_STORE_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-scan-type-qualified-path-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_SCAN_TYPE_QUALIFIED_PATH_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.lean-single-string-literal-codegen-sqw-overflow-2026-09-03 | repo_only | docs/audit/LEAN_SINGLE_STRING_LITERAL_CODEGEN_SQW_OVERFLOW_2026-09-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-use-as-alias-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_USE_AS_ALIAS_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.long-string-literal-diagnostic-census-2026-08-17 | repo_only | docs/audit/LONG_STRING_LITERAL_DIAGNOSTIC_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lorenz-i256-product-magnitude-2026-08-20 | repo_only | docs/audit/LORENZ_I256_PRODUCT_MAGNITUDE_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -277,6 +280,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-fo-cross-fn-return-2026-07-28 | repo_only | docs/audit/MADAROS_FO_CROSS_FN_RETURN_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-gum-stack-2026-07-27 | repo_only | docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-gen2-pr2307-isolation-2026-08-31 | repo_only | docs/audit/MADAROS_GEN2_PR2307_ISOLATION_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-gpu-kernel-ir-lower-to-ptx-ptx-module-combination-2026-07-02 | repo_only | docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-gpu-module-compile-oom-2026-07-03 | repo_only | docs/audit/MADAROS_GPU_MODULE_COMPILE_OOM_2026-07-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-handle-182-alloc-vs-live-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_182_ALLOC_VS_LIVE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

@@ -470,6 +470,8 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E170 | type-checker/epistemic | error | `.value` on `Knowledge<T>` requires `with Epistemic` | [E170.md](explanations/E170.md) |
 | E171 | type-checker/epistemic | error | Cannot cast epistemic type to its inner type | [E171.md](explanations/E171.md) |
 | E200 | lean_single/resolve | error | Undefined identifier | — |
+| E178 | type-checker/epistemic | error | noise-source capacity exceeded: more independent measurement sources than the noise-symbol domain can represent | — |
+| E179 | type-checker/epistemic | error | noise-set interning table exhausted: too many distinct source-sets in one checker run | — |
 | E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
 | E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
 | E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
@@ -501,6 +503,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E229 | lexer | error | source exceeds lexer byte buffer, or token table full (fail-closed) | [E229.md](explanations/E229.md) |
 | E230 | type-checker/epistemic | error | independence-assuming operation over correlated uncertainty | — |
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
+| E236 | type-checker/epistemic | error | binary operation on Knowledge values reuses a correlated binding; independence is not assumed (add `with Correlated`) | — |
 | E244 | type-checker/epistemic | error | Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured) | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
 | E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |
@@ -510,3 +513,8 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E250 | type-checker/extern | error | call to an extern C function the native backend does not implement | [E250.md](explanations/E250.md) |
 | E251 | type-checker/epistemic | error | product variance shortcut is unsound beyond the octonions (norm not multiplicative on Sedenion/Clifford) | [E251.md](explanations/E251.md) |
 | E252 | type-checker/algebra | error | algebra declares a reassociation strategy its multiplication law cannot certify | [E252.md](explanations/E252.md) |
+| E253 | type-checker/gpu | error | kernel function must return unit type | — |
+| E254 | type-checker/causal | error | is not a node of the declared causal graph | — |
+| E255 | type-checker/causal | error | is not d-separated from the other variable given the stated conditioning set | — |
+| E256 | type-checker/causal | error | `d_separated` needs a declared causal graph and exactly two variable names, with an optional conditioning set | — |
+| E257 | type-checker/causal | error | `indep_dsep`'s argument must be a `d_separated(...)` call the compiler itself discharged, not a hand-written value | — |

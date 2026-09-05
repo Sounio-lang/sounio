@@ -1,0 +1,267 @@
+//@ run-pass
+//
+// W4 bounded model of the SIGNED noise-set domain. Self-contained, at a smaller
+// shape than production (2 mask words / 128 sources instead of 4 / 256, table
+// cap 16 instead of 4096), so it checks the model-level logic and actually
+// EXECUTES -- the check-level witnesses in this directory cannot, because every
+// one of them performs Knowledge x Knowledge arithmetic and trips E245 (#1706).
+//
+// What it proves:
+//   1. multi-word membership: a source above bit 63 lands in word 1 and is
+//      disjoint from a source in word 0
+//   2. same-sign shared source  -> Cov >= 0 PROVEN  (Sub is safe, accepted)
+//   3. opposite-sign shared      -> NOT proven      (Sub understates, refused)
+//   4. sign-unknown shared       -> NOT proven      (fail closed)
+//   5. unknown / invalid handles -> NOT proven      (fail closed)
+//   6. disjoint sets             -> Cov >= 0 vacuously, and disjoint
+//
+// Integrated current-source behavior is owned by scripts/ci/ns_antigarbling_gate.sh.
+
+fn ns_unknown() -> i64 { 0 - 1 }
+fn ns_empty() -> i64 { 0 }
+fn ns_cap_model() -> i64 { 16 }
+
+struct SignSetTable { pos: [i64; 32], neg: [i64; 32], count: i64, overflow: i64 }
+fn table_new() -> SignSetTable { SignSetTable { pos: [0; 32], neg: [0; 32], count: 0, overflow: 0 } }
+
+var SC_POS: [i64; 2] = [0; 2]
+var SC_NEG: [i64; 2] = [0; 2]
+
+fn sc_clear() with Mut {
+    var w: i64 = 0
+    while w < 2 {
+        SC_POS[w as usize] = 0
+        SC_NEG[w as usize] = 0
+        w = w + 1
+    }
+}
+
+fn word_index(src: i64) -> i64 {
+    let six = 6 as u8
+    src >> six
+}
+
+fn bit_in_word(src: i64) -> i64 {
+    let sh = (src & 63) as u8
+    ((1 as i64) << sh) as i64
+}
+
+fn pos_word(t: &SignSetTable, h: i64, w: i64) -> i64 {
+    if h <= 0 { 0 } else {
+        let idx = h - 1
+        if idx < t.count { t.pos[(idx * 2 + w) as usize] } else { 0 }
+    }
+}
+
+fn neg_word(t: &SignSetTable, h: i64, w: i64) -> i64 {
+    if h <= 0 { 0 } else {
+        let idx = h - 1
+        if idx < t.count { t.neg[(idx * 2 + w) as usize] } else { 0 }
+    }
+}
+
+fn intern_scratch(t: &!SignSetTable) -> i64 with Mut, Panic, Div {
+    var is_empty = true
+    var w: i64 = 0
+    while w < 2 {
+        if SC_POS[w as usize] != 0 { is_empty = false }
+        if SC_NEG[w as usize] != 0 { is_empty = false }
+        w = w + 1
+    }
+    if is_empty { return 0 }
+    var i: i64 = 0
+    while i < t.count {
+        var same = true
+        var k: i64 = 0
+        while k < 2 {
+            if t.pos[(i * 2 + k) as usize] != SC_POS[k as usize] { same = false }
+            if t.neg[(i * 2 + k) as usize] != SC_NEG[k as usize] { same = false }
+            k = k + 1
+        }
+        if same { return i + 1 }
+        i = i + 1
+    }
+    if t.count >= ns_cap_model() {
+        t.overflow = 1
+        return ns_unknown()
+    }
+    let idx = t.count
+    var j: i64 = 0
+    while j < 2 {
+        t.pos[(idx * 2 + j) as usize] = SC_POS[j as usize]
+        t.neg[(idx * 2 + j) as usize] = SC_NEG[j as usize]
+        j = j + 1
+    }
+    t.count = idx + 1
+    idx + 1
+}
+
+fn singleton(t: &!SignSetTable, src: i64) -> i64 with Mut, Panic, Div {
+    if src < 0 { return ns_unknown() }
+    if src >= 128 { return ns_unknown() }
+    let bit = bit_in_word(src)
+    if bit == 0 { return ns_unknown() }
+    sc_clear()
+    SC_POS[word_index(src) as usize] = bit
+    intern_scratch(t)
+}
+
+fn handle_valid(t: &SignSetTable, h: i64) -> bool { (h == 0) || (h > 0 && h <= t.count) }
+
+fn union_add(t: &!SignSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > t.count { return ns_unknown() }
+    if b > t.count { return ns_unknown() }
+    var w: i64 = 0
+    while w < 2 {
+        SC_POS[w as usize] = pos_word(t, a, w) | pos_word(t, b, w)
+        SC_NEG[w as usize] = neg_word(t, a, w) | neg_word(t, b, w)
+        w = w + 1
+    }
+    intern_scratch(t)
+}
+
+fn union_sub(t: &!SignSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > t.count { return ns_unknown() }
+    if b > t.count { return ns_unknown() }
+    var w: i64 = 0
+    while w < 2 {
+        SC_POS[w as usize] = pos_word(t, a, w) | neg_word(t, b, w)
+        SC_NEG[w as usize] = neg_word(t, a, w) | pos_word(t, b, w)
+        w = w + 1
+    }
+    intern_scratch(t)
+}
+
+fn union_opaque(t: &!SignSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > t.count { return ns_unknown() }
+    if b > t.count { return ns_unknown() }
+    var w: i64 = 0
+    while w < 2 {
+        let m = pos_word(t, a, w) | neg_word(t, a, w) | pos_word(t, b, w) | neg_word(t, b, w)
+        SC_POS[w as usize] = m
+        SC_NEG[w as usize] = m
+        w = w + 1
+    }
+    intern_scratch(t)
+}
+
+fn disjoint(t: &SignSetTable, a: i64, b: i64) -> bool with Mut {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if !handle_valid(t, a) { return false }
+    if !handle_valid(t, b) { return false }
+    if a == 0 { return true }
+    if b == 0 { return true }
+    var shared = false
+    var w: i64 = 0
+    while w < 2 {
+        let ma = pos_word(t, a, w) | neg_word(t, a, w)
+        let mb = pos_word(t, b, w) | neg_word(t, b, w)
+        if (ma & mb) != 0 { shared = true }
+        w = w + 1
+    }
+    !shared
+}
+
+fn cov_nonneg(t: &SignSetTable, a: i64, b: i64) -> bool with Mut {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if !handle_valid(t, a) { return false }
+    if !handle_valid(t, b) { return false }
+    var opposed = false
+    var w: i64 = 0
+    while w < 2 {
+        let pa = pos_word(t, a, w)
+        let na = neg_word(t, a, w)
+        let pb = pos_word(t, b, w)
+        let nb = neg_word(t, b, w)
+        if ((pa & nb) | (na & pb)) != 0 { opposed = true }
+        w = w + 1
+    }
+    !opposed
+}
+
+// The E230 verdict for the subtractive lane, as the checker computes it.
+fn sub_refuses(t: &SignSetTable, a: i64, b: i64) -> bool with Mut {
+    if a == ns_empty() { return false }
+    if b == ns_empty() { return false }
+    if disjoint(t, a, b) { return false }
+    !cov_nonneg(t, a, b)
+}
+
+fn report(got: bool, want: bool) -> i32 with IO {
+    if got == want { println("PASS") return 0 } else { println("FAIL") return 1 }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var t = table_new()
+    var fails = 0
+    println("NS signed-domain model (W4: sign-of-covariance for Sub)")
+
+    let a = singleton(&!t, 0)      // word 0
+    let b = singleton(&!t, 1)      // word 0
+    let hi = singleton(&!t, 100)   // word 1 -- multi-word path
+
+    print("1a distinct sources disjoint: ")
+    fails = fails + report(disjoint(&t, a, b), true)
+    print("1b word-0 vs word-1 source disjoint: ")
+    fails = fails + report(disjoint(&t, a, hi), true)
+    print("1c word-1 source not disjoint from itself: ")
+    fails = fails + report(disjoint(&t, hi, hi), false)
+
+    print("2a same-sign shared source proves Cov >= 0: ")
+    fails = fails + report(cov_nonneg(&t, a, a), true)
+    print("2b so `x - x` is NOT refused: ")
+    fails = fails + report(sub_refuses(&t, a, a), false)
+
+    // d = b - a  =>  a enters with coefficient -1
+    let d = union_sub(&!t, b, a)
+    print("3a opposite-sign shared source does NOT prove Cov >= 0: ")
+    fails = fails + report(cov_nonneg(&t, d, a), false)
+    print("3b so `(b - a) - a` IS refused: ")
+    fails = fails + report(sub_refuses(&t, d, a), true)
+    print("3c and it is not disjoint either: ")
+    fails = fails + report(disjoint(&t, d, a), false)
+
+    // m = a * b  =>  every source of m is sign-unknown
+    let m = union_opaque(&!t, a, b)
+    print("4a sign-unknown shared source does NOT prove Cov >= 0: ")
+    fails = fails + report(cov_nonneg(&t, m, a), false)
+    print("4b so `(a * b) - a` IS refused: ")
+    fails = fails + report(sub_refuses(&t, m, a), true)
+
+    print("5a unknown handle never proves Cov >= 0: ")
+    fails = fails + report(cov_nonneg(&t, ns_unknown(), a), false)
+    print("5b invalid positive handle never proves Cov >= 0: ")
+    fails = fails + report(cov_nonneg(&t, 999, a), false)
+    print("5c unknown handle is never disjoint: ")
+    fails = fails + report(disjoint(&t, ns_unknown(), a), false)
+
+    // s = a + b : both coefficients stay +1, so a same-sign subtraction of a
+    // still overstates and stays accepted.
+    let s = union_add(&!t, a, b)
+    print("6a `(a + b) - a` keeps a same-signed: ")
+    fails = fails + report(cov_nonneg(&t, s, a), true)
+    print("6b so it is NOT refused: ")
+    fails = fails + report(sub_refuses(&t, s, a), false)
+    print("6c `(a + b) - hi` is disjoint and not refused: ")
+    fails = fails + report(sub_refuses(&t, s, hi), false)
+
+    print("7a empty set is disjoint from a real set: ")
+    fails = fails + report(disjoint(&t, ns_empty(), a), true)
+    print("7b interning is canonical (same masks -> same handle): ")
+    fails = fails + report(union_add(&!t, a, b) == s, true)
+
+    if fails == 0 {
+        println("ns-sign-domain-model: PASS")
+        return 0
+    }
+    println("ns-sign-domain-model: FAIL")
+    1
+}
