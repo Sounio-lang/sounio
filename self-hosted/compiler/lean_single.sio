@@ -1971,6 +1971,17 @@ fn type_hash_unit_dim(h: i64) -> i64 with Panic, Mut, Div {
 
 fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
     let param_dim = type_hash_unit_dim(param_hash)
+    // A NOMINAL unit -- declared `unit mg_dL;` with no dimensional right-hand
+    // side -- has dimension zero, and the dimension test below would then accept
+    // anything at all. That is not the same situation as a parameter with no
+    // unit, where accepting anything is correct, and the two were being
+    // conflated: passing mg_dL where mmol_L was declared went through unchecked.
+    // Compare such a parameter by NAME, which is what the reference design does
+    // for declared units regardless of how they were spelled.
+    if param_hash != 0 && param_dim == 0 && unit_is_user_declared_h(param_hash) {
+        if expr_unit == param_hash { return false }
+        return true
+    }
     if param_dim == 0 { return false }
     if expr_unit == param_hash { return false }
     if expr_dim != 0 && expr_dim == param_dim { return false }
@@ -7399,6 +7410,24 @@ fn lex_all() with IO, Mut, Panic, Div {
                 let us = p
                 while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57)) { p = p + 1 }
                 lit_unit_hash = gl_name_hash(us, p)
+            }
+            // Gen 19: <unit> annotation on a numeric literal, e.g. 140.0<mg_dL>.
+            // The opening angle must touch the number: `140.0<mg_dL>` is a unit
+            // and `140.0 < x` is a comparison, and requiring no space between
+            // them is what keeps the two apart without parser context. A closing
+            // `>` is required as well, so `140.0<x` with no close still lexes as
+            // a comparison and nothing here is consumed.
+            //
+            // Unlike the `_suffix` form above, the name may contain underscores,
+            // which is what clinical units need: mg_dL, mmol_L, U_L, mm_h.
+            if lit_unit_hash == 0 && p < SRC_LEN && sb(p) == 60 && p + 1 < SRC_LEN && ((sb(p + 1) >= 65 && sb(p + 1) <= 90) || (sb(p + 1) >= 97 && sb(p + 1) <= 122)) {
+                var q = p + 1
+                let us = q
+                while q < SRC_LEN && ((sb(q) >= 65 && sb(q) <= 90) || (sb(q) >= 97 && sb(q) <= 122) || (sb(q) >= 48 && sb(q) <= 57) || sb(q) == 95) { q = q + 1 }
+                if q < SRC_LEN && sb(q) == 62 && q > us {
+                    lit_unit_hash = gl_name_hash(us, q)
+                    p = q + 1
+                }
             }
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
