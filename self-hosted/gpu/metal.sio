@@ -76,7 +76,7 @@ fn metal_push_str(buf: MetalBuf, s: string) -> MetalBuf with Mut, Panic, Div {
     out
 }
 
-fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Div {
+pub fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Div {
     let nlen = str_len(needle)
     if nlen == 0 { return true }
     if buf.len < nlen { return false }
@@ -267,6 +267,52 @@ fn metal_emit_header(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
     out = metal_push_str(out, "using namespace metal;\n")
     out = metal_push_newline(out)
     out
+}
+
+fn metal_kernel_has_xor_convolution(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn metal_cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let ah = if a >= half { 1 } else { 0 }
+    let bh = if b >= half { 1 } else { 0 }
+    let al = a & (half - 1)
+    let bl = b & (half - 1)
+    if ah == 0 && bh == 0 { return metal_cd_sign(al, bl, bits - 1) }
+    if ah == 0 && bh == 1 { return metal_cd_sign(bl, al, bits - 1) }
+    if ah == 1 && bh == 0 {
+        if bl == 0 { return metal_cd_sign(al, 0, bits - 1) }
+        return 0 - metal_cd_sign(al, bl, bits - 1)
+    }
+    if bl == 0 { return 0 - metal_cd_sign(0, al, bits - 1) }
+    metal_cd_sign(bl, al, bits - 1)
+}
+
+fn metal_emit_xor_sign_table(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
+    var out = metal_push_str(buf, "constant char pireus_xor_sign[256] = {")
+    var d: i64 = 0
+    while d < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            if d != 0 || j != 0 { out = metal_push_str(out, ",") }
+            if metal_cd_sign(d ^ j, j, 4) < 0 {
+                out = metal_push_str(out, "-1")
+            } else {
+                out = metal_push_str(out, "1")
+            }
+            j = j + 1
+        }
+        d = d + 1
+    }
+    metal_push_str(out, "};\n\n")
 }
 
 // ============================================================================
@@ -512,10 +558,19 @@ fn metal_emit_atomic_binop(buf: MetalBuf, op: GpuOp, fn_name: string) -> MetalBu
 fn metal_lower_ops(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
     var out = buf
     var i: i64 = 0
+    let is_xor_convolution = metal_kernel_has_xor_convolution(kernel)
 
     while i < kernel.op_count {
         let op = kernel.ops[i as usize]
-        out = metal_lower_single_op(out, op, kernel)
+        // The seed IR places one unconditional terminal branch immediately
+        // before the compound operator. Only that exact adjacency is replaced.
+        let next_is_xor = i + 1 < kernel.op_count
+            && kernel.ops[(i + 1) as usize].opcode == GpuOpcode::GpuXorConvolutionF64
+        let is_compound_terminal_bra = is_xor_convolution
+            && op.opcode == GpuOpcode::GpuBra && op.pred_reg < 0 && next_is_xor
+        if !is_compound_terminal_bra {
+            out = metal_lower_single_op(out, op, kernel)
+        }
         i = i + 1
     }
 
@@ -651,6 +706,12 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
     // ---- LoadParam ----
     if opc == GpuOpcode::GpuLoadParam {
         let param = kernel.params[op.param_idx as usize]
+        if metal_kernel_has_xor_convolution(kernel) && op.ty == GpuType::GpuPtr {
+            out = metal_push_str(out, "    // ptr parameter consumed by Pireus float2 materializer: ")
+            out = metal_push_name(out, param.name)
+            out = metal_push_str(out, "\n")
+            return out
+        }
         out = metal_push_str(out, "    ")
         out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
         out = metal_push_str(out, " = (")
@@ -1337,6 +1398,36 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         return out
     }
 
+    if opc == GpuOpcode::GpuXorConvolutionF64 {
+        out = metal_push_str(out, "    // pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce\n")
+        out = metal_push_str(out, "    // pireus.equivalence=APPROXIMATE pireus.storage=float2-hi-lo\n")
+        out = metal_push_str(out, "    // pireus.source_semantics=f64x16 pireus.material_abi=float2x16\n")
+        out = metal_push_str(out, "    // pireus.requires_pack=f64-to-twofold-float2\n")
+        out = metal_push_str(out, "    if (tid < 16u) {\n")
+        out = metal_push_str(out, "        device const float2* __a = (device const float2*)")
+        out = metal_push_name(out, kernel.params[0].name)
+        out = metal_push_str(out, ";\n        device const float2* __b = (device const float2*)")
+        out = metal_push_name(out, kernel.params[1].name)
+        out = metal_push_str(out, ";\n        device float2* __out = (device float2*)")
+        out = metal_push_name(out, kernel.params[2].name)
+        out = metal_push_str(out, ";\n        float2 __acc = float2(0.0f);\n")
+        out = metal_push_str(out, "        for (uint __j = 0u; __j < 16u; ++__j) {\n")
+        out = metal_push_str(out, "            uint __ai = tid ^ __j;\n")
+        out = metal_push_str(out, "            float2 __av = __a[__ai];\n")
+        out = metal_push_str(out, "            float2 __bv = __b[__j];\n")
+        out = metal_push_str(out, "            float __p = __av.x * __bv.x;\n")
+        out = metal_push_str(out, "            float __e = fma(__av.x, __bv.x, -__p) + __av.x * __bv.y + __av.y * __bv.x;\n")
+        out = metal_push_str(out, "            float __sgn = (float)pireus_xor_sign[tid * 16u + __j];\n")
+        out = metal_push_str(out, "            __p *= __sgn;\n            __e *= __sgn;\n")
+        out = metal_push_str(out, "            float __s = __acc.x + __p;\n            float __bb = __s - __acc.x;\n")
+        out = metal_push_str(out, "            float __err = (__acc.x - (__s - __bb)) + (__p - __bb) + __acc.y + __e;\n")
+        out = metal_push_str(out, "            float __hi = __s + __err;\n")
+        out = metal_push_str(out, "            float __lo = __err - (__hi - __s);\n")
+        out = metal_push_str(out, "            __acc = float2(__hi, __lo);\n")
+        out = metal_push_str(out, "        }\n        __out[tid] = __acc;\n    }\n")
+        return out
+    }
+
     // Phase 6: Cooperative groups
     if opc == GpuOpcode::GpuCgTiledPartition {
         out = metal_push_str(out, "    // cg::tiled_partition: use simd_group in MSL\n")
@@ -1363,6 +1454,7 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
 pub fn gpu_lower_to_metal(kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
     var buf = metal_buf_new()
     buf = metal_emit_header(buf)
+    if metal_kernel_has_xor_convolution(kernel) { buf = metal_emit_xor_sign_table(buf) }
     buf = metal_emit_kernel_signature(buf, kernel)
     buf = metal_emit_var_decls(buf, kernel)
     buf = metal_lower_ops(buf, kernel)

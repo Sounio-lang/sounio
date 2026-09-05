@@ -26,6 +26,7 @@
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
+#   scripts/dev/souc-build-remote.sh --gate pireus-metal   # + emit Pireus MSL from current source
 #   scripts/dev/souc-build-remote.sh --gate stack-floor    # + <=32 MiB compiler stack gate
 #   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
 #     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
@@ -269,6 +270,25 @@ for g in $GATES; do
       echo "REMOTE: PIREUS_OPERATOR_IR_PASS artifact_bytes=\$(stat -c%s "\$out") kernel_bytes=1004"
       echo "REMOTE: PIREUS_OPERATOR_RECEIPT source_sha256=\$source_sha artifact_sha256=\$artifact_sha hardware=\$cpu_model"
       ;;
+    pireus-metal)
+      echo "REMOTE: --- Pireus Apple Metal materializer ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      msl="\$W/pireus_xor.metal"
+      "\$W/madaros.elf" tests/gpu/pireus_sed_xor_convolution_f64.sio \
+        -o "\$msl" --gpu-target metal >"\$W/pireus-metal.log" 2>&1
+      metal_rc=\$?
+      sed 's/^/REMOTE: /' "\$W/pireus-metal.log" | tail -30
+      echo "REMOTE: pireus_metal_build rc=\$metal_rc"
+      if [ \$metal_rc -ne 0 ] || [ ! -s "\$msl" ]; then exit 1; fi
+      if grep -q '// unhandled opcode' "\$msl"; then
+        echo "REMOTE: PIREUS_METAL_FAIL unhandled opcode"
+        exit 1
+      fi
+      echo "REMOTE: PIREUS_METAL_ARTIFACT_BEGIN"
+      base64 -w0 "\$msl"
+      echo
+      echo "REMOTE: PIREUS_METAL_ARTIFACT_END sha256=\$(sha256sum "\$msl" | cut -d' ' -f1) bytes=\$(stat -c%s "\$msl")"
+      ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
 done
@@ -278,7 +298,7 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*|*pireus-operator*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*|*pireus-operator*|*pireus-metal*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
