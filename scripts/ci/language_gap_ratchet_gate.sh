@@ -37,8 +37,16 @@ expect "derived unit annotation refused by lean_single" "1" "$([[ $(rc lean chec
 expect "derived unit annotation refused by Madaros" "1" "$([[ $(rc mad check $UNITS/derived_unit_annotation_unparsed.sio) -ne 0 ]] && echo 1 || echo 0)"
 # control: a direct mol + K mismatch IS caught (if this flips, units are off entirely)
 expect "control: direct unit mismatch caught by lean_single" "1" "$([[ $(rc lean check $UNITS/direct_unit_mismatch_is_caught.sio) -ne 0 ]] && echo 1 || echo 0)"
-# #2388 (2),(3) -- lean_single accepts a dimensionless quotient + K, and K into an f64 parameter
-expect "quotient loses dimension (lean_single accepts)" "0" "$(rc lean check $UNITS/derived_unit_dropped_by_inference.sio)"
+# #2388 (2) -- CLOSED 2026-09-05. A quotient used to lose its dimension, so
+# (mol/cm3) + K compiled. lean_single now says `error: unit dimension mismatch`
+# and exits non-zero, on BOTH targets. What closed it is the dimension carried
+# through `*` and `/` (dim_add / dim_sub at the multiplicative site) plus the
+# additive dimension check, which this branch mirrored into the arm64 pass and
+# which the refreshed seed now ships. The rung moves up: a gap that closed is
+# progress, and the ratchet is red in both directions, so this line is what
+# stops it reopening.
+expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_quotient_keeps_dimension.sio) -ne 0 ]] && echo 1 || echo 0)"
+# #2388 (3) -- still open: K still enters an f64 parameter unchecked.
 expect "unit lost at call boundary (lean_single accepts)" "0" "$(rc lean check $UNITS/unit_lost_at_call_boundary.sio)"
 
 # IEEE special values -- NaN compares as ordered on both engines

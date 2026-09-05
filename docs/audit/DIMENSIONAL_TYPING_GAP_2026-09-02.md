@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.dimensio
 
 # Dispatch: the dimensional type system cannot express the GRI-Mech constants (2026-09-02)
 
-**Status:** measured, not fixed. Issue [#2388](https://github.com/Sounio-lang/sounio/issues/2388); related [#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed under the forensic dispatch protocol
+**Status:** measured; Repro 2 CLOSED 2026-09-05 (see the correction at the end), Repros 1 and 3 still open. Issue [#2388](https://github.com/Sounio-lang/sounio/issues/2388); related [#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed under the forensic dispatch protocol
 (`CLAUDE.md` §8): evidence and minimal reproductions first, no ad-hoc patch to
 `self-hosted/`.
 
@@ -96,3 +96,43 @@ annotations that the checker does not read.
 Madaros and accepted by lean_single **as f64** — the halving count until
 `1+ε == 1` is 53, not 113. `CLAUDE.md` §13 states the opposite engine split
 and is stale. Recorded in `docs/compiler/KNOWN_LIMITATIONS.md`.
+
+---
+
+## Correction, 2026-09-05 — Repro 2 is closed
+
+`derived_unit_dropped_by_inference.sio` no longer passes, and has moved out of
+`tests/known-gaps/` to `tests/compile-fail/unit_quotient_keeps_dimension.sio`,
+where the a64 parity gate walks it with the rest of the corpus.
+On both targets, lean_single now reports
+
+```
+error: unit dimension mismatch at <main>:8
+typecheck: failed
+```
+
+so `(mol/cm3) + K` is refused and the quotient keeps its dimension.
+
+What closed it is item **2** of this document's own "What would close it" list --
+dimension propagation through `*` and `/` in inference, not only through `+`/`-`
+between annotated bindings. `dim_add` / `dim_sub` at the multiplicative site now
+compose the dimension of a derived quantity, and the additive check compares it.
+The arm64 pass carried neither and now carries both, which is why the refusal
+holds on `--target aarch64-linux` as well.
+
+Items **1** and **3** are untouched. Derived unit types (`A/B`, `A·B`, `A^n`) are
+still not in the grammar, and a `K` argument still enters an `f64` parameter
+unchecked -- Repro 3, which this document calls the decisive one, still passes:
+
+```
+[ratchet] ok   unit lost at call boundary (lean_single accepts): 0
+```
+
+So the conclusion about `stdlib/chemistry/gri30_h2.sio` stands: instance (6) is
+still not a compile error, and re-typing the kinetic path is still compiler work
+rather than a probe port.
+
+scripts/ci/language_gap_ratchet_gate.sh now asserts the refusal, so the closure
+cannot silently reopen: the ratchet is red in both directions. The test suite
+holds it a second way, as a compile-fail case that must be refused on both
+targets.
