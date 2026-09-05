@@ -7,6 +7,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      nightly:
+        description: "Run expensive nightly jobs (e.g. R6 corpus sweep)"
+        type: boolean
+        default: false
+        required: false
   schedule:
     - cron: '23 3 * * *'
 
@@ -306,18 +312,9 @@ jobs:
             bash "$g"
           done
 
-      # R6 is wired NIGHTLY, not per push, and the reason is measured rather
-      # than guessed: its I3 clause sweeps every pair of research contracts,
-      # O(pairs x functions^2). It takes ~957 s; the rest of the line costs
-      # ~200 s together.
-      #
-      # This is the budget being stated instead of the gate being dropped: a
-      # check too expensive to run on every push is not thereby exempt from
-      # running, it just runs on a cadence the repo can pay for.
-      - name: Self-falsifying compilation line (R6 corpus sweep, nightly)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        timeout-minutes: 25
-        run: bash scripts/ci/self_falsifying_compilation_line_r6_gate.sh
+      # R6 corpus sweep (#2392) moved to dedicated job `r6-corpus-sweep`.
+      # When executed inside Contracts, a timeout in R6 skipped the ~66
+      # subsequent gates. In its own job, a budget overrun fails only itself.
 
       - name: Worktree governance gate
         run: bash scripts/dev/worktree_branch_audit.sh --check
@@ -626,6 +623,38 @@ jobs:
           name: contract-artifacts
           path: artifacts/omega/claude_operational_contract_status.v1.json
           retention-days: 7
+      - name: Contracts evaluation summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            if [[ "$JOB_STATUS" == "success" ]]; then
+              echo "### ✅ Contracts Job Complete" >> "$GITHUB_STEP_SUMMARY"
+              echo "All contract gates evaluated successfully." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "### ⚠️ Contracts Job Incomplete" >> "$GITHUB_STEP_SUMMARY"
+              echo "A contract gate failed or was cancelled; subsequent gates were not evaluated." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+  r6-corpus-sweep:
+    name: R6 Corpus Sweep (Nightly)
+    needs: impact
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.nightly == true || inputs.nightly == 'true'))
+    # R6 is wired NIGHTLY, not per push (#2392). Its I3 clause sweeps every pair
+    # of research contracts, O(pairs x functions^2). As the corpus grew to 90
+    # contracts (4,005 pairs, ~336k comparisons), execution time exceeded the
+    # old 25-minute budget on standard runners. Isolated here with a 90-minute
+    # timeout so a budget overrun does not mask other contract gates.
+    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Self-falsifying compilation line (R6 corpus sweep, nightly)
+        run: bash scripts/ci/self_falsifying_compilation_line_r6_gate.sh
 
   native-selfhost-linux-x86_64:
     name: Native Self-Host (Linux x86_64)
