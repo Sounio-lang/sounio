@@ -35863,12 +35863,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let pw_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_x_slot_a)
+                // β⁷: park x's channel state; compiling y re-enters compile_or_a64.
+                let pw_prev = B7_TOP
+                var pw_ua = B7_TOP
+                if B7_TOP + B7_FRAME * 3 > 8192 {
+                    tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                    pw_ua = 8192 - B7_FRAME * 3
+                } else {
+                    B7_TOP = B7_TOP + B7_FRAME
+                }
+                b7_save_a64(pw_ua)
                 // β⁹ GTT: capture x's topology before the y arg overwrites EXPR_CH_SET.
                 let pw_x_ch_set_a = EXPR_CH_SET
                 let pw_x_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let pw_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_y_slot_a)
+                let pw_ub = pw_ua + B7_FRAME
+                if pw_ua + B7_FRAME * 3 <= 8192 { B7_TOP = pw_ub + B7_FRAME }
+                b7_save_a64(pw_ub)
+                let pw_out = pw_ub + B7_FRAME
                 // β⁹ GTT: y's topology. pow(x, y) depends on both → union.
                 let pw_y_ch_set_a = EXPR_CH_SET
                 let pw_y_param_used_a = EXPR_PARAM_USED
@@ -35886,6 +35900,65 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let pw_exp_fi_a = fn_find_lit("__native_exp_f64")
                 if pw_exp_fi_a >= 0 { emit_direct_fn_call_a64(pw_exp_fi_a, 1) } else { emit_drop_call_args_a64(1); em32(0xD2800000) }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // β⁷: x^y is a two-argument function and the a64 pass propagated
+                // neither order through it. Partials as compile_primary computes
+                // them, with res = x^y and lnx already in hand from the compose:
+                //   fa = res·y/x        fb  = res·lnx
+                //   faa = fa·(y-1)/x    fbb = res·lnx²
+                //   fab = (res/x)·(1 + y·lnx)
+                let pw_res_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(pw_res_a)
+                var pw_any: i64 = 0
+                var pw_q: i64 = 0
+                while pw_q < B7_FRAME {
+                    if B7F[(pw_ua + pw_q) as usize] >= 0 { pw_any = 1 }
+                    if B7F[(pw_ub + pw_q) as usize] >= 0 { pw_any = 1 }
+                    pw_q = pw_q + 1
+                }
+                if pw_any == 1 {
+                    let pw_fa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_fa)
+                    let pw_fb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fb)
+                    let pw_xym1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_xym1)
+                    let pw_faa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_fa); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_push_a64()
+                    emit_imm64_a64(4607182418800017408); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_faa)
+                    let pw_fbb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_fb); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fbb)
+                    let pw_fab = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_xym1); emit_push_a64()
+                    emit_imm64_a64(4607182418800017408); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fab)
+                    emit_two_arg_chain_a64(pw_faa, pw_fbb, pw_fab, pw_fa, pw_fb, pw_ua, pw_ub, pw_out)
+                    b7_restore_a64(pw_out)
+                    emit_load_var_a64(pw_res_a)
+                } else {
+                    var pw_t: i64 = 0
+                    while pw_t < B7_FRAME { B7F[(pw_out + pw_t) as usize] = -1; pw_t = pw_t + 1 }
+                    b7_restore_a64(pw_out)
+                }
+                B7_TOP = pw_prev
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
@@ -35899,12 +35972,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let a2_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_y_slot_a)
+                // β⁷: park y's channel state; compiling x re-enters compile_or_a64.
+                let a2_prev = B7_TOP
+                var a2_ua = B7_TOP
+                if B7_TOP + B7_FRAME * 3 > 8192 {
+                    tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                    a2_ua = 8192 - B7_FRAME * 3
+                } else {
+                    B7_TOP = B7_TOP + B7_FRAME
+                }
+                b7_save_a64(a2_ua)
                 // β⁹ GTT: capture y's topology before the x arg overwrites EXPR_CH_SET.
                 let a2_y_ch_set_a = EXPR_CH_SET
                 let a2_y_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let a2_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_x_slot_a)
+                let a2_ub = a2_ua + B7_FRAME
+                if a2_ua + B7_FRAME * 3 <= 8192 { B7_TOP = a2_ub + B7_FRAME }
+                b7_save_a64(a2_ub)
+                let a2_out = a2_ub + B7_FRAME
                 // β⁹ GTT: x's topology. atan2(y, x) depends on both → union.
                 let a2_x_ch_set_a = EXPR_CH_SET
                 let a2_x_param_used_a = EXPR_PARAM_USED
@@ -35918,6 +36005,73 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if a2_fi_a >= 0 { emit_direct_fn_call_a64(a2_fi_a, 2) }
                 else { tc_error(name_tok, "missing atan2 native"); emit_drop_call_args_a64(2); em32(0xD2800000) }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // β⁷: atan2 is the other two-argument function the a64 pass
+                // carried no derivative through. Partials as compile_primary
+                // computes them, with r2 = x²+y² and r4 = r2²:
+                //   fa  =  x/r2          fb  = -(y/r2)
+                //   faa = -(2xy/r4)      fbb =  2xy/r4
+                //   fab = (y²-x²)/r4
+                let a2_res_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(a2_res_a)
+                var a2_any: i64 = 0
+                var a2_q: i64 = 0
+                while a2_q < B7_FRAME {
+                    if B7F[(a2_ua + a2_q) as usize] >= 0 { a2_any = 1 }
+                    if B7F[(a2_ub + a2_q) as usize] >= 0 { a2_any = 1 }
+                    a2_q = a2_q + 1
+                }
+                if a2_any == 1 {
+                    let a2_r2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                    emit_store_var_a64(a2_r2)
+                    let a2_r4 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_r2); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(a2_r4)
+                    let a2_fa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_fa)
+                    let a2_fb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_f64_neg_a64()
+                    emit_store_var_a64(a2_fb)
+                    let a2_2xy = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(4611686018427387904); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_r4); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_2xy)
+                    let a2_faa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_2xy); emit_f64_neg_a64()
+                    emit_store_var_a64(a2_faa)
+                    let a2_fab = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_r4); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_fab)
+                    emit_two_arg_chain_a64(a2_faa, a2_2xy, a2_fab, a2_fa, a2_fb, a2_ua, a2_ub, a2_out)
+                    b7_restore_a64(a2_out)
+                    emit_load_var_a64(a2_res_a)
+                } else {
+                    var a2_t: i64 = 0
+                    while a2_t < B7_FRAME { B7F[(a2_out + a2_t) as usize] = -1; a2_t = a2_t + 1 }
+                    b7_restore_a64(a2_out)
+                }
+                B7_TOP = a2_prev
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
@@ -37845,7 +37999,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
             b7q_m = b7q_m + 1
         }
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
+        if left_f64 == 1 && (op == 19 || op == 20) && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -37896,6 +38050,27 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                     b7k_m = b7k_m + 1
                 }
                 b7j_m = b7j_m + 1
+            }
+        }
+        // β⁶/β⁷ through `/`. Same frames, same loop shape, the quotient rules.
+        // Division carried NEITHER order on this target: sensitivities passed
+        // through as if s(a/b) = s(a), and every Hessian entry stayed empty.
+        if left_f64 == 1 && op == 20 {
+            var b7c_d: i64 = 0
+            while b7c_d < 8 {
+                B7F[(b7_o_m + 36 + b7c_d) as usize] = emit_s_div_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_d) as usize], B7F[(b7_r_m + 36 + b7c_d) as usize])
+                b7c_d = b7c_d + 1
+            }
+            var b7j_d: i64 = 0
+            var b7i_d: i64 = 0
+            while b7j_d < 8 {
+                var b7k_d: i64 = b7j_d
+                while b7k_d < 8 {
+                    B7F[(b7_o_m + b7i_d) as usize] = emit_h_div_a64(B7F[(b7_l_m + b7i_d) as usize], B7F[(b7_r_m + b7i_d) as usize], b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7j_d) as usize], B7F[(b7_r_m + 36 + b7k_d) as usize], B7F[(b7_l_m + 36 + b7k_d) as usize], B7F[(b7_r_m + 36 + b7j_d) as usize])
+                    b7i_d = b7i_d + 1
+                    b7k_d = b7k_d + 1
+                }
+                b7j_d = b7j_d + 1
             }
         }
         b7_restore_a64(b7_o_m)
@@ -38251,6 +38426,213 @@ fn emit_h_chain_a64(d1: i64, d2: i64, h: i64, sj: i64, sk: i64) -> i64 with IO, 
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
     emit_store_var_a64(r)
     return r
+}
+
+
+// s_k(a/b) = (s_k(a)·b − a·s_k(b)) / b²   -- the quotient rule, first order.
+// Mirror of the β⁶ block in compile_multiplicative. `/` used to leave the a64
+// sensitivities untouched, which asserts s(a/b) = s(a): the numerator's
+// derivative handed on as the quotient's.
+fn emit_s_div_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a/b) = [H_jk(a)·b − a·H_jk(b) − s_j(a)·s_k(b) − s_k(a)·s_j(b)] / b²
+//             + 2·a·s_j(b)·s_k(b) / b³
+// Mirror of the β⁷ division rule in compile_multiplicative. On the diagonal the
+// caller passes saj == sak and sbj == sbk, which is what makes the two cross
+// terms coincide there, exactly as the x86 site spells out twice.
+fn emit_h_div_a64(lh: i64, rh: i64, lval: i64, rval: i64, saj: i64, sbk: i64, sak: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (saj < 0 || sbk < 0) && (sak < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let partial = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // H_jk(a)·b
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    // − a·H_jk(b)
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    // − s_j(a)·s_k(b)
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    // − s_k(a)·s_j(b)
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    // / b²
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    emit_store_var_a64(partial)
+    // 2·a·s_j(b)·s_k(b)
+    emit_imm64_a64(4611686018427387904)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // / b³
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    // + the / b² partial
+    emit_push_a64()
+    emit_load_var_a64(partial)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+
+// ─── ARM64 β⁷ two-argument chain rule ───
+//
+// For f(u, v) with the five partials fa=∂f/∂u, fb=∂f/∂v, faa, fbb, fab:
+//
+//   s_k(f)   = fa·s_k(u) + fb·s_k(v)
+//   H_jk(f)  = faa·s_j(u)·s_k(u) + fbb·s_j(v)·s_k(v)
+//            + fab·(s_j(u)·s_k(v) + s_k(u)·s_j(v))
+//            + fa·H_jk(u) + fb·H_jk(v)
+//
+// The same shape the x86 site spells out per entry. Only the five partials
+// differ between pow and atan2, so they are computed at the call sites and
+// these two helpers are shared.
+fn emit_s_two_a64(fa: i64, fb: i64, sa: i64, sb: i64) -> i64 with IO, Mut, Panic, Div {
+    if sa < 0 && sb < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(fa); emit_push_a64()
+    if sa >= 0 { emit_load_var_a64(sa) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(fb); emit_push_a64()
+    if sb >= 0 { emit_load_var_a64(sb) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+fn emit_h_two_a64(faa: i64, fbb: i64, fab: i64, fa: i64, fb: i64, saj: i64, sak: i64, sbj: i64, sbk: i64, ha: i64, hb: i64) -> i64 with IO, Mut, Panic, Div {
+    if ha < 0 && hb < 0 && saj < 0 && sak < 0 && sbj < 0 && sbk < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // faa·s_j(u)·s_k(u)
+    emit_load_var_a64(faa); emit_push_a64()
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    // + fbb·s_j(v)·s_k(v)
+    emit_load_var_a64(fbb); emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fab·(s_j(u)·s_k(v) + s_k(u)·s_j(v))
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    emit_load_var_a64(fab); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fa·H_jk(u)
+    emit_load_var_a64(fa); emit_push_a64()
+    if ha >= 0 { emit_load_var_a64(ha) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fb·H_jk(v)
+    emit_load_var_a64(fb); emit_push_a64()
+    if hb >= 0 { emit_load_var_a64(hb) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// Runs both loops over three frames: `ua` and `ub` hold the two arguments'
+// state, `out` receives the result. Shared by pow and atan2 -- the caller
+// computes the five partials, this walks the 8 channels and the 36 entries.
+fn emit_two_arg_chain_a64(faa: i64, fbb: i64, fab: i64, fa: i64, fb: i64, ua: i64, ub: i64, out: i64) with IO, Mut, Panic, Div {
+    var t: i64 = 0
+    while t < B7_FRAME { B7F[(out + t) as usize] = -1; t = t + 1 }
+    var c: i64 = 0
+    while c < 8 {
+        B7F[(out + 36 + c) as usize] = emit_s_two_a64(fa, fb, B7F[(ua + 36 + c) as usize], B7F[(ub + 36 + c) as usize])
+        c = c + 1
+    }
+    var j: i64 = 0
+    var i: i64 = 0
+    while j < 8 {
+        var k: i64 = j
+        while k < 8 {
+            B7F[(out + i) as usize] = emit_h_two_a64(faa, fbb, fab, fa, fb, B7F[(ua + 36 + j) as usize], B7F[(ua + 36 + k) as usize], B7F[(ub + 36 + j) as usize], B7F[(ub + 36 + k) as usize], B7F[(ua + i) as usize], B7F[(ub + i) as usize])
+            i = i + 1
+            k = k + 1
+        }
+        j = j + 1
+    }
 }
 
 // ─── ARM64 additive ───
