@@ -15,6 +15,7 @@ let max_exec_capability_payload_bytes = 512 * 1024
 
 external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
+external get_winsize : file_descr -> int * int = "sounio_loom_get_winsize"
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
@@ -1822,8 +1823,8 @@ let guardian_stop_child guardian =
     in
     wait ())
 
-let run_guardian paths agent lane session_id cwd command instance_id output_path
-    guardian_journal_path =
+let run_guardian ?cols ?rows paths agent lane session_id cwd command instance_id
+    output_path guardian_journal_path =
   let lock = Unix.openfile paths.guardian_lock_path [ O_WRONLY; O_CREAT ] 0o600 in
   Unix.set_close_on_exec lock;
   (try Unix.lockf lock F_TLOCK 0
@@ -1869,7 +1870,17 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
     Unix.execvpe command.(0) command environment);
   Unix.set_close_on_exec master_fd;
   Unix.set_nonblock master_fd;
-  (try set_winsize master_fd 40 140 with _ -> ());
+  (* Fall back to a fixed default only when the caller (ultimately, the
+     tmux wrapper that will attach to this session) did not report the
+     real terminal size. Starting the child at the wrong size and
+     resizing after the fact (see [stream_command]'s attach-time
+     [sync_winsize]) is too late: the child's TUI has often already
+     rendered its first diff-based frame against the fallback size by
+     the time a later SIGWINCH arrives, leaving stale/misaligned cells
+     behind that a diff-based renderer never fully overwrites. *)
+  let initial_rows = Option.value rows ~default:40 in
+  let initial_cols = Option.value cols ~default:140 in
+  (try set_winsize master_fd initial_rows initial_cols with _ -> ());
   let kernel_pid = Unix.getppid () in
   let guardian =
     {
@@ -3810,8 +3821,8 @@ let acquire_kernel_lock paths =
    with Unix_error _ -> failf "another Loom kernel owns this lane");
   lock
 
-let launch_guardian paths agent lane session_id cwd command instance_id
-    output_path guardian_journal_path kernel_lock =
+let launch_guardian ?cols ?rows paths agent lane session_id cwd command
+    instance_id output_path guardian_journal_path kernel_lock =
   (try Unix.unlink paths.guardian_descriptor_path with _ -> ());
   match Unix.fork () with
   | 0 ->
@@ -3822,8 +3833,8 @@ let launch_guardian paths agent lane session_id cwd command instance_id
       redirect_process_log paths.guardian_log_path;
       let code =
         try
-          run_guardian paths agent lane session_id cwd command instance_id
-            output_path guardian_journal_path
+          run_guardian ?cols ?rows paths agent lane session_id cwd command
+            instance_id output_path guardian_journal_path
         with
         | Loom_error error ->
             Printf.eprintf "guardian error: %s\n%!" error;
@@ -3943,7 +3954,7 @@ let close_kernel kernel lock =
   (try Unix.close kernel.guardian_fd with _ -> ());
   Unix.close lock
 
-let serve_session paths agent lane session_id cwd command =
+let serve_session ?cols ?rows paths agent lane session_id cwd command =
   let lock = acquire_kernel_lock paths in
   let instance_id = random_hex 16 in
   let generation_dir = Filename.concat (Filename.concat paths.session_dir "generations") instance_id in
@@ -3958,8 +3969,8 @@ let serve_session paths agent lane session_id cwd command =
   let kernel =
     try
       ignore
-        (launch_guardian paths agent lane session_id cwd command instance_id
-           output_path guardian_journal_path lock);
+        (launch_guardian ?cols ?rows paths agent lane session_id cwd command
+           instance_id output_path guardian_journal_path lock);
       let journal = open_journal journal_path in
       ignore
         (append_event journal "SESSION_STARTED"
@@ -4400,6 +4411,13 @@ let start_command ?(launch_source = "start")
   let session_id = required cli "--session-id" in
   let command = Array.of_list cli.rest in
   if Array.length command = 0 then failf "start requires a command after --";
+  (* The caller (normally the tmux wrapper about to attach) may report
+     the real terminal size up front, so the child's PTY -- and
+     whatever TUI runs inside it -- starts at the right size instead of
+     a fixed fallback. See [run_guardian] for why this must happen
+     before the child execs, not via a resize after the fact. *)
+  let cols = Option.map (parse_nonnegative "cols") (optional cli "--cols") in
+  let rows = Option.map (parse_nonnegative "rows") (optional cli "--rows") in
   let command_sha256 = command_argv_digest command in
   let paths = session_paths root agent lane in
   let already_active =
@@ -4432,7 +4450,7 @@ let start_command ?(launch_source = "start")
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
       Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_daemon_log paths.daemon_log_path;
-      let code = serve_session paths agent lane session_id cwd command in
+      let code = serve_session ?cols ?rows paths agent lane session_id cwd command in
       exit code
   | daemon_pid ->
       let deadline = Unix.gettimeofday () +. ready_timeout in
@@ -4632,10 +4650,34 @@ let stream_command cli interactive =
       Some (set_terminal_raw Unix.stdin)
     else None
   in
+  (* The guardian's PTY starts at a hardcoded fallback size (see
+     [start_command]/guardian fork) and previously stayed there forever,
+     because nothing ever told it the attaching terminal's real size:
+     the underlying program renders assuming that fallback width/height,
+     which the real (usually smaller) terminal then wraps/truncates,
+     producing corrupted-looking output. Sync the real size once on
+     attach, and again on every SIGWINCH, using the existing RESIZE
+     wire protocol ([resize_request], unchanged). *)
+  let sync_winsize () =
+    if Option.is_some terminal then
+      try
+        let rows, cols = get_winsize Unix.stdin in
+        if rows > 0 && cols > 0 then ignore (resize_request paths cols rows)
+      with _ -> ()
+  in
+  (* OCaml's [Sys] module does not expose SIGWINCH (it isn't portable to
+     Windows); this whole binary is Linux-only already (see the
+     [#ifdef __linux__] guards in loom_pty_stubs.c), where SIGWINCH is
+     always signal 28. *)
+  let sigwinch = 28 in
+  sync_winsize ();
+  if Option.is_some terminal then
+    Sys.set_signal sigwinch (Sys.Signal_handle (fun _ -> sync_winsize ()));
   let running = ref true in
   Fun.protect
     ~finally:(fun () ->
       Option.iter (fun original -> Unix.tcsetattr Unix.stdin TCSANOW original) terminal;
+      if Option.is_some terminal then Sys.set_signal sigwinch Sys.Signal_default;
       Unix.close socket)
     (fun () ->
       while !running do
