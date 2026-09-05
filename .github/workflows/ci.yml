@@ -515,6 +515,42 @@ jobs:
       #   scripts/ci/fixtures/gate_measurement_pilot_vacuous.sh  (must be refused)
       - name: Gates must prove they measured
         run: bash scripts/ci/gate_measurement_meta_gate.sh
+      # The arm64 backend must refuse what the x86 backend refuses.
+      # compile_all_arm64 re-emits pass 2 with its own mirror of the diagnostics
+      # and, until this PR, never read TYPECHECK_FAILED: every error it raised was
+      # printed and then discarded, the compiler exited 0, and an ELF was written.
+      # Nothing noticed, because nothing had ever run the corpus against
+      # --target aarch64-linux: the suite runner has no concept of a target, and
+      # tests/selfhost/aarch64_compile/ asserts only that `file` reports an
+      # aarch64 ELF — which cannot, by construction, notice a wrongly ACCEPTED
+      # program. The divergence was 265 cases when first measured.
+      #
+      # Built from source rather than run against bin/souc-lean-single-x86_64 on
+      # purpose. The claim is about lean_single.sio, which is what this PR
+      # changes; the shipped ELF lags it, and pointing the gate at a lagging
+      # binary would measure the wrong artifact. Two compiles: the seed builds A,
+      # A builds B. B, not A, because the seed still carries the 2 MiB
+      # append_src_lit bound this PR fixes and silently truncates the appended
+      # prelude of any source above it — A is built from a truncated source and
+      # works only because lean_single.sio calls none of the dropped __native_*
+      # helpers, which is luck, not a contract. A carries the fix, so B gets the
+      # whole prelude. Measured: B is its own fixed point, and B is byte-identical
+      # to the compiler reached by an independent two-step route.
+      #
+      # Placed BEFORE the canonical fixed-point step for the reason that step's
+      # neighbours already document: the seed refresh this PR requires has not
+      # happened, so the step below is red, and a step after it would never run.
+      # Timed 2026-09-05 on the merge commit: 4 s for the two compiles, 158 s for
+      # the gate at JOBS=4.
+      - name: aarch64 refuses what x86 refuses
+        run: |
+          set -euo pipefail
+          ./bin/souc-lean-single-x86_64 self-hosted/compiler/lean_single.sio /tmp/lean_a.elf
+          chmod +x /tmp/lean_a.elf
+          /tmp/lean_a.elf self-hosted/compiler/lean_single.sio /tmp/lean_b.elf
+          chmod +x /tmp/lean_b.elf
+          SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf JOBS=4 TIMEOUT_SECS=120 \
+            bash scripts/ci/a64_compile_fail_parity_gate.sh
       # The shipped lean_single ELF must BE the byte-identical fixed point of
       # current lean_single.sio. This gate existed, passed, and was wired to no
       # workflow — so the one thing that would notice the shipped binary drifting
