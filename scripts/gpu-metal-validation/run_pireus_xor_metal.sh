@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-MSL="${1:?usage: run_pireus_xor_metal.sh <generated.metal>}"
+MSL="${1:?usage: run_pireus_xor_metal.sh <generated.metal> [kernel-name]}"
+KERNEL_NAME="${2:-sedenion_xor_product}"
 WORK_DIR="${SOUNIO_PIREUS_METAL_WORK_DIR:-$(mktemp -d /tmp/sounio-pireus-metal.XXXXXX)}"
 AIR="$WORK_DIR/pireus_xor.air"
 LIB="$WORK_DIR/pireus_xor.metallib"
@@ -16,4 +17,4 @@ swiftc -O "$ROOT_DIR/scripts/gpu-metal-validation/pireus_xor_metal_runner.swift"
 if command -v codesign >/dev/null 2>&1; then
   codesign -s - "$RUNNER"
 fi
-"$RUNNER" "$LIB"
+"$RUNNER" "$LIB" "$KERNEL_NAME"

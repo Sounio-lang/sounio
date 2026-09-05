@@ -5,10 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MSL="${1:?usage: pireus_apple_metal_xor_materializer_gate.sh <generated.metal>}"
+KERNEL_NAME="${2:-step}"
 SELECTION="tools/pireus/cross_arch_candidates.values.v1"
 SEMANTICS="tools/pireus/xor_semantics.values.v1"
 BASIS_SEMANTICS="tools/pireus/xor_basis4_semantics.values.v1"
-RECEIPT="tools/pireus/evidence/pireus_apple_metal_xor_material.receipt.v1"
+RECEIPT="tools/pireus/evidence/pireus_apple_metal_typed_xor.receipt.v1"
 
 [[ -s "$MSL" ]] || { echo "FAIL: missing generated MSL: $MSL" >&2; exit 1; }
 [[ "$(wc -l < "$SEMANTICS" | tr -d ' ')" == 16 ]] || {
@@ -19,7 +20,7 @@ grep -qF 'selected=apple-silicon-metal/xor-shuffle+sign-xor+twofold-mul+compensa
   echo "FAIL: ontology did not select the Apple float2 compensated recipe" >&2
   exit 1
 }
-grep -qF 'kernel void sedenion_xor_product' "$MSL"
+grep -qF "kernel void $KERNEL_NAME" "$MSL"
 grep -qF 'pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce' "$MSL"
 grep -qF 'pireus.equivalence=APPROXIMATE pireus.storage=float2-hi-lo' "$MSL"
 grep -qF 'pireus.source_semantics=f64x16 pireus.material_abi=float2x16' "$MSL"
@@ -76,5 +77,5 @@ fi
 
 command -v xcrun >/dev/null || { echo "FAIL: xcrun unavailable; Apple runtime is required" >&2; exit 1; }
 command -v swiftc >/dev/null || { echo "FAIL: swiftc unavailable; Apple runtime is required" >&2; exit 1; }
-bash scripts/gpu-metal-validation/run_pireus_xor_metal.sh "$MSL"
+bash scripts/gpu-metal-validation/run_pireus_xor_metal.sh "$MSL" "$KERNEL_NAME"
 echo "PIREUS_APPLE_METAL_XOR_MATERIALIZER_GATE_PASS msl_sha256=$msl_sha"

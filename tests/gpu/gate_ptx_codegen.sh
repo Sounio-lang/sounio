@@ -203,6 +203,12 @@ check_souc \
     "T9d2_pireus_xor_convolution_global_source" \
     "tests/gpu/pireus_sed_xor_convolution_global_f64.sio"
 
+# The public language path is ordinary typed multiplication. This must remain
+# green independently of the legacy foundry ABI fixtures above.
+check_souc \
+    "T9d3_pireus_typed_sedenion_multiply" \
+    "tests/gpu/sedenion_mul_source_level.sio"
+
 {
     result="$(run_souc_tail self-hosted/gpu/pireus_xor_convolution_f64_codegen.sio)"
     if [ "$result" = "PIREUS_XOR_CONV_F64_CODEGEN_PASS" ]; then

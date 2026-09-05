@@ -1587,6 +1587,15 @@ fn gpu_widen_intrinsic_to_i64(kernel: GpuKernelIr, reg: i64, res_kind: HlirTypeK
 }
 
 // Lower a single HLIR instruction to GPU ops and append to kernel.
+pub fn hlir_gpu_xor_contract_valid(instr: HlirInstr) -> bool {
+    instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION
+        && instr.xor_bits == 4
+        && instr.xor_twist == HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN
+        && instr.call_arg_count == 3
+        && instr.xor_candidate >= HLIR_XOR_CANDIDATE_AUTO
+        && instr.xor_candidate <= HLIR_XOR_CANDIDATE_GLOBAL_LOAD
+}
+
 fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     let op_kind = instr.op_kind
@@ -1876,9 +1885,12 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             bf.rhs_reg = instr.call_args[1]
             bf.addr_reg = instr.call_args[2]
             k = gpu_kernel_append_op(k, bf)
-        } else if instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION {
+        } else if hlir_gpu_xor_contract_valid(instr) {
             // Explicit distributed ABI. One sedenion component lives in each of 16 active lanes.
             // call_args = [pa, pb, pout]. The DGX PTX backend preserves the serial j accumulation.
+            // Malformed or target-incompatible contracts deliberately fall
+            // through without a material opcode; they cannot be reinterpreted
+            // as a nearby XOR implementation.
             var xc = gpu_op_new()
             xc.opcode = GpuOpcode::GpuXorConvolutionF64
             xc.lhs_reg = instr.call_args[0]

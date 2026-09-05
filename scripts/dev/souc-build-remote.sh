@@ -27,6 +27,7 @@
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
 #   scripts/dev/souc-build-remote.sh --gate pireus-metal   # + emit Pireus MSL from current source
+#   scripts/dev/souc-build-remote.sh --gate pireus-typed   # + ordinary typed Hyper mul to PTX and MSL
 #   scripts/dev/souc-build-remote.sh --gate stack-floor    # + <=32 MiB compiler stack gate
 #   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
 #     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
@@ -119,6 +120,7 @@ rc=\$?
 echo "REMOTE: build rc=\$rc elapsed=\$((SECONDS-t0))s"
 if [ \$rc -ne 0 ]; then tail -20 "\$W/build.log"; rm -rf "\$W"; exit \$rc; fi
 ls -la "\$W/madaros.elf" | awk '{print "REMOTE: elf bytes="\$5}'
+echo "REMOTE: compiler_sha256=\$(sha256sum "\$W/madaros.elf" | cut -d' ' -f1)"
 for g in $GATES; do
   case "\$g" in
     full)
@@ -289,6 +291,82 @@ for g in $GATES; do
       echo
       echo "REMOTE: PIREUS_METAL_ARTIFACT_END sha256=\$(sha256sum "\$msl" | cut -d' ' -f1) bytes=\$(stat -c%s "\$msl")"
       ;;
+    pireus-typed)
+      echo "REMOTE: --- Pireus typed Hyper<Sedenion,f64> GPU descent ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      if grep -q 'callee == "pireus_sed_xor_convolution' self-hosted/hlir/lower.sio; then
+        echo "REMOTE: PIREUS_TYPED_FAIL nominal selector remains"
+        exit 1
+      fi
+      for src in tests/gpu/sedenion_mul_source_level.sio tests/gpu/sedenion_mul_source_level_renamed.sio; do
+        src_tag=\$(basename "\$src" .sio)
+        for target in dgx-sm121 metal; do
+          if [ "\$target" = metal ]; then suffix=metal; else suffix=ptx; fi
+          out="\$W/\$src_tag.\$suffix"
+          log="\$W/\$src_tag-\$target.log"
+          SOUNIO_PIREUS_OPERATOR_TRACE=1 "\$W/madaros.elf" "\$src" \
+            -o "\$out" --gpu-target "\$target" >"\$log" 2>&1
+          typed_rc=\$?
+          sed 's/^/REMOTE: /' "\$log" | tail -60
+          echo "REMOTE: pireus_typed source=\$src_tag target=\$target rc=\$typed_rc"
+          if [ \$typed_rc -ne 0 ] || [ ! -s "\$out" ]; then exit 1; fi
+          if ! grep -q '^PIREUS_HLIR_TYPED operator_kind=1 bits=4 twist=1 candidate=0 argc=3 callee_len=0$' "\$log"; then
+            echo "REMOTE: PIREUS_TYPED_FAIL missing checker-owned empty-callee HLIR contract"
+            exit 1
+          fi
+          echo "REMOTE: PIREUS_TYPED_ARTIFACT source=\$src_tag target=\$target sha256=\$(sha256sum "\$out" | cut -d' ' -f1) bytes=\$(stat -c%s "\$out")"
+          if [ "\$target" = metal ]; then
+            grep -q 'pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce' "\$out" || exit 1
+            grep -q 'fma(' "\$out" || exit 1
+          else
+            grep -q 'shfl.sync.bfly.b32' "\$out" || exit 1
+            grep -q 'st.global.f64' "\$out" || exit 1
+          fi
+        done
+      done
+      host_log="\$W/pireus-host-mut.log"
+      "\$W/madaros.elf" check tests/compile-fail/gpu_exclusive_ref_write_requires_mut_host.sio >"\$host_log" 2>&1
+      host_rc=\$?
+      if [ \$host_rc -eq 0 ] || ! grep -q 'missing: Mut' "\$host_log"; then
+        echo "REMOTE: PIREUS_TYPED_FAIL host exclusive store escaped Mut"
+        sed 's/^/REMOTE: /' "\$host_log"
+        exit 1
+      fi
+      for negative in pireus_magic_name_poison sedenion_f32_no_f64_lowering octonion_mul_source_level; do
+        neg_log="\$W/\$negative.log"
+        neg_out="\$W/\$negative.ptx"
+        SOUNIO_PIREUS_OPERATOR_TRACE=1 "\$W/madaros.elf" "tests/gpu/\$negative.sio" \
+          -o "\$neg_out" --gpu-target dgx-sm121 >"\$neg_log" 2>&1
+        neg_rc=\$?
+        if grep -q '^PIREUS_HLIR_TYPED ' "\$neg_log"; then
+          echo "REMOTE: PIREUS_TYPED_FAIL negative=\$negative selected f64x16 XOR"
+          exit 1
+        fi
+        if [ \$neg_rc -eq 0 ] && grep -q 'shfl.sync.bfly.b32' "\$neg_out"; then
+          echo "REMOTE: PIREUS_TYPED_FAIL negative=\$negative materialized XOR shuffle"
+          exit 1
+        fi
+        echo "REMOTE: PIREUS_TYPED_NEGATIVE_PASS source=\$negative rc=\$neg_rc"
+      done
+      contract_log="\$W/pireus-typed-contract.log"
+      "\$W/madaros.elf" run self-hosted/gpu/pireus_typed_xor_contract_gate.sio >"\$contract_log" 2>&1
+      contract_rc=\$?
+      if [ \$contract_rc -ne 0 ] || ! grep -q '^PIREUS_TYPED_XOR_CONTRACT_GATE_PASS$' "\$contract_log"; then
+        echo "REMOTE: PIREUS_TYPED_FAIL malformed-contract witness"
+        sed 's/^/REMOTE: /' "\$contract_log" | tail -40
+        exit 1
+      fi
+      echo "REMOTE: PIREUS_TYPED_PTX_BASE64_BEGIN"
+      base64 -w0 "\$W/sedenion_mul_source_level.ptx"
+      echo
+      echo "REMOTE: PIREUS_TYPED_PTX_BASE64_END"
+      echo "REMOTE: PIREUS_TYPED_METAL_BASE64_BEGIN"
+      base64 -w0 "\$W/sedenion_mul_source_level.metal"
+      echo
+      echo "REMOTE: PIREUS_TYPED_METAL_BASE64_END"
+      echo "REMOTE: PIREUS_TYPED_XOR_GPU_GATE_PASS positives=4 negatives=4 authority=checker-metadata"
+      ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
 done
@@ -298,7 +376,7 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*|*pireus-operator*|*pireus-metal*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*|*pireus-operator*|*pireus-metal*|*pireus-typed*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \

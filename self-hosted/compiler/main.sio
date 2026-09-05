@@ -28162,6 +28162,39 @@ fn compiler_mark_hlir_kernels_from_items(module: HlirModule, items: Option<Box<I
     }
 }
 
+fn compiler_trace_pireus_hlir(module: &HlirModule) with IO, Mut, Panic, Div, Alloc {
+    if !str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") { return }
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        var bi: i64 = 0
+        while bi < module.functions[fi as usize].block_count {
+            let block = &module.functions[fi as usize].blocks[bi as usize]
+            var ii: i64 = 0
+            while ii < block.instr_count {
+                let instr = &block.instrs[ii as usize]
+                if instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION {
+                    print("PIREUS_HLIR_TYPED operator_kind=")
+                    print_int(instr.operator_kind)
+                    print(" bits=")
+                    print_int(instr.xor_bits)
+                    print(" twist=")
+                    print_int(instr.xor_twist)
+                    print(" candidate=")
+                    print_int(instr.xor_candidate)
+                    print(" argc=")
+                    print_int(instr.call_arg_count)
+                    print(" callee_len=")
+                    print_int(instr.call_name.len)
+                    print("\n")
+                }
+                ii = ii + 1
+            }
+            bi = bi + 1
+        }
+        fi = fi + 1
+    }
+}
+
 
 // ============================================================================
 // GPU COMPILE PIPELINE
@@ -28209,13 +28242,24 @@ fn run_gpu_compile_pipeline(
         return 1
     }
 
+    // Preserve checker-owned hypercomplex operator identity across the AST
+    // reload below. HLIR may use syntax for physical layout, but it must not
+    // invent a Sedenion operator from a spelling or function name.
+    var hyper_epistemic = ir_empty_epistemic_section()
+    let hyper_prog = load_module_file(input_path)
+    if !check_program_epistemic_into(hyper_prog, &!hyper_epistemic) {
+        print("GPU: typed metadata export failed\n")
+        return 1
+    }
+
     // module_frontend_check_items_with_source_context consumes the item list on
     // the self-hosted value path. Reload before HLIR lowering so kernel fn
     // declarations remain visible to the GPU extraction pass.
     let lower_prog = load_module_file(input_path)
-    var hlir_module = hlir_lower_module(lower_prog)
+    var hlir_module = hlir_lower_module_with_epistemic(lower_prog, &hyper_epistemic)
     let kernel_mark_prog = load_module_file(input_path)
     hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
+    compiler_trace_pireus_hlir(&hlir_module)
 
     // Count GPU-annotated kernels
     let kcount = hlir_extract_kernel_count(hlir_module)

@@ -560,17 +560,26 @@ fn metal_lower_ops(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Pan
     var i: i64 = 0
     let is_xor_convolution = metal_kernel_has_xor_convolution(kernel)
 
+    // GpuXorConvolutionF64 is a terminal compound operator with its own
+    // three-pointer ABI. The scalar loads/GEPs that precede it in generic HLIR
+    // are provenance scaffolding, not executable parts of the selected Metal
+    // recipe. Emitting both produced undeclared synthetic registers and an
+    // early `return` before the materializer. Once selected, emit exactly the
+    // compound operator and nothing from the generic prelude.
+    if is_xor_convolution {
+        while i < kernel.op_count {
+            let selected = kernel.ops[i as usize]
+            if selected.opcode == GpuOpcode::GpuXorConvolutionF64 {
+                return metal_lower_single_op(out, selected, kernel)
+            }
+            i = i + 1
+        }
+        return out
+    }
+
     while i < kernel.op_count {
         let op = kernel.ops[i as usize]
-        // The seed IR places one unconditional terminal branch immediately
-        // before the compound operator. Only that exact adjacency is replaced.
-        let next_is_xor = i + 1 < kernel.op_count
-            && kernel.ops[(i + 1) as usize].opcode == GpuOpcode::GpuXorConvolutionF64
-        let is_compound_terminal_bra = is_xor_convolution
-            && op.opcode == GpuOpcode::GpuBra && op.pred_reg < 0 && next_is_xor
-        if !is_compound_terminal_bra {
-            out = metal_lower_single_op(out, op, kernel)
-        }
+        out = metal_lower_single_op(out, op, kernel)
         i = i + 1
     }
 

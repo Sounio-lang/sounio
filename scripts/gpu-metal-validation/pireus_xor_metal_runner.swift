@@ -1,17 +1,18 @@
 import Foundation
 import Metal
 
-guard CommandLine.arguments.count == 2 else {
-    fputs("usage: pireus_xor_metal_runner <metallib>\n", stderr)
+guard CommandLine.arguments.count == 3 else {
+    fputs("usage: pireus_xor_metal_runner <metallib> <kernel-name>\n", stderr)
     exit(2)
 }
+let kernelName = CommandLine.arguments[2]
 guard let device = MTLCreateSystemDefaultDevice() else {
     fputs("FAIL: no Metal device\n", stderr)
     exit(1)
 }
 guard let library = try? device.makeLibrary(URL: URL(fileURLWithPath: CommandLine.arguments[1])),
-      let function = library.makeFunction(name: "sedenion_xor_product") else {
-    fputs("FAIL: cannot load sedenion_xor_product\n", stderr)
+      let function = library.makeFunction(name: kernelName) else {
+    fputs("FAIL: cannot load \(kernelName)\n", stderr)
     exit(1)
 }
 
