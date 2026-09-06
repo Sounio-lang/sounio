@@ -584,6 +584,16 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
                 if len > 2 {
                     let ch1_any = CURSOR_SOURCE[(start + 1) as usize]
                     if ch0_any == (48 as i8) && (ch1_any == (120 as i8) || ch1_any == (88 as i8)) {
+                        // C99 hex-float: 0x1.8p+0 / 0x1p-10. Must win over HexLit
+                        // or pt_read_kind silently demotes lexer FloatLit → HexLit.
+                        var hex_scan: i64 = 2
+                        while hex_scan < len {
+                            let hex_ch = CURSOR_SOURCE[(start + hex_scan) as usize]
+                            if hex_ch == (46 as i8) || hex_ch == (112 as i8) || hex_ch == (80 as i8) {
+                                return TokenKind::FloatLit
+                            }
+                            hex_scan = hex_scan + 1
+                        }
                         return TokenKind::HexLit
                     }
                     if ch0_any == (48 as i8) && (ch1_any == (98 as i8) || ch1_any == (66 as i8)) {
@@ -1358,6 +1368,68 @@ pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Mut, Panic, D
         let idx = p.pos + offset
         if idx < p.token_count { pt_read_kind(idx) } else { TokenKind::Eof }
     }
+}
+
+// V0-B: true when token at p.pos+offset is the single-letter ident `p`/`P`
+// (C99 hex-float binary exponent). Uses CURSOR_SOURCE span, not PT_KIND.
+pub fn parser_ahead_is_p_ident(p: Parser, offset: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 0 || idx >= p.token_count {
+        return false
+    }
+    if pt_read_kind(idx) != TokenKind::Ident {
+        return false
+    }
+    let s = PT_START[idx as usize]
+    let e = PT_END[idx as usize]
+    if e - s != 1 {
+        return false
+    }
+    if s < 0 || s >= CURSOR_SOURCE_LEN {
+        return false
+    }
+    let ch = CURSOR_SOURCE[s as usize]
+    ch == 112 as i8 || ch == 80 as i8
+}
+
+// V0-B: Ident that is hex-digits ending in `p`/`P` (fraction+exponent letter fused),
+// e.g. `ffffffffffffffffffffffffffffp` after `0x1.`.
+pub fn parser_ahead_is_hex_frac_p_ident(p: Parser, offset: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 0 || idx >= p.token_count {
+        return false
+    }
+    if pt_read_kind(idx) != TokenKind::Ident {
+        return false
+    }
+    let s = PT_START[idx as usize]
+    let e = PT_END[idx as usize]
+    let nlen = e - s
+    if nlen < 2 || s < 0 || e > CURSOR_SOURCE_LEN {
+        return false
+    }
+    let last = CURSOR_SOURCE[(e - 1) as usize]
+    if last != 112 as i8 && last != 80 as i8 {
+        return false
+    }
+    var i: i64 = s
+    while i < e - 1 {
+        let ch = CURSOR_SOURCE[i as usize]
+        let is_hex = (ch >= 48 as i8 && ch <= 57 as i8)
+            || (ch >= 97 as i8 && ch <= 102 as i8)
+            || (ch >= 65 as i8 && ch <= 70 as i8)
+        if !is_hex {
+            return false
+        }
+        i = i + 1
+    }
+    true
 }
 
 impl Parser {

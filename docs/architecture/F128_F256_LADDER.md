@@ -41,14 +41,14 @@ let b = a + 1.0f128                       // compile-fail
 
 This boundary is **structural-only** and enforced **on Madaros** before type checking or IR lowering.
 
-### Engine split (FINDING 2026-08-17, PR #1767 Full Test Suite)
+### Engine split (FINDING 2026-08-17; V0-B lift 2026-09-06)
 
-| Engine | `f128`/`f256` type spellings + arithmetic/casts |
-|---|---|
-| **Madaros** (default `bin/souc`) | Rejects at parser with **`error[E249]`** and the reserved-message note. Matches this ladder's V0-A claim. |
-| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E249.** Compiles `fn add(a: f128, b: f128) -> f128 { a + b }` and `x as f128` to an ELF (`rc=0`, no diagnostic). Implicit `f128`→`f256` still fails lean_single typecheck (`tail type mismatch` / `typecheck: failed`). |
+| Engine | `f128`/`f256` type spellings + literals | Arithmetic / casts |
+|---|---|---|
+| **Madaros** (default `bin/souc`) | **V0-B green:** accepted through `check` (E249 lifted). | Still refused (E004 / E248 / mismatch). |
+| **lean_single** (bootstrap seed) | Accepts type names; arithmetic behaviour is seed-owned (see #2387 / lean_single f128 work). | Not the Madaros V0-B contract. |
 
-So the V0-A boundary in this document is **Madaros-owned**, not universal. The CI Full Test Suite runs lean_single: compile-fail fixtures that only see Madaros E249 must carry `//@ known-failure: lean_single-only gap…` and `//@ error-pattern: error[E249]` (same pattern as `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`). That is documentation of an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
+V0-A (parser E249 on all `f128`/`f256` source forms) was the Madaros-owned boundary before this stage. Compile-fail fixtures that still mention E249 under lean_single suite participation may carry `//@ known-failure: lean_single-only gap…` where needed — that documents an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
 
 The authoritative V0-B contract remains `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b` under default Madaros.
 
@@ -76,15 +76,12 @@ bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b
 
 **Success receipt**:
 ```
-PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=8
+PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=4
 ```
 
-**Acceptance criteria**:
-- All `f128`/`f256` literals parse without E249.
-- `check` succeeds on pure-type/literal probes; `souc run` may still fail (no codegen).
-- No change to IR constant emission yet (still uses existing numeric payload path).
-- Updates `docs/EXACT_CORE.md` and `KNOWN_LIMITATIONS.md` to mark literals as "V0-B green".
-- Semantic-Lane-ID: `WS-G-V0B-LITERALS-CHECK`.
+**Status (2026-09-06):** gate green on Madaros. Positive probes
+`tests/run-pass/f128_v0b_literal_smoke.sio` /
+`tests/run-pass/f256_v0b_literal_forms.sio` reach `check: OK`.
 
 ### V0-C: Wire Format / Limb Pools (Extend Existing Three Probes)
 

@@ -137,21 +137,14 @@ under `lean_single` and does not hold under the default compiler.** A decision
 on ε's polarity is owed; patching one engine alone re-points the other half of
 the corpus. Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`.
 
-**`f128`/`f256` source values are an engine split, not a universal unsupported type (2026-08-24, OPEN).**
-Current Madaros deliberately refuses source signatures, literals, arithmetic and
-casts with E218 at the V0-A format-identity boundary. The `lean_single` seed does
-not enforce that boundary: it accepts the arithmetic/cast fixtures and can emit
-an ELF. Therefore neither "Sounio supports `f128`/`f256` arithmetic" nor
-"Sounio rejects it" is true without an engine name. Compiler-owned descriptors,
-the bounded numeric-payload arena and the V0-C wire codec are implemented
-scaffolding; they are not source-value arithmetic. The V0-B/V0-D ladder remains
-deliberately red until literals and compiler-owned softfloat operations consume
-the oracle corpora. The engine split is pinned by
-`scripts/ci/madaros_f128_f256_format_identity_gate.sh` and the
-`f128_v0b_arithmetic_rejected.sio`/`f256_v0b_arithmetic_rejected.sio` fixtures.
-The passing `numeric_payload` and `numeric_wire` gates establish only the
-compiler-owned scaffolding; the staged ladder deliberately fails while E218
-still blocks V0-B source literals.
+**`f128`/`f256` source literals are V0-B green on Madaros; arithmetic remains refused (2026-09-06).**
+Madaros accepts `f128`/`f256` type spellings and decimal/hex/binary literals through
+`souc check` (gate receipt `f128_f256_v0b_literals … parser=E249_lifted` from
+`scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b`). Arithmetic still fails
+closed (`error[E004]`), casts with `error[E248]`, and implicit widen/narrow with
+type mismatch — pinned by the V0-B negative fixtures. Limb-identity / softfloat
+ops remain V0-D. Compiler-owned descriptors and the V0-C wire codec stay
+scaffolding only. Do not claim “Sounio supports `f128` arithmetic” from V0-B alone.
 
 **Unary `~` is accepted by `lean_single` and refused by Madaros (2026-08-24, OPEN).**
 `tests/run-pass/bitwise_not_bootstrap_regression.sio` compiles and returns 0
@@ -745,20 +738,18 @@ mechanism. Changing `lean_single.sio` risks perturbing that fixed point and
 was judged out of scope for this measurability pass; #1494 stays open for
 whoever picks option 1, 2, or the remainder of option 3.
 
-## `f128` is not a working numeric type on either engine (measured 2026-09-02, issue #2387)
+## `f128` / `f256` ladder status (updated 2026-09-06)
 
-- **Madaros** refuses `f128` at parse (`module failed to parse`).
-- **lean_single** accepts the type name and computes in **f64**: with
-  `one: f128 = 1.0` and `tiny` built by twenty exact divisions by ten,
-  `(one + tiny) - one == 0`; the number of halvings of `e` until
-  `(one + e) - one == 0` is **53** — the f64 significand — where binary128
-  gives 113. Repro: `examples/numerics/f128_is_f64_probe.sio`.
-- Consequence for `benchmarks/chemistry/RESULTS.md` §7.7: the 12–140× growth
-  of the replica's self-difference under step halving, left *unexplained*
-  there, is exactly the question a genuine `f128` reference integration would
-  settle; it is blocked by the compiler, not by choice.
-- `CLAUDE.md` §13 records the engine split the other way round (E218 under
-  lean_single); that entry is stale as of this measurement.
+- **Madaros V0-B:** source type spellings + literals through `check` are green
+  (`madaros_f128_f256_ladder_gate.sh --stage v0b`). Arithmetic/casts/implicit
+  conversion remain rejected (E004 / E248 / type mismatch).
+- **Madaros V0-D** (softfloat ops + limb identity) and **print** paths are still
+  out of scope.
+- **lean_single** history: earlier measurements showed silent f64 under the name
+  `f128` (#2387); the seed-side fix is tracked separately from this Madaros V0-B
+  landing. Repro probe: `examples/numerics/f128_is_f64_probe.sio`.
+- Consequence for `benchmarks/chemistry/RESULTS.md` §7.7 remains blocked on a
+  genuine reference integration path (V0-D+), not on V0-B literals alone.
 
 ## Derived unit types are not expressible; units are lost at call boundaries (measured 2026-09-02, issue #2388)
 

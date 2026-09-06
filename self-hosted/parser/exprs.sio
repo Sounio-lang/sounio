@@ -10,7 +10,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_assign_op_code, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_assign_op_code, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
 use parser::types::*
 use parser::stmts::*
 use parser::patterns::*
@@ -217,7 +217,15 @@ impl Parser {
             self.parse_unary(UnaryOp::OpDeref)
         }
         // Literals
-        else if k == TokenKind::IntLit || k == TokenKind::HexLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
+        else if k == TokenKind::HexLit {
+            // V0-B: C99 hex-float may arrive split as HexLit + (Dot+digits)? + p + exp
+            // when the lexer still emits legacy HexLit for the 0x… mantissa.
+            if parser_hex_float_tail_ahead(self) {
+                self.parse_c99_hex_float_literal()
+            } else {
+                self.parse_int_literal()
+            }
+        } else if k == TokenKind::IntLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
             self.parse_int_literal()
         } else if k == TokenKind::FloatLit {
             self.parse_float_literal()
@@ -366,6 +374,86 @@ impl Parser {
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprFloatLit, span)
         e.float_val = tok.float_value
+        parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // True when tokens after a HexLit look like a C99 hex-float tail:
+    //   p±exp   or   .frac p±exp   or   FloatLit(.frac) p±exp
+    //   or   . Ident(hexdigits+p) ±exp   (long hex frac fused with p)
+    fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
+        if parser_ahead_is_p_ident(p, 1) {
+            let after_p = parser_peek_ahead(p, 2)
+            if after_p == TokenKind::Plus || after_p == TokenKind::Minus {
+                return parser_peek_ahead(p, 3) == TokenKind::IntLit
+            }
+            return after_p == TokenKind::IntLit
+        }
+        if parser_peek_ahead(p, 1) == TokenKind::Dot {
+            let frac = parser_peek_ahead(p, 2)
+            if frac == TokenKind::IntLit || frac == TokenKind::HexLit || frac == TokenKind::FloatLit {
+                if parser_ahead_is_p_ident(p, 3) {
+                    let after_p = parser_peek_ahead(p, 4)
+                    if after_p == TokenKind::Plus || after_p == TokenKind::Minus {
+                        return parser_peek_ahead(p, 5) == TokenKind::IntLit
+                    }
+                    return after_p == TokenKind::IntLit
+                }
+            }
+            // Long hex fraction fused with trailing p into one Ident.
+            if parser_ahead_is_hex_frac_p_ident(p, 2) {
+                let after_p = parser_peek_ahead(p, 3)
+                if after_p == TokenKind::Plus || after_p == TokenKind::Minus {
+                    return parser_peek_ahead(p, 4) == TokenKind::IntLit
+                }
+                return after_p == TokenKind::IntLit
+            }
+        }
+        // Lexer may fuse ".8" into a single FloatLit after HexLit "0x1".
+        if parser_peek_ahead(p, 1) == TokenKind::FloatLit && parser_ahead_is_p_ident(p, 2) {
+            let after_p = parser_peek_ahead(p, 3)
+            if after_p == TokenKind::Plus || after_p == TokenKind::Minus {
+                return parser_peek_ahead(p, 4) == TokenKind::IntLit
+            }
+            return after_p == TokenKind::IntLit
+        }
+        false
+    }
+
+    // Consume HexLit [ . frac | FloatLit | Ident(hex+p) ] p? [+|-] IntLit [suffix] as FloatLit.
+    // Magnitude is a V0-B placeholder (limb identity is V0-D).
+    fn parse_c99_hex_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // HexLit mantissa
+        if parser_peek(p) == TokenKind::Dot {
+            p = parser_advance(p)
+            let frac = parser_peek(p)
+            if frac == TokenKind::IntLit || frac == TokenKind::HexLit || frac == TokenKind::FloatLit {
+                p = parser_advance(p)
+            } else if frac == TokenKind::Ident {
+                // Either hex-frac+p fused, or hex-frac then separate p.
+                p = parser_advance(p)
+            }
+        } else if parser_peek(p) == TokenKind::FloatLit {
+            p = parser_advance(p)
+        }
+        if parser_peek(p) == TokenKind::Ident {
+            p = parser_advance(p)  // p / P (when not fused into frac Ident)
+        }
+        let sign_or_exp = parser_peek(p)
+        if sign_or_exp == TokenKind::Plus || sign_or_exp == TokenKind::Minus {
+            p = parser_advance(p)
+        }
+        if parser_peek(p) == TokenKind::IntLit {
+            p = parser_advance(p)
+        }
+        // Optional numeric suffix tokenised as Ident (f128 / f256)
+        if parser_peek(p) == TokenKind::Ident {
+            p = parser_advance(p)
+        }
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprFloatLit, span)
+        e.float_val = 1.0
         parser_store_expr_box(Box::new(e))
         p
     }
