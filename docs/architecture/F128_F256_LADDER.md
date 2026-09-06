@@ -146,29 +146,44 @@ PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_f
 
 **Goal**: Full user-visible surface. `stdlib/math/float128.sio` (or `wide_float.sio`), `print_f128`, `format`, `Knowledge<f128>`, `Knowledge<f256>`, refinement types, epistemic propagation (`GUM` variance, provenance), units integration if applicable. Full `souc run` support. Printing must be deterministic and match softfloat results.
 
-**Gate** (umbrella):
-```bash
-bash scripts/ci/f128_f256_full_ladder_gate.sh
-```
-(includes all prior stages + stdlib_hyper_execution_gate.sh subset + GUM k95-style trust gate for wide types).
+**Staged delivery (2026-09-06):**
 
-**Positive witnesses**:
+| Slice | Gate | Status bar |
+|---|---|---|
+| **V0-E.1** print + limb stdlib API | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e` | Deterministic softfloat decimal/hex print; `stdlib/math/wide_float.sio`; Madaros `check` + seed-run hex wire smoke. Language `f128` `+` still E004; GUM/`Knowledge`/`MeasuredF256` deferred. |
+| **V0-E.2** source ops + builtin print + GUM | (future; umbrella `f128_f256_full_ladder_gate.sh`) | Lift E004, Madaros-run `print_f128`, `Knowledge`/`GUM` k95, `MeasuredF256=executable`. |
+
+**Gate** (V0-E.1):
+```bash
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e
+```
+
+**Positive witnesses (V0-E.1)**:
+- `tests/run-pass/f128_v0e_stdlib_smoke.sio` — limb constructors + hex wire print
+- `scripts/dev/ws_g_v0e_wide_print_oracle.py` — decimal/hex vs softfloat (rump ≠ f64)
+- `stdlib/math/wide_float.sio` — `F128Bits` / `F256Bits` API
+
+**Success receipt (V0-E.1)**:
+```
+PASS f128_f256_v0e_surface print=deterministic stdlib=wide_float.sio hex_wire=softfloat_match madaros_check=green seed_smoke=green gum=deferred MeasuredF256=deferred
+PASS madaros_f128_f256_ladder_gate stage=v0e
+```
+
+**Positive witnesses (V0-E.2 — not yet)**:
 - `tests/run-pass/f128_v0e_stdlib_smoke.sio`, `f256_gum_interaction.sio`, `print_wide_precision.sio`.
 - Integration with `sedenion_verdict.sio` and `Knowledge<T>` for high-precision measurements.
 - CPC-style receipts using `f256` where `f64` was previously marginal.
 
-**Success receipt**:
+**Success receipt (V0-E.2 full)**:
 ```
 PASS f128_f256_v0e_full stdlib_surface=complete print=deterministic gum_interaction=k95_trust MeasuredF256=executable epistemic_trust_map=updated ladder_complete=V0-E
 ```
 
-**Acceptance criteria**:
-- `f128`/`f256` are first-class in stdlib, printable, and interact with `Knowledge` without precision loss.
-- All prior gates green.
-- `docs/EXACT_CORE.md` updated to reflect `MeasuredF256` as executable.
-- New entry in `docs/compiler/KNOWN_LIMITATIONS.md` only for remaining gaps (e.g. GPU, full native ABI for >256-bit).
+**Acceptance criteria (V0-E.1)**:
+- Print oracle bit-stable and rump decimal ≠ f64 greenwash path.
+- `stdlib/math/wide_float.sio` is the limb API source of truth; smoke hex wires match softfloat.
+- Language source arithmetic / GUM / `MeasuredF256` remain explicitly deferred (V0-E.2).
 - Semantic-Lane-ID: `WS-G-V0E-STDLIB-GUM-SURFACE`.
-- Mandatory LLM-offload review for any math/GUM claims (`bin/llm-offload -t math-review -p xai`).
 
 ## Implementation Notes & Non-Goals
 
