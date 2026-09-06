@@ -281,9 +281,10 @@ classify_one() {
 }
 
 {
-  printf '# claim_oracle_inventory.tsv - provisional classifications (ADR-008)\n'
+  printf '# claim_oracle_inventory.tsv - provisional classifications (ADR-008 / ADR-009)\n'
   printf '# schema: docs/decisions/claim_oracle_inventory.schema.md\n'
   printf '# scanner: scripts/dev/claim_oracle_inventory.sh\n'
+  printf '# note: verified_foreign_reference is override-driven; Python/Rust never auto-promote\n'
   printf '# scanned_utc=%s\n' "$UTC"
   printf 'gate_id\tkind\toracle_class\tforeign_hard_fail\tsounio_witness\tforeign_runtimes\tci_tier\tnotes\tmigration\tscanned_utc\n'
 

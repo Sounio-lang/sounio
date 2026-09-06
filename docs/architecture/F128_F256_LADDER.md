@@ -152,7 +152,7 @@ PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_f
 |---|---|---|
 | **V0-E.1** print + limb stdlib API | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e` | Deterministic softfloat decimal/hex print; `stdlib/math/wide_float.sio`; Madaros `check` + seed-run hex wire smoke. |
 | **V0-E.2** source ops through check | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e2` | Same-format `f128`/`f256` `+ - * /` and comparisons typecheck (no E004). Mixed/cast/implicit still rejected. Madaros-run softfloat lowering, builtin `print_f128`, GUM/`MeasuredF256` deferred. |
-| **V0-E.3** run + GUM | (future; umbrella `f128_f256_full_ladder_gate.sh`) | Lift to Madaros-run ops, `print_f128`, `Knowledge`/`GUM` k95, `MeasuredF256=executable`. |
+| **V0-E.3** run ops (scaffold) | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e3` | Seed-run `F128Bits` soft_add cases + hex wires; **claim clock = `sounio_native_expected` (ADR-008/009)**. Python/Rust softfloat may measure only. Madaros-run language lower / GUM / `MeasuredF256` still deferred. |
 
 **Gate** (V0-E.1):
 ```bash
@@ -190,7 +190,7 @@ PASS f128_f256_v0e_full stdlib_surface=complete print=deterministic gum_interact
 
 - **Order**: Must be strictly staged. V0-B before V0-C, etc. Each gate must pass independently.
 - **No self-hosted edits in this doc**: Implementation of gates, probes, and softfloat routines belongs to subsequent dispatches (after this spec is reviewed/registered).
-- **Auditability**: Every stage requires positive + negative witnesses, exact receipts, and updates to the claim oracle. No retrofitted tolerances.
+- **Auditability**: Every stage requires positive + negative witnesses, exact receipts, and updates to the claim oracle. No retrofitted tolerances. Claim clocks follow ADR-008 / ADR-009: Sounio native or closed-form twin by default; Python/Rust never judge; verified foreign reference only for Futhark/F*/Koka/F#/C++23 (or other admitted SOTA++++).
 - **Coordination**: Use `bin/sounio-coord` for any overlapping lanes (especially parser, IR, stdlib, epistemic). See `docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md`.
 - **Dependencies**: Builds on existing numeric payload/wire infrastructure. Softfloat must be limb-based (no external libm for core ops).
 - **Next actions after this spec**:

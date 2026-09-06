@@ -49,7 +49,7 @@ expected = {
     249: (218, "f128/f256 is reserved for compiler-owned format identity"),
     250: (219, "call to an `extern \\\"C\\\"` function the native backend does not implement"),
 }
-emit_counts = {247: 3, 248: 2, 249: 2, 250: 3}
+emit_counts = {247: 3, 248: 2, 249: 0, 250: 3}
 failures = []
 
 for new, (old, message) in expected.items():
@@ -67,8 +67,12 @@ for new, (old, message) in expected.items():
     if not explanation.is_file():
         failures.append(f"E{new} explanation missing")
 
-if parser.count('print("error[E249]")') != 1:
-    failures.append("parser reserved-wide-float tag is not exactly E249 once")
+# V0-B+: parser_reject_reserved_wide_float_path is a no-op; E249 is retained as a
+# catalogue/message identity only (no live emitter). Do not require parser E249 prints.
+if "fn parser_reject_reserved_wide_float_path" not in parser:
+    failures.append("parser_reject_reserved_wide_float_path helper missing")
+if parser.count('print("error[E249]")') != 0:
+    failures.append("parser still emits live E249 after V0-B lift (expected 0)")
 if "error[E218]" in parser:
     failures.append("old colliding E218 remains in parser reserved-wide-float path")
 
@@ -77,7 +81,7 @@ if failures:
         print(f"diagnostic_remap_2170: FAIL {item}", file=sys.stderr)
     raise SystemExit(1)
 
-print("diagnostic_remap_2170: STATIC_PASS mappings=E208->E247,E217->E248,E218->E249,E219->E250")
+print("diagnostic_remap_2170: STATIC_PASS mappings=E208->E247,E217->E248,E218->E249(catalog_only),E219->E250")
 PY
 
 if [[ -n "$SOUC" ]]; then
@@ -99,9 +103,9 @@ if [[ -n "$SOUC" ]]; then
   }
 
   live_refuse 247 tests/audit/zd_mut_spine/exactly_private_locus_malformed.sio zd_locus
-  live_refuse 249 tests/compile-fail/f128_f256_source_signature_reserved.sio wide_float_reserved
+  # V0-B+: f128 source signatures are accepted; E249 is catalog-only.
   live_refuse 250 tests/compile-fail/extern_c_unimplemented_builtin.sio unsupported_extern
-  echo "diagnostic_remap_2170: LIVE_BOUNDARY E248=structural_only parser_E249_preempts_source_wide_float_casts"
+  echo "diagnostic_remap_2170: LIVE_BOUNDARY E248=structural_only E249=catalog_only_after_V0B"
 else
   echo "diagnostic_remap_2170: LIVE_NOT_RUN provide --souc with a source-fresh Madaros wrapper"
 fi
@@ -111,11 +115,34 @@ if [[ "$RUN_CONTROLS" -eq 1 ]]; then
     local new="$1" old="$2" kind="$3"
     local mutant="$WORK/${kind}-${new}-to-${old}.sio"
     if [[ "$kind" == "parser" ]]; then
+      # No live parser E249 after V0-B; skip parser sabotage for 249.
+      if [[ "$new" == "249" ]]; then
+        echo "diagnostic_remap_2170: SABOTAGE_SKIP E249 parser (no live emitter after V0-B)"
+        return 0
+      fi
       sed "s/error\[E${new}\]/error[E${old}]/" "$PARSER" >"$mutant"
       if "$0" --control-child --checker "$CHECKER" --parser "$mutant" >"$WORK/control-$new.log" 2>&1; then
         fail "sabotage E${new}->E${old} was accepted"
       fi
     else
+      if [[ "$new" == "249" ]]; then
+        # Sabotage the catalogue message arm identity instead of a missing emitter.
+        python3 - "$CHECKER" "$mutant" <<'PY'
+import pathlib, sys
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = src.read_text()
+old = 'else if code == 249 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }'
+new = 'else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }'
+if old not in text:
+    raise SystemExit("cannot build E249 message-arm control")
+dst.write_text(text.replace(old, new, 1))
+PY
+        if "$0" --control-child --checker "$mutant" --parser "$PARSER" >"$WORK/control-$new.log" 2>&1; then
+          fail "sabotage E249 message arm -> E218 was accepted"
+        fi
+        echo "diagnostic_remap_2170: SABOTAGE_PASS E249->E218 message_arm rejected"
+        return 0
+      fi
       python3 - "$CHECKER" "$mutant" "$new" "$old" <<'PY'
 import pathlib, sys
 src, dst, new, old = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
@@ -134,7 +161,7 @@ PY
 
   control_remap 247 208 checker
   control_remap 248 217 checker
-  control_remap 249 218 parser
+  control_remap 249 218 checker
   control_remap 250 219 checker
 fi
 

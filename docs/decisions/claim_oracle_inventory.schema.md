@@ -9,9 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.clai
 
 # Claim-oracle inventory schema
 
-Companion to **ADR-008**. Rows describe scripts that can affect
-acceptance of language/library claims (gates) or that supply expected
-values (oracles).
+Companion to **ADR-008** and **ADR-009**. Rows describe scripts that can
+affect acceptance of language/library claims (gates) or that supply
+expected values (oracles).
 
 ## TSV columns (tab-separated, `#` comments allowed)
 
@@ -19,13 +19,13 @@ values (oracles).
 |---|---|---|
 | `gate_id` | string | Path relative to repo root (stable id) |
 | `kind` | enum | `gate` \| `oracle` \| `parity_ref` \| `other` |
-| `oracle_class` | enum | See ADR-008 table (+ `research_harness`) |
+| `oracle_class` | enum | ADR-008 table + `research_harness` + ADR-009 `verified_foreign_reference` |
 | `foreign_hard_fail` | `yes`/`no`/`unknown` | Does foreign mismatch set fail/exit≠0 by default? |
 | `sounio_witness` | `yes`/`no`/`partial` | Is there a Sounio sentinel / ALL PASS / native expected? |
-| `foreign_runtimes` | string | Comma-separated: `python3`, `mpmath`, `scipy`, `none`, … |
+| `foreign_runtimes` | string | Comma-separated: `python3`, `mpmath`, `scipy`, `futhark`, `fstar`, `koka`, `fsharp`, `cxx23`, `none`, … |
 | `ci_tier` | string | Heuristic: `ci` \| `root_scripts` \| `dev` \| `research` \| `selfhost` \| `other` |
 | `notes` | string | Short free text (no tabs) |
-| `migration` | enum | `none` \| `keep` \| `demote_corroboration` \| `rehome_sounio` \| `delete` |
+| `migration` | enum | `none` \| `keep` \| `demote_corroboration` \| `rehome_sounio` \| `delete` \| `promote_verified_foreign` |
 | `scanned_utc` | ISO-8601 | Scanner timestamp |
 
 ## Classification heuristics (scanner defaults)
@@ -45,10 +45,19 @@ last wins).
 | Lean lake / formal (optionally with tooling Python) | `formal_only` |
 | Path `scripts/archive/*`, CI fixtures, pure C/CUDA receipt, Python-only meta | `research_harness` (not a language claim clock) |
 | ADR-008 soft foreign markers (`lib_sounio_claim_oracle`, `SOUNIO_FOREIGN_ORACLE_HARD`) | `external_corroboration_only`, `foreign_hard_fail=no` |
+| Pinned Futhark / F* / Koka / F# / C++23 reference meeting ADR-009 §1, may hard-fail | `verified_foreign_reference`, `foreign_hard_fail=yes` |
+| Python or Rust used as sole numeric expected for a claim | `forbidden_as_claim_oracle` (never `verified_foreign_reference`) |
 | Shell meta with neither Sounio nor Python nor C contract | `research_harness` |
 | Insufficient signal | `unknown` → notes must say so; treat as review debt |
 
-## Migration priorities (ADR-008)
+## ADR-009 note
+
+`verified_foreign_reference` is **manual / override-driven** until a
+scanner heuristic is trusted. Do not auto-promote Python or Rust paths.
+Default new claim clocks remain `sounio_native_expected` or
+`sounio_closed_form_twin`.
+
+## Migration priorities (ADR-008 / ADR-009)
 
 1. Rows with `foreign_hard_fail=yes` and `oracle_class=forbidden_as_claim_oracle`
 2. Claim-bearing stdlib gates under `scripts/` and `scripts/ci/`
