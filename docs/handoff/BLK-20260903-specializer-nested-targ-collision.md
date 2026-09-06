@@ -26,7 +26,7 @@ Observed: two instantiations of one generic template whose type arguments are
 Expected: distinct type arguments produce distinct instantiations, or the
   template is left unspecialized — never silently shared.
 Acceptance-Gate: scripts/ci/madaros_specializer_nested_targ_gate.sh
-Evidence-Level: E3
+Evidence-Level: E4
 Evidence: scripts/ci/madaros_specializer_nested_targ_gate.sh ->
   MADAROS_SPECIALIZER_NESTED_TARG_GATE_OK, run 2026-09-06 against two engines
   built from source: 39d72a37a9 (md5 54eccf3d), the merge of PR #2413, and
@@ -209,6 +209,19 @@ against the defect.
 The gate is wired into `.github/workflows/ci.yml` (job "Madaros Current-Source
 f64 Lowering"), so it runs on every PR reaching that job rather than only by
 hand.
+
+### Remote confirmation (E4)
+
+GitHub CI run 34030342462, on `main` at `6b2b7ff9b0`, job "Madaros
+Current-Source f64 Lowering": the gate step reports success on a runner-built
+compiler, with no local environment involved. That is what lifts this record
+from E3 (gate-bound) to E4 (remote-confirmed).
+
+The same job fails at a later, unrelated step — "Run changed Madaros tests with
+the current-source compiler", an intermittent exit 137 (killed) while rechecking
+a fixed list of 20 known-failure tests. It fails identically on `main` and has
+failed at other commits, so it is not attributable to this work and is not
+claimed fixed here.
 
 ### What is NOT closed by this
 

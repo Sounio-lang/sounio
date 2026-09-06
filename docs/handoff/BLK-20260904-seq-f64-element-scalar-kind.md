@@ -24,11 +24,13 @@ Observed: reading a Seq<f64> element produced 2^63 instead of the value, and
   println refused the same read with "unresolved scalar kind".
 Expected: a Seq<f64> element is a float in every spelling.
 Acceptance-Gate: scripts/ci/madaros_seq_f64_scalar_kind_gate.sh
-Evidence-Level: E3
+Evidence-Level: E4
 Evidence: scripts/ci/madaros_seq_f64_scalar_kind_gate.sh ->
   MADAROS_SEQ_F64_SCALAR_KIND_GATE_OK, run 2026-09-06 against two engines built
   from source: 39d72a37a9 (md5 54eccf3d), the merge of PR #2413, and main
-  6b2b7ff9b0 (md5 593ab4c9), two merges later.
+  6b2b7ff9b0 (md5 593ab4c9), two merges later. Remote: GitHub CI run
+  34030342462 on main 6b2b7ff9b0, job "Madaros Current-Source f64 Lowering",
+  step "Seq<f64> element reads classify as float" -> success.
 Fallback-Path: bind the read to a typed local before use.
 LLM-Offload: not-required
 Residual: `&Seq<T>` PARAMETER is NOT fixed -- separate path, wrong value in one
@@ -122,6 +124,19 @@ matrices read through `&ProbMeasure` / `&CostMatrix` receivers. The second is
 there because the first alone would pass on a fix that only handled bare locals.
 Both are wired into `.github/workflows/ci.yml` (job "Madaros Current-Source f64
 Lowering").
+
+### Remote confirmation (E4)
+
+GitHub CI run 34030342462, on `main` at `6b2b7ff9b0`, job "Madaros
+Current-Source f64 Lowering": the gate step reports success on a runner-built
+compiler, with no local environment involved. That is what lifts this record
+from E3 (gate-bound) to E4 (remote-confirmed).
+
+The same job fails at a later, unrelated step — "Run changed Madaros tests with
+the current-source compiler", an intermittent exit 137 (killed) while rechecking
+a fixed list of 20 known-failure tests. It fails identically on `main` and has
+failed at other commits, so it is not attributable to this work and is not
+claimed fixed here.
 
 ### The residual is live, and did not close with this record
 
