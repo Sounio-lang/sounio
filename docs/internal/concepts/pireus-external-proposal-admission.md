@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.concepts.pireus-external-proposal-admission
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-09-06
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-external-proposal-admission
 -->
 
@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 Concept-ID: `SOUNIO-PIREUS-EXTERNAL-PROPOSAL-ADMISSION`
 Semantic-Lane-ID: `continuity-20260906`
 Owner: `codex-pireus`
-Status: executable admission; live Inkling acceptance and materialization pending.
+Status: native admission and two-node material parity pass; live Inkling and timing acceptance pending.
 
 The founder-authorized boundary accepts LLM suggestions as untrusted data.
 The Sounio executable `tools/pireus/continuity/admission.sio` parses and admits

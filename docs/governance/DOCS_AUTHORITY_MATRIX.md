@@ -753,6 +753,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.pireus-apple-metal-family-import | repo_only | docs/internal/concepts/pireus-apple-metal-family-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-execution-engine-ontology | repo_only | docs/internal/concepts/pireus-execution-engine-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-external-proposal-admission | repo_only | docs/internal/concepts/pireus-external-proposal-admission.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-fenced-worker-detachment | repo_only | docs/internal/concepts/pireus-fenced-worker-detachment.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-graph-identity-composition | repo_only | docs/internal/concepts/pireus-graph-identity-composition.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-intel-vpermpd-selector-semantics | repo_only | docs/internal/concepts/pireus-intel-vpermpd-selector-semantics.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-material-engine-admission | repo_only | docs/internal/concepts/pireus-material-engine-admission.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

@@ -59,3 +59,42 @@ remain in the session logs; successful qualification receipts are separate.
 Validation: unittest discovery covers early EOF/range resumption, corruption
 preservation and LFS/Git qualification refusal. Shell syntax and Python parsing
 pass. Actual two-rank execution is in the committed validation logs.
+
+## Bounded recovery detachment
+
+recovery_detach.sio is a distinct, explicit native Sounio recovery authority.
+It does not forge or reuse an ALLOW from the predecessor Spark Pair Arbiter.
+Its only effect is removing the predecessor policy's Slurm worker selector
+from the two UID-pinned Spark nodes. No GPU grant, lease transition, barrier
+change, memory-floor change, service restart or resume belongs to this action.
+After detachment, the unchanged frozen arbiter must prove recovery itself.
+
+The predecessor recovery drains, fences, then detaches workers. In the
+2026-09-06 incident the hosts were already FENCED, but kubelet recreated
+worker processes before the empty-cgroup proof. Two unchanged recovery
+attempts failed. This extension stops that recreation while preserving
+the GPU barrier. It has a separate source/executable/predecessor freeze lock.
+
+The input frame has 19 unsigned decimal fields:
+schema 1; exact node UIDs; exact NodeSet UID; predecessor verification;
+RECOVERY_REQUIRED; owned lease; lease with >60 seconds remaining;
+matching frame/host/lease epoch and host owner; matching host lease UID;
+both FENCED with invalid grants; exact source/freeze bindings;
+fresh watchdogs; bound device barriers; protected resources unchanged;
+legacy inventory/services/restarts/Docker claims quiesced; predecessor
+Slurm observation mask; exact GPU consumer sets; two fresh host memory
+observations in MiB. All booleans must be one. Slurm mask must include
+controller-ready, both-drained, zero-jobs and zero-allocations (mask 30).
+Both memory observations must be >=32768 MiB. Unknown/malformed inputs refuse.
+
+The adapter captures raw facts and invokes the hash-pinned native decision.
+Only an ALLOW can reach --apply. Each node patch tests UID, resourceVersion
+and the original selector value; the lease resourceVersion is checked again
+before each patch. Pair-wide atomicity is not claimed: a failure after the
+first node leaves partial detachment, with both GPUs still fenced, and
+retains the exact effect record. Existing allocation and GPU admission remain
+under the predecessor authority. No test or review implies live recovery.
+
+Control gate: test_recovery_detach.py NATIVE_EXECUTABLE.
+Use remote tmux, --arbiter-root, --engine, --holder and a new --evidence
+directory; omit --apply for a decision-only run. An expired lease refuses.
