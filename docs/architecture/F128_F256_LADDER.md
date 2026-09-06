@@ -46,7 +46,7 @@ This boundary is **structural-only** and enforced **on Madaros** before type che
 | Engine | `f128`/`f256` type spellings + literals | Arithmetic / casts |
 |---|---|---|
 | **Madaros** (default `bin/souc`) | **V0-B green:** accepted through `check` (E249 lifted). | Still refused (E004 / E248 / mismatch). |
-| **lean_single** (bootstrap seed) | Accepts type names; arithmetic behaviour is seed-owned (see #2387 / lean_single f128 work). | Not the Madaros V0-B contract. |
+| **lean_single** (bootstrap seed) | Accepts type names + literals. | Annotated `f128` locals lower as **binary128** (kind 13, two i64 limbs, libgcc `__*tf3`); the #2387 probe reports real f128 arithmetic. Closed by #2426. `as f128` / `print_f128` and the Madaros V0-B–E contract remain out of scope. |
 
 V0-A (parser E249 on all `f128`/`f256` source forms) was the Madaros-owned boundary before this stage. Compile-fail fixtures that still mention E249 under lean_single suite participation may carry `//@ known-failure: lean_single-only gap…` where needed — that documents an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
 
