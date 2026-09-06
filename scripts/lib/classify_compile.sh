@@ -38,8 +38,8 @@
 #
 # After sourcing:
 #   sounio_classify_compile RC LOG [OUT]  — sets SOUNIO_CC_CLASS / SOUNIO_CC_DETAIL
-#   sounio_diag_codes LOG                 — sorted unique E-codes, one per line
-#   sounio_primary_diag LOG               — first E-code emitted, or empty
+#   sounio_diag_codes LOG                 — sorted unique diagnostic codes, one per line
+#   sounio_primary_diag LOG               — code on the first diagnostic, or empty
 #   sounio_is_fatal_log LOG               — true if the log shows a crash
 #   sounio_expect_refusal RC LOG OUT RULE — 0 iff REFUSED and rule matches
 
@@ -80,8 +80,8 @@ sounio_is_fatal_log() {
   grep -Eiq "$_SOUNIO_CC_FATAL_RE" "$log"
 }
 
-# All E-codes present, sorted unique. Must handle every emitter shape in the
-# tree, because there is no single catalog:
+# All diagnostic codes present, sorted unique. Must handle every emitter shape
+# in the tree, because there is no single catalog:
 #   error[E218] in mod::fn at 3..9: msg     (check.sio:2872)
 #   error[E170]: ... at line N              (lean_single.sio hardcoded sites)
 #   E200 `name` at line N                   (lean_single.sio:15642, bare)
@@ -98,22 +98,34 @@ sounio_diag_codes() {
   local log="$1"
   [[ -f "$log" ]] || return 0
   local codes
-  codes="$(grep -oE '\bE[0-9]{3}\b' "$log" 2>/dev/null || true)"
+  codes="$(grep -oE '\b[EPW][0-9]{3,4}\b' "$log" 2>/dev/null || true)"
   [[ -n "$codes" ]] || return 0
   printf '%s\n' "$codes" | LC_ALL=C sort -u
   return 0
 }
 
+# The code on the FIRST diagnostic the compiler printed -- not the first code
+# anywhere in the log. Those differ, and the difference is not academic: on
+# tests/compile-fail/alternative_requires_metadata.sio both targets open with an
+# identical `error[P0003]: Type mismatch ...`, but x86 goes on to print an E200
+# further down and aarch64 does not. Scanning for the first `E###` skipped the
+# P0003 that actually stopped the compile, compared two unrelated later lines,
+# and reported a divergence where the compilers agreed.
+#
+# So: locate the first diagnostic line, then read the code off THAT line, or
+# report none if it carries no code. Families in the tree are E (161 sites),
+# P (1) and W (1); a bare `E200 `x` at line N` form with no `error:` prefix also
+# exists (lean_single.sio:15642), so it is matched at line start too.
 sounio_primary_diag() {
   local log="$1"
   [[ -f "$log" ]] || return 0
-  local codes
-  codes="$(grep -oE '\bE[0-9]{3}\b' "$log" 2>/dev/null || true)"
-  [[ -n "$codes" ]] || return 0
-  # Emission order, not sort order: the first code the compiler printed is the
-  # one that stopped it. Parameter expansion rather than `head` keeps this free
-  # of pipelines entirely.
-  printf '%s\n' "${codes%%$'\n'*}"
+  local first
+  first="$(grep -m1 -E '^(error|warning)|^[EPW][0-9]{3,4}\b' "$log" 2>/dev/null || true)"
+  [[ -n "$first" ]] || return 0
+  local code
+  code="$(printf '%s' "$first" | grep -oE '\b[EPW][0-9]{3,4}\b' | head -1 || true)"
+  [[ -n "$code" ]] || return 0
+  printf '%s\n' "$code"
   return 0
 }
 
@@ -123,7 +135,7 @@ sounio_primary_diag() {
 _sounio_has_diagnostic() {
   local log="$1"
   [[ -f "$log" ]] || return 1
-  grep -qE '\bE[0-9]{3}\b|^error:|^error\[|'"$_SOUNIO_CC_VERDICT_FAIL_RE" "$log"
+  grep -qE '\b[EPW][0-9]{3,4}\b|^error:|^error\[|'"$_SOUNIO_CC_VERDICT_FAIL_RE" "$log"
 }
 
 # sounio_classify_compile RC LOG [OUT]
@@ -235,7 +247,7 @@ sounio_expect_refusal() {
   [[ "$SOUNIO_CC_CLASS" == "REFUSED" ]] || return 1
   [[ -z "$rule" ]] && return 0
 
-  if [[ "$rule" =~ ^E[0-9]{3}$ ]]; then
+  if [[ "$rule" =~ ^[EPW][0-9]{3,4}$ ]]; then
     sounio_diag_codes "$log" | grep -qx "$rule" || return 1
   else
     grep -qF -- "$rule" "$log" || return 1

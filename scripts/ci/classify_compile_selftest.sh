@@ -115,6 +115,33 @@ check not_executable       INFRA               126   ''
 check uncoded_diag         REFUSED               1   'error: unresolved function body for call target fn#7 g at line 12'
 check verdict_marker_only  REFUSED               1   'typecheck: failed'
 
+# --- primary diagnostic is the FIRST diagnostic, not the first E-code --------
+# Regression test for the bug this found on
+# tests/compile-fail/alternative_requires_metadata.sio: both targets opened with
+# an identical error[P0003] and only x86 printed an E200 further down. Reading
+# the first E### anywhere compared two unrelated lines and invented a drift.
+printf 'error[P0003]: Type mismatch at line 3\nerror[E200]: undefined identifier `x` at <main>:9\n' \
+  > "$TMP_DIR/order.log"
+checks=$((checks + 1))
+if [[ "$(sounio_primary_diag "$TMP_DIR/order.log")" != "P0003" ]]; then
+  printf 'FAIL  %-24s want=P0003 got=%s (first diagnostic wins, not first E-code)\n' \
+    "primary_is_first_diag" "$(sounio_primary_diag "$TMP_DIR/order.log")" >&2
+  fails=$((fails + 1))
+else
+  printf 'ok    %-24s P0003\n' "primary_is_first_diag"
+fi
+# An uncoded first diagnostic reports none, even when a later line carries a code.
+printf 'error: unknown identifier `x` at <main>:9 (bundle line 9)\nerror[E200]: later\n' \
+  > "$TMP_DIR/uncoded_first.log"
+checks=$((checks + 1))
+if [[ -n "$(sounio_primary_diag "$TMP_DIR/uncoded_first.log")" ]]; then
+  printf 'FAIL  %-24s want=<empty> got=%s\n' "primary_uncoded_first" \
+    "$(sounio_primary_diag "$TMP_DIR/uncoded_first.log")" >&2
+  fails=$((fails + 1))
+else
+  printf 'ok    %-24s none\n' "primary_uncoded_first"
+fi
+
 # --- rule matching must discriminate -----------------------------------------
 expect_refusal_is rule_right_code    yes   1   'error[E218] in m::f at 1..2: reserved'  E218
 expect_refusal_is rule_wrong_code    no    1   'error[E218] in m::f at 1..2: reserved'  E019
@@ -134,10 +161,11 @@ expect_refusal_is nc_artifact_right_code no  1 'error[E218] reserved'           
 # --- E-code extraction across the three emitter shapes -----------------------
 printf 'error[E218] in m::f at 3..9: a\nerror[E170]: b at line 4\nE200 `x` at line 9\n' \
   > "$TMP_DIR/codes.log"
+printf 'error[P0003]: p\n' >> "$TMP_DIR/codes.log"
 got_codes="$(sounio_diag_codes "$TMP_DIR/codes.log" | tr '\n' ',' | sed 's/,$//')"
 checks=$((checks + 1))
-if [[ "$got_codes" != "E170,E200,E218" ]]; then
-  printf 'FAIL  %-24s want=E170,E200,E218 got=%s\n' "diag_codes_all_shapes" "$got_codes" >&2
+if [[ "$got_codes" != "E170,E200,E218,P0003" ]]; then
+  printf 'FAIL  %-24s want=E170,E200,E218,P0003 got=%s\n' "diag_codes_all_shapes" "$got_codes" >&2
   fails=$((fails + 1))
 else
   printf 'ok    %-24s %s\n' "diag_codes_all_shapes" "$got_codes"
