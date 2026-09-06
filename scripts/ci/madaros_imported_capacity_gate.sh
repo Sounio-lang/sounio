@@ -118,7 +118,9 @@ emit_local_chain "$BOUNDARY_MAIN" "$((HALF - 1))"
 printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$BOUNDARY_MAIN"
 
 set +e
+__t0=$(date +%s)
 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$BOUNDARY_MAIN" -o "$BOUNDARY_OUT" >"$BOUNDARY_LOG" 2>&1
+echo "[TIMING] boundary_compile_seconds=$(( $(date +%s) - __t0 ))"
 boundary_compile_rc=$?
 set -e
 
