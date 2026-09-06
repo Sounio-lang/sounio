@@ -126,16 +126,20 @@ assert_structural_containment() {
     echo "FAIL unary operator wide-float dispatch guard missing" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL in-place TypeExpr boundary does not have exactly one E249 interceptor" >&2
+  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 0 ]]; then
+    echo "FAIL in-place TypeExpr still emits live E249 after V0-B lift" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'c.report_error_at(te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL by-value TypeExpr boundary does not have exactly one E249 interceptor" >&2
+  if [[ "$(grep -Fc 'c.report_error_at(te.span, 249' self-hosted/check/check.sio)" -ne 0 ]]; then
+    echo "FAIL by-value TypeExpr still emits live E249 after V0-B lift" >&2
     exit 1
   fi
   if [[ "$(grep -Fc 'parser_reject_reserved_wide_float_path(' self-hosted/parser/types.sio)" -ne 3 ]]; then
-    echo "FAIL parser TypeNamed constructors do not both enforce E249" >&2
+    echo "FAIL parser TypeNamed constructors do not keep reject-helper call sites" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'fn parser_reject_reserved_wide_float_path' self-hosted/parser/types.sio; then
+    echo "FAIL parser_reject_reserved_wide_float_path helper missing" >&2
     exit 1
   fi
   for exact in \
