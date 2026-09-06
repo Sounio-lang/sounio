@@ -66,7 +66,7 @@ The "no f256 arithmetic is implemented" claim above holds only for Madaros:
 
 | Engine | `fn add(a: f256, b: f256) -> f256 { a + b }` |
 |---|---|
-| **Madaros** (default `bin/souc`) | Rejects arithmetic/casts (E004 / E248). Literals/types are **V0-B green** through `check`; softfloat ops remain V0-D. |
+| **Madaros** (default `bin/souc`) | Rejects source arithmetic/casts (E004 / E248). Literals/types are **V0-B green**; **V0-D** limb softfloat is bit-identical on the MPFR hard corpus (internal/const path — no user `+` surface yet). |
 | **lean_single** (bootstrap seed) | **Compiles and executes.** No E249, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
 
 So `MeasuredF256` is unreachable under the engine this document otherwise treats as authoritative
