@@ -734,20 +734,23 @@ mechanism. Changing `lean_single.sio` risks perturbing that fixed point and
 was judged out of scope for this measurability pass; #1494 stays open for
 whoever picks option 1, 2, or the remainder of option 3.
 
-## `f128` is not a working numeric type on either engine (measured 2026-09-02, issue #2387)
+## `f128` is binary128 on lean_single; Madaros still refuses it (issue #2387)
 
-- **Madaros** refuses `f128` at parse (`module failed to parse`).
-- **lean_single** accepts the type name and computes in **f64**: with
-  `one: f128 = 1.0` and `tiny` built by twenty exact divisions by ten,
-  `(one + tiny) - one == 0`; the number of halvings of `e` until
-  `(one + e) - one == 0` is **53** — the f64 significand — where binary128
-  gives 113. Repro: `examples/numerics/f128_is_f64_probe.sio`.
-- Consequence for `benchmarks/chemistry/RESULTS.md` §7.7: the 12–140× growth
-  of the replica's self-difference under step halving, left *unexplained*
-  there, is exactly the question a genuine `f128` reference integration would
-  settle; it is blocked by the compiler, not by choice.
-- `CLAUDE.md` §13 records the engine split the other way round (E218 under
-  lean_single); that entry is stale as of this measurement.
+- **Madaros** still refuses `f128` at parse (`error[E249]`, ladder V0-A). That
+  half of the engine split is unchanged.
+- **lean_single** (closed 2026-09-06): annotated locals are a distinct kind
+  (not f64). `+`, `-`, `/`, `==`, `!=` lower through libgcc `__*tf3`
+  (`libgcc_s.so.1`). With `one: f128 = 1.0` and `tiny` built by twenty
+  divisions by ten, `(one + tiny) - one` is nonzero and the number of
+  halvings of `e` until `(one + e) - one == 0` is **113**. Repro:
+  `examples/numerics/f128_is_f64_probe.sio`.
+- Still out of scope on lean_single: `f256`, `print_f128`, `as f128`,
+  f128 arrays, and the Madaros V0-B–E ladder. `f256` is a reserved
+  non-numeric kind so the old lowercase-unknown→f64 fallback cannot
+  swallow it.
+- Consequence for `benchmarks/chemistry/RESULTS.md` §7.7: a genuine
+  binary128 reference integration is no longer blocked by lean_single
+  arithmetic; wiring it into that benchmark is a separate change.
 
 ## Derived unit types are not expressible; units are lost at call boundaries (measured 2026-09-02, issue #2388)
 
