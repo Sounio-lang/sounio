@@ -1,0 +1,327 @@
+//! Sounio classification of a sealed C++ U250 material receipt.
+//!
+//! The C++ child emits facts only. This module validates their exact bytes and
+//! delegates admission to the already-frozen dual-card Sounio classifier.
+
+use hardware::pireus::u250_dual_card_admission::{
+    PIREUS_U250_STATUS_INVENTORY_PARTIAL,
+    PireusU250AdmissionResult,
+    pireus_u250_canonical_declaration,
+    pireus_u250_dual_card_admit,
+    pireus_u250_empty_observation,
+    pireus_u250_reference_material_observation,
+}
+use crypto::sha256::{
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_U250_MATERIAL_INGEST_INVALID: i64 = 711190
+pub const PIREUS_U250_MATERIAL_INGEST_PARTIAL: i64 = 711191
+
+pub struct PireusU250MaterialIngestionResult {
+    pub valid: bool,
+    pub status: i64,
+    pub raw_probe_valid: bool,
+    pub parity_receipt_valid: bool,
+    pub material_observation_ready: bool,
+    pub classification_requested: bool,
+    pub classification_allowed: bool,
+    pub semantic_verdict_emitted_by_child: bool,
+    pub declared_card_count: i64,
+    pub material_slot_count: i64,
+    pub discovered_card_count: i64,
+    pub admitted_card_count: i64,
+    pub rejected_card_count: i64,
+    pub missing_card_count: i64,
+    pub inventory_complete: bool,
+    pub material_parity_ready: bool,
+    pub cost_present: bool,
+    pub speedup_present: bool,
+    pub kernel_correctness_present: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub failures: i64,
+}
+
+fn u250mi_invalid() -> PireusU250MaterialIngestionResult {
+    PireusU250MaterialIngestionResult {
+        valid: false,
+        status: PIREUS_U250_MATERIAL_INGEST_INVALID,
+        raw_probe_valid: false,
+        parity_receipt_valid: false,
+        material_observation_ready: false,
+        classification_requested: false,
+        classification_allowed: false,
+        semantic_verdict_emitted_by_child: false,
+        declared_card_count: 2,
+        material_slot_count: 2,
+        discovered_card_count: 0,
+        admitted_card_count: 0,
+        rejected_card_count: 0,
+        missing_card_count: 2,
+        inventory_complete: false,
+        material_parity_ready: false,
+        cost_present: false,
+        speedup_present: false,
+        kernel_correctness_present: false,
+        parity_open: false,
+        claim_ready: false,
+        failures: 1,
+    }
+}
+
+fn u250mi_span_eq(
+    raw: string, start: i64, end: i64, expected: string,
+) -> bool with Mut, Panic {
+    let expected_len = str_len(expected)
+    if end - start != expected_len { return false }
+    var i: i64 = 0
+    while i < expected_len {
+        if str_char_at(raw, start + i) != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn u250mi_line_count(raw: string, expected: string) -> i64
+with Mut, Panic {
+    let size = str_len(raw)
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < size {
+        var end = start
+        while end < size && str_char_at(raw, end) != 10 { end = end + 1 }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if u250mi_span_eq(raw, start, line_end, expected) {
+            count = count + 1
+        }
+        start = end + 1
+    }
+    count
+}
+
+fn u250mi_has_one(raw: string, expected: string) -> bool
+with Mut, Panic {
+    u250mi_line_count(raw, expected) == 1
+}
+
+fn u250mi_sha256_matches(raw: string, expected: &[i64; 8]) -> bool
+with Mut, Panic, Div {
+    let size = str_len(raw)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var byte = str_char_at(raw, pos + i) as i64
+            if byte < 0 { byte = byte + 256 }
+            window[i as usize] = byte as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    let digest = sha256_finalize(state)
+    var word: i64 = 0
+    while word < 8 {
+        var actual: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            actual = actual * 256 + sha256_digest_byte(
+                &digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        if actual != expected[word as usize] { return false }
+        word = word + 1
+    }
+    true
+}
+
+fn u250mi_raw_probe_valid(raw: string) -> bool with Mut, Panic, Div {
+    let expected: [i64; 8] = [
+        0x6bea3b96, 0x2c519dfe, 0x9a9878c0, 0x08a6300b,
+        0x67b920f0, 0xa2b51ba9, 0xd89dbf18, 0x0661e7df
+    ]
+    u250mi_sha256_matches(raw, &expected) &&
+        u250mi_has_one(raw, "schema=pireus.u250.material-probe.v1") &&
+        u250mi_has_one(raw, "producer_language=C++") &&
+        u250mi_has_one(raw, "producer_role=MATERIAL_PARITY") &&
+        u250mi_has_one(raw, "semantic_authority_language=Sounio") &&
+        u250mi_has_one(raw, "parent_semantics_sha256=9f0fe0bd01baadec0c60b370bf9dd616a6d2063f1f22b7cdf131f2bc9b6f5586") &&
+        u250mi_has_one(raw, "freeze_sha256=db90647e5ce23029699c2c75232ac8e84ccd9818ec597083f6ce56739843f64a") &&
+        u250mi_has_one(raw, "slot=0") &&
+        u250mi_has_one(raw, "target_family=AMD_ALVEO_U250") &&
+        u250mi_has_one(raw, "host=dl380-proxmox") &&
+        u250mi_has_one(raw, "management_bdf=0000:d8:00.0") &&
+        u250mi_has_one(raw, "user_bdf=0000:d8:00.1") &&
+        u250mi_has_one(raw, "management_pf_count=1") &&
+        u250mi_has_one(raw, "user_pf_count=1") &&
+        u250mi_has_one(raw, "management_pci_vendor=0x10ee") &&
+        u250mi_has_one(raw, "management_pci_device=0x5004") &&
+        u250mi_has_one(raw, "user_pci_vendor=0x10ee") &&
+        u250mi_has_one(raw, "user_pci_device=0x5005") &&
+        u250mi_has_one(raw, "serial=22000321B01F") &&
+        u250mi_has_one(raw, "physical_identity_present=true") &&
+        u250mi_has_one(raw, "board_type=u250") &&
+        u250mi_has_one(raw, "board_name=ALVEO U250 PQ") &&
+        u250mi_has_one(raw, "shell=xilinx_u250_gen3x16_xdma_shell_4_1") &&
+        u250mi_has_one(raw, "logic_uuid=12C8FAFB-0632-499D-B1C0-C6676271B8A6") &&
+        u250mi_has_one(raw, "management_ready=true") &&
+        u250mi_has_one(raw, "user_ready=true") &&
+        u250mi_has_one(raw, "xrt_version=2.23.0") &&
+        u250mi_has_one(raw, "xrt_branch=2026.1") &&
+        u250mi_has_one(raw, "xrt_hash=e61a02867980c8fd8acd80a3a4936d683caa1d82") &&
+        u250mi_has_one(raw, "ddr_bank_count=4") &&
+        u250mi_has_one(raw, "ddr_bytes=68719476736") &&
+        u250mi_has_one(raw, "xbmgmt_exit=0") &&
+        u250mi_has_one(raw, "xrt_smi_exit=0") &&
+        u250mi_has_one(raw, "material_execution_observed=true") &&
+        u250mi_has_one(raw, "material_probe_valid=true") &&
+        u250mi_has_one(raw, "semantic_verdict_emitted=false") &&
+        u250mi_has_one(raw, "classification_requested=false") &&
+        u250mi_has_one(raw, "cost_present=false") &&
+        u250mi_has_one(raw, "speedup_present=false") &&
+        u250mi_has_one(raw, "kernel_correctness_present=false") &&
+        u250mi_has_one(raw, "parity_open=false") &&
+        u250mi_has_one(raw, "claim_ready=false")
+}
+
+fn u250mi_receipt_valid(receipt: string) -> bool with Mut, Panic, Div {
+    let expected: [i64; 8] = [
+        0x9889567b, 0x684fcc02, 0x13ed38a4, 0x4041e847,
+        0x5c4c9a71, 0x722b7baa, 0x1c6c064e, 0x1f1d0d7a
+    ]
+    u250mi_sha256_matches(receipt, &expected) &&
+        u250mi_has_one(receipt,
+            "schema=pireus.u250.material-parity-receipt.v1") &&
+        u250mi_has_one(receipt, "stage=PARITY_OPEN") &&
+        u250mi_has_one(receipt, "producing_language=C++") &&
+        u250mi_has_one(receipt, "language_role=MATERIAL_PARITY") &&
+        u250mi_has_one(receipt, "semantic_authority_language=Sounio") &&
+        u250mi_has_one(receipt, "sounio_source_sha256=bf952aa999dad0e74871a0fc78dd6fe67479840a8f334de1c639ceaabd37eafb") &&
+        u250mi_has_one(receipt, "sounio_semantics_sha256=9f0fe0bd01baadec0c60b370bf9dd616a6d2063f1f22b7cdf131f2bc9b6f5586") &&
+        u250mi_has_one(receipt, "parent_semantics_sha256=9f0fe0bd01baadec0c60b370bf9dd616a6d2063f1f22b7cdf131f2bc9b6f5586") &&
+        u250mi_has_one(receipt, "freeze_sha256=db90647e5ce23029699c2c75232ac8e84ccd9818ec597083f6ce56739843f64a") &&
+        u250mi_has_one(receipt, "cpp_source_sha256=13be4f5284667b9ee76da4be4c71547352335076e6efb5700c8ee9c9f26aad80") &&
+        u250mi_has_one(receipt, "toolchain_sha256=2948c4213fd27288a16e3b167c53b3cdb0a3fb9aa450550d9048ef9dc672ff18") &&
+        u250mi_has_one(receipt, "hardware_sha256=3a58d573a921a705d01c8f510a54c9f44093cb8fcbd902b05dc0319ceea5f8a6") &&
+        u250mi_has_one(receipt, "command_sha256=7d5289f46cc31abcdb43edcf9183c24c7589268a20f3907819785fca38d556f0") &&
+        u250mi_has_one(receipt, "result_sha256=6bea3b962c519dfe9a9878c008a6300b67b920f0a2b51ba9d89dbf180661e7df") &&
+        u250mi_has_one(receipt, "raw_probe_sha256=6bea3b962c519dfe9a9878c008a6300b67b920f0a2b51ba9d89dbf180661e7df") &&
+        u250mi_has_one(receipt, "preexec_decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN") &&
+        u250mi_has_one(receipt, "seal_decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN") &&
+        u250mi_has_one(receipt, "parity_receipt_valid=true") &&
+        u250mi_has_one(receipt, "slot=0") &&
+        u250mi_has_one(receipt, "target_family=AMD_ALVEO_U250") &&
+        u250mi_has_one(receipt, "physical_identity=22000321B01F") &&
+        u250mi_has_one(receipt, "management_pf_count=1") &&
+        u250mi_has_one(receipt, "user_pf_count=1") &&
+        u250mi_has_one(receipt, "management_pci_identity=0x10ee5004") &&
+        u250mi_has_one(receipt, "user_pci_identity=0x10ee5005") &&
+        u250mi_has_one(receipt, "shell_ready=true") &&
+        u250mi_has_one(receipt, "xrt_identified=true") &&
+        u250mi_has_one(receipt, "ddr_bank_count=4") &&
+        u250mi_has_one(receipt, "ddr_bytes=68719476736") &&
+        u250mi_has_one(receipt, "material_execution_observed=true") &&
+        u250mi_has_one(receipt, "semantic_verdict_emitted=false") &&
+        u250mi_has_one(receipt, "classification_requested=false") &&
+        u250mi_has_one(receipt, "cost_present=false") &&
+        u250mi_has_one(receipt, "speedup_present=false") &&
+        u250mi_has_one(receipt, "kernel_correctness_present=false") &&
+        u250mi_has_one(receipt, "claim_ready=false")
+}
+
+fn u250mi_from_fleet(
+    fleet: &PireusU250AdmissionResult,
+) -> PireusU250MaterialIngestionResult {
+    let expected = fleet.valid &&
+        fleet.status == PIREUS_U250_STATUS_INVENTORY_PARTIAL &&
+        fleet.declared_card_count == 2 && fleet.material_slot_count == 2 &&
+        fleet.discovered_card_count == 1 &&
+        fleet.admitted_card_count == 1 && fleet.rejected_card_count == 0 &&
+        fleet.missing_card_count == 1 && !fleet.inventory_complete &&
+        fleet.material_parity_ready && fleet.parity_open &&
+        !fleet.cost_present && !fleet.speedup_present &&
+        !fleet.kernel_correctness_present && !fleet.claim_ready &&
+        fleet.failures == 0
+    PireusU250MaterialIngestionResult {
+        valid: expected,
+        status: if expected {
+            PIREUS_U250_MATERIAL_INGEST_PARTIAL
+        } else { PIREUS_U250_MATERIAL_INGEST_INVALID },
+        raw_probe_valid: true,
+        parity_receipt_valid: true,
+        material_observation_ready: true,
+        classification_requested: true,
+        classification_allowed: expected,
+        semantic_verdict_emitted_by_child: false,
+        declared_card_count: fleet.declared_card_count,
+        material_slot_count: fleet.material_slot_count,
+        discovered_card_count: fleet.discovered_card_count,
+        admitted_card_count: fleet.admitted_card_count,
+        rejected_card_count: fleet.rejected_card_count,
+        missing_card_count: fleet.missing_card_count,
+        inventory_complete: fleet.inventory_complete,
+        material_parity_ready: fleet.material_parity_ready,
+        cost_present: fleet.cost_present,
+        speedup_present: fleet.speedup_present,
+        kernel_correctness_present: fleet.kernel_correctness_present,
+        parity_open: fleet.parity_open,
+        claim_ready: fleet.claim_ready,
+        failures: fleet.failures,
+    }
+}
+
+pub fn pireus_u250_material_ingest_text(
+    raw_probe: string,
+    receipt: string,
+) -> PireusU250MaterialIngestionResult
+with Mut, Panic, Div {
+    if !u250mi_raw_probe_valid(raw_probe) ||
+        !u250mi_receipt_valid(receipt) {
+        return u250mi_invalid()
+    }
+    var declaration = pireus_u250_canonical_declaration()
+    declaration.semantics_frozen = true
+    declaration.parity_open_requested = true
+    let slot_0 = pireus_u250_reference_material_observation(0, 1)
+    let slot_1 = pireus_u250_empty_observation(1)
+    let fleet = pireus_u250_dual_card_admit(
+        &declaration, &slot_0, &slot_1)
+    u250mi_from_fleet(&fleet)
+}
+
+pub fn pireus_u250_material_ingest_files(
+    raw_probe_path: string,
+    receipt_path: string,
+) -> PireusU250MaterialIngestionResult
+with IO, Mut, Panic, Div, Alloc {
+    let raw_probe = read_file(raw_probe_path)
+    let receipt = read_file(receipt_path)
+    pireus_u250_material_ingest_text(raw_probe, receipt)
+}
+
+pub fn pireus_u250_material_ingestion_matches_expected(
+    result: &PireusU250MaterialIngestionResult,
+) -> bool {
+    result.valid && result.status == PIREUS_U250_MATERIAL_INGEST_PARTIAL &&
+        result.raw_probe_valid && result.parity_receipt_valid &&
+        result.material_observation_ready && result.classification_requested &&
+        result.classification_allowed &&
+        !result.semantic_verdict_emitted_by_child &&
+        result.declared_card_count == 2 && result.material_slot_count == 2 &&
+        result.discovered_card_count == 1 &&
+        result.admitted_card_count == 1 && result.rejected_card_count == 0 &&
+        result.missing_card_count == 1 && !result.inventory_complete &&
+        result.material_parity_ready && !result.cost_present &&
+        !result.speedup_present && !result.kernel_correctness_present &&
+        result.parity_open && !result.claim_ready && result.failures == 0
+}

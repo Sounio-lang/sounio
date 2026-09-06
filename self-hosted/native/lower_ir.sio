@@ -3,7 +3,8 @@
 module native::lower_ir
 
 use parser::ast::{BinaryOp, UnaryOp}
-use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX}
+use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX,
+    IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE}
 use ir::algebra::*
 use native::regalloc::*
 use native::encode::*
@@ -233,6 +234,8 @@ pub fn lower_instr(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div, 
         lower_hyper_norm_sq_o(nc, instr)
     } else if instr.op == IrOpcode::IrHyperMulS {
         lower_hyper_mul_s(nc, instr)
+    } else if instr.op == IrOpcode::IrXorConvolutionS {
+        lower_xor_convolution_s(nc, instr)
     } else if instr.op == IrOpcode::IrAssociator {
         lower_associator(nc, instr)
     } else if instr.op == IrOpcode::IrAssociatorVariance {
@@ -1235,6 +1238,23 @@ pub fn emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, sr
     b
 }
 
+// EVEX packed-f64 load with an explicit disp32. The sign table uses ordinary
+// GPR base addressing; RSP/R12 require a SIB byte. Keeping disp32 fixed makes
+// the material byte count independent of EVEX compressed-displacement rules.
+pub fn emit_evex_pd_rm_disp32(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, vvvv: i64, base_gpr: i64, disp: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, base_gpr, map))
+    b = emit_byte(b, evex_p2_pd(vvvv))
+    b = emit_byte(b, evex_p3_vl(vvvv, vl_code))
+    b = emit_byte(b, opcode)
+    let base_lo = evex_lo3(base_gpr)
+    b = emit_byte(b, 0x80 | (evex_lo3(dst) << 3) | base_lo)
+    if base_lo == 4 { b = emit_byte(b, 0x24) }
+    b = emit_u32_le(b, disp)
+    b
+}
+
 // VBROADCASTSD ZMM,XMM — EVEX.512.66.0F38.W1 19 /r
 // Broadcasts the low f64 of src (ZMM lane 0) to all lanes of dst.
 // vvvv = 1111 (unused): src1=0 in evex_p2_pd gives vvvv_inv=0xF → vvvv=1111.
@@ -1835,6 +1855,96 @@ pub fn lower_hyper_mul_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic,
     c.code = emit_fano_inline(c.code, beta_b, conj_c, p2_accum, t_bj, t_aj, ctrl_base)
     // Step 8: dst_hi = p3 + p4  (with masking)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, p1_accum, p2_accum, vl, mask_k, zb)
+    (*nc) = c
+}
+
+fn pireus_zmm_ranges_overlap(a: i64, a_count: i64, b: i64, b_count: i64) -> bool {
+    a < b + b_count && b < a + a_count
+}
+
+pub fn pireus_xor_zmm_plan_error(instr: IrInstr) -> i64 {
+    let xor_ctrl_base = instr.label_id & 31
+    let bcast_base = (instr.label_id >> 5) & 31
+    let twist = instr.imm_flags & 255
+    let candidate = (instr.imm_flags >> 8) & 255
+    if instr.imm_i64 != 4 { return 1 }
+    if twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN { return 2 }
+    if candidate != IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE { return 3 }
+    if instr.dst < 0 || instr.dst + 5 > 31 { return 4 }
+    if instr.src1 < 0 || instr.src1 + 1 > 31 { return 5 }
+    if instr.src2 < 0 || instr.src2 + 1 > 31 { return 6 }
+    if xor_ctrl_base < 0 || xor_ctrl_base + 7 > 31 { return 7 }
+    if bcast_base < 0 || bcast_base + 7 > 31 { return 8 }
+    if instr.field_idx < 0 || instr.field_idx > 15 { return 9 }
+    if pireus_zmm_ranges_overlap(instr.dst, 6, instr.src1, 2) { return 10 }
+    if pireus_zmm_ranges_overlap(instr.dst, 6, instr.src2, 2) { return 11 }
+    if pireus_zmm_ranges_overlap(instr.src1, 2, instr.src2, 2) { return 12 }
+    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, bcast_base, 8) { return 13 }
+    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.dst, 6) { return 14 }
+    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.src1, 2) { return 15 }
+    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.src2, 2) { return 16 }
+    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.dst, 6) { return 17 }
+    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.src1, 2) { return 18 }
+    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.src2, 2) { return 19 }
+    0
+}
+
+fn pireus_xor_zmm_plan_valid(instr: IrInstr) -> bool {
+    pireus_xor_zmm_plan_error(instr) == 0
+}
+
+// IrXorConvolutionS: compute all sixteen destination displacements in parallel.
+//
+// Constants:
+//   xor_ctrl_base+[0..7]   = [i xor 0, ..., i xor 7] for each i low bits
+//   bcast_base+[0..7]      = [i, i, ..., i]
+//   [sign_table_gpr+i*128] = two ZMM sign-bit vectors frozen by
+//                            xeon_avx512_xor_plan.sio
+//
+// Per i: 3 VPERMPD + 2 VMOVUPD + 2 VXORPD + 2 VFMADD231PD = 9 instructions.
+// Two initial VXORPD instructions zero the result: 146 instructions total.
+pub fn emit_xor_convolution_s(buf: CodeBuffer, instr: IrInstr) -> CodeBuffer with Mut, Panic, Div {
+    var code = buf
+    if !pireus_xor_zmm_plan_valid(instr) {
+        return emit_ud2(code)
+    }
+    let vl = 2
+    let dst_lo = instr.dst
+    let dst_hi = instr.dst + 1
+    let a_bcast = instr.dst + 2
+    let b_lo = instr.dst + 3
+    let b_hi = instr.dst + 4
+    let sign = instr.dst + 5
+    let xor_ctrl_base = instr.label_id & 31
+    let bcast_base = (instr.label_id >> 5) & 31
+    let sign_table_gpr = instr.field_idx
+
+    code = emit_evex_pd_rr_full(code, 1, 0x57, dst_lo, dst_lo, dst_lo, vl, 0, 0)
+    code = emit_evex_pd_rr_full(code, 1, 0x57, dst_hi, dst_hi, dst_hi, vl, 0, 0)
+    var i: i64 = 0
+    while i < 16 {
+        let lane = i & 7
+        let half = (i >> 3) & 1
+        let a_src = instr.src1 + half
+        let b_lo_src = instr.src2 + half
+        let b_hi_src = instr.src2 + (1 ^ half)
+        code = emit_evex_pd_rr_full(code, 2, 0x16, a_bcast, bcast_base + lane, a_src, vl, 0, 0)
+        code = emit_evex_pd_rr_full(code, 2, 0x16, b_lo, xor_ctrl_base + lane, b_lo_src, vl, 0, 0)
+        code = emit_evex_pd_rr_full(code, 2, 0x16, b_hi, xor_ctrl_base + lane, b_hi_src, vl, 0, 0)
+        code = emit_evex_pd_rm_disp32(code, 1, 0x10, sign, 0, sign_table_gpr, i * 128, vl)
+        code = emit_evex_pd_rr_full(code, 1, 0x57, b_lo, b_lo, sign, vl, 0, 0)
+        code = emit_evex_pd_rm_disp32(code, 1, 0x10, sign, 0, sign_table_gpr, i * 128 + 64, vl)
+        code = emit_evex_pd_rr_full(code, 1, 0x57, b_hi, b_hi, sign, vl, 0, 0)
+        code = emit_evex_pd_rr_full(code, 2, 0xB8, dst_lo, a_bcast, b_lo, vl, 0, 0)
+        code = emit_evex_pd_rr_full(code, 2, 0xB8, dst_hi, a_bcast, b_hi, vl, 0, 0)
+        i = i + 1
+    }
+    code
+}
+
+pub fn lower_xor_convolution_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
+    var c = (*nc)
+    c.code = emit_xor_convolution_s(c.code, instr)
     (*nc) = c
 }
 

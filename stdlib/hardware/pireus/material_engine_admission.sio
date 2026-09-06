@@ -1,0 +1,1477 @@
+//! Receipt-bound material engine admission for Pireus.
+//!
+//! This additive overlay admits only the Apple CPU and DGX .24 GPU engines
+//! witnessed by frozen material receipts. The DGX .48 locator stays unresolved.
+
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::target_profile::{
+    PIREUS_CLASS_MACHINE, PIREUS_HAS_TARGET,
+    PIREUS_TARGET_DARWIN_XEON,
+    PIREUS_TARGET_APPLE_SILICON, PIREUS_TARGET_DGX_SPARK,
+}
+use hardware::pireus::execution_engine::{
+    pireus_execution_engine_store,
+    pireus_query_cluster_machines, pireus_query_machine_engines,
+    pireus_query_observed_engines_by, pireus_query_observed_engines_for_target,
+    PIREUS_CLASS_EXECUTION_ENGINE, PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE,
+    PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE,
+    PIREUS_MACHINE_HAS_ENGINE, PIREUS_ENGINE_HAS_KIND,
+    PIREUS_ENGINE_IMPLEMENTS_ISA, PIREUS_ENGINE_SUPPORTS_INTERFACE,
+    PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_KIND_GPU,
+    PIREUS_ENGINE_ISA_AARCH64, PIREUS_ENGINE_ISA_NVIDIA_SM121,
+    PIREUS_INTERFACE_CUDA, PIREUS_INTERFACE_METAL,
+}
+use hardware::pireus::target_cost_observation::{
+    PIREUS_COST_DEPENDENCY_LATENCY, PIREUS_COST_RECIPROCAL_THROUGHPUT,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_store_count, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    sparql_result_count, triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT: i64 = 12
+
+pub const PIREUS_CLASS_MATERIAL_ENGINE_ADMISSION: i64 = 707000
+pub const PIREUS_CLASS_MATERIAL_ADMITTED_MACHINE: i64 = 707001
+pub const PIREUS_CLASS_MATERIAL_ADMITTED_ENGINE: i64 = 707002
+pub const PIREUS_CLASS_TRANSPORT_LOCATOR: i64 = 707003
+pub const PIREUS_CLASS_MATERIAL_RECEIPT: i64 = 707004
+pub const PIREUS_CLASS_MATERIAL_EVIDENCE: i64 = 707005
+pub const PIREUS_CLASS_HARDWARE_IDENTITY: i64 = 707006
+pub const PIREUS_CLASS_IDENTITY_REQUEST: i64 = 707007
+pub const PIREUS_CLASS_UNRESOLVED_IDENTITY_REQUEST: i64 = 707008
+pub const PIREUS_CLASS_COST_ELIGIBILITY: i64 = 707009
+
+pub const PIREUS_LOCATOR_FOR_TARGET: i64 = 707100
+pub const PIREUS_LOCATOR_RESOLVES_MACHINE: i64 = 707101
+pub const PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT: i64 = 707102
+pub const PIREUS_RECEIPT_HAS_EVIDENCE: i64 = 707103
+pub const PIREUS_RECEIPT_HAS_HARDWARE_IDENTITY: i64 = 707104
+pub const PIREUS_ENGINE_MATERIAL_COVERS_SUBJECT: i64 = 707105
+pub const PIREUS_IDENTITY_REQUEST_HAS_LOCATOR: i64 = 707106
+pub const PIREUS_IDENTITY_REQUEST_HAS_STATUS: i64 = 707107
+pub const PIREUS_ENGINE_HAS_COST_ELIGIBILITY: i64 = 707108
+pub const PIREUS_ELIGIBILITY_HAS_QUANTITY: i64 = 707109
+
+pub const PIREUS_EVIDENCE_MATERIAL_PARITY: i64 = 707200
+pub const PIREUS_EVIDENCE_IDENTITY_REQUEST: i64 = 707201
+pub const PIREUS_IDENTITY_STATUS_UNRESOLVED: i64 = 707202
+pub const PIREUS_MATERIAL_SUBJECT_XOR_SELECTOR: i64 = 707203
+
+pub const PIREUS_LOCATOR_APPLE_TAILNET: i64 = 707300
+pub const PIREUS_MACHINE_APPLE_MAC17_7: i64 = 707301
+pub const PIREUS_ENGINE_CPU_APPLE_M5_MAX: i64 = 707302
+pub const PIREUS_RECEIPT_APPLE_A64_TBL: i64 = 707303
+pub const PIREUS_EVIDENCE_APPLE_A64_TBL: i64 = 707304
+pub const PIREUS_HARDWARE_APPLE_MAC17_7: i64 = 707305
+
+pub const PIREUS_LOCATOR_DGX_24: i64 = 707310
+pub const PIREUS_MACHINE_DGX_SPARK_3C59: i64 = 707311
+pub const PIREUS_ENGINE_GPU_DGX_GB10: i64 = 707312
+pub const PIREUS_RECEIPT_DGX_PTX_SHFL: i64 = 707313
+pub const PIREUS_EVIDENCE_DGX_PTX_SHFL: i64 = 707314
+pub const PIREUS_HARDWARE_DGX_SPARK_3C59: i64 = 707315
+pub const PIREUS_MUTATION_MACHINE_DGX_SIBLING: i64 = 707316
+
+pub const PIREUS_LOCATOR_DGX_48: i64 = 707320
+pub const PIREUS_IDENTITY_REQUEST_DGX_48: i64 = 707321
+
+pub const PIREUS_ELIGIBILITY_APPLE_LATENCY: i64 = 707330
+pub const PIREUS_ELIGIBILITY_APPLE_THROUGHPUT: i64 = 707331
+pub const PIREUS_ELIGIBILITY_DGX_LATENCY: i64 = 707332
+pub const PIREUS_ELIGIBILITY_DGX_THROUGHPUT: i64 = 707333
+
+pub const PIREUS_MATERIAL_LANGUAGE_SOUNIO: i64 = 1
+pub const PIREUS_MATERIAL_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_MATERIAL_LANGUAGE_EXTERNAL_LLM: i64 = 6
+pub const PIREUS_MATERIAL_LANGUAGE_PYTHON: i64 = 7
+pub const PIREUS_MATERIAL_LANGUAGE_RUST: i64 = 8
+pub const PIREUS_MATERIAL_ROLE_SEMANTIC_AUTHORITY: i64 = 1
+pub const PIREUS_MATERIAL_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_MATERIAL_ROLE_REVIEW_ONLY: i64 = 6
+
+pub const PIREUS_MATERIAL_OPERATION_APPLE_A64_TBL: i64 = 707400
+pub const PIREUS_MATERIAL_OPERATION_DGX_SHFL_BFLY: i64 = 707401
+
+pub const PIREUS_MATERIAL_ENGINE_OK: i64 = 0
+pub const PIREUS_MATERIAL_ENGINE_ERR_PARENT: i64 = 1
+pub const PIREUS_MATERIAL_ENGINE_ERR_BASE: i64 = 2
+pub const PIREUS_MATERIAL_ENGINE_ERR_ADMISSION: i64 = 3
+pub const PIREUS_MATERIAL_ENGINE_ERR_ONTOLOGY: i64 = 4
+pub const PIREUS_MATERIAL_ENGINE_ERR_AUTHORITY: i64 = 5
+
+pub const PIREUS_MATERIAL_PARENT_OK: i64 = 0
+pub const PIREUS_MATERIAL_PARENT_ERR_GARDEN: i64 = 1
+pub const PIREUS_MATERIAL_PARENT_ERR_CONTROL: i64 = 2
+pub const PIREUS_MATERIAL_PARENT_ERR_APPLE_RECEIPT: i64 = 3
+pub const PIREUS_MATERIAL_PARENT_ERR_APPLE_EVIDENCE: i64 = 4
+pub const PIREUS_MATERIAL_PARENT_ERR_DGX_RECEIPT: i64 = 5
+pub const PIREUS_MATERIAL_PARENT_ERR_DGX_EVIDENCE: i64 = 6
+
+pub struct PireusMaterialEngineDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusMaterialEngineParentPaths {
+    pub garden: string,
+    pub engine_source: string,
+    pub engine_semantics: string,
+    pub engine_receipt: string,
+    pub cost_source: string,
+    pub cost_semantics: string,
+    pub cost_receipt: string,
+    pub cost_evidence: string,
+    pub apple_receipt: string,
+    pub apple_evidence: string,
+    pub dgx_receipt: string,
+    pub dgx_evidence: string,
+}
+
+pub struct PireusMaterialEngineCandidate {
+    pub target_id: i64,
+    pub locator_id: i64,
+    pub machine_id: i64,
+    pub engine_id: i64,
+    pub engine_kind: i64,
+    pub isa_id: i64,
+    pub interface_id: i64,
+    pub receipt_id: i64,
+    pub evidence_id: i64,
+    pub hardware_id: i64,
+    pub material_operation_id: i64,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub semantic_authority_language: i64,
+    pub parity_receipt_valid: bool,
+    pub material_execution_observed: bool,
+    pub blueprint_only: bool,
+    pub selector_covered: bool,
+    pub whole_operation_covered: bool,
+    pub cost_value_present: bool,
+    pub comparison_promoted: bool,
+    pub review_promoted: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+}
+
+pub struct PireusMaterialEngineNegatives {
+    pub missing_garden_binding: bool,
+    pub missing_or_mismatched_parent: bool,
+    pub material_receipt_evidence_drift: bool,
+    pub target_transplant: bool,
+    pub locator_to_machine: bool,
+    pub blueprint_without_execution: bool,
+    pub apple_cpu_to_gpu: bool,
+    pub metal_to_isa: bool,
+    pub apple_receipt_to_dgx: bool,
+    pub dgx_24_receipt_to_48: bool,
+    pub shared_label_sibling_identity: bool,
+    pub dgx_gpu_to_cpu: bool,
+    pub cuda_to_isa: bool,
+    pub dgx_receipt_to_apple: bool,
+    pub selector_to_whole_operation: bool,
+    pub material_parity_to_semantic_authority: bool,
+    pub static_evidence_to_execution: bool,
+    pub engine_admission_to_cost: bool,
+    pub engine_admission_to_comparability: bool,
+    pub review_to_authority: bool,
+    pub premature_parity_or_claim: bool,
+    pub forbidden_producer_prelaunch: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusMaterialEngineAdmissionResult {
+    pub valid: bool,
+    pub error: i64,
+    pub parent_file_match_mask: i64,
+    pub parent_file_match_count: i64,
+    pub parent_files_valid: bool,
+    pub execution_engine_parent_snapshot_matches: bool,
+    pub target_cost_parent_hash_bound: bool,
+    pub base_cluster_machine_count: i64,
+    pub base_cpu_engine_count: i64,
+    pub base_gpu_engine_count: i64,
+    pub base_darwin_engine_count: i64,
+    pub base_apple_engine_count: i64,
+    pub base_dgx_engine_count: i64,
+    pub overlay_cluster_machine_count: i64,
+    pub overlay_cpu_engine_count: i64,
+    pub overlay_gpu_engine_count: i64,
+    pub overlay_apple_engine_count: i64,
+    pub overlay_dgx_engine_count: i64,
+    pub admitted_machine_count: i64,
+    pub admitted_engine_count: i64,
+    pub material_receipt_count: i64,
+    pub unresolved_identity_request_count: i64,
+    pub identity_request_count: i64,
+    pub dgx_48_resolution_count: i64,
+    pub apple_gpu_engine_count: i64,
+    pub dgx_cpu_engine_count: i64,
+    pub cost_request_eligible_engine_count: i64,
+    pub cost_request_eligibility_count: i64,
+    pub apple_admitted: bool,
+    pub dgx_24_admitted: bool,
+    pub dgx_48_unresolved: bool,
+    pub ontology_identity_binding_valid: bool,
+    pub ontology_triple_count: i64,
+    pub ontology_digest: PireusMaterialEngineDigest,
+    pub material_cost_value_count: i64,
+    pub whole_operation_coverage_count: i64,
+    pub comparison_count: i64,
+    pub speedup_count: i64,
+    pub ranking_count: i64,
+    pub cross_target_comparable: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub result_digest: PireusMaterialEngineDigest,
+    pub negatives: PireusMaterialEngineNegatives,
+    pub failures: i64,
+}
+
+fn pmea_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pmea_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        bytes[i as usize] = ((value >> ((7 - i) * 8)) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn pmea_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    pmea_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn pmea_digest_finish(state: SHA256State) -> PireusMaterialEngineDigest
+with Mut, Panic, Div {
+    let finalized = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        var word: i64 = 0
+        var j: i64 = 0
+        while j < 4 {
+            word = word * 256 + sha256_digest_byte(finalized, i * 4 + j)
+            j = j + 1
+        }
+        words[i as usize] = word
+        i = i + 1
+    }
+    PireusMaterialEngineDigest { words: words }
+}
+
+fn pmea_file_hash(path: string) -> PireusMaterialEngineDigest
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size <= 0 || size >= 1048576 {
+        return PireusMaterialEngineDigest { words: [0; 8] }
+    }
+    let raw = read_file(path)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var byte = raw[(pos + i) as usize] as i64
+            if byte < 0 { byte = byte + 256 }
+            window[i as usize] = byte as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    pmea_digest_finish(state)
+}
+
+fn pmea_expected_parent_hash(index: i64) -> [i64; 8] {
+    if index == 0 { return [0x08d6bd31, 0x93db9a2c, 0xe0cd849d, 0xb4b1197d, 0x38904932, 0x2be3be29, 0x86bd9f95, 0x5257b21e] }
+    if index == 1 { return [0x8b5063f0, 0xe9a39650, 0xfb0b60e8, 0xb70b315f, 0x33972369, 0x0e06050c, 0x2bebacec, 0xe888e37e] }
+    if index == 2 { return [0xc47668a0, 0x8ad25f39, 0xbebe9d8b, 0xef90b66e, 0xb2ad7119, 0x063c19ab, 0x8319fa4f, 0xab265233] }
+    if index == 3 { return [0x9da8ca53, 0xc3cb0e66, 0x31c92e55, 0xa8e82387, 0xaed2bd53, 0x863ffa9d, 0x64671980, 0x6eec4ffd] }
+    if index == 4 { return [0x7ea2815c, 0x112b8547, 0x6fc6ac4d, 0x8bb9388e, 0xe0320628, 0x22c69054, 0x85c2084e, 0xe416d6bc] }
+    if index == 5 { return [0x0a899be7, 0xcd25375c, 0x8c444b9e, 0x1f0a71dd, 0x102ca895, 0x8072a429, 0x0073ae21, 0xc926a199] }
+    if index == 6 { return [0xb7577c78, 0x2a82431e, 0xb5431213, 0x7a52c181, 0x1f14316d, 0x5e5a5fb9, 0xe7aa9581, 0xf1c304ca] }
+    if index == 7 { return [0x06f21108, 0xddc89c8c, 0x468097b7, 0xcefec6a7, 0x66bda065, 0x918fd579, 0x7be19487, 0x8371577b] }
+    if index == 8 { return [0xc00a3d4e, 0x55668882, 0x9efadbbf, 0x640ea858, 0xcfe9520d, 0xc04103fa, 0x745cf1a8, 0x101f7840] }
+    if index == 9 { return [0x2877bfd4, 0x63b4d28d, 0xc3311b75, 0xc69bec2a, 0xa1c62b43, 0x0d083149, 0x89187d44, 0xb32a781e] }
+    if index == 10 { return [0x3c10882e, 0xff43d3b1, 0x97428839, 0x996c7a04, 0xc009c8f5, 0x37d0c145, 0x1bdf3e8a, 0x13e2f385] }
+    if index == 11 { return [0x2c6b6e44, 0x8265a556, 0x6d17df9a, 0x674246ea, 0x62c05210, 0xe432e48e, 0x418d1635, 0x8496853b] }
+    [0; 8]
+}
+
+fn pmea_parent_path(paths: &PireusMaterialEngineParentPaths, index: i64) -> string {
+    if index == 0 { return paths.garden }
+    if index == 1 { return paths.engine_source }
+    if index == 2 { return paths.engine_semantics }
+    if index == 3 { return paths.engine_receipt }
+    if index == 4 { return paths.cost_source }
+    if index == 5 { return paths.cost_semantics }
+    if index == 6 { return paths.cost_receipt }
+    if index == 7 { return paths.cost_evidence }
+    if index == 8 { return paths.apple_receipt }
+    if index == 9 { return paths.apple_evidence }
+    if index == 10 { return paths.dgx_receipt }
+    paths.dgx_evidence
+}
+
+fn pmea_parent_match_mask(paths: &PireusMaterialEngineParentPaths) -> i64
+with IO, Mut, Panic, Div, Alloc {
+    var mask: i64 = 0
+    var i: i64 = 0
+    while i < PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT {
+        let actual = pmea_file_hash(pmea_parent_path(paths, i))
+        let expected = pmea_expected_parent_hash(i)
+        if pmea_hash_equal(&actual.words, &expected) {
+            mask = mask | (1 << i)
+        }
+        i = i + 1
+    }
+    mask
+}
+
+pub fn pireus_material_engine_parent_file_matches(mask: i64, index: i64) -> bool {
+    index >= 0 && index < PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT &&
+        (mask & (1 << index)) != 0
+}
+
+fn pmea_all_parents_match(mask: i64) -> bool {
+    mask == (1 << PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT) - 1
+}
+
+pub fn pireus_material_engine_parent_error(mask: i64) -> i64 {
+    if !pireus_material_engine_parent_file_matches(mask, 0) {
+        return PIREUS_MATERIAL_PARENT_ERR_GARDEN
+    }
+    var i: i64 = 1
+    while i < 8 {
+        if !pireus_material_engine_parent_file_matches(mask, i) {
+            return PIREUS_MATERIAL_PARENT_ERR_CONTROL
+        }
+        i = i + 1
+    }
+    if !pireus_material_engine_parent_file_matches(mask, 8) {
+        return PIREUS_MATERIAL_PARENT_ERR_APPLE_RECEIPT
+    }
+    if !pireus_material_engine_parent_file_matches(mask, 9) {
+        return PIREUS_MATERIAL_PARENT_ERR_APPLE_EVIDENCE
+    }
+    if !pireus_material_engine_parent_file_matches(mask, 10) {
+        return PIREUS_MATERIAL_PARENT_ERR_DGX_RECEIPT
+    }
+    if !pireus_material_engine_parent_file_matches(mask, 11) {
+        return PIREUS_MATERIAL_PARENT_ERR_DGX_EVIDENCE
+    }
+    PIREUS_MATERIAL_PARENT_OK
+}
+
+pub fn pireus_material_engine_apple_candidate() -> PireusMaterialEngineCandidate {
+    PireusMaterialEngineCandidate {
+        target_id: PIREUS_TARGET_APPLE_SILICON,
+        locator_id: PIREUS_LOCATOR_APPLE_TAILNET,
+        machine_id: PIREUS_MACHINE_APPLE_MAC17_7,
+        engine_id: PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        engine_kind: PIREUS_ENGINE_KIND_CPU,
+        isa_id: PIREUS_ENGINE_ISA_AARCH64,
+        interface_id: 0,
+        receipt_id: PIREUS_RECEIPT_APPLE_A64_TBL,
+        evidence_id: PIREUS_EVIDENCE_APPLE_A64_TBL,
+        hardware_id: PIREUS_HARDWARE_APPLE_MAC17_7,
+        material_operation_id: PIREUS_MATERIAL_OPERATION_APPLE_A64_TBL,
+        producer_language: PIREUS_MATERIAL_LANGUAGE_CPP,
+        producer_role: PIREUS_MATERIAL_ROLE_MATERIAL_PARITY,
+        semantic_authority_language: PIREUS_MATERIAL_LANGUAGE_SOUNIO,
+        parity_receipt_valid: true,
+        material_execution_observed: true,
+        blueprint_only: false,
+        selector_covered: true,
+        whole_operation_covered: false,
+        cost_value_present: false,
+        comparison_promoted: false,
+        review_promoted: false,
+        parity_open: false,
+        claim_ready: false,
+    }
+}
+
+pub fn pireus_material_engine_dgx_24_candidate() -> PireusMaterialEngineCandidate {
+    PireusMaterialEngineCandidate {
+        target_id: PIREUS_TARGET_DGX_SPARK,
+        locator_id: PIREUS_LOCATOR_DGX_24,
+        machine_id: PIREUS_MACHINE_DGX_SPARK_3C59,
+        engine_id: PIREUS_ENGINE_GPU_DGX_GB10,
+        engine_kind: PIREUS_ENGINE_KIND_GPU,
+        isa_id: PIREUS_ENGINE_ISA_NVIDIA_SM121,
+        interface_id: PIREUS_INTERFACE_CUDA,
+        receipt_id: PIREUS_RECEIPT_DGX_PTX_SHFL,
+        evidence_id: PIREUS_EVIDENCE_DGX_PTX_SHFL,
+        hardware_id: PIREUS_HARDWARE_DGX_SPARK_3C59,
+        material_operation_id: PIREUS_MATERIAL_OPERATION_DGX_SHFL_BFLY,
+        producer_language: PIREUS_MATERIAL_LANGUAGE_CPP,
+        producer_role: PIREUS_MATERIAL_ROLE_MATERIAL_PARITY,
+        semantic_authority_language: PIREUS_MATERIAL_LANGUAGE_SOUNIO,
+        parity_receipt_valid: true,
+        material_execution_observed: true,
+        blueprint_only: false,
+        selector_covered: true,
+        whole_operation_covered: false,
+        cost_value_present: false,
+        comparison_promoted: false,
+        review_promoted: false,
+        parity_open: false,
+        claim_ready: false,
+    }
+}
+
+pub fn pireus_material_engine_producer_launch_allowed(language: i64) -> bool {
+    language == PIREUS_MATERIAL_LANGUAGE_CPP
+}
+
+fn pmea_receipt_binding_valid(
+    candidate: &PireusMaterialEngineCandidate,
+    parent_mask: i64,
+) -> bool {
+    if candidate.receipt_id == PIREUS_RECEIPT_APPLE_A64_TBL {
+        return candidate.evidence_id == PIREUS_EVIDENCE_APPLE_A64_TBL &&
+            candidate.hardware_id == PIREUS_HARDWARE_APPLE_MAC17_7 &&
+            candidate.material_operation_id ==
+                PIREUS_MATERIAL_OPERATION_APPLE_A64_TBL &&
+            pireus_material_engine_parent_file_matches(parent_mask, 8) &&
+            pireus_material_engine_parent_file_matches(parent_mask, 9)
+    }
+    if candidate.receipt_id == PIREUS_RECEIPT_DGX_PTX_SHFL {
+        return candidate.evidence_id == PIREUS_EVIDENCE_DGX_PTX_SHFL &&
+            candidate.hardware_id == PIREUS_HARDWARE_DGX_SPARK_3C59 &&
+            candidate.material_operation_id ==
+                PIREUS_MATERIAL_OPERATION_DGX_SHFL_BFLY &&
+            pireus_material_engine_parent_file_matches(parent_mask, 10) &&
+            pireus_material_engine_parent_file_matches(parent_mask, 11)
+    }
+    false
+}
+
+fn pmea_candidate_common_valid(
+    candidate: &PireusMaterialEngineCandidate,
+    parent_mask: i64,
+) -> bool {
+    pireus_material_engine_parent_error(parent_mask) ==
+            PIREUS_MATERIAL_PARENT_OK &&
+        pmea_receipt_binding_valid(candidate, parent_mask) &&
+        candidate.producer_language == PIREUS_MATERIAL_LANGUAGE_CPP &&
+        candidate.producer_role == PIREUS_MATERIAL_ROLE_MATERIAL_PARITY &&
+        candidate.semantic_authority_language == PIREUS_MATERIAL_LANGUAGE_SOUNIO &&
+        candidate.parity_receipt_valid &&
+        candidate.material_execution_observed && !candidate.blueprint_only &&
+        candidate.selector_covered && !candidate.whole_operation_covered &&
+        !candidate.cost_value_present && !candidate.comparison_promoted &&
+        !candidate.review_promoted && !candidate.parity_open &&
+        !candidate.claim_ready
+}
+
+fn pmea_apple_candidate_exact(candidate: &PireusMaterialEngineCandidate) -> bool {
+    candidate.target_id == PIREUS_TARGET_APPLE_SILICON &&
+        candidate.locator_id == PIREUS_LOCATOR_APPLE_TAILNET &&
+        candidate.machine_id == PIREUS_MACHINE_APPLE_MAC17_7 &&
+        candidate.engine_id == PIREUS_ENGINE_CPU_APPLE_M5_MAX &&
+        candidate.engine_kind == PIREUS_ENGINE_KIND_CPU &&
+        candidate.isa_id == PIREUS_ENGINE_ISA_AARCH64 &&
+        candidate.interface_id == 0 &&
+        candidate.receipt_id == PIREUS_RECEIPT_APPLE_A64_TBL &&
+        candidate.evidence_id == PIREUS_EVIDENCE_APPLE_A64_TBL &&
+        candidate.hardware_id == PIREUS_HARDWARE_APPLE_MAC17_7 &&
+        candidate.material_operation_id == PIREUS_MATERIAL_OPERATION_APPLE_A64_TBL
+}
+
+fn pmea_dgx_candidate_exact(candidate: &PireusMaterialEngineCandidate) -> bool {
+    candidate.target_id == PIREUS_TARGET_DGX_SPARK &&
+        candidate.locator_id == PIREUS_LOCATOR_DGX_24 &&
+        candidate.machine_id == PIREUS_MACHINE_DGX_SPARK_3C59 &&
+        candidate.engine_id == PIREUS_ENGINE_GPU_DGX_GB10 &&
+        candidate.engine_kind == PIREUS_ENGINE_KIND_GPU &&
+        candidate.isa_id == PIREUS_ENGINE_ISA_NVIDIA_SM121 &&
+        candidate.interface_id == PIREUS_INTERFACE_CUDA &&
+        candidate.receipt_id == PIREUS_RECEIPT_DGX_PTX_SHFL &&
+        candidate.evidence_id == PIREUS_EVIDENCE_DGX_PTX_SHFL &&
+        candidate.hardware_id == PIREUS_HARDWARE_DGX_SPARK_3C59 &&
+        candidate.material_operation_id == PIREUS_MATERIAL_OPERATION_DGX_SHFL_BFLY
+}
+
+pub fn pireus_material_engine_candidate_valid(
+    candidate: &PireusMaterialEngineCandidate,
+    parent_mask: i64,
+) -> bool {
+    pmea_candidate_common_valid(candidate, parent_mask) &&
+        (pmea_apple_candidate_exact(candidate) ||
+            pmea_dgx_candidate_exact(candidate))
+}
+
+pub fn pireus_material_engine_request_eligible(
+    candidate: &PireusMaterialEngineCandidate,
+    parent_mask: i64,
+    quantity: i64,
+) -> bool {
+    pireus_material_engine_candidate_valid(candidate, parent_mask) &&
+        (quantity == PIREUS_COST_DEPENDENCY_LATENCY ||
+            quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT)
+}
+
+fn pmea_add_class(store: &TripleStore, id: i64) {
+    triple_store_add(store, triple_iri(
+        id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn pmea_add_typed(store: &TripleStore, id: i64, class_id: i64) {
+    triple_store_add(store, triple_iri(id, PIREUS_RDF_TYPE, class_id))
+}
+
+fn pmea_add_receipt(
+    store: &TripleStore, receipt: i64, evidence: i64, hardware: i64,
+) {
+    pmea_add_typed(store, receipt, PIREUS_CLASS_MATERIAL_RECEIPT)
+    pmea_add_typed(store, evidence, PIREUS_CLASS_MATERIAL_EVIDENCE)
+    pmea_add_typed(store, hardware, PIREUS_CLASS_HARDWARE_IDENTITY)
+    triple_store_add(store, triple_iri(
+        receipt, PIREUS_RECEIPT_HAS_EVIDENCE, evidence))
+    triple_store_add(store, triple_iri(
+        receipt, PIREUS_RECEIPT_HAS_HARDWARE_IDENTITY, hardware))
+    triple_store_add(store, triple_iri(
+        receipt, PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY))
+}
+
+fn pmea_add_engine(
+    store: &TripleStore,
+    target: i64, locator: i64, machine: i64, engine: i64,
+    kind: i64, isa: i64, interface: i64,
+    receipt: i64, evidence: i64, hardware: i64,
+) {
+    pmea_add_typed(store, locator, PIREUS_CLASS_TRANSPORT_LOCATOR)
+    triple_store_add(store, triple_iri(
+        locator, PIREUS_LOCATOR_FOR_TARGET, target))
+    triple_store_add(store, triple_iri(
+        locator, PIREUS_LOCATOR_RESOLVES_MACHINE, machine))
+    pmea_add_typed(store, machine, PIREUS_CLASS_MACHINE)
+    pmea_add_typed(store, machine, PIREUS_CLASS_MATERIAL_ADMITTED_MACHINE)
+    triple_store_add(store, triple_iri(machine, PIREUS_HAS_TARGET, target))
+    triple_store_add(store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, machine))
+    triple_store_add(store, triple_iri(
+        machine, PIREUS_MACHINE_HAS_ENGINE, engine))
+    pmea_add_typed(store, engine, PIREUS_CLASS_EXECUTION_ENGINE)
+    pmea_add_typed(store, engine, PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)
+    pmea_add_typed(store, engine, PIREUS_CLASS_MATERIAL_ADMITTED_ENGINE)
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_HAS_KIND, kind))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_IMPLEMENTS_ISA, isa))
+    if interface != 0 {
+        triple_store_add(store, triple_iri(
+            engine, PIREUS_ENGINE_SUPPORTS_INTERFACE, interface))
+    }
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT, receipt))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_MATERIAL_COVERS_SUBJECT,
+        PIREUS_MATERIAL_SUBJECT_XOR_SELECTOR))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY))
+    pmea_add_receipt(store, receipt, evidence, hardware)
+}
+
+fn pmea_add_eligibility(
+    store: &TripleStore, engine: i64, eligibility: i64, quantity: i64,
+) {
+    pmea_add_typed(store, eligibility, PIREUS_CLASS_COST_ELIGIBILITY)
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_HAS_COST_ELIGIBILITY, eligibility))
+    triple_store_add(store, triple_iri(
+        eligibility, PIREUS_ELIGIBILITY_HAS_QUANTITY, quantity))
+}
+
+fn pmea_overlay_store() -> TripleStore with Mut {
+    var store = pireus_execution_engine_store()
+    pmea_add_class(&store, PIREUS_CLASS_MATERIAL_ENGINE_ADMISSION)
+    pmea_add_class(&store, PIREUS_CLASS_MATERIAL_ADMITTED_MACHINE)
+    pmea_add_class(&store, PIREUS_CLASS_MATERIAL_ADMITTED_ENGINE)
+    pmea_add_class(&store, PIREUS_CLASS_TRANSPORT_LOCATOR)
+    pmea_add_class(&store, PIREUS_CLASS_MATERIAL_RECEIPT)
+    pmea_add_class(&store, PIREUS_CLASS_MATERIAL_EVIDENCE)
+    pmea_add_class(&store, PIREUS_CLASS_HARDWARE_IDENTITY)
+    pmea_add_class(&store, PIREUS_CLASS_IDENTITY_REQUEST)
+    pmea_add_class(&store, PIREUS_CLASS_UNRESOLVED_IDENTITY_REQUEST)
+    pmea_add_class(&store, PIREUS_CLASS_COST_ELIGIBILITY)
+    pmea_add_typed(&store, PIREUS_EVIDENCE_MATERIAL_PARITY,
+        PIREUS_CLASS_EVIDENCE_ROLE)
+    pmea_add_typed(&store, PIREUS_EVIDENCE_IDENTITY_REQUEST,
+        PIREUS_CLASS_EVIDENCE_ROLE)
+
+    pmea_add_engine(&store,
+        PIREUS_TARGET_APPLE_SILICON, PIREUS_LOCATOR_APPLE_TAILNET,
+        PIREUS_MACHINE_APPLE_MAC17_7, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_ISA_AARCH64, 0,
+        PIREUS_RECEIPT_APPLE_A64_TBL, PIREUS_EVIDENCE_APPLE_A64_TBL,
+        PIREUS_HARDWARE_APPLE_MAC17_7)
+    pmea_add_engine(&store,
+        PIREUS_TARGET_DGX_SPARK, PIREUS_LOCATOR_DGX_24,
+        PIREUS_MACHINE_DGX_SPARK_3C59, PIREUS_ENGINE_GPU_DGX_GB10,
+        PIREUS_ENGINE_KIND_GPU, PIREUS_ENGINE_ISA_NVIDIA_SM121,
+        PIREUS_INTERFACE_CUDA, PIREUS_RECEIPT_DGX_PTX_SHFL,
+        PIREUS_EVIDENCE_DGX_PTX_SHFL, PIREUS_HARDWARE_DGX_SPARK_3C59)
+
+    pmea_add_typed(&store, PIREUS_LOCATOR_DGX_48,
+        PIREUS_CLASS_TRANSPORT_LOCATOR)
+    triple_store_add(&store, triple_iri(
+        PIREUS_LOCATOR_DGX_48, PIREUS_LOCATOR_FOR_TARGET,
+        PIREUS_TARGET_DGX_SPARK))
+    pmea_add_typed(&store, PIREUS_IDENTITY_REQUEST_DGX_48,
+        PIREUS_CLASS_IDENTITY_REQUEST)
+    pmea_add_typed(&store, PIREUS_IDENTITY_REQUEST_DGX_48,
+        PIREUS_CLASS_UNRESOLVED_IDENTITY_REQUEST)
+    triple_store_add(&store, triple_iri(
+        PIREUS_IDENTITY_REQUEST_DGX_48,
+        PIREUS_IDENTITY_REQUEST_HAS_LOCATOR, PIREUS_LOCATOR_DGX_48))
+    triple_store_add(&store, triple_iri(
+        PIREUS_IDENTITY_REQUEST_DGX_48,
+        PIREUS_IDENTITY_REQUEST_HAS_STATUS,
+        PIREUS_IDENTITY_STATUS_UNRESOLVED))
+    triple_store_add(&store, triple_iri(
+        PIREUS_IDENTITY_REQUEST_DGX_48, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_IDENTITY_REQUEST))
+
+    pmea_add_eligibility(&store, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        PIREUS_ELIGIBILITY_APPLE_LATENCY, PIREUS_COST_DEPENDENCY_LATENCY)
+    pmea_add_eligibility(&store, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        PIREUS_ELIGIBILITY_APPLE_THROUGHPUT,
+        PIREUS_COST_RECIPROCAL_THROUGHPUT)
+    pmea_add_eligibility(&store, PIREUS_ENGINE_GPU_DGX_GB10,
+        PIREUS_ELIGIBILITY_DGX_LATENCY, PIREUS_COST_DEPENDENCY_LATENCY)
+    pmea_add_eligibility(&store, PIREUS_ENGINE_GPU_DGX_GB10,
+        PIREUS_ELIGIBILITY_DGX_THROUGHPUT,
+        PIREUS_COST_RECIPROCAL_THROUGHPUT)
+    store
+}
+
+fn pmea_query_class(store: &TripleStore, class_id: i64) -> SparqlResult
+with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(class_id)))
+    sparql_execute(store, &query)
+}
+
+fn pmea_query_relation(
+    store: &TripleStore, subject: i64, predicate: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(subject), queryterm_iri(predicate),
+        queryterm_variable(0)))
+    sparql_execute(store, &query)
+}
+
+fn pmea_single_iri_relation_matches(
+    store: &TripleStore, subject: i64, predicate: i64, object: i64,
+) -> bool with Epistemic, Panic {
+    let count = store.triples.len().unwrap("triple count") as i64
+    var relation_count: i64 = 0
+    var exact_count: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let triple = store.triples[i]
+        if triple.subject == subject && triple.predicate == predicate &&
+            !triple.is_object_literal {
+            relation_count = relation_count + 1
+            if triple.object_iri == object { exact_count = exact_count + 1 }
+        }
+        i = i + 1
+    }
+    relation_count == 1 && exact_count == 1
+}
+
+fn pmea_iri_relation_contains(
+    store: &TripleStore, subject: i64, predicate: i64, object: i64,
+) -> bool with Epistemic, Panic {
+    let count = store.triples.len().unwrap("triple count") as i64
+    var i: i64 = 0
+    while i < count {
+        let triple = store.triples[i]
+        if triple.subject == subject && triple.predicate == predicate &&
+            !triple.is_object_literal && triple.object_iri == object {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn pmea_store_digest(store: &TripleStore) -> PireusMaterialEngineDigest
+with Mut, Panic, Div, Epistemic {
+    // TripleStore is append-only. The frozen base constructor and the fixed
+    // overlay call order therefore define the canonical serialization order.
+    var state = pmea_digest_add_i64(sha256_init(), 0x504d454153544f31)
+    let count = store.triples.len().unwrap("triple count") as i64
+    state = pmea_digest_add_i64(state, count)
+    var i: i64 = 0
+    while i < count {
+        let triple = store.triples[i as usize]
+        state = pmea_digest_add_i64(state, triple.subject)
+        state = pmea_digest_add_i64(state, triple.predicate)
+        state = pmea_digest_add_i64(state, triple.object_iri)
+        state = pmea_digest_add_i64(state, triple.object_literal)
+        state = pmea_digest_add_i64(state, f64_to_bits(triple.object_value))
+        state = pmea_digest_add_bool(state, triple.is_object_literal)
+        i = i + 1
+    }
+    pmea_digest_finish(state)
+}
+
+fn pmea_query_target_kind(
+    store: &TripleStore, target: i64, kind: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_HAS_TARGET),
+        queryterm_iri(target)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_MACHINE_HAS_ENGINE),
+        queryterm_variable(1)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1), queryterm_iri(PIREUS_ENGINE_HAS_KIND),
+        queryterm_iri(kind)))
+    sparql_execute(store, &query)
+}
+
+fn pmea_negative_value(
+    negatives: &PireusMaterialEngineNegatives, index: i64,
+) -> bool {
+    if index == 0 { return negatives.missing_garden_binding }
+    if index == 1 { return negatives.missing_or_mismatched_parent }
+    if index == 2 { return negatives.material_receipt_evidence_drift }
+    if index == 3 { return negatives.target_transplant }
+    if index == 4 { return negatives.locator_to_machine }
+    if index == 5 { return negatives.blueprint_without_execution }
+    if index == 6 { return negatives.apple_cpu_to_gpu }
+    if index == 7 { return negatives.metal_to_isa }
+    if index == 8 { return negatives.apple_receipt_to_dgx }
+    if index == 9 { return negatives.dgx_24_receipt_to_48 }
+    if index == 10 { return negatives.shared_label_sibling_identity }
+    if index == 11 { return negatives.dgx_gpu_to_cpu }
+    if index == 12 { return negatives.cuda_to_isa }
+    if index == 13 { return negatives.dgx_receipt_to_apple }
+    if index == 14 { return negatives.selector_to_whole_operation }
+    if index == 15 { return negatives.material_parity_to_semantic_authority }
+    if index == 16 { return negatives.static_evidence_to_execution }
+    if index == 17 { return negatives.engine_admission_to_cost }
+    if index == 18 { return negatives.engine_admission_to_comparability }
+    if index == 19 { return negatives.review_to_authority }
+    if index == 20 { return negatives.premature_parity_or_claim }
+    negatives.forbidden_producer_prelaunch
+}
+
+fn pmea_exercise_negatives(
+    parent_mask: i64, store: &TripleStore,
+) -> PireusMaterialEngineNegatives with Mut, Panic, Epistemic {
+    var values: [bool; 22] = [false; 22]
+    let apple_seed = pireus_material_engine_apple_candidate()
+    let dgx_seed = pireus_material_engine_dgx_24_candidate()
+
+    let missing_garden_mask = parent_mask & ~(1 << 0)
+    values[0] = pireus_material_engine_parent_error(missing_garden_mask) ==
+            PIREUS_MATERIAL_PARENT_ERR_GARDEN &&
+        !pireus_material_engine_candidate_valid(
+            &apple_seed, missing_garden_mask)
+    let missing_control_mask = parent_mask & ~(1 << 2)
+    values[1] = pireus_material_engine_parent_error(missing_control_mask) ==
+            PIREUS_MATERIAL_PARENT_ERR_CONTROL &&
+        !pireus_material_engine_candidate_valid(
+            &apple_seed, missing_control_mask)
+    var apple_binding = pireus_material_engine_apple_candidate()
+    apple_binding.evidence_id = PIREUS_EVIDENCE_DGX_PTX_SHFL
+    var dgx_binding = pireus_material_engine_dgx_24_candidate()
+    dgx_binding.hardware_id = PIREUS_HARDWARE_APPLE_MAC17_7
+    values[2] = !pmea_receipt_binding_valid(&apple_binding, parent_mask) &&
+        !pmea_receipt_binding_valid(&dgx_binding, parent_mask) &&
+        pireus_material_engine_parent_error(parent_mask & ~(1 << 8)) ==
+            PIREUS_MATERIAL_PARENT_ERR_APPLE_RECEIPT &&
+        pireus_material_engine_parent_error(parent_mask & ~(1 << 11)) ==
+            PIREUS_MATERIAL_PARENT_ERR_DGX_EVIDENCE
+
+    var apple = pireus_material_engine_apple_candidate()
+    apple.target_id = PIREUS_TARGET_DGX_SPARK
+    values[3] = !pireus_material_engine_candidate_valid(&apple, parent_mask)
+    apple = pireus_material_engine_apple_candidate()
+    apple.machine_id = PIREUS_LOCATOR_APPLE_TAILNET
+    values[4] = !pireus_material_engine_candidate_valid(&apple, parent_mask)
+    apple = pireus_material_engine_apple_candidate()
+    apple.blueprint_only = true
+    values[5] = !pireus_material_engine_candidate_valid(&apple, parent_mask)
+    apple = pireus_material_engine_apple_candidate()
+    apple.engine_kind = PIREUS_ENGINE_KIND_GPU
+    apple.isa_id = PIREUS_ENGINE_ISA_NVIDIA_SM121
+    values[6] = !pireus_material_engine_candidate_valid(&apple, parent_mask)
+    apple = pireus_material_engine_apple_candidate()
+    apple.isa_id = PIREUS_INTERFACE_METAL
+    values[7] = !pireus_material_engine_candidate_valid(&apple, parent_mask)
+    var dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.receipt_id = PIREUS_RECEIPT_APPLE_A64_TBL
+    dgx.evidence_id = PIREUS_EVIDENCE_APPLE_A64_TBL
+    dgx.hardware_id = PIREUS_HARDWARE_APPLE_MAC17_7
+    dgx.material_operation_id = PIREUS_MATERIAL_OPERATION_APPLE_A64_TBL
+    values[8] = !pireus_material_engine_candidate_valid(&dgx, parent_mask) &&
+        !pmea_iri_relation_contains(
+            store, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT,
+            PIREUS_RECEIPT_APPLE_A64_TBL)
+
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.locator_id = PIREUS_LOCATOR_DGX_48
+    values[9] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.machine_id = PIREUS_MUTATION_MACHINE_DGX_SIBLING
+    values[10] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.engine_kind = PIREUS_ENGINE_KIND_CPU
+    dgx.isa_id = PIREUS_ENGINE_ISA_AARCH64
+    dgx.interface_id = 0
+    values[11] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.isa_id = PIREUS_INTERFACE_CUDA
+    values[12] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    apple = pireus_material_engine_apple_candidate()
+    apple.receipt_id = PIREUS_RECEIPT_DGX_PTX_SHFL
+    apple.evidence_id = PIREUS_EVIDENCE_DGX_PTX_SHFL
+    apple.hardware_id = PIREUS_HARDWARE_DGX_SPARK_3C59
+    apple.material_operation_id = PIREUS_MATERIAL_OPERATION_DGX_SHFL_BFLY
+    values[13] = !pireus_material_engine_candidate_valid(&apple, parent_mask) &&
+        !pmea_iri_relation_contains(
+            store, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT,
+            PIREUS_RECEIPT_DGX_PTX_SHFL)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.whole_operation_covered = true
+    values[14] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.producer_role = PIREUS_MATERIAL_ROLE_SEMANTIC_AUTHORITY
+    values[15] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.material_execution_observed = false
+    values[16] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.cost_value_present = true
+    values[17] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.comparison_promoted = true
+    values[18] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.review_promoted = true
+    values[19] = !pireus_material_engine_candidate_valid(&dgx, parent_mask) &&
+        !pireus_material_engine_producer_launch_allowed(
+            PIREUS_MATERIAL_LANGUAGE_EXTERNAL_LLM)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.parity_open = true
+    dgx.claim_ready = true
+    values[20] = !pireus_material_engine_candidate_valid(&dgx, parent_mask)
+    dgx = pireus_material_engine_dgx_24_candidate()
+    dgx.producer_language = PIREUS_MATERIAL_LANGUAGE_PYTHON
+    var rust = pireus_material_engine_dgx_24_candidate()
+    rust.producer_language = PIREUS_MATERIAL_LANGUAGE_RUST
+    values[21] = !pireus_material_engine_candidate_valid(&dgx, parent_mask) &&
+        !pireus_material_engine_candidate_valid(&rust, parent_mask) &&
+        !pireus_material_engine_producer_launch_allowed(
+            PIREUS_MATERIAL_LANGUAGE_PYTHON) &&
+        !pireus_material_engine_producer_launch_allowed(
+            PIREUS_MATERIAL_LANGUAGE_RUST)
+
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < 22 {
+        if values[i as usize] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusMaterialEngineNegatives {
+        missing_garden_binding: values[0],
+        missing_or_mismatched_parent: values[1],
+        material_receipt_evidence_drift: values[2],
+        target_transplant: values[3], locator_to_machine: values[4],
+        blueprint_without_execution: values[5], apple_cpu_to_gpu: values[6],
+        metal_to_isa: values[7], apple_receipt_to_dgx: values[8],
+        dgx_24_receipt_to_48: values[9],
+        shared_label_sibling_identity: values[10],
+        dgx_gpu_to_cpu: values[11], cuda_to_isa: values[12],
+        dgx_receipt_to_apple: values[13],
+        selector_to_whole_operation: values[14],
+        material_parity_to_semantic_authority: values[15],
+        static_evidence_to_execution: values[16],
+        engine_admission_to_cost: values[17],
+        engine_admission_to_comparability: values[18],
+        review_to_authority: values[19],
+        premature_parity_or_claim: values[20],
+        forbidden_producer_prelaunch: values[21],
+        passed: passed, total: 22,
+    }
+}
+
+fn pmea_digest_candidate(
+    state: SHA256State, candidate: &PireusMaterialEngineCandidate,
+) -> SHA256State with Mut, Panic, Div {
+    var next = pmea_digest_add_i64(state, candidate.target_id)
+    next = pmea_digest_add_i64(next, candidate.locator_id)
+    next = pmea_digest_add_i64(next, candidate.machine_id)
+    next = pmea_digest_add_i64(next, candidate.engine_id)
+    next = pmea_digest_add_i64(next, candidate.engine_kind)
+    next = pmea_digest_add_i64(next, candidate.isa_id)
+    next = pmea_digest_add_i64(next, candidate.interface_id)
+    next = pmea_digest_add_i64(next, candidate.receipt_id)
+    next = pmea_digest_add_i64(next, candidate.evidence_id)
+    next = pmea_digest_add_i64(next, candidate.hardware_id)
+    next = pmea_digest_add_i64(next, candidate.material_operation_id)
+    next = pmea_digest_add_i64(next, candidate.producer_language)
+    next = pmea_digest_add_i64(next, candidate.producer_role)
+    next = pmea_digest_add_i64(next, candidate.semantic_authority_language)
+    next = pmea_digest_add_bool(next, candidate.parity_receipt_valid)
+    next = pmea_digest_add_bool(next, candidate.material_execution_observed)
+    next = pmea_digest_add_bool(next, candidate.blueprint_only)
+    next = pmea_digest_add_bool(next, candidate.selector_covered)
+    next = pmea_digest_add_bool(next, candidate.whole_operation_covered)
+    next = pmea_digest_add_bool(next, candidate.cost_value_present)
+    next = pmea_digest_add_bool(next, candidate.comparison_promoted)
+    next = pmea_digest_add_bool(next, candidate.review_promoted)
+    next = pmea_digest_add_bool(next, candidate.parity_open)
+    pmea_digest_add_bool(next, candidate.claim_ready)
+}
+
+fn pmea_digest_result(
+    parent_mask: i64,
+    apple: &PireusMaterialEngineCandidate,
+    dgx: &PireusMaterialEngineCandidate,
+    ontology_digest: &PireusMaterialEngineDigest,
+    counts: &[i64; 29], boundaries: &[bool; 13],
+    negatives: &PireusMaterialEngineNegatives,
+) -> PireusMaterialEngineDigest with Mut, Panic, Div {
+    // Canonical v1 order: tag, parents, Apple, DGX .24, .48 request,
+    // eligibility rows, ontology digest, counts, boundaries, then negatives.
+    var state = pmea_digest_add_i64(sha256_init(), 0x504d454130303031)
+    state = pmea_digest_add_i64(state, parent_mask)
+    state = pmea_digest_candidate(state, apple)
+    state = pmea_digest_candidate(state, dgx)
+    state = pmea_digest_add_i64(state, PIREUS_TARGET_DGX_SPARK)
+    state = pmea_digest_add_i64(state, PIREUS_LOCATOR_DGX_48)
+    state = pmea_digest_add_i64(state, PIREUS_IDENTITY_REQUEST_DGX_48)
+    state = pmea_digest_add_i64(state, PIREUS_IDENTITY_STATUS_UNRESOLVED)
+    let unresolved_machine_id: i64 = 0
+    let unresolved_engine_id: i64 = 0
+    state = pmea_digest_add_i64(state, unresolved_machine_id)
+    state = pmea_digest_add_i64(state, unresolved_engine_id)
+    let eligibility: [i64; 8] = [
+        PIREUS_ENGINE_CPU_APPLE_M5_MAX, PIREUS_COST_DEPENDENCY_LATENCY,
+        PIREUS_ENGINE_CPU_APPLE_M5_MAX, PIREUS_COST_RECIPROCAL_THROUGHPUT,
+        PIREUS_ENGINE_GPU_DGX_GB10, PIREUS_COST_DEPENDENCY_LATENCY,
+        PIREUS_ENGINE_GPU_DGX_GB10, PIREUS_COST_RECIPROCAL_THROUGHPUT,
+    ]
+    var i: i64 = 0
+    while i < 8 {
+        state = pmea_digest_add_i64(state, eligibility[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        state = pmea_digest_add_i64(
+            state, ontology_digest.words[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < 29 {
+        state = pmea_digest_add_i64(state, counts[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < 13 {
+        state = pmea_digest_add_bool(state, boundaries[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < 22 {
+        state = pmea_digest_add_bool(state, pmea_negative_value(negatives, i))
+        i = i + 1
+    }
+    state = pmea_digest_add_i64(state, negatives.passed)
+    state = pmea_digest_add_i64(state, negatives.total)
+    pmea_digest_finish(state)
+}
+
+pub fn pireus_material_engine_admission_evaluate(
+    parent_paths: &PireusMaterialEngineParentPaths,
+) -> PireusMaterialEngineAdmissionResult
+with IO, Mut, Panic, Div, Alloc, Epistemic {
+    let parent_mask = pmea_parent_match_mask(parent_paths)
+    var parent_count: i64 = 0
+    var i: i64 = 0
+    while i < PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT {
+        if pireus_material_engine_parent_file_matches(parent_mask, i) {
+            parent_count = parent_count + 1
+        }
+        i = i + 1
+    }
+    let parent_files_valid = pmea_all_parents_match(parent_mask)
+
+    var base = pireus_execution_engine_store()
+    let base_cluster = pireus_query_cluster_machines(&base)
+    let base_cpu = pireus_query_observed_engines_by(
+        &base, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU)
+    let base_gpu = pireus_query_observed_engines_by(
+        &base, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_GPU)
+    let base_darwin = pireus_query_observed_engines_for_target(
+        &base, PIREUS_TARGET_DARWIN_XEON)
+    let base_apple = pireus_query_observed_engines_for_target(
+        &base, PIREUS_TARGET_APPLE_SILICON)
+    let base_dgx = pireus_query_observed_engines_for_target(
+        &base, PIREUS_TARGET_DGX_SPARK)
+    let base_cluster_count = sparql_result_count(&base_cluster)
+    let base_cpu_count = sparql_result_count(&base_cpu)
+    let base_gpu_count = sparql_result_count(&base_gpu)
+    let base_darwin_count = sparql_result_count(&base_darwin)
+    let base_apple_count = sparql_result_count(&base_apple)
+    let base_dgx_count = sparql_result_count(&base_dgx)
+    let engine_parent_live = base_cluster_count == 5 &&
+        base_cpu_count == 5 && base_gpu_count == 4 &&
+        base_darwin_count == 9 && base_apple_count == 0 &&
+        base_dgx_count == 0 &&
+        pireus_material_engine_parent_file_matches(parent_mask, 1) &&
+        pireus_material_engine_parent_file_matches(parent_mask, 2) &&
+        pireus_material_engine_parent_file_matches(parent_mask, 3)
+    let cost_parent_hash_bound =
+        pireus_material_engine_parent_file_matches(parent_mask, 4) &&
+        pireus_material_engine_parent_file_matches(parent_mask, 5) &&
+        pireus_material_engine_parent_file_matches(parent_mask, 6) &&
+        pireus_material_engine_parent_file_matches(parent_mask, 7)
+
+    let apple = pireus_material_engine_apple_candidate()
+    let dgx = pireus_material_engine_dgx_24_candidate()
+    let apple_admitted = pireus_material_engine_candidate_valid(
+        &apple, parent_mask)
+    let dgx_admitted = pireus_material_engine_candidate_valid(
+        &dgx, parent_mask)
+
+    var overlay = pmea_overlay_store()
+    let overlay_cluster = pireus_query_cluster_machines(&overlay)
+    let overlay_cpu = pireus_query_observed_engines_by(
+        &overlay, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU)
+    let overlay_gpu = pireus_query_observed_engines_by(
+        &overlay, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_GPU)
+    let overlay_apple = pireus_query_observed_engines_for_target(
+        &overlay, PIREUS_TARGET_APPLE_SILICON)
+    let overlay_dgx = pireus_query_observed_engines_for_target(
+        &overlay, PIREUS_TARGET_DGX_SPARK)
+    let admitted_machines = pmea_query_class(
+        &overlay, PIREUS_CLASS_MATERIAL_ADMITTED_MACHINE)
+    let admitted_engines = pmea_query_class(
+        &overlay, PIREUS_CLASS_MATERIAL_ADMITTED_ENGINE)
+    let receipts = pmea_query_class(&overlay, PIREUS_CLASS_MATERIAL_RECEIPT)
+    let unresolved = pmea_query_class(
+        &overlay, PIREUS_CLASS_UNRESOLVED_IDENTITY_REQUEST)
+    let identity_requests = pmea_query_class(
+        &overlay, PIREUS_CLASS_IDENTITY_REQUEST)
+    let dgx_48_resolution = pmea_query_relation(
+        &overlay, PIREUS_LOCATOR_DGX_48, PIREUS_LOCATOR_RESOLVES_MACHINE)
+    let apple_gpu = pmea_query_target_kind(
+        &overlay, PIREUS_TARGET_APPLE_SILICON, PIREUS_ENGINE_KIND_GPU)
+    let dgx_cpu = pmea_query_target_kind(
+        &overlay, PIREUS_TARGET_DGX_SPARK, PIREUS_ENGINE_KIND_CPU)
+    let apple_eligibility = pmea_query_relation(
+        &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        PIREUS_ENGINE_HAS_COST_ELIGIBILITY)
+    let dgx_eligibility = pmea_query_relation(
+        &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+        PIREUS_ENGINE_HAS_COST_ELIGIBILITY)
+    let apple_interfaces = pmea_query_relation(
+        &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+        PIREUS_ENGINE_SUPPORTS_INTERFACE)
+
+    let overlay_cluster_count = sparql_result_count(&overlay_cluster)
+    let overlay_cpu_count = sparql_result_count(&overlay_cpu)
+    let overlay_gpu_count = sparql_result_count(&overlay_gpu)
+    let overlay_apple_count = sparql_result_count(&overlay_apple)
+    let overlay_dgx_count = sparql_result_count(&overlay_dgx)
+    let admitted_machine_count = sparql_result_count(&admitted_machines)
+    let admitted_engine_count = sparql_result_count(&admitted_engines)
+    let receipt_count = sparql_result_count(&receipts)
+    let unresolved_count = sparql_result_count(&unresolved)
+    let request_count = sparql_result_count(&identity_requests)
+    let dgx_48_resolution_count = sparql_result_count(&dgx_48_resolution)
+    let apple_gpu_count = sparql_result_count(&apple_gpu)
+    let dgx_cpu_count = sparql_result_count(&dgx_cpu)
+    let apple_eligibility_count = sparql_result_count(&apple_eligibility)
+    let dgx_eligibility_count = sparql_result_count(&dgx_eligibility)
+    let request_eligibility_count =
+        apple_eligibility_count + dgx_eligibility_count
+    let request_eligible_engine_count =
+        (if apple_eligibility_count == 2 { 1 } else { 0 }) +
+        (if dgx_eligibility_count == 2 { 1 } else { 0 })
+    let dgx_48_unresolved = unresolved_count == 1 && request_count == 1 &&
+        dgx_48_resolution_count == 0
+    let ontology_triples = triple_store_count(&overlay)
+    let ontology_digest = pmea_store_digest(&overlay)
+    let ontology_identity_valid =
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_LOCATOR_APPLE_TAILNET,
+            PIREUS_LOCATOR_FOR_TARGET, PIREUS_TARGET_APPLE_SILICON) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_LOCATOR_APPLE_TAILNET,
+            PIREUS_LOCATOR_RESOLVES_MACHINE,
+            PIREUS_MACHINE_APPLE_MAC17_7) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_MACHINE_APPLE_MAC17_7,
+            PIREUS_HAS_TARGET, PIREUS_TARGET_APPLE_SILICON) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE,
+            PIREUS_MACHINE_APPLE_MAC17_7) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_MACHINE_APPLE_MAC17_7,
+            PIREUS_MACHINE_HAS_ENGINE, PIREUS_ENGINE_CPU_APPLE_M5_MAX) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_IMPLEMENTS_ISA, PIREUS_ENGINE_ISA_AARCH64) &&
+        sparql_result_count(&apple_interfaces) == 0 &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT,
+            PIREUS_RECEIPT_APPLE_A64_TBL) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_MATERIAL_COVERS_SUBJECT,
+            PIREUS_MATERIAL_SUBJECT_XOR_SELECTOR) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_APPLE_A64_TBL,
+            PIREUS_RECEIPT_HAS_EVIDENCE, PIREUS_EVIDENCE_APPLE_A64_TBL) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_APPLE_A64_TBL,
+            PIREUS_RECEIPT_HAS_HARDWARE_IDENTITY,
+            PIREUS_HARDWARE_APPLE_MAC17_7) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_APPLE_A64_TBL,
+            PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_HAS_COST_ELIGIBILITY,
+            PIREUS_ELIGIBILITY_APPLE_LATENCY) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_ENGINE_CPU_APPLE_M5_MAX,
+            PIREUS_ENGINE_HAS_COST_ELIGIBILITY,
+            PIREUS_ELIGIBILITY_APPLE_THROUGHPUT) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ELIGIBILITY_APPLE_LATENCY,
+            PIREUS_ELIGIBILITY_HAS_QUANTITY,
+            PIREUS_COST_DEPENDENCY_LATENCY) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ELIGIBILITY_APPLE_THROUGHPUT,
+            PIREUS_ELIGIBILITY_HAS_QUANTITY,
+            PIREUS_COST_RECIPROCAL_THROUGHPUT) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_LOCATOR_DGX_24,
+            PIREUS_LOCATOR_FOR_TARGET, PIREUS_TARGET_DGX_SPARK) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_LOCATOR_DGX_24,
+            PIREUS_LOCATOR_RESOLVES_MACHINE,
+            PIREUS_MACHINE_DGX_SPARK_3C59) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_MACHINE_DGX_SPARK_3C59,
+            PIREUS_HAS_TARGET, PIREUS_TARGET_DGX_SPARK) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE,
+            PIREUS_MACHINE_DGX_SPARK_3C59) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_MACHINE_DGX_SPARK_3C59,
+            PIREUS_MACHINE_HAS_ENGINE, PIREUS_ENGINE_GPU_DGX_GB10) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_GPU) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_IMPLEMENTS_ISA,
+            PIREUS_ENGINE_ISA_NVIDIA_SM121) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_SUPPORTS_INTERFACE, PIREUS_INTERFACE_CUDA) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_MATERIALIZED_BY_RECEIPT,
+            PIREUS_RECEIPT_DGX_PTX_SHFL) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_MATERIAL_COVERS_SUBJECT,
+            PIREUS_MATERIAL_SUBJECT_XOR_SELECTOR) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_DGX_PTX_SHFL,
+            PIREUS_RECEIPT_HAS_EVIDENCE, PIREUS_EVIDENCE_DGX_PTX_SHFL) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_DGX_PTX_SHFL,
+            PIREUS_RECEIPT_HAS_HARDWARE_IDENTITY,
+            PIREUS_HARDWARE_DGX_SPARK_3C59) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_RECEIPT_DGX_PTX_SHFL,
+            PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_MATERIAL_PARITY) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_HAS_COST_ELIGIBILITY,
+            PIREUS_ELIGIBILITY_DGX_LATENCY) &&
+        pmea_iri_relation_contains(
+            &overlay, PIREUS_ENGINE_GPU_DGX_GB10,
+            PIREUS_ENGINE_HAS_COST_ELIGIBILITY,
+            PIREUS_ELIGIBILITY_DGX_THROUGHPUT) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ELIGIBILITY_DGX_LATENCY,
+            PIREUS_ELIGIBILITY_HAS_QUANTITY,
+            PIREUS_COST_DEPENDENCY_LATENCY) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_ELIGIBILITY_DGX_THROUGHPUT,
+            PIREUS_ELIGIBILITY_HAS_QUANTITY,
+            PIREUS_COST_RECIPROCAL_THROUGHPUT) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_LOCATOR_DGX_48,
+            PIREUS_LOCATOR_FOR_TARGET, PIREUS_TARGET_DGX_SPARK) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_IDENTITY_REQUEST_DGX_48,
+            PIREUS_IDENTITY_REQUEST_HAS_LOCATOR, PIREUS_LOCATOR_DGX_48) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_IDENTITY_REQUEST_DGX_48,
+            PIREUS_IDENTITY_REQUEST_HAS_STATUS,
+            PIREUS_IDENTITY_STATUS_UNRESOLVED) &&
+        pmea_single_iri_relation_matches(
+            &overlay, PIREUS_IDENTITY_REQUEST_DGX_48,
+            PIREUS_HAS_EVIDENCE_ROLE, PIREUS_EVIDENCE_IDENTITY_REQUEST)
+
+    let material_cost_values: i64 = 0
+    let whole_operation_coverage: i64 = 0
+    let comparisons: i64 = 0
+    let speedups: i64 = 0
+    let rankings: i64 = 0
+    let cross_target_comparable = false
+    let parity_open = false
+    let claim_ready = false
+    let negatives = pmea_exercise_negatives(parent_mask, &overlay)
+    let counts: [i64; 29] = [
+        parent_count, base_cluster_count, base_cpu_count, base_gpu_count,
+        base_darwin_count, base_apple_count, base_dgx_count,
+        overlay_cluster_count, overlay_cpu_count, overlay_gpu_count,
+        overlay_apple_count, overlay_dgx_count, admitted_machine_count,
+        admitted_engine_count, receipt_count, unresolved_count, request_count,
+        dgx_48_resolution_count, apple_gpu_count, dgx_cpu_count,
+        request_eligible_engine_count, request_eligibility_count,
+        ontology_triples, material_cost_values, whole_operation_coverage,
+        comparisons, speedups, rankings, negatives.passed,
+    ]
+    let boundaries: [bool; 13] = [
+        parent_files_valid, engine_parent_live, cost_parent_hash_bound,
+        apple_admitted, dgx_admitted, dgx_48_unresolved,
+        ontology_identity_valid,
+        apple_gpu_count == 0, dgx_cpu_count == 0,
+        material_cost_values == 0 && whole_operation_coverage == 0,
+        comparisons == 0 && speedups == 0 && rankings == 0,
+        !cross_target_comparable && !parity_open && !claim_ready,
+        negatives.passed == negatives.total,
+    ]
+    let digest = pmea_digest_result(
+        parent_mask, &apple, &dgx, &ontology_digest,
+        &counts, &boundaries, &negatives)
+
+    var error = PIREUS_MATERIAL_ENGINE_OK
+    if !parent_files_valid || !cost_parent_hash_bound {
+        error = PIREUS_MATERIAL_ENGINE_ERR_PARENT
+    } else if !engine_parent_live {
+        error = PIREUS_MATERIAL_ENGINE_ERR_BASE
+    } else if !apple_admitted || !dgx_admitted || !dgx_48_unresolved {
+        error = PIREUS_MATERIAL_ENGINE_ERR_ADMISSION
+    } else if overlay_cluster_count != base_cluster_count + admitted_machine_count ||
+        overlay_cpu_count != base_cpu_count + 1 ||
+        overlay_gpu_count != base_gpu_count + 1 ||
+        overlay_apple_count != 1 || overlay_dgx_count != 1 ||
+        admitted_machine_count != 2 || admitted_engine_count != 2 ||
+        receipt_count != 2 || unresolved_count != 1 || request_count != 1 ||
+        dgx_48_resolution_count != 0 || apple_gpu_count != 0 ||
+        dgx_cpu_count != 0 || request_eligible_engine_count != 2 ||
+        request_eligibility_count != 4 || !ontology_identity_valid ||
+        ontology_triples <= triple_store_count(&base) {
+        error = PIREUS_MATERIAL_ENGINE_ERR_ONTOLOGY
+    } else if negatives.passed != negatives.total || material_cost_values != 0 ||
+        whole_operation_coverage != 0 || comparisons != 0 || speedups != 0 ||
+        rankings != 0 || cross_target_comparable || parity_open || claim_ready {
+        error = PIREUS_MATERIAL_ENGINE_ERR_AUTHORITY
+    }
+    var failures: i64 = 0
+    if error != PIREUS_MATERIAL_ENGINE_OK { failures = failures + 1 }
+
+    PireusMaterialEngineAdmissionResult {
+        valid: error == PIREUS_MATERIAL_ENGINE_OK && failures == 0,
+        error: error,
+        parent_file_match_mask: parent_mask,
+        parent_file_match_count: parent_count,
+        parent_files_valid: parent_files_valid,
+        execution_engine_parent_snapshot_matches: engine_parent_live,
+        target_cost_parent_hash_bound: cost_parent_hash_bound,
+        base_cluster_machine_count: base_cluster_count,
+        base_cpu_engine_count: base_cpu_count,
+        base_gpu_engine_count: base_gpu_count,
+        base_darwin_engine_count: base_darwin_count,
+        base_apple_engine_count: base_apple_count,
+        base_dgx_engine_count: base_dgx_count,
+        overlay_cluster_machine_count: overlay_cluster_count,
+        overlay_cpu_engine_count: overlay_cpu_count,
+        overlay_gpu_engine_count: overlay_gpu_count,
+        overlay_apple_engine_count: overlay_apple_count,
+        overlay_dgx_engine_count: overlay_dgx_count,
+        admitted_machine_count: admitted_machine_count,
+        admitted_engine_count: admitted_engine_count,
+        material_receipt_count: receipt_count,
+        unresolved_identity_request_count: unresolved_count,
+        identity_request_count: request_count,
+        dgx_48_resolution_count: dgx_48_resolution_count,
+        apple_gpu_engine_count: apple_gpu_count,
+        dgx_cpu_engine_count: dgx_cpu_count,
+        cost_request_eligible_engine_count: request_eligible_engine_count,
+        cost_request_eligibility_count: request_eligibility_count,
+        apple_admitted: apple_admitted,
+        dgx_24_admitted: dgx_admitted,
+        dgx_48_unresolved: dgx_48_unresolved,
+        ontology_identity_binding_valid: ontology_identity_valid,
+        ontology_triple_count: ontology_triples,
+        ontology_digest: ontology_digest,
+        material_cost_value_count: material_cost_values,
+        whole_operation_coverage_count: whole_operation_coverage,
+        comparison_count: comparisons,
+        speedup_count: speedups,
+        ranking_count: rankings,
+        cross_target_comparable: cross_target_comparable,
+        parity_open: parity_open,
+        claim_ready: claim_ready,
+        result_digest: digest,
+        negatives: negatives,
+        failures: failures,
+    }
+}
+
+/// Exact predicate written only after the first post-Garden Sounio stream.
+pub fn pireus_material_engine_admission_matches_frozen_semantics(
+    result: &PireusMaterialEngineAdmissionResult,
+) -> bool with Mut, Panic {
+    if !result.valid || result.error != PIREUS_MATERIAL_ENGINE_OK ||
+        result.failures != 0 || !result.parent_files_valid ||
+        result.parent_file_match_count != 12 ||
+        !result.execution_engine_parent_snapshot_matches ||
+        !result.target_cost_parent_hash_bound {
+        return false
+    }
+    var i: i64 = 0
+    while i < PIREUS_MATERIAL_ENGINE_PARENT_FILE_COUNT {
+        if !pireus_material_engine_parent_file_matches(
+            result.parent_file_match_mask, i) {
+            return false
+        }
+        i = i + 1
+    }
+    if result.base_cluster_machine_count != 5 ||
+        result.base_cpu_engine_count != 5 ||
+        result.base_gpu_engine_count != 4 ||
+        result.base_darwin_engine_count != 9 ||
+        result.base_apple_engine_count != 0 ||
+        result.base_dgx_engine_count != 0 ||
+        result.overlay_cluster_machine_count != 7 ||
+        result.overlay_cpu_engine_count != 6 ||
+        result.overlay_gpu_engine_count != 5 ||
+        result.overlay_apple_engine_count != 1 ||
+        result.overlay_dgx_engine_count != 1 ||
+        result.admitted_machine_count != 2 ||
+        result.admitted_engine_count != 2 ||
+        result.material_receipt_count != 2 ||
+        result.unresolved_identity_request_count != 1 ||
+        result.identity_request_count != 1 ||
+        result.dgx_48_resolution_count != 0 ||
+        result.apple_gpu_engine_count != 0 ||
+        result.dgx_cpu_engine_count != 0 ||
+        result.cost_request_eligible_engine_count != 2 ||
+        result.cost_request_eligibility_count != 4 ||
+        !result.apple_admitted || !result.dgx_24_admitted ||
+        !result.dgx_48_unresolved ||
+        !result.ontology_identity_binding_valid ||
+        result.ontology_triple_count != 366 ||
+        result.material_cost_value_count != 0 ||
+        result.whole_operation_coverage_count != 0 ||
+        result.comparison_count != 0 || result.speedup_count != 0 ||
+        result.ranking_count != 0 || result.cross_target_comparable ||
+        result.parity_open || result.claim_ready {
+        return false
+    }
+    if result.negatives.passed != 22 || result.negatives.total != 22 ||
+        !result.negatives.missing_garden_binding ||
+        !result.negatives.missing_or_mismatched_parent ||
+        !result.negatives.material_receipt_evidence_drift ||
+        !result.negatives.target_transplant ||
+        !result.negatives.locator_to_machine ||
+        !result.negatives.blueprint_without_execution ||
+        !result.negatives.apple_cpu_to_gpu ||
+        !result.negatives.metal_to_isa ||
+        !result.negatives.apple_receipt_to_dgx ||
+        !result.negatives.dgx_24_receipt_to_48 ||
+        !result.negatives.shared_label_sibling_identity ||
+        !result.negatives.dgx_gpu_to_cpu ||
+        !result.negatives.cuda_to_isa ||
+        !result.negatives.dgx_receipt_to_apple ||
+        !result.negatives.selector_to_whole_operation ||
+        !result.negatives.material_parity_to_semantic_authority ||
+        !result.negatives.static_evidence_to_execution ||
+        !result.negatives.engine_admission_to_cost ||
+        !result.negatives.engine_admission_to_comparability ||
+        !result.negatives.review_to_authority ||
+        !result.negatives.premature_parity_or_claim ||
+        !result.negatives.forbidden_producer_prelaunch {
+        return false
+    }
+    let expected_ontology: [i64; 8] = [
+        2058720326, 8114423, 2692954918, 39064,
+        264032718, 2437098100, 4195323016, 150194624,
+    ]
+    let expected_result: [i64; 8] = [
+        1987781134, 3449544734, 2538874717, 3559779810,
+        1021512403, 1875438742, 1937396250, 2579435395,
+    ]
+    pmea_hash_equal(&result.ontology_digest.words, &expected_ontology) &&
+        pmea_hash_equal(&result.result_digest.words, &expected_result)
+}

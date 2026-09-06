@@ -1,0 +1,1098 @@
+//@ module hardware::pireus::intel_vpermpd_semantics
+//! Bounded Sounio-owned probe for the pinned Intel SDM Volume 2C bytes.
+
+use crypto::sha256::{
+    SHA256Digest, sha256_init, sha256_update, sha256_finalize,
+}
+use compress::inflate::{
+    SounioInflateInput, SounioInflateResult,
+    SOUNIO_INFLATE_OK,
+    SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY,
+    SOUNIO_INFLATE_INPUT_CAPACITY,
+    sounio_inflate_zlib,
+}
+use hardware::pireus::xor_material_matching::{
+    pireus_xor_material_evaluate,
+    pireus_xor_material_matches_frozen_semantics,
+}
+
+pub const PIREUS_INTEL_PDF_OK: i64 = 0
+pub const PIREUS_INTEL_PDF_ERR_FILE: i64 = 1
+pub const PIREUS_INTEL_PDF_ERR_LENGTH: i64 = 2
+pub const PIREUS_INTEL_PDF_ERR_HASH: i64 = 3
+pub const PIREUS_INTEL_PDF_ERR_HEADER: i64 = 4
+pub const PIREUS_INTEL_PDF_ERR_EOF: i64 = 5
+pub const PIREUS_INTEL_PDF_ERR_STARTXREF: i64 = 6
+pub const PIREUS_INTEL_PDF_ERR_SEMANTIC_ANCHOR: i64 = 7
+pub const PIREUS_INTEL_PDF_ERR_PARENT: i64 = 8
+pub const PIREUS_INTEL_PDF_ERR_SELECTOR_MATCH: i64 = 9
+
+pub const PIREUS_INTEL_PDF_EXPECTED_BYTES: i64 = 3298744
+pub const PIREUS_INTEL_PDF_FILE_CAPACITY: i64 = 3400000
+
+const PIREUS_INTEL_PDF_FILE_WORDS: i64 = 425000
+
+var PIREUS_INTEL_PDF_WORDS: [i64; 425000]
+var PIREUS_INTEL_ANCHOR_STREAM: [i64; 262144]
+var PIREUS_INTEL_ANCHOR_STREAM_LEN: i64 = 0
+var PIREUS_INTEL_ANCHOR_TEXT: [i64; 131072]
+var PIREUS_INTEL_ANCHOR_TEXT_LEN: i64 = 0
+
+pub struct PireusIntelPdfProbe {
+    pub error: i64,
+    pub total_bytes: i64,
+    pub digest_match: bool,
+    pub header_match: bool,
+    pub eof_offset: i64,
+    pub startxref_marker: i64,
+    pub startxref_offset: i64,
+    pub startxref_classic: bool,
+    pub startxref_indirect_object: bool,
+    pub xref_token_count: i64,
+    pub type_xref_count: i64,
+    pub object_stream_count: i64,
+    pub flate_decode_count: i64,
+    pub encrypt_count: i64,
+    pub raw_vpermpd_count: i64,
+    pub raw_vpermi2pd_count: i64,
+    pub raw_vpermt2pd_count: i64,
+    pub stream_markers: i64,
+    pub direct_length_streams: i64,
+    pub indirect_or_unknown_length_streams: i64,
+    pub flate_streams: i64,
+    pub decodable_flate_streams: i64,
+    pub decoded_flate_streams: i64,
+    pub oversized_flate_inputs: i64,
+    pub oversized_flate_outputs: i64,
+    pub oversized_output_stream_offset: i64,
+    pub oversized_output_object_stream: bool,
+    pub oversized_output_xref: bool,
+    pub oversized_output_image: bool,
+    pub oversized_output_font: bool,
+    pub oversized_output_content_candidate: bool,
+    pub flate_decode_failures: i64,
+    pub decoded_bytes: i64,
+    pub decoded_vpermpd_count: i64,
+    pub decoded_vpermi2pd_count: i64,
+    pub decoded_vpermt2pd_count: i64,
+    pub first_vpermpd_stream_offset: i64,
+    pub vpermpd_streams: i64,
+    pub operation_streams: i64,
+    pub first_operation_stream_offset: i64,
+    pub description_page_matches: i64,
+    pub vector_form_matches: i64,
+    pub description_selector_rule_matches: i64,
+    pub operation_page_matches: i64,
+    pub operation_vector_form_matches: i64,
+    pub operation_selector_cells: i64,
+}
+
+pub struct PireusIntelVpermpdResult {
+    pub valid: bool,
+    pub error: i64,
+    pub pdf: PireusIntelPdfProbe,
+    pub parent_valid: bool,
+    pub selector_semantics_receipt_present: bool,
+    pub vector_bits: i64,
+    pub element_bits: i64,
+    pub index_element_bits: i64,
+    pub selector_bits: i64,
+    pub selector_mask: i64,
+    pub source_lanes: i64,
+    pub semantic_formula_cells: i64,
+    pub xor_selector_cells: i64,
+    pub xor_selector_matches: i64,
+    pub xor_selector_failures: i64,
+    pub abstract_form_applications: i64,
+    pub vector_control_complete: bool,
+    pub imm8_patterns_tested: i64,
+    pub imm8_patterns_supported: i64,
+    pub imm8_patterns_refused: i64,
+    pub imm8_complete: bool,
+    pub one_source_form_sufficient: bool,
+    pub two_source_form_required: bool,
+    pub instruction_match_authorized: bool,
+    pub material_observation_count: i64,
+    pub lowering_count: i64,
+    pub cost_record_count: i64,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub negative_witnesses_passed: i64,
+    pub negative_witnesses_total: i64,
+    pub failures: i64,
+}
+
+fn intel_pdf_probe_empty() -> PireusIntelPdfProbe {
+    PireusIntelPdfProbe {
+        error: PIREUS_INTEL_PDF_OK,
+        total_bytes: 0,
+        digest_match: false,
+        header_match: false,
+        eof_offset: 0 - 1,
+        startxref_marker: 0 - 1,
+        startxref_offset: 0 - 1,
+        startxref_classic: false,
+        startxref_indirect_object: false,
+        xref_token_count: 0,
+        type_xref_count: 0,
+        object_stream_count: 0,
+        flate_decode_count: 0,
+        encrypt_count: 0,
+        raw_vpermpd_count: 0,
+        raw_vpermi2pd_count: 0,
+        raw_vpermt2pd_count: 0,
+        stream_markers: 0,
+        direct_length_streams: 0,
+        indirect_or_unknown_length_streams: 0,
+        flate_streams: 0,
+        decodable_flate_streams: 0,
+        decoded_flate_streams: 0,
+        oversized_flate_inputs: 0,
+        oversized_flate_outputs: 0,
+        oversized_output_stream_offset: 0 - 1,
+        oversized_output_object_stream: false,
+        oversized_output_xref: false,
+        oversized_output_image: false,
+        oversized_output_font: false,
+        oversized_output_content_candidate: false,
+        flate_decode_failures: 0,
+        decoded_bytes: 0,
+        decoded_vpermpd_count: 0,
+        decoded_vpermi2pd_count: 0,
+        decoded_vpermt2pd_count: 0,
+        first_vpermpd_stream_offset: 0 - 1,
+        vpermpd_streams: 0,
+        operation_streams: 0,
+        first_operation_stream_offset: 0 - 1,
+        description_page_matches: 0,
+        vector_form_matches: 0,
+        description_selector_rule_matches: 0,
+        operation_page_matches: 0,
+        operation_vector_form_matches: 0,
+        operation_selector_cells: 0,
+    }
+}
+
+pub fn pireus_intel_pdf_expected_sha256() -> string {
+    "939c9543ff98eefb80f5c5a517bf6f08e864497ea8e032334849f3e39a7b3b07"
+}
+
+pub fn pireus_intel_material_semantics_sha256() -> string {
+    "b4791514032859acc0e8888c4d35760f549a6267e02b2cd5f30a96c0b9dee554"
+}
+
+pub fn pireus_intel_material_receipt_sha256() -> string {
+    "cc157a7d6ba33b945bc9537be1856bf60481573067ade5f166101ca36a98c1df"
+}
+
+pub fn pireus_intel_pdf_byte(index: i64) -> i64 with Panic, Div {
+    if index < 0 || index >= PIREUS_INTEL_PDF_FILE_CAPACITY { return 0 - 1 }
+    let word = PIREUS_INTEL_PDF_WORDS[(index / 8) as usize]
+    (word >> ((index % 8) * 8)) & 255
+}
+
+fn intel_pdf_space(code: i64) -> bool {
+    code == 0 || code == 9 || code == 10 || code == 12 ||
+        code == 13 || code == 32
+}
+
+fn intel_pdf_match(limit: i64, start: i64, needle: string) -> bool
+with Mut, Panic, Div {
+    let n = str_len(needle)
+    if start < 0 || start + n > limit { return false }
+    var i: i64 = 0
+    while i < n {
+        if pireus_intel_pdf_byte(start + i) != str_char_at(needle, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn intel_pdf_find_last(limit: i64, needle: string) -> i64
+with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n <= 0 || n > limit { return 0 - 1 }
+    var pos = limit - n
+    while pos >= 0 {
+        if intel_pdf_match(limit, pos, needle) { return pos }
+        pos = pos - 1
+    }
+    0 - 1
+}
+
+fn intel_pdf_count(limit: i64, needle: string) -> i64
+with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n <= 0 || n > limit { return 0 }
+    var count: i64 = 0
+    var pos: i64 = 0
+    while pos + n <= limit {
+        if intel_pdf_match(limit, pos, needle) {
+            count = count + 1
+            pos = pos + n
+        } else {
+            pos = pos + 1
+        }
+    }
+    count
+}
+
+fn intel_pdf_count_range(start: i64, end: i64, needle: string) -> i64
+with Mut, Panic, Div {
+    let n = str_len(needle)
+    if start < 0 || end < start || n <= 0 || start + n > end { return 0 }
+    var count: i64 = 0
+    var pos = start
+    while pos + n <= end {
+        if intel_pdf_match(end, pos, needle) {
+            count = count + 1
+            pos = pos + n
+        } else {
+            pos = pos + 1
+        }
+    }
+    count
+}
+
+fn intel_pdf_skip_space(limit: i64, start: i64) -> i64
+with Panic, Div {
+    var pos = start
+    while pos < limit && intel_pdf_space(pireus_intel_pdf_byte(pos)) {
+        pos = pos + 1
+    }
+    pos
+}
+
+fn intel_pdf_parse_uint(limit: i64, start: i64) -> (i64, i64, i64)
+with Panic, Div {
+    var pos = intel_pdf_skip_space(limit, start)
+    var value: i64 = 0
+    var digits: i64 = 0
+    while pos < limit {
+        let code = pireus_intel_pdf_byte(pos)
+        if code < 48 || code > 57 { break }
+        value = value * 10 + code - 48
+        digits = digits + 1
+        pos = pos + 1
+    }
+    if digits == 0 { return (0, 0, start) }
+    (1, value, pos)
+}
+
+fn intel_pdf_indirect_object_at(limit: i64, start: i64) -> bool
+with Mut, Panic, Div {
+    let (object_ok, object, after_object) = intel_pdf_parse_uint(limit, start)
+    if object_ok != 1 || object <= 0 { return false }
+    let (generation_ok, generation, after_generation) =
+        intel_pdf_parse_uint(limit, after_object)
+    if generation_ok != 1 || generation < 0 { return false }
+    let keyword = intel_pdf_skip_space(limit, after_generation)
+    intel_pdf_match(limit, keyword, "obj")
+}
+
+fn intel_pdf_dictionary_before(limit: i64, stream: i64) -> (i64, i64, i64)
+with Panic, Div {
+    var end = stream
+    while end > 0 && intel_pdf_space(pireus_intel_pdf_byte(end - 1)) {
+        end = end - 1
+    }
+    if end < 2 || pireus_intel_pdf_byte(end - 2) != 62 ||
+        pireus_intel_pdf_byte(end - 1) != 62 {
+        return (0, 0, 0)
+    }
+    var depth: i64 = 1
+    var pos = end - 3
+    while pos >= 1 {
+        let left = pireus_intel_pdf_byte(pos - 1)
+        let right = pireus_intel_pdf_byte(pos)
+        if left == 62 && right == 62 {
+            depth = depth + 1
+            pos = pos - 2
+        } else {
+            if left == 60 && right == 60 {
+                depth = depth - 1
+                if depth == 0 { return (1, pos - 1, end) }
+                pos = pos - 2
+            } else {
+                pos = pos - 1
+            }
+        }
+    }
+    (0, 0, 0)
+}
+
+fn intel_pdf_find_range(start: i64, end: i64, needle: string) -> i64
+with Mut, Panic, Div {
+    let n = str_len(needle)
+    if start < 0 || end < start || n <= 0 { return 0 - 1 }
+    var pos = start
+    while pos + n <= end {
+        if intel_pdf_match(end, pos, needle) { return pos }
+        pos = pos + 1
+    }
+    0 - 1
+}
+
+fn intel_pdf_direct_length(dict_start: i64, dict_end: i64) -> (i64, i64)
+with Mut, Panic, Div {
+    let key = intel_pdf_find_range(dict_start, dict_end, "/Length")
+    if key < 0 { return (0, 0) }
+    let (ok, length, after) = intel_pdf_parse_uint(dict_end, key + 7)
+    if ok != 1 || length <= 0 { return (0, 0) }
+    let next = intel_pdf_skip_space(dict_end, after)
+    if next < dict_end {
+        let code = pireus_intel_pdf_byte(next)
+        if code >= 48 && code <= 57 { return (0, 0) }
+    }
+    (1, length)
+}
+
+fn intel_pdf_stream_payload_start(limit: i64, stream: i64) -> i64
+with Mut, Panic, Div {
+    if !intel_pdf_match(limit, stream, "stream") { return 0 - 1 }
+    if stream > 0 {
+        let before = pireus_intel_pdf_byte(stream - 1)
+        if !intel_pdf_space(before) && before != 62 { return 0 - 1 }
+    }
+    let after = stream + 6
+    if after >= limit { return 0 - 1 }
+    let code = pireus_intel_pdf_byte(after)
+    if code == 13 && after + 1 < limit &&
+        pireus_intel_pdf_byte(after + 1) == 10 {
+        return after + 2
+    }
+    if code == 10 || code == 13 { return after + 1 }
+    0 - 1
+}
+
+fn intel_inflate_result_empty() -> SounioInflateResult {
+    SounioInflateResult {
+        bytes: [0; 262144],
+        error: 0,
+        input_bytes: 0,
+        output_bytes: 0,
+        blocks: 0,
+        stored_blocks: 0,
+        fixed_blocks: 0,
+        dynamic_blocks: 0,
+        literals: 0,
+        copies: 0,
+        max_distance: 0,
+        checksum_match: false,
+    }
+}
+
+fn intel_inflate_count(
+    result: &SounioInflateResult,
+    needle: string,
+) -> i64 with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n <= 0 || n > result.output_bytes { return 0 }
+    var count: i64 = 0
+    var pos: i64 = 0
+    while pos + n <= result.output_bytes {
+        var same = true
+        var i: i64 = 0
+        while i < n {
+            if result.bytes[(pos + i) as usize] != str_char_at(needle, i) {
+                same = false
+                break
+            }
+            i = i + 1
+        }
+        if same {
+            count = count + 1
+            pos = pos + n
+        } else {
+            pos = pos + 1
+        }
+    }
+    count
+}
+
+fn intel_anchor_text_push(code: i64) with Mut, Panic {
+    if PIREUS_INTEL_ANCHOR_TEXT_LEN >= 131072 { return }
+    PIREUS_INTEL_ANCHOR_TEXT[PIREUS_INTEL_ANCHOR_TEXT_LEN as usize] = code
+    PIREUS_INTEL_ANCHOR_TEXT_LEN = PIREUS_INTEL_ANCHOR_TEXT_LEN + 1
+}
+
+fn intel_anchor_text_newline() with Mut, Panic {
+    if PIREUS_INTEL_ANCHOR_TEXT_LEN == 0 ||
+        PIREUS_INTEL_ANCHOR_TEXT[(PIREUS_INTEL_ANCHOR_TEXT_LEN - 1) as usize] != 10 {
+        intel_anchor_text_push(10)
+    }
+}
+
+fn intel_anchor_project_literal(start: i64) -> i64 with Mut, Panic {
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < PIREUS_INTEL_ANCHOR_STREAM_LEN && depth > 0 {
+        let code = PIREUS_INTEL_ANCHOR_STREAM[pos as usize]
+        if code == 92 {
+            pos = pos + 1
+            if pos >= PIREUS_INTEL_ANCHOR_STREAM_LEN { break }
+            let escaped = PIREUS_INTEL_ANCHOR_STREAM[pos as usize]
+            if escaped == 10 {
+                pos = pos + 1
+            } else {
+                if escaped == 13 {
+                    pos = pos + 1
+                    if pos < PIREUS_INTEL_ANCHOR_STREAM_LEN &&
+                        PIREUS_INTEL_ANCHOR_STREAM[pos as usize] == 10 {
+                        pos = pos + 1
+                    }
+                } else {
+                    if escaped >= 48 && escaped <= 55 {
+                        var value = escaped - 48
+                        var digits: i64 = 1
+                        pos = pos + 1
+                        while digits < 3 && pos < PIREUS_INTEL_ANCHOR_STREAM_LEN {
+                            let next = PIREUS_INTEL_ANCHOR_STREAM[pos as usize]
+                            if next < 48 || next > 55 { break }
+                            value = value * 8 + next - 48
+                            digits = digits + 1
+                            pos = pos + 1
+                        }
+                        intel_anchor_text_push(value)
+                    } else {
+                        if escaped == 110 { intel_anchor_text_push(10) }
+                        else {
+                            if escaped == 114 { intel_anchor_text_push(13) }
+                            else {
+                                if escaped == 116 { intel_anchor_text_push(9) }
+                                else {
+                                    if escaped == 98 { intel_anchor_text_push(8) }
+                                    else {
+                                        if escaped == 102 { intel_anchor_text_push(12) }
+                                        else { intel_anchor_text_push(escaped) }
+                                    }
+                                }
+                            }
+                        }
+                        pos = pos + 1
+                    }
+                }
+            }
+        } else {
+            if code == 40 {
+                depth = depth + 1
+                intel_anchor_text_push(code)
+                pos = pos + 1
+            } else {
+                if code == 41 {
+                    depth = depth - 1
+                    if depth > 0 { intel_anchor_text_push(code) }
+                    pos = pos + 1
+                } else {
+                    intel_anchor_text_push(code)
+                    pos = pos + 1
+                }
+            }
+        }
+    }
+    pos
+}
+
+fn intel_project_anchor_stream_text() with Mut, Panic {
+    PIREUS_INTEL_ANCHOR_TEXT_LEN = 0
+    var pos: i64 = 0
+    while pos < PIREUS_INTEL_ANCHOR_STREAM_LEN {
+        let code = PIREUS_INTEL_ANCHOR_STREAM[pos as usize]
+        if code == 40 {
+            pos = intel_anchor_project_literal(pos)
+        } else {
+            if code == 84 && pos + 1 < PIREUS_INTEL_ANCHOR_STREAM_LEN {
+                let next = PIREUS_INTEL_ANCHOR_STREAM[(pos + 1) as usize]
+                if next == 106 || next == 74 {
+                    intel_anchor_text_newline()
+                    pos = pos + 2
+                } else {
+                    pos = pos + 1
+                }
+            } else {
+                if code == 69 && pos + 1 < PIREUS_INTEL_ANCHOR_STREAM_LEN &&
+                    PIREUS_INTEL_ANCHOR_STREAM[(pos + 1) as usize] == 84 {
+                    intel_anchor_text_newline()
+                    pos = pos + 2
+                } else {
+                    pos = pos + 1
+                }
+            }
+        }
+    }
+}
+
+fn intel_anchor_compact_count(needle: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(needle)
+    if n <= 0 { return 0 }
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < PIREUS_INTEL_ANCHOR_TEXT_LEN {
+        let start_code = PIREUS_INTEL_ANCHOR_TEXT[start as usize]
+        if start_code == 0 || start_code == 9 || start_code == 10 ||
+            start_code == 12 || start_code == 13 || start_code == 32 {
+            start = start + 1
+            continue
+        }
+        var pos = start
+        var at: i64 = 0
+        while pos < PIREUS_INTEL_ANCHOR_TEXT_LEN && at < n {
+            let code = PIREUS_INTEL_ANCHOR_TEXT[pos as usize]
+            if code == 0 || code == 9 || code == 10 || code == 12 ||
+                code == 13 || code == 32 {
+                pos = pos + 1
+            } else {
+                if code != str_char_at(needle, at) { break }
+                at = at + 1
+                pos = pos + 1
+            }
+        }
+        if at == n { count = count + 1 }
+        start = start + 1
+    }
+    count
+}
+
+fn intel_project_candidate_stream(result: &SounioInflateResult) with Mut, Panic {
+    PIREUS_INTEL_ANCHOR_STREAM_LEN = result.output_bytes
+    var i: i64 = 0
+    while i < result.output_bytes {
+        PIREUS_INTEL_ANCHOR_STREAM[i as usize] = result.bytes[i as usize]
+        i = i + 1
+    }
+    intel_project_anchor_stream_text()
+}
+
+fn intel_pdf_scan_flate(
+    size: i64,
+    probe: &!PireusIntelPdfProbe,
+) with Mut, Panic, Div {
+    var input = SounioInflateInput { bytes: [0; 65536] }
+    var result = intel_inflate_result_empty()
+    PIREUS_INTEL_ANCHOR_STREAM_LEN = 0
+    PIREUS_INTEL_ANCHOR_TEXT_LEN = 0
+    var pos: i64 = 0
+    while pos + 6 <= size {
+        let payload = intel_pdf_stream_payload_start(size, pos)
+        if payload < 0 {
+            pos = pos + 1
+        } else {
+            probe.stream_markers = probe.stream_markers + 1
+            let (dict_ok, dict_start, dict_end) =
+                intel_pdf_dictionary_before(size, pos)
+            if dict_ok != 1 {
+                probe.indirect_or_unknown_length_streams =
+                    probe.indirect_or_unknown_length_streams + 1
+                pos = payload
+            } else {
+                let flate = intel_pdf_count_range(
+                    dict_start, dict_end, "/FlateDecode") > 0
+                if flate { probe.flate_streams = probe.flate_streams + 1 }
+                let (length_ok, length) =
+                    intel_pdf_direct_length(dict_start, dict_end)
+                if length_ok != 1 || payload + length > size {
+                    probe.indirect_or_unknown_length_streams =
+                        probe.indirect_or_unknown_length_streams + 1
+                    pos = payload
+                } else {
+                    probe.direct_length_streams =
+                        probe.direct_length_streams + 1
+                    let after_payload = intel_pdf_skip_space(size, payload + length)
+                    if flate && intel_pdf_match(size, after_payload, "endstream") {
+                        if length > SOUNIO_INFLATE_INPUT_CAPACITY {
+                            probe.oversized_flate_inputs =
+                                probe.oversized_flate_inputs + 1
+                        } else {
+                            probe.decodable_flate_streams =
+                                probe.decodable_flate_streams + 1
+                            var i: i64 = 0
+                            while i < length {
+                                input.bytes[i as usize] =
+                                    pireus_intel_pdf_byte(payload + i)
+                                i = i + 1
+                            }
+                            sounio_inflate_zlib(&input, length, &!result)
+                            if result.error == SOUNIO_INFLATE_OK {
+                                probe.decoded_flate_streams =
+                                    probe.decoded_flate_streams + 1
+                                probe.decoded_bytes = probe.decoded_bytes +
+                                    result.output_bytes
+                                let vpermpd = intel_inflate_count(&result, "VPERMPD")
+                                let vpermi2pd = intel_inflate_count(&result, "VPERMI2PD")
+                                let vpermt2pd = intel_inflate_count(&result, "VPERMT2PD")
+                                intel_project_candidate_stream(&result)
+                                let projected_page_5_524 =
+                                    intel_anchor_compact_count("Vol.2C5-524")
+                                let projected_page_5_522 =
+                                    intel_anchor_compact_count("Vol.2C5-522")
+                                if projected_page_5_522 > 0 {
+                                    probe.description_page_matches =
+                                        probe.description_page_matches +
+                                        projected_page_5_522
+                                    probe.vector_form_matches =
+                                        probe.vector_form_matches +
+                                        intel_anchor_compact_count(
+                                            "EVEX.512.66.0F38.W116/rVPERMPDzmm1{k1}{z},zmm2,zmm3/m512/m64bcst")
+                                    probe.description_selector_rule_matches =
+                                        probe.description_selector_rule_matches +
+                                        intel_anchor_compact_count(
+                                            "Thefirst3bitsofeach64bitelementintheindexoperandselectswhichquadwordinthesecondsourceoperandtocopy.")
+                                }
+                                if projected_page_5_524 > 0 {
+                                    probe.operation_page_matches =
+                                        probe.operation_page_matches +
+                                        projected_page_5_524
+                                    probe.operation_vector_form_matches =
+                                        probe.operation_vector_form_matches +
+                                        intel_anchor_compact_count(
+                                            "VPERMPD(EVEX-vectorcontrolforms)")
+                                    probe.operation_selector_cells =
+                                        probe.operation_selector_cells +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[63:0]:=(TMP_SRC2[511:0]>>(SRC1[2:0]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[127:64]:=(TMP_SRC2[511:0]>>(SRC1[66:64]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[191:128]:=(TMP_SRC2[511:0]>>(SRC1[130:128]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[255:192]:=(TMP_SRC2[511:0]>>(SRC1[194:192]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[319:256]:=(TMP_SRC2[511:0]>>(SRC1[258:256]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[383:320]:=(TMP_SRC2[511:0]>>(SRC1[322:320]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[447:384]:=(TMP_SRC2[511:0]>>(SRC1[386:384]*64))[63:0];") +
+                                        intel_anchor_compact_count(
+                                            "TMP_DEST[511:448]:=(TMP_SRC2[511:0]>>(SRC1[450:448]*64))[63:0];")
+                                }
+                                if projected_page_5_524 > 0 &&
+                                    probe.operation_streams == 0 {
+                                    probe.operation_streams =
+                                        probe.operation_streams + 1
+                                    if probe.first_operation_stream_offset < 0 {
+                                        probe.first_operation_stream_offset = pos
+                                    }
+                                }
+                                probe.decoded_vpermpd_count =
+                                    probe.decoded_vpermpd_count + vpermpd
+                                probe.decoded_vpermi2pd_count =
+                                    probe.decoded_vpermi2pd_count + vpermi2pd
+                                probe.decoded_vpermt2pd_count =
+                                    probe.decoded_vpermt2pd_count + vpermt2pd
+                                if vpermpd > 0 &&
+                                    probe.first_vpermpd_stream_offset < 0 {
+                                    probe.first_vpermpd_stream_offset = pos
+                                }
+                                if vpermpd > 0 {
+                                    probe.vpermpd_streams = probe.vpermpd_streams + 1
+                                }
+                            } else {
+                                if result.error == SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY {
+                                    probe.oversized_flate_outputs =
+                                        probe.oversized_flate_outputs + 1
+                                    probe.oversized_output_stream_offset = pos
+                                    probe.oversized_output_object_stream =
+                                        intel_pdf_count_range(
+                                            dict_start, dict_end, "/ObjStm") > 0
+                                    probe.oversized_output_xref =
+                                        intel_pdf_count_range(
+                                            dict_start, dict_end, "/XRef") > 0
+                                    probe.oversized_output_image =
+                                        intel_pdf_count_range(
+                                            dict_start, dict_end, "/Image") > 0
+                                    probe.oversized_output_font =
+                                        intel_pdf_count_range(
+                                            dict_start, dict_end, "/FontFile") > 0
+                                    probe.oversized_output_content_candidate =
+                                        !probe.oversized_output_object_stream &&
+                                        !probe.oversized_output_xref &&
+                                        !probe.oversized_output_image &&
+                                        !probe.oversized_output_font
+                                } else {
+                                    probe.flate_decode_failures =
+                                        probe.flate_decode_failures + 1
+                                }
+                            }
+                        }
+                    }
+                    pos = payload + length
+                }
+            }
+        }
+    }
+}
+
+fn intel_pdf_digest(size: i64) -> SHA256Digest with Mut, Panic, Div {
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var chunk: [u8; 256] = [0; 256]
+        var n = size - pos
+        if n > 256 { n = 256 }
+        var i: i64 = 0
+        while i < n {
+            chunk[i as usize] = pireus_intel_pdf_byte(pos + i) as u8
+            i = i + 1
+        }
+        state = sha256_update(state, chunk, n as i32)
+        pos = pos + n
+    }
+    sha256_finalize(state)
+}
+
+fn intel_pdf_digest_matches(digest: &SHA256Digest) -> bool with Panic {
+    let expected: [i64; 32] = [
+        0x93, 0x9c, 0x95, 0x43, 0xff, 0x98, 0xee, 0xfb,
+        0x80, 0xf5, 0xc5, 0xa5, 0x17, 0xbf, 0x6f, 0x08,
+        0xe8, 0x64, 0x49, 0x7e, 0xa8, 0xe0, 0x32, 0x33,
+        0x48, 0x49, 0xf3, 0xe3, 0x9a, 0x7b, 0x3b, 0x07
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn pireus_intel_pdf_probe(path: string) -> PireusIntelPdfProbe
+with IO, Mut, Panic, Div, Alloc {
+    var probe = intel_pdf_probe_empty()
+    let size = file_size(path)
+    probe.total_bytes = size
+    if size <= 0 {
+        probe.error = PIREUS_INTEL_PDF_ERR_FILE
+        return probe
+    }
+    if size != PIREUS_INTEL_PDF_EXPECTED_BYTES ||
+        size > PIREUS_INTEL_PDF_FILE_CAPACITY {
+        probe.error = PIREUS_INTEL_PDF_ERR_LENGTH
+        return probe
+    }
+
+    let raw = read_file(path)
+    let words_used = (size + 7) / 8
+    var word: i64 = 0
+    while word < words_used {
+        PIREUS_INTEL_PDF_WORDS[word as usize] = 0
+        word = word + 1
+    }
+    var pos: i64 = 0
+    while pos < size {
+        var byte = raw[pos as usize] as i64
+        if byte < 0 { byte = byte + 256 }
+        let word_at = pos / 8
+        let shift = (pos % 8) * 8
+        PIREUS_INTEL_PDF_WORDS[word_at as usize] =
+            PIREUS_INTEL_PDF_WORDS[word_at as usize] | (byte << shift)
+        pos = pos + 1
+    }
+
+    let digest = intel_pdf_digest(size)
+    probe.digest_match = intel_pdf_digest_matches(&digest)
+    if !probe.digest_match {
+        probe.error = PIREUS_INTEL_PDF_ERR_HASH
+        return probe
+    }
+    probe.header_match = intel_pdf_match(size, 0, "%PDF-1.6")
+    if !probe.header_match {
+        probe.error = PIREUS_INTEL_PDF_ERR_HEADER
+        return probe
+    }
+    probe.eof_offset = intel_pdf_find_last(size, "%%EOF")
+    if probe.eof_offset < 0 {
+        probe.error = PIREUS_INTEL_PDF_ERR_EOF
+        return probe
+    }
+    probe.startxref_marker = intel_pdf_find_last(probe.eof_offset, "startxref")
+    if probe.startxref_marker < 0 {
+        probe.error = PIREUS_INTEL_PDF_ERR_STARTXREF
+        return probe
+    }
+    let (xref_ok, xref_offset, after_xref) =
+        intel_pdf_parse_uint(probe.eof_offset, probe.startxref_marker + 9)
+    if xref_ok != 1 || xref_offset <= 0 ||
+        xref_offset >= probe.eof_offset || after_xref <= probe.startxref_marker {
+        probe.error = PIREUS_INTEL_PDF_ERR_STARTXREF
+        return probe
+    }
+    probe.startxref_offset = xref_offset
+    probe.startxref_classic = intel_pdf_match(size, xref_offset, "xref")
+    probe.startxref_indirect_object =
+        intel_pdf_indirect_object_at(size, xref_offset)
+    if !probe.startxref_classic && !probe.startxref_indirect_object {
+        probe.error = PIREUS_INTEL_PDF_ERR_STARTXREF
+        return probe
+    }
+
+    probe.xref_token_count = intel_pdf_count(size, "xref")
+    probe.type_xref_count = intel_pdf_count(size, "/Type/XRef") +
+        intel_pdf_count(size, "/Type /XRef")
+    probe.object_stream_count = intel_pdf_count(size, "/ObjStm")
+    probe.flate_decode_count = intel_pdf_count(size, "/FlateDecode")
+    probe.encrypt_count = intel_pdf_count(size, "/Encrypt")
+    probe.raw_vpermpd_count = intel_pdf_count(size, "VPERMPD")
+    probe.raw_vpermi2pd_count = intel_pdf_count(size, "VPERMI2PD")
+    probe.raw_vpermt2pd_count = intel_pdf_count(size, "VPERMT2PD")
+    intel_pdf_scan_flate(size, &!probe)
+    probe.error = PIREUS_INTEL_PDF_OK
+    probe
+}
+
+pub fn pireus_intel_vpermpd_select_lane(index_element: i64) -> i64 {
+    index_element & 7
+}
+
+pub fn pireus_intel_vpermpd_imm8_supports_xor(
+    low_displacement: i64,
+) -> bool with Div {
+    if low_displacement < 0 || low_displacement >= 8 { return false }
+    var lane: i64 = 0
+    while lane < 8 {
+        let desired = lane ^ low_displacement
+        if lane / 4 != desired / 4 { return false }
+        let immediate_slot = lane % 4
+        let encoded_source = immediate_slot ^ (low_displacement & 3)
+        if desired % 4 != encoded_source { return false }
+        lane = lane + 1
+    }
+    true
+}
+
+fn intel_selector_shape_valid(
+    vector_bits: i64,
+    element_bits: i64,
+    index_element_bits: i64,
+    selector_bits: i64,
+    source_lanes: i64,
+) -> bool {
+    vector_bits == 512 && element_bits == 64 &&
+        index_element_bits == 64 && selector_bits == 3 && source_lanes == 8
+}
+
+fn intel_instruction_match_gate(
+    parent_valid: bool,
+    semantic_receipt: bool,
+    vector_complete: bool,
+    groups: i64,
+) -> bool {
+    parent_valid && semantic_receipt && vector_complete && groups == 32
+}
+
+fn intel_claim_boundary_valid(
+    material_observations: i64,
+    lowerings: i64,
+    costs: i64,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    material_observations == 0 && lowerings == 0 && costs == 0 &&
+        !parity_open && !claim_ready
+}
+
+fn intel_loaded_digest_negative(size: i64) -> bool with Mut, Panic, Div {
+    if size != PIREUS_INTEL_PDF_EXPECTED_BYTES { return false }
+    let original = PIREUS_INTEL_PDF_WORDS[0]
+    PIREUS_INTEL_PDF_WORDS[0] = original ^ 1
+    let digest = intel_pdf_digest(size)
+    let refused = !intel_pdf_digest_matches(&digest)
+    PIREUS_INTEL_PDF_WORDS[0] = original
+    refused
+}
+
+fn intel_pdf_semantic_anchors_valid(probe: &PireusIntelPdfProbe) -> bool {
+    probe.error == PIREUS_INTEL_PDF_OK && probe.digest_match &&
+        probe.header_match && probe.stream_markers == 2034 &&
+        probe.flate_streams == 2032 && probe.decoded_flate_streams == 2031 &&
+        probe.oversized_flate_outputs == 1 &&
+        probe.oversized_output_stream_offset == 3292436 &&
+        probe.oversized_output_xref &&
+        !probe.oversized_output_content_candidate &&
+        probe.flate_decode_failures == 0 && probe.encrypt_count == 0 &&
+        probe.description_page_matches == 1 &&
+        probe.vector_form_matches == 1 &&
+        probe.description_selector_rule_matches == 1 &&
+        probe.operation_page_matches == 1 &&
+        probe.operation_vector_form_matches == 1 &&
+        probe.operation_selector_cells == 8 &&
+        probe.first_vpermpd_stream_offset == 1678050 &&
+        probe.first_operation_stream_offset == 1684617
+}
+
+pub fn pireus_intel_vpermpd_evaluate(
+    pdf_path: string,
+    xed_path: string,
+) -> PireusIntelVpermpdResult with IO, Mut, Panic, Div, Alloc {
+    let pdf = pireus_intel_pdf_probe(pdf_path)
+    let parent = pireus_xor_material_evaluate(xed_path)
+    let parent_valid = pireus_xor_material_matches_frozen_semantics(&parent)
+    let semantic_receipt = intel_pdf_semantic_anchors_valid(&pdf)
+
+    var xor_matches: i64 = 0
+    var xor_failures: i64 = 0
+    var cell: i64 = 0
+    while cell < parent.selector.count {
+        let desired = parent.selector.source_lanes[cell as usize]
+        let selected = pireus_intel_vpermpd_select_lane(desired)
+        if desired >= 0 && desired < 8 && selected == desired {
+            xor_matches = xor_matches + 1
+        } else {
+            xor_failures = xor_failures + 1
+        }
+        cell = cell + 1
+    }
+
+    var imm8_supported: i64 = 0
+    var imm8_refused: i64 = 0
+    var low: i64 = 0
+    while low < 8 {
+        if pireus_intel_vpermpd_imm8_supports_xor(low) {
+            imm8_supported = imm8_supported + 1
+        } else {
+            imm8_refused = imm8_refused + 1
+        }
+        low = low + 1
+    }
+
+    let vector_complete = parent.selector.count == 256 &&
+        xor_matches == 256 && xor_failures == 0
+    let one_source = parent_valid && semantic_receipt &&
+        parent.layout_one_source_per_group && vector_complete &&
+        parent.one_source_groups == 32
+    let instruction_match = one_source
+
+    var negative_passed: i64 = 0
+    var negative_total: i64 = 0
+    negative_total = negative_total + 1
+    if intel_loaded_digest_negative(pdf.total_bytes) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_selector_shape_valid(256, 64, 64, 3, 8) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_selector_shape_valid(512, 32, 64, 3, 8) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_selector_shape_valid(512, 64, 32, 3, 8) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_selector_shape_valid(512, 64, 64, 2, 8) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_selector_shape_valid(512, 64, 64, 3, 16) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if pireus_intel_vpermpd_select_lane(8) == 0 {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !pireus_intel_vpermpd_imm8_supports_xor(4) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !pireus_intel_vpermpd_imm8_supports_xor(8) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if imm8_supported != 8 {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_instruction_match_gate(false, true, true, 32) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_instruction_match_gate(true, false, true, 32) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_instruction_match_gate(true, true, true, 31) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_claim_boundary_valid(1, 0, 0, false, false) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_claim_boundary_valid(0, 1, 0, false, false) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_claim_boundary_valid(0, 0, 1, false, false) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_claim_boundary_valid(0, 0, 0, true, false) {
+        negative_passed = negative_passed + 1
+    }
+    negative_total = negative_total + 1
+    if !intel_claim_boundary_valid(0, 0, 0, false, true) {
+        negative_passed = negative_passed + 1
+    }
+
+    var error = PIREUS_INTEL_PDF_OK
+    if pdf.error != PIREUS_INTEL_PDF_OK {
+        error = pdf.error
+    } else {
+        if !semantic_receipt {
+            error = PIREUS_INTEL_PDF_ERR_SEMANTIC_ANCHOR
+        } else {
+            if !parent_valid {
+                error = PIREUS_INTEL_PDF_ERR_PARENT
+            } else {
+                if !vector_complete || !one_source ||
+                    imm8_supported != 4 || imm8_refused != 4 {
+                    error = PIREUS_INTEL_PDF_ERR_SELECTOR_MATCH
+                }
+            }
+        }
+    }
+    var failures: i64 = 0
+    if error != PIREUS_INTEL_PDF_OK { failures = failures + 1 }
+    if negative_passed != negative_total { failures = failures + 1 }
+
+    PireusIntelVpermpdResult {
+        valid: error == PIREUS_INTEL_PDF_OK && failures == 0,
+        error: error,
+        pdf: pdf,
+        parent_valid: parent_valid,
+        selector_semantics_receipt_present: semantic_receipt,
+        vector_bits: 512,
+        element_bits: 64,
+        index_element_bits: 64,
+        selector_bits: 3,
+        selector_mask: 7,
+        source_lanes: 8,
+        semantic_formula_cells: pdf.operation_selector_cells,
+        xor_selector_cells: parent.selector.count,
+        xor_selector_matches: xor_matches,
+        xor_selector_failures: xor_failures,
+        abstract_form_applications: parent.one_source_groups,
+        vector_control_complete: vector_complete,
+        imm8_patterns_tested: 8,
+        imm8_patterns_supported: imm8_supported,
+        imm8_patterns_refused: imm8_refused,
+        imm8_complete: imm8_supported == 8,
+        one_source_form_sufficient: one_source,
+        two_source_form_required: false,
+        instruction_match_authorized: instruction_match,
+        material_observation_count: 0,
+        lowering_count: 0,
+        cost_record_count: 0,
+        parity_open: false,
+        claim_ready: false,
+        negative_witnesses_passed: negative_passed,
+        negative_witnesses_total: negative_total,
+        failures: failures,
+    }
+}

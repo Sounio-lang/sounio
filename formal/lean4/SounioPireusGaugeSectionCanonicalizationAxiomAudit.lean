@@ -1,0 +1,19 @@
+import SounioPireusGaugeSectionCanonicalization
+
+open SounioPireusGaugeSectionCanonicalization
+
+#print axioms section_bit_xor
+#print axioms section_bit_gauge_action
+#print axioms direct_section_word_testBit
+#print axioms direct_section_word_gauge_action
+#print axioms normalize_gauge_has_zero_section_bits
+#print axioms normalize_gauge_idempotent
+#print axioms normalize_gauge_invariant
+#print axioms same_gauge_orbit_refl
+#print axioms same_gauge_orbit_symm
+#print axioms same_gauge_orbit_trans
+#print axioms normalize_gauge_equal_of_same_orbit
+#print axioms same_orbit_of_normalize_gauge_equal
+#print axioms normalize_gauge_equal_iff_same_orbit
+#print axioms direct_section_is_unique_orbit_representative
+#print axioms gauge_section_progress_does_not_close_v13_target03
