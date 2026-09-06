@@ -123,8 +123,15 @@ printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$BOUNDARY_MAIN"
 # the same tree. The wrapper timeout is for ordinary builds, not this probe.
 compile_capacity_witness() {
   local src="$1" out="$2" log="$3"
+  local stack_kb="${MADAROS_STACK_KB:-524288}"
   set +e
   (
+    # Match bin/madaros: raw ELF needs ~512 MiB stack or this probe SEGVs (rc=139).
+    if [[ "$stack_kb" == "0" ]]; then
+      ulimit -s unlimited 2>/dev/null || true
+    else
+      ulimit -s "$stack_kb" 2>/dev/null || true
+    fi
     ulimit -v "${MADAROS_VMEM_LIMIT_KB:-33554432}" 2>/dev/null || true
     exec timeout "${SOUNIO_MADAROS_IMPORTED_CAPACITY_TIMEOUT_SEC:-900}" \
       "$MADAROS_ELF" "$src" -o "$out"
