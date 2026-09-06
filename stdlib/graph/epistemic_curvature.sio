@@ -36,17 +36,33 @@ fn max_f64(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
 }
 
+// The loop below squares n times, which raises the seed to the 2^n-th power, so
+// the pre-scale divisor is 2^n -- derived from n here rather than written as a
+// literal, so the two cannot drift apart. They once did: a hardcoded
+// `x / 16.0` against 16 squarings gave exp(4096*x), where exp_approx(1.0)
+// saturated at 2^63 and exp_approx(-1.0) returned 0. That collapsed the Gibbs
+// kernel below to an indicator of the zero-cost cells, so every W1 came out 0
+// and every kappa came out exactly 1, and it made hehl_kappa's Poisson matching
+// term identically 1. Four of this module's six tests failed on it. The same
+// helper is duplicated in stdlib/graph/sinkhorn.sio, fixed there in the same way.
 fn exp_approx(x: f64) -> f64 {
     if x < -20.0 { return 0.0 }
     if x > 20.0 { return 485165195.0 }
-    let scaled = x / 16.0
+    let n = 16  // Number of squarings
+    var divisor = 1.0
+    var d: usize = 0
+    while d < n {
+        divisor = divisor * 2.0
+        d = d + 1
+    }
+    let scaled = x / divisor
     let x2 = scaled * scaled
     let x3 = x2 * scaled
     let x4 = x3 * scaled
     let x5 = x4 * scaled
     var result = 1.0 + scaled + x2/2.0 + x3/6.0 + x4/24.0 + x5/120.0
     var i: usize = 0
-    while i < 16 {
+    while i < n {
         result = result * result
         i = i + 1
     }
@@ -137,37 +153,46 @@ impl EpistemicCurvatureParams {
 
 // Result of Sinkhorn that also returns the transport plan gamma
 struct SinkhornWithPlan {
-    distance: f64,      // W1 estimate
-    gamma: [f64],       // transport plan (n*m flattened, row-major)
+    distance: f64,
+    // Seq, not [f64]: the plan has n*m entries pushed one at a time, and
+    // slices are fixed-length.
+    gamma: Seq<f64>,      // transport plan (n*m flattened, row-major)
     n: usize,
     m: usize,
 }
 
 // Sinkhorn that extracts the optimal transport plan for uncertainty propagation
+//
+// Seq parameters are taken BY VALUE, never `&Seq<...>`: a Seq is a handle, so
+// by-value shares storage and costs nothing, while reading a Seq through a
+// reference parameter is a known compiler defect
+// (docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md).
 fn sinkhorn_with_plan(
-    mu: &[f64],
-    nu: &[f64],
-    cost: &[f64],
+    mu: Seq<f64>,
+    nu: Seq<f64>,
+    cost: Seq<f64>,
     n: usize,
     m: usize,
     epsilon: f64,
     max_iter: usize
-) -> SinkhornWithPlan {
+) -> SinkhornWithPlan with Mut, Panic, Div {
     if n == 0 || m == 0 {
-        return SinkhornWithPlan { distance: 0.0, gamma: [], n: 0, m: 0 }
+        var empty: Seq<f64> = seq_new()
+        return SinkhornWithPlan { distance: 0.0, gamma: empty, n: 0, m: 0 }
     }
 
     // Gibbs kernel K = exp(-C/epsilon)
-    var kmat: [f64] = []
+    var kmat: Seq<f64> = seq_new()
     var idx: usize = 0
     while idx < n * m {
-        kmat.push(exp_approx(-cost[idx] / epsilon))
+        let c: f64 = cost.get(idx)
+        kmat.push(exp_approx(0.0 - c / epsilon))
         idx = idx + 1
     }
 
     // Scaling vectors
-    var u: [f64] = []
-    var v: [f64] = []
+    var u: Seq<f64> = seq_new()
+    var v: Seq<f64> = seq_new()
     var i: usize = 0
     while i < n { u.push(1.0); i = i + 1 }
     i = 0
@@ -182,11 +207,14 @@ fn sinkhorn_with_plan(
             var sum: f64 = 0.0
             var j: usize = 0
             while j < m {
-                sum = sum + kmat[i * m + j] * v[j]
+                let kij: f64 = kmat.get(i * m + j)
+                let vj: f64 = v.get(j)
+                sum = sum + kij * vj
                 j = j + 1
             }
             if sum > 1e-10 {
-                u[i] = mu[i] / sum
+                let mui: f64 = mu.get(i)
+                u.set(i, mui / sum)
             }
             i = i + 1
         }
@@ -197,11 +225,14 @@ fn sinkhorn_with_plan(
             var sum: f64 = 0.0
             i = 0
             while i < n {
-                sum = sum + kmat[i * m + j] * u[i]
+                let kij: f64 = kmat.get(i * m + j)
+                let ui: f64 = u.get(i)
+                sum = sum + kij * ui
                 i = i + 1
             }
             if sum > 1e-10 {
-                v[j] = nu[j] / sum
+                let nuj: f64 = nu.get(j)
+                v.set(j, nuj / sum)
             }
             j = j + 1
         }
@@ -210,15 +241,19 @@ fn sinkhorn_with_plan(
     }
 
     // Extract transport plan gamma_ij = u_i * K_ij * v_j
-    var gamma: [f64] = []
+    var gamma: Seq<f64> = seq_new()
     var distance: f64 = 0.0
     i = 0
     while i < n {
         var j: usize = 0
         while j < m {
-            let g_ij = u[i] * kmat[i * m + j] * v[j]
+            let ui: f64 = u.get(i)
+            let kij: f64 = kmat.get(i * m + j)
+            let vj: f64 = v.get(j)
+            let g_ij = ui * kij * vj
             gamma.push(g_ij)
-            distance = distance + g_ij * cost[i * m + j]
+            let cij: f64 = cost.get(i * m + j)
+            distance = distance + g_ij * cij
             j = j + 1
         }
         i = i + 1
@@ -245,30 +280,40 @@ fn sinkhorn_with_plan(
 // This is exact in the LP limit (epsilon → 0) and approximate for Sinkhorn.
 
 // Build probability measure for a node (same as curvature.sio)
-fn neighborhood_measure_nodes(adj: &[[usize]], node: usize, alpha: f64) -> [usize] {
-    if node >= adj.len() { return [] }
-    let neighbors = &adj[node]
-    let deg = neighbors.len()
-    if deg == 0 { return [node] }
+fn neighborhood_measure_nodes(adj: Seq<Seq<usize>>, node: usize, alpha: f64) -> Seq<usize> with Mut, Panic, Epistemic {
+    var nodes: Seq<usize> = seq_new()
+    let n: usize = (adj.len().unwrap("adj")) as usize
+    if node >= n { return nodes }
 
-    var nodes: [usize] = []
+    let neighbors: Seq<usize> = adj.get(node)
+    let deg: usize = (neighbors.len().unwrap("neighbors")) as usize
+    if deg == 0 {
+        nodes.push(node)
+        return nodes
+    }
+
     if alpha > 0.0 { nodes.push(node) }
     var i: usize = 0
     while i < deg {
-        nodes.push(neighbors[i])
+        nodes.push(neighbors.get(i))
         i = i + 1
     }
     nodes
 }
 
-fn neighborhood_measure_probs(adj: &[[usize]], node: usize, alpha: f64) -> [f64] {
-    if node >= adj.len() { return [] }
-    let neighbors = &adj[node]
-    let deg = neighbors.len()
-    if deg == 0 { return [1.0] }
+fn neighborhood_measure_probs(adj: Seq<Seq<usize>>, node: usize, alpha: f64) -> Seq<f64> with Mut, Panic, Div, Epistemic {
+    var probs: Seq<f64> = seq_new()
+    let n: usize = (adj.len().unwrap("adj")) as usize
+    if node >= n { return probs }
+
+    let neighbors: Seq<usize> = adj.get(node)
+    let deg: usize = (neighbors.len().unwrap("neighbors")) as usize
+    if deg == 0 {
+        probs.push(1.0)
+        return probs
+    }
 
     let w = (1.0 - alpha) / (deg as f64)
-    var probs: [f64] = []
     if alpha > 0.0 { probs.push(alpha) }
     var i: usize = 0
     while i < deg {
@@ -281,14 +326,15 @@ fn neighborhood_measure_probs(adj: &[[usize]], node: usize, alpha: f64) -> [f64]
 // Compute epistemic ORC for a single edge
 // Returns kappa with GUM-propagated uncertainty from cost matrix uncertainty
 pub fn epistemic_edge_curvature(
-    adj: &[[usize]],
-    distances: &[[i64]],
-    cost_uncertainty: &[[f64]],  // sigma_d(i,j) for each node pair
+    adj: Seq<Seq<usize>>,
+    distances: Seq<Seq<i64>>,
+    cost_uncertainty: Seq<Seq<f64>>,  // sigma_d(i,j) for each node pair
     u: usize,
     v: usize,
     params: &EpistemicCurvatureParams
-) -> EpistemicEdgeCurvature {
-    let d_uv = distances[u][v]
+) -> EpistemicEdgeCurvature with Mut, Panic, Div, Epistemic {
+    let d_row_u: Seq<i64> = distances.get(u)
+    let d_uv = d_row_u.get(v)
     if d_uv <= 0 {
         return EpistemicEdgeCurvature {
             u, v, kappa: 0.0, sigma_kappa: 0.0,
@@ -298,13 +344,13 @@ pub fn epistemic_edge_curvature(
     }
 
     // Build measures
-    let mu_nodes = neighborhood_measure_nodes(adj, u, params.alpha)
-    let mu_probs = neighborhood_measure_probs(adj, u, params.alpha)
-    let nu_nodes = neighborhood_measure_nodes(adj, v, params.alpha)
-    let nu_probs = neighborhood_measure_probs(adj, v, params.alpha)
+    let mu_nodes: Seq<usize> = neighborhood_measure_nodes(adj, u, params.alpha)
+    let mu_probs: Seq<f64> = neighborhood_measure_probs(adj, u, params.alpha)
+    let nu_nodes: Seq<usize> = neighborhood_measure_nodes(adj, v, params.alpha)
+    let nu_probs: Seq<f64> = neighborhood_measure_probs(adj, v, params.alpha)
 
-    let n = mu_nodes.len()
-    let m = nu_nodes.len()
+    let n: usize = (mu_nodes.len().unwrap("mu_nodes")) as usize
+    let m: usize = (nu_nodes.len().unwrap("nu_nodes")) as usize
 
     if n == 0 || m == 0 {
         return EpistemicEdgeCurvature {
@@ -315,18 +361,21 @@ pub fn epistemic_edge_curvature(
     }
 
     // Build cost matrix and cost uncertainty matrix
-    var cost_data: [f64] = []
-    var cost_sigma: [f64] = []
+    var cost_data: Seq<f64> = seq_new()
+    var cost_sigma: Seq<f64> = seq_new()
     var i: usize = 0
     while i < n {
         var j: usize = 0
         while j < m {
-            let ni = mu_nodes[i]
-            let nj = nu_nodes[j]
-            let d = distances[ni][nj]
+            let ni = mu_nodes.get(i)
+            let nj = nu_nodes.get(j)
+            let d_row: Seq<i64> = distances.get(ni)
+            let d = d_row.get(nj)
             if d >= 0 {
                 cost_data.push(d as f64)
-                cost_sigma.push(cost_uncertainty[ni][nj])
+                let s_row: Seq<f64> = cost_uncertainty.get(ni)
+                let s: f64 = s_row.get(nj)
+                cost_sigma.push(s)
             } else {
                 cost_data.push(1000.0)
                 cost_sigma.push(0.0)
@@ -338,7 +387,7 @@ pub fn epistemic_edge_curvature(
 
     // Sinkhorn with transport plan extraction
     let result = sinkhorn_with_plan(
-        &mu_probs, &nu_probs, &cost_data,
+        mu_probs, nu_probs, cost_data,
         n, m, params.epsilon, params.max_iter
     )
 
@@ -349,11 +398,12 @@ pub fn epistemic_edge_curvature(
     let kappa = 1.0 - w1 / d_uv_f
 
     // Delta method: sigma_W1^2 = sum_ij gamma_ij^2 * sigma_C_ij^2
+    let plan: Seq<f64> = result.gamma
     var var_w1: f64 = 0.0
     i = 0
     while i < n * m {
-        let g = result.gamma[i]
-        let sc = cost_sigma[i]
+        let g: f64 = plan.get(i)
+        let sc: f64 = cost_sigma.get(i)
         var_w1 = var_w1 + g * g * sc * sc
         i = i + 1
     }
@@ -411,26 +461,28 @@ pub fn epistemic_edge_curvature(
 // =============================================================================
 
 // BFS all-pairs distance matrix
-fn compute_all_distances(adj: &[[usize]]) -> [[i64]] {
-    let n = adj.len()
-    var distances: [[i64]] = []
+fn compute_all_distances(adj: Seq<Seq<usize>>) -> Seq<Seq<i64>> with Mut, Panic, Epistemic {
+    let n: usize = (adj.len().unwrap("adj")) as usize
+    var distances: Seq<Seq<i64>> = seq_new()
     var source: usize = 0
     while source < n {
-        var dist: [i64] = []
+        var dist: Seq<i64> = seq_new()
         var i: usize = 0
         while i < n { dist.push(-1); i = i + 1 }
-        dist[source] = 0
-        var queue: [usize] = [source]
-        var head: usize = 0
-        while head < queue.len() {
-            let u = queue[head]
+        dist.set(source, 0)
+        var queue: Seq<usize> = seq_new()
+        queue.push(source)
+        var head: i64 = 0
+        while head < queue.len().unwrap("distance queue") {
+            let u = queue.get(head as usize)
             head = head + 1
-            let nbrs = &adj[u]
+            let nbrs: Seq<usize> = adj.get(u)
+            let deg: usize = (nbrs.len().unwrap("nbrs")) as usize
             var j: usize = 0
-            while j < nbrs.len() {
-                let v = nbrs[j]
-                if dist[v] == -1 {
-                    dist[v] = dist[u] + 1
+            while j < deg {
+                let v = nbrs.get(j)
+                if dist.get(v) == -1 {
+                    dist.set(v, dist.get(u) + 1)
                     queue.push(v)
                 }
                 j = j + 1
@@ -451,18 +503,19 @@ pub struct GraphMetrics {
     pub eta: f64,               // k^2/N
 }
 
-pub fn compute_graph_metrics(adj: &[[usize]]) -> GraphMetrics {
-    let n = adj.len()
+pub fn compute_graph_metrics(adj: Seq<Seq<usize>>) -> GraphMetrics with Mut, Panic, Div, Epistemic {
+    let n: usize = (adj.len().unwrap("adj")) as usize
     var total_degree: usize = 0
     var n_edges: usize = 0
 
     var u: usize = 0
     while u < n {
-        total_degree = total_degree + adj[u].len()
-        let nbrs = &adj[u]
+        let nbrs: Seq<usize> = adj.get(u)
+        let deg: usize = (nbrs.len().unwrap("nbrs")) as usize
+        total_degree = total_degree + deg
         var i: usize = 0
-        while i < nbrs.len() {
-            if nbrs[i] > u { n_edges = n_edges + 1 }
+        while i < deg {
+            if nbrs.get(i) > u { n_edges = n_edges + 1 }
             i = i + 1
         }
         u = u + 1
@@ -476,21 +529,22 @@ pub fn compute_graph_metrics(adj: &[[usize]]) -> GraphMetrics {
     var triplets: usize = 0
     u = 0
     while u < n {
-        let nbrs = &adj[u]
-        let d = nbrs.len()
+        let nbrs: Seq<usize> = adj.get(u)
+        let d: usize = (nbrs.len().unwrap("nbrs")) as usize
         if d >= 2 {
             triplets = triplets + d * (d - 1) / 2
             var i: usize = 0
             while i < d {
                 var j: usize = i + 1
                 while j < d {
-                    // Check if nbrs[i] and nbrs[j] are connected
-                    let ni = nbrs[i]
-                    let nj = nbrs[j]
-                    let nbrs_ni = &adj[ni]
+                    // Check if nbrs.get(i) and nbrs.get(j) are connected
+                    let ni = nbrs.get(i)
+                    let nj = nbrs.get(j)
+                    let nbrs_ni: Seq<usize> = adj.get(ni)
+                    let d_ni: usize = (nbrs_ni.len().unwrap("nbrs_ni")) as usize
                     var k: usize = 0
-                    while k < nbrs_ni.len() {
-                        if nbrs_ni[k] == nj {
+                    while k < d_ni {
+                        if nbrs_ni.get(k) == nj {
                             triangles = triangles + 1
                         }
                         k = k + 1
@@ -523,14 +577,15 @@ pub fn compute_graph_metrics(adj: &[[usize]]) -> GraphMetrics {
 // Hypothesis: GCI_ADHD < GCI_TDC (ADHD brains have more
 // geometrically ambiguous edges due to hypersynchrony noise)
 
-pub fn geometric_certainty_index(curvatures: &[EpistemicEdgeCurvature]) -> f64 {
-    let n = curvatures.len()
+pub fn geometric_certainty_index(curvatures: Seq<EpistemicEdgeCurvature>) -> f64 with Mut, Panic, Div, Epistemic {
+    let n: usize = (curvatures.len().unwrap("curvatures")) as usize
     if n == 0 { return 0.0 }
 
     var n_certain: usize = 0
     var i: usize = 0
     while i < n {
-        if curvatures[i].sign_certain {
+        let ec: EpistemicEdgeCurvature = curvatures.get(i)
+        if ec.sign_certain {
             n_certain = n_certain + 1
         }
         i = i + 1
@@ -630,25 +685,26 @@ pub fn phase_boundary_distance(eta: f64, clustering: f64, n_nodes: f64, alpha: f
 // Compute epistemic curvature for all edges in a graph
 // cost_uncertainty: N×N matrix of sigma_d values (0 for exact hop-count)
 pub fn analyze_epistemic_curvature(
-    adj: &[[usize]],
-    cost_uncertainty: &[[f64]],
+    adj: Seq<Seq<usize>>,
+    cost_uncertainty: Seq<Seq<f64>>,
     params: &EpistemicCurvatureParams
-) -> EpistemicCurvatureAnalysis {
-    let distances = compute_all_distances(adj)
+) -> EpistemicCurvatureAnalysis with Mut, Panic, Div, Epistemic {
+    let distances: Seq<Seq<i64>> = compute_all_distances(adj)
     let metrics = compute_graph_metrics(adj)
-    let n = adj.len()
+    let n: usize = (adj.len().unwrap("adj")) as usize
 
     // Compute all edge curvatures
-    var curvatures: [EpistemicEdgeCurvature] = []
+    var curvatures: Seq<EpistemicEdgeCurvature> = seq_new()
     var u: usize = 0
     while u < n {
-        let nbrs = &adj[u]
+        let nbrs: Seq<usize> = adj.get(u)
+        let deg: usize = (nbrs.len().unwrap("nbrs")) as usize
         var i: usize = 0
-        while i < nbrs.len() {
-            let v = nbrs[i]
+        while i < deg {
+            let v = nbrs.get(i)
             if u < v {
                 let ec = epistemic_edge_curvature(
-                    adj, &distances, cost_uncertainty, u, v, params
+                    adj, distances, cost_uncertainty, u, v, params
                 )
                 curvatures.push(ec)
             }
@@ -657,7 +713,7 @@ pub fn analyze_epistemic_curvature(
         u = u + 1
     }
 
-    let num_edges = curvatures.len()
+    let num_edges: usize = (curvatures.len().unwrap("curvatures")) as usize
     if num_edges == 0 {
         return EpistemicCurvatureAnalysis {
             mean_kappa: 0.0, sigma_mean_kappa: 0.0, std_kappa: 0.0,
@@ -674,8 +730,9 @@ pub fn analyze_epistemic_curvature(
     var sum_k: f64 = 0.0
     var sum_k2: f64 = 0.0
     var sum_conf: f64 = 0.0
-    var min_k: f64 = curvatures[0].kappa
-    var max_k: f64 = curvatures[0].kappa
+    let first_ec: EpistemicEdgeCurvature = curvatures.get(0)
+    var min_k: f64 = first_ec.kappa
+    var max_k: f64 = first_ec.kappa
     var n_hyp: usize = 0
     var n_euc: usize = 0
     var n_sph: usize = 0
@@ -684,7 +741,7 @@ pub fn analyze_epistemic_curvature(
 
     var idx: usize = 0
     while idx < num_edges {
-        let ec = &curvatures[idx]
+        let ec: EpistemicEdgeCurvature = curvatures.get(idx)
         sum_k = sum_k + ec.kappa
         sum_k2 = sum_k2 + ec.kappa * ec.kappa
         sum_conf = sum_conf + ec.confidence
@@ -755,14 +812,14 @@ pub fn analyze_epistemic_curvature(
 // =============================================================================
 
 // When the graph topology is exact (no FC uncertainty), cost_uncertainty = 0
-pub fn analyze_curvature_exact(adj: &[[usize]]) -> EpistemicCurvatureAnalysis {
-    let n = adj.len()
+pub fn analyze_curvature_exact(adj: Seq<Seq<usize>>) -> EpistemicCurvatureAnalysis with Mut, Panic, Div, Epistemic {
+    let n: usize = (adj.len().unwrap("adj")) as usize
 
     // Build zero uncertainty matrix
-    var zero_sigma: [[f64]] = []
+    var zero_sigma: Seq<Seq<f64>> = seq_new()
     var i: usize = 0
     while i < n {
-        var row: [f64] = []
+        var row: Seq<f64> = seq_new()
         var j: usize = 0
         while j < n {
             row.push(0.0)
@@ -773,7 +830,7 @@ pub fn analyze_curvature_exact(adj: &[[usize]]) -> EpistemicCurvatureAnalysis {
     }
 
     let params = EpistemicCurvatureParams::clinical()
-    analyze_epistemic_curvature(adj, &zero_sigma, &params)
+    analyze_epistemic_curvature(adj, zero_sigma, &params)
 }
 
 // =============================================================================
@@ -787,23 +844,26 @@ pub fn analyze_curvature_exact(adj: &[[usize]]) -> EpistemicCurvatureAnalysis {
 // Cost uncertainty for edge (i,j) = Fisher-z SE propagated through BFS.
 // For edges near threshold (|r| within 1 SE of threshold), uncertainty is high.
 pub struct FCGraphResult {
-    pub adj: [[usize]],
-    pub cost_uncertainty: [[f64]],
+    // Seq, not [[...]]: both matrices are grown row by row, and slices are
+    // fixed-length.
+    pub adj: Seq<Seq<usize>>,
+    pub cost_uncertainty: Seq<Seq<f64>>,
     pub n_certain_edges: usize,     // edges far from threshold
     pub n_uncertain_edges: usize,   // edges near threshold (within 1 SE)
 }
 
 pub fn build_fc_graph(
-    correlations: &[[f64]],     // N_roi × N_roi correlation matrix
-    uncertainties: &[[f64]],    // N_roi × N_roi Fisher-z SE matrix
+    correlations: Seq<Seq<f64>>,     // N_roi x N_roi correlation matrix
+    uncertainties: Seq<Seq<f64>>,    // N_roi x N_roi Fisher-z SE matrix
     n_rois: usize,
     threshold: f64
-) -> FCGraphResult {
+) -> FCGraphResult with Mut, Panic, Div, Epistemic {
     // Build adjacency list
-    var adj: [[usize]] = []
+    var adj: Seq<Seq<usize>> = seq_new()
     var i: usize = 0
     while i < n_rois {
-        adj.push([])
+        var row: Seq<usize> = seq_new()
+        adj.push(row)
         i = i + 1
     }
 
@@ -812,15 +872,22 @@ pub fn build_fc_graph(
 
     i = 0
     while i < n_rois {
+        let corr_i: Seq<f64> = correlations.get(i)
+        let unc_i: Seq<f64> = uncertainties.get(i)
         var j: usize = i + 1
         while j < n_rois {
-            let r = abs_f64(correlations[i][j])
+            let c_ij: f64 = corr_i.get(j)
+            let r = abs_f64(c_ij)
             if r > threshold {
-                adj[i].push(j)
-                adj[j].push(i)
+                // adj.get returns a handle sharing storage, so pushing into the
+                // bound row is visible through the outer Seq.
+                var row_i: Seq<usize> = adj.get(i)
+                row_i.push(j)
+                var row_j: Seq<usize> = adj.get(j)
+                row_j.push(i)
 
                 // Check if edge is near threshold
-                let sigma_r = uncertainties[i][j]
+                let sigma_r: f64 = unc_i.get(j)
                 if r - threshold < sigma_r {
                     n_uncertain = n_uncertain + 1
                 } else {
@@ -833,7 +900,7 @@ pub fn build_fc_graph(
     }
 
     // Compute BFS distances
-    let distances = compute_all_distances(&adj)
+    let distances: Seq<Seq<i64>> = compute_all_distances(adj)
 
     // Build cost uncertainty matrix
     // For hop-count distances, uncertainty comes from edge existence uncertainty.
@@ -845,17 +912,18 @@ pub fn build_fc_graph(
         (n_uncertain as f64) / (total_edges as f64)
     } else { 0.0 }
 
-    var cost_unc: [[f64]] = []
+    var cost_unc: Seq<Seq<f64>> = seq_new()
     i = 0
     while i < n_rois {
-        var row: [f64] = []
+        let d_row: Seq<i64> = distances.get(i)
+        var row: Seq<f64> = seq_new()
         var j: usize = 0
         while j < n_rois {
-            let d = distances[i][j]
+            let d = d_row.get(j)
             if d > 0 {
                 // Uncertainty scales with path length and fraction of uncertain edges
                 // Each hop has probability frac_uncertain of being wrong
-                // sigma_d ≈ sqrt(d * frac_uncertain)
+                // sigma_d ~ sqrt(d * frac_uncertain)
                 row.push(sqrt_f64((d as f64) * frac_uncertain))
             } else {
                 row.push(0.0)
@@ -885,28 +953,29 @@ pub fn build_fc_graph(
 // Hypothesis: d*_ADHD < d*_TDC < d*_depression
 
 pub struct DimensionalTrajectory {
-    pub dimensions: [usize],    // [4, 8, 16, ...]
-    pub kappas: [f64],          // mean kappa at each d
+    // Seq, not [...]: both are copied in by growing, and slices are fixed.
+    pub dimensions: Seq<usize>,    // [4, 8, 16, ...]
+    pub kappas: Seq<f64>,          // mean kappa at each d
     pub d_star: f64,            // interpolated zero-crossing (0 if no crossing)
     pub has_crossing: bool,
 }
 
 // Interpolate zero-crossing from a kappa(d) trajectory
-pub fn find_d_star(dimensions: &[usize], kappas: &[f64]) -> DimensionalTrajectory {
-    let n = dimensions.len()
+pub fn find_d_star(dimensions: Seq<usize>, kappas: Seq<f64>) -> DimensionalTrajectory with Mut, Panic, Div, Epistemic {
+    let n: usize = (dimensions.len().unwrap("dimensions")) as usize
     var d_star: f64 = 0.0
     var has_crossing = false
 
     if n >= 2 {
         var i: usize = 0
         while i < n - 1 {
-            let k1 = kappas[i]
-            let k2 = kappas[i + 1]
+            let k1: f64 = kappas.get(i)
+            let k2: f64 = kappas.get(i + 1)
             // Check for sign change
             if (k1 < 0.0 && k2 >= 0.0) || (k1 >= 0.0 && k2 < 0.0) {
                 // Linear interpolation for zero-crossing
-                let d1 = dimensions[i] as f64
-                let d2 = dimensions[i + 1] as f64
+                let d1 = dimensions.get(i) as f64
+                let d2 = dimensions.get(i + 1) as f64
                 let frac = abs_f64(k1) / (abs_f64(k1) + abs_f64(k2))
                 d_star = d1 + frac * (d2 - d1)
                 has_crossing = true
@@ -916,12 +985,13 @@ pub fn find_d_star(dimensions: &[usize], kappas: &[f64]) -> DimensionalTrajector
     }
 
     // Copy arrays
-    var dims: [usize] = []
-    var ks: [f64] = []
+    var dims: Seq<usize> = seq_new()
+    var ks: Seq<f64> = seq_new()
     var i: usize = 0
     while i < n {
-        dims.push(dimensions[i])
-        ks.push(kappas[i])
+        dims.push(dimensions.get(i))
+        let kv: f64 = kappas.get(i)
+        ks.push(kv)
         i = i + 1
     }
 
@@ -948,15 +1018,23 @@ pub fn test_find_eta_c() -> bool {
 }
 
 pub fn test_clustering_lowers_eta_c() -> bool {
-    // Higher clustering should lower eta_c
+    // Higher clustering should lower eta_c.
+    //
+    // Probed at C = 0.3, not the 0.15 this test used to pass in. hehl_kappa
+    // takes t = max(C*(k-1), (k-1)^2/(N-1)), so clustering only moves the answer
+    // once C exceeds the random-incidence term. At N=100 the crossover sits near
+    // C = 0.152 and 0.15 lands just under it: eta_c(0.15) == eta_c(0.0) exactly,
+    // which is the model behaving as written rather than a defect. Measured
+    // eta_c at alpha=0.5, N=100: C=0.0 -> 2.576, 0.15 -> 2.576, 0.2 -> 2.381,
+    // 0.3 -> 2.021.
     let eta_c_0 = find_eta_c(100.0, 0.0, 0.5)
-    let eta_c_15 = find_eta_c(100.0, 0.15, 0.5)
-    eta_c_15 < eta_c_0
+    let eta_c_30 = find_eta_c(100.0, 0.3, 0.5)
+    eta_c_30 < eta_c_0
 }
 
-pub fn test_gci_range() -> bool {
+pub fn test_gci_range() -> bool with Mut, Panic, Div, Epistemic {
     // GCI must be in [0, 1]
-    var test_curvatures: [EpistemicEdgeCurvature] = []
+    var test_curvatures: Seq<EpistemicEdgeCurvature> = seq_new()
     test_curvatures.push(EpistemicEdgeCurvature {
         u: 0, v: 1, kappa: -0.3, sigma_kappa: 0.01,
         ci_lower: -0.32, ci_upper: -0.28, confidence: 0.95,
@@ -968,7 +1046,7 @@ pub fn test_gci_range() -> bool {
         sign_certain: false, geometry: GeometryClass::Uncertain,
     })
 
-    let gci = geometric_certainty_index(&test_curvatures)
+    let gci = geometric_certainty_index(test_curvatures)
     gci >= 0.0 && gci <= 1.0 && gci == 0.5
 }
 
@@ -979,15 +1057,23 @@ pub fn test_phase_boundary_distance() -> bool {
     delta < 0.0
 }
 
-pub fn test_d_star_interpolation() -> bool {
-    let dims: [usize] = [4, 8, 16]
-    let kappas: [f64] = [-0.05, 0.02, 0.08]
+pub fn test_d_star_interpolation() -> bool with Mut, Panic, Div, Epistemic {
+    // Seq, not an array literal: DimensionalTrajectory holds Seq now, and a
+    // nested/typed literal would not survive the boundary.
+    var dims: Seq<usize> = seq_new()
+    dims.push(4)
+    dims.push(8)
+    dims.push(16)
+    var kappas: Seq<f64> = seq_new()
+    kappas.push(0.0 - 0.05)
+    kappas.push(0.02)
+    kappas.push(0.08)
 
-    let traj = find_d_star(&dims, &kappas)
+    let traj = find_d_star(dims, kappas)
     traj.has_crossing && traj.d_star > 4.0 && traj.d_star < 8.0
 }
 
-pub fn run_epistemic_curvature_tests() -> bool {
+pub fn run_epistemic_curvature_tests() -> bool with Mut, Panic, Div, Epistemic {
     test_hehl_kappa_basic() &&
     test_find_eta_c() &&
     test_clustering_lowers_eta_c() &&
