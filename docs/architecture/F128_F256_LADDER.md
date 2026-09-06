@@ -46,7 +46,7 @@ This boundary is **structural-only** and enforced **on Madaros** before type che
 | Engine | `f128`/`f256` type spellings + arithmetic/casts |
 |---|---|
 | **Madaros** (default `bin/souc`) | Rejects at parser with **`error[E249]`** and the reserved-message note. Matches this ladder's V0-A claim. |
-| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E249.** Compiles `fn add(a: f128, b: f128) -> f128 { a + b }` and `x as f128` to an ELF (`rc=0`, no diagnostic). Implicit `f128`→`f256` still fails lean_single typecheck (`tail type mismatch` / `typecheck: failed`). |
+| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E249.** Annotated `f128` locals are binary128 (kind 13, two i64 limbs, libgcc `__*tf3`). The #2387 probe prints `ARITHMETIC IS f128: nonzero` and **113** halvings. `f256` is reserved (kind 14) and is not numeric. `as f128` / `print_f128` / Madaros V0-B–E remain out of scope. |
 
 So the V0-A boundary in this document is **Madaros-owned**, not universal. The CI Full Test Suite runs lean_single: compile-fail fixtures that only see Madaros E249 must carry `//@ known-failure: lean_single-only gap…` and `//@ error-pattern: error[E249]` (same pattern as `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`). That is documentation of an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
 

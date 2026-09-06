@@ -827,6 +827,7 @@ fn ty_slot_count(ty: i64, ty_hash: i64) -> i64 with Panic, Div, Mut {
     }
     if type_is_option_inline(ty, ty_hash) { return 2 }
     if ty == 11 { return 1 }
+    if ty == 13 { return 2 }
     if knowledge_hash_is(ty_hash) { return 3 }
     return 1
 }
@@ -1056,6 +1057,15 @@ var POOL_REFILL_COUNT_BSS_OFF: i64 = 0
 var POOL_REFILL_BYTES_BSS_OFF: i64 = 0
 
 var NEEDS_GPU_RUNTIME_DYNLINK: i64 = 0
+var NEEDS_F128_RUNTIME_DYNLINK: i64 = 0
+var F128_RT_READY_BSS_OFF: i64 = 0
+var F128_RT_LIB_BSS_OFF: i64 = 0
+var F128_RT_ADD_BSS_OFF: i64 = 0
+var F128_RT_SUB_BSS_OFF: i64 = 0
+var F128_RT_MUL_BSS_OFF: i64 = 0
+var F128_RT_DIV_BSS_OFF: i64 = 0
+var F128_RT_EQ_BSS_OFF: i64 = 0
+var F128_RT_EXTEND_BSS_OFF: i64 = 0
 
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
 fn gpu_param_kind_slice_in_f64() -> i64 { 2 }
@@ -3470,7 +3480,7 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic, Mut {
     return true
 }
 
-fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 }
+fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 || k == 13 }
 
 fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
     if TK[p as usize] != 3 { return false }
@@ -4198,6 +4208,8 @@ fn type_name_kind(ns: i64, ne: i64) -> i64 with Panic, Mut {
     if src_match(ns, ne - ns, "usize") { return 1 }
     if src_match(ns, ne - ns, "f32") { return 2 }
     if src_match(ns, ne - ns, "f64") { return 2 }
+    if src_match(ns, ne - ns, "f128") { return 13 }
+    if src_match(ns, ne - ns, "f256") { return 14 }
     if src_match(ns, ne - ns, "str") { return 3 }
     if src_match(ns, ne - ns, "string") { return 3 }
     if src_match(ns, ne - ns, "bool") { return 4 }
@@ -6703,6 +6715,23 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p
             return
         }
+        // Kind 13 = binary128. Distinct from f64 (2) and from Seq (12).
+        if src_match(ns, ne - ns, "f128") {
+            SCAN_TY = 13
+            SCAN_TY_HASH = 0
+            p = p + 1
+            SCAN_TY_NEXT = p
+            return
+        }
+        // Kind 14 = reserved wide float. Not numeric, so the lowercase-unknown
+        // fallback cannot silently rewrite f256 into f64.
+        if src_match(ns, ne - ns, "f256") {
+            SCAN_TY = 14
+            SCAN_TY_HASH = 0
+            p = p + 1
+            SCAN_TY_NEXT = p
+            return
+        }
         if src_match(ns, ne - ns, "i8") {
             SCAN_TY = 1
         } else {
@@ -8425,6 +8454,19 @@ fn var_add(ns: i64, ne: i64) -> i64 with Mut, Panic {
     return slot
 }
 
+fn var_add_f128(ns: i64, ne: i64) -> i64 with Mut, Panic {
+    let slot = NEXT_SLOT
+    if local_meta_add(ns, ne, slot, 0, 0, 16, 0, 0, 0, 0, 0, 0, 13, 0) < 0 {
+        LAST_LOCAL_BSS_SPILL = 0
+        LAST_LOCAL_BSS_ADDR = 0
+        return -1
+    }
+    NEXT_SLOT = NEXT_SLOT + 2
+    LAST_LOCAL_BSS_SPILL = 0
+    LAST_LOCAL_BSS_ADDR = 0
+    return slot
+}
+
 fn var_add_option_inline(ns: i64, ne: i64, ty_hash: i64) -> i64 with Mut, Panic {
     let tag_slot = NEXT_SLOT + 1
     if local_meta_add(ns, ne, tag_slot, 0, 0, 16, 0, 0, 0, 0, 0, 0, 11, ty_hash) < 0 {
@@ -8813,6 +8855,163 @@ fn emit_push() with Mut { em(0x50) }
 fn emit_pop_rcx() with Mut { em(0x59) }
 // mov rax, imm64
 fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
+// mov [rbp - 8*slot], rdx
+fn emit_store_rdx_var(slot: i64) with Mut { em(0x48); em(0x89); em(0x95); em32(0 - slot * 8) }
+// mov rdx, [rbp - 8*slot]
+fn emit_load_rdx_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x95); em32(0 - slot * 8) }
+
+fn emit_call_rax_aligned_x86() with Mut {
+    em(0x49); em(0x89); em(0xc3)
+    em(0x41); em(0x54)
+    em(0x49); em(0x89); em(0xe4)
+    em(0x48); em(0x83); em(0xe4); em(0xf0)
+    em(0x41); em(0xff); em(0xd3)
+    em(0x4c); em(0x89); em(0xe4)
+    em(0x41); em(0x5c)
+}
+
+fn emit_rax_rdx_to_xmm0_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0x48); em(0x89); em(0x04); em(0x24)
+    em(0x48); em(0x89); em(0x54); em(0x24); em(8)
+    em(0xf3); em(0x0f); em(0x6f); em(0x04); em(0x24)
+    em(0x48); em(0x83); em(0xc4); em(16)
+}
+
+fn emit_rax_rdx_to_xmm1_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0x48); em(0x89); em(0x04); em(0x24)
+    em(0x48); em(0x89); em(0x54); em(0x24); em(8)
+    em(0xf3); em(0x0f); em(0x6f); em(0x0c); em(0x24)
+    em(0x48); em(0x83); em(0xc4); em(16)
+}
+
+fn emit_xmm0_to_rax_rdx_x86() with Mut {
+    em(0x48); em(0x83); em(0xec); em(16)
+    em(0xf3); em(0x0f); em(0x7f); em(0x04); em(0x24)
+    em(0x48); em(0x8b); em(0x04); em(0x24)
+    em(0x48); em(0x8b); em(0x54); em(0x24); em(8)
+    em(0x48); em(0x83); em(0xc4); em(16)
+}
+
+fn emit_f128_die_x86(msg: string) with Mut, Panic, Div {
+    emit_inline_cstr_from_string_x86(msg)
+    emit_print_cstr()
+    em(0x48); em(0x31); em(0xff)
+    em(0xb8); em32(60)
+    em(0x0f); em(0x05)
+}
+
+fn emit_f128_resolve_sym_x86(sym: string, dst_off: i64) with Mut, Panic, Div {
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + F128_RT_LIB_BSS_OFF)
+    em(0x50)
+    emit_inline_cstr_from_string_x86(sym)
+    em(0x50)
+    emit_call_abs_qword_x86(gpu_dyn_linux_x86_got_slot_dlsym(), 2)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let have = CL
+    em32(0)
+    emit_f128_die_x86("error: f128 runtime missing a libgcc __*tf3 symbol\n")
+    patch32(have, CL)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + dst_off)
+}
+
+fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
+    NEEDS_F128_RUNTIME_DYNLINK = 1
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + F128_RT_READY_BSS_OFF)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let already = CL
+    em32(0)
+    emit_inline_cstr_from_string_x86("libgcc_s.so.1")
+    em(0x50)
+    emit_imm64(2)
+    em(0x50)
+    emit_call_abs_qword_x86(gpu_dyn_linux_x86_got_slot_dlopen(), 2)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x85)
+    let have_lib = CL
+    em32(0)
+    emit_f128_die_x86("error: f128 runtime requires libgcc_s.so.1\n")
+    patch32(have_lib, CL)
+    emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + F128_RT_LIB_BSS_OFF)
+    emit_f128_resolve_sym_x86("__addtf3", F128_RT_ADD_BSS_OFF)
+    emit_f128_resolve_sym_x86("__subtf3", F128_RT_SUB_BSS_OFF)
+    emit_f128_resolve_sym_x86("__multf3", F128_RT_MUL_BSS_OFF)
+    emit_f128_resolve_sym_x86("__divtf3", F128_RT_DIV_BSS_OFF)
+    emit_f128_resolve_sym_x86("__extenddftf2", F128_RT_EXTEND_BSS_OFF)
+    emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + F128_RT_READY_BSS_OFF, 1)
+    patch32(already, CL)
+}
+
+fn emit_widen_f64_to_f128_x86() with Mut, Panic, Div {
+    let save = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(save)
+    emit_f128_ensure_libgcc_x86()
+    emit_load_var(save)
+    em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + F128_RT_EXTEND_BSS_OFF)
+    emit_call_rax_aligned_x86()
+    emit_xmm0_to_rax_rdx_x86()
+    EXPR_TY = 13
+    EXPR_TY_HASH = 0
+    EXPR_IS_F64 = 0
+}
+
+fn emit_f128_rhs_widen_if_f64() with IO, Mut, Panic, Div {
+    if EXPR_TY == 2 || EXPR_IS_F64 == 1 {
+        emit_widen_f64_to_f128_x86()
+    }
+}
+
+fn emit_f128_binop_x86(op: i64, lhs_lo: i64, lhs_hi: i64) with Mut, Panic, Div {
+    let rhs_lo = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let rhs_hi = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(rhs_lo)
+    emit_store_rdx_var(rhs_hi)
+    emit_f128_ensure_libgcc_x86()
+    emit_load_var(lhs_lo)
+    emit_load_rdx_var(lhs_hi)
+    emit_rax_rdx_to_xmm0_x86()
+    emit_load_var(rhs_lo)
+    emit_load_rdx_var(rhs_hi)
+    emit_rax_rdx_to_xmm1_x86()
+    var ptr_off: i64 = F128_RT_ADD_BSS_OFF
+    if op == 18 { ptr_off = F128_RT_SUB_BSS_OFF }
+    if op == 19 { ptr_off = F128_RT_MUL_BSS_OFF }
+    if op == 20 { ptr_off = F128_RT_DIV_BSS_OFF }
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ptr_off)
+    emit_call_rax_aligned_x86()
+    emit_xmm0_to_rax_rdx_x86()
+    EXPR_TY = 13
+    EXPR_TY_HASH = 0
+    EXPR_IS_F64 = 0
+}
+
+fn emit_f128_eq_x86(lhs_lo: i64, lhs_hi: i64, invert: i64) with Mut, Panic, Div {
+    em(0x49); em(0x89); em(0xc0)
+    em(0x49); em(0x89); em(0xd1)
+    emit_load_var(lhs_lo)
+    em(0x4c); em(0x31); em(0xc0)
+    em(0x49); em(0x89); em(0xc2)
+    emit_load_var(lhs_hi)
+    em(0x4c); em(0x31); em(0xc8)
+    em(0x4c); em(0x09); em(0xd0)
+    em(0x48); em(0x85); em(0xc0)
+    if invert == 0 {
+        em(0x0f); em(0x94); em(0xc0)
+    } else {
+        em(0x0f); em(0x95); em(0xc0)
+    }
+    em(0x48); em(0x0f); em(0xb6); em(0xc0)
+    EXPR_IS_F64 = 0
+    EXPR_TY = 4
+    EXPR_TY_HASH = 0
+}
 
 fn emit_push_expr_as_slice_arg_x86(call_tok: i64) with IO, Mut, Panic, Div {
     if type_is_slice_ref(EXPR_TY, EXPR_TY_HASH) {
@@ -13195,7 +13394,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
         compile_postfix_tail()
         if EXPR_TY != 0 && ty_is_numeric(EXPR_TY) == false { tc_error_hard(op_tok, "unary - requires numeric operand") }
         // EXPR_IS_F64 kept from inner expression (unary minus preserves type)
-        if EXPR_IS_F64 == 1 {
+        if EXPR_TY == 13 {
+            em(0x48); em(0x0f); em(0xba); em(0xfa); em(63)
+        } else if EXPR_IS_F64 == 1 {
             // f64 negate: flip sign bit (bit 63)
             em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
         } else {
@@ -16900,6 +17101,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 emit_lea_var(slot)
             } else if vi >= 0 && type_is_option_inline(VAR_TY[vi as usize], VAR_TY_HASH[vi as usize]) && VAR_ESIZ[vi as usize] >= 16 {
                 emit_lea_var(slot)
+            } else if vi >= 0 && VAR_TY[vi as usize] == 13 {
+                emit_load_var(slot)
+                emit_load_rdx_var(slot + 1)
             } else {
                 emit_load_var(slot)
             }
@@ -18589,8 +18793,31 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
     EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
-    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
-    EXPR_HSHADOW_77 = -1
+        EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+        EXPR_HSHADOW_77 = -1
+        if left_ty == 13 {
+            let lhs_lo = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let lhs_hi = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(lhs_lo)
+            emit_store_rdx_var(lhs_hi)
+            compile_postfix()
+            if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
+                if op == 20 { tc_error_hard(op_tok, "division by zero") }
+                else { tc_error_hard(op_tok, "modulo by zero") }
+            }
+            if op == 29 {
+                tc_error_hard(op_tok, "modulo requires integer operands")
+            } else {
+                emit_f128_rhs_widen_if_f64()
+                if EXPR_TY != 0 && EXPR_TY != 13 {
+                    tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+                }
+                emit_f128_binop_x86(op, lhs_lo, lhs_hi)
+            }
+            continue
+        }
         emit_push()
         compile_postfix()
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
@@ -20198,6 +20425,30 @@ fn compile_additive() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
+        if left_ty == 13 {
+            let lhs_lo_a = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let lhs_hi_a = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(lhs_lo_a)
+            emit_store_rdx_var(lhs_hi_a)
+            compile_multiplicative()
+            let right_unit_a = EXPR_UNIT
+            let right_unit_dim_a = EXPR_UNIT_DIM
+            if left_unit != 0 && right_unit_a != 0 && left_unit != right_unit_a {
+                tc_linear_violation(op_tok, "unit mismatch")
+            }
+            if left_unit_dim != 0 && right_unit_dim_a != 0 && left_unit_dim != right_unit_dim_a {
+                tc_linear_violation(op_tok, "unit dimension mismatch")
+            }
+            if left_unit != 0 { EXPR_UNIT = left_unit; EXPR_UNIT_DIM = left_unit_dim }
+            emit_f128_rhs_widen_if_f64()
+            if EXPR_TY != 0 && EXPR_TY != 13 {
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+            emit_f128_binop_x86(op, lhs_lo_a, lhs_hi_a)
+            continue
+        }
         emit_push()
         compile_multiplicative()
         let right_ty = EXPR_TY
@@ -21136,6 +21387,27 @@ fn compile_comparison() with IO, Mut, Panic, Div {
         let left_raw_ty = EXPR_TY
         let left_raw_hash = EXPR_TY_HASH
         EP = EP + 1
+        if left_raw_ty == 13 {
+            let lhs_lo_c = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            let lhs_hi_c = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(lhs_lo_c)
+            emit_store_rdx_var(lhs_hi_c)
+            compile_bitor()
+            comparison_require_observe(op_tok, left_raw_ty, EXPR_TY)
+            emit_f128_rhs_widen_if_f64()
+            if EXPR_TY != 0 && EXPR_TY != 13 {
+                tc_error_hard(op_tok, "comparison operands must have the same type")
+            }
+            if op != 21 && op != 22 {
+                tc_error_hard(op_tok, "ordered comparison of f128 is not implemented")
+            }
+            var invert_eq: i64 = 0
+            if op == 22 { invert_eq = 1 }
+            emit_f128_eq_x86(lhs_lo_c, lhs_hi_c, invert_eq)
+            return
+        }
         emit_push()
         compile_bitor()
         let right_raw_ty = EXPR_TY
@@ -24336,8 +24608,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     decl_ty_hash = 0
                 }
                 if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
-                    decl_ty = 2
-                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                    if src_match(ann_ns, ann_ne - ann_ns, "f256") == false {
+                        decl_ty = 2
+                        decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                    }
                 }
                 if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     decl_ty = 2
@@ -24490,6 +24764,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             }
         } else {
             compile_or()
+            if decl_ty == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
+                emit_widen_f64_to_f128_x86()
+            }
             if (decl_ty != 0 || decl_ty_hash != 0) && ty_eq(decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH) == false {
                 if type_has_knowledge(decl_ty, decl_ty_hash) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                     tc_epistemic_boundary(EP)
@@ -24542,7 +24819,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     VAR_MUT[svix as usize] = decl_is_mut
                 }
             } else {
-                let slot = var_add(ns, ne)
+                var slot: i64 = 0
+                if decl_ty == 13 || (decl_ty == 0 && EXPR_TY == 13) {
+                    slot = var_add_f128(ns, ne)
+                } else {
+                    slot = var_add(ns, ne)
+                }
                 if slot < 0 { return }
                 let vix = VAR_COUNT - 1
                 // PR-4: track per-variable literal value for cross-binding refinement
@@ -24699,7 +24981,12 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     patch32(pred_ok_f_off, CL)
                     SCAN_HAS_PRED = 0
                 }
-                emit_store_var(slot)
+                if decl_ty == 13 || EXPR_TY == 13 {
+                    emit_store_var(slot)
+                    emit_store_rdx_var(slot + 1)
+                } else {
+                    emit_store_var(slot)
+                }
                 // Set f64 flag: explicit type annotation takes priority, else infer from RHS
                 if decl_is_f64 == 1 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                 else if decl_is_f64 == 0 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 0 }
@@ -24948,11 +25235,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let ne = TE[EP as usize]
         EP = EP + 2
         compile_or()
-        let rhs_ty = EXPR_TY
-        let rhs_ty_hash = EXPR_TY_HASH
         let slot = var_find(ns, ne)
         if slot >= 0 {
             let ty_vi = var_find_idx(ns, ne)
+            if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
+                emit_widen_f64_to_f128_x86()
+            }
+            let rhs_ty = EXPR_TY
+            let rhs_ty_hash = EXPR_TY_HASH
             if ty_vi >= 0 {
                 if VAR_MUT[ty_vi as usize] == 0 {
                     tc_error_hard(name_tok, "assignment to immutable binding requires var/Mut")
@@ -24974,6 +25264,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 emit_copy_option_to_local_x86(slot)
             } else if ty_vi >= 0 && type_is_struct_like(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize]) {
                 copy_struct_into_local_slot_x86(slot, VAR_TY_HASH[ty_vi as usize])
+            } else if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 13 {
+                emit_store_var(slot)
+                emit_store_rdx_var(slot + 1)
             } else {
                 emit_store_var(slot)
             }
@@ -30241,8 +30534,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     ARENA_UNMAP_BYTES_BSS_OFF = bss_alloc_aligned(8)
     POOL_REFILL_COUNT_BSS_OFF = bss_alloc_aligned(8)
     POOL_REFILL_BYTES_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_READY_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_LIB_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_ADD_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_SUB_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_MUL_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_DIV_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_EQ_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_EXTEND_BSS_OFF = bss_alloc_aligned(8)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
+    NEEDS_F128_RUNTIME_DYNLINK = 0
     // R15 Runtime Tag Stack: reserve BSS for side table (up to 16384 call sites × 8 bytes)
     if CLI_R15_MONITOR != 0 {
         R15_SIDE_TABLE_BSS_OFF = bss_alloc_aligned(16384 * 8)
@@ -31782,7 +32084,7 @@ fn write_elf_gpu_dyn_x86(output: string) -> i64 with IO, Mut, Panic, Div {
 
 // ─── ELF writer (2 LOAD segments: text RX + BSS RW) ───
 fn write_elf(output: string) -> i64 with IO, Mut, Panic, Div {
-    if TARGET_OS == 0 && TARGET_ARCH == 0 && NEEDS_GPU_RUNTIME_DYNLINK != 0 {
+    if TARGET_OS == 0 && TARGET_ARCH == 0 && (NEEDS_GPU_RUNTIME_DYNLINK != 0 || NEEDS_F128_RUNTIME_DYNLINK != 0) {
         return write_elf_gpu_dyn_x86(output)
     }
     let text_base = 0x400000
@@ -38679,8 +38981,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     decl_ty_hash = 0
                 }
                 if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
-                    decl_ty = 2
-                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                    if src_match(ann_ns, ann_ne - ann_ns, "f256") == false {
+                        decl_ty = 2
+                        decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
+                    }
                 }
                 if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     decl_ty = 2
