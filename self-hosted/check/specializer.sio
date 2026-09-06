@@ -130,6 +130,14 @@ var SPEC_GF_NEEDED: [bool; 256] = [false; 256]
 var SPEC_GF_INST_HASH: [i64; 256] = [0; 256]
 var SPEC_GF_POISONED: [bool; 256] = [false; 256]
 var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
+// Did any recorded instantiation of this template use a type argument that is
+// not a primitive scalar? Poisoning such a template is unsound: the
+// unspecialized body reaches lowering, which has no generics concept, and
+// struct-typed arguments come back as zero. Measured on Madaros v0.80.0 —
+// see docs/handoff/BLK-20260903-specializer-nested-targ-collision.md.
+var SPEC_GF_NONSCALAR: [bool; 256] = [false; 256]
+// Set when a template is poisoned in a way lowering cannot represent.
+var SPEC_UNSOUND_POISON: bool = false
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
 var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
@@ -146,11 +154,31 @@ fn spec_reset_state() with Mut {
         SPEC_GF_INST_HASH[i as usize] = 0
         SPEC_GF_POISONED[i as usize] = false
         SPEC_GF_CLONE_PTR[i as usize] = 0
+        SPEC_GF_NONSCALAR[i as usize] = false
         SPEC_ST_PTRS[i as usize] = 0
         i = i + 1
     }
     SPEC_GF_COUNT = 0
     SPEC_ST_COUNT = 0
+    SPEC_UNSOUND_POISON = false
+}
+
+// True when this pass poisoned a template whose instantiations cannot survive
+// unspecialized lowering. The caller must refuse to emit code: the alternative
+// is a program that compiles and returns zeros.
+pub fn spec_unsound_poison_detected() -> bool {
+    SPEC_UNSOUND_POISON
+}
+
+// Report the refusal and return true when the caller must fail. Callers fold
+// this into their existing verdict check, so the message only appears when the
+// program would otherwise have been accepted.
+pub fn spec_report_unsound_poison() -> bool with IO {
+    if !SPEC_UNSOUND_POISON { return false }
+    print("error: a generic function was instantiated with more than one type-argument list in a single compilation unit, and at least one of those arguments is not a primitive scalar\n")
+    print("  note: monomorphization keeps only one instantiation per template; the others would reach code generation unspecialized and evaluate to zero\n")
+    print("  help: write a separate concrete function for each type, or keep the generic call sites in separate compilation units\n")
+    true
 }
 
 // ============================================================
@@ -512,27 +540,181 @@ fn spec_type_args_nth(opt: Option<Box<TypeExprList>>, n: i64) -> TypeExpr with M
     }
 }
 
-fn spec_render_type_name(te: TypeExpr) -> Name with Mut, Panic, Div {
-    if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
-        return spec_path_single_name(te.path)
+// Render a type argument as a mangle fragment.
+//
+// Returns "" for any shape this scheme cannot render *injectively*; every
+// caller treats "" as "cannot mangle" and falls back to unspecialized
+// behaviour. Rendering a shape we cannot distinguish is not an option.
+//
+// What this replaces: the previous version returned the head name of any
+// single-segment named type and DROPPED its type arguments, falling back to
+// the literal "T" for everything else. So `pick::<Cell<i64>>` and
+// `pick::<Cell<f64>>` both mangled to `pick__Cell`, hashed equal, and the
+// second instantiation silently reused the first one's clone — and
+// `Cell<Cell<i64>>` / `Cell<Cell<f64>>` both emitted one struct named
+// `Cell__Cell`. Witnessed on Madaros v0.80.0.
+//
+// Nesting is encoded with `_Lb_` / `_Rb_` / `_Cm_` so the result stays in
+// [A-Za-z0-9_] for the backend. Residual: a source identifier that literally
+// contains one of those markers could still alias. That is a far narrower
+// surface than the previous collapse-everything-to-T behaviour, and it is
+// documented in docs/compiler/KNOWN_LIMITATIONS.md rather than hidden.
+fn spec_render_type_string(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
+    if te.kind == TypeExprKind::TypeUnit {
+        return "Unit"
     }
-    make_name("T")
+    if te.kind == TypeExprKind::TypeReference {
+        match te.inner {
+            None => { return "" }
+            Some(b) => {
+                let s = spec_render_type_string(*b)
+                if str_len(s) == 0 { return "" }
+                return str_concat("Ref_", s)
+            }
+        }
+    }
+    if te.kind == TypeExprKind::TypeRefMut {
+        match te.inner {
+            None => { return "" }
+            Some(b) => {
+                let s = spec_render_type_string(*b)
+                if str_len(s) == 0 { return "" }
+                return str_concat("RefMut_", s)
+            }
+        }
+    }
+    if te.kind != TypeExprKind::TypeNamed {
+        // Tuples, fn types, arrays (whose size lives in an Expr we cannot
+        // render), Knowledge/refinement types and the ZD wrappers: no
+        // injective spelling here.
+        return ""
+    }
+    if te.path.seg_count != 1 {
+        // Qualified paths would need a segment walk and a separator that
+        // cannot alias `_`; not attempted.
+        return ""
+    }
+
+    var s = spec_name_to_string(spec_path_single_name(te.path))
+    if str_len(s) == 0 { return "" }
+
+    match te.type_args {
+        None => { return s }
+        Some(_args) => {
+            var out = str_concat(s, "_Lb_")
+            var cur = te.type_args
+            var first = true
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(list) => {
+                        let arg = spec_render_type_string((*list).head)
+                        if str_len(arg) == 0 { return "" }
+                        if first {
+                            out = str_concat(out, arg)
+                            first = false
+                        } else {
+                            out = str_concat(str_concat(out, "_Cm_"), arg)
+                        }
+                        cur = (*list).tail
+                    }
+                }
+            }
+            return str_concat(out, "_Rb_")
+        }
+    }
 }
 
-fn spec_mangle_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div {
+// Thin Name wrapper. `empty_name()` is the "unrenderable" sentinel.
+fn spec_render_type_name(te: TypeExpr) -> Name with Mut, Panic, Div, Alloc {
+    let s = spec_render_type_string(te)
+    if str_len(s) == 0 { return empty_name() }
+    make_name(s)
+}
+
+// Mangle `base` with its turbofish args. Returns `empty_name()` when the
+// instantiation cannot be named injectively (unrenderable argument, or a
+// name that would overrun Name.buf). Callers must check.
+fn spec_mangle_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
     var s = spec_name_to_string(base)
+    if str_len(s) == 0 { return empty_name() }
     var cur = targs
     var going = true
     while going {
         match cur {
             None => { going = false }
             Some(list) => {
-                s = str_concat(str_concat(s, "__"), spec_name_to_string(spec_render_type_name((*list).head)))
+                let arg = spec_render_type_string((*list).head)
+                if str_len(arg) == 0 { return empty_name() }
+                s = str_concat(str_concat(s, "__"), arg)
                 cur = (*list).tail
             }
         }
     }
+    // Name.buf is [i8; 128] but make_name sets `len` from the *string*
+    // length while copying only the first 128 bytes, so a longer string
+    // yields a Name whose `len` runs past its own buffer and name_eq /
+    // ast_name_hash then read out of bounds. Fail closed rather than
+    // truncate: truncation would reintroduce the very collision this guard
+    // exists to prevent. (Literal, not a module-level const — D6.)
+    if str_len(s) > 120 { return empty_name() }
     make_name(s)
+}
+
+fn spec_name_is_empty(n: Name) -> bool {
+    n.len == 0
+}
+
+// Is this type argument a primitive scalar?
+//
+// Scalars survive an unspecialized template body: lowering passes them in a
+// register and the value arrives intact (measured: `pick::<i64>` + `pick::<f64>`
+// in one unit prints 7 and 1.5 correctly even though the template is poisoned).
+// Anything else — a struct, a generic instance, a reference — arrives as zero,
+// because lowering has no generics concept and the handle is dropped. Measured
+// on Madaros v0.80.0 with both `pick::<Cell<i64>>` / `pick::<Cell<f64>>` and
+// `pick::<P>` / `pick::<Q>` for plain structs P and Q: both print zeros, on the
+// committed binary as well as this one. The second shape is a pre-existing
+// wrong-code path on the default engine, not a consequence of the mangling fix.
+fn spec_type_arg_is_scalar(te: TypeExpr) -> bool with Mut, Panic, Div, Alloc {
+    if te.kind != TypeExprKind::TypeNamed { return false }
+    if te.path.seg_count != 1 { return false }
+    match te.type_args {
+        Some(_a) => { return false }
+        None => {}
+    }
+    let n = spec_name_to_string(spec_path_single_name(te.path))
+    if str_eq(n, "i8") { return true }
+    if str_eq(n, "i16") { return true }
+    if str_eq(n, "i32") { return true }
+    if str_eq(n, "i64") { return true }
+    if str_eq(n, "u8") { return true }
+    if str_eq(n, "u16") { return true }
+    if str_eq(n, "u32") { return true }
+    if str_eq(n, "u64") { return true }
+    if str_eq(n, "f32") { return true }
+    if str_eq(n, "f64") { return true }
+    if str_eq(n, "bool") { return true }
+    if str_eq(n, "char") { return true }
+    if str_eq(n, "usize") { return true }
+    if str_eq(n, "isize") { return true }
+    false
+}
+
+fn spec_type_args_all_scalar(targs: Option<Box<TypeExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    var cur = targs
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if !spec_type_arg_is_scalar((*list).head) { return false }
+                cur = (*list).tail
+            }
+        }
+    }
+    true
 }
 
 // ============================================================
@@ -658,7 +840,12 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
                     r2 = r2 - 1
                 }
                 let base2 = spec_path_single_name((*p).e.path)
-                (*p).e.path = spec_name_to_path(spec_mangle_name(base2, args_list2))
+                let mangled2 = spec_mangle_name(base2, args_list2)
+                // Only rewrite when the instance was actually nameable; an
+                // empty mangle means no instance was emitted above.
+                if !spec_name_is_empty(mangled2) {
+                    (*p).e.path = spec_name_to_path(mangled2)
+                }
             }
         }
     }
@@ -813,6 +1000,11 @@ fn spec_extra_push_item(it: Item) with Mut, Panic, Div, Alloc {
 // the same cache).
 fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
     let mangled = spec_mangle_name(base, targs)
+    // Unnameable instantiation: emit nothing and hand back the template name.
+    // The checker's signature lowering then erases the generic args, which is
+    // the pre-existing baseline — wrong-but-uniform, not two distinct types
+    // silently sharing one emitted struct.
+    if spec_name_is_empty(mangled) { return base }
     if spec_emitted_has(mangled) { return mangled }
     spec_emitted_push(mangled)
 
@@ -886,15 +1078,36 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
     if gt_idx < 0 { return }
     if spec_type_args_count(targs) != spec_generic_table_tp_count(gt_idx) { return }
 
-    let inst_hash = ast_name_hash(spec_mangle_name(base_name, targs))
+    // An instantiation we cannot name injectively must not be specialized:
+    // two different arg lists would otherwise share one hash and one clone.
+    // Poison the template so it keeps its unspecialized (baseline) behaviour.
+    let args_scalar = spec_type_args_all_scalar(targs)
+
+    let mangled_inst = spec_mangle_name(base_name, targs)
+    if spec_name_is_empty(mangled_inst) {
+        SPEC_GF_POISONED[gt_idx as usize] = true
+        if !args_scalar { SPEC_UNSOUND_POISON = true }
+        if spec_trace_enabled() { print("specializer: poisoned (unrenderable type argument)\n") }
+        return
+    }
+
+    let inst_hash = ast_name_hash(mangled_inst)
     if SPEC_GF_INST_HASH[gt_idx as usize] != 0 {
         if SPEC_GF_INST_HASH[gt_idx as usize] != inst_hash {
             SPEC_GF_POISONED[gt_idx as usize] = true
+            // A poisoned template keeps its unspecialized body, and lowering
+            // has no generics concept. That is survivable for scalars and
+            // silently returns zeros for everything else, so refuse rather
+            // than emit code we know is wrong.
+            if !args_scalar || SPEC_GF_NONSCALAR[gt_idx as usize] {
+                SPEC_UNSOUND_POISON = true
+            }
             if spec_trace_enabled() { print("specializer: poisoned (second distinct instantiation)\n") }
         }
         return
     }
     SPEC_GF_INST_HASH[gt_idx as usize] = inst_hash
+    if !args_scalar { SPEC_GF_NONSCALAR[gt_idx as usize] = true }
 
     match spec_generic_table_fd(gt_idx) {
         None => {}

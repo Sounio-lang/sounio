@@ -1,0 +1,82 @@
+//@ requires: madaros
+// Seq<f64> element reads are classified as float by the modular Madaros
+// codegen (self-hosted/ir/lower.sio, d80435a49e); the lean_single bootstrap
+// that builds the suite's stage2 binary has no such classification and reads
+// the element as an integer. Measured 2026-09-05, same worktree, engine
+// swapped: lean_single rc=1; Madaros built from this branch rc=0. The
+// committed bin/madaros-linux-x86_64 (2026-09-03) also rc=1 -- it predates
+// the fix, so this needs a refreshed prebuilt before a Madaros job can run it.
+//@ run-pass
+//@ expect-stdout-contains: SEQ_F64_SCALAR_KIND_OK
+// Reading a Seq<f64> element must produce a float, in every spelling.
+//
+// Seq access is an intrinsic: `seq.get(i)` lowers to __sounio_seq_get with no
+// fn symbol, so the two routines that classify an expression's type both missed
+// on the mangled-method lookup and fell through to their integer default:
+// expr_result_scalar_kind_ref (println) and expr_result_is_float_ref
+// (arithmetic). The `a[i]` spelling had an answer in both; the method spelling
+// had one in neither.
+//
+// Measured on the committed compiler before the fix -- a wrong-code path, not a
+// rejection, so the program type-checked clean and printed nonsense:
+//   sum of 0.25 and 0.75 in a loop  -> 9203105838531608576.0
+//   w.get(0) + w.get(1) unrolled    -> 9223372036854775808.0  (2^63)
+//   println(w.get(0))               -> refused, "unresolved scalar kind"
+// Seq<i64> was correct throughout the same shapes, which is what made this a
+// float-classification defect rather than a Seq defect.
+//
+// NOT covered here, and NOT fixed: a `&Seq<f64>` PARAMETER. That path is
+// separate and still wrong -- one shape returns a wrong value, another
+// segfaults. See docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md.
+
+fn main() -> i32 with IO, Mut, Panic, Epistemic {
+    var w: Seq<f64> = seq_new()
+    w.push(0.25)
+    w.push(0.75)
+
+    // Unrolled: both operands are intrinsic reads.
+    let unrolled: f64 = w.get(0) + w.get(1)
+    if unrolled < 0.999 || unrolled > 1.001 {
+        print("seq_f64: FAIL (unrolled)\n")
+        return 1
+    }
+
+    // Accumulating loop, i64 counter with a cast in the index.
+    var sa: f64 = 0.0
+    let k: i64 = w.len().unwrap("len")
+    var i: i64 = 0
+    while i < k {
+        sa = sa + w.get(i as usize)
+        i = i + 1
+    }
+    if sa < 0.999 || sa > 1.001 {
+        print("seq_f64: FAIL (i64 loop)\n")
+        return 1
+    }
+
+    // Same loop with a usize counter and no cast.
+    var sb: f64 = 0.0
+    let ku: usize = k as usize
+    var j: usize = 0
+    while j < ku {
+        sb = sb + w.get(j)
+        j = j + 1
+    }
+    if sb < 0.999 || sb > 1.001 {
+        print("seq_f64: FAIL (usize loop)\n")
+        return 1
+    }
+
+    // Seq<i64> control: correct before and after, so a fix that breaks this
+    // broke integer classification rather than repairing the float one.
+    var n: Seq<i64> = seq_new()
+    n.push(3)
+    n.push(4)
+    if n.get(0) + n.get(1) != 7 {
+        print("seq_f64: FAIL (i64 control)\n")
+        return 1
+    }
+
+    print("SEQ_F64_SCALAR_KIND_OK\n")
+    0
+}

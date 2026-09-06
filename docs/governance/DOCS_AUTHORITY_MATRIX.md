@@ -637,6 +637,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.blk-20260804-p0b-qd128-native-v2 | repo_only | docs/handoff/BLK-20260804-p0b-qd128-native-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.blk-20260805-p0b-zero-provenance | repo_only | docs/handoff/BLK-20260805-p0b-zero-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.blk-20260805-thinlink-ir-threshold | repo_only | docs/handoff/BLK-20260805-thinlink-ir-threshold.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.blk-20260903-specializer-nested-targ-collision | repo_only | docs/handoff/BLK-20260903-specializer-nested-targ-collision.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.blk-20260904-seq-f64-element-scalar-kind | repo_only | docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.butterfly-handoff | repo_only | docs/handoff/butterfly-handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.c2-heap-columnar-dataframe-codex-dispatch-2026-07-18 | repo_only | docs/handoff/c2_heap_columnar_dataframe_codex_dispatch_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.c3-group-select-radix-codex-dispatch-2026-07-21 | repo_only | docs/handoff/c3_group_select_radix_codex_dispatch_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

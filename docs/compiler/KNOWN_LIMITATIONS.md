@@ -320,6 +320,17 @@ gate is named separately.
 
 **Turbofish + generic monomorphization** (working): Multi-type-parameter generic functions are monomorphised and execute correctly, including **3+ type parameters** — `func::<T>(args)`, `func::<T, U>(args)`, and `func::<A, B, C>(args)` are all supported (verified: `fn trip<A,B,C>(a,b,c)->C` with `trip::<i64,i64,i64>(1,2,7)` compiles and returns 7). The `<TPARAMS>` section is stripped from the specialised token copy, every type parameter is substituted, and the specialised function is compiled as an ordinary function.
 
+**Turbofish — one instantiation per template** (bounded, 2026-09-03). The sentence above describes what a *single* instantiation of each template does. `self-hosted/check/specializer.sio` is a one-instantiation-per-template monomorphiser: the clone keeps the template's own name and replaces the template at finalize time, so call sites are never rewritten. A second instantiation with a different type-argument list poisons the template back to its unspecialized body (`SPEC_GF_POISONED`), and IR lowering has no generics concept.
+
+- Distinct **scalar** type arguments survive that fallback: `pick::<i64>(...)` and `pick::<f64>(...)` in one unit compile and return the right values.
+- Anything else does not. A poisoned template whose arguments are struct-typed used to compile with `rc=0` and evaluate to **zero** — measured on the committed binary with plain structs (`pick::<P>` / `pick::<Q>`), no nesting required. That path is now **refused** with a diagnostic naming the constraint. Gate: `scripts/ci/madaros_specializer_nested_targ_gate.sh`; fixtures `tests/run-pass/specializer_nested_targ_distinct.sio` and `tests/compile-fail/specializer_multi_instantiation_nonscalar.sio`; blocker `docs/handoff/BLK-20260903-specializer-nested-targ-collision.md`.
+
+**Instantiation naming** (fixed 2026-09-03). `spec_render_type_name` kept the head name of a single-segment named type and dropped that type's own arguments, so `Cell<i64>` rendered as `Cell`. Two instantiations differing only inside the nesting mangled identically, hashed equal, and shared one clone or one emitted struct — without tripping the poison guard. Rendering is now recursive (`_Lb_` / `_Cm_` / `_Rb_`). Residuals, none claimed closed: shapes with no injective spelling here (qualified paths, tuples, fn types, sized arrays, `Knowledge`/refinement types, ZD wrappers) are refused rather than supported; a mangled name over 120 bytes is refused, because `make_name` sets `Name.len` from the string length while copying at most 128 bytes into a `[i8; 128]` buffer; and an identifier that literally contains `_Lb_`/`_Cm_`/`_Rb_` can still alias.
+
+**Undocumented specializer caps** (measured 2026-09-03, not fixed): at most 4 type parameters per generic function (`tp_h0..tp_h3`), 256 generic functions and 256 generic structs per unit. Exceeding a cap degrades silently rather than erroring.
+
+**Method-call turbofish is inert** (open): `x.m::<T>()` parses and the type arguments are stored on the AST node, but `checker_check_method_call_with_base_ty_inplace` never reads `e.type_args` and IR lowering has no generics concept. The annotation is silently discarded rather than rejected.
+
 **Range slice half-open syntax** (fixed): `&arr[..n]` (start omitted, defaults to 0) now correctly compiles. Previously `compile_primary()` consumed the `..` token as an unrecognised primary, causing both the range-check and base-check to fail. Fix: detect `..`/`..=` at the start of the slice index and emit start=0 directly.
 
 **String `.as_bytes()`** (fixed): `.as_bytes()` on a `string` is now a recognised builtin — it passes through as a no-op (string pointer unchanged, type stays `string`), making `&bytes[..n]` range slices work on the result. Previously the method fell through to field-access dispatch, producing type 0 and causing the slice borrow to segfault.
@@ -771,3 +782,71 @@ parameter unchecked.
 - Working rule until fixed: bound every loop that exits on a float comparison
   and range-check `x >= lo && x < hi` after it; see `ulp()` in
   `examples/chemistry/rep_stagnation.sio`.
+## Reading a rejection: E035 and E137 are not language limitations
+
+Measured 2026-09-03 over `stdlib/`, `examples/` and `tests/run-pass/` — 4539
+files, 78.4% accepted by `souc check`. Reproduce with
+`scripts/dev/language_limitation_sweep.sh`; the run behind these figures is
+`artifacts/audit/language_limitation_sweep_20260903.tsv`.
+
+The two largest error classes in the tree are the two that most often get read
+as compiler gaps. Neither is one.
+
+**E035 — `effect not declared in function signature`.** 199 files at the time
+of the sweep, 140 of them in `stdlib/`. Of the 93 with attributable
+diagnostics, 57 had a single cause: `Epistemic::measured` was declared
+`with Mut, Div, Panic` while its body is a struct literal with one f64
+multiplication. `stdlib/pbpk/rapamycin_params.sio` declares 35 accessors that
+call it, and the 57 pbpk modules importing that file inherited all 35 errors.
+Removing the annotation (`35b92be4d1`) took stdlib from **140 files to 36**.
+The residue is a long tail with no shared cause — `libm_pow`,
+`particle_physics` `mass_*`, `msgpack_encode_*`, `io_buf_read` — and some of it
+is very likely annotation that really is missing.
+
+The effect checker was correct throughout: it propagated faithfully what the
+signature declared. When E035 appears in bulk, look at the callee named by
+`required by` before assuming the caller is at fault.
+
+**E137 — `use of undeclared variable`.** 323 files, 3623 occurrences. The
+message says "variable" but the code also fires on an unresolved *function*
+name, which is what most of these are. Classified:
+
+- 191 of the 323 files contain **no `use` statement at all** while calling
+  functions from other modules — 2947 of the 3623 occurrences. 139 of those are
+  under `examples/`.
+- Of the 676 occurrences in the 132 files that do import something: 529 name a
+  function defined **nowhere** in the tree, 147 name one that exists but is not
+  imported, and **0** name one that exists *and* is imported.
+
+That last number is the one that matters here. The only shape that would
+implicate name resolution is a name the file imports and the compiler still
+cannot see, and there are none. Two names account for 42% of the 676:
+`set_probe14_coord` (170) and `dim_rate` (114); neither has a definition
+anywhere. `dim_rate` is instructive — `stdlib/pbpk/rapamycin_units_bridge.sio`
+worked around `BLK-20260602-SRET-FORWARDING-IMPORTS` by hardcoding `UnitDim`
+struct literals and says so in a comment that ends "do NOT call `dim_rate()`",
+but its test functions were never updated and still call a function that was
+never written.
+
+Caveats on the classification: the offending identifier is recovered from the
+diagnostic's byte span, and 12 of the 676 extracted names are types or keywords
+rather than the intended identifier. The `defined_elsewhere_not_imported` count
+is an upper bound — its most frequent entries (`ln`, `len`, `print_i64`) are
+builtins that happen to share a name with some module-level `fn`. Neither
+source of noise can inflate the zero: a name would have to both exist and be
+imported to land there.
+
+### Measuring this yourself
+
+Pin the compiler and the stdlib together. `bin/souc` resolves a local
+`artifacts/self-hosted/madaros` ahead of the committed
+`bin/madaros-linux-x86_64`, so a build landing mid-sweep silently splits a run
+across two engines; the sweep script pins `SOUNIO_MADAROS_BIN` and records its
+identity in the TSV header for that reason.
+
+Do not use a second worktree as the "before" oracle. `SOUNIO_STDLIB_PATH`
+changes verdicts on its own: `tests/run-pass/seq_knowledge_nested_generic.sio`
+reports E137 against one worktree's `stdlib/` and checks clean against another
+on the *same* binary. Vary `SOUNIO_MADAROS_BIN` inside one tree instead. A
+differential that varied both produced a wrong claim in `681eebdd74`, withdrawn
+in `docs/handoff/BLK-20260903-specializer-nested-targ-collision.md`.

@@ -5702,6 +5702,25 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
             None => return false,
         }
     }
+    // Seq<f64> is a growable array whose elements are floats, but it is spelled
+    // as a named type with a type argument rather than TypeArray, so it never
+    // reached the marking below. A local declared `var w: Seq<f64>` was left
+    // unmarked, and every read of an element fell to the integer path: used
+    // directly as an operand, `w.get(0) + w.get(1)` produced 2^63 rather than
+    // the sum. Binding to a typed local happened to restore the kind, which is
+    // why the defect survived -- it looked like a print-dispatch quirk.
+    if (*te).kind == TypeExprKind::TypeNamed && (*te).path.seg_count == 1 {
+        let seg = (*te).path.segments
+        if seg.head_len == 3
+            && seg.head_buf[0] as i64 == 83      // S
+            && seg.head_buf[1] as i64 == 101     // e
+            && seg.head_buf[2] as i64 == 113 {   // q
+            match (*te).type_args {
+                None => { return false }
+                Some(args) => { return lower_type_expr_is_f64(&(*args).head) }
+            }
+        }
+    }
     if (*te).kind != TypeExprKind::TypeArray { return false }
     match (*te).inner {
         Some(inner_ty) => lower_type_expr_is_f64(&(*inner_ty)),
@@ -13607,6 +13626,16 @@ impl Lowerer {
         }
         // print(e.val()) / method results: same returns_float lookup as ExprCall.
         if (*e).kind == ExprKind::ExprMethodCall {
+            // `seq.get(i)` is an intrinsic: it lowers to __sounio_seq_get with no
+            // fn symbol, so the returns_float lookup below misses and the result
+            // classified as integer. That is the arithmetic-side half of the same
+            // gap fixed in expr_result_scalar_kind_ref -- `a[i]` had an answer for
+            // both, `seq.get(i)` for neither, so `w.get(0) + w.get(1)` over a
+            // Seq<f64> read the IEEE bits as an integer and printed 2^63.
+            if ir_name_eq((*e).name, make_name("get"))
+                && self.index_base_elem_is_float_ref(&(*e).left) {
+                return true
+            }
             let recv_type = self.lower_method_recv_type(&(*e).left)
             let call_name = if recv_type.len > 0 {
                 ir_mangle_method_name(recv_type, (*e).name)
@@ -14205,6 +14234,17 @@ impl Lowerer {
             // lookup below misses and kind stays 0 → println's char* printer SEGVs.
             if ir_name_eq((*e).name, make_name("len")) || ir_name_eq((*e).name, make_name("count")) {
                 return 1
+            }
+            // `seq.get(i)` on a Seq whose elements are floats. Seq access is an
+            // intrinsic like .len() above -- it lowers to __sounio_seq_get with no
+            // fn symbol, so the mangled-method lookup below misses and the kind
+            // stayed 0. The ExprIndex arm further down already answers this for
+            // `a[i]`; the method spelling had no equivalent, which is why
+            // `w.get(0) + w.get(1)` read the IEEE bits as an integer and
+            // `println(w.get(0))` refused outright.
+            if ir_name_eq((*e).name, make_name("get"))
+                && self.index_base_elem_is_float_ref(&(*e).left) {
+                return 2
             }
             let recv_type = self.lower_method_recv_type(&(*e).left)
             let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, (*e).name) } else { (*e).name }
@@ -16508,6 +16548,15 @@ impl Lowerer {
                         s.name,
                         lower_struct_layout_index_of(&(*lo.struct_layouts), seq_elem),
                     )
+                    // A Seq<f64> holds float elements exactly as [f64] does. This
+                    // branch recorded the element LAYOUT but never the element
+                    // KIND, so every read of an element fell to the integer path:
+                    // `w.get(0) + w.get(1)` produced 2^63 rather than the sum, and
+                    // `println(w.get(0))` refused with "unresolved scalar kind".
+                    // The array branch marks this; the Seq branch did not.
+                    if ir_name_eq(seq_elem, make_name("f64")) || ir_name_eq(seq_elem, make_name("f32")) {
+                        lo = lo.bind_local_array_elem_float(s.name)
+                    }
                 }
                 None => {}
             }
@@ -19068,6 +19117,9 @@ impl Lowerer {
             let pair_dst_seq_call = lo_args_seq_call.fresh_reg()
             let lo_dst_seq_call = pair_dst_seq_call.0
             let dst_seq_call = pair_dst_seq_call.1
+            // Mirror the array IndexGet path: a float element has to leave the
+            // call in a float register, or downstream arithmetic reads the
+            // IEEE bits as an integer.
             return (lo_dst_seq_call.emit(ir_call(
                 dst_seq_call,
                 fn_id_seq_call,
@@ -20718,6 +20770,11 @@ impl Lowerer {
                 let pair_d_seq_access = lo_seq_access.fresh_reg()
                 lo_seq_access = pair_d_seq_access.0
                 let dst_seq_access = pair_d_seq_access.1
+                // A float element has to leave the call in a float register, or
+                // downstream arithmetic reads the IEEE bits as an integer. The
+                // array IndexGet path has always done this; the three Seq paths
+                // did not, so `w.get(0) + w.get(1)` over a Seq<f64> produced
+                // 2^63 instead of the sum.
                 return (lo_seq_access.emit(ir_call(
                     dst_seq_access,
                     fn_id_seq_access,
