@@ -22405,10 +22405,24 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     // non-function metadata from the original AST before that aggregate copy.
     // Global cross-module DCE and local specialized-collapse DCE use separate
     // mark tables, but both rebuild the item list before this summary path.
-    // Skip the extra walk only when neither mode is active.
-    if spec_dce_global_marks_ready() || spec_mono_marker_count() > 0 {
-        lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
-    }
+    //
+    // Bug (gen2 --version SIGSEGV, third-bug residual, 2026-09-06): this used
+    // to run ONLY when spec_dce_global_marks_ready() OR spec_mono_marker_count()
+    // > 0 -- on the unverified assumption that with neither DCE mode active,
+    // prog.items already carries every struct/enum untouched, so the separate
+    // preserve-metadata walk would be redundant. Measured false for the real
+    // self-hosted main.sio compile: with both conditions false, this call was
+    // skipped entirely, and main.sio's OWN struct declarations (e.g. ArgList)
+    // were never registered by any path -- the loop below only preseeds
+    // EXTERNAL programs, by design excluding the self program's own items.
+    // Confirmed via address-probe instrumentation: arg_list_get's compiling
+    // Lowerer used a struct_layouts table with 709 entries (all from the
+    // external loop) that never included ArgList, so field_idx_from_name fell
+    // through to the raw byte-hash fallback (44 instead of the real index 1)
+    // and corrupted arg_list_get's bounds check, crashing gen2 --version via
+    // str_eq dereferencing garbage. Struct/enum metadata registration should
+    // not depend on DCE readiness -- run it unconditionally.
+    lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
