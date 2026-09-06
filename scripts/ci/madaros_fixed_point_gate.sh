@@ -33,11 +33,17 @@
 # short and when it goes further — a ratchet, so ground gained cannot be lost
 # silently and ground gained is not absorbed silently either.
 #
-# The default is `check`. It was `none` when this gate was written: measured
-# 2026-08-04 against origin/main 40116b661d, gen1 reported 3635 errors on
-# main.sio and never reached lowering. As of 2026-08-05 `madaros check
-# self-hosted/compiler/main.sio` exits 0 with zero diagnostics — the first time
-# Madaros has typechecked its own entry point.
+# The default is `run`. History of the ratchet, each step a recorded gain:
+#   - `none` when written: measured 2026-08-04 against origin/main 40116b661d,
+#     gen1 reported 3635 errors on main.sio and never reached lowering.
+#   - `check` as of 2026-08-05: `madaros check self-hosted/compiler/main.sio`
+#     exits 0 with zero diagnostics — Madaros typechecks its own entry point.
+#   - `gen2`: gen1 compiles main.sio to a gen2 ELF.
+#   - `run` as of 2026-09-06: gen2 answers `--version` as Madaros. This became
+#     reachable once the seed-module structs were registered in the preseed
+#     (self-hosted/ir/lower.sio): before, arg_list_get read ArgList.len from a
+#     legacy-hash slot and gen2 SIGSEGV'd on --version. See the field-idx /
+#     ArgList-offset fix for the full root cause.
 #
 # The historical wall was named and loud, which is the point of the whole line:
 #
@@ -60,7 +66,7 @@ cd "$ROOT_DIR"
 gate_name "madaros_fixed_point"
 
 SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
-EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-gen2}"
+EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-run}"
 MIN_INTO_ACC_DONE="${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
 MADAROS="${MADAROS_BIN:-}"
 IR_MAX_FUNCS="$(sed -nE 's/^pub let IR_MAX_FUNCS: i64 = ([0-9]+).*$/\1/p' self-hosted/ir/ir.sio | head -1)"
