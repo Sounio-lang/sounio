@@ -99,11 +99,11 @@ assert_structural_containment() {
   }
 
   if function_body is_numeric_type | grep -Eq 'TyF128|TyF256'; then
-    echo "FAIL wide identity leaked into is_numeric_type" >&2
+    echo "FAIL wide floats must stay out of is_numeric_type (use wide_float_* dispatch)" >&2
     exit 1
   fi
   if function_body is_float_type | grep -Eq 'TyF128|TyF256'; then
-    echo "FAIL wide identity leaked into is_float_type" >&2
+    echo "FAIL wide floats must stay out of is_float_type (use wide_float_* dispatch)" >&2
     exit 1
   fi
   if ! function_body is_wide_float_type | grep -Fq 'TyF128'; then
@@ -114,12 +114,16 @@ assert_structural_containment() {
     echo "FAIL is_wide_float_type omits TyF256" >&2
     exit 1
   fi
+  if ! grep -Fq 'wide_float_binary_result_type' self-hosted/check/compat.sio; then
+    echo "FAIL wide_float_binary_result_type missing (V0-E.2 ops dispatch)" >&2
+    exit 1
+  fi
   if ! grep -Fq 'if is_wide_float_type(left) || is_wide_float_type(right)' self-hosted/check/compat.sio; then
-    echo "FAIL binary operator containment guard missing" >&2
+    echo "FAIL binary operator wide-float dispatch guard missing" >&2
     exit 1
   fi
   if ! grep -Fq 'if is_wide_float_type(operand)' self-hosted/check/compat.sio; then
-    echo "FAIL unary operator containment guard missing" >&2
+    echo "FAIL unary operator wide-float dispatch guard missing" >&2
     exit 1
   fi
   if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
