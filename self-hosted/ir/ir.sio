@@ -1009,7 +1009,11 @@ pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
     if at < 0 || at >= ir_instr_arena_capacity() { return }
     var len = nm.len
     if len < 0 { len = 0 }
-    if len > 128 { len = 128 }
+    // Cap must match Name.buf (384). A hard 128 here was the measured silent
+    // string-literal truncation on the native-v2 path: codegen reads LoadString
+    // bytes via ir_arena_name → NC_BIG_RODATA, so content past 128 was dropped
+    // with rc=0 and no diagnostic (2026-08-17). Parser E258 refuses past Name.
+    if len > 384 { len = 384 }
     // Re-storing an instruction used to re-append its name, so pool consumption
     // tracked STORES rather than instructions and a dozen cleanup peels
     // multiplied it. If this slot already holds exactly this name, keep the
@@ -2042,7 +2046,7 @@ pub struct IrAlgebraTable {
 
 pub fn ir_empty_algebra_info() -> IrAlgebraInfo {
     IrAlgebraInfo {
-        name: Name { buf: [0; 128], len: 0 },
+        name: Name { buf: [0; 384], len: 0 },
         add_commutative: true,
         add_associative: true,
         mul_commutative: true,
@@ -2138,8 +2142,8 @@ pub struct IrOntologyTable {
 
 fn ir_empty_ontology_class_info() -> IrOntologyClassInfo {
     IrOntologyClassInfo {
-        name: Name { buf: [0; 128], len: 0 },
-        ontology_name: Name { buf: [0; 128], len: 0 },
+        name: Name { buf: [0; 384], len: 0 },
+        ontology_name: Name { buf: [0; 384], len: 0 },
         class_index: -1,
         superclass_count: 0,
         is_valid: false,
@@ -2148,7 +2152,7 @@ fn ir_empty_ontology_class_info() -> IrOntologyClassInfo {
 
 fn ir_empty_ontology_property_info() -> IrOntologyPropertyInfo {
     IrOntologyPropertyInfo {
-        name: Name { buf: [0; 128], len: 0 },
+        name: Name { buf: [0; 384], len: 0 },
         property_index: -1,
         domain_class_idx: -1,
         range_class_idx: -1,
@@ -3610,7 +3614,7 @@ pub fn empty_enum_variant_table() -> EnumVariantTable {
 
 // Mangle a method name: "TypeName" + "_" + "method_name"
 pub fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, Panic, Div {
-    var result = Name { buf: [0; 128], len: 0 }
+    var result = Name { buf: [0; 384], len: 0 }
     // Copy type_name
     var i: i64 = 0
     while i < type_name.len && result.len < 127 {
@@ -3625,7 +3629,7 @@ pub fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mu
     }
     // Copy method_name
     var j: i64 = 0
-    while j < method_name.len && result.len < 128 {
+    while j < method_name.len && result.len < 384 {
         result.buf[result.len] = method_name.buf[j]
         result.len = result.len + 1
         j = j + 1
@@ -3634,7 +3638,7 @@ pub fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mu
 }
 
 pub fn ir_empty_name() -> Name {
-    Name { buf: [0; 128], len: 0 }
+    Name { buf: [0; 384], len: 0 }
 }
 
 pub(crate) fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
@@ -3647,7 +3651,7 @@ pub(crate) fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
 //
 // WHY IrInstr DOES NOT CARRY A Name.
 //
-// `Name` is `{ buf: [i8; 128], len: i64 }` = 136 bytes, and IrInstr used to
+// `Name` is `{ buf: [i8; 384], len: i64 }` = 392 bytes, and IrInstr used to
 // hold one inline. That made the instruction ~248 bytes, of which 55% was a
 // buffer that MOST INSTRUCTIONS NEVER USE — an add, a jump, a label, a return
 // all carried 128 zero bytes each. Multiplied out through
@@ -3672,19 +3676,19 @@ pub let IR_NAME_POOL_MAX: i64 = 65536
 
 // PARALLEL FLAT ARRAYS, NOT `[Name; N]`. A global whose element is a struct
 // containing an inline array is miscompiled — measured 2026-08-04 with a
-// minimal probe (a 4096-entry global of `struct { buf: [i8;128], len: i64 }`,
+// minimal probe (a 4096-entry global of `struct { buf: [i8;384], len: i64 }`,
 // two writes then two reads) which SIGSEGVs, while the identical program over
-// parallel `[i8; N*128]` + `[i64; N]` round-trips exactly. The first shape is
+// parallel `[i8; N*384]` + `[i64; N]` round-trips exactly. The first shape is
 // what this pool was written as, and it turned every string literal in every
 // compiled program into nothing at all — the compiler still exited 0.
 //
 // No initialisers, for two more reasons. The seed (lean_single) rejects a
-// `Name { buf: [0; 128], len: 0 }` fill literal in a global, and this compiler
+// `Name { buf: [0; 384], len: 0 }` fill literal in a global, and this compiler
 // BSS-zeroes `var` initialisers anyway, so a non-zero one would be a lie that
 // holds on one engine and not the other. Every invariant here is therefore
 // stated so that ALL-ZERO IS THE CORRECT INITIAL STATE: ids are 1-based,
 // IR_NAME_POOL_COUNT counts what is stored, and an all-zero index means empty.
-var IR_NAME_POOL_BUF: [i8; 8388608]
+var IR_NAME_POOL_BUF: [i8; 25165824]
 var IR_NAME_POOL_LEN: [i64; 65536]
 var IR_NAME_POOL_COUNT: i64 = 0
 // Set when the pool fills. Interning then returns 0 (the empty name), which is
@@ -3713,7 +3717,7 @@ var IR_NAME_INDEX: [i64; 131072]
 fn ir_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
     var i: i64 = 0
-    while i < n.len && i < 128 {
+    while i < n.len && i < 384 {
         h = h * 33 + (n.buf[i as usize] as i64)
         i = i + 1
     }
@@ -3757,9 +3761,9 @@ pub fn ir_intern_name(n: Name) -> i64 with Mut, Panic, Div {
 // that escaped its pool is a bug, but blanking one symbol is survivable where a
 // panic in the middle of codegen is not.
 fn ir_name_pool_store(id: i64, n: Name) with Mut, Panic, Div {
-    let base = (id - 1) * 128
+    let base = (id - 1) * 384
     var i: i64 = 0
-    while i < n.len && i < 128 {
+    while i < n.len && i < 384 {
         IR_NAME_POOL_BUF[(base + i) as usize] = n.buf[i as usize]
         i = i + 1
     }
@@ -3772,9 +3776,9 @@ fn ir_name_pool_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
     if IR_NAME_POOL_LEN[(id - 1) as usize] != n.len {
         return false
     }
-    let base = (id - 1) * 128
+    let base = (id - 1) * 384
     var i: i64 = 0
-    while i < n.len && i < 128 {
+    while i < n.len && i < 384 {
         if IR_NAME_POOL_BUF[(base + i) as usize] != n.buf[i as usize] {
             return false
         }
@@ -3788,10 +3792,10 @@ pub fn ir_name_at(id: i64) -> Name with Mut, Panic, Div {
         return ir_empty_name()
     }
     var out = ir_empty_name()
-    let base = (id - 1) * 128
+    let base = (id - 1) * 384
     let n = IR_NAME_POOL_LEN[(id - 1) as usize]
     var i: i64 = 0
-    while i < n && i < 128 {
+    while i < n && i < 384 {
         out.buf[i as usize] = IR_NAME_POOL_BUF[(base + i) as usize]
         i = i + 1
     }
@@ -3820,7 +3824,7 @@ pub fn ir_name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
 }
 
 pub fn ir_name_from_bytes(a: i8, b: i8, c: i8, d: i8, len: i64) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: len }
+    var n = Name { buf: [0; 384], len: len }
     if len > 0 { n.buf[0] = a }
     if len > 1 { n.buf[1] = b }
     if len > 2 { n.buf[2] = c }
@@ -3829,9 +3833,9 @@ pub fn ir_name_from_bytes(a: i8, b: i8, c: i8, d: i8, len: i64) -> Name with Mut
 }
 
 fn ir_name_from_string_list(sl: StringList) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: sl.head_len }
+    var n = Name { buf: [0; 384], len: sl.head_len }
     var i: i64 = 0
-    while i < sl.head_len && i < 128 {
+    while i < sl.head_len && i < 384 {
         n.buf[i] = sl.head_buf[i]
         i = i + 1
     }

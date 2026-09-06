@@ -8,6 +8,13 @@
 // ─── Global buffers ───
 var SRC: [i8; 16777216] = [0; 16777216]
 var SRC_LEN: i64 = 0
+// Capacity of SRC, as a name rather than a literal repeated at each writer.
+// append_src_lit carried its own copy of an older 2 MiB bound long after SRC
+// was raised to 16 MiB, and silently truncated everything past it.
+var SRC_CAP: i64 = 16777216
+// Set when a write to SRC was dropped for lack of room. Checked where IO is
+// available; append_src_lit itself has no IO in its effect row.
+var SRC_OVERFLOW: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
 var IMP_RAW_PATH: [i8; 4096] = [0; 4096]
@@ -285,6 +292,10 @@ var MAIN_SRC_END: i64 = 0
 // ─── Phase 6a: Unit tracking (compile-time only) ───
 // Unit hash per local variable (0 = no unit)
 var VAR_UNIT: [i64; 2048] = [0; 2048]
+// Dimension of a variable whose unit was derived by arithmetic and so has no
+// declared name. VAR_UNIT holds a unit NAME, from which the dimension is looked
+// up; a composed dimension has no name, so it needs to be stored directly.
+var VAR_UNIT_DIM: [i64; 2048] = [0; 2048]
 
 // ─── Phase 6c: Linear type tracking ───
 // Per-struct: 1 if declared with 'linear' keyword, 0 otherwise
@@ -408,6 +419,10 @@ var EXPR_UNIT: i64 = 0
 // UNIT_HASH_TABLE[slot] = full hash (0=empty), UNIT_DIM_TABLE[slot] = packed dim
 var UNIT_HASH_TABLE: [i64; 2048] = [0; 2048]
 var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
+// G12: 1 where the name was declared by an explicit `unit NAME;` in source.
+// The preloaded SI table (init_unit_table) leaves this 0, so a symbol like K
+// stays usable as a generic type parameter -- `struct Map<K, V>`.
+var UNIT_USER_TABLE: [i64; 2048] = [0; 2048]
 // Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
 var TU: [i64; 2097152] = [0; 2097152]
 // Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
@@ -1663,11 +1678,10 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
 fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
     if fi < 0 || fi >= FN_COUNT { return 0 }
     var saw_gpu_tid: i64 = 0
-    var saw_tid: i64 = 0
-    var saw_n: i64 = 0
-    var saw_a: i64 = 0
-    var saw_b: i64 = 0
-    var saw_c: i64 = 0
+    var saw_extent: i64 = 0
+    var saw_lhs: i64 = 0
+    var saw_rhs: i64 = 0
+    var saw_out: i64 = 0
     var saw_add: i64 = 0
     var p: i64 = body_start
     var depth: i64 = 1
@@ -1676,18 +1690,17 @@ fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 
         if TK[p as usize] == 9 { depth = depth - 1 }
         if TK[p as usize] == 3 {
             if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "c") { saw_c = 1 }
+            if fn_param_name_matches_token(fi, 0, p) { saw_extent = 1 }
+            if fn_param_name_matches_token(fi, 1, p) && token_is_index_assignment_target(p) == false { saw_lhs = 1 }
+            if fn_param_name_matches_token(fi, 2, p) && token_is_index_assignment_target(p) == false { saw_rhs = 1 }
+            if fn_param_name_matches_token(fi, 3, p) && token_is_index_assignment_target(p) { saw_out = 1 }
         }
         if TK[p as usize] == 17 { saw_add = 1 }
         p = p + 1
     }
     if saw_gpu_tid == 0 { return 0 }
-    if saw_tid == 0 || saw_n == 0 { return 0 }
-    if saw_a == 0 || saw_b == 0 || saw_c == 0 { return 0 }
+    if saw_extent == 0 { return 0 }
+    if saw_lhs == 0 || saw_rhs == 0 || saw_out == 0 { return 0 }
     if saw_add == 0 { return 0 }
     return 1
 }
@@ -1698,7 +1711,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     if FN_ARITY[fi as usize] != 4 { return }
     if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
     if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
+    let rhs_kind = fn_param_kind(fi, 2)
+    if rhs_kind != gpu_param_kind_slice_in_f64() && rhs_kind != gpu_param_kind_slice_out_f64() { return }
     if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
     if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
 
@@ -1709,7 +1723,7 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     let start_off = PTX_LEN
     FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
     FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = rhs_kind
     FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
 
     ptx_emit_string(".version 7.0\n")
@@ -1884,6 +1898,39 @@ fn unit_lookup_dim(h: i64) -> i64 with Panic, Mut, Div {
         iters = iters + 1
     }
     return 0
+}
+
+fn unit_mark_user_h(h: i64) with Mut, Panic, Div {
+    if h == 0 { return }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == h { UNIT_USER_TABLE[probe as usize] = 1  return }
+        if UNIT_HASH_TABLE[probe as usize] == 0 { return }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+}
+
+// Only a user-declared unit names a TYPE. A preloaded SI symbol does not:
+// `K` must remain a generic type parameter unless the source says `unit K;`.
+fn unit_is_user_declared_h(h: i64) -> bool with Panic, Mut, Div {
+    if h == 0 { return false }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 { return false }
+        if UNIT_HASH_TABLE[probe as usize] == h { return UNIT_USER_TABLE[probe as usize] == 1 }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+    return false
 }
 
 fn unit_is_registered_h(h: i64) -> bool with Panic, Mut, Div {
@@ -2157,11 +2204,24 @@ fn emit_load_call_arg_to_rax_x86(argc: i64, arg_idx: i64) with Mut {
     emit_load_stack_qword_to_rax_x86((argc - 1 - arg_idx) * 8)
 }
 
+fn emit_load_call_arg_to_rax_shift_x86(argc: i64, arg_idx: i64, shift_slots: i64) with Mut {
+    emit_load_stack_qword_to_rax_x86((shift_slots + argc - 1 - arg_idx) * 8)
+}
+
 fn emit_call_rax_x86(argc: i64) with Mut {
+    let extra = call_extra_stack_args_x86(argc, 6)
+    var align_pad: i64 = 0
+    if ((argc + extra) & 1) != 0 { align_pad = 1 }
+    // Argument setup may use rax as scratch when stack arguments are present.
+    // Keep the indirect C-call target in caller-saved r11 until the call.
+    em(0x49); em(0x89); em(0xc3)
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
-    em(0xff); em(0xd0)
-    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+    if align_pad != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+    }
+    em(0x41); em(0xff); em(0xd3)
+    emit_drop_call_args_x86(argc + extra + align_pad)
 }
 
 fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
@@ -2454,7 +2514,7 @@ fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
 }
 
 fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
-    if argc > regc + 1 { return argc - regc }
+    if argc > regc { return argc - regc }
     return 0
 }
 
@@ -2473,7 +2533,7 @@ fn emit_sret_destination_x86(ret_slots: i64) with Mut, Panic, Div {
 
 fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
     let extra = call_extra_stack_args_x86(argc, regc)
-    if extra <= 1 { return }
+    if extra <= 0 { return }
     let scratch_bytes = extra * 8
     if scratch_bytes < 128 {
         em(0x48); em(0x83); em(0xec); em(scratch_bytes)
@@ -2852,7 +2912,8 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
     let ptr_slot = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     var linear_flag: i64 = 0
-    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize] }
+    var affine_flag: i64 = 0
+    if knowledge_hash_is(ty_hash) == false { linear_flag = ST_LINEAR[si as usize]; affine_flag = ST_AFFINE[si as usize] }
     var out_ty: i64 = 0
     if knowledge_hash_is(ty_hash) == false { out_ty = 6 }
     if local_meta_add(ns, ne, ptr_slot, 0, 0, 8, 0, 0, 0, 0, linear_flag, 0, out_ty, ty_hash) < 0 {
@@ -2860,6 +2921,7 @@ fn bind_struct_local_from_x0_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Panic
         NEXT_SLOT = NEXT_SLOT - 1
         return
     }
+    VAR_AFFINE[(VAR_COUNT - 1) as usize] = affine_flag
     em32(0xAA0003EA)  // mov x10, x0
     if spill {
         emit_image_addr_a64(spill_addr)
@@ -3475,6 +3537,15 @@ fn arr_ty_hash_with_elem(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> 
 fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Panic, Mut {
     if elem_hash != 0 {
         if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
+        // An array whose elements are themselves arrays must keep its element
+        // hash, exactly as scan_type does for the same type. A nested type
+        // declaration goes through arr_ty_hash_with_elem, which preserves it; an
+        // array LITERAL arrives here, fell through to the plain arr_ty_hash
+        // below, and dropped it. The two encodings then disagreed for the same
+        // type -- measured as 10^12-plus against 80 -- so returning a nested
+        // literal from a function declared to return a 2-D array was reported as
+        // a type mismatch.
+        if elem_ty == 8 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         if elem_ty == 0 && st_find(elem_hash) >= 0 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         // Knowledge<T> element (kind=7, negative hash): preserve the element hash in
         // the side table so `arr[i]` recovers its Knowledge type. The by-value
@@ -3549,11 +3620,16 @@ fn array_lit_count(p0: i64) -> i64 with Panic, Mut {
     var cu: i64 = 0
     var commas: i64 = 0
     var has_elem: i64 = 0
+    // Whether an element token has appeared since the last top-level comma. A
+    // trailing comma leaves this at 0, and counting commas + 1 would then report
+    // one element too many -- giving the literal type [T; n+1] and making it fail
+    // to match its own declared type.
+    var since_comma: i64 = 0
     while p < TC && br > 0 {
         let k = TK[p as usize]
         if br == 1 && pa == 0 && cu == 0 {
-            if k == 28 { commas = commas + 1 }
-            else if k != 42 { has_elem = 1 }
+            if k == 28 { commas = commas + 1; since_comma = 0 }
+            else if k != 42 { has_elem = 1; since_comma = 1 }
         }
         if k == 6 { pa = pa + 1 }
         if k == 7 { pa = pa - 1 }
@@ -3564,7 +3640,7 @@ fn array_lit_count(p0: i64) -> i64 with Panic, Mut {
         p = p + 1
     }
     if has_elem == 0 { return 0 }
-    return commas + 1
+    return commas + since_comma
 }
 
 fn array_init_is_repeat(p0: i64) -> bool with Panic, Mut {
@@ -4390,6 +4466,16 @@ fn tc_stack_frame_too_large(bytes: i64) with IO, Mut, Panic {
     // Not a hard error — large-struct value-semantics are valid but risky at runtime
 }
 
+// NOTE ON SEVERITY, because the name says the opposite of what this does.
+// tc_error prints "warning: " and does NOT call tc_mark_failed(), so every one
+// of its ~365 call sites reports something the build then ignores. The fatal
+// helper is tc_error_hard, just below: it prints "error: " and marks the unit
+// failed. tc_linear_violation is fatal too.
+//
+// This was mistaken once for the check being unreachable: a build with an
+// unconditional tc_error injected into the return-type branch appeared not to
+// fire, because the probe read the exit code and never the text. It fired. It
+// was a warning.
 fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("warning: ")
     print(msg)
@@ -6693,10 +6779,23 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                                     SCAN_PRED_COMPOUND_IS_AND = REF_TYPE_IS_AND[ref_idx as usize]
                                                                 }
                                                             } else {
+                                                            // G12 FIX: a `unit NAME;` declaration names an f64 carrying a dimension
+                                                            // brand. It was falling through to the unknown-type case below, so every
+                                                            // unit-typed binding allocated as type 0 and the value never survived --
+                                                            // a module-level `var T: degK = 298.0` read back as garbage, and the same
+                                                            // value passed as an argument arrived corrupted. The dimension CHECKING
+                                                            // already worked, because it resolves the raw name hash through
+                                                            // unit_lookup_dim; only the storage type was wrong. Setting ty=2 (f64)
+                                                            // and keeping the name hash leaves every existing check untouched.
+                                                            if unit_is_user_declared_h(h) {
+                                                                SCAN_TY = 2
+                                                                SCAN_TY_HASH = h
+                                                            } else {
                                                             // Unknown type name — leave as type 0 (unresolved)
                                                             // Type checker will skip errors for type-0 operands
                                                             SCAN_TY = 0
                                                             SCAN_TY_HASH = h
+                                                            }
                                                             }
                                                         }
                                                     }
@@ -8300,6 +8399,7 @@ fn local_meta_add(
     VAR_IS_CLOSURE[idx as usize] = is_closure
     VAR_MUT[idx as usize] = is_mut
     VAR_UNIT[idx as usize] = unit_hash
+    VAR_UNIT_DIM[idx as usize] = 0
     VAR_LINEAR[idx as usize] = is_linear
     VAR_AFFINE[idx as usize] = 0
     VAR_MOVED[idx as usize] = 0
@@ -8629,6 +8729,70 @@ fn find_matching_body_close(open_tok: i64) -> i64 with Panic, Mut {
         q = q + 1
     }
     return TC
+}
+
+fn find_fn_body_open_after_name(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
+    var p = name_tok + 1
+    if TK[p as usize] == 6 {
+        p = p + 1
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 43 {
+                    p = p + 1
+                    scan_type(p)
+                    p = SCAN_TY_NEXT
+                }
+            } else {
+                p = p + 1
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+    }
+    if TK[p as usize] == 10 {
+        p = p + 1
+        scan_type(p)
+        p = SCAN_TY_NEXT
+    }
+    p = skip_signature_where_clause(p)
+    if TK[p as usize] == 38 {
+        p = p + 1
+        while TK[p as usize] == 3 || TK[p as usize] == 28 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 6 {
+                    p = p + 1
+                    while TK[p as usize] != 7 && TK[p as usize] != 0 { p = p + 1 }
+                    if TK[p as usize] == 7 { p = p + 1 }
+                }
+            } else {
+                p = p + 1
+            }
+        }
+    }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
+    return p
+}
+
+fn skip_trait_decl_at(p0: i64) -> i64 with Panic, Mut {
+    if p0 < 0 || p0 >= TC { return p0 }
+    if TK[p0 as usize] != 75 { return p0 }
+    var p = p0 + 1
+    if p < TC && TK[p as usize] == 3 { p = p + 1 }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 {
+        p = p + 1
+    }
+    if p < TC && TK[p as usize] == 8 {
+        var depth: i64 = 1
+        p = p + 1
+        while p < TC && depth > 0 {
+            if TK[p as usize] == 8 { depth = depth + 1 }
+            if TK[p as usize] == 9 { depth = depth - 1 }
+            p = p + 1
+        }
+    }
+    return p
 }
 
 fn ep_before_body_close() -> bool {
@@ -12302,6 +12466,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_CH_SET = 0
     EXPR_PARAM_USED = 0
     EXPR_UNIT = 0
+    // A fresh primary must clear the DIMENSION too, not just the name. Clearing
+    // only EXPR_UNIT left a stale dim vector alive across unrelated
+    // expressions: unit_call_arg_mismatch accepts whenever expr_dim equals
+    // param_dim, so a leftover could satisfy a parameter it never came from,
+    // and the additive check could report a dimension mismatch between two
+    // operands that carried no dimension at all.
+    EXPR_UNIT_DIM = 0
     LAST_IS_LITERAL = 0
     LAST_IS_LITERAL_F64 = 0
     EXPR_VSHADOW = -1
@@ -13499,6 +13670,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                     EXPR_TY = FN_RET_TY[static_mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[static_mfi as usize]
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     return
                 }
@@ -14999,6 +15171,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if seq_hash_is(sh) {
                     EXPR_TY = seq_hash_inner_ty(sh)
                     EXPR_TY_HASH = seq_hash_inner_hash(sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 } else {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
@@ -16273,6 +16446,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // β⁹ GTT: union of argument channel sets becomes the return
                 // value's topology. Conservative upper bound; matches the
@@ -16607,6 +16781,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if seq_hash_is(seq_sh) {
                     EXPR_TY = seq_hash_inner_ty(seq_sh)
                     EXPR_TY_HASH = seq_hash_inner_hash(seq_sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 } else {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
@@ -16626,6 +16801,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                     EXPR_TY = elem_ty
                     EXPR_TY_HASH = elem_hash
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else if esz > 8 {
                     // Struct-element array: rax = base + idx * esiz (pointer to element).
@@ -16637,6 +16813,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     em(0x48); em(0x01); em(0xc8)  // add rax, rcx
                     EXPR_TY = elem_ty
                     EXPR_TY_HASH = elem_hash
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     EXPR_IS_F64 = 0
                 } else {
                     // i8 array: movsx rax, byte [rax + rcx]
@@ -16688,6 +16865,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
                         EXPR_TY = elem_ty
                         EXPR_TY_HASH = elem_hash
+                        expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                         if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     } else if is_arr_ty == 1 && lesiz == 1 {
                         em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x08)  // movsx rax, byte [rax + rcx]
@@ -16819,6 +16997,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // Track unit for dimension checking at + and -
             if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
             EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // A variable holding a derived quantity carries a dimension with no
+            // name, which unit_lookup_dim cannot recover from a zero hash. Named
+            // units keep the value computed on the line above; this fills in only
+            // the anonymous case, so nothing that worked before changes.
+            if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
+                EXPR_UNIT_DIM = VAR_UNIT_DIM[vi as usize]
+            }
             var_mark_used(ns, ne)
             // Linear variable consumed inside a loop — would be consumed multiple times
             if vi >= 0 && VAR_LINEAR[vi as usize] == 1 && LOOP_DEPTH > 0 {
@@ -16843,6 +17028,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 if GL_TY[gi as usize] == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // G12b: a global read must carry its unit brand, as a local read does at
+                // the VAR_UNIT site above. Without this a module-level `var EA: kJ_per_mol`
+                // held the right VALUE after the G12 fix but arrived at a call site with no
+                // unit, so a correctly-typed argument was rejected as a mismatch.
+                if GL_TY[gi as usize] == 2 && unit_is_user_declared_h(GL_TY_HASH[gi as usize]) {
+                    EXPR_UNIT = GL_TY_HASH[gi as usize]
+                    EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+                }
                 return
             } else {
                 // Named function reference: materialize a closure-ABI adapter thunk.
@@ -17019,6 +17212,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             if cast_ty == 3 && src_is_f64 == 0 { EP = SCAN_TY_NEXT; continue }
             EXPR_TY = cast_ty
             EXPR_TY_HASH = cast_hash
+            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -17047,11 +17241,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
                     EXPR_TY = 8
                     EXPR_TY_HASH = elem_hash
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     EXPR_IS_F64 = 0
                 } else if esiz == 8 {
                     em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8]
                     EXPR_TY = elem_ty
                     EXPR_TY_HASH = elem_hash
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x11)  // movsx rax, byte [rcx + rdx]
@@ -17074,6 +17270,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if seq_hash_is(base_hash) {
                     EXPR_TY = seq_hash_inner_ty(base_hash)
                     EXPR_TY_HASH = seq_hash_inner_hash(base_hash)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 } else {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
@@ -17094,6 +17291,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     em(0x48); em(0x8b); em(0x04); em(0xd0)  // mov rax, [rax + rdx*8]
                     EXPR_TY = elem_ty
                     EXPR_TY_HASH = elem_hash
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if elem_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 } else {
                     em(0x48); em(0x0f); em(0xbe); em(0x04); em(0x10)  // movsx rax, byte [rax + rdx]
@@ -17300,6 +17498,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if seq_hash_is(get_sh) {
                     EXPR_TY = seq_hash_inner_ty(get_sh)
                     EXPR_TY_HASH = seq_hash_inner_hash(get_sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 } else {
                     EXPR_TY = 1
                     EXPR_TY_HASH = 0
@@ -17910,6 +18109,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     }
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
@@ -18214,6 +18414,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         if off >= 0 {
                             EXPR_TY = st_field_ty(bsi, fh)
                             EXPR_TY_HASH = st_field_hash(bsi, fh)
+                            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                         ST_QUERY_NS = -1
                         ST_QUERY_NE = -1
                             if EXPR_TY == 12 {
@@ -18259,6 +18460,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     } else {
                         EXPR_TY = st_field_ty(si, fh)
                         EXPR_TY_HASH = st_field_hash(si, fh)
+                        expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     ST_QUERY_NS = -1
                     ST_QUERY_NE = -1
                         if EXPR_TY == 12 {
@@ -20562,6 +20764,11 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     }
 
     NEEDS_GPU_RUNTIME_DYNLINK = 1
+    var entry_pad_slots: i64 = 0
+    if (abi_argc & 1) != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+        entry_pad_slots = 1
+    }
     emit_try_gpu_runtime_init_x86()
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x84)
@@ -20588,18 +20795,21 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // Stack slots grow toward lower addresses. Allocate the pointer-vector
+    // slots in reverse so &paddr0 is a C-contiguous kernelParams array:
+    // [ &param0, &param1, &param2, &param3 ].
     let paddr3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
 
-    emit_load_call_arg_to_rax_x86(abi_argc, 0); emit_store_var(n_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 1); emit_store_var(a_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 2); emit_store_var(a_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 3); emit_store_var(b_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 4); emit_store_var(b_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 5); emit_store_var(c_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 6); emit_store_var(c_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 0, entry_pad_slots); emit_store_var(n_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 1, entry_pad_slots); emit_store_var(a_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 2, entry_pad_slots); emit_store_var(a_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 3, entry_pad_slots); emit_store_var(b_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 4, entry_pad_slots); emit_store_var(b_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 5, entry_pad_slots); emit_store_var(c_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 6, entry_pad_slots); emit_store_var(c_len_slot)
 
     emit_load_var(a_len_slot)
     em(0x48); em(0xc1); em(0xe0); em(3)
@@ -20695,7 +20905,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
     emit_load_var(dptr_c_slot); em(0x50)
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
-    emit_drop_call_args_x86(abi_argc)
+    emit_drop_call_args_x86(abi_argc + entry_pad_slots)
     em(0x31); em(0xc0)
     em(0xe9)
     let done = CL
@@ -20714,6 +20924,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     patch32(gpu_fail_k, CL)
     emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
     patch32(cpu_fallback, CL)
+    emit_drop_call_args_x86(entry_pad_slots)
     emit_kernel_cpu_direct_call_x86(fi, abi_argc)
     patch32(done, CL)
 }
@@ -21260,13 +21471,44 @@ fn tuple_destructure_from_ptr_x86(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
 // ptr_slot holds the SRET pointer (x0 from the call).  tup_hash encodes the
 // element types/sizes via the standard format.  Currently handles flat 2-element tuples only.
 fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) with IO, Mut, Panic, Div {
-    let tup_first_slots = (tup_hash % 1000000) / 1000
-    let tup_total_slots = tup_hash % 1000
+    // This mirrored the two-element model: tup_first_* / tup_last_*, selected by
+    // `elem_idx == 0`. For a tuple of three or more, every element past the first
+    // took the LAST element's type AND the same byte offset, so `let (a,b,c,d) = f()`
+    // bound only `a` and the rest came out as unknown identifiers on aarch64.
+    // Same root cause as docs/audit/LEAN_SINGLE_NARY_TUPLE_MIDDLE_ELEMENT_2026-07-05.md,
+    // which fixed the x86 side; this is that fix, mirrored.
+    var tup_first_slots: i64 = (tup_hash % 1000000) / 1000
+    var tup_total_slots: i64 = tup_hash % 1000
+    var tup_first_f64: i64 = (tup_hash / 10000000) % 10
+    var tup_last_f64: i64 = (tup_hash / 1000000) % 10
+    var tup_first_ty: i64 = 1
+    var tup_first_ty_hash: i64 = 0
+    var tup_last_ty: i64 = 1
+    var tup_last_ty_hash: i64 = 0
+    let tup_ci = tup_cache_lookup(tup_hash)
+    var have_full: i64 = 0
+    if tup_ci >= 0 {
+        tup_first_ty = TUP_CACHE_FIRST_TY[tup_ci as usize]
+        tup_first_ty_hash = TUP_CACHE_FIRST_HASH[tup_ci as usize]
+        tup_last_ty = TUP_CACHE_LAST_TY[tup_ci as usize]
+        tup_last_ty_hash = TUP_CACHE_LAST_HASH[tup_ci as usize]
+        let fs = ty_slot_count(tup_first_ty, tup_first_ty_hash)
+        let ls = ty_slot_count(tup_last_ty, tup_last_ty_hash)
+        if fs > 0 { tup_first_slots = fs }
+        if tup_first_ty == 2 { tup_first_f64 = 1 } else { tup_first_f64 = 0 }
+        if tup_last_ty == 2 { tup_last_f64 = 1 } else { tup_last_f64 = 0 }
+        if TUP_CACHE_TCOUNT[tup_ci as usize] > 2 {
+            have_full = 1
+            let es = tup_elem_slots_sum(tup_ci)
+            if es > 0 { tup_total_slots = es }
+        } else if fs > 0 && ls > 0 {
+            tup_total_slots = fs + ls
+        }
+    }
     let tup_last_slots = tup_total_slots - tup_first_slots
-    let tup_first_f64 = (tup_hash / 10000000) % 10
-    let tup_last_f64 = (tup_hash / 1000000) % 10
     var pp = pat_start + 1
     var elem_idx: i64 = 0
+    var byte_off_acc: i64 = 0
     while TK[pp as usize] != 7 && TK[pp as usize] != 0 {
         if TK[pp as usize] == 28 { pp = pp + 1; continue }
         if TK[pp as usize] != 3 { pp = pp + 1; continue }
@@ -21274,24 +21516,50 @@ fn tuple_destructure_from_ptr_a64(pat_start: i64, tup_hash: i64, ptr_slot: i64) 
         let pne = TE[pp as usize]
         let is_wild = if pne - pns == 1 && sb(pns) == 95 { 1 } else { 0 }
         pp = pp + 1
-        let elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
-        let elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
-        let byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+        var elem_is_f64: i64 = 0
+        var elem_slots: i64 = 0
+        var byte_off: i64 = 0
+        var elem_ty: i64 = 0
+        var elem_ty_hash: i64 = 0
+        if have_full == 1 && elem_idx < TUP_CACHE_TCOUNT[tup_ci as usize] {
+            elem_ty = TUP_CACHE_ELEM_TY[(tup_ci * 16 + elem_idx) as usize]
+            elem_ty_hash = TUP_CACHE_ELEM_HASH[(tup_ci * 16 + elem_idx) as usize]
+            elem_slots = ty_slot_count(elem_ty, elem_ty_hash)
+            elem_is_f64 = if elem_ty == 2 { 1 } else { 0 }
+            byte_off = byte_off_acc
+        } else {
+            elem_is_f64 = if elem_idx == 0 { tup_first_f64 } else { tup_last_f64 }
+            elem_slots = if elem_idx == 0 { tup_first_slots } else { tup_last_slots }
+            byte_off = if elem_idx == 0 { 0 } else { tup_first_slots * 8 }
+            elem_ty = if elem_idx == 0 { tup_first_ty } else { tup_last_ty }
+            elem_ty_hash = if elem_idx == 0 { tup_first_ty_hash } else { tup_last_ty_hash }
+        }
         if is_wild == 0 {
-            if elem_slots == 1 {
-                emit_load_var_a64(ptr_slot)
-                if byte_off > 0 {
-                    // add x0, x0, #byte_off  (imm12 in bits [21:10])
+            emit_load_var_a64(ptr_slot)
+            if byte_off > 0 {
+                // ADD immediate carries imm12: anything wider has to go through a
+                // register, or the offset would silently wrap.
+                if byte_off < 4096 {
                     em32(0x91000000 | (byte_off << 10))
+                } else {
+                    emit_imm64_reg_a64(9, byte_off)
+                    em32(0x8B090000)  // add x0, x0, x9
                 }
-                // ldr x0, [x0]
-                em32(0xF9400000)
+            }
+            if elem_slots == 1 {
+                em32(0xF9400000)  // ldr x0, [x0]
                 if elem_is_f64 == 1 { EXPR_IS_F64 = 1; EXPR_TY = 2 }
                 else { EXPR_IS_F64 = 0; EXPR_TY = 1 }
                 EXPR_TY_HASH = 0
-                tuple_bind_leaf_a64(pns, pne)
+            } else {
+                // Aggregate element: bind as a pointer into the SRET buffer.
+                EXPR_IS_F64 = 0
+                EXPR_TY = elem_ty
+                EXPR_TY_HASH = elem_ty_hash
             }
+            tuple_bind_leaf_a64(pns, pne)
         }
+        byte_off_acc = byte_off_acc + elem_slots * 8
         elem_idx = elem_idx + 1
     }
 }
@@ -21505,7 +21773,35 @@ fn tuple_bind_pattern_a64(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
         if TK[pp as usize] == 28 { pp = pp + 1 }
         if TK[rp as usize] == 28 { rp = rp + 1 }
     }
-    if TK[pp as usize] != 7 || TK[rp as usize] != 7 { tc_error(pp0, "tuple destructure arity mismatch") }
+    if TK[pp as usize] != 7 || TK[rp as usize] != 7 {
+        // Same E213 as the x86 twin, with the same counting and the same
+        // tc_mark_failed. This site used tc_error, which prints `warning:` and
+        // marks nothing, so an arity mismatch was accepted on aarch64.
+        var pc: i64 = 0; var qp = pp0 + 1; var dpth: i64 = 0; var pc_done: i64 = 0
+        while TK[qp as usize] != 0 && pc_done == 0 {
+            if TK[qp as usize] == 6 { dpth = dpth + 1 }
+            if TK[qp as usize] == 7 && dpth == 0 { pc = pc + 1; pc_done = 1 }
+            if TK[qp as usize] == 7 && dpth > 0 { dpth = dpth - 1 }
+            if TK[qp as usize] == 28 && dpth == 0 { pc = pc + 1 }
+            qp = qp + 1
+        }
+        var rc: i64 = 0; var qr = rp0 + 1; dpth = 0; var rc_done: i64 = 0
+        while TK[qr as usize] != 0 && rc_done == 0 {
+            if TK[qr as usize] == 6 { dpth = dpth + 1 }
+            if TK[qr as usize] == 7 && dpth == 0 { rc = rc + 1; rc_done = 1 }
+            if TK[qr as usize] == 7 && dpth > 0 { dpth = dpth - 1 }
+            if TK[qr as usize] == 28 && dpth == 0 { rc = rc + 1 }
+            qr = qr + 1
+        }
+        print("error[E213]: tuple destructure arity mismatch: has ")
+        print_int(pc)
+        print(" elements but type has ")
+        print_int(rc)
+        print(" at line ")
+        print_int(TL[pp0 as usize])
+        print("\n")
+        tc_mark_failed()
+    }
     if TK[pp as usize] == 7 { pp = pp + 1 }
     if TK[rp as usize] == 7 { rp = rp + 1 }
     TUP_PAT_NEXT = pp
@@ -24432,6 +24728,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
                 }
+                // A derived quantity has no unit NAME to store: distance / time
+                // composes the dimension m/s, but no declared unit is named by
+                // that composition, so the branches above store nothing and the
+                // brand dies at the binding. Keep the composed dimension.
+                if VAR_UNIT[(VAR_COUNT - 1) as usize] == 0 && EXPR_UNIT_DIM != 0 {
+                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = EXPR_UNIT_DIM
+                }
                 // β⁴/β⁵: capture variance and sensitivity shadow slots into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
                 if decl_is_mut == 1 && EXPR_IS_F64 == 1 {
@@ -25047,10 +25350,20 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(EP)
                     } else {
-                        tc_error(EP - 1, "return type does not match function signature")
+                        tc_error_hard(EP - 1, "return type does not match function signature")
                     }
                 }
             }
+        }
+        // The unit of the returned value must be the unit the signature
+        // promises. Until the type check above could fail a build this was not
+        // worth adding: a call result already takes the unit of its declared
+        // return type, so `-> molal` was a promise nothing verified, and
+        // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
+        // molar value. The same helper the call site uses works unchanged here,
+        // with the declared return hash in place of the parameter hash.
+        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+            tc_linear_violation(EP - 1, "unit mismatch in return value")
         }
         // PR-5: enforce refinement predicate on return value (literal/let-literal)
         try_apply_return_refinement(EP - 1)
@@ -29317,10 +29630,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         }
                     }
                     unit_register_h(uhash, derived_dim)
+                    unit_mark_user_h(uhash)
                 } else {
                     // Plain 'unit NAME;' — look up dim from preloaded table (may be 0 if new)
                     let existing_dim = unit_lookup_dim(uhash)
                     unit_register_h(uhash, existing_dim)
+                    unit_mark_user_h(uhash)
                 }
                 // Skip to semicolon
                 while p < TC && TK[p as usize] != 27 && TK[p as usize] != 0 { p = p + 1 }
@@ -30240,9 +30555,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
-            var q: i64 = p + 1
-            if TK[q as usize] == 6 { q = q + 1 }
-            while q < TC && TK[q as usize] != 8 { q = q + 1 }
+            var q: i64 = find_fn_body_open_after_name(p)
             if FN_RET_TY[ret_fi as usize] == 8 && arr_hash_alen(FN_RET_HASH[ret_fi as usize]) == 0 {
                 let ret_esiz = arr_hash_esiz(FN_RET_HASH[ret_fi as usize])
                 let ret_elem_ty = arr_hash_elem_ty(FN_RET_HASH[ret_fi as usize])
@@ -30808,6 +31121,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if pslot >= 0 {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        // A unit-typed parameter carries its brand, exactly as a
+                        // unit-typed let does (see the let site above). Without this
+                        // every function boundary erased the unit: the value arrived
+                        // numerically correct but unbranded, so it could go on to
+                        // satisfy a parameter of some other unit entirely.
+                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                            VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                         // fn-type parameters are always called with closure ABI (env_ptr in rdi)
                         if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
@@ -32202,6 +32523,14 @@ fn emit_print_f64_a64() with Mut, Panic {
     em32(0x5400000A)                                  // b.ge sign_done
     emit_print_char_lit_a64(45)
     patch_branch_a64(sign_done_patch, CL)
+    // Printing the '-' is a write(2). The kernel returns the byte count in x0,
+    // which is exactly where the |x| bits were sitting -- so every negative f64
+    // was formatted from the value 1 (a denormal) and printed as -0.000000,
+    // sign right, magnitude always gone. Recompute |x| from x15, which holds
+    // the original bits and which the char printer does not touch. x9 cannot be
+    // reused: the exponent extract above overwrote the mask.
+    emit_imm64_reg_a64(9, 9223372036854775807)
+    em32(0x8A0901E0)                                  // and x0, x15, x9
     em32(0x9E670000)                                  // fmov d0, x0
     em32(0x9E78000D)                                  // fcvtzs x13, d0
     em32(0xAA0D03E0)                                  // mov x0, x13
@@ -32605,6 +32934,130 @@ fn compile_measure_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
     EXPR_TY_HASH = knowledge_hash_make(value_ty, value_hash, eps_scaled)
 }
 
+// ─── Seq (a64) ───
+// Layout, identical to the x86 twins: [0]=len [8]=capacity [16]=elem_size
+// [24]=len_variance [32]=len_confidence, payload from +40. Every encoding below
+// was checked by disassembly before it was written, and the emitted code was
+// executed on a real aarch64 node -- these are not mirrored on faith.
+fn emit_seq_new_a64() with Mut, Panic {
+    emit_imm64_a64(72)                       // 40 header + 4 slots * 8
+    emit_heap_alloc_a64()                    // x0 = user ptr
+    em32(0xD2800001)                         // movz x1, #0
+    em32(0xF9000001)                         // str x1, [x0]        len = 0
+    em32(0xD2800081)                         // movz x1, #4
+    em32(0xF9000401)                         // str x1, [x0, #8]    capacity = 4
+    em32(0xD2800101)                         // movz x1, #8
+    em32(0xF9000801)                         // str x1, [x0, #16]   elem_size = 8
+    em32(0xD2800001)                         // movz x1, #0
+    em32(0xF9000C01)                         // str x1, [x0, #24]   len_variance = 0
+    emit_imm64_reg_a64(1, 4607182418800017408)  // 1.0
+    em32(0xF9001001)                         // str x1, [x0, #32]   len_confidence = 1.0
+}
+
+fn seq_materialize_push_value_a64(seq_hash: i64, tok: i64) -> i64 with IO, Mut, Panic, Div {
+    if seq_hash_is(seq_hash) == false { return 0 }
+    let in_ty = seq_hash_inner_ty(seq_hash)
+    let in_hash = seq_hash_inner_hash(seq_hash)
+    if in_ty == 6 || in_ty == 7 || type_is_struct_like(in_ty, in_hash) {
+        // materialize_struct_value_x86 has no a64 twin. Refusing is the only
+        // honest option: emitting the push without materialising the struct
+        // would store a stale pointer and the program would be wrong at runtime
+        // with no diagnostic.
+        tc_error_hard(tok, "Seq<T> with struct elements is not supported on the aarch64 target yet")
+        return 1
+    }
+    0
+}
+
+
+fn emit_seq_push_slots_a64(slot_s: i64, slot_v: i64) with Mut, Panic {
+    let slot_newcap = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]        len
+    em32(0xF9400402)                         // ldr x2, [x0, #8]    capacity
+    em32(0xEB02003F)                         // cmp x1, x2
+    let p_nogrow = CL
+    em32(0x54000001)                         // b.ne no_grow        (patched)
+    // grow: new_cap = capacity * 2
+    em32(0x8B020040)                         // add x0, x2, x2
+    emit_store_var_a64(slot_newcap)
+    emit_load_var_a64(slot_s)                // x0 = old P
+    em32(0xAA0003EA)                         // mov x10, x0         realloc takes it here
+    emit_load_var_a64(slot_newcap)           // x0 = new_cap   (clobbers x9/x0 only)
+    em32(0xD37DF000)                         // lsl x0, x0, #3      new_cap * 8
+    em32(0x9100A000)                         // add x0, x0, #40     + header
+    emit_heap_realloc_a64()                  // x0 = new user ptr
+    emit_store_var_a64(slot_s)               // the pointer moved: write it back
+    emit_load_var_a64(slot_newcap)           // x0 = new_cap
+    em32(0xAA0003E1)                         // mov x1, x0
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9000401)                         // str x1, [x0, #8]    capacity = new_cap
+    patch_branch_a64(p_nogrow, CL)           // no_grow:
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]        len
+    em32(0x9100A002)                         // add x2, x0, #40     payload base
+    emit_load_var_a64(slot_v)                // x0 = value (x1/x2 survive: only x9/x0 clobbered)
+    em32(0xF8217840)                         // str x0, [x2, x1, lsl #3]
+    emit_load_var_a64(slot_s)                // x0 = P
+    em32(0xF9400001)                         // ldr x1, [x0]
+    em32(0x91000421)                         // add x1, x1, #1
+    em32(0xF9000001)                         // str x1, [x0]        len++
+}
+
+
+fn emit_seq_count_a64(slot_s: i64) with Mut, Panic {
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+}
+
+fn emit_seq_len_a64(slot_s: i64) with Mut, Panic {
+    let base = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 3
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+    emit_store_var_a64(base + 2)
+    emit_load_var_a64(slot_s)
+    em32(0xF9400C00)                         // ldr x0, [x0, #24]   variance
+    emit_store_var_a64(base + 1)
+    emit_load_var_a64(slot_s)
+    em32(0xF9401000)                         // ldr x0, [x0, #32]   confidence
+    emit_store_var_a64(base)
+    emit_lea_var_a64(base + 2)
+}
+
+fn emit_seq_bounds_check_a64(slot_s: i64, slot_idx: i64) with Mut, Panic {
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0          idx
+    emit_load_var_a64(slot_s)
+    em32(0xF9400000)                         // ldr x0, [x0]        len
+    em32(0xEB00003F)                         // cmp x1, x0
+    let p_ok = CL
+    em32(0x54000003)                         // b.lo <in_bounds>    (patched)
+    emit_assert_fail_a64()
+    patch_branch_a64(p_ok, CL)
+}
+
+fn emit_seq_get_slots_a64(slot_s: i64, slot_idx: i64) with Mut, Panic {
+    emit_seq_bounds_check_a64(slot_s, slot_idx)
+    emit_load_var_a64(slot_s)
+    em32(0x9100A002)                         // add x2, x0, #40     payload base
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0          idx
+    em32(0xF8617840)                         // ldr x0, [x2, x1, lsl #3]
+}
+
+fn emit_seq_set_slots_a64(slot_s: i64, slot_idx: i64, slot_v: i64) with Mut, Panic {
+    emit_seq_bounds_check_a64(slot_s, slot_idx)
+    emit_load_var_a64(slot_s)
+    em32(0x9100A002)                         // add x2, x0, #40
+    emit_load_var_a64(slot_idx)
+    em32(0xAA0003E1)                         // mov x1, x0
+    emit_load_var_a64(slot_v)
+    em32(0xF8217840)                         // str x0, [x2, x1, lsl #3]
+}
+
+
 fn emit_heap_alloc_a64() with Mut {
     // x0 = requested size. Allocate size+8 via mmap, write header, return user ptr.
     em32(0x91002000)               // add x0, x0, #8 (total = size + header)
@@ -32646,9 +33099,6 @@ fn emit_heap_realloc_a64() with Mut {
     // Linux mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
     em32(0x91002000)               // add x0, x0, #8 (new_total)
     em32(0xAA0003E9)               // mov x9, x0 (save new_total in x9)
-    em32(0xD100200A)               // sub x10, x0, ... wait — x10 has old_user_ptr from caller
-    // Caller has: push old_ptr, then compile new_size → x0. We pop old_ptr.
-    // Actually for ARM64, caller saves old_ptr in x10 before calling this.
     // x10 = old_user_ptr, x0 = new_size (already added 8 above)
     em32(0xD100214A)               // sub x10, x10, #8 (old mmap base)
     em32(0xF940014B)               // ldr x11, [x10] (old_total)
@@ -33000,6 +33450,14 @@ fn compile_knowledge_paren_a64() with IO, Mut, Panic, Div {
 fn compile_primary_a64() with IO, Mut, Panic, Div {
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
+    LAST_EXPR_VAR_IDX = -1
+    LAST_EXPR_IS_AFFINE = 0
+    // β⁹ GTT: a fresh primary expression starts with empty channel topology
+    // (mirror of compile_primary). Without this reset the a64 pass carried the
+    // previous expression's channel set into the next one, so every union
+    // downstream was an over-approximation of an already-wrong set.
+    EXPR_CH_SET = 0
+    EXPR_PARAM_USED = 0
     EXPR_VSHADOW = -1
     EXPR_SSHADOW = -1
     EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
@@ -33014,6 +33472,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
+    // A fresh primary must clear the unit brand, name AND dimension, exactly as
+    // compile_primary does. The a64 mirror never cleared either: the only
+    // producer on this path is the global read below, so a brand set once
+    // survived into every later expression, and unit_call_arg_mismatch --
+    // which accepts whenever expr_dim equals param_dim -- then rejected
+    // arguments that never carried a unit at all. Measured on
+    // tests/run-pass/unit_param_forwarded_to_param.sio and three others: clean
+    // under x86, spurious "unit mismatch in call argument" under
+    // --target aarch64-linux.
+    EXPR_UNIT = 0
+    EXPR_UNIT_DIM = 0
+    // Every refinement check opens with `if LAST_IS_LITERAL != 1 { return }`.
+    // The a64 pass tracked no literal at all -- not one site in the whole
+    // mirror -- so try_apply_call_arg_refinement, try_apply_return_refinement
+    // and the let-binding check returned immediately on this target, and the
+    // nineteen refinement compile-fail cases were accepted.
+    LAST_IS_LITERAL = 0
+    LAST_IS_LITERAL_F64 = 0
     let k = TK[EP as usize]
     // Integer literal
     if k == 4 {
@@ -33023,6 +33499,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         EP = EP + 1
         EXPR_IS_F64 = 0
         EXPR_TY = 1
+        LAST_IS_LITERAL = 1
+        LAST_LITERAL_VAL = v
         EXPR_TY_HASH = 0
         return
     }
@@ -33066,6 +33544,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         em32(0x9E660000)  // fmov x0, d0
         EXPR_IS_F64 = 1
         EXPR_TY = 2
+        // PR-7: track the f64 literal for compile-time predicate checking.
+        LAST_IS_LITERAL_F64 = 1
+        LAST_LITERAL_F64_INT = fl_int
+        LAST_LITERAL_F64_FRAC = fl_frac
+        LAST_LITERAL_F64_DENOM = fl_denom
         EXPR_TY_HASH = 0
         return
     }
@@ -33845,6 +34328,42 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         EXPR_IS_F64 = 0
         EXPR_TY = 10
+        // Borrow conflict detection and tracking (mirror of
+        // compile_borrow_primary_x86). The arm64 mirror had no VAR_BORROW_COUNT
+        // or VAR_BORROW_EXCL site at all, so no borrow was ever recorded and no
+        // conflict could ever be reported on this target.
+        let bvi_a = var_find_idx(rns, rne)
+        if bvi_a >= 0 {
+            // Reborrow through a reference is always safe: exclusivity is already
+            // guaranteed by the existing reference.
+            let bvi_a_is_ref = VAR_TY[bvi_a as usize] == 10
+            if bvi_a_is_ref == false {
+                if want_mut != 0 {
+                    if VAR_BORROW_COUNT[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "cannot borrow as mutable because it is also borrowed as shared")
+                    }
+                    if VAR_BORROW_EXCL[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "Cannot borrow as mutable: exclusive borrow already active")
+                    }
+                    VAR_BORROW_EXCL[bvi_a as usize] = VAR_BORROW_EXCL[bvi_a as usize] + 1
+                    if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                        CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi_a
+                        CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 1
+                        CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                    }
+                } else {
+                    if VAR_BORROW_EXCL[bvi_a as usize] > 0 {
+                        tc_linear_violation(borrow_tok, "cannot borrow as shared because it is also borrowed as mutable")
+                    }
+                    VAR_BORROW_COUNT[bvi_a as usize] = VAR_BORROW_COUNT[bvi_a as usize] + 1
+                    if IN_CALL_ARGS != 0 && CALL_ARG_BORROW_N < 32 {
+                        CALL_ARG_BORROW_VI[CALL_ARG_BORROW_N as usize] = bvi_a
+                        CALL_ARG_BORROW_EXCL[CALL_ARG_BORROW_N as usize] = 0
+                        CALL_ARG_BORROW_N = CALL_ARG_BORROW_N + 1
+                    }
+                }
+            }
+        }
         if var_find_idx(rns, rne) >= 0 {
             var inner_ty_b = VAR_TY[var_find_idx(rns, rne) as usize]
             var inner_hash_b = VAR_TY_HASH[var_find_idx(rns, rne) as usize]
@@ -33962,6 +34481,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             em32(0x9E670000); em32(0x1E614000); em32(0x9E660000)
         } else {
             em32(0xCB0003E0)  // neg x0, x0
+            // Track negation in the literal value so compile-time refinement
+            // checks see -N, not N.
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
         }
         return
     }
@@ -34556,6 +35078,216 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
                 return
             }
+            if src_match(ns, ne - ns, "hessian_of") {
+                // Mirror of the compile_primary site. The block is almost entirely
+                // shadow-channel bookkeeping: the only target-specific calls in it are
+                // emit_load_var and emit_imm64, which have exact a64 twins. Without it
+                // `hessian_of` was an unknown identifier on aarch64 and the a64 pass
+                // emitted `mov x0, #0` in its place -- a second derivative of zero,
+                // silently, in twenty run-pass programs.
+                // hessian_of(x: f64, j: i64, k: i64) -> f64
+                // Returns ∂²x/∂input_j∂input_k via the β⁷ second-order shadow channels (j≤k by convention).
+                EP = EP + 1  // skip (
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+    EXPR_HSHADOW_77 = -1
+                var b7h_arg_vi: i64 = -1
+                if TK[EP as usize] == 3 {
+                    b7h_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
+                }
+                compile_or_a64()  // first arg (expr)
+                // GTT: capture the first-arg's channel topology before j/k args overwrite EXPR_CH_SET.
+                let b7h_ch_set = EXPR_CH_SET
+                // Save Hessian shadow state before j/k args overwrite EXPR_HSHADOW via compile_primary_a64()
+                let b7h_saved_h00 = EXPR_HSHADOW_00; let b7h_saved_h01 = EXPR_HSHADOW_01
+                let b7h_saved_h02 = EXPR_HSHADOW_02; let b7h_saved_h03 = EXPR_HSHADOW_03
+                let b7h_saved_h11 = EXPR_HSHADOW_11; let b7h_saved_h12 = EXPR_HSHADOW_12
+                let b7h_saved_h13 = EXPR_HSHADOW_13; let b7h_saved_h22 = EXPR_HSHADOW_22
+                let b7h_saved_h23 = EXPR_HSHADOW_23; let b7h_saved_h33 = EXPR_HSHADOW_33
+                let b7h_saved_h04 = EXPR_HSHADOW_04; let b7h_saved_h05 = EXPR_HSHADOW_05
+                let b7h_saved_h06 = EXPR_HSHADOW_06; let b7h_saved_h07 = EXPR_HSHADOW_07
+                let b7h_saved_h14 = EXPR_HSHADOW_14; let b7h_saved_h15 = EXPR_HSHADOW_15
+                let b7h_saved_h16 = EXPR_HSHADOW_16; let b7h_saved_h17 = EXPR_HSHADOW_17
+                let b7h_saved_h24 = EXPR_HSHADOW_24; let b7h_saved_h25 = EXPR_HSHADOW_25
+                let b7h_saved_h26 = EXPR_HSHADOW_26; let b7h_saved_h27 = EXPR_HSHADOW_27
+                let b7h_saved_h34 = EXPR_HSHADOW_34; let b7h_saved_h35 = EXPR_HSHADOW_35
+                let b7h_saved_h36 = EXPR_HSHADOW_36; let b7h_saved_h37 = EXPR_HSHADOW_37
+                let b7h_saved_h44 = EXPR_HSHADOW_44; let b7h_saved_h45 = EXPR_HSHADOW_45
+                let b7h_saved_h46 = EXPR_HSHADOW_46; let b7h_saved_h47 = EXPR_HSHADOW_47
+                let b7h_saved_h55 = EXPR_HSHADOW_55; let b7h_saved_h56 = EXPR_HSHADOW_56
+                let b7h_saved_h57 = EXPR_HSHADOW_57
+                let b7h_saved_h66 = EXPR_HSHADOW_66; let b7h_saved_h67 = EXPR_HSHADOW_67
+                let b7h_saved_h77 = EXPR_HSHADOW_77
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                var b7h_j: i64 = 0
+                if TK[EP as usize] == 4 { b7h_j = TV[EP as usize] }
+                compile_or_a64()  // second arg (j)
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                var b7h_k: i64 = 0
+                if TK[EP as usize] == 4 { b7h_k = TV[EP as usize] }
+                compile_or_a64()  // third arg (k)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                // Normalize so j ≤ k
+                if b7h_j > b7h_k {
+                    let b7h_tmp = b7h_j; b7h_j = b7h_k; b7h_k = b7h_tmp
+                }
+                // GTT — gradient topology type check.
+                // If the first-arg expression has a known non-empty channel
+                // topology (b7h_ch_set != 0) and both j, k are literal
+                // channel indices in [0, 8), require both bits to be in the
+                // topology.  A zero b7h_ch_set means the topology is unknown
+                // (variable-load without persistence, or opaque expression);
+                // in that case we fall through to the existing slot-based
+                // dispatch and don't force-refuse.
+                if b7h_ch_set != 0 && b7h_j >= 0 && b7h_j < 8 && b7h_k >= 0 && b7h_k < 8 {
+                    let j_bit = 1 << b7h_j
+                    let k_bit = 1 << b7h_k
+                    if (b7h_ch_set & j_bit) == 0 || (b7h_ch_set & k_bit) == 0 {
+                        // Print GTT diagnostic directly (bypass tc_error due to
+                        // a tc_error-path issue that crashes here).
+                        print("warning: hessian_of: requested channel not in expression's gradient topology (GTT refusal)\n")
+                        TYPECHECK_FAILED = 1
+                    }
+                }
+                // Resolve shadow slot from variable (via VAR_HSHADOW) or expression (via saved slot)
+                var b7h_slot: i64 = -1
+                if b7h_j == 0 && b7h_k == 0 {
+                    b7h_slot = b7h_saved_h00
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_00[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_00[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 1 {
+                    b7h_slot = b7h_saved_h01
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_01[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_01[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 2 {
+                    b7h_slot = b7h_saved_h02
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_02[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_02[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 3 {
+                    b7h_slot = b7h_saved_h03
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_03[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_03[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 1 {
+                    b7h_slot = b7h_saved_h11
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_11[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_11[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 2 {
+                    b7h_slot = b7h_saved_h12
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_12[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_12[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 3 {
+                    b7h_slot = b7h_saved_h13
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_13[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_13[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 2 {
+                    b7h_slot = b7h_saved_h22
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_22[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_22[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 3 {
+                    b7h_slot = b7h_saved_h23
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_23[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_23[b7h_arg_vi as usize] }
+                } else if b7h_j == 3 && b7h_k == 3 {
+                    b7h_slot = b7h_saved_h33
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_33[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_33[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 4 {
+                    b7h_slot = b7h_saved_h04
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_04[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_04[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h05
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_05[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_05[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h06
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_06[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_06[b7h_arg_vi as usize] }
+                } else if b7h_j == 0 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h07
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_07[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_07[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 4 {
+                    b7h_slot = b7h_saved_h14
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_14[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_14[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h15
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_15[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_15[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h16
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_16[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_16[b7h_arg_vi as usize] }
+                } else if b7h_j == 1 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h17
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_17[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_17[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 4 {
+                    b7h_slot = b7h_saved_h24
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_24[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_24[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h25
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_25[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_25[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h26
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_26[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_26[b7h_arg_vi as usize] }
+                } else if b7h_j == 2 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h27
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_27[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_27[b7h_arg_vi as usize] }
+                } else if b7h_j == 3 && b7h_k == 4 {
+                    b7h_slot = b7h_saved_h34
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_34[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_34[b7h_arg_vi as usize] }
+                } else if b7h_j == 3 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h35
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_35[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_35[b7h_arg_vi as usize] }
+                } else if b7h_j == 3 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h36
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_36[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_36[b7h_arg_vi as usize] }
+                } else if b7h_j == 3 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h37
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_37[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_37[b7h_arg_vi as usize] }
+                } else if b7h_j == 4 && b7h_k == 4 {
+                    b7h_slot = b7h_saved_h44
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_44[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_44[b7h_arg_vi as usize] }
+                } else if b7h_j == 4 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h45
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_45[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_45[b7h_arg_vi as usize] }
+                } else if b7h_j == 4 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h46
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_46[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_46[b7h_arg_vi as usize] }
+                } else if b7h_j == 4 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h47
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_47[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_47[b7h_arg_vi as usize] }
+                } else if b7h_j == 5 && b7h_k == 5 {
+                    b7h_slot = b7h_saved_h55
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_55[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_55[b7h_arg_vi as usize] }
+                } else if b7h_j == 5 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h56
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_56[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_56[b7h_arg_vi as usize] }
+                } else if b7h_j == 5 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h57
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_57[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_57[b7h_arg_vi as usize] }
+                } else if b7h_j == 6 && b7h_k == 6 {
+                    b7h_slot = b7h_saved_h66
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_66[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_66[b7h_arg_vi as usize] }
+                } else if b7h_j == 6 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h67
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_67[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_67[b7h_arg_vi as usize] }
+                } else if b7h_j == 7 && b7h_k == 7 {
+                    b7h_slot = b7h_saved_h77
+                    if b7h_arg_vi >= 0 && VAR_HSHADOW_77[b7h_arg_vi as usize] >= 0 { b7h_slot = VAR_HSHADOW_77[b7h_arg_vi as usize] }
+                }
+                if b7h_slot >= 0 { emit_load_var_a64(b7h_slot) } else { emit_imm64_a64(0) }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                EXPR_VSHADOW = -1
+                EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+    EXPR_HSHADOW_77 = -1
+                return
+            }
             if src_match(ns, ne - ns, "arg_count") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -34974,7 +35706,198 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
             let extern_c_math_stub_a64 = extern_stub_matches_src(ns, ne)
-            if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log")) {
+            // ── Seq<T> free functions, a64 (mirror of the compile_primary blocks) ──
+            // seq_push / seq_push_uncertain are NOT here yet: they need the grow path,
+            // which is a separate change.
+            if src_match(ns, ne - ns, "seq_new") {
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 } else {
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                }
+                emit_seq_new_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 12
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_push") {
+                EP = EP + 1
+                let vns = TS[EP as usize]
+                let vne = TE[EP as usize]
+                var slot_s: i64 = 0 - 1
+                if TK[EP as usize] == 3 { slot_s = var_find(vns, vne) }
+                let lvi = var_find_idx(vns, vne)
+                if slot_s < 0 || lvi < 0 || VAR_TY[lvi as usize] != 12 {
+                    tc_error_hard(name_tok, "seq_push requires a local Seq variable as first argument")
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 5
+                    EXPR_TY_HASH = 0
+                    return
+                }
+                EP = EP + 1
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity_hard(name_tok, 2, 1) }
+                let slot_v = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()
+                seq_materialize_push_value_a64(VAR_TY_HASH[lvi as usize], name_tok)
+                emit_store_var_a64(slot_v)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_slots_a64(slot_s, slot_v)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_get") {
+                EP = EP + 1
+                let slot_sg = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_ig = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr → rax
+                let sh = EXPR_TY_HASH
+                emit_store_var_a64(slot_sg)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                compile_or_a64()  // index → rax
+                emit_store_var_a64(slot_ig)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_get_slots_a64(slot_sg, slot_ig)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(sh) {
+                    EXPR_TY = seq_hash_inner_ty(sh)
+                    EXPR_TY_HASH = seq_hash_inner_hash(sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
+                return
+            }
+            if src_match(ns, ne - ns, "seq_set") {
+                EP = EP + 1
+                let slot_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_is = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                let slot_vs = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_ss)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 1) }
+                compile_or_a64()  // index
+                emit_store_var_a64(slot_is)
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 3, 2) }
+                compile_or_a64()  // value
+                emit_store_var_a64(slot_vs)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_set_slots_a64(slot_ss, slot_is, slot_vs)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if src_match(ns, ne - ns, "seq_len") {
+                EP = EP + 1
+                let slot_sl = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_sl)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_len_a64(slot_sl)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 0
+                EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
+                return
+            }
+            if src_match(ns, ne - ns, "seq_count") {
+                EP = EP + 1
+                let slot_sc = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // seq ptr
+                emit_store_var_a64(slot_sc)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_count_a64(slot_sc)
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            // pow(x, y) = exp(y * ln(x)), composed from the prelude helpers exactly as
+            // compile_primary does. The x86 block additionally propagates first- and
+            // second-order AD shadows through the two arguments; this does not, so a
+            // pow() inside a hessian_of() chain returns the right VALUE with no
+            // derivative channel. That is a narrower mirror, stated rather than hidden.
+            if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && src_match(ns, ne - ns, "pow") {
+                EP = EP + 1
+                compile_or_a64()
+                let pw_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_x_slot_a)
+                // β⁹ GTT: capture x's topology before the y arg overwrites EXPR_CH_SET.
+                let pw_x_ch_set_a = EXPR_CH_SET
+                let pw_x_param_used_a = EXPR_PARAM_USED
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()
+                let pw_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_y_slot_a)
+                // β⁹ GTT: y's topology. pow(x, y) depends on both → union.
+                let pw_y_ch_set_a = EXPR_CH_SET
+                let pw_y_param_used_a = EXPR_PARAM_USED
+                if TK[EP as usize] == 28 {
+                    tc_wrong_arity(name_tok, 2, 3)
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                }
+                emit_load_var_a64(pw_x_slot_a); emit_push_a64()
+                let pw_ln_fi_a = fn_find_lit("__native_ln_f64")
+                if pw_ln_fi_a >= 0 { emit_direct_fn_call_a64(pw_ln_fi_a, 1) } else { emit_drop_call_args_a64(1); em32(0xD2800000) }
+                let pw_lnx_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_lnx_slot_a)
+                emit_load_var_a64(pw_y_slot_a); emit_push_a64()
+                emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                emit_push_a64()
+                let pw_exp_fi_a = fn_find_lit("__native_exp_f64")
+                if pw_exp_fi_a >= 0 { emit_direct_fn_call_a64(pw_exp_fi_a, 1) } else { emit_drop_call_args_a64(1); em32(0xD2800000) }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                // β⁹ GTT: pow(x, y) depends on both x and y.
+                EXPR_CH_SET = pw_x_ch_set_a | pw_y_ch_set_a
+                EXPR_PARAM_USED = pw_x_param_used_a | pw_y_param_used_a
+                return
+            }
+            // atan2(y, x) — same shape, same omission of the AD shadow propagation.
+            if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && src_match(ns, ne - ns, "atan2") {
+                EP = EP + 1
+                compile_or_a64()
+                let a2_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_y_slot_a)
+                // β⁹ GTT: capture y's topology before the x arg overwrites EXPR_CH_SET.
+                let a2_y_ch_set_a = EXPR_CH_SET
+                let a2_y_param_used_a = EXPR_PARAM_USED
+                if TK[EP as usize] == 28 { EP = EP + 1 }
+                compile_or_a64()
+                let a2_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_x_slot_a)
+                // β⁹ GTT: x's topology. atan2(y, x) depends on both → union.
+                let a2_x_ch_set_a = EXPR_CH_SET
+                let a2_x_param_used_a = EXPR_PARAM_USED
+                if TK[EP as usize] == 28 {
+                    tc_wrong_arity(name_tok, 2, 3)
+                    while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                }
+                emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                let a2_fi_a = fn_find_lit("__native_atan2_f64")
+                if a2_fi_a >= 0 { emit_direct_fn_call_a64(a2_fi_a, 2) }
+                else { tc_error(name_tok, "missing atan2 native"); emit_drop_call_args_a64(2); em32(0xD2800000) }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_IS_F64 = 1
+                EXPR_TY = 2
+                EXPR_TY_HASH = 0
+                // β⁹ GTT: atan2(y, x) depends on both y and x.
+                EXPR_CH_SET = a2_y_ch_set_a | a2_x_ch_set_a
+                EXPR_PARAM_USED = a2_y_param_used_a | a2_x_param_used_a
+                return
+            }
+            if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -34987,12 +35910,35 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         tc_wrong_arity(name_tok, 1, 2)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
+                    // β⁶/β⁷ chain rule: park u and the argument's own channel
+                    // state. Without this the a64 pass left the ARGUMENT's
+                    // sensitivities on the result, i.e. it behaved as if
+                    // f'(u) == 1 for every transcendental.
+                    let m_arg_a = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(m_arg_a)
+                    let m_prev_a = B7_TOP
+                    var m_u_a = B7_TOP
+                    if B7_TOP + B7_FRAME * 2 > 8192 {
+                        tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                        m_u_a = 8192 - B7_FRAME * 2
+                    } else {
+                        B7_TOP = B7_TOP + B7_FRAME
+                    }
+                    b7_save_a64(m_u_a)
+                    let m_out_a = m_u_a + B7_FRAME
+                    emit_load_var_a64(m_arg_a)
                     emit_push_a64()
                     var math_fi: i64 = fn_find_lit("__native_sqrt_f64")
                     if src_match(ns, ne - ns, "sin") { math_fi = fn_find_lit("__native_sin_f64") }
                     if src_match(ns, ne - ns, "cos") { math_fi = fn_find_lit("__native_cos_f64") }
                     if src_match(ns, ne - ns, "exp") { math_fi = fn_find_lit("__native_exp_f64") }
                     if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") { math_fi = fn_find_lit("__native_ln_f64") }
+                    if src_match(ns, ne - ns, "tan") { math_fi = fn_find_lit("__native_tan_f64") }
+                    if src_match(ns, ne - ns, "atan") { math_fi = fn_find_lit("__native_atan_f64") }
+                    if src_match(ns, ne - ns, "tanh") { math_fi = fn_find_lit("__native_tanh_f64") }
+                    if src_match(ns, ne - ns, "asin") { math_fi = fn_find_lit("__native_asin_f64") }
+                    if src_match(ns, ne - ns, "acos") { math_fi = fn_find_lit("__native_acos_f64") }
                     if math_fi >= 0 { emit_direct_fn_call_a64(math_fi, 1) }
                     else {
                         tc_error(name_tok, "missing native math helper")
@@ -35000,6 +35946,56 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         em32(0xD2800000)
                     }
                     if TK[EP as usize] == 7 { EP = EP + 1 }
+                    var m_kind_a: i64 = 0
+                    if src_match(ns, ne - ns, "sin") { m_kind_a = 1 }
+                    if src_match(ns, ne - ns, "cos") { m_kind_a = 2 }
+                    if src_match(ns, ne - ns, "exp") { m_kind_a = 3 }
+                    if src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") { m_kind_a = 4 }
+                    if src_match(ns, ne - ns, "tan") { m_kind_a = 5 }
+                    if src_match(ns, ne - ns, "atan") { m_kind_a = 6 }
+                    if src_match(ns, ne - ns, "tanh") { m_kind_a = 7 }
+                    if src_match(ns, ne - ns, "asin") { m_kind_a = 8 }
+                    if src_match(ns, ne - ns, "acos") { m_kind_a = 9 }
+                    let m_res_a = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(m_res_a)
+                    var m_t_a: i64 = 0
+                    while m_t_a < B7_FRAME { B7F[(m_out_a + m_t_a) as usize] = -1; m_t_a = m_t_a + 1 }
+                    var m_any_a: i64 = 0
+                    var m_q_a: i64 = 0
+                    while m_q_a < B7_FRAME {
+                        if B7F[(m_u_a + m_q_a) as usize] >= 0 { m_any_a = 1 }
+                        m_q_a = m_q_a + 1
+                    }
+                    if m_any_a == 1 {
+                        let m_d1_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
+                        emit_store_var_a64(m_d1_a)
+                        let m_d2_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 1, m_arg_a, m_res_a, m_d1_a)
+                        emit_store_var_a64(m_d2_a)
+                        var m_c_a: i64 = 0
+                        while m_c_a < 8 {
+                            B7F[(m_out_a + 36 + m_c_a) as usize] = emit_s_chain_a64(m_d1_a, B7F[(m_u_a + 36 + m_c_a) as usize])
+                            m_c_a = m_c_a + 1
+                        }
+                        var m_j_a: i64 = 0
+                        var m_i_a: i64 = 0
+                        while m_j_a < 8 {
+                            var m_k_a: i64 = m_j_a
+                            while m_k_a < 8 {
+                                B7F[(m_out_a + m_i_a) as usize] = emit_h_chain_a64(m_d1_a, m_d2_a, B7F[(m_u_a + m_i_a) as usize], B7F[(m_u_a + 36 + m_j_a) as usize], B7F[(m_u_a + 36 + m_k_a) as usize])
+                                m_i_a = m_i_a + 1
+                                m_k_a = m_k_a + 1
+                            }
+                            m_j_a = m_j_a + 1
+                        }
+                        emit_load_var_a64(m_res_a)
+                    }
+                    b7_restore_a64(m_out_a)
+                    B7_TOP = m_prev_a
                 }
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
@@ -35132,6 +36128,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             let call_tok = EP - 1
             EP = EP + 1
             var argc: i64 = 0
+                // Mark that we are inside a call argument list so borrows taken
+                // here are tracked, and save the previous depth so nested calls
+                // do not clobber our records.
+                let prev_in_call_args_a = IN_CALL_ARGS
+                let prev_borrow_n_a = CALL_ARG_BORROW_N
+                IN_CALL_ARGS = 1
             var abi_argc: i64 = 0
             B5_ARG_VCOUNT = 0
             B9_ARG_CH_COUNT = 0
@@ -35169,6 +36171,25 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 }
                 try_apply_call_arg_refinement(call_tok)
+                // Observation boundary: passing Unobserved<T> to a non-Unobserved
+                // parameter (mirror of compile_primary). The a64 mirror had only
+                // the IO/FFI variant below, not this one.
+                if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(SCAN_TY) && SCAN_TY != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(call_tok, "cannot pass Unobserved<T> to non-Unobserved parameter")
+                }
+                // Mark a struct variable moved when it is passed by value. Only
+                // linear/affine structs move; the rest are implicitly copied.
+                // The a64 pass never set LAST_EXPR_VAR_IDX, so nothing on this
+                // target was ever marked moved and the use-after-move check
+                // above could not fire.
+                if EXPR_TY == 6 && LAST_EXPR_VAR_IDX >= 0 {
+                    if VAR_LINEAR[LAST_EXPR_VAR_IDX as usize] == 1 || VAR_AFFINE[LAST_EXPR_VAR_IDX as usize] == 1 {
+                        if VAR_BORROW_COUNT[LAST_EXPR_VAR_IDX as usize] > 0 {
+                            tc_linear_violation(call_tok, "cannot move while borrowed")
+                        }
+                        VAR_MOVED[LAST_EXPR_VAR_IDX as usize] = 1
+                    }
+                }
                 // Observation boundary: passing Unobserved<T> to an IO or FFI-imported function
                 // requires the caller to have `with Observe` — IO collapses epistemic uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
@@ -35188,8 +36209,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
+            // Restore call-arg tracking state and release the borrows taken in
+            // this argument list (mirror of compile_primary).
+            IN_CALL_ARGS = prev_in_call_args_a
+            release_call_arg_borrows(prev_borrow_n_a)
             if fi >= 0 {
-                if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
+                // Hard, as the x86 general-call site is: a call whose argument
+                // count does not match the resolved definition is a genuine
+                // mis-resolution, and emitting a binary in that state
+                // miscompiles the call silently.
+                if FN_ARITY[fi as usize] != argc { tc_wrong_arity_hard(call_tok, FN_ARITY[fi as usize], argc) }
                 // Parity with the x86-64 twin (compile_primary ~14477): mask out the
                 // visibility/meta bits (pub=1024, import=2048, and higher marker bits)
                 // before the effect subset check. Imported/pub callees otherwise look
@@ -35199,6 +36228,19 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
+                // The three effects carried above the & 1023 mask are checked
+                // individually on the x86 path and were absent here, so a call
+                // needing Approx, Causal or NaturalityG2 from a caller that does
+                // not declare it compiled on aarch64.
+                if (FN_EFFECTS[fi as usize] & 262144) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 262144) == 0 {
+                    tc_effect_call_violation(call_tok, 262144, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                if (FN_EFFECTS[fi as usize] & 524288) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 524288) == 0 {
+                    tc_effect_call_violation(call_tok, 524288, FN_EFFECTS[CURRENT_FN as usize])
+                }
+                if (FN_EFFECTS[fi as usize] & 1048576) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 1048576) == 0 {
+                    tc_effect_call_violation(call_tok, 1048576, FN_EFFECTS[CURRENT_FN as usize])
+                }
                 // β⁵ a64: store argument variance values into global BSS array
                 var b5a_pvi: i64 = 0
                 while b5a_pvi < B5_ARG_VCOUNT && b5a_pvi < 16 {
@@ -35222,6 +36264,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_add_sp_bytes_a64(a64_dargs_drop)
                 EXPR_TY = FN_RET_TY[fi as usize]
                 EXPR_TY_HASH = FN_RET_HASH[fi as usize]
+                // The result of a call carries the unit of its RETURN type, not
+                // of its last argument (mirror of the x86 site). Without this the
+                // brand of the final argument outlived the call and stood in for
+                // the result.
+                expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 // β⁹ GTT a64: union of argument channel sets becomes the return
                 // value's topology (mirror of x86 compile_primary at ~10313).
@@ -35491,6 +36538,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 6
                 EXPR_TY_HASH = sh
                 LAST_EXPR_IS_LINEAR = ST_LINEAR[si as usize]
+                LAST_EXPR_IS_AFFINE = ST_AFFINE[si as usize]
                 return
             }
         }
@@ -35616,6 +36664,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = VAR_TY_HASH[vi as usize]
                 if VAR_ALEN[vi as usize] > 0 { LAST_ALEN = VAR_ALEN[vi as usize] }
                 if VAR_IS_CLOSURE[vi as usize] == 1 { LAST_EXPR_IS_CLOSURE = 1 }
+                // Use-after-move, for linear/affine struct variables only.
+                if vi >= 0 && VAR_MOVED[vi as usize] == 1 && (VAR_LINEAR[vi as usize] == 1 || VAR_AFFINE[vi as usize] == 1) {
+                    tc_linear_violation(EP - 1, "use of moved value")
+                }
+                // Track the variable index so the call site can mark it moved.
+                if vi >= 0 && (VAR_TY[vi as usize] == 6 || VAR_TY[vi as usize] == 12 || knowledge_hash_is(VAR_TY_HASH[vi as usize])) { LAST_EXPR_VAR_IDX = vi }
+                // PR-4: propagate the tracked literal value so cross-binding
+                // refinement checks fire on `let x = -5; takes_pos(x)`.
+                if VAR_LIT_DATA[(vi * 2 + 0) as usize] == 1 {
+                    LAST_IS_LITERAL = 1
+                    LAST_LITERAL_VAL = VAR_LIT_DATA[(vi * 2 + 1) as usize]
+                }
                 // β⁴: propagate variance/sensitivity shadow for this variable
                 EXPR_VSHADOW = VAR_VSHADOW[vi as usize]
                 EXPR_SSHADOW = VAR_SSHADOW[vi as usize]
@@ -35683,7 +36743,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_CH_SET = 0
                 EXPR_PARAM_USED = 0
             }
+            // Track unit for dimension checking at + and - (mirror of the x86
+            // ident-load site). The a64 pass read no brand off a local at all,
+            // so only globals ever carried one.
+            if vi >= 0 { EXPR_UNIT = VAR_UNIT[vi as usize] } else { EXPR_UNIT = 0 }
+            EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+            // A derived quantity carries a dimension with no name, which
+            // unit_lookup_dim cannot recover from a zero hash.
+            if vi >= 0 && EXPR_UNIT == 0 && VAR_UNIT_DIM[vi as usize] != 0 {
+                EXPR_UNIT_DIM = VAR_UNIT_DIM[vi as usize]
+            }
             var_mark_used(ns, ne)
+            // Linear value consumed inside a loop -- it would be consumed more
+            // than once (mirror of the x86 ident-load site).
+            if vi >= 0 && VAR_LINEAR[vi as usize] == 1 && LOOP_DEPTH > 0 {
+                tc_linear_violation(EP - 1, "linear value consumed in loop body")
+            }
+            // Affine value used more than once.
+            if vi >= 0 && VAR_AFFINE[vi as usize] == 1 && VAR_USED[vi as usize] > 1 {
+                tc_linear_violation(EP - 1, "affine value used more than once")
+            }
         } else {
             let gi = gl_find(ns, ne)
             if gi >= 0 {
@@ -35698,6 +36777,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = GL_TY[gi as usize]
                 EXPR_TY_HASH = GL_TY_HASH[gi as usize]
                 if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                // G12b: carry the unit brand on a global read -- see the other site.
+                if EXPR_TY == 2 && unit_is_user_declared_h(EXPR_TY_HASH) {
+                    EXPR_UNIT = EXPR_TY_HASH
+                    EXPR_UNIT_DIM = unit_lookup_dim(EXPR_UNIT)
+                }
             } else {
                 let fri = fn_find(TS[(EP - 1) as usize], TE[(EP - 1) as usize])
                 if fri >= 0 {
@@ -35842,6 +36926,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             EXPR_TY = cast_ty
             EXPR_TY_HASH = cast_hash
+            // A cast sets the brand from the target type: `raw as molal`
+            // enters the unit world (mirror of the x86 cast site).
+            expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
             if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
             EP = SCAN_TY_NEXT
             continue
@@ -35935,6 +37022,100 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             let fne = TE[EP as usize]
             let fh = gl_name_hash(fns, fne)
             // Built-in .as_bytes() — string → &[i8] pass-through (ARM64)
+            // ── Seq<T> methods, a64 (TY_SEQ = 12) ──
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "push") && TK[(EP + 1) as usize] == 6 {
+                // Local Seq variable receiver only. SEQ_RECV_PLACE_SLOT has no a64
+                // site, so the struct-field receiver the x86 twin also handles
+                // cannot be reached here; it is refused rather than compiled into
+                // a push against the wrong address.
+                let push_seqhash = EXPR_TY_HASH
+                if LAST_EXPR_VAR_IDX < 0 {
+                    tc_error_hard(method_tok, "Seq .push on this target requires a local Seq variable receiver")
+                    EP = EP + 1
+                    var pd_a: i64 = 0
+                    while EP < TC { if TK[EP as usize] == 6 { pd_a = pd_a + 1 } if TK[EP as usize] == 7 { pd_a = pd_a - 1; if pd_a == 0 { EP = EP + 1; break } } EP = EP + 1 }
+                    EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                    continue
+                }
+                let push_slot_s = VAR_SLOT[LAST_EXPR_VAR_IDX as usize]
+                EP = EP + 1
+                EP = EP + 1
+                let push_sv = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()
+                seq_materialize_push_value_a64(push_seqhash, method_tok)
+                emit_store_var_a64(push_sv)
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_seq_push_slots_a64(push_slot_s, push_sv)
+                EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "get") && TK[(EP + 1) as usize] == 6 {
+                let get_sh = EXPR_TY_HASH
+                EP = EP + 1  // skip 'get'
+                EP = EP + 1  // skip (
+                let get_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(get_ss)  // receiver ptr (still in rax)
+                let get_si = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // index → rax
+                emit_store_var_a64(get_si)
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                emit_seq_get_slots_a64(get_ss, get_si)
+                EXPR_IS_F64 = 0
+                if seq_hash_is(get_sh) {
+                    EXPR_TY = seq_hash_inner_ty(get_sh)
+                    EXPR_TY_HASH = seq_hash_inner_hash(get_sh)
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
+                } else {
+                    EXPR_TY = 1
+                    EXPR_TY_HASH = 0
+                }
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "set") && TK[(EP + 1) as usize] == 6 {
+                EP = EP + 1  // skip 'set'
+                EP = EP + 1  // skip (
+                let set_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(set_ss)  // receiver ptr
+                let set_si = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // index → rax
+                emit_store_var_a64(set_si)
+                if TK[EP as usize] == 28 { EP = EP + 1 }  // skip ,
+                let set_sv = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                compile_or_a64()  // value → rax
+                emit_store_var_a64(set_sv)
+                if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+                emit_seq_set_slots_a64(set_ss, set_si, set_sv)
+                EXPR_TY = 5; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "len") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1  // skip 'len'
+                EP = EP + 1  // skip (
+                EP = EP + 1  // skip )
+                let len_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(len_ss)  // receiver ptr
+                emit_seq_len_a64(len_ss)
+                EXPR_TY = 0
+                EXPR_TY_HASH = knowledge_hash_make(1, 0, -1)
+                EXPR_IS_F64 = 0
+                continue
+            }
+            if EXPR_TY == 12 && src_match(fns, fne - fns, "count") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 {
+                EP = EP + 1; EP = EP + 1; EP = EP + 1   // skip count ( )
+                let cnt_ss = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(cnt_ss)
+                emit_seq_count_a64(cnt_ss)
+                EXPR_TY = 1; EXPR_TY_HASH = 0; EXPR_IS_F64 = 0
+                continue
+            }
             if src_match(fns, fne - fns, "as_bytes") && TK[(EP + 1) as usize] == 6 && TK[(EP + 2) as usize] == 7 && EXPR_TY == 3 {
                 EP = EP + 1  // skip 'as_bytes'
                 EP = EP + 1  // skip (
@@ -36075,6 +37256,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     emit_add_sp_bytes_a64(a64_margs_drop)
                     EXPR_TY = FN_RET_TY[mfi as usize]
                     EXPR_TY_HASH = FN_RET_HASH[mfi as usize]
+                    // The result of a method call carries the unit of its RETURN
+                    // type, not of its last argument (mirror of the x86 site).
+                    expr_set_unit_from_type(EXPR_TY, EXPR_TY_HASH)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                     continue
                 }
@@ -36199,50 +37383,136 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     if (FN_EFFECTS[CURRENT_FN as usize] & 512) == 0 {
                         tc_epistemic_value_access(method_tok)
                     }
-                    // β⁴: save ptr, load variance shadow, restore ptr, load .value
-                    // x0 = Knowledge ptr: [x0+0]=value, [x0+8]=variance
-                    let b4a_ptr_slot = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_ptr_slot)         // save ptr
-                    em32(0xF9400400)                          // ldr x0, [x0, #8] (variance)
-                    let b4a_vseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_vseed)             // store variance shadow
-                    // β¹⁰: bind σ² to FO channel (parity with x86 path)
-                    if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
-                        CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
+                    // β⁴/β⁵ covariance: save variance/sensitivity shadow before loading .value.
+                    // x0 = Knowledge ptr: [x0+0]=value, [x0+8]=variance, [x0+16]=confidence.
+                    //
+                    // β⁵: reuse vseed/sseed for the same Knowledge<T> variable so that
+                    // left_vshadow == right_vshadow in x.value - x.value → Var=0 at the
+                    // subtraction. Mirror of compile_postfix_tail; the a64 pass had no cache
+                    // and allocated a fresh channel on every read, so the SECOND read of one
+                    // variable landed on a different channel than the first, and past the
+                    // eighth read on a bit outside [0,8) entirely.
+                    var b4a_vseed: i64 = -1
+                    var b4a_sseed: i64 = -1
+                    var b4a_sseed_1: i64 = -1
+                    var b4a_sseed_2: i64 = -1
+                    var b4a_sseed_3: i64 = -1
+                    var b4a_sseed_4: i64 = -1
+                    var b4a_sseed_5: i64 = -1
+                    var b4a_sseed_6: i64 = -1
+                    var b4a_sseed_7: i64 = -1
+                    var km_cached_a: i64 = 0
+                    if LAST_EXPR_VAR_IDX >= 0 {
+                        var cia: i64 = 0
+                        while cia < KM_CACHE_COUNT {
+                            if KM_CACHE_VI[cia as usize] == LAST_EXPR_VAR_IDX {
+                                b4a_vseed = KM_CACHE_VS[cia as usize]
+                                b4a_sseed = KM_CACHE_SS[cia as usize]
+                                b4a_sseed_1 = KM_CACHE_SS_1[cia as usize]
+                                b4a_sseed_2 = KM_CACHE_SS_2[cia as usize]
+                                b4a_sseed_3 = KM_CACHE_SS_3[cia as usize]
+                                b4a_sseed_4 = KM_CACHE_SS4[cia as usize]
+                                b4a_sseed_5 = KM_CACHE_SS_5[cia as usize]
+                                b4a_sseed_6 = KM_CACHE_SS_6[cia as usize]
+                                b4a_sseed_7 = KM_CACHE_SS_7[cia as usize]
+                                km_cached_a = 1
+                                cia = KM_CACHE_COUNT
+                            }
+                            cia = cia + 1
+                        }
                     }
-                    emit_load_var_a64(b4a_ptr_slot)           // restore ptr
-                    em32(0xF9400000)                          // ldr x0, [x0] (.value)
+                    if km_cached_a == 1 {
+                        // Slots already populated: just load .value.
+                        em32(0xF9400000)                      // ldr x0, [x0]
+                    } else {
+                        let b4a_ptr_slot = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_ptr_slot)      // save ptr
+                        em32(0xF9400400)                      // ldr x0, [x0, #8] (variance)
+                        b4a_vseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_vseed)         // store variance shadow
+                        // β¹⁰: bind σ² to FO channel (parity with x86 path)
+                        if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
+                            CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
+                        }
+                        emit_load_var_a64(b4a_ptr_slot)       // restore ptr
+                        em32(0xF9400000)                      // ldr x0, [x0] (.value)
+                        // Save .value before the sensitivity seeds (emit_imm64_a64 overwrites x0)
+                        let b4a_valsave = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4a_valsave)
+                        // Sensitivity seeds ch0-ch7: 1.0 for the matching Knowledge access,
+                        // else 0.0. The a64 pass seeded only ch0-ch3; an expression over more
+                        // than four measured inputs lost its four upper channels silently.
+                        b4a_sseed = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 0 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed)
+                        b4a_sseed_1 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 1 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_1)
+                        b4a_sseed_2 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 2 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_2)
+                        b4a_sseed_3 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 3 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_3)
+                        b4a_sseed_4 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 4 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_4)
+                        b4a_sseed_5 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 5 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_5)
+                        b4a_sseed_6 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 6 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_6)
+                        b4a_sseed_7 = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        if MEAS_KNOW_IDX == 7 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
+                        emit_store_var_a64(b4a_sseed_7)
+                        MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
+                        // Restore .value (emit_imm64_a64 overwrote x0 with the last seed)
+                        emit_load_var_a64(b4a_valsave)
+                        // Register in cache for future reuse
+                        if LAST_EXPR_VAR_IDX >= 0 && KM_CACHE_COUNT < 32 {
+                            KM_CACHE_VI[KM_CACHE_COUNT as usize] = LAST_EXPR_VAR_IDX
+                            KM_CACHE_VS[KM_CACHE_COUNT as usize] = b4a_vseed
+                            KM_CACHE_SS[KM_CACHE_COUNT as usize] = b4a_sseed
+                            KM_CACHE_SS_1[KM_CACHE_COUNT as usize] = b4a_sseed_1
+                            KM_CACHE_SS_2[KM_CACHE_COUNT as usize] = b4a_sseed_2
+                            KM_CACHE_SS_3[KM_CACHE_COUNT as usize] = b4a_sseed_3
+                            KM_CACHE_SS4[KM_CACHE_COUNT as usize] = b4a_sseed_4
+                            KM_CACHE_SS_5[KM_CACHE_COUNT as usize] = b4a_sseed_5
+                            KM_CACHE_SS_6[KM_CACHE_COUNT as usize] = b4a_sseed_6
+                            KM_CACHE_SS_7[KM_CACHE_COUNT as usize] = b4a_sseed_7
+                            KM_CACHE_COUNT = KM_CACHE_COUNT + 1
+                        }
+                    }
                     EXPR_VSHADOW = b4a_vseed
-                    // Save .value before emitting sensitivity seed (emit_imm64_a64 overwrites x0)
-                    let b4a_valsave = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b4a_valsave)
-                    // Sensitivity seeds ch0-ch3: 1.0 for the matching Knowledge access, else 0.0
-                    let b4a_sseed = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 0 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed)
-                    let b4a_sseed_1 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 1 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_1)
-                    let b4a_sseed_2 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 2 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_2)
-                    let b4a_sseed_3 = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 1
-                    if MEAS_KNOW_IDX == 3 { emit_imm64_a64(4607182418800017408) } else { emit_imm64_a64(0) }
-                    emit_store_var_a64(b4a_sseed_3)
                     EXPR_SSHADOW = b4a_sseed
                     EXPR_SSHADOW_1 = b4a_sseed_1
                     EXPR_SSHADOW_2 = b4a_sseed_2
                     EXPR_SSHADOW_3 = b4a_sseed_3
-                    MEAS_KNOW_IDX = MEAS_KNOW_IDX + 1
-                    // Restore .value (emit_imm64_a64 overwrote x0 with sensitivity seed)
-                    emit_load_var_a64(b4a_valsave)
+                    EXPR_SSHADOW_4 = b4a_sseed_4
+                    EXPR_SSHADOW_5 = b4a_sseed_5
+                    EXPR_SSHADOW_6 = b4a_sseed_6
+                    EXPR_SSHADOW_7 = b4a_sseed_7
+                    // β⁹ GTT: this .value access seeds channel (MEAS_KNOW_IDX - 1),
+                    // since MEAS_KNOW_IDX was just incremented above. The topology of the
+                    // resulting scalar is the singleton {just-seeded channel}. This is the
+                    // ONE line the a64 pass was missing that made b7h_ch_set always 0, so
+                    // the GTT refusal below it -- already mirrored, already correct -- could
+                    // never fire. EXPR_PARAM_USED is intentionally preserved from the base
+                    // variable load: the scalar still depends on the same caller parameter
+                    // whose Knowledge<T> we just extracted.
+                    EXPR_CH_SET = 1 << (MEAS_KNOW_IDX - 1)
                     EXPR_TY = knowledge_hash_inner_ty(base_data_hash)
                     EXPR_TY_HASH = knowledge_hash_inner_hash(base_data_hash)
                     if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -36350,9 +37620,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             }
             if found == 0 {
                 if TK[EP as usize] == 6 {
-                    tc_error(method_tok, "unknown method")
+                    tc_error_hard(method_tok, "unknown method")
                 } else {
-                    tc_error(method_tok, "unknown field access")
+                    tc_error_hard(method_tok, "unknown field access")
                 }
                 em32(0xD2800000)
             }
@@ -36390,6 +37660,12 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        // Gen 19: capture unit dim before push (EXPR_UNIT_DIM is global).
+        let left_udim_a = EXPR_UNIT_DIM
+        // β⁹ GTT: capture LHS channel topology before the RHS compiles (which
+        // resets EXPR_CH_SET at compile_primary_a64's entry).
+        let left_ch_set_m = EXPR_CH_SET
+        let left_param_used_m = EXPR_PARAM_USED
         // R6 Correlated: see compile_additive's twin capture.
         let left_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture LHS shadow + save LHS f64 value for GUM/AD propagation
@@ -36398,6 +37674,16 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         let b4am_left_sshadow_1 = EXPR_SSHADOW_1
         let b4am_left_sshadow_2 = EXPR_SSHADOW_2
         let b4am_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: park the LHS second-order state; compiling the RHS re-enters here.
+        let b7_prev_m = B7_TOP
+        var b7_l_m = B7_TOP
+        if B7_TOP + B7_FRAME * 3 > 8192 {
+            tc_error_hard(op_tok, "expression nesting too deep for second-order shadows")
+            b7_l_m = 8192 - B7_FRAME * 3
+        } else {
+            B7_TOP = B7_TOP + B7_FRAME
+        }
+        b7_save_a64(b7_l_m)
         // β⁴: always save lval/rval for f64 mul (a²·var(b) needs a even when var(a)=0)
         var b4am_lval_slot: i64 = -1
         if left_f64 == 1 {
@@ -36410,6 +37696,8 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
         compile_postfix_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        // Gen 19: capture unit dim of the RHS before it is overwritten.
+        let right_udim_a = EXPR_UNIT_DIM
         let right_var_idx = LAST_EXPR_VAR_IDX
         if (op == 20 || op == 29) && rhs_const_known != 0 && rhs_const_val == 0 {
             if op == 20 { tc_error(op_tok, "division by zero") }
@@ -36444,14 +37732,23 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             }
             tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
             compile_knowledge_muldiv_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            B7_TOP = b7_prev_m
             continue
         }
+        // β⁹ GTT: capture RHS channel topology before the shadow work below
+        // reaches back into compile_*_a64 and overwrites EXPR_CH_SET.
+        let right_ch_set_m = EXPR_CH_SET
+        let right_param_used_m = EXPR_PARAM_USED
         // β⁴: capture RHS shadow + save RHS f64 value
         let b4am_right_vshadow = EXPR_VSHADOW
         let b4am_right_sshadow = EXPR_SSHADOW
         let b4am_right_sshadow_1 = EXPR_SSHADOW_1
         let b4am_right_sshadow_2 = EXPR_SSHADOW_2
         let b4am_right_sshadow_3 = EXPR_SSHADOW_3
+        let b7_r_m = b7_l_m + B7_FRAME
+        if b7_l_m + B7_FRAME * 3 <= 8192 { B7_TOP = b7_r_m + B7_FRAME }
+        b7_save_a64(b7_r_m)
+        let b7_o_m = b7_r_m + B7_FRAME
         var b4am_rval_slot: i64 = -1
         if left_f64 == 1 {
             b4am_rval_slot = NEXT_SLOT
@@ -36464,6 +37761,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if op == 20 { emit_f64_binop_a64(0x1E611800) }
             if op == 29 { em32(0x9B007C20) }
             EXPR_IS_F64 = 1
+            EXPR_TY = 2
         } else {
             if op == 19 { em32(0x9B007C20) }  // mul x0, x1, x0
             if op == 20 { em32(0x9AC00C20) }  // sdiv x0, x1, x0
@@ -36471,12 +37769,54 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                 em32(0x9AC00C00 | (0 << 16) | (1 << 5) | 9)
                 em32(0x9B008000 | (0 << 16) | (1 << 10) | (9 << 5) | 0)
             }
+            EXPR_TY = 1
         }
+        // An arithmetic result is a fresh number: its type is the operand kind
+        // and it carries no named type (mirror of the x86 site). The a64 pass
+        // left EXPR_TY_HASH holding the RHS's hash, so `distance / time` was
+        // typed `s` and a `velocity` parameter rejected it as E001.
+        EXPR_TY_HASH = 0
+        // Hessian AD over a non-associative algebra needs the opt-in
+        // `reassociate: fano_selective` (formal/NonAssocHessian.lean). Mirror of
+        // compile_multiplicative. The a64 pass has no left Hessian-shadow capture,
+        // so the fourth disjunct of the x86 guard (left_hsh_00 >= 0) has no
+        // counterpart here and this condition is narrower by that one term.
+        if (op == 19 || op == 20) && left_ty != 0 && right_ty != 0 {
+            let left_is_algebra_a = al_is_algebra(left_ty, left_hash) as i64
+            let right_is_algebra_a = al_is_algebra(right_ty, right_hash) as i64
+            if left_is_algebra_a == 1 || right_is_algebra_a == 1 {
+                if al_mul_is_associative(left_hash) == false {
+                    if b4am_left_sshadow >= 0 || EXPR_SSHADOW >= 0 || EXPR_HSHADOW_00 >= 0 {
+                        if al_reassoc_mode(left_hash) != 2 {
+                            print("error[E212]: ")
+                            print("Hessian AD over a non-associative algebra — `reassociate: fano_selective` required (formal/NonAssocHessian.lean) at line ")
+                            print_int(TL[op_tok as usize])
+                            print("\n")
+                            tc_mark_failed()
+                        }
+                    }
+                }
+            }
+        }
+        // Gen 19: propagate unit dimension through * and / (mirror of the x86
+        // compile_multiplicative site). Without this a derived quantity --
+        // distance / time -- lost its composed dimension on the a64 path, so a
+        // `velocity` parameter rejected the very value that produced it.
+        if op == 19 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_add(left_udim_a, right_udim_a) }
+        else if op == 20 { EXPR_UNIT = 0; EXPR_UNIT_DIM = dim_sub(left_udim_a, right_udim_a) }
+        else { EXPR_UNIT = 0; EXPR_UNIT_DIM = 0 }
         // β⁴: GUM variance propagation through *
         // Save result first — shadow computation overwrites x0
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         var b4am_result_slot: i64 = -1
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0) || (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0) || (b4am_left_sshadow_2 >= 0 || b4am_right_sshadow_2 >= 0) || (b4am_left_sshadow_3 >= 0 || b4am_right_sshadow_3 >= 0)) {
+        var b7_any_m: i64 = 0
+        var b7q_m: i64 = 0
+        while b7q_m < B7_FRAME {
+            if B7F[(b7_l_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
+            if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
+            b7q_m = b7q_m + 1
+        }
+        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -36506,74 +37846,382 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             emit_store_var_a64(b4am_vres)
             EXPR_VSHADOW = b4am_vres
         }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow >= 0 || b4am_right_sshadow >= 0) {
-            // sens(a*b) = a·sens(b) + b·sens(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow >= 0 { emit_load_var_a64(b4am_right_sshadow) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // a·sens(b)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow >= 0 { emit_load_var_a64(b4am_left_sshadow) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // b·sens(a)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // sum
-            let b4am_sres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres)
-            EXPR_SSHADOW = b4am_sres
+        // β⁵/β⁷ through · , as loops over the frames. The product's own
+        // second-order state starts empty -- without the clear, the RHS's
+        // entries leaked out as if they were the product's.
+        var b7t_m: i64 = 0
+        while b7t_m < B7_FRAME { B7F[(b7_o_m + b7t_m) as usize] = -1; b7t_m = b7t_m + 1 }
+        if left_f64 == 1 && op == 19 {
+            var b7c_m: i64 = 0
+            while b7c_m < 8 {
+                B7F[(b7_o_m + 36 + b7c_m) as usize] = emit_s_mul_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_m) as usize], B7F[(b7_r_m + 36 + b7c_m) as usize])
+                b7c_m = b7c_m + 1
+            }
+            var b7j_m: i64 = 0
+            var b7i_m: i64 = 0
+            while b7j_m < 8 {
+                var b7k_m: i64 = b7j_m
+                while b7k_m < 8 {
+                    B7F[(b7_o_m + b7i_m) as usize] = emit_h_mul_a64(B7F[(b7_l_m + b7i_m) as usize], B7F[(b7_r_m + b7i_m) as usize], b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7j_m) as usize], B7F[(b7_r_m + 36 + b7k_m) as usize], B7F[(b7_l_m + 36 + b7k_m) as usize], B7F[(b7_r_m + 36 + b7j_m) as usize])
+                    b7i_m = b7i_m + 1
+                    b7k_m = b7k_m + 1
+                }
+                b7j_m = b7j_m + 1
+            }
         }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_1 >= 0 || b4am_right_sshadow_1 >= 0) {
-            // sens_ch1(a*b) = a·sens_ch1(b) + b·sens_ch1(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_1 >= 0 { emit_load_var_a64(b4am_right_sshadow_1) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_1 >= 0 { emit_load_var_a64(b4am_left_sshadow_1) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres1)
-            EXPR_SSHADOW_1 = b4am_sres1
-        }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_2 >= 0 || b4am_right_sshadow_2 >= 0) {
-            // sens_ch2(a*b) = a·sens_ch2(b) + b·sens_ch2(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_2 >= 0 { emit_load_var_a64(b4am_right_sshadow_2) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_2 >= 0 { emit_load_var_a64(b4am_left_sshadow_2) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres2)
-            EXPR_SSHADOW_2 = b4am_sres2
-        }
-        if left_f64 == 1 && op == 19 && (b4am_left_sshadow_3 >= 0 || b4am_right_sshadow_3 >= 0) {
-            // sens_ch3(a*b) = a·sens_ch3(b) + b·sens_ch3(a)
-            if b4am_lval_slot >= 0 { emit_load_var_a64(b4am_lval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_right_sshadow_3 >= 0 { emit_load_var_a64(b4am_right_sshadow_3) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_push_a64()
-            if b4am_rval_slot >= 0 { emit_load_var_a64(b4am_rval_slot) } else { emit_imm64_a64(0) }
-            emit_push_a64()
-            if b4am_left_sshadow_3 >= 0 { emit_load_var_a64(b4am_left_sshadow_3) } else { emit_imm64_a64(0) }
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
-            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
-            let b4am_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-            emit_store_var_a64(b4am_sres3)
-            EXPR_SSHADOW_3 = b4am_sres3
-        }
+        b7_restore_a64(b7_o_m)
+        B7_TOP = b7_prev_m
         // Restore arithmetic result
         if b4am_result_slot >= 0 { emit_load_var_a64(b4am_result_slot) }
+        // β⁹ GTT: channel topology of a·b, a/b is the union of operand topologies
+        // (mirror of compile_multiplicative). The Knowledge branch above `continue`s
+        // before reaching here, exactly as the x86 twin does.
+        EXPR_CH_SET = left_ch_set_m | right_ch_set_m
+        EXPR_PARAM_USED = left_param_used_m | right_param_used_m
         lhs_end_line = TL[(EP - 1) as usize]
     }
+}
+
+
+// ─── ARM64 β⁷/β⁵ second-order shadow frames ───
+//
+// The a64 pass had NO producer for EXPR_HSHADOW_* anywhere: those globals were
+// only ever set to -1 or copied to and from VAR_HSHADOW_*. hessian_of() always
+// resolved to slot -1 and emitted a literal 0.0, so every Hessian entry the x86
+// target computes came back as 0.000000 in a binary that exited 0. Measured on
+// an arm64 node, 2026-09-04, before this change:
+//   epistemic_hessian_of       x86 1.0 2.0 10.0     a64 0.0 0.0 0.0
+//   epistemic_hessian_8inputs  x86 1.0 7.0 1.0 2.0  a64 0.0 0.0 0.0 0.0
+//
+// The x86 pass writes each of the 36 (j,k) entries out inline, twice per
+// operator, which is where most of compile_multiplicative's bulk comes from.
+// Doing that here would have cost ~29 KB of source, and lean_single.sio has to
+// stay inside the SEED compiler's own 2 MiB prelude bound (see the SRC_CAP
+// commit) or the committed seed can no longer rebuild the tree. So the operand
+// state goes into an explicit frame and the rules run as loops.
+//
+// A frame is 44 entries: 36 Hessian slots in (j,k) lexicographic order, then
+// the 8 first-order sensitivity slots. Frames are stacked because these
+// functions recurse -- additive calls multiplicative calls postfix calls
+// primary, which can re-enter additive -- so plain globals would be clobbered
+// by the operand that is compiled second.
+var B7F:     [i64; 8192] = [-1; 8192]
+var B7_TOP:  i64 = 0
+var B7_FRAME: i64 = 44
+
+fn b7_save_a64(base: i64) with Mut {
+    B7F[(base + 0) as usize] = EXPR_HSHADOW_00
+    B7F[(base + 1) as usize] = EXPR_HSHADOW_01
+    B7F[(base + 2) as usize] = EXPR_HSHADOW_02
+    B7F[(base + 3) as usize] = EXPR_HSHADOW_03
+    B7F[(base + 4) as usize] = EXPR_HSHADOW_04
+    B7F[(base + 5) as usize] = EXPR_HSHADOW_05
+    B7F[(base + 6) as usize] = EXPR_HSHADOW_06
+    B7F[(base + 7) as usize] = EXPR_HSHADOW_07
+    B7F[(base + 8) as usize] = EXPR_HSHADOW_11
+    B7F[(base + 9) as usize] = EXPR_HSHADOW_12
+    B7F[(base + 10) as usize] = EXPR_HSHADOW_13
+    B7F[(base + 11) as usize] = EXPR_HSHADOW_14
+    B7F[(base + 12) as usize] = EXPR_HSHADOW_15
+    B7F[(base + 13) as usize] = EXPR_HSHADOW_16
+    B7F[(base + 14) as usize] = EXPR_HSHADOW_17
+    B7F[(base + 15) as usize] = EXPR_HSHADOW_22
+    B7F[(base + 16) as usize] = EXPR_HSHADOW_23
+    B7F[(base + 17) as usize] = EXPR_HSHADOW_24
+    B7F[(base + 18) as usize] = EXPR_HSHADOW_25
+    B7F[(base + 19) as usize] = EXPR_HSHADOW_26
+    B7F[(base + 20) as usize] = EXPR_HSHADOW_27
+    B7F[(base + 21) as usize] = EXPR_HSHADOW_33
+    B7F[(base + 22) as usize] = EXPR_HSHADOW_34
+    B7F[(base + 23) as usize] = EXPR_HSHADOW_35
+    B7F[(base + 24) as usize] = EXPR_HSHADOW_36
+    B7F[(base + 25) as usize] = EXPR_HSHADOW_37
+    B7F[(base + 26) as usize] = EXPR_HSHADOW_44
+    B7F[(base + 27) as usize] = EXPR_HSHADOW_45
+    B7F[(base + 28) as usize] = EXPR_HSHADOW_46
+    B7F[(base + 29) as usize] = EXPR_HSHADOW_47
+    B7F[(base + 30) as usize] = EXPR_HSHADOW_55
+    B7F[(base + 31) as usize] = EXPR_HSHADOW_56
+    B7F[(base + 32) as usize] = EXPR_HSHADOW_57
+    B7F[(base + 33) as usize] = EXPR_HSHADOW_66
+    B7F[(base + 34) as usize] = EXPR_HSHADOW_67
+    B7F[(base + 35) as usize] = EXPR_HSHADOW_77
+    B7F[(base + 36) as usize] = EXPR_SSHADOW
+    B7F[(base + 37) as usize] = EXPR_SSHADOW_1
+    B7F[(base + 38) as usize] = EXPR_SSHADOW_2
+    B7F[(base + 39) as usize] = EXPR_SSHADOW_3
+    B7F[(base + 40) as usize] = EXPR_SSHADOW_4
+    B7F[(base + 41) as usize] = EXPR_SSHADOW_5
+    B7F[(base + 42) as usize] = EXPR_SSHADOW_6
+    B7F[(base + 43) as usize] = EXPR_SSHADOW_7
+}
+
+fn b7_restore_a64(base: i64) with Mut {
+    EXPR_HSHADOW_00 = B7F[(base + 0) as usize]
+    EXPR_HSHADOW_01 = B7F[(base + 1) as usize]
+    EXPR_HSHADOW_02 = B7F[(base + 2) as usize]
+    EXPR_HSHADOW_03 = B7F[(base + 3) as usize]
+    EXPR_HSHADOW_04 = B7F[(base + 4) as usize]
+    EXPR_HSHADOW_05 = B7F[(base + 5) as usize]
+    EXPR_HSHADOW_06 = B7F[(base + 6) as usize]
+    EXPR_HSHADOW_07 = B7F[(base + 7) as usize]
+    EXPR_HSHADOW_11 = B7F[(base + 8) as usize]
+    EXPR_HSHADOW_12 = B7F[(base + 9) as usize]
+    EXPR_HSHADOW_13 = B7F[(base + 10) as usize]
+    EXPR_HSHADOW_14 = B7F[(base + 11) as usize]
+    EXPR_HSHADOW_15 = B7F[(base + 12) as usize]
+    EXPR_HSHADOW_16 = B7F[(base + 13) as usize]
+    EXPR_HSHADOW_17 = B7F[(base + 14) as usize]
+    EXPR_HSHADOW_22 = B7F[(base + 15) as usize]
+    EXPR_HSHADOW_23 = B7F[(base + 16) as usize]
+    EXPR_HSHADOW_24 = B7F[(base + 17) as usize]
+    EXPR_HSHADOW_25 = B7F[(base + 18) as usize]
+    EXPR_HSHADOW_26 = B7F[(base + 19) as usize]
+    EXPR_HSHADOW_27 = B7F[(base + 20) as usize]
+    EXPR_HSHADOW_33 = B7F[(base + 21) as usize]
+    EXPR_HSHADOW_34 = B7F[(base + 22) as usize]
+    EXPR_HSHADOW_35 = B7F[(base + 23) as usize]
+    EXPR_HSHADOW_36 = B7F[(base + 24) as usize]
+    EXPR_HSHADOW_37 = B7F[(base + 25) as usize]
+    EXPR_HSHADOW_44 = B7F[(base + 26) as usize]
+    EXPR_HSHADOW_45 = B7F[(base + 27) as usize]
+    EXPR_HSHADOW_46 = B7F[(base + 28) as usize]
+    EXPR_HSHADOW_47 = B7F[(base + 29) as usize]
+    EXPR_HSHADOW_55 = B7F[(base + 30) as usize]
+    EXPR_HSHADOW_56 = B7F[(base + 31) as usize]
+    EXPR_HSHADOW_57 = B7F[(base + 32) as usize]
+    EXPR_HSHADOW_66 = B7F[(base + 33) as usize]
+    EXPR_HSHADOW_67 = B7F[(base + 34) as usize]
+    EXPR_HSHADOW_77 = B7F[(base + 35) as usize]
+    EXPR_SSHADOW = B7F[(base + 36) as usize]
+    EXPR_SSHADOW_1 = B7F[(base + 37) as usize]
+    EXPR_SSHADOW_2 = B7F[(base + 38) as usize]
+    EXPR_SSHADOW_3 = B7F[(base + 39) as usize]
+    EXPR_SSHADOW_4 = B7F[(base + 40) as usize]
+    EXPR_SSHADOW_5 = B7F[(base + 41) as usize]
+    EXPR_SSHADOW_6 = B7F[(base + 42) as usize]
+    EXPR_SSHADOW_7 = B7F[(base + 43) as usize]
+}
+
+// s(a ± b) = s(a) ± s(b).  -1 in, -1 out: an absent sensitivity is absent, not
+// a known zero.
+fn emit_s_addsub_a64(op: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64()
+    if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+    emit_store_var_a64(res)
+    return res
+}
+
+// s(a·b) = a·s(b) + b·s(a)
+fn emit_s_mul_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a ± b) = H_jk(a) ± H_jk(b)
+fn emit_h_addsub_a64(op: i64, lh: i64, rh: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64()
+    if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a·b) = H_jk(a)·b + s_j(a)·s_k(b) + s_k(a)·s_j(b) + a·H_jk(b)
+// (the x86 inline rule in compile_multiplicative). On the diagonal the caller
+// passes saj == sak and sbj == sbk, giving the 2·s_j(a)·s_j(b) cross term.
+fn emit_h_mul_a64(lh: i64, rh: i64, lval: i64, rval: i64, saj: i64, sbk: i64, sak: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (saj < 0 || sbk < 0) && (sak < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+
+// fneg d0, d0 -- exact sign flip, so -0.0 stays -0.0 (x86 XORs the sign bit).
+fn emit_f64_neg_a64() with Mut {
+    em32(0x9E670000)
+    em32(0x1E614000)
+    em32(0x9E660000)
+}
+
+fn emit_native1_a64(nm: string) with IO, Mut, Panic, Div {
+    let fi = fn_find_lit(nm)
+    if fi >= 0 { emit_direct_fn_call_a64(fi, 1) } else { emit_imm64_a64(0) }
+}
+
+// f'(u) when second == 0, f''(u) when second == 1, into x0. Kinds:
+// 0 sqrt 1 sin 2 cos 3 exp 4 ln/log 5 tan 6 atan 7 tanh 8 asin 9 acos.
+// arg holds u, res holds f(u), d1 holds f'(u) (read only when second == 1).
+// Same formulas as the inline x86 block in compile_primary. 1.0 and 2.0 are
+// 4607182418800017408 and 4611686018427387904 as IEEE-754 bit patterns.
+fn emit_math_deriv_a64(kind: i64, second: i64, arg: i64, res: i64, d1: i64) with IO, Mut, Panic, Div {
+    if second == 0 {
+        if kind == 0 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 1 {
+            emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_cos_f64")
+        } else if kind == 2 {
+            emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_sin_f64")
+            emit_f64_neg_a64()
+        } else if kind == 3 {
+            emit_load_var_a64(res)
+        } else if kind == 4 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 5 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+        } else if kind == 6 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        } else if kind == 7 {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(res); emit_push_a64()
+            emit_load_var_a64(res); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+        } else {
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_imm64_a64(4607182418800017408); emit_push_a64()
+            emit_load_var_a64(arg); emit_push_a64()
+            emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+            emit_push_a64(); emit_native1_a64("__native_sqrt_f64")
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+            if kind == 9 { emit_f64_neg_a64() }
+        }
+        return
+    }
+    if kind == 0 {
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        emit_f64_neg_a64()
+    } else if kind == 1 {
+        emit_load_var_a64(arg); emit_push_a64(); emit_native1_a64("__native_sin_f64")
+        emit_f64_neg_a64()
+    } else if kind == 2 {
+        emit_load_var_a64(res); emit_f64_neg_a64()
+    } else if kind == 3 {
+        emit_load_var_a64(res)
+    } else if kind == 4 {
+        emit_imm64_a64(4607182418800017408); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(arg); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+        emit_f64_neg_a64()
+    } else if kind == 5 || kind == 7 {
+        emit_imm64_a64(4611686018427387904); emit_push_a64()
+        emit_load_var_a64(res); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        if kind == 7 { emit_f64_neg_a64() }
+    } else if kind == 6 {
+        emit_imm64_a64(4611686018427387904); emit_push_a64()
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_f64_neg_a64()
+    } else {
+        // asin and acos share f''(x) = arg·f'(x)^3; for acos f' is negative, so
+        // the cube already carries the sign (mirror of the x86 comment).
+        emit_load_var_a64(arg); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_push_a64()
+        emit_load_var_a64(d1); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    }
+}
+
+// s_j(f(u)) = f'(u)·s_j(u)
+fn emit_s_chain_a64(d1: i64, sv: i64) -> i64 with IO, Mut, Panic, Div {
+    if sv < 0 { return -1 }
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(d1); emit_push_a64()
+    emit_load_var_a64(sv); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_store_var_a64(r)
+    return r
+}
+
+// H_jk(f(u)) = f''(u)·s_j(u)·s_k(u) + f'(u)·H_jk(u)
+fn emit_h_chain_a64(d1: i64, d2: i64, h: i64, sj: i64, sk: i64) -> i64 with IO, Mut, Panic, Div {
+    if h < 0 && (sj < 0 || sk < 0) { return -1 }
+    let r = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(d2); emit_push_a64()
+    if sj >= 0 { emit_load_var_a64(sj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sk >= 0 { emit_load_var_a64(sk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(d1); emit_push_a64()
+    if h >= 0 { emit_load_var_a64(h) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(r)
+    return r
 }
 
 // ─── ARM64 additive ───
@@ -36586,6 +38234,14 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let left_f64 = EXPR_IS_F64
         let left_ty = EXPR_TY
         let left_hash = EXPR_TY_HASH
+        let left_unit_a = EXPR_UNIT
+        let left_unit_dim_a = EXPR_UNIT_DIM
+        // PR-8: capture the LHS literal before the RHS overwrites the globals.
+        let left_is_literal_a = LAST_IS_LITERAL
+        let left_literal_val_a = LAST_LITERAL_VAL
+        // β⁹ GTT: capture LHS channel topology before the RHS compiles.
+        let left_ch_set_a = EXPR_CH_SET
+        let left_param_used_a = EXPR_PARAM_USED
         // R6 Correlated: see compile_additive's twin capture.
         let left_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture LHS shadow
@@ -36594,11 +38250,27 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let b4aa_left_sshadow_1 = EXPR_SSHADOW_1
         let b4aa_left_sshadow_2 = EXPR_SSHADOW_2
         let b4aa_left_sshadow_3 = EXPR_SSHADOW_3
+        // β⁷: the LHS's 36 Hessian slots and 8 sensitivity slots, parked in a
+        // frame because compiling the RHS below re-enters this function.
+        let b7_prev_a = B7_TOP
+        var b7_l_a = B7_TOP
+        if B7_TOP + B7_FRAME * 3 > 8192 {
+            tc_error_hard(op_tok, "expression nesting too deep for second-order shadows")
+            b7_l_a = 8192 - B7_FRAME * 3
+        } else {
+            B7_TOP = B7_TOP + B7_FRAME
+        }
+        b7_save_a64(b7_l_a)
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         emit_push_a64()
         compile_multiplicative_a64()
         let right_ty = EXPR_TY
         let right_hash = EXPR_TY_HASH
+        let right_unit_a = EXPR_UNIT
+        let right_unit_dim_a = EXPR_UNIT_DIM
+        // β⁹ GTT: capture RHS channel topology before the merge below.
+        let right_ch_set_a = EXPR_CH_SET
+        let right_param_used_a = EXPR_PARAM_USED
         let right_var_idx = LAST_EXPR_VAR_IDX
         // β⁴: capture RHS shadow
         let b4aa_right_vshadow = EXPR_VSHADOW
@@ -36606,6 +38278,10 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         let b4aa_right_sshadow_1 = EXPR_SSHADOW_1
         let b4aa_right_sshadow_2 = EXPR_SSHADOW_2
         let b4aa_right_sshadow_3 = EXPR_SSHADOW_3
+        let b7_r_a = b7_l_a + B7_FRAME
+        if b7_l_a + B7_FRAME * 3 <= 8192 { B7_TOP = b7_r_a + B7_FRAME }
+        b7_save_a64(b7_r_a)
+        let b7_o_a = b7_r_a + B7_FRAME
         // String `+` concatenation (a64 twin of compile_additive :~18549). Without
         // this branch the else path below emits `add x0, x1, x0` — ADDING the two
         // string POINTERS as integers, yielding a garbage address that prints junk.
@@ -36622,8 +38298,21 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             EXPR_IS_F64 = 0
             EXPR_TY = 3
             EXPR_TY_HASH = 0
+            B7_TOP = b7_prev_a
             continue
         }
+        // Gen 19: named units must match exactly for additive arithmetic, and
+        // packed dimensions must agree (so g + kg is fine, m + kg is not).
+        // Mirror of compile_additive; the a64 pass captured neither operand's
+        // unit and ran neither check.
+        if left_unit_a != 0 && right_unit_a != 0 && left_unit_a != right_unit_a {
+            tc_linear_violation(op_tok, "unit mismatch")
+        }
+        if left_unit_dim_a != 0 && right_unit_dim_a != 0 && left_unit_dim_a != right_unit_dim_a {
+            tc_linear_violation(op_tok, "unit dimension mismatch")
+        }
+        // Inherit the left unit name and dim for the result.
+        if left_unit_a != 0 { EXPR_UNIT = left_unit_a; EXPR_UNIT_DIM = left_unit_dim_a }
         let left_has_knowledge = knowledge_hash_is(left_hash)
         let right_has_knowledge = knowledge_hash_is(right_hash)
         if left_has_knowledge || right_has_knowledge {
@@ -36649,6 +38338,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             }
             tc_check_correlated_same_slot(op_tok, left_var_idx, right_var_idx, left_hash, right_hash)
             compile_knowledge_addsub_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
+            B7_TOP = b7_prev_a
             continue
         }
         emit_pop_x1_a64()
@@ -36673,54 +38363,39 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_vres)
                 EXPR_VSHADOW = b4aa_vres
             }
-            if b4aa_left_sshadow >= 0 || b4aa_right_sshadow >= 0 {
-                // sens(a+b)=sens(a)+sens(b); sens(a-b)=sens(a)-sens(b)
-                if b4aa_left_sshadow >= 0 { emit_load_var_a64(b4aa_left_sshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow >= 0 { emit_load_var_a64(b4aa_right_sshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres)
-                EXPR_SSHADOW = b4aa_sres
+            // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
+            // inline copies. Channels 4-7 had no a64 site at all before this:
+            // an expression over more than four measured inputs lost its four
+            // upper sensitivity channels at the first `+`.
+            var b7c_a: i64 = 0
+            while b7c_a < 8 {
+                B7F[(b7_o_a + 36 + b7c_a) as usize] = emit_s_addsub_a64(op, B7F[(b7_l_a + 36 + b7c_a) as usize], B7F[(b7_r_a + 36 + b7c_a) as usize])
+                b7c_a = b7c_a + 1
             }
-            if b4aa_left_sshadow_1 >= 0 || b4aa_right_sshadow_1 >= 0 {
-                // sens_ch1(a+b)=sens_ch1(a)+sens_ch1(b); sens_ch1(a-b)=sens_ch1(a)-sens_ch1(b)
-                if b4aa_left_sshadow_1 >= 0 { emit_load_var_a64(b4aa_left_sshadow_1) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_1 >= 0 { emit_load_var_a64(b4aa_right_sshadow_1) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres1)
-                EXPR_SSHADOW_1 = b4aa_sres1
+            var b7i_a: i64 = 0
+            while b7i_a < 36 {
+                B7F[(b7_o_a + b7i_a) as usize] = emit_h_addsub_a64(op, B7F[(b7_l_a + b7i_a) as usize], B7F[(b7_r_a + b7i_a) as usize])
+                b7i_a = b7i_a + 1
             }
-            if b4aa_left_sshadow_2 >= 0 || b4aa_right_sshadow_2 >= 0 {
-                if b4aa_left_sshadow_2 >= 0 { emit_load_var_a64(b4aa_left_sshadow_2) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_2 >= 0 { emit_load_var_a64(b4aa_right_sshadow_2) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres2)
-                EXPR_SSHADOW_2 = b4aa_sres2
-            }
-            if b4aa_left_sshadow_3 >= 0 || b4aa_right_sshadow_3 >= 0 {
-                if b4aa_left_sshadow_3 >= 0 { emit_load_var_a64(b4aa_left_sshadow_3) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_sshadow_3 >= 0 { emit_load_var_a64(b4aa_right_sshadow_3) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64()
-                if op == 17 { emit_f64_binop_a64(0x1E612800) } else { emit_f64_binop_a64(0x1E613800) }
-                let b4aa_sres3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_sres3)
-                EXPR_SSHADOW_3 = b4aa_sres3
-            }
+            b7_restore_a64(b7_o_a)
             if b4aa_result_slot >= 0 { emit_load_var_a64(b4aa_result_slot) }
         } else {
             if op == 17 { em32(0x8B000020) }
             if op == 18 { em32(0xCB000020) }
+            // PR-8: constant fold if both operands are known literals; otherwise
+            // clear (mirror of compile_additive).
+            if left_is_literal_a == 1 && LAST_IS_LITERAL == 1 {
+                if op == 17 { LAST_LITERAL_VAL = left_literal_val_a + LAST_LITERAL_VAL }
+                if op == 18 { LAST_LITERAL_VAL = left_literal_val_a - LAST_LITERAL_VAL }
+            } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
         }
+        B7_TOP = b7_prev_a
+        // β⁹ GTT: channel topology of a + b, a - b is the union of operand
+        // topologies (mirror of compile_additive). The string-concat and
+        // Knowledge branches above `continue` before reaching here.
+        EXPR_CH_SET = left_ch_set_a | right_ch_set_a
+        EXPR_PARAM_USED = left_param_used_a | right_param_used_a
     }
 }
 
@@ -37144,6 +38819,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     tc_decl_init_mismatch(EP - 1, decl_ty, decl_ty_hash, EXPR_TY, EXPR_TY_HASH)
                 }
             }
+                // Observation boundary: Unobserved<T> assigned to a non-Unobserved
+                // binding (mirror of compile_stmt).
+                if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(decl_ty) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                    tc_observe_boundary(EP - 1, "cannot assign Unobserved<T> to non-Unobserved binding")
+                }
             if type_is_slice_ref(decl_ty, decl_ty_hash) || (decl_ty == 0 && type_is_slice_ref(EXPR_TY, EXPR_TY_HASH)) {
                 var bind_hash = EXPR_TY_HASH
                 if decl_ty != 0 || decl_ty_hash != 0 { bind_hash = decl_ty_hash }
@@ -37207,6 +38887,123 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_CLOSURE
                 VAR_MUT[(VAR_COUNT - 1) as usize] = decl_is_mut
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
+                VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
+                // Set unit hash for unit-typed bindings (mirror of the x86 let
+                // site). The a64 pass stored no brand at a binding, so
+                // `let m: molal = 2.5` produced an unbranded local and the very
+                // next call rejected it as a mismatch.
+                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                    VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
+                } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
+                    VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
+                }
+                // A derived quantity has no unit NAME to store: distance / time
+                // composes m/s, which no declared unit names.
+                if VAR_UNIT[(VAR_COUNT - 1) as usize] == 0 && EXPR_UNIT_DIM != 0 {
+                    VAR_UNIT_DIM[(VAR_COUNT - 1) as usize] = EXPR_UNIT_DIM
+                }
+                // Compile-time refinement predicate at a let binding, plus the
+                // per-variable literal tracking that cross-binding checks read.
+                // Verbatim from compile_stmt: this is target-independent logic, and
+                // the a64 pass simply never ran it. The x86 runtime bound-check
+                // emission that follows it there is NOT mirrored here -- that is
+                // machine code, and it needs its own aarch64 encoding.
+                // PR-4: track per-variable literal value for cross-binding refinement
+                // checks (let x = -5; takes_pos(x)). Only for immutable integer bindings.
+                if LAST_IS_LITERAL == 1 && decl_is_mut == 0 && (decl_ty == 0 || decl_ty == 1) {
+                    VAR_LIT_DATA[(vix * 2 + 0) as usize] = 1
+                    VAR_LIT_DATA[(vix * 2 + 1) as usize] = LAST_LITERAL_VAL
+                }
+                // Refinement predicate: compile-time check for constant literals.
+                if SCAN_HAS_PRED == 1 && LAST_IS_LITERAL == 1 && SCAN_PRED_IS_F64 == 0 {
+                    let cv = LAST_LITERAL_VAL; let bv = SCAN_PRED_BOUND; var violated: i64 = 0
+                    if SCAN_PRED_OP == 26 && cv < bv { violated = 1 }  // >= : violated if cv < bv
+                    if SCAN_PRED_OP == 24 && cv <= bv { violated = 1 } // >  : violated if cv <= bv
+                    if SCAN_PRED_OP == 25 && cv > bv { violated = 1 }  // <= : violated if cv > bv
+                    if SCAN_PRED_OP == 23 && cv >= bv { violated = 1 } // <  : violated if cv >= bv
+                    if SCAN_PRED_OP == 21 && cv != bv { violated = 1 } // == : violated if cv != bv
+                    if SCAN_PRED_OP == 22 && cv == bv { violated = 1 } // != : violated if cv == bv
+                    // PR-6: AND compound — check second independently; OR — second pred can clear violation
+                    if SCAN_HAS_PRED2 == 1 && SCAN_PRED_IS_F64_2 == 0 {
+                        let bv2 = SCAN_PRED_BOUND2
+                        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                            if SCAN_PRED_OP2 == 26 && cv < bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 24 && cv <= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 25 && cv > bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 23 && cv >= bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 21 && cv != bv2 { violated = 1 }
+                            if SCAN_PRED_OP2 == 22 && cv == bv2 { violated = 1 }
+                        } else {
+                            if violated == 1 {
+                                var ok2: i64 = 0
+                                if SCAN_PRED_OP2 == 26 && cv >= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 24 && cv > bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 25 && cv <= bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 23 && cv < bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 21 && cv == bv2 { ok2 = 1 }
+                                if SCAN_PRED_OP2 == 22 && cv != bv2 { ok2 = 1 }
+                                if ok2 == 1 { violated = 0 }
+                            }
+                        }
+                    }
+                    if violated == 1 {
+                        print("error[E208]: refinement type violation — value ")
+                        print_int(cv)
+                        print(" does not satisfy predicate at line ")
+                        print_int(TL[(EP - 1) as usize])
+                        print("\n")
+                        tc_mark_failed()
+                        SCAN_HAS_PRED = 0
+                    }
+                }
+                // PR-9: f64 literal predicate check at let-binding site
+                if SCAN_HAS_PRED == 1 && SCAN_PRED_IS_F64 == 1 && LAST_IS_LITERAL_F64 == 1 {
+                    let cv9_int = LAST_LITERAL_F64_INT
+                    let cv9_frac = LAST_LITERAL_F64_FRAC
+                    let cv9_denom = LAST_LITERAL_F64_DENOM
+                    let bv9_int = SCAN_PRED_BOUND
+                    let bv9_frac = SCAN_PRED_BOUND_FRAC
+                    let bv9_denom = SCAN_PRED_BOUND_DENOM
+                    let lhs9 = (cv9_int * cv9_denom + cv9_frac) * bv9_denom
+                    let rhs9 = (bv9_int * bv9_denom + bv9_frac) * cv9_denom
+                    let op9 = SCAN_PRED_OP
+                    var f64_viol9: i64 = 0
+                    if op9 == 26 && lhs9 < rhs9 { f64_viol9 = 1 }
+                    if op9 == 24 && lhs9 <= rhs9 { f64_viol9 = 1 }
+                    if op9 == 25 && lhs9 > rhs9 { f64_viol9 = 1 }
+                    if op9 == 23 && lhs9 >= rhs9 { f64_viol9 = 1 }
+                    if SCAN_HAS_PRED2 == 1 {
+                        let bv2_int9 = SCAN_PRED_BOUND2
+                        let bv2_frac9 = SCAN_PRED_BOUND2_FRAC
+                        let bv2_denom9 = SCAN_PRED_BOUND2_DENOM
+                        let lhs9b = (cv9_int * cv9_denom + cv9_frac) * bv2_denom9
+                        let rhs9b = (bv2_int9 * bv2_denom9 + bv2_frac9) * cv9_denom
+                        let op9b = SCAN_PRED_OP2
+                        if SCAN_PRED_COMPOUND_IS_AND == 1 {
+                            if op9b == 26 && lhs9b < rhs9b { f64_viol9 = 1 }
+                            if op9b == 24 && lhs9b <= rhs9b { f64_viol9 = 1 }
+                            if op9b == 25 && lhs9b > rhs9b { f64_viol9 = 1 }
+                            if op9b == 23 && lhs9b >= rhs9b { f64_viol9 = 1 }
+                        } else {
+                            if f64_viol9 == 1 {
+                                var ok9b: i64 = 0
+                                if op9b == 26 && lhs9b >= rhs9b { ok9b = 1 }
+                                if op9b == 24 && lhs9b > rhs9b { ok9b = 1 }
+                                if op9b == 25 && lhs9b <= rhs9b { ok9b = 1 }
+                                if op9b == 23 && lhs9b < rhs9b { ok9b = 1 }
+                                if ok9b == 1 { f64_viol9 = 0 }
+                            }
+                        }
+                    }
+                    if f64_viol9 == 1 {
+                        print("error[E209]: refinement type violation — f64 value violates let-binding predicate at line ")
+                        print_int(TL[(EP - 1) as usize])
+                        print("\n")
+                        tc_mark_failed()
+                    }
+                    SCAN_HAS_PRED = 0
+                    SCAN_HAS_PRED2 = 0
+                }
                 // β⁴/β⁵: capture variance/sensitivity shadow into the new variable
                 // Mutable f64 vars get a fixed runtime slot so variance_of() works across loop iterations
                 if decl_is_mut == 1 && EXPR_IS_F64 == 1 {
@@ -37411,6 +39208,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
+                // Linear reassignment: the old value must be consumed before it
+                // is overwritten (mirror of compile_stmt).
+                if VAR_LINEAR[ty_vi as usize] == 1 {
+                    if VAR_USED[ty_vi as usize] == 0 {
+                        tc_linear_violation(name_tok, "linear value not consumed")
+                    }
+                    VAR_USED[ty_vi as usize] = 0
+                }
             }
             if ty_vi >= 0 && VAR_TY[ty_vi as usize] == 8 {
                 copy_array_into_local_slot_a64(slot, VAR_TY_HASH[ty_vi as usize])
@@ -37442,6 +39247,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     VAR_SSHADOW_2[ty_vi as usize] = EXPR_SSHADOW_2
                     VAR_SSHADOW_3[ty_vi as usize] = EXPR_SSHADOW_3
                 }
+                // β⁹ GTT: update channel topology on var reassignment, mirroring
+                // the let-declaration path (a64 twin of compile_stmt). Without it
+                // a reassigned variable kept the topology of its FIRST binding.
+                VAR_CH_SET[ty_vi as usize] = EXPR_CH_SET
+                VAR_PARAM_USED[ty_vi as usize] = EXPR_PARAM_USED
             }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
             if EXPR_TY == 9 { LAST_EXPR_IS_CLOSURE = 1 }
@@ -37877,15 +39687,39 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(EP)
                     } else {
-                        tc_error(EP - 1, "return type does not match function signature")
+                        tc_error_hard(EP - 1, "return type does not match function signature")
                     }
                 }
             }
         }
+        // The unit of the returned value must be the unit the signature
+        // promises. Until the type check above could fail a build this was not
+        // worth adding: a call result already takes the unit of its declared
+        // return type, so `-> molal` was a promise nothing verified, and
+        // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
+        // molar value. The same helper the call site uses works unchanged here,
+        // with the declared return hash in place of the parameter hash.
+        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+            tc_linear_violation(EP - 1, "unit mismatch in return value")
+        }
         // PR-5: enforce refinement predicate on return value (a64 mirror)
         try_apply_return_refinement(EP - 1)
+        // Observation boundary: returning Unobserved<T> from a non-Observe
+        // function (mirror of compile_stmt).
+        if ty_is_unobserved(EXPR_TY) && !ty_is_unobserved(CURRENT_RET_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+            tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+        }
         if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(EXPR_TY, EXPR_TY_HASH) {
             stabilize_return_agg_a64(EXPR_TY, EXPR_TY_HASH)
+        }
+        // Linear check at an early return: any unconsumed linear var is an
+        // error (mirror of compile_stmt).
+        var lce_a: i64 = 0
+        while lce_a < VAR_COUNT {
+            if VAR_LINEAR[lce_a as usize] == 1 && VAR_USED[lce_a as usize] == 0 {
+                tc_linear_violation(EP - 1, "linear value not consumed")
+            }
+            lce_a = lce_a + 1
         }
         // β⁵: store return variance to global BSS for inter-procedural propagation
         if EXPR_IS_F64 == 1 {
@@ -37937,6 +39771,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
     }
     // if/else  (with Phase 1.3 if-let support)
     if k == 13 {
+        let if_tok_a = EP
         EP = EP + 1
 
         // ── Phase 1.3: if let <pattern> = <expr> { ... } (AArch64) ──
@@ -38091,6 +39926,14 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
+        // Snapshot VAR_USED + VAR_MOVED for linear branch tracking
+        // (mirror of x86 compile_stmt).
+        var lsnap_a: i64 = 0
+        while lsnap_a < VAR_COUNT {
+            CL_SAVE_USED[lsnap_a as usize] = VAR_USED[lsnap_a as usize]
+            CL_SAVE_MUT[lsnap_a as usize] = VAR_MOVED[lsnap_a as usize]
+            lsnap_a = lsnap_a + 1
+        }
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
         // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
@@ -38107,6 +39950,18 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let b_end_off = CL
             em32(0x14000000)
             patch_branch_a64(cbz_off, CL)
+            // Save then-branch state, restore pre-branch snapshot for else
+            // (mirror of x86 compile_stmt).
+            var lthen_a: i64 = 0
+            while lthen_a < VAR_COUNT {
+                let then_used_a = VAR_USED[lthen_a as usize]
+                let then_moved_a = VAR_MOVED[lthen_a as usize]
+                VAR_USED[lthen_a as usize] = CL_SAVE_USED[lthen_a as usize]
+                VAR_MOVED[lthen_a as usize] = CL_SAVE_MUT[lthen_a as usize]
+                CL_SAVE_USED[lthen_a as usize] = then_used_a
+                CL_SAVE_MUT[lthen_a as usize] = then_moved_a
+                lthen_a = lthen_a + 1
+            }
             if TK[EP as usize] == 13 { compile_stmt_a64() }
             else {
                 LAST_STMT_HAS_VALUE = 0
@@ -38118,6 +39973,30 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
             let if_else_ch_set_a = EXPR_CH_SET
+            // Linear branch asymmetry check + merge (mirror of x86 compile_stmt).
+            // Without this the a64 pass counted a linear value consumed in BOTH
+            // arms as two uses and reported "used more than once" on a program
+            // the x86 pass accepts.
+            var lchk_a: i64 = 0
+            while lchk_a < VAR_COUNT {
+                if VAR_LINEAR[lchk_a as usize] == 1 {
+                    let then_u_a = CL_SAVE_USED[lchk_a as usize]
+                    let else_u_a = VAR_USED[lchk_a as usize]
+                    if then_u_a > 0 && else_u_a == 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in then-branch but not else-branch")
+                    }
+                    if then_u_a == 0 && else_u_a > 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in else-branch but not then-branch")
+                    }
+                    if then_u_a > else_u_a { VAR_USED[lchk_a as usize] = then_u_a }
+                }
+                if VAR_LINEAR[lchk_a as usize] == 1 || VAR_AFFINE[lchk_a as usize] == 1 {
+                    if CL_SAVE_MUT[lchk_a as usize] == 1 || VAR_MOVED[lchk_a as usize] == 1 {
+                        VAR_MOVED[lchk_a as usize] = 1
+                    }
+                }
+                lchk_a = lchk_a + 1
+            }
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
@@ -38142,6 +40021,16 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 LAST_STMT_TY_HASH = 0
             }
         } else {
+            // Linear tracking, no-else arm (mirror of x86 compile_stmt).
+            var lne_a: i64 = 0
+            while lne_a < VAR_COUNT {
+                if VAR_LINEAR[lne_a as usize] == 1 {
+                    if VAR_USED[lne_a as usize] > 0 && CL_SAVE_USED[lne_a as usize] == 0 {
+                        tc_linear_violation(if_tok_a, "linear value consumed in if-branch with no else — not consumed on all paths")
+                    }
+                }
+                lne_a = lne_a + 1
+            }
             patch_branch_a64(cbz_off, CL)
             // FALL-THROUGH FIX (a64 mirror of x86 em(0x90) at if-without-else): a then-branch
             // ending in `ret` (0xD65F03C0) would make the implicit-return guard skip the
@@ -38283,6 +40172,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         LOOP_TOP[LOOP_DEPTH as usize] = loop_top
         LOOP_DEPTH = LOOP_DEPTH + 1
         let saved_bc = BREAK_COUNT
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         compile_or_a64()
         let cbz_off = CL
         em32(0xB4000000)
@@ -38291,6 +40182,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel = (loop_top - CL) / 4
         em32(0x14000000 | (rel & 0x3FFFFFF))
+        // β⁹ GTT loop fixed-point: union post-body topology with the pre-loop
+        // snapshot, so a zero-iteration loop cannot narrow a variable's topology.
+        gtt_loop_union()
         patch_branch_a64(cbz_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
@@ -38336,6 +40230,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         }
         let iter_slot = saved_next_a
         let end_slot = saved_next_a + 1
+        // β⁹ GTT loop fixed-point: snapshot VAR_CH_SET before the loop runs
+        gtt_loop_snapshot()
         // For-loop: b cond; incr: iter++; cond: cmp; cbz end; body; b incr; end:
         let jmp_cond_a = CL; em32(0x14000000)  // b cond (patched below)
         let incr_addr_a = CL
@@ -38354,6 +40250,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         if TK[EP as usize] == 9 { EP = EP + 1 }
         let rel_bi = (incr_addr_a - CL) / 4
         em32(0x14000000 | (rel_bi & 0x3FFFFFF))
+        // β⁹ GTT loop fixed-point: union post-body topology with the pre-loop snapshot
+        gtt_loop_union()
         patch_branch_a64(cbz_off, CL)
         var bi: i64 = saved_bc
         while bi < BREAK_COUNT { patch_branch_a64(BREAK_PATCH[bi as usize], CL); bi = bi + 1 }
@@ -38819,6 +40717,13 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                     if pslot >= 0 {
                         VAR_TY[(VAR_COUNT - 1) as usize] = SCAN_TY
                         VAR_TY_HASH[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        // A unit-typed parameter carries its brand, exactly as the
+                        // x86 param scan does. Without this the a64 pass erased the
+                        // unit at every function boundary, so a parameter forwarded
+                        // to another parameter arrived unbranded.
+                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                            VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
+                        }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                         // fn-type (SCAN_TY==9) parameters arrive as tagged fn-refs (bit 0 set);
                         // mark them closure so the call site untags via the tbnz dispatch (Path A)
@@ -38835,6 +40740,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                         } else if SCAN_TY == 8 {
                             VAR_ALEN[(VAR_COUNT - 1) as usize] = SCAN_TY_ALEN
                             VAR_ESIZ[(VAR_COUNT - 1) as usize] = SCAN_TY_ESIZ
+                        }
+                        // Mark the parameter linear/affine when its type is a
+                        // linear/affine struct (mirror of the x86 param scan). The
+                        // a64 pass left VAR_LINEAR at 0 for every parameter, so the
+                        // end-of-function "not consumed" check in this very function
+                        // could never fire for one.
+                        let lin_si_a = st_find(SCAN_TY_HASH)
+                        if lin_si_a >= 0 && knowledge_hash_is(SCAN_TY_HASH) == false {
+                            VAR_LINEAR[(VAR_COUNT - 1) as usize] = ST_LINEAR[lin_si_a as usize]
+                            VAR_AFFINE[(VAR_COUNT - 1) as usize] = ST_AFFINE[lin_si_a as usize]
                         }
                     }
                     p = SCAN_TY_NEXT
@@ -38979,9 +40894,16 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                             if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                                 tc_epistemic_boundary(EP)
                             } else {
-                                print("warning: tail type mismatch at line ")
+                                // E218, as the x86 twin emits it: this printed
+                                // `warning:` and marked nothing, so a tail whose type
+                                // does not match the declared return type was accepted
+                                // on aarch64.
+                                print("error[E218]: tail type mismatch at ")
+                                print_src_loc_for_tok(EP - 1)
+                                print(" (bundle line ")
                                 print_int(TL[(EP - 1) as usize])
-                                print("\n")
+                                print(")\n")
+                                tc_mark_failed()
                             }
                         }
                     }
@@ -38989,6 +40911,12 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                     stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)
                 }
+            // Observation boundary: implicit tail return of Unobserved<T> as a
+            // non-Unobserved type (mirror of compile_all). The `return` statement
+            // path is covered separately; this is the bare tail expression.
+            if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
+                tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+            }
             }
             // Restore sp from the frame pointer so any transient expression-stack
             // imbalance cannot make the epilogue pop x29/x30 from the wrong address.
@@ -39007,13 +40935,21 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         fn_idx = fn_idx + 1
     }
 
-    // Pass 2 (arm64-specific codegen, e.g. emit_print_a64/compile_primary_a64)
-    // can set TYPECHECK_FAILED on an error Pass 1's x86-64 pass never saw
-    // (different threshold, different code path) -- compile_all()'s own
-    // TYPECHECK_FAILED gate only covers Pass 1. Without this, Pass 2 falls
-    // through to patch/emit and this function returns 0 regardless, so a
-    // binary described as "typecheck: failed" is written anyway (see the
-    // emit_print_a64/compile_primary_a64 string-literal-length checks).
+    // Every diagnostic the arm64 pass raised above set TYPECHECK_FAILED through
+    // tc_mark_failed, and nothing read it: this function emitted the binary and
+    // returned 0 regardless. Mirror of the x86 gate in compile_all.
+    //
+    // compile_all() cannot cover it, for two independent reasons. It returns
+    // early at the `if TARGET_ARCH == 1` guard, before reaching its own gate;
+    // and its gate only covers Pass 1, while arm64-specific codegen in Pass 2
+    // (emit_print_a64 / compile_primary_a64, different thresholds and different
+    // code paths) can set TYPECHECK_FAILED on an error the x86-64 pass never
+    // saw -- see the string-literal-length checks there. Without this, Pass 2
+    // falls through to patch/emit and a binary described as "typecheck: failed"
+    // is written anyway.
+    //
+    // main and this branch added this gate independently; this is the union of
+    // the two explanations, and the code below is what both wrote.
     if TYPECHECK_FAILED != 0 {
         print_limit_error()
         print("typecheck: failed\n")
@@ -39467,14 +41403,25 @@ fn set_base_dir_from_src_path(ps: i64, pe: i64) with Mut, Panic {
     BASE_DIR[BASE_DIR_LEN as usize] = 0
 }
 
+// Appends to SRC. The bound here was `2097151` -- a 2 MiB limit left behind
+// when SRC grew to 16 MiB -- and the loop simply STOPPED at it. The prelude was
+// then truncated mid-function, and the build failed with
+//   error: unbalanced braces in module (N unclosed `{`) near <main>:42294
+//   error: unknown identifier `__native_sqrt_f64` ...
+// naming a line PAST the end of the file, on a source whose braces are
+// perfectly balanced. Nothing said "too big". Measured 2026-09-04: any program
+// whose source plus the appended prelude exceeded 2097151 bytes hit this; for
+// lean_single.sio itself that was 18907 bytes of headroom left.
 fn append_src_lit(s: string) with Mut, Panic, Div {
     let n = str_len(s)
     var i: i64 = 0
-    while i < n && SRC_LEN < 2097151 {
+    while i < n && SRC_LEN < SRC_CAP - 1 {
         SRC[SRC_LEN as usize] = str_char_at(s, i) as i8
         SRC_LEN = SRC_LEN + 1
         i = i + 1
     }
+    // Truncating is not a thing this may do quietly.
+    if i < n { SRC_OVERFLOW = 1 }
 }
 
 fn append_native_prelude() with Mut, Panic, Div {
@@ -41064,8 +43011,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
-    while i < sz && i < 16777216 { SRC[i as usize] = str_char_at(raw, i) as i8; i = i + 1 }
-    SRC_LEN = if sz < 16777216 { sz } else { 16777216 }
+    while i < sz && i < SRC_CAP { SRC[i as usize] = str_char_at(raw, i) as i8; i = i + 1 }
+    SRC_LEN = if sz < SRC_CAP { sz } else { SRC_CAP }
+    if sz > SRC_CAP { SRC_OVERFLOW = 1 }
     MAIN_SRC_END = sz
     print("source: "); print(src); print(" "); print_int(sz); print(" bytes\n")
     resolve_imports()
@@ -41073,6 +43021,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     strip_extern_blocks()
     append_native_prelude()
     print("total source: "); print_int(SRC_LEN); print(" bytes\n")
+    if SRC_OVERFLOW != 0 {
+        print("error: source too large: ")
+        print_int(SRC_LEN)
+        print(" bytes of a ")
+        print_int(SRC_CAP)
+        print("-byte buffer, including the appended native prelude\n")
+        return 1
+    }
     if precheck_knightian_conflict() != 0 { return 1 }
     if precheck_temporal_window_conflict() != 0 { return 1 }
     lex_all()
