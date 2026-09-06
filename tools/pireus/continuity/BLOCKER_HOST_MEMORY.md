@@ -1,5 +1,5 @@
 Blocker-ID: BLK-20260906-pireus-host-memory-observation
-Status: owned
+Status: owned; stale-memory predicate corrected, full recovery still blocked
 Severity: B1
 Class: platform-resource
 Owner: codex-pireus
@@ -18,7 +18,7 @@ Evidence: validation/pireus-fence-recovery-3.log; validation/pireus-fence-recove
 Fallback-Path: none; no model replacement, threshold reduction or GPU grant bypass
 Legacy-Kept: yes
 LLM-Offload: logged:reviews/recovery-initial-* and reviews/recovery-followup-*
-Next-Action: implement and verify a versioned recovery observation/migration contract for stale Slurm memory, preserving fresh host memory >=32768 MiB and the device barrier
+Next-Action: isolate the host watchdog/commit interleaving that may invalidate Slurm activation; preserve the reviewed observer revision, 32768 MiB floor and device barrier
 
 The initial cause of the host fence during Inkling weight loading remains an
 investigation item. It is not proven to be host OOM or the memory predicate.
@@ -38,3 +38,26 @@ https://slurm.schedmd.com/scontrol.html
 It is distinct from the fresh host MemAvailable observation captured here.
 The current frozen bootstrap migration also requires UNINITIALIZED; it cannot
 be repurposed to rebind this RECOVERY_REQUIRED lease without a new contract.
+
+
+2026-09-06 observer revision update:
+- Frozen backend revision 2daf6df41434cd9b9d9a723b7675c9d2d2eda46850d2e66d0a67817f4b8e828d
+  uses both host memory bits. The fresh watchdog predicate remains required.
+- Native observer rebind ALLOW and journal/lease CAS postconditions passed:
+  validation/recovery-observer-migration-live-1. Source/executable/host policy,
+  minimum memory and barrier authority were unchanged.
+- New freeze 452289a8a9c201271f6631973c65cbc428cbe3a7f7228e2483e9768a875fb46b
+  passed verification and canonical recovery reached GRANT_HOST_SLURM at epoch 11.
+- Activation verification failed; canonical transaction proved both hosts
+  FENCED again. See validation/recovery-observer-live-1/recover.log.
+- A deterministic mocked interleaving reproduces stale FENCED enforcement
+  after a concurrent SLURM commit. This is a source-level possible race,
+  not proof of the live incident cause. See runtime/reproduce_watchdog_interleaving.sh
+  and validation/watchdog-interleaving-repro.log.
+
+The controlled second recovery also refused at epoch 12, exit 42.
+Both grant files were observed in SLURM before returning to FENCED within
+seconds. Raw observations, failed initial observer transport (missing Python
+in the observer image / pod replacement), receipts and transition summary
+are retained in validation/recovery-observer-live-2. This supports the
+concurrency investigation; it does not identify the exact failing predicate.

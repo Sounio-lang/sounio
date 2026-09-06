@@ -1042,9 +1042,12 @@ host_mask_from_facts() {
     mask="$(bit_add "$mask" "$power" "$truth")"
   done
   truth=0
+  # Host reports enforce the frozen MemAvailable floor. Slurm FreeMem can
+  # remain stale while workers are detached, so it is supplementary telemetry.
+  # Report/watchdog freshness remains independently required by the Sounio
+  # host_heartbeat_fresh predicate before any handoff or recovery is admitted.
   if [[ "$(frame_field "$report0" memory 2>/dev/null || true)" == 1 &&
-        "$(frame_field "$report1" memory 2>/dev/null || true)" == 1 ]] &&
-      slurm_free_memory_ready "$slurm_nodes"; then truth=1; fi
+        "$(frame_field "$report1" memory 2>/dev/null || true)" == 1 ]]; then truth=1; fi
   mask="$(bit_add "$mask" 4096 "$truth")"
   truth=0
   if [[ "$(frame_field "$report0" protected 2>/dev/null || true)" == 1 &&

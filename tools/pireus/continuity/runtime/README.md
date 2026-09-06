@@ -98,3 +98,37 @@ under the predecessor authority. No test or review implies live recovery.
 Control gate: test_recovery_detach.py NATIVE_EXECUTABLE.
 Use remote tmux, --arbiter-root, --engine, --holder and a new --evidence
 directory; omit --apply for a decision-only run. An expired lease refuses.
+
+## Versioned recovery observer migration
+
+The stale-memory recovery fix changes only material_backend_sha256 in the
+Spark Pair Arbiter freeze. Both fresh host memory predicates remain required;
+Slurm FreeMem no longer vetoes recovery while detached workers cannot refresh
+it. The native arbiter, its compiler/executable, host-fence source, device
+barrier, 32768 MiB floor and protected baseline remain pinned.
+
+recovery_migrate.sio admits REBIND_RECOVERY_OBSERVER, independently of the
+unchanged arbiter. recovery_migrate.py is its observation/CAS transport.
+recovery-migration-lock.json pins both freezes and the new admission engine.
+The 19-field frame is defined by the ordered checks in recovery_migrate.py:
+schema; unchanged native authority; lease revision binding; exact pair/NodeSet
+identity; owned expired RECOVERY_REQUIRED lease; selectors absent; workers
+absent; both FENCED; host revision/boot binding; fresh watchdogs; device barriers;
+protected resources; quiesced legacy/consumer/cgroup facts; no pair workloads;
+epoch/owner/lease identity; Slurm mask with bits 2,4,8,16; bound journal; both
+host memory observations. Missing/unknown or sub-floor facts refuse.
+
+Run inside remote tmux with --old-root, --new-root, --engine, --holder and a new
+--evidence directory. Without --apply this only captures native admission.
+Apply repeats the complete observation and native decision, persists intent,
+CAS-updates the journal then only the lease freeze annotation, and verifies
+unchanged scheduling authority plus fenced hosts. Partial journal migration
+can be replayed only against the same lease UID/resource version and exact
+revision pair. Recovery is then run through the new root's canonical arbiter.
+This is a revision-specific recovery operation, not a general lease editor.
+
+Controls: test_recovery_migrate.py NATIVE_EXECUTABLE;
+bash runtime/test_memory_observation.sh from the continuity directory;
+scripts/ci/spark_pair_arbiter_selftest.sh from the repository root.
+Raw independent reviews and live migration evidence are committed separately
+from subsequent canonical recovery and hardware acceptance.
