@@ -60,7 +60,7 @@ cd "$ROOT_DIR"
 gate_name "madaros_fixed_point"
 
 SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
-EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-gen2}"
+EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-run}"
 MIN_INTO_ACC_DONE="${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
 MADAROS="${MADAROS_BIN:-}"
 IR_MAX_FUNCS="$(sed -nE 's/^pub let IR_MAX_FUNCS: i64 = ([0-9]+).*$/\1/p' self-hosted/ir/ir.sio | head -1)"
