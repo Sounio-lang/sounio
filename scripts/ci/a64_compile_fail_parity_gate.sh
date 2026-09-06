@@ -122,7 +122,46 @@ export -f probe sounio_classify_compile sounio_primary_diag sounio_diag_codes \
 export SOUC WORK_DIR TIMEOUT_SECS
 export _SOUNIO_CC_FATAL_RE _SOUNIO_CC_SUCCESS_RE _SOUNIO_CC_VERDICT_FAIL_RE
 
-find tests/compile-fail -name '*.sio' -print0 \
+# Corpus scope: this gate runs lean_single, so a fixture whose `//@ requires:`
+# names a different engine is not evidence about it. 288 of the 680 files in
+# tests/compile-fail carry `//@ requires: madaros`; running them here produced
+# 257 PARITY verdicts in which two targets of the WRONG engine agreed about a
+# check the fixture never asked lean_single to have. That is coverage on paper.
+#
+# The semantics mirror scripts/dev/run_sio_test_suite_v2.sh:417-459, including
+# its rule that an unrecognised value must not fall through silently -- a typo
+# like `requires: madros` would otherwise re-admit the whole class.
+#
+# Exclusions are printed, never silent: a gate that quietly narrows its own
+# corpus is the failure mode this gate exists to detect.
+ENGINE="${PARITY_ENGINE:-lean_single}"
+: > "$WORK_DIR/in_scope.txt"
+: > "$WORK_DIR/excluded.txt"
+unknown_requires=""
+while IFS= read -r f; do
+    req="$(sed -n 's|^//@[[:space:]]*requires:[[:space:]]*\([A-Za-z_][A-Za-z_0-9]*\).*|\1|p' "$f" | head -1)"
+    case "$req" in
+        "")               printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        gpu|llvm)         printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        "$ENGINE")        printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        madaros|lean_single)
+                          printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
+        *)                unknown_requires="$unknown_requires $f:$req" ;;
+    esac
+done < <(find tests/compile-fail -name '*.sio' | LC_ALL=C sort)
+
+if [[ -n "$unknown_requires" ]]; then
+    echo "--- unrecognised '//@ requires:' values (expected: gpu|llvm|madaros|lean_single) ---"
+    printf '%s\n' $unknown_requires
+    echo "A64_COMPILE_FAIL_PARITY_GATE=FAIL (unknown requires would silently re-admit the wrong engine)"
+    exit 1
+fi
+
+n_corpus="$(wc -l < "$WORK_DIR/in_scope.txt" | tr -d ' ')"
+n_excluded="$(wc -l < "$WORK_DIR/excluded.txt" | tr -d ' ')"
+echo "engine=$ENGINE corpus_files=$n_corpus excluded_other_engine=$n_excluded"
+
+tr '\n' '\0' < "$WORK_DIR/in_scope.txt" \
   | xargs -0 -P "$JOBS" -I{} bash -c 'probe "$@"' _ {} \
   | LC_ALL=C sort > "$WORK_DIR/census.tsv"
 
@@ -148,12 +187,12 @@ n_in_scope=$(( n_parity + $(count_of DIVERGENCE) + n_drift ))
 echo "corpus_total=$n_total"
 echo "parity=$n_parity divergence=$(count_of DIVERGENCE) rule_drift=$n_drift out_of_scope=$n_scope instrument=$n_instr"
 
-# Corpus floor. The corpus grows (291 files on 2026-09-05, 678 on 2026-09-06),
-# so these are floors, not equalities, and they are overridable for a filtered
-# run. A collapse in the in-scope population is the signature of the wrong-cwd
-# or wrong-stdlib false green described above.
-CORPUS_MIN="${CORPUS_MIN:-678}"
-IN_SCOPE_MIN="${IN_SCOPE_MIN:-500}"
+# Corpus floor, over the engine-scoped population above (392 of 680 files on
+# 2026-09-06). The corpus grows, so these are floors rather than equalities and
+# are overridable for a filtered run. A collapse in the in-scope population is
+# the signature of the wrong-cwd or wrong-stdlib false green described above.
+CORPUS_MIN="${CORPUS_MIN:-392}"
+IN_SCOPE_MIN="${IN_SCOPE_MIN:-300}"
 if [[ "$n_total" -lt "$CORPUS_MIN" ]]; then
     echo "A64_COMPILE_FAIL_PARITY_GATE=FAIL (corpus shrank: $n_total < $CORPUS_MIN)"
     exit 1
