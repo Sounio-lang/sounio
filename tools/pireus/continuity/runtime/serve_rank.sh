@@ -7,6 +7,12 @@ set -euo pipefail
 export NCCL_NET=IB NCCL_IB_DISABLE=0 NCCL_DEBUG=INFO NCCL_SOCKET_IFNAME=eth0
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
+export TRITON_CACHE_DIR=/scratch/pireus/cache/triton
+export TORCHINDUCTOR_CACHE_DIR=/scratch/pireus/cache/inductor
+export HF_HOME=/scratch/pireus/cache/huggingface
+export XDG_CACHE_HOME=/scratch/pireus/cache
+export TIKTOKEN_CACHE_DIR=/scratch/pireus/cache/tiktoken
+echo "PIREUS_SERVING_JOB=$SLURM_JOB_ID rank=$PIREUS_RANK host=$(hostname)"
 MODEL=/scratch/pireus/models/Inkling-Small-NVFP4/b6a99534467840620d411e4cd4ad5819b2610d9c
 python3 -c 'import json,hashlib;from pathlib import Path;p=Path("/scratch/pireus/receipts/inkling-model.json");r=json.loads(p.read_text());assert r["revision"]=="b6a99534467840620d411e4cd4ad5819b2610d9c";assert r["manifest_sha256"]==hashlib.sha256(Path("/scratch/pireus/runtime/inkling-files.json").read_bytes()).hexdigest()'
 exec /scratch/pireus/runtime/run_in_container.sh python3 -m sglang.launch_server \

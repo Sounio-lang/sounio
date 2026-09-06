@@ -1,0 +1,70 @@
+// Sounio-owned material probe for admitted Pireus plans.
+// One block of 16 threads computes one Sedenion. Grid x is vector count.
+// The arithmetic sequence matches the canonical ascending-j GPU experiment:
+// product=a[i]*b[j]; signed=product*sigma(i,j); sum=sum+signed.
+// Explicit .rn instructions preserve separate multiply and addition.
+use algebra::cayley_dickson::cd_sigma
+
+fn address_index(layout: i64, coefficient: string) with IO {
+    if layout == 0 {
+        print("    mad.lo.u32 %r7, %r1, 16, "); print(coefficient); print(";\n")
+    } else {
+        print("    mad.lo.u32 %r7, "); print(coefficient); print(", %r2, %r1;\n")
+    }
+}
+pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64) with IO, Mut, Panic, Div {
+    print(".version 9.0\n.target sm_121\n.address_size 64\n")
+    print("// PIREUS material probe: f64 mul, sign mul, add; ascending j; no FMA.\n")
+    print(".const .align 4 .u32 pireus_signs[16] = {")
+    var j: i64 = 0
+    while j < 16 {
+        var mask: i64 = 0
+        var k: i64 = 0
+        while k < 16 {
+            if cd_sigma((k ^ j) as i32, j as i32, 4) < 0 { mask = mask | (1 << k) }
+            k = k + 1
+        }
+        if j > 0 { print(",") }
+        print_int(mask)
+        j = j + 1
+    }
+    print("};\n.visible .entry pireus_candidate(.param .u64 pa, .param .u64 pb, .param .u64 pc)\n.maxntid 16,1,1\n{\n")
+    print("    .reg .b32 %r<32>;\n    .reg .b64 %rd<16>;\n    .reg .f64 %fd<8>;\n    .reg .pred %p<4>;\n")
+    print("    ld.param.u64 %rd0, [pa];\n    ld.param.u64 %rd1, [pb];\n    ld.param.u64 %rd2, [pc];\n")
+    print("    mov.u32 %r0, %tid.x;\n    mov.u32 %r1, %ctaid.x;\n    mov.u32 %r2, %nctaid.x;\n")
+    print("    setp.gt.u32 %p0, %r2, 16777216;\n    @%p0 bra DONE;\n")
+    print("    mad.lo.u32 %r3, %r0, "); print_int(stride); print(", "); print_int(offset); print(";\n    and.b32 %r3, %r3, 15;\n")
+    var inverse: i64 = 1
+    while (inverse * stride) % 16 != 1 { inverse = inverse + 2 }
+    if load == 1 {
+        address_index(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+        print("    mov.b64 {%r11,%r12}, %fd2;\n")
+    }
+    print("    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r4, 0;\nLOOP:\n")
+    var u: i64 = 0
+    while u < unroll {
+        print("    add.u32 %r5, %r4, "); print_int(u); print(";\n    xor.b32 %r6, %r3, %r5;\n")
+        address_index(layout, "%r6")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd0, %rd3;\n    ld.global.f64 %fd1, [%rd3];\n")
+        if load == 0 {
+            address_index(layout, "%r5")
+            print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+        } else {
+            print("    sub.u32 %r8, %r5, "); print_int(offset); print(";\n")
+            print("    mul.lo.u32 %r8, %r8, "); print_int(inverse); print(";\n    and.b32 %r8, %r8, 15;\n")
+            print("    shfl.sync.idx.b32 %r9, %r11, %r8, 15, 65535;\n    shfl.sync.idx.b32 %r10, %r12, %r8, 15, 65535;\n    mov.b64 %fd2, {%r9,%r10};\n")
+        }
+        print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
+        print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")
+        print("    shr.u32 %r13, %r13, %r3;\n    and.b32 %r13, %r13, 1;\n    setp.ne.u32 %p1, %r13, 0;\n")
+        print("    selp.f64 %fd4, 0dBFF0000000000000, 0d3FF0000000000000, %p1;\n")
+        print("    mul.rn.f64 %fd3, %fd3, %fd4;\n    add.rn.f64 %fd0, %fd0, %fd3;\n")
+        u = u + 1
+    }
+    if unroll < 16 {
+        print("    add.u32 %r4, %r4, "); print_int(unroll); print(";\n    setp.lt.u32 %p2, %r4, 16;\n    @%p2 bra LOOP;\n")
+    }
+    address_index(layout, "%r3")
+    print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd2, %rd3;\n    st.global.f64 [%rd3], %fd0;\nDONE:\n    ret;\n}\n")
+}

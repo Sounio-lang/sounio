@@ -21,6 +21,11 @@ def main():
   before={p.name:p.read_bytes() for p in run.glob("*.receipt.json")}
   call("validate","--engine",args.engine)
   assert {p.name:p.read_bytes() for p in run.glob("*.receipt.json")}==before
+  call("materialize","--engine",args.engine)
+  artifacts={p.name:p.read_bytes() for p in run.glob("*.ptx")}
+  assert len(artifacts)==8 and len(set(artifacts.values()))==8
+  call("materialize","--engine",args.engine)
+  assert {p.name:p.read_bytes() for p in run.glob("*.ptx")}==artifacts
   result=json.loads(call("resume").stdout)
   assert result["admitted"]==8 and result["unique_plans"]==8 and not result["claim_ready"],result
   old=(run/"000.proposal.json").read_bytes()

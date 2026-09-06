@@ -10,6 +10,7 @@ def main():
   progress=False
   for name,e in list(pending.items()):
    p=a.root/name;part=p.with_name(p.name+".partial")
+   p.parent.mkdir(parents=True,exist_ok=True)
    if p.exists():
     if p.stat().st_size!=e["size"]:raise ValueError("existing size mismatch")
     del pending[name];continue

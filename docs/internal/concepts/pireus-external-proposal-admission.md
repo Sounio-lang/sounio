@@ -22,14 +22,16 @@ its receipts. No Python result grants semantic or scientific authority.
 
 The context file is a trusted, frozen input supplied by the research run;
 a proposal cannot supply or override its capabilities. Context provenance must
-be retained by `cycle.py prepare --evidence`. The current CLI accepts an
-already-prepared context; automatic extraction from ontology queries is still
-a pending interface. A synthetic context in tests is not observed hardware.
+be retained by `cycle.py prepare --evidence`. The CLI accepts a prepared context or invokes research_context.sio. That
+producer queries the actual TripleStore/SPARQL machinery and explicitly
+adds research-local declared primitive facts, retaining missing, unknown and
+contradictory controls. A synthetic context in tests is not observed hardware.
 
 The first grammar varies odd affine lane permutations, direct or shuffle loads,
 AoS or SoA layout, and unroll factors 1/2/4/8/16. Admission is distinct from
-materialization: this version reconstructs and identifies these plans but has
-not emitted or benchmarked their kernels.
+materialization: Sounio reconstructs and identifies these plans and emits bounded PTX.
+GPU observations are compared by material_parity.sio; performance remains a
+separate measurement and decision stage.
 
 The numeric contract is dimension 16, f64, no FMA, output k with ascending
 right operand j and left i = k XOR j. This is a distinct ordered experiment
@@ -55,7 +57,11 @@ Acceptance: `test_admission.py <rebuilt-admission.elf>` and
 `test_cycle.py <rebuilt-admission.elf>`; evidence is committed under
 `tools/pireus/continuity/validation`.
 
-Pending interfaces: ontology-to-context producer; a real Inkling batch;
-Sounio-owned materialization and hardware parity; new-operator grammar and
-classification; benchmark and GRPO corpus stages. Historical V0–V14 producers
+Material parity now has positive and poisoned-sign negative evidence on both
+Sparks. The finite-bits-nan-class-v1 contract compares exact non-NaN bits and
+NaN class without claiming payload preservation or general FP proof.
+benchmark_decision.sio requires four paired comparisons (both controls on both
+nodes), median gain >= 5% and positive lower bootstrap bounds.
+Pending acceptance: a real Inkling batch; integrated live performance trial;
+new-operator grammar and classification; GRPO corpus. Historical V0–V14 producers
 and their authority boundaries remain distinct and retained.
