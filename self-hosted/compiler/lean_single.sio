@@ -9820,6 +9820,92 @@ fn emit_fo_var_from_sens_x86(
     return out
 }
 
+// ─── aarch64 twins of the two FO-variance rebuilders above ───
+// Neither β¹⁰ nor β¹¹ had an a64 site: this target kept the β⁴ blind sums
+// (var(a·b) = a²var(b) + b²var(a), var(a±b) = var(a) + var(b)) all the way
+// out, so a·a under-counted (2a²σ² where the FO rule gives 4a²σ²) and
+// a·b − a·b reported 2·var instead of the exact cancellation. Same rules and
+// the same channel loop as the x86 originals, on this target's primitives:
+// pushed operand lands in d1, current in d0, and emit_f64_binop_a64 computes
+// d0 = d1 OP d0 (0x1E610800 fmul, 0x1E612800 fadd, 0x1E613800 fsub).
+
+fn emit_fo_channel_contrib_sub_a64(acc_slot: i64, ls: i64, rs: i64, ch: i64) with Mut, Panic {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if ls < 0 && rs < 0 { return }
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    // x0 = ds; square
+    emit_push_a64()
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // x0 = ds²; × σ²_k
+    emit_push_a64()
+    emit_load_var_a64(iv)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // x0 = contrib; acc += contrib
+    emit_push_a64()
+    emit_load_var_a64(acc_slot)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(acc_slot)
+}
+
+fn emit_fo_var_from_sens_diff_sub_a64(
+    ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+) -> i64 with Mut, Panic {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    emit_fo_channel_contrib_sub_a64(out, ls0, rs0, 0)
+    emit_fo_channel_contrib_sub_a64(out, ls1, rs1, 1)
+    emit_fo_channel_contrib_sub_a64(out, ls2, rs2, 2)
+    emit_fo_channel_contrib_sub_a64(out, ls3, rs3, 3)
+    emit_fo_channel_contrib_sub_a64(out, ls4, rs4, 4)
+    emit_fo_channel_contrib_sub_a64(out, ls5, rs5, 5)
+    emit_fo_channel_contrib_sub_a64(out, ls6, rs6, 6)
+    emit_fo_channel_contrib_sub_a64(out, ls7, rs7, 7)
+    return out
+}
+
+fn emit_fo_channel_contrib_sq_a64(acc_slot: i64, s_slot: i64, ch: i64) with Mut, Panic {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if s_slot < 0 { return }
+    emit_load_var_a64(s_slot)
+    emit_push_a64()
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(iv)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(acc_slot)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(acc_slot)
+}
+
+fn emit_fo_var_from_sens_a64(
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64
+) -> i64 with Mut, Panic {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    emit_fo_channel_contrib_sq_a64(out, s0, 0)
+    emit_fo_channel_contrib_sq_a64(out, s1, 1)
+    emit_fo_channel_contrib_sq_a64(out, s2, 2)
+    emit_fo_channel_contrib_sq_a64(out, s3, 3)
+    emit_fo_channel_contrib_sq_a64(out, s4, 4)
+    emit_fo_channel_contrib_sq_a64(out, s5, 5)
+    emit_fo_channel_contrib_sq_a64(out, s6, 6)
+    emit_fo_channel_contrib_sq_a64(out, s7, 7)
+    return out
+}
+
 fn emit_load_operand_value_x86(slot: i64, ty: i64, ty_hash: i64, tok: i64) with IO, Mut, Panic, Div {
     emit_load_var(slot)
     if knowledge_hash_is(ty_hash) {
@@ -38073,6 +38159,27 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                 b7j_d = b7j_d + 1
             }
         }
+        // β¹¹ twin: rebuild Var from the FO sensitivities now that the product's
+        // own sens frame is complete. The β⁴ block above is a blind
+        // a²·var(b) + b²·var(a), which under-counts a·a — the FO rule wants
+        // 4a²σ², not 2a²σ². The x86 site does this from EXPR_SSHADOW_*; here the
+        // product's channels are still in the output frame, so read them there.
+        if left_f64 == 1 && op == 19 {
+            var b11_any_m: i64 = 0
+            var b11_q_m: i64 = 0
+            while b11_q_m < 8 {
+                if B7F[(b7_o_m + 36 + b11_q_m) as usize] >= 0 { b11_any_m = 1 }
+                b11_q_m = b11_q_m + 1
+            }
+            if b11_any_m == 1 {
+                EXPR_VSHADOW = emit_fo_var_from_sens_a64(
+                    B7F[(b7_o_m + 36) as usize], B7F[(b7_o_m + 37) as usize],
+                    B7F[(b7_o_m + 38) as usize], B7F[(b7_o_m + 39) as usize],
+                    B7F[(b7_o_m + 40) as usize], B7F[(b7_o_m + 41) as usize],
+                    B7F[(b7_o_m + 42) as usize], B7F[(b7_o_m + 43) as usize]
+                )
+            }
+        }
         b7_restore_a64(b7_o_m)
         B7_TOP = b7_prev_m
         // Restore arithmetic result
@@ -38766,13 +38873,54 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_result_slot)
             }
             if b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0 {
-                if b4aa_left_vshadow >= 0 { emit_load_var_a64(b4aa_left_vshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_vshadow >= 0 { emit_load_var_a64(b4aa_right_vshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
-                let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_vres)
-                EXPR_VSHADOW = b4aa_vres
+                // β⁵ covariance: slot identity → Var(x−x)=0 (same shadow slot on
+                // both sides). Mirror of the x86 chain, which this site had
+                // collapsed into the blind sum below.
+                if op == 18 && b4aa_left_vshadow >= 0 && b4aa_left_vshadow == b4aa_right_vshadow {
+                    let b4aa_vzero = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(0)
+                    emit_store_var_a64(b4aa_vzero)
+                    EXPR_VSHADOW = b4aa_vzero
+                } else if b4aa_right_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_left_vshadow   // Var(a ± 0) = Var(a), pass through
+                } else if b4aa_left_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_right_vshadow  // Var(0 + b) = Var(b), pass through
+                } else {
+                    // β¹⁰: FO sensitivity-difference variance on sub when multi-
+                    // channel AD shadows are live (cancels a·b − a·b, which slot
+                    // identity cannot see). Else the blind sum. The x86 site reads
+                    // the operands' EXPR_SSHADOW_*; the a64 operands are parked in
+                    // their frames, and those carry all eight channels, not four.
+                    var b4aa_use_fo: i64 = 0
+                    if op == 18 {
+                        var b10_q_a: i64 = 0
+                        while b10_q_a < 8 {
+                            if B7F[(b7_l_a + 36 + b10_q_a) as usize] >= 0 { b4aa_use_fo = 1 }
+                            if B7F[(b7_r_a + 36 + b10_q_a) as usize] >= 0 { b4aa_use_fo = 1 }
+                            b10_q_a = b10_q_a + 1
+                        }
+                    }
+                    if b4aa_use_fo == 1 {
+                        EXPR_VSHADOW = emit_fo_var_from_sens_diff_sub_a64(
+                            B7F[(b7_l_a + 36) as usize], B7F[(b7_l_a + 37) as usize],
+                            B7F[(b7_l_a + 38) as usize], B7F[(b7_l_a + 39) as usize],
+                            B7F[(b7_l_a + 40) as usize], B7F[(b7_l_a + 41) as usize],
+                            B7F[(b7_l_a + 42) as usize], B7F[(b7_l_a + 43) as usize],
+                            B7F[(b7_r_a + 36) as usize], B7F[(b7_r_a + 37) as usize],
+                            B7F[(b7_r_a + 38) as usize], B7F[(b7_r_a + 39) as usize],
+                            B7F[(b7_r_a + 40) as usize], B7F[(b7_r_a + 41) as usize],
+                            B7F[(b7_r_a + 42) as usize], B7F[(b7_r_a + 43) as usize]
+                        )
+                    } else {
+                        emit_load_var_a64(b4aa_left_vshadow)
+                        emit_push_a64()
+                        emit_load_var_a64(b4aa_right_vshadow)
+                        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
+                        let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4aa_vres)
+                        EXPR_VSHADOW = b4aa_vres
+                    }
+                }
             }
             // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
             // inline copies. Channels 4-7 had no a64 site at all before this:
