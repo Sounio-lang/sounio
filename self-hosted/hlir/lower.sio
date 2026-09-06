@@ -109,7 +109,22 @@ pub struct HlirLowerState {
     oct_keys: [i64; 128],
     oct_comps: [i64; 2048],
     oct_dims: [i64; 128],
+    // Pointer provenance and deferred algebraic operator operands. A loaded
+    // Hyper value keeps its source pointer; a Sedenion product keeps the two
+    // source pointers until the destination store makes the three-pointer ABI
+    // explicit. This prevents the frontend from erasing the operator into 256
+    // scalar products before target selection.
+    oct_ptrs: [i64; 128],
+    oct_xor_lhs_ptrs: [i64; 128],
+    oct_xor_rhs_ptrs: [i64; 128],
     oct_count: i64,
+    // Checker-owned semantic identity, reduced to the fields HLIR needs. The
+    // source span is stable across the post-check AST reload in the GPU path.
+    hyper_span_starts: [i64; 128],
+    hyper_span_ends: [i64; 128],
+    hyper_algebra_tags: [i64; 128],
+    hyper_op_kinds: [i64; 128],
+    hyper_expr_count: i64,
 }
 
 struct HlirExprListResult {
@@ -140,8 +155,46 @@ pub fn hlir_lower_state_new() -> HlirLowerState with Div, Mut, Panic {
         oct_keys: [0 - 1; 128],
         oct_comps: [0; 2048],
         oct_dims: [0; 128],
+        oct_ptrs: [HLIR_INVALID_VALUE; 128],
+        oct_xor_lhs_ptrs: [HLIR_INVALID_VALUE; 128],
+        oct_xor_rhs_ptrs: [HLIR_INVALID_VALUE; 128],
         oct_count: 0,
+        hyper_span_starts: [0; 128],
+        hyper_span_ends: [0; 128],
+        hyper_algebra_tags: [0 - 1; 128],
+        hyper_op_kinds: [0; 128],
+        hyper_expr_count: 0,
     }
+}
+
+fn hlir_install_hyper_metadata(state: HlirLowerState, epistemic: &IrEpistemicSection) -> HlirLowerState with Mut, Panic {
+    var s = state
+    var count = epistemic.hyper_expr_count
+    if count > 128 { count = 128 }
+    var i: i64 = 0
+    while i < count {
+        let info = epistemic.hyper_exprs[i as usize]
+        s.hyper_span_starts[i as usize] = info.span_start
+        s.hyper_span_ends[i as usize] = info.span_end
+        s.hyper_algebra_tags[i as usize] = info.algebra_tag
+        s.hyper_op_kinds[i as usize] = info.op_kind
+        i = i + 1
+    }
+    s.hyper_expr_count = count
+    s
+}
+
+fn hlir_checked_hyper_mul_algebra(state: HlirLowerState, span: Span) -> i64 {
+    var i: i64 = 0
+    while i < state.hyper_expr_count {
+        if state.hyper_span_starts[i as usize] == span.start
+            && state.hyper_span_ends[i as usize] == span.end
+            && state.hyper_op_kinds[i as usize] == 1 {
+            return state.hyper_algebra_tags[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
 }
 
 // --- Octonion value model helpers (GPU first-class `a * h`) ---
@@ -184,6 +237,39 @@ fn hlir_oct_record(state: HlirLowerState, comps: [i64; 16], dim: i64) -> (HlirLo
         s.oct_count = s.oct_count + 1
     }
     (s, repr)
+}
+
+fn hlir_oct_find(state: HlirLowerState, repr: i64) -> i64 {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr { return k }
+        k = k + 1
+    }
+    0 - 1
+}
+
+fn hlir_oct_record_pointer(state: HlirLowerState, repr: i64, ptr: i64) -> HlirLowerState {
+    var s = state
+    let k = hlir_oct_find(s, repr)
+    if k >= 0 { s.oct_ptrs[k as usize] = ptr }
+    s
+}
+
+fn hlir_oct_pointer(state: HlirLowerState, repr: i64) -> i64 {
+    let k = hlir_oct_find(state, repr)
+    if k < 0 { return HLIR_INVALID_VALUE }
+    state.oct_ptrs[k as usize]
+}
+
+fn hlir_oct_record_deferred_xor(state: HlirLowerState, lhs_ptr: i64, rhs_ptr: i64) -> (HlirLowerState, i64) with Mut, Panic {
+    let recorded = hlir_oct_record(state, [HLIR_INVALID_VALUE; 16], 16)
+    var s = recorded.0
+    let k = hlir_oct_find(s, recorded.1)
+    if k >= 0 {
+        s.oct_xor_lhs_ptrs[k as usize] = lhs_ptr
+        s.oct_xor_rhs_ptrs[k as usize] = rhs_ptr
+    }
+    (s, recorded.1)
 }
 
 // Is value_id a recorded hypercomplex repr?
@@ -239,28 +325,38 @@ fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerSta
         comps[c as usize] = load_pair.1
         c = c + 1
     }
-    hlir_oct_record(s, comps, dim)
+    let recorded = hlir_oct_record(s, comps, dim)
+    (hlir_oct_record_pointer(recorded.0, recorded.1, ptr_val), recorded.1)
 }
 
-// Cayley-Dickson multiply: r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over `dim` components
-// (dim=8/bits=3 octonion, dim=16/bits=4 sedenion). Returns a fresh repr.
-fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+// Twisted XOR convolution for the Cayley-Dickson sign function:
+// r[d] = sum_i sigma(i, i^d, bits) * a[i] * b[i^d].
+// Fixing d makes every selected pair land in one result lane. The explicit
+// reduction order remains authoritative; target selectors may accelerate only
+// b[i^d] until a reduction proof is available.
+fn hlir_xor_convolution(state: HlirLowerState, a_repr: i64, b_repr: i64, contract: HlirXorConvolution) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
+    let dim = contract.dimension
+    let bits = contract.bits
+    if bits == 4 && dim == 16 {
+        let lhs_ptr = hlir_oct_pointer(s, a_repr)
+        let rhs_ptr = hlir_oct_pointer(s, b_repr)
+        if lhs_ptr == HLIR_INVALID_VALUE || rhs_ptr == HLIR_INVALID_VALUE {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        return hlir_oct_record_deferred_xor(s, lhs_ptr, rhs_ptr)
+    }
     let a = hlir_oct_lookup(s, a_repr)
     let b = hlir_oct_lookup(s, b_repr)
     var r: [i64; 16] = [0 - 1; 16]
-    var z: i64 = 0
-    while z < dim {
+    var d: i64 = 0
+    while d < dim {
         let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
         s = zp.0
-        r[z as usize] = zp.1
-        z = z + 1
-    }
-    var i: i64 = 0
-    while i < dim {
-        var j: i64 = 0
-        while j < dim {
-            let m = i ^ j
+        var sum = zp.1
+        var i: i64 = 0
+        while i < dim {
+            let j = i ^ d
             let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
             s = mulp.0
             var t = mulp.1
@@ -271,12 +367,13 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits:
                 s = negp.0
                 t = negp.1
             }
-            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, r[m as usize], t, hlir_type_f64())
+            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, sum, t, hlir_type_f64())
             s = addp.0
-            r[m as usize] = addp.1
-            j = j + 1
+            sum = addp.1
+            i = i + 1
         }
-        i = i + 1
+        r[d as usize] = sum
+        d = d + 1
     }
     hlir_oct_record(s, r, dim)
 }
@@ -284,6 +381,17 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits:
 // Store a repr's `dim` components through a hypercomplex pointer value.
 fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
+    let repr_idx = hlir_oct_find(s, repr)
+    if repr_idx >= 0 && s.oct_xor_lhs_ptrs[repr_idx as usize] != HLIR_INVALID_VALUE {
+        var args: [i64; 64] = [HLIR_INVALID_VALUE; 64]
+        args[0] = s.oct_xor_lhs_ptrs[repr_idx as usize]
+        args[1] = s.oct_xor_rhs_ptrs[repr_idx as usize]
+        args[2] = ptr_val
+        let lowered = hlir_lower_xor_convolution_call(
+            s, hlir_empty_name(), args, 3, hlir_type_void(),
+            hlir_cayley_dickson_xor_convolution(4), HLIR_XOR_CANDIDATE_AUTO)
+        return lowered.0
+    }
     let comps = hlir_oct_lookup(s, repr)
     let dim = hlir_oct_dim(s, repr)
     var c: i64 = 0
@@ -316,8 +424,10 @@ pub fn hlir_lower_has_errors(state: HlirLowerState) -> bool {
 // Module finalization
 // ============================================================================
 
-pub fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule {
-    hlir_module_builder_finish(state.module_builder)
+pub fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule with Mut {
+    var module = hlir_module_builder_finish(state.module_builder)
+    module.lowering_error_count = state.error_count
+    module
 }
 
 // ============================================================================
@@ -560,6 +670,13 @@ pub fn hlir_lower_call_named(state: HlirLowerState, callee: HlirName, arg_vals: 
     s.builder = pair.0
     let result = pair.1
     (s, result)
+}
+
+pub fn hlir_lower_xor_convolution_call(state: HlirLowerState, callee: HlirName, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType, contract: HlirXorConvolution, candidate: i64) -> (HlirLowerState, i64) with Mut, Panic {
+    var s = state
+    let pair = hlir_builder_emit_xor_convolution(s.builder, callee, arg_vals, arg_count, ret_ty, contract, candidate)
+    s.builder = pair.0
+    (s, pair.1)
 }
 
 // ============================================================================
@@ -2024,8 +2141,19 @@ pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc 
             match ty.type_args {
                 Some(args) => {
                     let alg_name = hlir_ast_path_head_to_string((*args).head.path)
-                    if alg_name == "Octonion" { return hlir_type_octonion() }
-                    if alg_name == "Sedenion" { return hlir_type_sedenion() }
+                    // The only material contract currently defined is f64.
+                    // Keep every other scalar type out of these f64-only HLIR
+                    // kinds until it has its own opcode and backend ABI.
+                    match (*args).tail {
+                        Some(scalar_args) => {
+                            let scalar_name = hlir_ast_path_head_to_string((*scalar_args).head.path)
+                            if scalar_name == "f64" {
+                                if alg_name == "Octonion" { return hlir_type_octonion() }
+                                if alg_name == "Sedenion" { return hlir_type_sedenion() }
+                            }
+                        }
+                        None => {}
+                    }
                 }
                 None => {}
             }
@@ -2460,10 +2588,30 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         // First-class hypercomplex multiply: both operands are recorded reprs → expand
         // r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over the components (Convention X / cd_sigma).
         // dim/bits come from the operands: octonion (8,3) or sedenion (16,4).
-        if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
-            let dim = hlir_oct_dim(s, lhs_val)
-            let bits = if dim == 16 { 4 } else { 3 }
-            return hlir_oct_mul(s, lhs_val, rhs_val, dim, bits)
+        let checked_algebra = hlir_checked_hyper_mul_algebra(s, expr.span)
+        if expr.bin_op == BinaryOp::OpMul && checked_algebra >= 0
+            && (!hlir_oct_is(s, lhs_val) || !hlir_oct_is(s, rhs_val)) {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        // An unbound aggregate multiply must never become a scalar multiply.
+        if expr.bin_op == BinaryOp::OpMul && checked_algebra < 0
+            && (hlir_oct_is(s, lhs_val) || hlir_oct_is(s, rhs_val)) {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
+        if expr.bin_op == BinaryOp::OpMul
+            && checked_algebra >= 0
+            && hlir_oct_is(s, lhs_val)
+            && hlir_oct_is(s, rhs_val) {
+            let lhs_dim = hlir_oct_dim(s, lhs_val)
+            let rhs_dim = hlir_oct_dim(s, rhs_val)
+            let bits = if checked_algebra == 4 && lhs_dim == 16 && rhs_dim == 16 { 4 }
+                else if checked_algebra == 3 && lhs_dim == 8 && rhs_dim == 8 { 3 }
+                else { 0 }
+            if bits == 0 {
+                return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+            }
+            let contract = hlir_cayley_dickson_xor_convolution(bits)
+            return hlir_xor_convolution(s, lhs_val, rhs_val, contract)
         }
         let lhs_ty = hlir_lower_value_type(s, lhs_val)
         let rhs_ty = hlir_lower_value_type(s, rhs_val)
@@ -2794,6 +2942,18 @@ pub fn hlir_lower_items(state: HlirLowerState, items: Option<Box<ItemList>>) -> 
 
 pub fn hlir_lower_module(ast_module: Program) -> HlirModule with Mut, Panic, Div, Alloc {
     var s = hlir_lower_state_new()
+    let mod_name = hlir_ast_path_head_to_string(ast_module.module_path)
+    if str_len(mod_name) > 0 {
+        s = hlir_lower_set_module_name(s, mod_name)
+    } else {
+        s = hlir_lower_set_module_name(s, "module")
+    }
+    s = hlir_lower_items(s, ast_module.items)
+    hlir_lower_finish_module(s)
+}
+
+pub fn hlir_lower_module_with_epistemic(ast_module: Program, epistemic: &IrEpistemicSection) -> HlirModule with Mut, Panic, Div, Alloc {
+    var s = hlir_install_hyper_metadata(hlir_lower_state_new(), epistemic)
     let mod_name = hlir_ast_path_head_to_string(ast_module.module_path)
     if str_len(mod_name) > 0 {
         s = hlir_lower_set_module_name(s, mod_name)

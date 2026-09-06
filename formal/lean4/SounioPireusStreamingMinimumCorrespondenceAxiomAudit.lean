@@ -1,0 +1,30 @@
+import SounioPireusStreamingMinimumCorrespondence
+
+open SounioPireusStreamingMinimumCorrespondence
+
+#print axioms sounioStreamingStep
+#print axioms sounio_streaming_step_eq_min
+#print axioms sounioStreamingMinimum
+#print axioms sounio_streaming_minimum_eq_list_min?
+#print axioms quotientStreamingCanonicalOption
+#print axioms quotient_streaming_minimum_eq_abstract_canonical
+#print axioms FrozenScanActionView
+#print axioms frozenScanActionViews
+#print axioms scanViewToAnalytic
+#print axioms every_frozen_scan_entry_mem
+#print axioms every_analytic_basis_entry_mem
+#print axioms every_frozen_scan_action_view_mem
+#print axioms every_analytic_action_view_mem
+#print axioms mapped_frozen_scan_action_views_membership
+#print axioms scan_witness_eq_mapped_analytic_witness
+#print axioms actionOfFrozenScanView
+#print axioms action_of_frozen_scan_view_eq_mapped_analytic_action
+#print axioms frozenScanCandidate
+#print axioms frozen_scan_candidate_eq_mapped_quotient_action
+#print axioms frozenScanCandidateList
+#print axioms frozen_scan_candidate_membership_eq_analytic_orbit
+#print axioms frozenScanModelStreamingCanonicalOption
+#print axioms frozen_scan_model_streaming_minimum_eq_declared_canonical
+#print axioms StreamingMinimumCorrespondenceBoundary
+#print axioms streamingMinimumCorrespondenceBoundary
+#print axioms streaming_fold_closed_without_executed_parity_promotion

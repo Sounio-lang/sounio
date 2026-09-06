@@ -7,14 +7,14 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
 use native::macho::*
 use native::reloc::*
 use native::frame::*
-use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code}
+use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s}
 use native::machine_ir::*
 use native::peephole::{ph_run_on_func}
 use native::regalloc::*
@@ -8851,6 +8851,120 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
     }
 }
 
+fn pireus_native_cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let ah = if a >= half { 1 } else { 0 }
+    let bh = if b >= half { 1 } else { 0 }
+    let al = a & (half - 1)
+    let bl = b & (half - 1)
+    if ah == 0 && bh == 0 { return pireus_native_cd_sign(al, bl, bits - 1) }
+    if ah == 0 && bh == 1 { return pireus_native_cd_sign(bl, al, bits - 1) }
+    if ah == 1 && bh == 0 {
+        if bl == 0 { return pireus_native_cd_sign(al, 0, bits - 1) }
+        return 0 - pireus_native_cd_sign(al, bl, bits - 1)
+    }
+    if bl == 0 { return 0 - pireus_native_cd_sign(0, al, bits - 1) }
+    pireus_native_cd_sign(bl, al, bits - 1)
+}
+
+fn pireus_native_rodata_align64(nc: &! NativeCompiler) with Mut, Panic, Div {
+    while ((*nc).flat_rodata_len & 63) != 0 {
+        native_v2_rodata_append_byte_into(nc, 0)
+    }
+}
+
+fn pireus_native_rodata_append_i64(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
+    var byte: i64 = 0
+    while byte < 8 {
+        native_v2_rodata_append_byte_into(nc, (value >> (byte * 8)) & 255)
+        byte = byte + 1
+    }
+}
+
+// Materialize semantic ptr3 XorConvolution<4,CayleyDicksonSign> at the final
+// x86 boundary. The ZMM layout is the frozen Pireus Xeon candidate validated by
+// emit_xor_convolution_s; virtual Core-IR registers never masquerade as ZMM ids.
+fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
+    pireus_native_rodata_align64(nc)
+    let xor_offset = (*nc).flat_rodata_len
+    var lane: i64 = 0
+    while lane < 8 {
+        var d: i64 = 0
+        while d < 8 {
+            pireus_native_rodata_append_i64(nc, lane ^ d)
+            d = d + 1
+        }
+        lane = lane + 1
+    }
+    let broadcast_offset = (*nc).flat_rodata_len
+    lane = 0
+    while lane < 8 {
+        var q: i64 = 0
+        while q < 8 {
+            pireus_native_rodata_append_i64(nc, lane)
+            q = q + 1
+        }
+        lane = lane + 1
+    }
+    let sign_offset = (*nc).flat_rodata_len
+    var i: i64 = 0
+    while i < 16 {
+        var out: i64 = 0
+        while out < 16 {
+            let sign_bits = if pireus_native_cd_sign(i, i ^ out, 4) < 0 {
+                0 - 9223372036854775807 - 1
+            } else {
+                0
+            }
+            pireus_native_rodata_append_i64(nc, sign_bits)
+            out = out + 1
+        }
+        i = i + 1
+    }
+
+    // SysV pointer registers stay live through the EVEX-only kernel.
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 6, 0, 7, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 7, 0, 7, 64, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 8, 0, 6, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 9, 0, 6, 64, 2)
+
+    let xor_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, xor_lea + 3, xor_offset)
+    lane = 0
+    while lane < 8 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 10 + lane, 0, 0, lane * 64, 2)
+        lane = lane + 1
+    }
+    let broadcast_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, broadcast_lea + 3, broadcast_offset)
+    lane = 0
+    while lane < 8 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 18 + lane, 0, 0, lane * 64, 2)
+        lane = lane + 1
+    }
+    let sign_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, sign_lea + 3, sign_offset)
+
+    let physical = ir_xor_convolution_s(0, 6, 8, 10, 18, 0)
+    (*nc).code = emit_xor_convolution_s((*nc).code, physical)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 0, 0, 2, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 1, 0, 2, 64, 2)
+    nc_emit_byte(nc, 0xc5)
+    nc_emit_byte(nc, 0xf8)
+    nc_emit_byte(nc, 0x77)
+    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+        print("PIREUS_NATIVE_EMIT opcode=IrXorConvolutionS candidate=two_zmm_indexed_permute kernel_bytes=1004 abi=ptr3\n")
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_refresh_wide_mul_sabotage()
     nc_v2_reset_label_state()
@@ -9231,6 +9345,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             } else {
                 return false
             }
+        } else if instr_op == IrOpcode::IrXorConvolutionS {
+            let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
+            let twist = flags & 255
+            let candidate = (flags >> 8) & 255
+            if IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize] != 4
+                || twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
+                || candidate != IR_XOR_CANDIDATE_AUTO
+                || IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] != 1 {
+                return false
+            }
+            pireus_native_emit_xor_convolution_s_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
         } else if instr_op == IrOpcode::IrStorePtr {
             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
             nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])

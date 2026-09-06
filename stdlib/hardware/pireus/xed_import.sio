@@ -1,0 +1,661 @@
+//! Grammar-bounded Intel XED importer for the first Pireus vendor slice.
+//!
+//! The accepted corpus is the exact AVX-512 foundation file from Intel XED
+//! v2026.08.23. The importer recognizes only the eight 512-bit f64 records for
+//! VPERMPD, VPERMI2PD, and VPERMT2PD. Any byte drift, unknown selected-record
+//! field, missing field, or unrecognized field value fails closed.
+
+use crypto::sha256::{
+    SHA256Digest, sha256_init, sha256_update, sha256_finalize,
+}
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::target_profile::{
+    pireus_v01_store,
+    PIREUS_ACCESS_WRITE, PIREUS_ACCESS_READ_WRITE,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_XED_OK: i64 = 0
+pub const PIREUS_XED_ERR_FILE: i64 = 1
+pub const PIREUS_XED_ERR_HASH: i64 = 2
+pub const PIREUS_XED_ERR_SYNTAX: i64 = 3
+pub const PIREUS_XED_ERR_UNKNOWN_FIELD: i64 = 4
+pub const PIREUS_XED_ERR_MISSING_FIELD: i64 = 5
+pub const PIREUS_XED_ERR_VALUE_DRIFT: i64 = 6
+pub const PIREUS_XED_ERR_CAPACITY: i64 = 7
+
+pub const PIREUS_XED_FAMILY_VPERMI2PD: i64 = 1
+pub const PIREUS_XED_FAMILY_VPERMPD: i64 = 2
+pub const PIREUS_XED_FAMILY_VPERMT2PD: i64 = 3
+
+pub const PIREUS_XED_SELECTOR_UNASSIGNED: i64 = 0
+pub const PIREUS_XED_SELECTOR_UIMM8: i64 = 1
+pub const PIREUS_XED_SELECTOR_REGISTER_INDEX: i64 = 2
+
+pub const PIREUS_XED_STORAGE_REGISTER: i64 = 1
+pub const PIREUS_XED_STORAGE_MEMORY: i64 = 2
+
+pub const PIREUS_XED_CLASS_INSTRUCTION_FORM: i64 = 702000
+pub const PIREUS_XED_CLASS_VENDOR_CORPUS: i64 = 702001
+pub const PIREUS_XED_CLASS_ICLASS: i64 = 702002
+pub const PIREUS_XED_CLASS_ISA_SET: i64 = 702003
+pub const PIREUS_XED_CLASS_RAW_SELECTOR_SYNTAX: i64 = 702004
+pub const PIREUS_XED_CLASS_STORAGE_KIND: i64 = 702005
+
+pub const PIREUS_XED_HAS_CORPUS: i64 = 702100
+pub const PIREUS_XED_HAS_ICLASS: i64 = 702101
+pub const PIREUS_XED_HAS_ISA_SET: i64 = 702102
+pub const PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX: i64 = 702103
+pub const PIREUS_XED_HAS_STORAGE_KIND: i64 = 702104
+pub const PIREUS_XED_HAS_DESTINATION_ACCESS: i64 = 702105
+
+pub const PIREUS_XED_CORPUS_AVX512F_2026_08_23: i64 = 702200
+pub const PIREUS_XED_EVIDENCE_NORMATIVE_VENDOR: i64 = 702201
+pub const PIREUS_XED_ICLASS_VPERMI2PD: i64 = 702210
+pub const PIREUS_XED_ICLASS_VPERMPD: i64 = 702211
+pub const PIREUS_XED_ICLASS_VPERMT2PD: i64 = 702212
+pub const PIREUS_XED_ISA_AVX512F_512: i64 = 702220
+pub const PIREUS_XED_SELECTOR_RAW_UNASSIGNED: i64 = 702230
+pub const PIREUS_XED_SELECTOR_RAW_UIMM8: i64 = 702231
+pub const PIREUS_XED_SELECTOR_RAW_REGISTER_INDEX: i64 = 702232
+pub const PIREUS_XED_STORAGE_RAW_REGISTER: i64 = 702240
+pub const PIREUS_XED_STORAGE_RAW_MEMORY: i64 = 702241
+
+const PIREUS_XED_EXPECTED_BYTES: i64 = 458470
+const PIREUS_XED_EXPECTED_FIELDS: i64 = 2047
+
+pub struct PireusXedBuffer {
+    data: [i8; 524288],
+    len: i64,
+    error: i64,
+}
+
+pub struct PireusXedForm {
+    record_kind: i64,
+    family: i64,
+    destination_access: i64,
+    raw_selector_syntax: i64,
+    storage_kind: i64,
+    operand_count: i64,
+    read_operand_count: i64,
+    mask_read_count: i64,
+    destination_zf64_count: i64,
+    register_read_zf64_count: i64,
+    memory_read_f64_count: i64,
+    immediate_read_count: i64,
+}
+
+pub struct PireusXedInventory {
+    forms: [PireusXedForm; 16],
+    count: i64,
+    ignored_records: i64,
+    unknown_fields: i64,
+    digest_match: bool,
+    error: i64,
+}
+
+struct PireusXedRecord {
+    target_family: i64,
+    fields: i64,
+    pattern_kind: i64,
+    operands_kind: i64,
+    iform_kind: i64,
+}
+
+fn xed_form_empty() -> PireusXedForm {
+    PireusXedForm {
+        record_kind: 0,
+        family: 0,
+        destination_access: 0,
+        raw_selector_syntax: 0,
+        storage_kind: 0,
+        operand_count: 0,
+        read_operand_count: 0,
+        mask_read_count: 0,
+        destination_zf64_count: 0,
+        register_read_zf64_count: 0,
+        memory_read_f64_count: 0,
+        immediate_read_count: 0,
+    }
+}
+
+fn xed_inventory_empty() -> PireusXedInventory with Mut {
+    PireusXedInventory {
+        forms: [xed_form_empty(); 16],
+        count: 0,
+        ignored_records: 0,
+        unknown_fields: 0,
+        digest_match: false,
+        error: PIREUS_XED_OK,
+    }
+}
+
+fn xed_record_empty() -> PireusXedRecord {
+    PireusXedRecord {
+        target_family: 0,
+        fields: 0,
+        pattern_kind: 0,
+        operands_kind: 0,
+        iform_kind: 0,
+    }
+}
+
+pub fn pireus_xed_expected_sha256() -> string {
+    "e9bc0522be4c1a3a3d938eab334c47e306fe759cccf376b9dfb2b9cf7aee0038"
+}
+
+pub fn pireus_xed_load(path: string) -> PireusXedBuffer
+with IO, Mut, Panic, Div, Alloc {
+    var out = PireusXedBuffer {
+        data: [0; 524288], len: 0, error: PIREUS_XED_OK,
+    }
+    let size = file_size(path)
+    if size <= 0 || size > 524288 {
+        out.error = PIREUS_XED_ERR_FILE
+        return out
+    }
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < size {
+        out.data[i as usize] = raw[i as usize] as i8
+        i = i + 1
+    }
+    out.len = size
+    out
+}
+
+fn xed_digest(buf: &PireusXedBuffer) -> SHA256Digest with Mut, Panic, Div {
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < buf.len {
+        var chunk: [u8; 256] = [0; 256]
+        var n: i64 = buf.len - pos
+        if n > 256 { n = 256 }
+        var i: i64 = 0
+        while i < n {
+            chunk[i as usize] = buf.data[(pos + i) as usize] as u8
+            i = i + 1
+        }
+        state = sha256_update(state, chunk, n as i32)
+        pos = pos + n
+    }
+    sha256_finalize(state)
+}
+
+pub fn pireus_xed_digest_matches(buf: &PireusXedBuffer) -> bool
+with Mut, Panic, Div {
+    if buf.len != PIREUS_XED_EXPECTED_BYTES { return false }
+    let digest = xed_digest(buf)
+    let expected: [i64; 32] = [
+        0xe9, 0xbc, 0x05, 0x22, 0xbe, 0x4c, 0x1a, 0x3a,
+        0x3d, 0x93, 0x8e, 0xab, 0x33, 0x4c, 0x47, 0xe3,
+        0x06, 0xfe, 0x75, 0x9c, 0xcc, 0xf3, 0x76, 0xb9,
+        0xdf, 0xb2, 0xb9, 0xcf, 0x7a, 0xee, 0x00, 0x38
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn xed_hws(c: i64) -> bool { c == 32 || c == 9 || c == 13 }
+
+fn xed_trim_start(buf: &PireusXedBuffer, start: i64, end: i64) -> i64 {
+    var p = start
+    while p < end && xed_hws(buf.data[p as usize] as i64) { p = p + 1 }
+    p
+}
+
+fn xed_trim_end(buf: &PireusXedBuffer, start: i64, end: i64) -> i64 {
+    var p = end
+    while p > start && xed_hws(buf.data[(p - 1) as usize] as i64) { p = p - 1 }
+    p
+}
+
+fn xed_span_eq(
+    buf: &PireusXedBuffer, start: i64, end: i64, value: string,
+) -> bool with Panic, Div {
+    let n = str_len(value)
+    if end - start != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if buf.data[(start + i) as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn pireus_xed_find(
+    buf: &PireusXedBuffer, start: i64, needle: string,
+) -> i64 with Panic, Div {
+    let n = str_len(needle)
+    if n == 0 { return start }
+    var p = start
+    while p + n <= buf.len {
+        var i: i64 = 0
+        var same = true
+        while i < n {
+            if buf.data[(p + i) as usize] != str_char_at(needle, i) as i8 {
+                same = false
+                break
+            }
+            i = i + 1
+        }
+        if same { return p }
+        p = p + 1
+    }
+    0 - 1
+}
+
+fn xed_key_index(
+    buf: &PireusXedBuffer, start: i64, end: i64,
+) -> i64 with Panic, Div {
+    if xed_span_eq(buf, start, end, "ICLASS") { return 0 }
+    if xed_span_eq(buf, start, end, "CPL") { return 1 }
+    if xed_span_eq(buf, start, end, "CATEGORY") { return 2 }
+    if xed_span_eq(buf, start, end, "EXTENSION") { return 3 }
+    if xed_span_eq(buf, start, end, "ISA_SET") { return 4 }
+    if xed_span_eq(buf, start, end, "EXCEPTIONS") { return 5 }
+    if xed_span_eq(buf, start, end, "REAL_OPCODE") { return 6 }
+    if xed_span_eq(buf, start, end, "ATTRIBUTES") { return 7 }
+    if xed_span_eq(buf, start, end, "PATTERN") { return 8 }
+    if xed_span_eq(buf, start, end, "OPERANDS") { return 9 }
+    if xed_span_eq(buf, start, end, "IFORM") { return 10 }
+    0 - 1
+}
+
+fn xed_pattern_kind(
+    buf: &PireusXedBuffer, start: i64, end: i64,
+) -> i64 with Panic, Div {
+    if xed_span_eq(buf, start, end,
+        "EVV 0x77 V66 V0F38 MOD[0b11] MOD=3 BCRC=0 UBIT=1 REG[rrr] RM[nnn]  VL512  W1") { return 1 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x77 V66 V0F38 MOD[mm] MOD!=3 UBIT=1 REG[rrr] RM[nnn]  MODRM()  VL512  W1    ESIZE_64_BITS() NELEM_FULL()") { return 2 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x01 V66 V0F3A MOD[0b11] MOD=3 BCRC=0 UBIT=1 REG[rrr] RM[nnn]  VL512  W1  NOEVSR UIMM8()") { return 3 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x01 V66 V0F3A MOD[mm] MOD!=3 UBIT=1 REG[rrr] RM[nnn]  MODRM()  VL512  W1  NOEVSR UIMM8()  ESIZE_64_BITS() NELEM_FULL()") { return 4 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x16 V66 V0F38 MOD[0b11] MOD=3 BCRC=0 UBIT=1 REG[rrr] RM[nnn]  VL512  W1") { return 5 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x16 V66 V0F38 MOD[mm] MOD!=3 UBIT=1 REG[rrr] RM[nnn]  MODRM()  VL512  W1    ESIZE_64_BITS() NELEM_FULL()") { return 6 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x7F V66 V0F38 MOD[0b11] MOD=3 BCRC=0 UBIT=1 REG[rrr] RM[nnn]  VL512  W1") { return 7 }
+    if xed_span_eq(buf, start, end,
+        "EVV 0x7F V66 V0F38 MOD[mm] MOD!=3 UBIT=1 REG[rrr] RM[nnn]  MODRM()  VL512  W1    ESIZE_64_BITS() NELEM_FULL()") { return 8 }
+    0
+}
+
+fn xed_operands_kind(
+    buf: &PireusXedBuffer, start: i64, end: i64,
+) -> i64 with Panic, Div {
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():rw:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR REG2=ZMM_N3():r:zf64 REG3=ZMM_B3():r:zf64") { return 1 }
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():rw:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR REG2=ZMM_N3():r:zf64 MEM0:r:vv:f64:TXT=BCASTSTR") { return 2 }
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():w:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR REG2=ZMM_B3():r:zf64 IMM0:r:b") { return 3 }
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():w:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR MEM0:r:vv:f64:TXT=BCASTSTR IMM0:r:b") { return 4 }
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():w:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR REG2=ZMM_N3():r:zf64 REG3=ZMM_B3():r:zf64") { return 5 }
+    if xed_span_eq(buf, start, end,
+        "REG0=ZMM_R3():w:zf64 REG1=MASK1():r:mskw:TXT=ZEROSTR REG2=ZMM_N3():r:zf64 MEM0:r:vv:f64:TXT=BCASTSTR") { return 6 }
+    0
+}
+
+fn xed_iform_kind(
+    buf: &PireusXedBuffer, start: i64, end: i64,
+) -> i64 with Panic, Div {
+    if xed_span_eq(buf, start, end,
+        "VPERMI2PD_ZMMf64_MASKmskw_ZMMf64_ZMMf64_AVX512") { return 1 }
+    if xed_span_eq(buf, start, end,
+        "VPERMI2PD_ZMMf64_MASKmskw_ZMMf64_MEMf64_AVX512") { return 2 }
+    if xed_span_eq(buf, start, end,
+        "VPERMPD_ZMMf64_MASKmskw_ZMMf64_IMM8_AVX512") { return 3 }
+    if xed_span_eq(buf, start, end,
+        "VPERMPD_ZMMf64_MASKmskw_MEMf64_IMM8_AVX512") { return 4 }
+    if xed_span_eq(buf, start, end,
+        "VPERMPD_ZMMf64_MASKmskw_ZMMf64_ZMMf64_AVX512") { return 5 }
+    if xed_span_eq(buf, start, end,
+        "VPERMPD_ZMMf64_MASKmskw_ZMMf64_MEMf64_AVX512") { return 6 }
+    if xed_span_eq(buf, start, end,
+        "VPERMT2PD_ZMMf64_MASKmskw_ZMMf64_ZMMf64_AVX512") { return 7 }
+    if xed_span_eq(buf, start, end,
+        "VPERMT2PD_ZMMf64_MASKmskw_ZMMf64_MEMf64_AVX512") { return 8 }
+    0
+}
+
+fn xed_kind_family(kind: i64) -> i64 {
+    if kind == 1 || kind == 2 { return PIREUS_XED_FAMILY_VPERMI2PD }
+    if kind >= 3 && kind <= 6 { return PIREUS_XED_FAMILY_VPERMPD }
+    if kind == 7 || kind == 8 { return PIREUS_XED_FAMILY_VPERMT2PD }
+    0
+}
+
+fn xed_form_from_kind(kind: i64) -> PireusXedForm {
+    let memory = kind == 2 || kind == 4 || kind == 6 || kind == 8
+    let write_only = kind >= 3 && kind <= 6
+    var selector = PIREUS_XED_SELECTOR_UNASSIGNED
+    if kind == 3 || kind == 4 { selector = PIREUS_XED_SELECTOR_UIMM8 }
+    if kind == 5 || kind == 6 { selector = PIREUS_XED_SELECTOR_REGISTER_INDEX }
+    var register_reads: i64 = 1
+    if kind == 1 || kind == 5 || kind == 7 { register_reads = 2 }
+    if kind == 3 { register_reads = 1 }
+    if kind == 4 { register_reads = 0 }
+    PireusXedForm {
+        record_kind: kind,
+        family: xed_kind_family(kind),
+        destination_access: if write_only {
+            PIREUS_ACCESS_WRITE
+        } else {
+            PIREUS_ACCESS_READ_WRITE
+        },
+        raw_selector_syntax: selector,
+        storage_kind: if memory {
+            PIREUS_XED_STORAGE_MEMORY
+        } else {
+            PIREUS_XED_STORAGE_REGISTER
+        },
+        operand_count: 4,
+        read_operand_count: 3,
+        mask_read_count: 1,
+        destination_zf64_count: 1,
+        register_read_zf64_count: register_reads,
+        memory_read_f64_count: if memory { 1 } else { 0 },
+        immediate_read_count: if kind == 3 || kind == 4 { 1 } else { 0 },
+    }
+}
+
+fn xed_finish_record(
+    rec: &PireusXedRecord, inv: &!PireusXedInventory,
+) -> i64 with Mut {
+    if rec.target_family == 0 {
+        inv.ignored_records = inv.ignored_records + 1
+        return PIREUS_XED_OK
+    }
+    if rec.fields != PIREUS_XED_EXPECTED_FIELDS {
+        return PIREUS_XED_ERR_MISSING_FIELD
+    }
+    if rec.pattern_kind == 0 || rec.operands_kind == 0 || rec.iform_kind == 0 {
+        return PIREUS_XED_ERR_VALUE_DRIFT
+    }
+    if rec.pattern_kind != rec.iform_kind {
+        return PIREUS_XED_ERR_VALUE_DRIFT
+    }
+    var operand_kind = rec.operands_kind
+    if rec.iform_kind == 7 && operand_kind == 1 { operand_kind = 7 }
+    if rec.iform_kind == 8 && operand_kind == 2 { operand_kind = 8 }
+    if operand_kind != rec.iform_kind {
+        return PIREUS_XED_ERR_VALUE_DRIFT
+    }
+    if xed_kind_family(rec.iform_kind) != rec.target_family {
+        return PIREUS_XED_ERR_VALUE_DRIFT
+    }
+    if inv.count >= 16 { return PIREUS_XED_ERR_CAPACITY }
+    inv.forms[inv.count as usize] = xed_form_from_kind(rec.iform_kind)
+    inv.count = inv.count + 1
+    PIREUS_XED_OK
+}
+
+pub fn pireus_xed_parse(
+    buf: &PireusXedBuffer, require_digest: bool,
+) -> PireusXedInventory with Mut, Panic, Div {
+    var inv = xed_inventory_empty()
+    if buf.error != PIREUS_XED_OK {
+        inv.error = buf.error
+        return inv
+    }
+    inv.digest_match = pireus_xed_digest_matches(buf)
+    if require_digest && !inv.digest_match {
+        inv.error = PIREUS_XED_ERR_HASH
+        return inv
+    }
+
+    var in_record = false
+    var rec = xed_record_empty()
+    var line_start: i64 = 0
+    while line_start < buf.len {
+        var line_end = line_start
+        while line_end < buf.len && (buf.data[line_end as usize] as i64) != 10 {
+            line_end = line_end + 1
+        }
+        let start = xed_trim_start(buf, line_start, line_end)
+        let end = xed_trim_end(buf, start, line_end)
+
+        if start < end && (buf.data[start as usize] as i64) != 35 {
+            if end - start == 1 && (buf.data[start as usize] as i64) == 123 {
+                if in_record {
+                    inv.error = PIREUS_XED_ERR_SYNTAX
+                    return inv
+                }
+                in_record = true
+                rec = xed_record_empty()
+            } else if end - start == 1 && (buf.data[start as usize] as i64) == 125 {
+                if !in_record {
+                    inv.error = PIREUS_XED_ERR_SYNTAX
+                    return inv
+                }
+                let finish = xed_finish_record(&rec, &!inv)
+                if finish != PIREUS_XED_OK {
+                    inv.error = finish
+                    return inv
+                }
+                in_record = false
+            } else if in_record {
+                var colon: i64 = start
+                while colon < end && (buf.data[colon as usize] as i64) != 58 {
+                    colon = colon + 1
+                }
+                if colon >= end {
+                    if rec.target_family != 0 {
+                        inv.error = PIREUS_XED_ERR_UNKNOWN_FIELD
+                        inv.unknown_fields = inv.unknown_fields + 1
+                        return inv
+                    }
+                } else {
+                    let key_start = xed_trim_start(buf, start, colon)
+                    let key_end = xed_trim_end(buf, key_start, colon)
+                    let value_start = xed_trim_start(buf, colon + 1, end)
+                    let value_end = xed_trim_end(buf, value_start, end)
+                    let key = xed_key_index(buf, key_start, key_end)
+
+                    if rec.fields == 0 {
+                        if key != 0 {
+                            rec.target_family = 0
+                            rec.fields = 1
+                        } else {
+                            if xed_span_eq(buf, value_start, value_end, "VPERMI2PD") {
+                                rec.target_family = PIREUS_XED_FAMILY_VPERMI2PD
+                            } else if xed_span_eq(buf, value_start, value_end, "VPERMPD") {
+                                rec.target_family = PIREUS_XED_FAMILY_VPERMPD
+                            } else if xed_span_eq(buf, value_start, value_end, "VPERMT2PD") {
+                                rec.target_family = PIREUS_XED_FAMILY_VPERMT2PD
+                            } else {
+                                rec.target_family = 0
+                            }
+                            rec.fields = 1
+                        }
+                    } else if rec.target_family != 0 {
+                        if key < 0 {
+                            inv.error = PIREUS_XED_ERR_UNKNOWN_FIELD
+                            inv.unknown_fields = inv.unknown_fields + 1
+                            return inv
+                        }
+                        let bit = 1 << key
+                        if (rec.fields & bit) != 0 {
+                            inv.error = PIREUS_XED_ERR_SYNTAX
+                            return inv
+                        }
+                        rec.fields = rec.fields | bit
+
+                        var value_ok = true
+                        if key == 1 { value_ok = xed_span_eq(buf, value_start, value_end, "3") }
+                        if key == 2 { value_ok = xed_span_eq(buf, value_start, value_end, "AVX512") }
+                        if key == 3 { value_ok = xed_span_eq(buf, value_start, value_end, "AVX512EVEX") }
+                        if key == 4 { value_ok = xed_span_eq(buf, value_start, value_end, "AVX512F_512") }
+                        if key == 5 { value_ok = xed_span_eq(buf, value_start, value_end, "AVX512-E4NF") }
+                        if key == 6 { value_ok = xed_span_eq(buf, value_start, value_end, "Y") }
+                        if key == 7 {
+                            value_ok = xed_span_eq(buf, value_start, value_end, "MASKOP_EVEX") ||
+                                xed_span_eq(buf, value_start, value_end,
+                                    "MASKOP_EVEX DISP8_FULL BROADCAST_ENABLED")
+                        }
+                        if key == 8 {
+                            rec.pattern_kind = xed_pattern_kind(buf, value_start, value_end)
+                            value_ok = rec.pattern_kind != 0
+                        }
+                        if key == 9 {
+                            rec.operands_kind = xed_operands_kind(buf, value_start, value_end)
+                            value_ok = rec.operands_kind != 0
+                        }
+                        if key == 10 {
+                            rec.iform_kind = xed_iform_kind(buf, value_start, value_end)
+                            value_ok = rec.iform_kind != 0
+                        }
+                        if !value_ok {
+                            inv.error = PIREUS_XED_ERR_VALUE_DRIFT
+                            return inv
+                        }
+                    }
+                }
+            }
+        }
+        line_start = line_end + 1
+    }
+    if in_record {
+        inv.error = PIREUS_XED_ERR_SYNTAX
+        return inv
+    }
+    if inv.count != 8 {
+        inv.error = PIREUS_XED_ERR_MISSING_FIELD
+        return inv
+    }
+    inv
+}
+
+fn xed_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn xed_family_iri(family: i64) -> i64 {
+    if family == PIREUS_XED_FAMILY_VPERMI2PD { return PIREUS_XED_ICLASS_VPERMI2PD }
+    if family == PIREUS_XED_FAMILY_VPERMPD { return PIREUS_XED_ICLASS_VPERMPD }
+    PIREUS_XED_ICLASS_VPERMT2PD
+}
+
+fn xed_selector_iri(selector: i64) -> i64 {
+    if selector == PIREUS_XED_SELECTOR_UIMM8 { return PIREUS_XED_SELECTOR_RAW_UIMM8 }
+    if selector == PIREUS_XED_SELECTOR_REGISTER_INDEX {
+        return PIREUS_XED_SELECTOR_RAW_REGISTER_INDEX
+    }
+    PIREUS_XED_SELECTOR_RAW_UNASSIGNED
+}
+
+fn xed_storage_iri(storage: i64) -> i64 {
+    if storage == PIREUS_XED_STORAGE_MEMORY { return PIREUS_XED_STORAGE_RAW_MEMORY }
+    PIREUS_XED_STORAGE_RAW_REGISTER
+}
+
+pub fn pireus_xed_inventory_store(inv: &PireusXedInventory) -> TripleStore
+with Mut {
+    var store = pireus_v01_store()
+    xed_add_class(&store, PIREUS_XED_CLASS_INSTRUCTION_FORM)
+    xed_add_class(&store, PIREUS_XED_CLASS_VENDOR_CORPUS)
+    xed_add_class(&store, PIREUS_XED_CLASS_ICLASS)
+    xed_add_class(&store, PIREUS_XED_CLASS_ISA_SET)
+    xed_add_class(&store, PIREUS_XED_CLASS_RAW_SELECTOR_SYNTAX)
+    xed_add_class(&store, PIREUS_XED_CLASS_STORAGE_KIND)
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_CORPUS_AVX512F_2026_08_23,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_VENDOR_CORPUS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_CORPUS_AVX512F_2026_08_23,
+        PIREUS_HAS_EVIDENCE_ROLE, PIREUS_XED_EVIDENCE_NORMATIVE_VENDOR))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_EVIDENCE_NORMATIVE_VENDOR,
+        PIREUS_RDF_TYPE, PIREUS_CLASS_EVIDENCE_ROLE))
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_ICLASS_VPERMI2PD, PIREUS_RDF_TYPE, PIREUS_XED_CLASS_ICLASS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_ICLASS_VPERMPD, PIREUS_RDF_TYPE, PIREUS_XED_CLASS_ICLASS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_ICLASS_VPERMT2PD, PIREUS_RDF_TYPE, PIREUS_XED_CLASS_ICLASS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_ISA_AVX512F_512, PIREUS_RDF_TYPE, PIREUS_XED_CLASS_ISA_SET))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_SELECTOR_RAW_UNASSIGNED,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_RAW_SELECTOR_SYNTAX))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_SELECTOR_RAW_UIMM8,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_RAW_SELECTOR_SYNTAX))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_SELECTOR_RAW_REGISTER_INDEX,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_RAW_SELECTOR_SYNTAX))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_STORAGE_RAW_REGISTER,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_STORAGE_KIND))
+    triple_store_add(&store, triple_iri(
+        PIREUS_XED_STORAGE_RAW_MEMORY,
+        PIREUS_RDF_TYPE, PIREUS_XED_CLASS_STORAGE_KIND))
+
+    var i: i64 = 0
+    while i < inv.count {
+        let subject = 702300 + i
+        let form = inv.forms[i as usize]
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_RDF_TYPE, PIREUS_XED_CLASS_INSTRUCTION_FORM))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_CORPUS,
+            PIREUS_XED_CORPUS_AVX512F_2026_08_23))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_ICLASS, xed_family_iri(form.family)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_ISA_SET, PIREUS_XED_ISA_AVX512F_512))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_DESTINATION_ACCESS,
+            form.destination_access))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX,
+            xed_selector_iri(form.raw_selector_syntax)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_XED_HAS_STORAGE_KIND,
+            xed_storage_iri(form.storage_kind)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_HAS_EVIDENCE_ROLE,
+            PIREUS_XED_EVIDENCE_NORMATIVE_VENDOR))
+        i = i + 1
+    }
+    store
+}
+
+pub fn pireus_xed_query_forms_by(
+    store: &TripleStore, predicate: i64, object: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1),
+        queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_XED_CLASS_INSTRUCTION_FORM)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1),
+        queryterm_iri(predicate),
+        queryterm_iri(object)))
+    sparql_execute(store, &query)
+}

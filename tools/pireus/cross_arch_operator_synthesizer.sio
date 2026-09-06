@@ -1,0 +1,218 @@
+// Pireus target-capability ontology and lowering-plan synthesizer.
+//
+// Target facts never name a lowering. Rewrite recipes never name a target.
+// Candidates exist only when the generic solver proves that a target provides
+// every primitive, lane-width and precision property required by a recipe.
+
+let P_F64_LOAD: i64 = 1
+let P_F64_MUL: i64 = 2
+let P_F64_ADD: i64 = 4
+let P_INDEXED_SELECT: i64 = 8
+let P_XOR_SHUFFLE: i64 = 16
+let P_SIGN_XOR: i64 = 32
+let P_F32_LOAD: i64 = 64
+let P_F32_MUL: i64 = 128
+let P_F32_ADD: i64 = 256
+let P_TWOFOLD: i64 = 512
+
+let EQ_EXACT: i64 = 1
+let EQ_APPROXIMATE: i64 = 2
+let PROOF_ALGEBRAIC_EXACT: i64 = 1
+let PROOF_APPROXIMATE_CONSTRUCTION: i64 = 2
+
+pub struct HardwareNode {
+    pub name: string,
+    pub primitives: i64,
+    pub lane_width: i64,
+    pub native_f64: bool,
+}
+
+pub struct LoweringRecipe {
+    pub name: string,
+    pub required: i64,
+    pub min_lane_width: i64,
+    pub equivalence: i64,
+    pub proof_class: i64,
+    pub base_cost: i64,
+}
+
+fn hardware_node(name: string, primitives: i64, lane_width: i64, native_f64: bool) -> HardwareNode {
+    HardwareNode { name: name, primitives: primitives, lane_width: lane_width, native_f64: native_f64 }
+}
+
+fn lowering_recipe(name: string, required: i64, min_lane_width: i64, equivalence: i64, proof_class: i64, base_cost: i64) -> LoweringRecipe {
+    LoweringRecipe {
+        name: name,
+        required: required,
+        min_lane_width: min_lane_width,
+        equivalence: equivalence,
+        proof_class: proof_class,
+        base_cost: base_cost,
+    }
+}
+
+fn dgx_sm121() -> HardwareNode {
+    hardware_node("dgx-sm121", P_F64_LOAD | P_F64_MUL | P_F64_ADD | P_XOR_SHUFFLE | P_SIGN_XOR, 32, true)
+}
+
+fn xeon_avx512() -> HardwareNode {
+    hardware_node("xeon-avx512", P_F64_LOAD | P_F64_MUL | P_F64_ADD | P_INDEXED_SELECT | P_SIGN_XOR, 8, true)
+}
+
+fn apple_silicon_metal() -> HardwareNode {
+    hardware_node("apple-silicon-metal", P_F32_LOAD | P_F32_MUL | P_F32_ADD | P_INDEXED_SELECT | P_XOR_SHUFFLE | P_SIGN_XOR | P_TWOFOLD, 32, false)
+}
+
+fn recipe_indexed_exact() -> LoweringRecipe {
+    lowering_recipe("indexed-select+sign-xor+mul+tree-reduce", P_F64_LOAD | P_F64_MUL | P_F64_ADD | P_INDEXED_SELECT | P_SIGN_XOR, 8, EQ_EXACT, PROOF_ALGEBRAIC_EXACT, 88)
+}
+
+fn recipe_shuffle_exact() -> LoweringRecipe {
+    lowering_recipe("xor-shuffle+sign-xor+mul+tree-reduce", P_F64_LOAD | P_F64_MUL | P_F64_ADD | P_XOR_SHUFFLE | P_SIGN_XOR, 16, EQ_EXACT, PROOF_ALGEBRAIC_EXACT, 54)
+}
+
+fn recipe_scalar_exact() -> LoweringRecipe {
+    lowering_recipe("scalar-load+sign-xor+mul+linear-reduce", P_F64_LOAD | P_F64_MUL | P_F64_ADD | P_SIGN_XOR, 1, EQ_EXACT, PROOF_ALGEBRAIC_EXACT, 256)
+}
+
+fn recipe_indexed_twofold() -> LoweringRecipe {
+    lowering_recipe("indexed-select+sign-xor+twofold-mul+compensated-reduce", P_F32_LOAD | P_F32_MUL | P_F32_ADD | P_INDEXED_SELECT | P_SIGN_XOR | P_TWOFOLD, 8, EQ_APPROXIMATE, PROOF_APPROXIMATE_CONSTRUCTION, 176)
+}
+
+fn recipe_shuffle_twofold() -> LoweringRecipe {
+    lowering_recipe("xor-shuffle+sign-xor+twofold-mul+compensated-reduce", P_F32_LOAD | P_F32_MUL | P_F32_ADD | P_XOR_SHUFFLE | P_SIGN_XOR | P_TWOFOLD, 16, EQ_APPROXIMATE, PROOF_APPROXIMATE_CONSTRUCTION, 112)
+}
+
+fn recipe_at(i: i64) -> LoweringRecipe {
+    if i == 0 { return recipe_indexed_exact() }
+    if i == 1 { return recipe_shuffle_exact() }
+    if i == 2 { return recipe_scalar_exact() }
+    if i == 3 { return recipe_indexed_twofold() }
+    recipe_shuffle_twofold()
+}
+
+fn recipe_eligible(node: HardwareNode, recipe: LoweringRecipe) -> bool {
+    if (node.primitives & recipe.required) != recipe.required { return false }
+    if node.lane_width < recipe.min_lane_width { return false }
+    if recipe.equivalence == EQ_EXACT && !node.native_f64 { return false }
+    if recipe.equivalence == EQ_EXACT && recipe.proof_class != PROOF_ALGEBRAIC_EXACT { return false }
+    if recipe.equivalence == EQ_APPROXIMATE && recipe.proof_class != PROOF_APPROXIMATE_CONSTRUCTION { return false }
+    true
+}
+
+fn hardware_facts_consistent(node: HardwareNode) -> bool {
+    let f64_arithmetic = P_F64_LOAD | P_F64_MUL | P_F64_ADD
+    let primitives_claim_f64 = (node.primitives & f64_arithmetic) == f64_arithmetic
+    primitives_claim_f64 == node.native_f64
+}
+
+fn recipe_cost(node: HardwareNode, recipe: LoweringRecipe) -> i64 with Div {
+    let chunks = (16 + node.lane_width - 1) / node.lane_width
+    recipe.base_cost * chunks
+}
+
+fn equivalence_name(eq: i64) -> string {
+    if eq == EQ_EXACT { return "EXACT" }
+    "APPROXIMATE"
+}
+
+fn candidate_count(node: HardwareNode) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        if recipe_eligible(node, recipe_at(i)) { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn candidate_signature(node: HardwareNode) -> i64 with Div {
+    var signature: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        let recipe = recipe_at(i)
+        if recipe_eligible(node, recipe) {
+            signature = signature + (i + 1) * 1000 + recipe_cost(node, recipe)
+        }
+        i = i + 1
+    }
+    signature
+}
+
+fn emit_candidates(node: HardwareNode) -> i64 with IO, Div {
+    print("target="); print(node.name)
+    print(" native_f64="); if node.native_f64 { print("1") } else { print("0") }
+    print(" lane_width="); print_int(node.lane_width); print("\n")
+
+    var count: i64 = 0
+    var best_i: i64 = -1
+    var best_cost: i64 = 9223372036854775807
+    var i: i64 = 0
+    while i < 5 {
+        let recipe = recipe_at(i)
+        if recipe_eligible(node, recipe) {
+            let cost = recipe_cost(node, recipe)
+            print("candidate="); print(node.name); print("/"); print(recipe.name)
+            print(" equivalence="); print(equivalence_name(recipe.equivalence))
+            if recipe.proof_class == PROOF_ALGEBRAIC_EXACT {
+                print(" proof=algebraic-rewrite+capability-subset")
+            } else {
+                print(" proof=approximate-construction+capability-subset")
+            }
+            print(" cost="); print_int(cost); print(" derived=ontology-search\n")
+            count = count + 1
+            if cost < best_cost {
+                best_cost = cost
+                best_i = i
+            }
+        }
+        i = i + 1
+    }
+
+    if best_i >= 0 {
+        let best = recipe_at(best_i)
+        print("selected="); print(node.name); print("/"); print(best.name)
+        print(" equivalence="); print(equivalence_name(best.equivalence))
+        print(" cost="); print_int(best_cost)
+        if best.proof_class == PROOF_ALGEBRAIC_EXACT {
+            print(" proof=algebraic-rewrite+capability-subset\n")
+        } else {
+            print(" proof=approximate-construction+capability-subset\n")
+        }
+    }
+    if !node.native_f64 {
+        print("decision="); print(node.name); print("/EXACT DENY reason=no-native-f64\n")
+    }
+    count
+}
+
+fn main() -> i32 with IO, Div {
+    let dgx = dgx_sm121()
+    let xeon = xeon_avx512()
+    let apple = apple_silicon_metal()
+
+    // The commutative signature is a Sounio-side negative guard against
+    // accidental dependence on ontology fact order.
+    let forward = candidate_signature(dgx) + candidate_signature(xeon) + candidate_signature(apple)
+    let reverse = candidate_signature(apple) + candidate_signature(xeon) + candidate_signature(dgx)
+
+    print("schema=pireus-cross-arch-candidates-v2\n")
+    print("producer_language=Sounio\n")
+    print("producer_role=TARGET_CANDIDATE_SYNTHESIZER\n")
+    print("operator=XorConvolution bits=4 twist=CayleyDicksonSign\n")
+    print("ontology_rule=required-primitives-subset+lane-width+precision\n")
+    let dgx_count = emit_candidates(dgx)
+    let xeon_count = emit_candidates(xeon)
+    let apple_count = emit_candidates(apple)
+    let total = dgx_count + xeon_count + apple_count
+    print("ontology_order_invariant="); if forward == reverse { print("1\n") } else { print("0\n") }
+    print("candidate_count="); print_int(total); print("\n")
+    if dgx_count == 2 && xeon_count == 2 && apple_count == 2 && total == 6 && forward == reverse
+        && hardware_facts_consistent(dgx) && hardware_facts_consistent(xeon)
+        && hardware_facts_consistent(apple) {
+        print("PIREUS_CROSS_ARCH_SYNTHESIZER_PASS\n")
+        return 0
+    }
+    print("PIREUS_CROSS_ARCH_SYNTHESIZER_FAIL\n")
+    1
+}

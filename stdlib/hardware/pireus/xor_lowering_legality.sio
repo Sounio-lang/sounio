@@ -1,0 +1,1341 @@
+//! Pireus target-independent lowering legality for bits=4 XorConvolution.
+//!
+//! The complete five-node semantic schedule is kept distinct from material
+//! instruction candidates. In particular, the ascending-i f64 fold is never
+//! reassociated and an Intel selector match is not whole-operation lowering.
+
+use algebra::cayley_dickson::cd_sigma
+use algebra::xor_convolution::xor_convolution_generate_inputs
+use hardware::pireus::xor_convolution_operation::{
+    PIREUS_XOR_NODE_XOR_PERMUTE,
+    PIREUS_XOR_NODE_TWIST_APPLY,
+    PIREUS_XOR_NODE_MULTIPLY,
+    PIREUS_XOR_NODE_HORIZONTAL_REDUCE,
+    PIREUS_XOR_NODE_OUTPUT_LANE,
+    PIREUS_XOR_CAP_LANE_XOR_PERMUTE,
+    PIREUS_XOR_CAP_PER_TERM_SIGN,
+    PIREUS_XOR_CAP_FLOAT_MULTIPLY,
+    PIREUS_XOR_CAP_FIXED_ORDER_REDUCE,
+    PIREUS_XOR_CAP_OUTPUT_MATERIALIZE,
+    PIREUS_XOR_ACCUMULATION_ASCENDING_I,
+    PIREUS_XOR_TARGET_DARWIN_XEON,
+    PIREUS_XOR_TARGET_APPLE_SILICON,
+    PIREUS_XOR_TARGET_DGX,
+    pireus_xor_operation_evaluate,
+    pireus_xor_operation_matches_frozen_semantics,
+}
+use hardware::pireus::xor_material_matching::{
+    pireus_xor_material_evaluate,
+    pireus_xor_material_matches_frozen_semantics,
+}
+use hardware::pireus::intel_vpermpd_semantics::{
+    PIREUS_INTEL_PDF_OK,
+    pireus_intel_vpermpd_evaluate,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_XOR_LOWERING_BITS: i64 = 4
+pub const PIREUS_XOR_LOWERING_DIMENSION: i64 = 16
+pub const PIREUS_XOR_LOWERING_NODE_CAPACITY: i64 = 5
+pub const PIREUS_XOR_LOWERING_GROUP_CAPACITY: i64 = 32
+
+pub const PIREUS_XOR_SEMANTIC_FORM_UNRESOLVED: i64 = 0
+pub const PIREUS_XOR_SEMANTIC_FORM_INDEXED_CHUNK_MAP: i64 = 1
+pub const PIREUS_XOR_SEMANTIC_FORM_COEFFICIENT_SIGN_MAP: i64 = 2
+pub const PIREUS_XOR_SEMANTIC_FORM_ORDERED_F64_PRODUCT: i64 = 3
+pub const PIREUS_XOR_SEMANTIC_FORM_ASCENDING_I_FOLD: i64 = 4
+pub const PIREUS_XOR_SEMANTIC_FORM_OUTPUT_LANE_STORE: i64 = 5
+
+pub const PIREUS_XOR_MATERIAL_FORM_UNRESOLVED: i64 = 0
+pub const PIREUS_XOR_MATERIAL_FORM_INTEL_VPERMPD_VECTOR_CONTROL: i64 = 1
+
+pub const PIREUS_XOR_REFUSAL_NONE: i64 = 0
+pub const PIREUS_XOR_REFUSAL_TARGET_OBSERVATION_MISSING: i64 = 1
+pub const PIREUS_XOR_REFUSAL_MATERIAL_SEMANTICS_MISSING: i64 = 2
+
+pub const PIREUS_XOR_LOWERING_OK: i64 = 0
+pub const PIREUS_XOR_LOWERING_ERR_PARENT: i64 = 1
+pub const PIREUS_XOR_LOWERING_ERR_PLAN: i64 = 2
+pub const PIREUS_XOR_LOWERING_ERR_SIGN: i64 = 3
+pub const PIREUS_XOR_LOWERING_ERR_EXECUTION: i64 = 4
+pub const PIREUS_XOR_LOWERING_ERR_TARGET: i64 = 5
+pub const PIREUS_XOR_LOWERING_ERR_AUTHORITY: i64 = 6
+
+pub struct PireusXorLoweringDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusXorLoweringParentBindings {
+    pub operation_source_sha256: [i64; 8],
+    pub operation_semantics_sha256: [i64; 8],
+    pub operation_receipt_sha256: [i64; 8],
+    pub material_source_sha256: [i64; 8],
+    pub material_semantics_sha256: [i64; 8],
+    pub material_receipt_sha256: [i64; 8],
+    pub intel_source_sha256: [i64; 8],
+    pub intel_semantics_sha256: [i64; 8],
+    pub intel_receipt_sha256: [i64; 8],
+    pub operation_live_match: bool,
+    pub material_live_match: bool,
+    pub intel_live_match: bool,
+    pub valid: bool,
+}
+
+pub struct PireusXorLoweringPlan {
+    pub count: i64,
+    pub node_kinds: [i64; 5],
+    pub capabilities: [i64; 5],
+    pub semantic_forms: [i64; 5],
+    pub material_forms: [i64; 5],
+    pub group_counts: [i64; 5],
+    pub exact_order_preserved: [bool; 5],
+    pub reassociation_required: [bool; 5],
+    pub barriers_present: [bool; 5],
+    pub barriers_crossed: [bool; 5],
+    pub material_receipt_required: [bool; 5],
+    pub semantic_authorized: [bool; 5],
+    pub material_authorized: [bool; 5],
+    pub refusal_reasons: [i64; 5],
+    pub semantic_authorized_count: i64,
+    pub material_candidate_count: i64,
+    pub material_authorized_count: i64,
+    pub unresolved_material_count: i64,
+    pub reassociation_required_count: i64,
+    pub exact_tree_reduction_refused: bool,
+}
+
+pub struct PireusXorSignPlan {
+    pub count: i64,
+    pub displacements: [i64; 32],
+    pub chunks: [i64; 32],
+    pub negative_lane_masks: [i64; 32],
+    pub negative_cells: i64,
+    pub positive_cells: i64,
+    pub other_cells: i64,
+    pub complete_cells: i64,
+    pub valid: bool,
+}
+
+pub struct PireusXorExecutionWitness {
+    pub output_bits: [i64; 16],
+    pub parent_output_bits: [i64; 16],
+    pub matching_lanes: i64,
+    pub mismatching_lanes: i64,
+    pub first_mismatch: i64,
+    pub partner_table_valid: bool,
+    pub ascending_i: bool,
+    pub reassociated: bool,
+    pub bit_exact_to_frozen_parent: bool,
+}
+
+pub struct PireusXorLoweringTargets {
+    pub count: i64,
+    pub target_ids: [i64; 3],
+    pub canonical: [bool; 3],
+    pub observed: [bool; 3],
+    pub material_receipts: [bool; 3],
+    pub selector_candidates: [bool; 3],
+}
+
+pub struct PireusXorLoweringNegatives {
+    pub missing_parent_hash: bool,
+    pub mismatched_parent_hash: bool,
+    pub missing_parent_live_match: bool,
+    pub missing_node: bool,
+    pub reordered_node: bool,
+    pub disconnected_node: bool,
+    pub changed_capability: bool,
+    pub changed_barrier: bool,
+    pub changed_accumulation_order: bool,
+    pub selector_promoted_to_whole_operation: bool,
+    pub unvalidated_sign_mask: bool,
+    pub unvalidated_multiply_form: bool,
+    pub tree_promoted_to_exact: bool,
+    pub reassociation_without_contract: bool,
+    pub barrier_crossing: bool,
+    pub capability_promoted_to_emitted_use: bool,
+    pub target_observation_without_receipt: bool,
+    pub cost_without_material_receipt: bool,
+    pub parity_before_freeze: bool,
+    pub claim_before_parity: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusXorLoweringResult {
+    pub valid: bool,
+    pub error: i64,
+    pub bits: i64,
+    pub dimension: i64,
+    pub parents: PireusXorLoweringParentBindings,
+    pub plan: PireusXorLoweringPlan,
+    pub signs: PireusXorSignPlan,
+    pub execution: PireusXorExecutionWitness,
+    pub targets: PireusXorLoweringTargets,
+    pub plan_digest: PireusXorLoweringDigest,
+    pub sign_digest: PireusXorLoweringDigest,
+    pub execution_digest: PireusXorLoweringDigest,
+    pub target_digest: PireusXorLoweringDigest,
+    pub witness_digest: PireusXorLoweringDigest,
+    pub material_observation_count: i64,
+    pub compiler_emission_count: i64,
+    pub cost_record_count: i64,
+    pub numerical_refinement_receipt_count: i64,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub negatives: PireusXorLoweringNegatives,
+    pub failures: i64,
+}
+
+fn pxl_operation_source_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xbc039d5d, 0xb9f195b9, 0x4fbeb08f, 0x22f9c961,
+        0x64a174c2, 0xcea67573, 0x9e901a07, 0xfdf54db8
+    ]
+    value
+}
+
+fn pxl_operation_semantics_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x40fe6982, 0x9b1feb58, 0x43ea8b47, 0x20b70516,
+        0x303e8eda, 0x37c14498, 0x9909b52d, 0x1b466fb1
+    ]
+    value
+}
+
+fn pxl_operation_receipt_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x9e1e416d, 0xefa4a1cf, 0xc477f063, 0x0623321e,
+        0x12209a40, 0xc9f5f878, 0xb85cce40, 0xbe83d330
+    ]
+    value
+}
+
+fn pxl_material_source_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xeadd752f, 0xbda1f50f, 0x24bed126, 0x0c54936d,
+        0x710af109, 0x73653982, 0xf5687cd8, 0xa551a575
+    ]
+    value
+}
+
+fn pxl_material_semantics_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xb4791514, 0x032859ac, 0xc0e8888c, 0x4d35760f,
+        0x549a6267, 0xe02b2cd5, 0xf30a96c0, 0xb9dee554
+    ]
+    value
+}
+
+fn pxl_material_receipt_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xcc157a7d, 0x6ba33b94, 0x5bc9537b, 0xe1856bf6,
+        0x04815730, 0x67ade5f1, 0x66101ca3, 0x6a98c1df
+    ]
+    value
+}
+
+fn pxl_intel_source_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x4f7e007a, 0xa432564b, 0x873c941e, 0x239c353a,
+        0xeed3b118, 0x83844b73, 0xec7e31ac, 0xe4811b20
+    ]
+    value
+}
+
+fn pxl_intel_semantics_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xba25ceb1, 0x8685ed65, 0x6ecaf1c5, 0x77eb95a6,
+        0x98ca214f, 0xe2a939fc, 0xe5a8ffd6, 0xd106b243
+    ]
+    value
+}
+
+fn pxl_intel_receipt_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xfddad144, 0x2d0b2120, 0x1bccf57f, 0xce380a2d,
+        0x57a94bb5, 0x5bee9924, 0x636d0647, 0x3128218f
+    ]
+    value
+}
+
+fn pxl_zero_hash() -> [i64; 8] { [0; 8] }
+
+fn pxl_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxl_hash_nonzero(value: &[i64; 8]) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if value[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pxl_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        bytes[i] = ((value >> (56 - i * 8)) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn pxl_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    pxl_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn pxl_digest_add_hash(state: SHA256State, value: &[i64; 8]) -> SHA256State
+with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = pxl_digest_add_i64(next, value[i])
+        i = i + 1
+    }
+    next
+}
+
+fn pxl_digest_finish(state: SHA256State) -> PireusXorLoweringDigest
+with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(&digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusXorLoweringDigest { words: words }
+}
+
+pub fn pireus_xor_lowering_digest_nonzero(
+    digest: &PireusXorLoweringDigest,
+) -> bool with Mut, Panic {
+    pxl_hash_nonzero(&digest.words)
+}
+
+fn pxl_expected_parent_bindings(
+    operation_live: bool,
+    material_live: bool,
+    intel_live: bool,
+) -> PireusXorLoweringParentBindings {
+    PireusXorLoweringParentBindings {
+        operation_source_sha256: pxl_operation_source_hash(),
+        operation_semantics_sha256: pxl_operation_semantics_hash(),
+        operation_receipt_sha256: pxl_operation_receipt_hash(),
+        material_source_sha256: pxl_material_source_hash(),
+        material_semantics_sha256: pxl_material_semantics_hash(),
+        material_receipt_sha256: pxl_material_receipt_hash(),
+        intel_source_sha256: pxl_intel_source_hash(),
+        intel_semantics_sha256: pxl_intel_semantics_hash(),
+        intel_receipt_sha256: pxl_intel_receipt_hash(),
+        operation_live_match: operation_live,
+        material_live_match: material_live,
+        intel_live_match: intel_live,
+        valid: operation_live && material_live && intel_live,
+    }
+}
+
+fn pxl_parent_bindings_valid(bindings: &PireusXorLoweringParentBindings)
+    -> bool with Mut, Panic {
+    let operation_source = pxl_operation_source_hash()
+    let operation_semantics = pxl_operation_semantics_hash()
+    let operation_receipt = pxl_operation_receipt_hash()
+    let material_source = pxl_material_source_hash()
+    let material_semantics = pxl_material_semantics_hash()
+    let material_receipt = pxl_material_receipt_hash()
+    let intel_source = pxl_intel_source_hash()
+    let intel_semantics = pxl_intel_semantics_hash()
+    let intel_receipt = pxl_intel_receipt_hash()
+    bindings.valid && bindings.operation_live_match &&
+        bindings.material_live_match && bindings.intel_live_match &&
+        pxl_hash_equal(&bindings.operation_source_sha256, &operation_source) &&
+        pxl_hash_equal(&bindings.operation_semantics_sha256, &operation_semantics) &&
+        pxl_hash_equal(&bindings.operation_receipt_sha256, &operation_receipt) &&
+        pxl_hash_equal(&bindings.material_source_sha256, &material_source) &&
+        pxl_hash_equal(&bindings.material_semantics_sha256, &material_semantics) &&
+        pxl_hash_equal(&bindings.material_receipt_sha256, &material_receipt) &&
+        pxl_hash_equal(&bindings.intel_source_sha256, &intel_source) &&
+        pxl_hash_equal(&bindings.intel_semantics_sha256, &intel_semantics) &&
+        pxl_hash_equal(&bindings.intel_receipt_sha256, &intel_receipt)
+}
+
+fn pxl_intel_parent_live_match(
+    valid: bool,
+    error: i64,
+    parent_valid: bool,
+    semantic_receipt: bool,
+    vector_bits: i64,
+    element_bits: i64,
+    index_bits: i64,
+    selector_bits: i64,
+    selector_mask: i64,
+    source_lanes: i64,
+    cells: i64,
+    matches: i64,
+    failures: i64,
+    groups: i64,
+    vector_complete: bool,
+    one_source: bool,
+    instruction_match: bool,
+    material_observations: i64,
+    lowerings: i64,
+    costs: i64,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    valid && error == PIREUS_INTEL_PDF_OK && parent_valid &&
+        semantic_receipt && vector_bits == 512 && element_bits == 64 &&
+        index_bits == 64 && selector_bits == 3 && selector_mask == 7 &&
+        source_lanes == 8 && cells == 256 && matches == cells &&
+        failures == 0 && groups == 32 && vector_complete && one_source &&
+        instruction_match && material_observations == 0 && lowerings == 0 &&
+        costs == 0 && !parity_open && !claim_ready
+}
+
+fn pxl_semantic_form(capability: i64) -> i64 {
+    if capability == PIREUS_XOR_CAP_LANE_XOR_PERMUTE {
+        return PIREUS_XOR_SEMANTIC_FORM_INDEXED_CHUNK_MAP
+    }
+    if capability == PIREUS_XOR_CAP_PER_TERM_SIGN {
+        return PIREUS_XOR_SEMANTIC_FORM_COEFFICIENT_SIGN_MAP
+    }
+    if capability == PIREUS_XOR_CAP_FLOAT_MULTIPLY {
+        return PIREUS_XOR_SEMANTIC_FORM_ORDERED_F64_PRODUCT
+    }
+    if capability == PIREUS_XOR_CAP_FIXED_ORDER_REDUCE {
+        return PIREUS_XOR_SEMANTIC_FORM_ASCENDING_I_FOLD
+    }
+    if capability == PIREUS_XOR_CAP_OUTPUT_MATERIALIZE {
+        return PIREUS_XOR_SEMANTIC_FORM_OUTPUT_LANE_STORE
+    }
+    PIREUS_XOR_SEMANTIC_FORM_UNRESOLVED
+}
+
+fn pxl_expected_kind_for_capability(capability: i64) -> i64 {
+    if capability == PIREUS_XOR_CAP_LANE_XOR_PERMUTE {
+        return PIREUS_XOR_NODE_XOR_PERMUTE
+    }
+    if capability == PIREUS_XOR_CAP_PER_TERM_SIGN {
+        return PIREUS_XOR_NODE_TWIST_APPLY
+    }
+    if capability == PIREUS_XOR_CAP_FLOAT_MULTIPLY {
+        return PIREUS_XOR_NODE_MULTIPLY
+    }
+    if capability == PIREUS_XOR_CAP_FIXED_ORDER_REDUCE {
+        return PIREUS_XOR_NODE_HORIZONTAL_REDUCE
+    }
+    if capability == PIREUS_XOR_CAP_OUTPUT_MATERIALIZE {
+        return PIREUS_XOR_NODE_OUTPUT_LANE
+    }
+    0
+}
+
+fn pxl_group_count(capability: i64, selector_groups: i64,
+    dimension: i64) -> i64 {
+    if capability == PIREUS_XOR_CAP_LANE_XOR_PERMUTE ||
+        capability == PIREUS_XOR_CAP_PER_TERM_SIGN ||
+        capability == PIREUS_XOR_CAP_FLOAT_MULTIPLY {
+        return selector_groups
+    }
+    if capability == PIREUS_XOR_CAP_FIXED_ORDER_REDUCE ||
+        capability == PIREUS_XOR_CAP_OUTPUT_MATERIALIZE {
+        return dimension
+    }
+    0
+}
+
+fn pxl_build_plan(
+    node_count: i64,
+    node_kinds: &[i64; 5],
+    capabilities: &[i64; 5],
+    fixed_order: &[bool; 5],
+    barriers: &[bool; 5],
+    selector_groups: i64,
+    dimension: i64,
+    intel_selector_match: bool,
+) -> PireusXorLoweringPlan with Mut, Panic {
+    var plan = PireusXorLoweringPlan {
+        count: node_count,
+        node_kinds: [0; 5], capabilities: [0; 5],
+        semantic_forms: [0; 5], material_forms: [0; 5],
+        group_counts: [0; 5], exact_order_preserved: [false; 5],
+        reassociation_required: [false; 5], barriers_present: [false; 5],
+        barriers_crossed: [false; 5], material_receipt_required: [true; 5],
+        semantic_authorized: [false; 5], material_authorized: [false; 5],
+        refusal_reasons: [0; 5], semantic_authorized_count: 0,
+        material_candidate_count: 0, material_authorized_count: 0,
+        unresolved_material_count: 0, reassociation_required_count: 0,
+        exact_tree_reduction_refused: false,
+    }
+    var index: i64 = 0
+    while index < node_count && index < PIREUS_XOR_LOWERING_NODE_CAPACITY {
+        let capability = capabilities[index]
+        let semantic_form = pxl_semantic_form(capability)
+        let exact = if capability == PIREUS_XOR_CAP_FIXED_ORDER_REDUCE {
+            fixed_order[index]
+        } else { true }
+        let semantic_ok = semantic_form != PIREUS_XOR_SEMANTIC_FORM_UNRESOLVED &&
+            pxl_expected_kind_for_capability(capability) == node_kinds[index] &&
+            exact
+        let material_form = if capability == PIREUS_XOR_CAP_LANE_XOR_PERMUTE &&
+            intel_selector_match {
+            PIREUS_XOR_MATERIAL_FORM_INTEL_VPERMPD_VECTOR_CONTROL
+        } else { PIREUS_XOR_MATERIAL_FORM_UNRESOLVED }
+        plan.node_kinds[index] = node_kinds[index]
+        plan.capabilities[index] = capability
+        plan.semantic_forms[index] = semantic_form
+        plan.material_forms[index] = material_form
+        plan.group_counts[index] = pxl_group_count(
+            capability, selector_groups, dimension)
+        plan.exact_order_preserved[index] = exact
+        plan.reassociation_required[index] = false
+        plan.barriers_present[index] = barriers[index]
+        plan.barriers_crossed[index] = false
+        plan.semantic_authorized[index] = semantic_ok
+        plan.material_authorized[index] = false
+        plan.refusal_reasons[index] =
+            if material_form != PIREUS_XOR_MATERIAL_FORM_UNRESOLVED {
+                PIREUS_XOR_REFUSAL_TARGET_OBSERVATION_MISSING
+            } else { PIREUS_XOR_REFUSAL_MATERIAL_SEMANTICS_MISSING }
+        if semantic_ok {
+            plan.semantic_authorized_count =
+                plan.semantic_authorized_count + 1
+        }
+        if material_form != PIREUS_XOR_MATERIAL_FORM_UNRESOLVED {
+            plan.material_candidate_count = plan.material_candidate_count + 1
+        }
+        if plan.material_authorized[index] {
+            plan.material_authorized_count = plan.material_authorized_count + 1
+        } else {
+            plan.unresolved_material_count = plan.unresolved_material_count + 1
+        }
+        if plan.reassociation_required[index] {
+            plan.reassociation_required_count =
+                plan.reassociation_required_count + 1
+        }
+        index = index + 1
+    }
+    plan.exact_tree_reduction_refused =
+        fixed_order[3] && !plan.reassociation_required[3]
+    plan
+}
+
+fn pxl_plan_valid(plan: &PireusXorLoweringPlan) -> bool with Mut, Panic {
+    if plan.count != PIREUS_XOR_LOWERING_NODE_CAPACITY ||
+        !plan.exact_tree_reduction_refused {
+        return false
+    }
+    var i: i64 = 0
+    while i < plan.count {
+        if plan.node_kinds[i] != pxl_expected_kind_for_capability(
+            plan.capabilities[i]) ||
+            plan.semantic_forms[i] != pxl_semantic_form(plan.capabilities[i]) ||
+            plan.semantic_forms[i] == PIREUS_XOR_SEMANTIC_FORM_UNRESOLVED ||
+            plan.group_counts[i] <= 0 || !plan.exact_order_preserved[i] ||
+            plan.reassociation_required[i] || plan.barriers_crossed[i] ||
+            !plan.material_receipt_required[i] ||
+            !plan.semantic_authorized[i] || plan.material_authorized[i] ||
+            plan.refusal_reasons[i] == PIREUS_XOR_REFUSAL_NONE {
+            return false
+        }
+        if plan.material_forms[i] != PIREUS_XOR_MATERIAL_FORM_UNRESOLVED &&
+            (i != 0 || plan.material_forms[i] !=
+                PIREUS_XOR_MATERIAL_FORM_INTEL_VPERMPD_VECTOR_CONTROL) {
+            return false
+        }
+        i = i + 1
+    }
+    plan.semantic_authorized_count == plan.count &&
+        plan.material_authorized_count == 0 &&
+        plan.unresolved_material_count == plan.count &&
+        plan.reassociation_required_count == 0
+}
+
+fn pxl_copy_plan(source: &PireusXorLoweringPlan)
+    -> PireusXorLoweringPlan with Mut, Panic {
+    var copy = PireusXorLoweringPlan {
+        count: source.count,
+        node_kinds: [0; 5], capabilities: [0; 5],
+        semantic_forms: [0; 5], material_forms: [0; 5],
+        group_counts: [0; 5], exact_order_preserved: [false; 5],
+        reassociation_required: [false; 5], barriers_present: [false; 5],
+        barriers_crossed: [false; 5], material_receipt_required: [false; 5],
+        semantic_authorized: [false; 5], material_authorized: [false; 5],
+        refusal_reasons: [0; 5],
+        semantic_authorized_count: source.semantic_authorized_count,
+        material_candidate_count: source.material_candidate_count,
+        material_authorized_count: source.material_authorized_count,
+        unresolved_material_count: source.unresolved_material_count,
+        reassociation_required_count: source.reassociation_required_count,
+        exact_tree_reduction_refused: source.exact_tree_reduction_refused,
+    }
+    var i: i64 = 0
+    while i < PIREUS_XOR_LOWERING_NODE_CAPACITY {
+        copy.node_kinds[i] = source.node_kinds[i]
+        copy.capabilities[i] = source.capabilities[i]
+        copy.semantic_forms[i] = source.semantic_forms[i]
+        copy.material_forms[i] = source.material_forms[i]
+        copy.group_counts[i] = source.group_counts[i]
+        copy.exact_order_preserved[i] = source.exact_order_preserved[i]
+        copy.reassociation_required[i] = source.reassociation_required[i]
+        copy.barriers_present[i] = source.barriers_present[i]
+        copy.barriers_crossed[i] = source.barriers_crossed[i]
+        copy.material_receipt_required[i] = source.material_receipt_required[i]
+        copy.semantic_authorized[i] = source.semantic_authorized[i]
+        copy.material_authorized[i] = source.material_authorized[i]
+        copy.refusal_reasons[i] = source.refusal_reasons[i]
+        i = i + 1
+    }
+    copy
+}
+
+fn pxl_build_sign_plan(bits: i64, dimension: i64, chunk_lanes: i64)
+    -> PireusXorSignPlan with Mut, Panic, Div {
+    var plan = PireusXorSignPlan {
+        count: 0, displacements: [0; 32], chunks: [0; 32],
+        negative_lane_masks: [0; 32], negative_cells: 0,
+        positive_cells: 0, other_cells: 0, complete_cells: 0, valid: false,
+    }
+    if dimension <= 0 || chunk_lanes <= 0 ||
+        dimension % chunk_lanes != 0 ||
+        dimension * (dimension / chunk_lanes) >
+            PIREUS_XOR_LOWERING_GROUP_CAPACITY {
+        return plan
+    }
+    let chunks = dimension / chunk_lanes
+    var d: i64 = 0
+    while d < dimension {
+        var chunk: i64 = 0
+        while chunk < chunks {
+            let group = plan.count
+            var mask: i64 = 0
+            var lane: i64 = 0
+            while lane < chunk_lanes {
+                let i = chunk * chunk_lanes + lane
+                let partner = i ^ d
+                let coefficient = cd_sigma(
+                    i as i32, partner as i32, bits as i32) as i64
+                if coefficient == 0 - 1 {
+                    mask = mask | (1 << lane)
+                    plan.negative_cells = plan.negative_cells + 1
+                } else {
+                    if coefficient == 1 {
+                        plan.positive_cells = plan.positive_cells + 1
+                    } else {
+                        plan.other_cells = plan.other_cells + 1
+                    }
+                }
+                plan.complete_cells = plan.complete_cells + 1
+                lane = lane + 1
+            }
+            plan.displacements[group] = d
+            plan.chunks[group] = chunk
+            plan.negative_lane_masks[group] = mask
+            plan.count = plan.count + 1
+            chunk = chunk + 1
+        }
+        d = d + 1
+    }
+    plan.valid = plan.count <= PIREUS_XOR_LOWERING_GROUP_CAPACITY &&
+        plan.complete_cells == dimension * dimension &&
+        plan.negative_cells + plan.positive_cells + plan.other_cells ==
+            plan.complete_cells && plan.other_cells == 0
+    plan
+}
+
+fn pxl_sign_plan_valid(plan: &PireusXorSignPlan, bits: i64,
+    dimension: i64, chunk_lanes: i64) -> bool with Mut, Panic, Div {
+    if dimension <= 0 || chunk_lanes <= 0 ||
+        dimension % chunk_lanes != 0 ||
+        dimension * (dimension / chunk_lanes) >
+            PIREUS_XOR_LOWERING_GROUP_CAPACITY ||
+        !plan.valid || plan.complete_cells != dimension * dimension ||
+        plan.other_cells != 0 { return false }
+    let chunks = dimension / chunk_lanes
+    var counted_negative: i64 = 0
+    var counted_positive: i64 = 0
+    var group: i64 = 0
+    while group < plan.count {
+        let d = group / chunks
+        let chunk = group - d * chunks
+        if plan.displacements[group] != d || plan.chunks[group] != chunk {
+            return false
+        }
+        var expected_mask: i64 = 0
+        var lane: i64 = 0
+        while lane < chunk_lanes {
+            let i = chunk * chunk_lanes + lane
+            let partner = i ^ d
+            if cd_sigma(i as i32, partner as i32, bits as i32) as i64 ==
+                0 - 1 {
+                expected_mask = expected_mask | (1 << lane)
+                counted_negative = counted_negative + 1
+            } else {
+                counted_positive = counted_positive + 1
+            }
+            lane = lane + 1
+        }
+        if plan.negative_lane_masks[group] != expected_mask { return false }
+        group = group + 1
+    }
+    counted_negative == plan.negative_cells &&
+        counted_positive == plan.positive_cells
+}
+
+fn pxl_copy_sign_plan(source: &PireusXorSignPlan)
+    -> PireusXorSignPlan with Mut, Panic {
+    var copy = PireusXorSignPlan {
+        count: source.count,
+        displacements: [0; 32], chunks: [0; 32],
+        negative_lane_masks: [0; 32],
+        negative_cells: source.negative_cells,
+        positive_cells: source.positive_cells,
+        other_cells: source.other_cells,
+        complete_cells: source.complete_cells,
+        valid: source.valid,
+    }
+    var i: i64 = 0
+    while i < PIREUS_XOR_LOWERING_GROUP_CAPACITY {
+        copy.displacements[i] = source.displacements[i]
+        copy.chunks[i] = source.chunks[i]
+        copy.negative_lane_masks[i] = source.negative_lane_masks[i]
+        i = i + 1
+    }
+    copy
+}
+
+fn pxl_partner_table_valid(
+    partner_indices: &[i64; 256],
+    dimension: i64,
+) -> bool with Mut, Panic {
+    if dimension <= 0 || dimension * dimension > 256 { return false }
+    var d: i64 = 0
+    while d < dimension {
+        var i: i64 = 0
+        while i < dimension {
+            if partner_indices[d * dimension + i] != (i ^ d) { return false }
+            i = i + 1
+        }
+        d = d + 1
+    }
+    true
+}
+
+fn pxl_execute_exact(
+    dimension: i64,
+    chunk_lanes: i64,
+    partner_indices: &[i64; 256],
+    signs: &PireusXorSignPlan,
+    parent_bits: &[i64; 64],
+) -> PireusXorExecutionWitness with Mut, Panic, Div {
+    var a: [f64; 64] = [0.0; 64]
+    var b: [f64; 64] = [0.0; 64]
+    xor_convolution_generate_inputs(dimension, &!a, &!b)
+    let partner_table_valid = pxl_partner_table_valid(
+        partner_indices, dimension)
+    var output_bits: [i64; 16] = [0; 16]
+    var expected_bits: [i64; 16] = [0; 16]
+    var matches: i64 = 0
+    var mismatches: i64 = 0
+    var first_mismatch: i64 = 0 - 1
+    var d: i64 = 0
+    while d < dimension {
+        var sum: f64 = 0.0
+        var i: i64 = 0
+        while i < dimension {
+            let chunk = i / chunk_lanes
+            let lane = i - chunk * chunk_lanes
+            let group = d * (dimension / chunk_lanes) + chunk
+            let negative = ((signs.negative_lane_masks[group] >> lane) & 1) == 1
+            let coefficient: f64 = if negative { 0.0 - 1.0 } else { 1.0 }
+            let partner = partner_indices[d * dimension + i]
+            sum = sum + coefficient * a[i] * b[partner]
+            i = i + 1
+        }
+        output_bits[d] = f64_to_bits(sum)
+        expected_bits[d] = parent_bits[d]
+        if output_bits[d] == expected_bits[d] {
+            matches = matches + 1
+        } else {
+            mismatches = mismatches + 1
+            if first_mismatch < 0 { first_mismatch = d }
+        }
+        d = d + 1
+    }
+    PireusXorExecutionWitness {
+        output_bits: output_bits,
+        parent_output_bits: expected_bits,
+        matching_lanes: matches,
+        mismatching_lanes: mismatches,
+        first_mismatch: first_mismatch,
+        partner_table_valid: partner_table_valid,
+        ascending_i: true,
+        reassociated: false,
+        bit_exact_to_frozen_parent:
+            partner_table_valid && matches == dimension && mismatches == 0,
+    }
+}
+
+fn pxl_targets() -> PireusXorLoweringTargets {
+    PireusXorLoweringTargets {
+        count: 3,
+        target_ids: [
+            PIREUS_XOR_TARGET_DARWIN_XEON,
+            PIREUS_XOR_TARGET_APPLE_SILICON,
+            PIREUS_XOR_TARGET_DGX
+        ],
+        canonical: [true, true, true],
+        observed: [false, false, false],
+        material_receipts: [false, false, false],
+        selector_candidates: [true, false, false],
+    }
+}
+
+fn pxl_targets_valid(targets: &PireusXorLoweringTargets) -> bool with Mut, Panic {
+    if targets.count != 3 ||
+        targets.target_ids[0] != PIREUS_XOR_TARGET_DARWIN_XEON ||
+        targets.target_ids[1] != PIREUS_XOR_TARGET_APPLE_SILICON ||
+        targets.target_ids[2] != PIREUS_XOR_TARGET_DGX {
+        return false
+    }
+    var i: i64 = 0
+    while i < targets.count {
+        if !targets.canonical[i] || targets.observed[i] ||
+            targets.material_receipts[i] { return false }
+        i = i + 1
+    }
+    targets.selector_candidates[0] && !targets.selector_candidates[1] &&
+        !targets.selector_candidates[2]
+}
+
+fn pxl_claim_boundary_valid(
+    observations: i64,
+    emissions: i64,
+    costs: i64,
+    refinements: i64,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    observations == 0 && emissions == 0 && costs == 0 && refinements == 0 &&
+        !parity_open && !claim_ready
+}
+
+fn pxl_reassociation_authorized(
+    fixed_order: bool,
+    accumulation_order: i64,
+    reassociation_required: bool,
+    numerical_contract_present: bool,
+) -> bool {
+    if !fixed_order ||
+        accumulation_order != PIREUS_XOR_ACCUMULATION_ASCENDING_I {
+        return false
+    }
+    if reassociation_required { return numerical_contract_present }
+    true
+}
+
+fn pxl_bit_exact_order_preserved(
+    fixed_order: bool,
+    accumulation_order: i64,
+    reassociation_required: bool,
+) -> bool {
+    fixed_order &&
+        accumulation_order == PIREUS_XOR_ACCUMULATION_ASCENDING_I &&
+        !reassociation_required
+}
+
+fn pxl_whole_operation_material_authorized(
+    plan: &PireusXorLoweringPlan,
+) -> bool with Mut, Panic {
+    if plan.count != PIREUS_XOR_LOWERING_NODE_CAPACITY { return false }
+    var i: i64 = 0
+    while i < plan.count {
+        if !plan.material_authorized[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxl_exercise_negatives(
+    parents: &PireusXorLoweringParentBindings,
+    plan: &PireusXorLoweringPlan,
+    signs: &PireusXorSignPlan,
+    bits: i64,
+    dimension: i64,
+    chunk_lanes: i64,
+) -> PireusXorLoweringNegatives with Mut, Panic, Div {
+    var missing = pxl_expected_parent_bindings(true, true, true)
+    missing.operation_source_sha256 = pxl_zero_hash()
+    let missing_parent_hash = !pxl_parent_bindings_valid(&missing)
+    var mismatched = pxl_expected_parent_bindings(true, true, true)
+    mismatched.intel_receipt_sha256[0] =
+        mismatched.intel_receipt_sha256[0] ^ 1
+    let mismatched_parent_hash = !pxl_parent_bindings_valid(&mismatched)
+    let missing_live = pxl_expected_parent_bindings(true, false, true)
+    let missing_parent_live_match = !pxl_parent_bindings_valid(&missing_live)
+
+    var missing_node_plan = pxl_copy_plan(plan)
+    missing_node_plan.count = missing_node_plan.count - 1
+    let missing_node = !pxl_plan_valid(&missing_node_plan)
+    var reordered = pxl_copy_plan(plan)
+    let first_kind = reordered.node_kinds[0]
+    reordered.node_kinds[0] = reordered.node_kinds[1]
+    reordered.node_kinds[1] = first_kind
+    let reordered_node = !pxl_plan_valid(&reordered)
+    var disconnected = pxl_copy_plan(plan)
+    disconnected.node_kinds[3] = PIREUS_XOR_NODE_OUTPUT_LANE
+    disconnected.node_kinds[4] = 0
+    let disconnected_node = !pxl_plan_valid(&disconnected)
+    var changed_capability_plan = pxl_copy_plan(plan)
+    changed_capability_plan.capabilities[2] = PIREUS_XOR_CAP_PER_TERM_SIGN
+    let changed_capability = !pxl_plan_valid(&changed_capability_plan)
+    var changed_barrier_plan = pxl_copy_plan(plan)
+    changed_barrier_plan.barriers_crossed[3] = true
+    let changed_barrier = !pxl_plan_valid(&changed_barrier_plan)
+    let changed_accumulation_order = !pxl_reassociation_authorized(
+        true, 2, false, false)
+    let selector_promoted_to_whole_operation =
+        !pxl_whole_operation_material_authorized(plan)
+    var corrupted_signs = pxl_copy_sign_plan(signs)
+    corrupted_signs.negative_lane_masks[0] =
+        corrupted_signs.negative_lane_masks[0] ^ 1
+    let unvalidated_sign_mask = !pxl_sign_plan_valid(
+        &corrupted_signs, bits, dimension, chunk_lanes)
+    var invalid_multiply = pxl_copy_plan(plan)
+    invalid_multiply.material_forms[2] =
+        PIREUS_XOR_MATERIAL_FORM_INTEL_VPERMPD_VECTOR_CONTROL
+    let unvalidated_multiply_form = !pxl_plan_valid(&invalid_multiply)
+    let tree_promoted_to_exact = !pxl_bit_exact_order_preserved(
+        true, PIREUS_XOR_ACCUMULATION_ASCENDING_I, true)
+    let reassociation_without_contract = !pxl_reassociation_authorized(
+        true, PIREUS_XOR_ACCUMULATION_ASCENDING_I, true, false)
+    let barrier_crossing = changed_barrier
+    let capability_promoted_to_emitted_use =
+        pxl_claim_boundary_valid(0, 0, 0, 0, false, false) &&
+        !pxl_claim_boundary_valid(0, 1, 0, 0, false, false)
+    let target_observation_without_receipt =
+        !pxl_claim_boundary_valid(1, 0, 0, 0, false, false)
+    let cost_without_material_receipt =
+        !pxl_claim_boundary_valid(0, 0, 1, 0, false, false)
+    let parity_before_freeze =
+        !pxl_claim_boundary_valid(0, 0, 0, 0, true, false)
+    let claim_before_parity =
+        !pxl_claim_boundary_valid(0, 0, 0, 0, false, true)
+    var passed: i64 = 0
+    let values: [bool; 20] = [
+        missing_parent_hash, mismatched_parent_hash,
+        missing_parent_live_match, missing_node, reordered_node,
+        disconnected_node, changed_capability, changed_barrier,
+        changed_accumulation_order, selector_promoted_to_whole_operation,
+        unvalidated_sign_mask, unvalidated_multiply_form,
+        tree_promoted_to_exact, reassociation_without_contract,
+        barrier_crossing, capability_promoted_to_emitted_use,
+        target_observation_without_receipt, cost_without_material_receipt,
+        parity_before_freeze, claim_before_parity
+    ]
+    var i: i64 = 0
+    while i < 20 {
+        if values[i] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusXorLoweringNegatives {
+        missing_parent_hash: missing_parent_hash,
+        mismatched_parent_hash: mismatched_parent_hash,
+        missing_parent_live_match: missing_parent_live_match,
+        missing_node: missing_node,
+        reordered_node: reordered_node,
+        disconnected_node: disconnected_node,
+        changed_capability: changed_capability,
+        changed_barrier: changed_barrier,
+        changed_accumulation_order: changed_accumulation_order,
+        selector_promoted_to_whole_operation:
+            selector_promoted_to_whole_operation,
+        unvalidated_sign_mask: unvalidated_sign_mask,
+        unvalidated_multiply_form: unvalidated_multiply_form,
+        tree_promoted_to_exact: tree_promoted_to_exact,
+        reassociation_without_contract: reassociation_without_contract,
+        barrier_crossing: barrier_crossing,
+        capability_promoted_to_emitted_use:
+            capability_promoted_to_emitted_use,
+        target_observation_without_receipt:
+            target_observation_without_receipt,
+        cost_without_material_receipt: cost_without_material_receipt,
+        parity_before_freeze: parity_before_freeze,
+        claim_before_parity: claim_before_parity,
+        passed: passed,
+        total: 20,
+    }
+}
+
+fn pxl_digest_plan(plan: &PireusXorLoweringPlan)
+    -> PireusXorLoweringDigest with Mut, Panic, Div {
+    var state = pxl_digest_add_i64(sha256_init(), 0x50584c504c414e31)
+    state = pxl_digest_add_i64(state, plan.count)
+    var i: i64 = 0
+    while i < plan.count {
+        state = pxl_digest_add_i64(state, plan.node_kinds[i])
+        state = pxl_digest_add_i64(state, plan.capabilities[i])
+        state = pxl_digest_add_i64(state, plan.semantic_forms[i])
+        state = pxl_digest_add_i64(state, plan.material_forms[i])
+        state = pxl_digest_add_i64(state, plan.group_counts[i])
+        state = pxl_digest_add_bool(state, plan.exact_order_preserved[i])
+        state = pxl_digest_add_bool(state, plan.reassociation_required[i])
+        state = pxl_digest_add_bool(state, plan.barriers_present[i])
+        state = pxl_digest_add_bool(state, plan.barriers_crossed[i])
+        state = pxl_digest_add_bool(state, plan.semantic_authorized[i])
+        state = pxl_digest_add_bool(state, plan.material_authorized[i])
+        state = pxl_digest_add_i64(state, plan.refusal_reasons[i])
+        i = i + 1
+    }
+    state = pxl_digest_add_i64(state, plan.semantic_authorized_count)
+    state = pxl_digest_add_i64(state, plan.material_candidate_count)
+    state = pxl_digest_add_i64(state, plan.material_authorized_count)
+    state = pxl_digest_add_i64(state, plan.unresolved_material_count)
+    state = pxl_digest_add_i64(state, plan.reassociation_required_count)
+    state = pxl_digest_add_bool(state, plan.exact_tree_reduction_refused)
+    pxl_digest_finish(state)
+}
+
+fn pxl_digest_signs(signs: &PireusXorSignPlan)
+    -> PireusXorLoweringDigest with Mut, Panic, Div {
+    var state = pxl_digest_add_i64(sha256_init(), 0x50584c5349474e31)
+    state = pxl_digest_add_i64(state, signs.count)
+    var i: i64 = 0
+    while i < signs.count {
+        state = pxl_digest_add_i64(state, signs.displacements[i])
+        state = pxl_digest_add_i64(state, signs.chunks[i])
+        state = pxl_digest_add_i64(state, signs.negative_lane_masks[i])
+        i = i + 1
+    }
+    state = pxl_digest_add_i64(state, signs.negative_cells)
+    state = pxl_digest_add_i64(state, signs.positive_cells)
+    state = pxl_digest_add_i64(state, signs.other_cells)
+    state = pxl_digest_add_i64(state, signs.complete_cells)
+    pxl_digest_finish(state)
+}
+
+fn pxl_digest_execution(execution: &PireusXorExecutionWitness)
+    -> PireusXorLoweringDigest with Mut, Panic, Div {
+    var state = pxl_digest_add_i64(sha256_init(), 0x50584c4558454331)
+    var i: i64 = 0
+    while i < 16 {
+        state = pxl_digest_add_i64(state, execution.output_bits[i])
+        state = pxl_digest_add_i64(state, execution.parent_output_bits[i])
+        i = i + 1
+    }
+    state = pxl_digest_add_i64(state, execution.matching_lanes)
+    state = pxl_digest_add_i64(state, execution.mismatching_lanes)
+    state = pxl_digest_add_i64(state, execution.first_mismatch)
+    state = pxl_digest_add_bool(state, execution.partner_table_valid)
+    state = pxl_digest_add_bool(state, execution.ascending_i)
+    state = pxl_digest_add_bool(state, execution.reassociated)
+    state = pxl_digest_add_bool(
+        state, execution.bit_exact_to_frozen_parent)
+    pxl_digest_finish(state)
+}
+
+fn pxl_digest_targets(targets: &PireusXorLoweringTargets)
+    -> PireusXorLoweringDigest with Mut, Panic, Div {
+    var state = pxl_digest_add_i64(sha256_init(), 0x50584c5441524731)
+    state = pxl_digest_add_i64(state, targets.count)
+    var i: i64 = 0
+    while i < targets.count {
+        state = pxl_digest_add_i64(state, targets.target_ids[i])
+        state = pxl_digest_add_bool(state, targets.canonical[i])
+        state = pxl_digest_add_bool(state, targets.observed[i])
+        state = pxl_digest_add_bool(state, targets.material_receipts[i])
+        state = pxl_digest_add_bool(state, targets.selector_candidates[i])
+        i = i + 1
+    }
+    pxl_digest_finish(state)
+}
+
+fn pxl_digest_negatives(negatives: &PireusXorLoweringNegatives)
+    -> PireusXorLoweringDigest with Mut, Panic, Div {
+    var state = pxl_digest_add_i64(sha256_init(), 0x50584c5749544e31)
+    let values: [bool; 20] = [
+        negatives.missing_parent_hash,
+        negatives.mismatched_parent_hash,
+        negatives.missing_parent_live_match,
+        negatives.missing_node,
+        negatives.reordered_node,
+        negatives.disconnected_node,
+        negatives.changed_capability,
+        negatives.changed_barrier,
+        negatives.changed_accumulation_order,
+        negatives.selector_promoted_to_whole_operation,
+        negatives.unvalidated_sign_mask,
+        negatives.unvalidated_multiply_form,
+        negatives.tree_promoted_to_exact,
+        negatives.reassociation_without_contract,
+        negatives.barrier_crossing,
+        negatives.capability_promoted_to_emitted_use,
+        negatives.target_observation_without_receipt,
+        negatives.cost_without_material_receipt,
+        negatives.parity_before_freeze,
+        negatives.claim_before_parity
+    ]
+    var i: i64 = 0
+    while i < 20 {
+        state = pxl_digest_add_bool(state, values[i])
+        i = i + 1
+    }
+    state = pxl_digest_add_i64(state, negatives.passed)
+    state = pxl_digest_add_i64(state, negatives.total)
+    pxl_digest_finish(state)
+}
+
+pub fn pireus_xor_lowering_evaluate(
+    pdf_path: string,
+    xed_path: string,
+) -> PireusXorLoweringResult with IO, Mut, Panic, Div, Alloc {
+    let operation = pireus_xor_operation_evaluate()
+    let material = pireus_xor_material_evaluate(xed_path)
+    let intel = pireus_intel_vpermpd_evaluate(pdf_path, xed_path)
+    let operation_live = pireus_xor_operation_matches_frozen_semantics(
+        &operation)
+    let material_live = pireus_xor_material_matches_frozen_semantics(&material)
+    let intel_live = pxl_intel_parent_live_match(
+        intel.valid, intel.error, intel.parent_valid,
+        intel.selector_semantics_receipt_present, intel.vector_bits,
+        intel.element_bits, intel.index_element_bits, intel.selector_bits,
+        intel.selector_mask, intel.source_lanes, intel.xor_selector_cells,
+        intel.xor_selector_matches, intel.xor_selector_failures,
+        intel.abstract_form_applications, intel.vector_control_complete,
+        intel.one_source_form_sufficient, intel.instruction_match_authorized,
+        intel.material_observation_count, intel.lowering_count,
+        intel.cost_record_count, intel.parity_open, intel.claim_ready,
+    )
+    var parents = pxl_expected_parent_bindings(
+        operation_live, material_live, intel_live)
+    parents.valid = pxl_parent_bindings_valid(&parents)
+    let plan = pxl_build_plan(
+        operation.graph.node_count, &operation.graph.node_kinds,
+        &operation.graph.node_capabilities, &operation.graph.node_fixed_order,
+        &operation.graph.node_nonassociative_barrier,
+        material.one_source_groups, operation.dimension,
+        intel.instruction_match_authorized)
+    let signs = pxl_build_sign_plan(
+        operation.bits, operation.dimension, material.chunk_lanes)
+    let execution = pxl_execute_exact(
+        operation.dimension, material.chunk_lanes,
+        &material.selector.partner_indices, &signs, &operation.output_bits)
+    let targets = pxl_targets()
+    let negatives = pxl_exercise_negatives(
+        &parents, &plan, &signs, operation.bits, operation.dimension,
+        material.chunk_lanes)
+    let plan_digest = pxl_digest_plan(&plan)
+    let sign_digest = pxl_digest_signs(&signs)
+    let execution_digest = pxl_digest_execution(&execution)
+    let target_digest = pxl_digest_targets(&targets)
+    let witness_digest = pxl_digest_negatives(&negatives)
+
+    var error = PIREUS_XOR_LOWERING_OK
+    if !parents.valid { error = PIREUS_XOR_LOWERING_ERR_PARENT }
+    else if !pxl_plan_valid(&plan) { error = PIREUS_XOR_LOWERING_ERR_PLAN }
+    else if !pxl_sign_plan_valid(
+        &signs, operation.bits, operation.dimension, material.chunk_lanes) {
+        error = PIREUS_XOR_LOWERING_ERR_SIGN
+    } else if !execution.partner_table_valid ||
+        !execution.bit_exact_to_frozen_parent ||
+        !execution.ascending_i ||
+        execution.reassociated {
+        error = PIREUS_XOR_LOWERING_ERR_EXECUTION
+    } else if !pxl_targets_valid(&targets) {
+        error = PIREUS_XOR_LOWERING_ERR_TARGET
+    } else if negatives.passed != negatives.total ||
+        !pxl_claim_boundary_valid(0, 0, 0, 0, false, false) {
+        error = PIREUS_XOR_LOWERING_ERR_AUTHORITY
+    }
+
+    var failures: i64 = 0
+    if error != PIREUS_XOR_LOWERING_OK { failures = failures + 1 }
+    if !pireus_xor_lowering_digest_nonzero(&plan_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_lowering_digest_nonzero(&sign_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_lowering_digest_nonzero(&execution_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_lowering_digest_nonzero(&target_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_lowering_digest_nonzero(&witness_digest) {
+        failures = failures + 1
+    }
+
+    PireusXorLoweringResult {
+        valid: error == PIREUS_XOR_LOWERING_OK && failures == 0,
+        error: error,
+        bits: operation.bits,
+        dimension: operation.dimension,
+        parents: parents,
+        plan: plan,
+        signs: signs,
+        execution: execution,
+        targets: targets,
+        plan_digest: plan_digest,
+        sign_digest: sign_digest,
+        execution_digest: execution_digest,
+        target_digest: target_digest,
+        witness_digest: witness_digest,
+        material_observation_count: 0,
+        compiler_emission_count: 0,
+        cost_record_count: 0,
+        numerical_refinement_receipt_count: 0,
+        parity_open: false,
+        claim_ready: false,
+        negatives: negatives,
+        failures: failures,
+    }
+}
+
+fn pxl_digest_matches(
+    digest: &PireusXorLoweringDigest,
+    expected: &[i64; 8],
+) -> bool with Mut, Panic {
+    pxl_hash_equal(&digest.words, expected)
+}
+
+/// Byte-exact predicate admitted only after the first Sounio authority stream.
+pub fn pireus_xor_lowering_matches_frozen_semantics(
+    result: &PireusXorLoweringResult,
+) -> bool with Mut, Panic, Div {
+    if !result.valid || result.error != PIREUS_XOR_LOWERING_OK ||
+        result.bits != 4 || result.dimension != 16 ||
+        !pxl_parent_bindings_valid(&result.parents) ||
+        !pxl_plan_valid(&result.plan) ||
+        !pxl_sign_plan_valid(&result.signs, 4, 16, 8) ||
+        !pxl_targets_valid(&result.targets) ||
+        result.failures != 0 {
+        return false
+    }
+
+    if result.plan.count != 5 ||
+        result.plan.semantic_authorized_count != 5 ||
+        result.plan.material_candidate_count != 1 ||
+        result.plan.material_authorized_count != 0 ||
+        result.plan.unresolved_material_count != 5 ||
+        result.plan.reassociation_required_count != 0 ||
+        !result.plan.exact_tree_reduction_refused {
+        return false
+    }
+    let expected_kinds: [i64; 5] = [1, 2, 3, 4, 5]
+    let expected_forms: [i64; 5] = [1, 2, 3, 4, 5]
+    let expected_material: [i64; 5] = [1, 0, 0, 0, 0]
+    let expected_groups: [i64; 5] = [32, 32, 32, 16, 16]
+    let expected_barriers: [bool; 5] = [false, true, false, true, true]
+    let expected_refusals: [i64; 5] = [1, 2, 2, 2, 2]
+    var node: i64 = 0
+    while node < 5 {
+        if result.plan.node_kinds[node] != expected_kinds[node] ||
+            result.plan.capabilities[node] != expected_kinds[node] ||
+            result.plan.semantic_forms[node] != expected_forms[node] ||
+            result.plan.material_forms[node] != expected_material[node] ||
+            result.plan.group_counts[node] != expected_groups[node] ||
+            result.plan.barriers_present[node] != expected_barriers[node] ||
+            result.plan.refusal_reasons[node] != expected_refusals[node] ||
+            !result.plan.exact_order_preserved[node] ||
+            result.plan.reassociation_required[node] ||
+            result.plan.barriers_crossed[node] ||
+            !result.plan.semantic_authorized[node] ||
+            result.plan.material_authorized[node] {
+            return false
+        }
+        node = node + 1
+    }
+
+    let expected_masks: [i64; 32] = [
+        254, 255, 104, 150, 194, 60, 164, 90,
+        14, 240, 84, 170, 152, 102, 50, 204,
+        254, 0, 148, 149, 56, 57, 82, 83,
+        224, 225, 138, 139, 38, 39, 76, 77
+    ]
+    if result.signs.count != 32 || result.signs.negative_cells != 120 ||
+        result.signs.positive_cells != 136 || result.signs.other_cells != 0 ||
+        result.signs.complete_cells != 256 {
+        return false
+    }
+    var group: i64 = 0
+    while group < 32 {
+        if result.signs.displacements[group] != group / 2 ||
+            result.signs.chunks[group] != group % 2 ||
+            result.signs.negative_lane_masks[group] != expected_masks[group] {
+            return false
+        }
+        group = group + 1
+    }
+
+    if !result.execution.partner_table_valid ||
+        result.execution.matching_lanes != 16 ||
+        result.execution.mismatching_lanes != 0 ||
+        result.execution.first_mismatch != 0 - 1 ||
+        !result.execution.ascending_i || result.execution.reassociated ||
+        !result.execution.bit_exact_to_frozen_parent {
+        return false
+    }
+    var lane: i64 = 0
+    while lane < 16 {
+        if result.execution.output_bits[lane] !=
+            result.execution.parent_output_bits[lane] { return false }
+        lane = lane + 1
+    }
+
+    let expected_plan: [i64; 8] = [
+        2142091107, 4249907122, 3863427811, 504864931,
+        773906704, 3125338900, 1218300674, 2342175410
+    ]
+    let expected_signs: [i64; 8] = [
+        752426894, 1081783397, 4255815771, 3046881682,
+        374348601, 3092447425, 409805503, 2155165117
+    ]
+    let expected_execution: [i64; 8] = [
+        1681975016, 353754803, 255370894, 371728465,
+        3003784656, 2361654069, 297010941, 1230873056
+    ]
+    let expected_targets: [i64; 8] = [
+        1171138587, 3673533213, 2025206369, 3854413864,
+        2173565745, 4002586673, 3864924956, 1538784405
+    ]
+    let expected_witnesses: [i64; 8] = [
+        3349983975, 2376690512, 2661503365, 1848883686,
+        3608709071, 4162318832, 3458944498, 2513815805
+    ]
+    if !pxl_digest_matches(&result.plan_digest, &expected_plan) ||
+        !pxl_digest_matches(&result.sign_digest, &expected_signs) ||
+        !pxl_digest_matches(&result.execution_digest, &expected_execution) ||
+        !pxl_digest_matches(&result.target_digest, &expected_targets) ||
+        !pxl_digest_matches(&result.witness_digest, &expected_witnesses) {
+        return false
+    }
+
+    result.negatives.passed == 20 && result.negatives.total == 20 &&
+        result.material_observation_count == 0 &&
+        result.compiler_emission_count == 0 &&
+        result.cost_record_count == 0 &&
+        result.numerical_refinement_receipt_count == 0 &&
+        !result.parity_open && !result.claim_ready
+}

@@ -1,0 +1,168 @@
+// Sounio authority for the complete Xeon AVX-512 material artifact.
+//@ run-pass
+use native::encode::*
+use native::lower_ir::*
+use ir::ir::*
+use hlir::ir::*
+use hlir::native_bridge::*
+
+fn cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let ah = if a >= half { 1 } else { 0 }
+    let bh = if b >= half { 1 } else { 0 }
+    let al = a & (half - 1)
+    let bl = b & (half - 1)
+    if ah == 0 && bh == 0 { return cd_sign(al, bl, bits - 1) }
+    if ah == 0 && bh == 1 { return cd_sign(bl, al, bits - 1) }
+    if ah == 1 && bh == 0 {
+        if bl == 0 { return cd_sign(al, 0, bits - 1) }
+        return 0 - cd_sign(al, bl, bits - 1)
+    }
+    if bl == 0 { return 0 - cd_sign(0, al, bits - 1) }
+    cd_sign(bl, al, bits - 1)
+}
+
+fn print_quad(v: i64) with IO {
+    print("  .quad "); print_int(v); print("\n")
+}
+
+fn print_sign_quad(negative: bool) with IO {
+    if negative { print("  .quad -9223372036854775808\n") }
+    else { print("  .quad 0\n") }
+}
+
+fn typed_hlir(candidate: i64) -> HlirInstr with Mut, Panic, Div, Alloc {
+    var args: [i64; 64] = [0; 64]
+    args[0] = 101
+    args[1] = 102
+    args[2] = 103
+    hlir_instr_xor_convolution_call_direct(
+        104, hlir_name_from_str("name_is_not_authority"), args, 3, hlir_type_i64(),
+        hlir_cayley_dickson_xor_convolution(4), candidate)
+}
+
+fn bridge_instruction() -> IrInstr with Mut, Panic, Div, Alloc {
+    let h = typed_hlir(HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE)
+    let bridged = hlir_xor_convolution_to_native_ir(h, hlir_xor_native_layout_xeon())
+    if !bridged.accepted || bridged.reason != 0 { return ir_instr_new(IrOpcode::IrNop) }
+    bridged.instr
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var wrong_bits = typed_hlir(HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE)
+    wrong_bits.xor_bits = 3
+    var wrong_twist = typed_hlir(HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE)
+    wrong_twist.xor_twist = HLIR_XOR_TWIST_NONE
+    let wrong_candidate = typed_hlir(HLIR_XOR_CANDIDATE_WARP_SHUFFLE)
+    var wrong_arity = typed_hlir(HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE)
+    wrong_arity.call_arg_count = 2
+    let n1 = hlir_xor_convolution_to_native_ir(wrong_bits, hlir_xor_native_layout_xeon())
+    let n2 = hlir_xor_convolution_to_native_ir(wrong_twist, hlir_xor_native_layout_xeon())
+    let n3 = hlir_xor_convolution_to_native_ir(wrong_candidate, hlir_xor_native_layout_xeon())
+    let n4 = hlir_xor_convolution_to_native_ir(wrong_arity, hlir_xor_native_layout_xeon())
+    if n1.reason != 2 || n2.reason != 3 || n3.reason != 4 || n4.reason != 5 {
+        print("PIREUS_XEON_MATERIALIZER_FAIL bridge_negative\n")
+        return 1
+    }
+    let instr = bridge_instruction()
+    if instr.op != IrOpcode::IrXorConvolutionS {
+        print("PIREUS_XEON_MATERIALIZER_FAIL bridge\n")
+        return 1
+    }
+    let code = emit_xor_convolution_s(code_buffer_new(), instr)
+    if code.len != 1004 {
+        print("PIREUS_XEON_MATERIALIZER_FAIL bytes="); print_int(code.len); print("\n")
+        return 1
+    }
+
+    print("schema=pireus-xeon-avx512-material-assembly-v1\n")
+    print("producer_language=Sounio\nproducer_role=SEMANTIC_AUTHORITY\n")
+    print("operator=XorConvolution bits=4 twist=CayleyDicksonSign\n")
+    print("---BEGIN-ASSEMBLY---\n")
+    print(".text\n.globl pireus_xor_avx512\n.type pireus_xor_avx512,@function\n")
+    print("pireus_xor_avx512:\n")
+    print("  vmovupd 0(%rdi), %zmm6\n  vmovupd 64(%rdi), %zmm7\n")
+    print("  vmovupd 0(%rsi), %zmm8\n  vmovupd 64(%rsi), %zmm9\n")
+    var r: i64 = 0
+    while r < 8 {
+        print("  vmovdqu64 pireus_xor_ctrl+"); print_int(r * 64)
+        print("(%rip), %zmm"); print_int(10 + r); print("\n")
+        r = r + 1
+    }
+    r = 0
+    while r < 8 {
+        print("  vmovdqu64 pireus_broadcast_ctrl+"); print_int(r * 64)
+        print("(%rip), %zmm"); print_int(18 + r); print("\n")
+        r = r + 1
+    }
+    print("  leaq pireus_sign_table(%rip), %rax\n")
+    var k: i64 = 0
+    while k < code.len {
+        if (k & 15) == 0 { print("  .byte ") } else { print(",") }
+        print_int(code_buffer_read_byte(code, k))
+        if (k & 15) == 15 || k + 1 == code.len { print("\n") }
+        k = k + 1
+    }
+    print("  vmovupd %zmm0, 0(%rdx)\n  vmovupd %zmm1, 64(%rdx)\n")
+    print("  vzeroupper\n  ret\n.size pireus_xor_avx512,.-pireus_xor_avx512\n")
+    print(".section .rodata\n.balign 64\npireus_xor_ctrl:\n")
+    var lane: i64 = 0
+    while lane < 8 {
+        var d: i64 = 0
+        while d < 8 { print_quad(lane ^ d); d = d + 1 }
+        lane = lane + 1
+    }
+    print(".balign 64\npireus_broadcast_ctrl:\n")
+    lane = 0
+    while lane < 8 {
+        var q: i64 = 0
+        while q < 8 { print_quad(lane); q = q + 1 }
+        lane = lane + 1
+    }
+    print(".balign 64\npireus_sign_table:\n")
+    var i: i64 = 0
+    while i < 16 {
+        var d2: i64 = 0
+        while d2 < 16 {
+            print_sign_quad(cd_sign(i, i ^ d2, 4) < 0)
+            d2 = d2 + 1
+        }
+        i = i + 1
+    }
+    print(".globl pireus_expected_sign\n.type pireus_expected_sign,@object\n")
+    print("pireus_expected_sign:\n")
+    var negative_pairs: i64 = 0
+    var signed_lane_checksum: i64 = 0
+    i = 0
+    while i < 16 {
+        var j: i64 = 0
+        print("  .byte ")
+        while j < 16 {
+            if j > 0 { print(",") }
+            let expected_sign = cd_sign(i, j, 4)
+            if expected_sign < 0 {
+                negative_pairs = negative_pairs + 1
+                print("255")
+            } else { print("1") }
+            signed_lane_checksum = signed_lane_checksum
+                + (i * 16 + j + 1) * expected_sign * ((i ^ j) + 1)
+            j = j + 1
+        }
+        print("\n")
+        i = i + 1
+    }
+    if negative_pairs != 120 || signed_lane_checksum != 21336 {
+        print("---END-ASSEMBLY---\n")
+        print("PIREUS_XEON_MATERIALIZER_FAIL semantic_freeze\n")
+        return 1
+    }
+    print(".size pireus_expected_sign,256\n.section .note.GNU-stack,\"\",@progbits\n")
+    print("---END-ASSEMBLY---\n")
+    print("machine_bytes=1004 basis_pairs=256 bridge=HLIR_TYPED_METADATA\n")
+    print("negative_pairs=120 signed_lane_checksum=21336\n")
+    print("bridge_negative_tests=4/4\n")
+    print("PIREUS_XEON_MATERIALIZER_PASS\n")
+    0
+}

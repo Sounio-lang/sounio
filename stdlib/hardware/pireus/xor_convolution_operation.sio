@@ -1,0 +1,1121 @@
+//! Pireus semantic operation graph for the frozen bits=4 XorConvolution.
+//!
+//! This module binds two frozen parents and names the material-neutral DAG a
+//! later target lowering must realize. It selects no instruction and records
+//! no hardware observation, cost, or performance result.
+
+use algebra::xor_convolution::{
+    XorDigest, XorConvolutionResult,
+    xor_convolution_evaluate, xor_convolution_matches_frozen_semantics,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+pub const PIREUS_XOR_OPERATION_BITS: i64 = 4
+pub const PIREUS_XOR_OPERATION_DIMENSION: i64 = 16
+pub const PIREUS_XOR_OVERLAY_GRAPH_ID: i64 = 7
+pub const PIREUS_XOR_OVERLAY_OWNER_ID: i64 = 9
+
+pub const PIREUS_XOR_NODE_XOR_PERMUTE: i64 = 1
+pub const PIREUS_XOR_NODE_TWIST_APPLY: i64 = 2
+pub const PIREUS_XOR_NODE_MULTIPLY: i64 = 3
+pub const PIREUS_XOR_NODE_HORIZONTAL_REDUCE: i64 = 4
+pub const PIREUS_XOR_NODE_OUTPUT_LANE: i64 = 5
+
+pub const PIREUS_XOR_CAP_LANE_XOR_PERMUTE: i64 = 1
+pub const PIREUS_XOR_CAP_PER_TERM_SIGN: i64 = 2
+pub const PIREUS_XOR_CAP_FLOAT_MULTIPLY: i64 = 3
+pub const PIREUS_XOR_CAP_FIXED_ORDER_REDUCE: i64 = 4
+pub const PIREUS_XOR_CAP_OUTPUT_MATERIALIZE: i64 = 5
+
+pub const PIREUS_XOR_TARGET_DARWIN_XEON: i64 = 1
+pub const PIREUS_XOR_TARGET_APPLE_SILICON: i64 = 2
+pub const PIREUS_XOR_TARGET_DGX: i64 = 3
+
+pub const PIREUS_XOR_ACCUMULATION_ASCENDING_I: i64 = 1
+pub const PIREUS_XOR_EVIDENCE_DECLARED_CANONICAL: i64 = 1
+pub const PIREUS_XOR_EVIDENCE_MATERIAL_OBSERVATION: i64 = 2
+
+pub const PIREUS_XOR_OPERATION_OK: i64 = 0
+pub const PIREUS_XOR_OPERATION_ERR_PARENT: i64 = 1
+pub const PIREUS_XOR_OPERATION_ERR_BITS: i64 = 2
+pub const PIREUS_XOR_OPERATION_ERR_GRAPH: i64 = 3
+pub const PIREUS_XOR_OPERATION_ERR_CAPABILITY: i64 = 4
+pub const PIREUS_XOR_OPERATION_ERR_CLASSIFICATION: i64 = 5
+pub const PIREUS_XOR_OPERATION_ERR_TARGET: i64 = 6
+pub const PIREUS_XOR_OPERATION_ERR_MATERIAL: i64 = 7
+pub const PIREUS_XOR_OPERATION_ERR_AUTHORITY: i64 = 8
+
+pub struct PireusXorOperationDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusXorGraphParentReceipt {
+    pub identity_module_sha256: [i64; 8],
+    pub semantics_sha256: [i64; 8],
+    pub authority_stream_sha256: [i64; 8],
+    pub registry_digest: [i64; 8],
+    pub dependency_digest: [i64; 8],
+    pub lifted_graph_digest: [i64; 8],
+    pub occurrence_digest: [i64; 8],
+    pub collision_digest: [i64; 8],
+    pub provenance_digest: [i64; 8],
+    pub valid: bool,
+}
+
+pub struct PireusXorOperationGraph {
+    pub overlay_graph_id: i64,
+    pub overlay_owner_id: i64,
+    pub node_count: i64,
+    pub node_kinds: [i64; 5],
+    pub node_capabilities: [i64; 5],
+    pub node_fixed_order: [bool; 5],
+    pub node_nonassociative_barrier: [bool; 5],
+    pub edge_count: i64,
+    pub edge_sources: [i64; 4],
+    pub edge_targets: [i64; 4],
+}
+
+pub struct PireusXorTargetDeclarations {
+    pub count: i64,
+    pub target_ids: [i64; 3],
+    pub canonical: [bool; 3],
+    pub observed: [bool; 3],
+    pub evidence_roles: [i64; 3],
+    pub material_receipt_count: i64,
+}
+
+pub struct PireusXorOperationNegatives {
+    pub absent_xor_parent: bool,
+    pub absent_graph_parent: bool,
+    pub mismatched_xor_parent: bool,
+    pub mismatched_graph_parent: bool,
+    pub invalid_bits: bool,
+    pub topology_corruption: bool,
+    pub missing_capability: bool,
+    pub accumulation_order_change: bool,
+    pub displacement_promotion: bool,
+    pub separability_promotion: bool,
+    pub cocycle_promotion: bool,
+    pub associativity_promotion: bool,
+    pub wht_promotion: bool,
+    pub missing_darwin_xeon: bool,
+    pub missing_apple_silicon: bool,
+    pub missing_dgx: bool,
+    pub target_observation_without_receipt: bool,
+    pub material_claim_without_receipt: bool,
+    pub parity_before_freeze: bool,
+    pub claim_before_parity: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusXorOperationResult {
+    pub valid: bool,
+    pub error: i64,
+    pub bits: i64,
+    pub dimension: i64,
+    pub xor_parent_frozen: bool,
+    pub graph_parent_frozen: bool,
+    pub xor_parent_match: bool,
+    pub graph_parent_receipt_valid: bool,
+    pub graph_parent: PireusXorGraphParentReceipt,
+    pub graph: PireusXorOperationGraph,
+    pub targets: PireusXorTargetDeclarations,
+    pub output_bits: [i64; 64],
+    pub output_matches_parent: bool,
+    pub zero_free: bool,
+    pub normalized: bool,
+    pub displacement_only: bool,
+    pub rank_one_separable: bool,
+    pub left_square: bool,
+    pub group_two_cocycle: bool,
+    pub associator_defect_count: i64,
+    pub nonassociative_barrier_count: i64,
+    pub wht_rewrite_authorized: bool,
+    pub material_observation_count: i64,
+    pub lowering_count: i64,
+    pub cost_record_count: i64,
+    pub parent_digest: PireusXorOperationDigest,
+    pub graph_digest: PireusXorOperationDigest,
+    pub capability_digest: PireusXorOperationDigest,
+    pub target_digest: PireusXorOperationDigest,
+    pub result_digest: PireusXorOperationDigest,
+    pub witness_digest: PireusXorOperationDigest,
+    pub negatives: PireusXorOperationNegatives,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub failures: i64,
+}
+
+pub fn pireus_xor_parent_semantics_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xda782da9, 0x38ee5f9e, 0x0a49cb1f, 0x95dfbb6a,
+        0xcac8aa70, 0x6c9eb6d7, 0x11565adc, 0xb9031502
+    ]
+    value
+}
+
+pub fn pireus_graph_parent_semantics_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x8dc9c6c9, 0x0d4f21b1, 0x3c07d8ec, 0x3e914839,
+        0xb9f3bfaa, 0x1e32f222, 0xa25bdcb2, 0x67c943cb
+    ]
+    value
+}
+
+fn pxo_graph_parent_module_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0xcaedf51b, 0xabd450db, 0x0af50f97, 0x55e67778,
+        0x6cc8b563, 0xad923f35, 0x98153759, 0x859f9985
+    ]
+    value
+}
+
+fn pxo_graph_parent_authority_hash() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x5b3efa60, 0x6d86805a, 0xa222ced7, 0x2a37ed87,
+        0xe7b3dab6, 0x6b21e58e, 0x0547163a, 0xa19c83dd
+    ]
+    value
+}
+
+fn pxo_graph_parent_registry_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x9b56f6f0, 0x306d949e, 0x2266776e, 0xe34f05f3,
+        0xba1dec42, 0x39e0bba9, 0x411b3aed, 0x9c2b27ce
+    ]
+    value
+}
+
+fn pxo_graph_parent_dependency_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x4dd37bf1, 0xcdd774e4, 0xab840e54, 0x44d7b18b,
+        0x8a1d0990, 0x063901b8, 0xa85743a7, 0xac2abbcc
+    ]
+    value
+}
+
+fn pxo_graph_parent_lifted_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x0bcf3ef8, 0xb9598cb4, 0x363864d9, 0xba75d9b0,
+        0x50a22df5, 0x01b80a09, 0xeda7290b, 0x3e331765
+    ]
+    value
+}
+
+fn pxo_graph_parent_occurrence_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x57218fbb, 0x4a6d640e, 0x4651dea0, 0xd14a17a5,
+        0x4559a2f5, 0x59e45e31, 0x86a46df7, 0xd8a05950
+    ]
+    value
+}
+
+fn pxo_graph_parent_collision_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x3a72cc51, 0x58aa0e84, 0x1b4b13de, 0x2a924d1b,
+        0xca516778, 0xb651ae3f, 0x1fe9be80, 0xd26925bb
+    ]
+    value
+}
+
+fn pxo_graph_parent_provenance_digest() -> [i64; 8] {
+    let value: [i64; 8] = [
+        0x1e962677, 0xcfb1846a, 0x5e5b9dd7, 0x0c13c25c,
+        0xae5f92ad, 0x905f6ad7, 0x95a8912b, 0x4e352f20
+    ]
+    value
+}
+
+fn pxo_graph_parent_fields_valid(
+    module_hash: &[i64; 8],
+    semantics_hash: &[i64; 8],
+    authority_hash: &[i64; 8],
+    registry_digest: &[i64; 8],
+    dependency_digest: &[i64; 8],
+    lifted_digest: &[i64; 8],
+    occurrence_digest: &[i64; 8],
+    collision_digest: &[i64; 8],
+    provenance_digest: &[i64; 8],
+) -> bool {
+    let expected_module = pxo_graph_parent_module_hash()
+    let expected_semantics = pireus_graph_parent_semantics_hash()
+    let expected_authority = pxo_graph_parent_authority_hash()
+    let expected_registry = pxo_graph_parent_registry_digest()
+    let expected_dependency = pxo_graph_parent_dependency_digest()
+    let expected_lifted = pxo_graph_parent_lifted_digest()
+    let expected_occurrence = pxo_graph_parent_occurrence_digest()
+    let expected_collision = pxo_graph_parent_collision_digest()
+    let expected_provenance = pxo_graph_parent_provenance_digest()
+    pxo_hash_equal(module_hash, &expected_module) &&
+        pxo_hash_equal(semantics_hash, &expected_semantics) &&
+        pxo_hash_equal(authority_hash, &expected_authority) &&
+        pxo_hash_equal(registry_digest, &expected_registry) &&
+        pxo_hash_equal(dependency_digest, &expected_dependency) &&
+        pxo_hash_equal(lifted_digest, &expected_lifted) &&
+        pxo_hash_equal(occurrence_digest, &expected_occurrence) &&
+        pxo_hash_equal(collision_digest, &expected_collision) &&
+        pxo_hash_equal(provenance_digest, &expected_provenance)
+}
+
+fn pxo_graph_parent_receipt() -> PireusXorGraphParentReceipt {
+    let module_hash = pxo_graph_parent_module_hash()
+    let semantics_hash = pireus_graph_parent_semantics_hash()
+    let authority_hash = pxo_graph_parent_authority_hash()
+    let registry_digest = pxo_graph_parent_registry_digest()
+    let dependency_digest = pxo_graph_parent_dependency_digest()
+    let lifted_digest = pxo_graph_parent_lifted_digest()
+    let occurrence_digest = pxo_graph_parent_occurrence_digest()
+    let collision_digest = pxo_graph_parent_collision_digest()
+    let provenance_digest = pxo_graph_parent_provenance_digest()
+    let valid = pxo_graph_parent_fields_valid(
+        &module_hash, &semantics_hash, &authority_hash,
+        &registry_digest, &dependency_digest, &lifted_digest,
+        &occurrence_digest, &collision_digest, &provenance_digest,
+    )
+    PireusXorGraphParentReceipt {
+        identity_module_sha256: module_hash,
+        semantics_sha256: semantics_hash,
+        authority_stream_sha256: authority_hash,
+        registry_digest: registry_digest,
+        dependency_digest: dependency_digest,
+        lifted_graph_digest: lifted_digest,
+        occurrence_digest: occurrence_digest,
+        collision_digest: collision_digest,
+        provenance_digest: provenance_digest,
+        valid: valid,
+    }
+}
+
+fn pxo_zero_hash() -> [i64; 8] { [0; 8] }
+
+fn pxo_hash_nonzero(hash: &[i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if hash[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pxo_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+    with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn pxo_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+    with Mut, Panic, Div {
+    pxo_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn pxo_digest_add_hash(state: SHA256State, hash: &[i64; 8]) -> SHA256State
+    with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = pxo_digest_add_i64(next, hash[i])
+        i = i + 1
+    }
+    next
+}
+
+fn pxo_digest_add_xor(state: SHA256State, digest: &XorDigest) -> SHA256State
+    with Mut, Panic, Div {
+    pxo_digest_add_hash(state, &digest.words)
+}
+
+fn pxo_digest_finish(state: SHA256State) -> PireusXorOperationDigest
+    with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(&digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusXorOperationDigest { words: words }
+}
+
+pub fn pireus_xor_operation_digest_nonzero(
+    digest: &PireusXorOperationDigest,
+) -> bool {
+    pxo_hash_nonzero(&digest.words)
+}
+
+fn pxo_operation_digest_matches(
+    digest: &PireusXorOperationDigest,
+    expected: [i64; 8],
+) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != expected[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_canonical_graph() -> PireusXorOperationGraph {
+    let node_kinds: [i64; 5] = [
+        PIREUS_XOR_NODE_XOR_PERMUTE,
+        PIREUS_XOR_NODE_TWIST_APPLY,
+        PIREUS_XOR_NODE_MULTIPLY,
+        PIREUS_XOR_NODE_HORIZONTAL_REDUCE,
+        PIREUS_XOR_NODE_OUTPUT_LANE
+    ]
+    let node_capabilities: [i64; 5] = [
+        PIREUS_XOR_CAP_LANE_XOR_PERMUTE,
+        PIREUS_XOR_CAP_PER_TERM_SIGN,
+        PIREUS_XOR_CAP_FLOAT_MULTIPLY,
+        PIREUS_XOR_CAP_FIXED_ORDER_REDUCE,
+        PIREUS_XOR_CAP_OUTPUT_MATERIALIZE
+    ]
+    let node_fixed_order: [bool; 5] = [false, false, false, true, true]
+    let node_barriers: [bool; 5] = [false, true, false, true, true]
+    let edge_sources: [i64; 4] = [1, 2, 3, 4]
+    let edge_targets: [i64; 4] = [2, 3, 4, 5]
+    PireusXorOperationGraph {
+        overlay_graph_id: PIREUS_XOR_OVERLAY_GRAPH_ID,
+        overlay_owner_id: PIREUS_XOR_OVERLAY_OWNER_ID,
+        node_count: 5,
+        node_kinds: node_kinds,
+        node_capabilities: node_capabilities,
+        node_fixed_order: node_fixed_order,
+        node_nonassociative_barrier: node_barriers,
+        edge_count: 4,
+        edge_sources: edge_sources,
+        edge_targets: edge_targets,
+    }
+}
+
+fn pxo_canonical_targets() -> PireusXorTargetDeclarations {
+    let target_ids: [i64; 3] = [
+        PIREUS_XOR_TARGET_DARWIN_XEON,
+        PIREUS_XOR_TARGET_APPLE_SILICON,
+        PIREUS_XOR_TARGET_DGX
+    ]
+    let canonical: [bool; 3] = [true, true, true]
+    let observed: [bool; 3] = [false, false, false]
+    let evidence_roles: [i64; 3] = [
+        PIREUS_XOR_EVIDENCE_DECLARED_CANONICAL,
+        PIREUS_XOR_EVIDENCE_DECLARED_CANONICAL,
+        PIREUS_XOR_EVIDENCE_DECLARED_CANONICAL
+    ]
+    PireusXorTargetDeclarations {
+        count: 3,
+        target_ids: target_ids,
+        canonical: canonical,
+        observed: observed,
+        evidence_roles: evidence_roles,
+        material_receipt_count: 0,
+    }
+}
+
+fn pxo_topology_valid(
+    node_count: i64,
+    nodes: &[i64; 5],
+    edge_count: i64,
+    sources: &[i64; 4],
+    targets: &[i64; 4],
+) -> bool {
+    if node_count != 5 || edge_count != 4 { return false }
+    let expected_nodes: [i64; 5] = [1, 2, 3, 4, 5]
+    let expected_sources: [i64; 4] = [1, 2, 3, 4]
+    let expected_targets: [i64; 4] = [2, 3, 4, 5]
+    var i: i64 = 0
+    while i < 5 {
+        if nodes[i] != expected_nodes[i] { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < 4 {
+        if sources[i] != expected_sources[i] ||
+            targets[i] != expected_targets[i] { return false }
+        if sources[i] >= targets[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_graph_masks_valid(
+    fixed_order: &[bool; 5],
+    barriers: &[bool; 5],
+) -> bool {
+    let expected_fixed: [bool; 5] = [false, false, false, true, true]
+    let expected_barriers: [bool; 5] = [false, true, false, true, true]
+    var i: i64 = 0
+    while i < 5 {
+        if fixed_order[i] != expected_fixed[i] ||
+            barriers[i] != expected_barriers[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_graph_valid(graph: &PireusXorOperationGraph) -> bool {
+    pxo_topology_valid(
+        graph.node_count, &graph.node_kinds, graph.edge_count,
+        &graph.edge_sources, &graph.edge_targets,
+    ) && pxo_graph_masks_valid(
+        &graph.node_fixed_order,
+        &graph.node_nonassociative_barrier,
+    )
+}
+
+fn pxo_bits_dimension_valid(bits: i64, dimension: i64) -> bool {
+    bits == PIREUS_XOR_OPERATION_BITS &&
+        dimension == PIREUS_XOR_OPERATION_DIMENSION &&
+        dimension == (1 << bits)
+}
+
+fn pxo_accumulation_order_valid(order: i64) -> bool {
+    order == PIREUS_XOR_ACCUMULATION_ASCENDING_I
+}
+
+fn pxo_capabilities_valid(capabilities: &[i64; 5]) -> bool {
+    let expected: [i64; 5] = [1, 2, 3, 4, 5]
+    var i: i64 = 0
+    while i < 5 {
+        if capabilities[i] != expected[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_target_declarations_valid(targets: &PireusXorTargetDeclarations) -> bool {
+    if targets.count != 3 || targets.material_receipt_count != 0 {
+        return false
+    }
+    let expected: [i64; 3] = [1, 2, 3]
+    var i: i64 = 0
+    while i < 3 {
+        if targets.target_ids[i] != expected[i] || !targets.canonical[i] ||
+            targets.observed[i] ||
+            targets.evidence_roles[i] !=
+                PIREUS_XOR_EVIDENCE_DECLARED_CANONICAL {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pxo_classification_valid(parent: &XorConvolutionResult) -> bool {
+    parent.classification.zero_free &&
+        parent.classification.normalized &&
+        !parent.classification.displacement_only &&
+        !parent.classification.rank_one_separable &&
+        parent.classification.left_square &&
+        !parent.classification.group_two_cocycle &&
+        parent.classification.associator_defect_count > 0
+}
+
+fn pxo_output_matches_parent(parent: &XorConvolutionResult) -> bool {
+    var d: i64 = 0
+    while d < parent.contract.dimension {
+        if parent.direct_bits[d] != parent.horizontal_bits[d] { return false }
+        d = d + 1
+    }
+    true
+}
+
+fn pxo_count_true_5(values: &[bool; 5]) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        if values[i] { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn pxo_target_slot_valid(targets: &[bool; 3], slot: i64) -> bool {
+    slot >= 0 && slot < 3 && targets[slot]
+}
+
+fn pxo_target_observation_valid(observed: bool, material_receipt: bool) -> bool {
+    !observed || material_receipt
+}
+
+fn pxo_material_claim_valid(
+    instruction_claimed: bool,
+    lowering_claimed: bool,
+    cost_claimed: bool,
+    material_receipt: bool,
+) -> bool {
+    (!instruction_claimed && !lowering_claimed && !cost_claimed) ||
+        material_receipt
+}
+
+fn pxo_wht_claim_authorized(
+    parent: &XorConvolutionResult,
+    claimed: bool,
+    transform_identity_receipt: bool,
+) -> bool {
+    !claimed || (parent.classification.rank_one_separable &&
+        transform_identity_receipt)
+}
+
+fn pxo_associativity_claim_valid(parent: &XorConvolutionResult, claimed: bool)
+    -> bool {
+    !claimed || parent.classification.associator_defect_count == 0
+}
+
+fn pxo_classification_claim_valid(claimed: bool, observed: bool) -> bool {
+    claimed == observed
+}
+
+fn pxo_parity_transition_valid(
+    requested: bool,
+    source_frozen: bool,
+    semantics_frozen: bool,
+) -> bool {
+    !requested || (source_frozen && semantics_frozen)
+}
+
+fn pxo_claim_transition_valid(
+    requested: bool,
+    parity_open: bool,
+    material_receipt: bool,
+) -> bool {
+    !requested || (parity_open && material_receipt)
+}
+
+fn pxo_exercise_negatives(parent: &XorConvolutionResult)
+    -> PireusXorOperationNegatives with Mut, Panic, Div {
+    let expected_xor = pireus_xor_parent_semantics_hash()
+    let absent = pxo_zero_hash()
+
+    var bad_xor = expected_xor
+    bad_xor[0] = bad_xor[0] ^ 1
+    let graph_module = pxo_graph_parent_module_hash()
+    let graph_semantics = pireus_graph_parent_semantics_hash()
+    let graph_authority = pxo_graph_parent_authority_hash()
+    let graph_registry = pxo_graph_parent_registry_digest()
+    let graph_dependency = pxo_graph_parent_dependency_digest()
+    let graph_lifted = pxo_graph_parent_lifted_digest()
+    let graph_occurrence = pxo_graph_parent_occurrence_digest()
+    let graph_collision = pxo_graph_parent_collision_digest()
+    let graph_provenance = pxo_graph_parent_provenance_digest()
+    var bad_graph_semantics = graph_semantics
+    bad_graph_semantics[7] = bad_graph_semantics[7] ^ 1
+    var bad_graph_lifted = graph_lifted
+    bad_graph_lifted[0] = bad_graph_lifted[0] ^ 1
+
+    let absent_xor_parent = !pxo_hash_nonzero(&absent)
+    let absent_graph_parent = !pxo_graph_parent_fields_valid(
+        &absent, &absent, &absent, &absent, &absent,
+        &absent, &absent, &absent, &absent,
+    )
+    let mismatched_xor_parent = !pxo_hash_equal(&bad_xor, &expected_xor)
+    let mismatched_graph_parent =
+        !pxo_graph_parent_fields_valid(
+            &graph_module, &bad_graph_semantics, &graph_authority,
+            &graph_registry, &graph_dependency, &graph_lifted,
+            &graph_occurrence, &graph_collision, &graph_provenance,
+        ) &&
+        !pxo_graph_parent_fields_valid(
+            &graph_module, &graph_semantics, &graph_authority,
+            &graph_registry, &graph_dependency, &bad_graph_lifted,
+            &graph_occurrence, &graph_collision, &graph_provenance,
+        ) &&
+        !pxo_graph_parent_fields_valid(
+            &graph_module, &graph_semantics, &graph_authority,
+            &graph_dependency, &graph_registry, &graph_lifted,
+            &graph_occurrence, &graph_collision, &graph_provenance,
+        )
+    let invalid_bits = !pxo_bits_dimension_valid(
+        PIREUS_XOR_OPERATION_BITS + 1,
+        PIREUS_XOR_OPERATION_DIMENSION,
+    )
+
+    let nodes: [i64; 5] = [1, 2, 3, 4, 5]
+    let sources: [i64; 4] = [1, 2, 3, 4]
+    var reordered_targets: [i64; 4] = [2, 3, 4, 5]
+    reordered_targets[1] = 5
+    reordered_targets[3] = 3
+    var missing_targets: [i64; 4] = [2, 3, 4, 5]
+    missing_targets[3] = 0
+    var duplicate_targets: [i64; 4] = [2, 3, 4, 5]
+    duplicate_targets[2] = 3
+    var cyclic_targets: [i64; 4] = [2, 3, 4, 5]
+    cyclic_targets[2] = 1
+    let topology_corruption =
+        !pxo_topology_valid(5, &nodes, 4, &sources, &reordered_targets) &&
+        !pxo_topology_valid(5, &nodes, 4, &sources, &missing_targets) &&
+        !pxo_topology_valid(5, &nodes, 4, &sources, &duplicate_targets) &&
+        !pxo_topology_valid(5, &nodes, 4, &sources, &cyclic_targets)
+
+    var missing_caps: [i64; 5] = [1, 2, 3, 4, 5]
+    missing_caps[3] = 0
+    let missing_capability = !pxo_capabilities_valid(&missing_caps)
+    var changed_fixed: [bool; 5] = [false, false, false, true, true]
+    changed_fixed[3] = false
+    let expected_barriers: [bool; 5] = [false, true, false, true, true]
+    let accumulation_order_change =
+        !pxo_accumulation_order_valid(
+            PIREUS_XOR_ACCUMULATION_ASCENDING_I + 1) &&
+        !pxo_graph_masks_valid(&changed_fixed, &expected_barriers)
+    let displacement_promotion = !pxo_classification_claim_valid(
+        true, parent.classification.displacement_only)
+    let separability_promotion = !pxo_classification_claim_valid(
+        true, parent.classification.rank_one_separable)
+    let cocycle_promotion = !pxo_classification_claim_valid(
+        true, parent.classification.group_two_cocycle)
+    let associativity_promotion = !pxo_associativity_claim_valid(parent, true)
+    let wht_promotion = !pxo_wht_claim_authorized(parent, true, false)
+
+    let target_flags: [bool; 3] = [true, true, true]
+    var no_darwin = target_flags
+    no_darwin[0] = false
+    var no_apple = target_flags
+    no_apple[1] = false
+    var no_dgx = target_flags
+    no_dgx[2] = false
+    let missing_darwin_xeon = !pxo_target_slot_valid(&no_darwin, 0)
+    let missing_apple_silicon = !pxo_target_slot_valid(&no_apple, 1)
+    let missing_dgx = !pxo_target_slot_valid(&no_dgx, 2)
+
+    let target_observation_without_receipt =
+        !pxo_target_observation_valid(true, false)
+    let material_claim_without_receipt =
+        !pxo_material_claim_valid(true, true, true, false)
+    let parity_before_freeze =
+        !pxo_parity_transition_valid(true, true, false)
+    let claim_before_parity =
+        !pxo_claim_transition_valid(true, false, false)
+
+    var passed: i64 = 0
+    if absent_xor_parent { passed = passed + 1 }
+    if absent_graph_parent { passed = passed + 1 }
+    if mismatched_xor_parent { passed = passed + 1 }
+    if mismatched_graph_parent { passed = passed + 1 }
+    if invalid_bits { passed = passed + 1 }
+    if topology_corruption { passed = passed + 1 }
+    if missing_capability { passed = passed + 1 }
+    if accumulation_order_change { passed = passed + 1 }
+    if displacement_promotion { passed = passed + 1 }
+    if separability_promotion { passed = passed + 1 }
+    if cocycle_promotion { passed = passed + 1 }
+    if associativity_promotion { passed = passed + 1 }
+    if wht_promotion { passed = passed + 1 }
+    if missing_darwin_xeon { passed = passed + 1 }
+    if missing_apple_silicon { passed = passed + 1 }
+    if missing_dgx { passed = passed + 1 }
+    if target_observation_without_receipt { passed = passed + 1 }
+    if material_claim_without_receipt { passed = passed + 1 }
+    if parity_before_freeze { passed = passed + 1 }
+    if claim_before_parity { passed = passed + 1 }
+
+    PireusXorOperationNegatives {
+        absent_xor_parent: absent_xor_parent,
+        absent_graph_parent: absent_graph_parent,
+        mismatched_xor_parent: mismatched_xor_parent,
+        mismatched_graph_parent: mismatched_graph_parent,
+        invalid_bits: invalid_bits,
+        topology_corruption: topology_corruption,
+        missing_capability: missing_capability,
+        accumulation_order_change: accumulation_order_change,
+        displacement_promotion: displacement_promotion,
+        separability_promotion: separability_promotion,
+        cocycle_promotion: cocycle_promotion,
+        associativity_promotion: associativity_promotion,
+        wht_promotion: wht_promotion,
+        missing_darwin_xeon: missing_darwin_xeon,
+        missing_apple_silicon: missing_apple_silicon,
+        missing_dgx: missing_dgx,
+        target_observation_without_receipt:
+            target_observation_without_receipt,
+        material_claim_without_receipt: material_claim_without_receipt,
+        parity_before_freeze: parity_before_freeze,
+        claim_before_parity: claim_before_parity,
+        passed: passed,
+        total: 20,
+    }
+}
+
+fn pxo_digest_parents(
+    xor_parent: &XorConvolutionResult,
+    graph_parent: &PireusXorGraphParentReceipt,
+) -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x505852504152454e)
+    let xor_hash = pireus_xor_parent_semantics_hash()
+    let graph_hash = pireus_graph_parent_semantics_hash()
+    state = pxo_digest_add_hash(state, &xor_hash)
+    state = pxo_digest_add_hash(state, &graph_hash)
+    state = pxo_digest_add_xor(state, &xor_parent.contract_digest)
+    state = pxo_digest_add_xor(state, &xor_parent.direct_digest)
+    state = pxo_digest_add_xor(state, &xor_parent.twist_table_digest)
+    state = pxo_digest_add_xor(state, &xor_parent.property_digest)
+    state = pxo_digest_add_xor(state, &xor_parent.witness_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.identity_module_sha256)
+    state = pxo_digest_add_hash(state, &graph_parent.authority_stream_sha256)
+    state = pxo_digest_add_hash(state, &graph_parent.registry_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.dependency_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.lifted_graph_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.occurrence_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.collision_digest)
+    state = pxo_digest_add_hash(state, &graph_parent.provenance_digest)
+    pxo_digest_finish(state)
+}
+
+fn pxo_digest_graph(
+    graph: &PireusXorOperationGraph,
+    parent: &XorConvolutionResult,
+) -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x5058524752415048)
+    state = pxo_digest_add_i64(state, PIREUS_XOR_OPERATION_BITS)
+    state = pxo_digest_add_i64(state, PIREUS_XOR_OPERATION_DIMENSION)
+    state = pxo_digest_add_i64(state, graph.overlay_graph_id)
+    state = pxo_digest_add_i64(state, graph.overlay_owner_id)
+    state = pxo_digest_add_i64(state, graph.node_count)
+    var i: i64 = 0
+    while i < graph.node_count {
+        state = pxo_digest_add_i64(state, i)
+        state = pxo_digest_add_i64(state, graph.node_kinds[i])
+        state = pxo_digest_add_i64(state, graph.node_capabilities[i])
+        state = pxo_digest_add_bool(state, graph.node_fixed_order[i])
+        state = pxo_digest_add_bool(
+            state, graph.node_nonassociative_barrier[i])
+        i = i + 1
+    }
+    state = pxo_digest_add_i64(state, graph.edge_count)
+    i = 0
+    while i < graph.edge_count {
+        state = pxo_digest_add_i64(state, graph.edge_sources[i])
+        state = pxo_digest_add_i64(state, graph.edge_targets[i])
+        i = i + 1
+    }
+    state = pxo_digest_add_bool(state, parent.classification.zero_free)
+    state = pxo_digest_add_bool(state, parent.classification.normalized)
+    state = pxo_digest_add_bool(state, parent.classification.displacement_only)
+    state = pxo_digest_add_bool(state, parent.classification.rank_one_separable)
+    state = pxo_digest_add_bool(state, parent.classification.left_square)
+    state = pxo_digest_add_bool(state, parent.classification.group_two_cocycle)
+    state = pxo_digest_add_i64(
+        state, parent.classification.associator_defect_count)
+    pxo_digest_finish(state)
+}
+
+fn pxo_digest_capabilities(graph: &PireusXorOperationGraph)
+    -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x5058524341504142)
+    var i: i64 = 0
+    while i < graph.node_count {
+        state = pxo_digest_add_i64(state, graph.node_kinds[i])
+        state = pxo_digest_add_i64(state, graph.node_capabilities[i])
+        i = i + 1
+    }
+    pxo_digest_finish(state)
+}
+
+fn pxo_digest_targets(targets: &PireusXorTargetDeclarations)
+    -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x5058525441524745)
+    state = pxo_digest_add_i64(state, targets.count)
+    var i: i64 = 0
+    while i < targets.count {
+        state = pxo_digest_add_i64(state, targets.target_ids[i])
+        state = pxo_digest_add_bool(state, targets.canonical[i])
+        state = pxo_digest_add_bool(state, targets.observed[i])
+        state = pxo_digest_add_i64(state, targets.evidence_roles[i])
+        i = i + 1
+    }
+    state = pxo_digest_add_i64(state, targets.material_receipt_count)
+    pxo_digest_finish(state)
+}
+
+fn pxo_digest_result(parent: &XorConvolutionResult)
+    -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x505852524553554c)
+    state = pxo_digest_add_i64(state, parent.contract.bits)
+    state = pxo_digest_add_i64(state, parent.contract.dimension)
+    var d: i64 = 0
+    while d < parent.contract.dimension {
+        state = pxo_digest_add_i64(state, d)
+        state = pxo_digest_add_i64(state, parent.horizontal_bits[d])
+        d = d + 1
+    }
+    pxo_digest_finish(state)
+}
+
+fn pxo_digest_negatives(negatives: &PireusXorOperationNegatives)
+    -> PireusXorOperationDigest with Mut, Panic, Div {
+    var state = pxo_digest_add_i64(sha256_init(), 0x5058525749544e45)
+    state = pxo_digest_add_bool(state, negatives.absent_xor_parent)
+    state = pxo_digest_add_bool(state, negatives.absent_graph_parent)
+    state = pxo_digest_add_bool(state, negatives.mismatched_xor_parent)
+    state = pxo_digest_add_bool(state, negatives.mismatched_graph_parent)
+    state = pxo_digest_add_bool(state, negatives.invalid_bits)
+    state = pxo_digest_add_bool(state, negatives.topology_corruption)
+    state = pxo_digest_add_bool(state, negatives.missing_capability)
+    state = pxo_digest_add_bool(state, negatives.accumulation_order_change)
+    state = pxo_digest_add_bool(state, negatives.displacement_promotion)
+    state = pxo_digest_add_bool(state, negatives.separability_promotion)
+    state = pxo_digest_add_bool(state, negatives.cocycle_promotion)
+    state = pxo_digest_add_bool(state, negatives.associativity_promotion)
+    state = pxo_digest_add_bool(state, negatives.wht_promotion)
+    state = pxo_digest_add_bool(state, negatives.missing_darwin_xeon)
+    state = pxo_digest_add_bool(state, negatives.missing_apple_silicon)
+    state = pxo_digest_add_bool(state, negatives.missing_dgx)
+    state = pxo_digest_add_bool(
+        state, negatives.target_observation_without_receipt)
+    state = pxo_digest_add_bool(
+        state, negatives.material_claim_without_receipt)
+    state = pxo_digest_add_bool(state, negatives.parity_before_freeze)
+    state = pxo_digest_add_bool(state, negatives.claim_before_parity)
+    state = pxo_digest_add_i64(state, negatives.passed)
+    state = pxo_digest_add_i64(state, negatives.total)
+    pxo_digest_finish(state)
+}
+
+pub fn pireus_xor_operation_evaluate() -> PireusXorOperationResult
+    with Mut, Panic, Div {
+    let xor_parent = xor_convolution_evaluate(PIREUS_XOR_OPERATION_BITS)
+    let graph_parent = pxo_graph_parent_receipt()
+    let graph = pxo_canonical_graph()
+    let targets = pxo_canonical_targets()
+    let xor_hash = pireus_xor_parent_semantics_hash()
+    let graph_hash = pireus_graph_parent_semantics_hash()
+
+    let xor_parent_frozen = pxo_hash_nonzero(&xor_hash)
+    let graph_parent_frozen = pxo_hash_nonzero(&graph_hash)
+    let xor_parent_match =
+        xor_convolution_matches_frozen_semantics(&xor_parent)
+    let graph_parent_receipt_valid = graph_parent.valid
+    let parent_output_match = pxo_output_matches_parent(&xor_parent)
+    let classification_ok = pxo_classification_valid(&xor_parent)
+    let graph_ok = pxo_graph_valid(&graph)
+    let capabilities_ok = pxo_capabilities_valid(&graph.node_capabilities)
+    let targets_ok = pxo_target_declarations_valid(&targets)
+    let negatives = pxo_exercise_negatives(&xor_parent)
+    let barrier_count = pxo_count_true_5(&graph.node_nonassociative_barrier)
+
+    var output_bits: [i64; 64] = [0; 64]
+    var d: i64 = 0
+    while d < xor_parent.contract.dimension {
+        output_bits[d] = xor_parent.horizontal_bits[d]
+        d = d + 1
+    }
+
+    var error = PIREUS_XOR_OPERATION_OK
+    if !xor_parent_frozen || !graph_parent_frozen ||
+        !xor_parent_match || !graph_parent_receipt_valid {
+        error = PIREUS_XOR_OPERATION_ERR_PARENT
+    } else if !pxo_bits_dimension_valid(
+        xor_parent.contract.bits, xor_parent.contract.dimension) ||
+        !pxo_accumulation_order_valid(
+            xor_parent.contract.accumulation_order) {
+        error = PIREUS_XOR_OPERATION_ERR_BITS
+    } else if !graph_ok || !parent_output_match {
+        error = PIREUS_XOR_OPERATION_ERR_GRAPH
+    } else if !capabilities_ok {
+        error = PIREUS_XOR_OPERATION_ERR_CAPABILITY
+    } else if !classification_ok {
+        error = PIREUS_XOR_OPERATION_ERR_CLASSIFICATION
+    } else if !targets_ok {
+        error = PIREUS_XOR_OPERATION_ERR_TARGET
+    } else if targets.material_receipt_count != 0 {
+        error = PIREUS_XOR_OPERATION_ERR_MATERIAL
+    } else if negatives.passed != negatives.total {
+        error = PIREUS_XOR_OPERATION_ERR_AUTHORITY
+    }
+
+    let parent_digest = pxo_digest_parents(&xor_parent, &graph_parent)
+    let graph_digest = pxo_digest_graph(&graph, &xor_parent)
+    let capability_digest = pxo_digest_capabilities(&graph)
+    let target_digest = pxo_digest_targets(&targets)
+    let result_digest = pxo_digest_result(&xor_parent)
+    let witness_digest = pxo_digest_negatives(&negatives)
+
+    var failures: i64 = 0
+    if error != PIREUS_XOR_OPERATION_OK { failures = failures + 1 }
+    if !pireus_xor_operation_digest_nonzero(&parent_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_operation_digest_nonzero(&graph_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_operation_digest_nonzero(&capability_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_operation_digest_nonzero(&target_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_operation_digest_nonzero(&result_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_operation_digest_nonzero(&witness_digest) {
+        failures = failures + 1
+    }
+
+    PireusXorOperationResult {
+        valid: error == PIREUS_XOR_OPERATION_OK && failures == 0,
+        error: error,
+        bits: xor_parent.contract.bits,
+        dimension: xor_parent.contract.dimension,
+        xor_parent_frozen: xor_parent_frozen,
+        graph_parent_frozen: graph_parent_frozen,
+        xor_parent_match: xor_parent_match,
+        graph_parent_receipt_valid: graph_parent_receipt_valid,
+        graph_parent: graph_parent,
+        graph: graph,
+        targets: targets,
+        output_bits: output_bits,
+        output_matches_parent: parent_output_match,
+        zero_free: xor_parent.classification.zero_free,
+        normalized: xor_parent.classification.normalized,
+        displacement_only: xor_parent.classification.displacement_only,
+        rank_one_separable:
+            xor_parent.classification.rank_one_separable,
+        left_square: xor_parent.classification.left_square,
+        group_two_cocycle: xor_parent.classification.group_two_cocycle,
+        associator_defect_count:
+            xor_parent.classification.associator_defect_count,
+        nonassociative_barrier_count: barrier_count,
+        wht_rewrite_authorized:
+            pxo_wht_claim_authorized(&xor_parent, true, false),
+        material_observation_count: 0,
+        lowering_count: 0,
+        cost_record_count: 0,
+        parent_digest: parent_digest,
+        graph_digest: graph_digest,
+        capability_digest: capability_digest,
+        target_digest: target_digest,
+        result_digest: result_digest,
+        witness_digest: witness_digest,
+        negatives: negatives,
+        parity_open: false,
+        claim_ready: false,
+        failures: failures,
+    }
+}
+
+/// Byte-exact predicate created only after the first Sounio execution.
+pub fn pireus_xor_operation_matches_frozen_semantics(
+    result: &PireusXorOperationResult,
+) -> bool {
+    if !result.valid || result.error != PIREUS_XOR_OPERATION_OK ||
+        result.bits != PIREUS_XOR_OPERATION_BITS ||
+        result.dimension != PIREUS_XOR_OPERATION_DIMENSION ||
+        !result.xor_parent_frozen || !result.graph_parent_frozen ||
+        !result.xor_parent_match || !result.graph_parent_receipt_valid ||
+        !result.output_matches_parent || !pxo_graph_valid(&result.graph) ||
+        !pxo_capabilities_valid(&result.graph.node_capabilities) ||
+        !pxo_target_declarations_valid(&result.targets) {
+        return false
+    }
+
+    if !pxo_graph_parent_fields_valid(
+        &result.graph_parent.identity_module_sha256,
+        &result.graph_parent.semantics_sha256,
+        &result.graph_parent.authority_stream_sha256,
+        &result.graph_parent.registry_digest,
+        &result.graph_parent.dependency_digest,
+        &result.graph_parent.lifted_graph_digest,
+        &result.graph_parent.occurrence_digest,
+        &result.graph_parent.collision_digest,
+        &result.graph_parent.provenance_digest,
+    ) {
+        return false
+    }
+
+    if !result.zero_free || !result.normalized || result.displacement_only ||
+        result.rank_one_separable || !result.left_square ||
+        result.group_two_cocycle || result.associator_defect_count != 1848 ||
+        result.nonassociative_barrier_count != 3 ||
+        result.wht_rewrite_authorized ||
+        result.material_observation_count != 0 || result.lowering_count != 0 ||
+        result.cost_record_count != 0 || result.parity_open ||
+        result.claim_ready || result.failures != 0 {
+        return false
+    }
+
+    let expected_bits: [i64; 16] = [
+        4613118981945187609,
+        0 - 4611510553506841004,
+        0 - 4614727410383534212,
+        0 - 4608966312158910915,
+        4604258003457569030,
+        0 - 4604813642372634225,
+        4612475610569848966,
+        4616423571282154268,
+        0 - 4600193066131565794,
+        4615458514219146306,
+        0 - 4606699890268513426,
+        0 - 4603058993167165201,
+        0 - 4605968786432901330,
+        0 - 4614201015621893512,
+        0 - 4608907823852061948,
+        0 - 4604608933298662840,
+    ]
+    var d: i64 = 0
+    while d < 16 {
+        if result.output_bits[d] != expected_bits[d] { return false }
+        d = d + 1
+    }
+    while d < 64 {
+        if result.output_bits[d] != 0 { return false }
+        d = d + 1
+    }
+
+    let neg = &result.negatives
+    if !neg.absent_xor_parent || !neg.absent_graph_parent ||
+        !neg.mismatched_xor_parent || !neg.mismatched_graph_parent ||
+        !neg.invalid_bits || !neg.topology_corruption ||
+        !neg.missing_capability || !neg.accumulation_order_change ||
+        !neg.displacement_promotion || !neg.separability_promotion ||
+        !neg.cocycle_promotion || !neg.associativity_promotion ||
+        !neg.wht_promotion || !neg.missing_darwin_xeon ||
+        !neg.missing_apple_silicon || !neg.missing_dgx ||
+        !neg.target_observation_without_receipt ||
+        !neg.material_claim_without_receipt || !neg.parity_before_freeze ||
+        !neg.claim_before_parity || neg.passed != 20 || neg.total != 20 {
+        return false
+    }
+
+    pxo_operation_digest_matches(&result.parent_digest,
+        [0x12686c8d, 0xe11d8eb6, 0xfe422085, 0xee39b983,
+         0x045c81ff, 0x26e69678, 0x13aa1543, 0xe5b586e5]) &&
+    pxo_operation_digest_matches(&result.graph_digest,
+        [0xce636b3b, 0xbaea074e, 0x2033b665, 0x6120256f,
+         0x53b75d00, 0xb0958d57, 0x269a63d8, 0x36a90bfa]) &&
+    pxo_operation_digest_matches(&result.capability_digest,
+        [0xb8f34a86, 0xe3fd7e22, 0x225c7555, 0x28e160f4,
+         0xf5eabf1b, 0x8d0c57e4, 0x73a04550, 0x64db8ebe]) &&
+    pxo_operation_digest_matches(&result.target_digest,
+        [0x38f74af0, 0x2731ec3c, 0x2ac6ac1c, 0xe57659cd,
+         0xe2351c15, 0x7726dcb1, 0x9aa8d616, 0x3d7282c6]) &&
+    pxo_operation_digest_matches(&result.result_digest,
+        [0x84edf6ba, 0xe148754e, 0xbd0e8722, 0x368e2eb0,
+         0x6095cd92, 0x9779c36d, 0xef4f3bb5, 0x00013a3]) &&
+    pxo_operation_digest_matches(&result.witness_digest,
+        [0xd726dd98, 0xaf6b5225, 0x8f91709d, 0x8df3f050,
+         0xeee6b494, 0x4e19e677, 0x43707ef1, 0xd2a08a23])
+}

@@ -1,0 +1,1017 @@
+//! Streaming, grammar-bounded importer for the first open Arm AARCHMRS slice.
+//!
+//! The normative input is Instructions.json from the open A-profile FAT
+//! 2025-12 package. The native bootstrap read_file builtin is bounded to 1 MiB,
+//! so byte transport uses 116 ordered chunks. Sounio reconstructs the complete
+//! stream, verifies its length and SHA-256, parses JSON structure across chunk
+//! boundaries, and selects exact TBL/TBX instruction shapes.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize,
+}
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::target_profile::{pireus_v01_store}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_AARCHMRS_OK: i64 = 0
+pub const PIREUS_AARCHMRS_ERR_FILE: i64 = 1
+pub const PIREUS_AARCHMRS_ERR_LENGTH: i64 = 2
+pub const PIREUS_AARCHMRS_ERR_HASH: i64 = 3
+pub const PIREUS_AARCHMRS_ERR_JSON: i64 = 4
+pub const PIREUS_AARCHMRS_ERR_DEPTH: i64 = 5
+pub const PIREUS_AARCHMRS_ERR_DUPLICATE_FIELD: i64 = 6
+pub const PIREUS_AARCHMRS_ERR_SELECTED_SHAPE: i64 = 7
+pub const PIREUS_AARCHMRS_ERR_CAPACITY: i64 = 8
+
+pub const PIREUS_ARM_FAMILY_TBL: i64 = 1
+pub const PIREUS_ARM_FAMILY_TBX: i64 = 2
+pub const PIREUS_ARM_VECTOR_FIXED_128: i64 = 1
+pub const PIREUS_ARM_VECTOR_SCALABLE: i64 = 2
+
+pub const PIREUS_ARM_OP_TBL_ADVSIMD: i64 = 1
+pub const PIREUS_ARM_OP_TBX_ADVSIMD: i64 = 2
+pub const PIREUS_ARM_OP_TBL_Z_ZZ: i64 = 3
+pub const PIREUS_ARM_OP_TBX_Z_ZZ: i64 = 4
+
+pub const PIREUS_ARM_CLASS_INSTRUCTION_FORM: i64 = 703000
+pub const PIREUS_ARM_CLASS_VENDOR_CORPUS: i64 = 703001
+pub const PIREUS_ARM_CLASS_OPERATION_ID: i64 = 703002
+pub const PIREUS_ARM_CLASS_VECTOR_SHAPE: i64 = 703003
+pub const PIREUS_ARM_CLASS_TABLE_CARDINALITY: i64 = 703004
+
+pub const PIREUS_ARM_HAS_CORPUS: i64 = 703100
+pub const PIREUS_ARM_HAS_OPERATION_ID: i64 = 703101
+pub const PIREUS_ARM_HAS_VECTOR_SHAPE: i64 = 703102
+pub const PIREUS_ARM_HAS_TABLE_CARDINALITY: i64 = 703103
+pub const PIREUS_ARM_HAS_RAW_FAMILY: i64 = 703104
+
+pub const PIREUS_ARM_CORPUS_AARCHMRS_FAT_2025_12: i64 = 703200
+pub const PIREUS_ARM_EVIDENCE_NORMATIVE_VENDOR: i64 = 703201
+pub const PIREUS_ARM_OP_IRI_TBL_ADVSIMD: i64 = 703210
+pub const PIREUS_ARM_OP_IRI_TBX_ADVSIMD: i64 = 703211
+pub const PIREUS_ARM_OP_IRI_TBL_Z_ZZ: i64 = 703212
+pub const PIREUS_ARM_OP_IRI_TBX_Z_ZZ: i64 = 703213
+pub const PIREUS_ARM_VECTOR_IRI_FIXED_128: i64 = 703220
+pub const PIREUS_ARM_VECTOR_IRI_SCALABLE: i64 = 703221
+pub const PIREUS_ARM_TABLES_IRI_1: i64 = 703230
+pub const PIREUS_ARM_TABLES_IRI_2: i64 = 703231
+pub const PIREUS_ARM_TABLES_IRI_3: i64 = 703232
+pub const PIREUS_ARM_TABLES_IRI_4: i64 = 703233
+pub const PIREUS_ARM_FAMILY_IRI_TBL: i64 = 703240
+pub const PIREUS_ARM_FAMILY_IRI_TBX: i64 = 703241
+
+const PIREUS_AARCHMRS_EXPECTED_BYTES: i64 = 115312065
+const PIREUS_AARCHMRS_CHUNKS: i64 = 116
+const PIREUS_AARCHMRS_CHUNK_BYTES: i64 = 1000000
+const PIREUS_AARCHMRS_LAST_CHUNK_BYTES: i64 = 312065
+const PIREUS_AARCHMRS_MAX_DEPTH: i64 = 128
+
+pub struct PireusArmForm {
+    pub record_kind: i64,
+    pub operation_id_kind: i64,
+    pub family: i64,
+    pub vector_shape: i64,
+    pub table_registers: i64,
+}
+
+pub struct PireusAarchmrsInventory {
+    pub forms: [PireusArmForm; 16],
+    pub count: i64,
+    pub tbl_count: i64,
+    pub tbx_count: i64,
+    pub fixed_count: i64,
+    pub scalable_count: i64,
+    pub instruction_objects: i64,
+    pub json_objects: i64,
+    pub json_strings: i64,
+    pub max_depth: i64,
+    pub total_bytes: i64,
+    pub chunk_count: i64,
+    pub digest_match: bool,
+    pub error: i64,
+}
+
+struct PireusAarchmrsParser {
+    container_kind: [i64; 128],
+    container_state: [i64; 128],
+    key_kind: [i64; 128],
+    type_keys: [i64; 128],
+    name_keys: [i64; 128],
+    operation_keys: [i64; 128],
+    type_kind: [i64; 128],
+    name_kind: [i64; 128],
+    operation_kind: [i64; 128],
+    depth: i64,
+    root_seen: bool,
+    root_done: bool,
+    in_string: bool,
+    string_role: i64,
+    escape: bool,
+    unicode_remaining: i64,
+    token: [i8; 128],
+    token_len: i64,
+    token_overflow: bool,
+    token_plain: bool,
+    primitive_active: bool,
+    inventory: PireusAarchmrsInventory,
+    error: i64,
+}
+
+struct PireusAarchmrsRun {
+    parser: PireusAarchmrsParser,
+    sha: SHA256State,
+    total_bytes: i64,
+    chunks: i64,
+    error: i64,
+}
+
+fn arm_form_empty() -> PireusArmForm {
+    PireusArmForm {
+        record_kind: 0,
+        operation_id_kind: 0,
+        family: 0,
+        vector_shape: 0,
+        table_registers: 0,
+    }
+}
+
+fn arm_inventory_empty() -> PireusAarchmrsInventory with Mut {
+    PireusAarchmrsInventory {
+        forms: [arm_form_empty(); 16],
+        count: 0,
+        tbl_count: 0,
+        tbx_count: 0,
+        fixed_count: 0,
+        scalable_count: 0,
+        instruction_objects: 0,
+        json_objects: 0,
+        json_strings: 0,
+        max_depth: 0,
+        total_bytes: 0,
+        chunk_count: 0,
+        digest_match: false,
+        error: PIREUS_AARCHMRS_OK,
+    }
+}
+
+fn arm_parser_new() -> PireusAarchmrsParser with Mut {
+    PireusAarchmrsParser {
+        container_kind: [0; 128],
+        container_state: [0; 128],
+        key_kind: [0; 128],
+        type_keys: [0; 128],
+        name_keys: [0; 128],
+        operation_keys: [0; 128],
+        type_kind: [0; 128],
+        name_kind: [0; 128],
+        operation_kind: [0; 128],
+        depth: 0,
+        root_seen: false,
+        root_done: false,
+        in_string: false,
+        string_role: 0,
+        escape: false,
+        unicode_remaining: 0,
+        token: [0; 128],
+        token_len: 0,
+        token_overflow: false,
+        token_plain: true,
+        primitive_active: false,
+        inventory: arm_inventory_empty(),
+        error: PIREUS_AARCHMRS_OK,
+    }
+}
+
+fn arm_run_new() -> PireusAarchmrsRun with Mut {
+    PireusAarchmrsRun {
+        parser: arm_parser_new(),
+        sha: sha256_init(),
+        total_bytes: 0,
+        chunks: 0,
+        error: PIREUS_AARCHMRS_OK,
+    }
+}
+
+pub fn pireus_aarchmrs_expected_sha256() -> string {
+    "bedf5f8fc142d6232f15caaa170b9fab996a732db0b04bf4604e91fb10c3244b"
+}
+
+fn arm_is_ws(b: i64) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn arm_is_hex(b: i64) -> bool {
+    (b >= 48 && b <= 57) || (b >= 65 && b <= 70) ||
+    (b >= 97 && b <= 102)
+}
+
+fn arm_token_reset(parser: &!PireusAarchmrsParser) with Mut {
+    parser.token_len = 0
+    parser.token_overflow = false
+    parser.token_plain = true
+}
+
+fn arm_token_push(parser: &!PireusAarchmrsParser, b: i64) with Mut, Panic {
+    if parser.token_len < 128 {
+        parser.token[parser.token_len as usize] = b as i8
+    } else {
+        parser.token_overflow = true
+    }
+    parser.token_len = parser.token_len + 1
+}
+
+fn arm_token_eq(parser: &PireusAarchmrsParser, value: string) -> bool
+with Panic, Div {
+    if parser.token_overflow || !parser.token_plain { return false }
+    let n = str_len(value)
+    if parser.token_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.token[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn arm_token_key_kind(parser: &PireusAarchmrsParser) -> i64
+with Panic, Div {
+    if arm_token_eq(parser, "_type") { return 1 }
+    if arm_token_eq(parser, "name") { return 2 }
+    if arm_token_eq(parser, "operation_id") { return 3 }
+    0
+}
+
+fn arm_token_name_kind(parser: &PireusAarchmrsParser) -> i64
+with Panic, Div {
+    if arm_token_eq(parser, "TBL_asimdtbl_L1_1") { return 1 }
+    if arm_token_eq(parser, "TBL_asimdtbl_L2_2") { return 2 }
+    if arm_token_eq(parser, "TBL_asimdtbl_L3_3") { return 3 }
+    if arm_token_eq(parser, "TBL_asimdtbl_L4_4") { return 4 }
+    if arm_token_eq(parser, "TBX_asimdtbl_L1_1") { return 5 }
+    if arm_token_eq(parser, "TBX_asimdtbl_L2_2") { return 6 }
+    if arm_token_eq(parser, "TBX_asimdtbl_L3_3") { return 7 }
+    if arm_token_eq(parser, "TBX_asimdtbl_L4_4") { return 8 }
+    if arm_token_eq(parser, "tbl_z_zz_1") { return 9 }
+    if arm_token_eq(parser, "tbl_z_zz_2") { return 10 }
+    if arm_token_eq(parser, "tbx_z_zz_") { return 11 }
+    0
+}
+
+fn arm_token_operation_kind(parser: &PireusAarchmrsParser) -> i64
+with Panic, Div {
+    if arm_token_eq(parser, "TBL_advsimd") {
+        return PIREUS_ARM_OP_TBL_ADVSIMD
+    }
+    if arm_token_eq(parser, "TBX_advsimd") {
+        return PIREUS_ARM_OP_TBX_ADVSIMD
+    }
+    if arm_token_eq(parser, "tbl_z_zz") {
+        return PIREUS_ARM_OP_TBL_Z_ZZ
+    }
+    if arm_token_eq(parser, "tbx_z_zz") {
+        return PIREUS_ARM_OP_TBX_Z_ZZ
+    }
+    0
+}
+
+fn arm_name_matches_operation(name: i64, operation: i64) -> bool {
+    if name >= 1 && name <= 4 {
+        return operation == PIREUS_ARM_OP_TBL_ADVSIMD
+    }
+    if name >= 5 && name <= 8 {
+        return operation == PIREUS_ARM_OP_TBX_ADVSIMD
+    }
+    if name == 9 || name == 10 {
+        return operation == PIREUS_ARM_OP_TBL_Z_ZZ
+    }
+    if name == 11 {
+        return operation == PIREUS_ARM_OP_TBX_Z_ZZ
+    }
+    false
+}
+
+fn arm_form_from_kind(kind: i64, operation: i64) -> PireusArmForm {
+    let fixed = kind >= 1 && kind <= 8
+    let tbl = kind <= 4 || kind == 9 || kind == 10
+    var tables: i64 = 1
+    if kind >= 1 && kind <= 4 { tables = kind }
+    if kind >= 5 && kind <= 8 { tables = kind - 4 }
+    if kind == 10 { tables = 2 }
+    PireusArmForm {
+        record_kind: kind,
+        operation_id_kind: operation,
+        family: if tbl { PIREUS_ARM_FAMILY_TBL } else {
+            PIREUS_ARM_FAMILY_TBX
+        },
+        vector_shape: if fixed { PIREUS_ARM_VECTOR_FIXED_128 } else {
+            PIREUS_ARM_VECTOR_SCALABLE
+        },
+        table_registers: tables,
+    }
+}
+
+fn arm_add_selected_form(
+    parser: &!PireusAarchmrsParser, name: i64, operation: i64,
+) with Mut, Panic {
+    if parser.inventory.count >= 16 {
+        parser.error = PIREUS_AARCHMRS_ERR_CAPACITY
+        return
+    }
+    let form = arm_form_from_kind(name, operation)
+    parser.inventory.forms[parser.inventory.count as usize] = form
+    parser.inventory.count = parser.inventory.count + 1
+    if form.family == PIREUS_ARM_FAMILY_TBL {
+        parser.inventory.tbl_count = parser.inventory.tbl_count + 1
+    } else {
+        parser.inventory.tbx_count = parser.inventory.tbx_count + 1
+    }
+    if form.vector_shape == PIREUS_ARM_VECTOR_FIXED_128 {
+        parser.inventory.fixed_count = parser.inventory.fixed_count + 1
+    } else {
+        parser.inventory.scalable_count = parser.inventory.scalable_count + 1
+    }
+}
+
+fn arm_finalize_object(parser: &!PireusAarchmrsParser, slot: i64)
+with Mut, Panic {
+    parser.inventory.json_objects = parser.inventory.json_objects + 1
+    if parser.type_kind[slot as usize] == 1 {
+        parser.inventory.instruction_objects =
+            parser.inventory.instruction_objects + 1
+    }
+    let name = parser.name_kind[slot as usize]
+    let operation = parser.operation_kind[slot as usize]
+    if name == 0 && operation == 0 { return }
+    if parser.type_keys[slot as usize] != 1 ||
+        parser.name_keys[slot as usize] != 1 ||
+        parser.operation_keys[slot as usize] != 1 {
+        parser.error = PIREUS_AARCHMRS_ERR_DUPLICATE_FIELD
+        return
+    }
+    if parser.type_kind[slot as usize] != 1 || name == 0 || operation == 0 ||
+        !arm_name_matches_operation(name, operation) {
+        parser.error = PIREUS_AARCHMRS_ERR_SELECTED_SHAPE
+        return
+    }
+    arm_add_selected_form(parser, name, operation)
+}
+
+fn arm_value_start(parser: &!PireusAarchmrsParser) -> bool
+with Mut, Panic {
+    if parser.depth == 0 {
+        if parser.root_seen || parser.root_done {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return false
+        }
+        parser.root_seen = true
+        return true
+    }
+    let slot = parser.depth - 1
+    let kind = parser.container_kind[slot as usize]
+    let state = parser.container_state[slot as usize]
+    if kind == 1 {
+        if state != 2 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return false
+        }
+        parser.container_state[slot as usize] = 3
+        return true
+    }
+    if kind == 2 {
+        if state != 0 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return false
+        }
+        parser.container_state[slot as usize] = 1
+        return true
+    }
+    parser.error = PIREUS_AARCHMRS_ERR_JSON
+    false
+}
+
+fn arm_scalar_complete(parser: &!PireusAarchmrsParser) with Mut {
+    if parser.depth == 0 {
+        parser.root_done = true
+    }
+}
+
+fn arm_push_container(parser: &!PireusAarchmrsParser, kind: i64)
+with Mut, Panic {
+    if !arm_value_start(parser) { return }
+    if parser.depth >= PIREUS_AARCHMRS_MAX_DEPTH {
+        parser.error = PIREUS_AARCHMRS_ERR_DEPTH
+        return
+    }
+    let slot = parser.depth
+    parser.container_kind[slot as usize] = kind
+    parser.container_state[slot as usize] = 0
+    parser.key_kind[slot as usize] = 0
+    parser.type_keys[slot as usize] = 0
+    parser.name_keys[slot as usize] = 0
+    parser.operation_keys[slot as usize] = 0
+    parser.type_kind[slot as usize] = 0
+    parser.name_kind[slot as usize] = 0
+    parser.operation_kind[slot as usize] = 0
+    parser.depth = parser.depth + 1
+    if parser.depth > parser.inventory.max_depth {
+        parser.inventory.max_depth = parser.depth
+    }
+}
+
+fn arm_close_container(parser: &!PireusAarchmrsParser, kind: i64)
+with Mut, Panic {
+    if parser.depth <= 0 {
+        parser.error = PIREUS_AARCHMRS_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    if parser.container_kind[slot as usize] != kind {
+        parser.error = PIREUS_AARCHMRS_ERR_JSON
+        return
+    }
+    let state = parser.container_state[slot as usize]
+    if kind == 1 {
+        if state != 0 && state != 3 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        arm_finalize_object(parser, slot)
+    } else {
+        if state != 0 && state != 1 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+    }
+    if parser.error != PIREUS_AARCHMRS_OK { return }
+    parser.depth = parser.depth - 1
+    if parser.depth == 0 { parser.root_done = true }
+}
+
+fn arm_string_start(parser: &!PireusAarchmrsParser) with Mut, Panic {
+    if parser.depth == 0 {
+        if !arm_value_start(parser) { return }
+        parser.string_role = 2
+    } else {
+        let slot = parser.depth - 1
+        let kind = parser.container_kind[slot as usize]
+        let state = parser.container_state[slot as usize]
+        if kind == 1 && state == 0 {
+            parser.string_role = 1
+        } else {
+            if !arm_value_start(parser) { return }
+            parser.string_role = 2
+        }
+    }
+    arm_token_reset(parser)
+    parser.in_string = true
+    parser.escape = false
+    parser.unicode_remaining = 0
+}
+
+fn arm_string_complete(parser: &!PireusAarchmrsParser)
+with Mut, Panic, Div {
+    parser.in_string = false
+    parser.inventory.json_strings = parser.inventory.json_strings + 1
+    if parser.string_role == 1 {
+        if parser.depth <= 0 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        let slot = parser.depth - 1
+        let key = arm_token_key_kind(parser)
+        parser.key_kind[slot as usize] = key
+        if key == 1 {
+            parser.type_keys[slot as usize] =
+                parser.type_keys[slot as usize] + 1
+        }
+        if key == 2 {
+            parser.name_keys[slot as usize] =
+                parser.name_keys[slot as usize] + 1
+        }
+        if key == 3 {
+            parser.operation_keys[slot as usize] =
+                parser.operation_keys[slot as usize] + 1
+        }
+        parser.container_state[slot as usize] = 1
+        return
+    }
+    if parser.depth > 0 {
+        let slot = parser.depth - 1
+        if parser.container_kind[slot as usize] == 1 {
+            let key = parser.key_kind[slot as usize]
+            if key == 1 && arm_token_eq(parser, "Instruction.Instruction") {
+                parser.type_kind[slot as usize] = 1
+            }
+            if key == 2 {
+                parser.name_kind[slot as usize] = arm_token_name_kind(parser)
+            }
+            if key == 3 {
+                parser.operation_kind[slot as usize] =
+                    arm_token_operation_kind(parser)
+            }
+        }
+    }
+    arm_scalar_complete(parser)
+}
+
+fn arm_number_valid(parser: &PireusAarchmrsParser) -> bool with Panic {
+    let n = parser.token_len
+    if n <= 0 || n > 128 || parser.token_overflow { return false }
+    var i: i64 = 0
+    if parser.token[0] as i64 == 45 {
+        i = 1
+        if i >= n { return false }
+    }
+    let first = parser.token[i as usize] as i64
+    if first == 48 {
+        i = i + 1
+        if i < n {
+            let next = parser.token[i as usize] as i64
+            if next >= 48 && next <= 57 { return false }
+        }
+    } else {
+        if first < 49 || first > 57 { return false }
+        i = i + 1
+        while i < n {
+            let d = parser.token[i as usize] as i64
+            if d < 48 || d > 57 { break }
+            i = i + 1
+        }
+    }
+    if i < n && parser.token[i as usize] as i64 == 46 {
+        i = i + 1
+        if i >= n { return false }
+        var digits: i64 = 0
+        while i < n {
+            let d = parser.token[i as usize] as i64
+            if d < 48 || d > 57 { break }
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits == 0 { return false }
+    }
+    if i < n {
+        let e = parser.token[i as usize] as i64
+        if e != 69 && e != 101 { return false }
+        i = i + 1
+        if i < n {
+            let sign = parser.token[i as usize] as i64
+            if sign == 43 || sign == 45 { i = i + 1 }
+        }
+        if i >= n { return false }
+        var digits: i64 = 0
+        while i < n {
+            let d = parser.token[i as usize] as i64
+            if d < 48 || d > 57 { return false }
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits == 0 { return false }
+    }
+    i == n
+}
+
+fn arm_primitive_valid(parser: &PireusAarchmrsParser) -> bool
+with Panic, Div {
+    if arm_token_eq(parser, "null") { return true }
+    if arm_token_eq(parser, "true") { return true }
+    if arm_token_eq(parser, "false") { return true }
+    arm_number_valid(parser)
+}
+
+fn arm_primitive_start(parser: &!PireusAarchmrsParser, b: i64)
+with Mut, Panic {
+    if !arm_value_start(parser) { return }
+    arm_token_reset(parser)
+    arm_token_push(parser, b)
+    parser.primitive_active = true
+}
+
+fn arm_primitive_complete(parser: &!PireusAarchmrsParser)
+with Mut, Panic, Div {
+    if !arm_primitive_valid(parser) {
+        parser.error = PIREUS_AARCHMRS_ERR_JSON
+        return
+    }
+    parser.primitive_active = false
+    arm_scalar_complete(parser)
+}
+
+fn arm_parser_feed(parser: &!PireusAarchmrsParser, raw_b: i64)
+with Mut, Panic, Div {
+    if parser.error != PIREUS_AARCHMRS_OK { return }
+    var b = raw_b
+    if b < 0 { b = b + 256 }
+
+    if parser.in_string {
+        if parser.unicode_remaining > 0 {
+            if !arm_is_hex(b) {
+                parser.error = PIREUS_AARCHMRS_ERR_JSON
+                return
+            }
+            parser.unicode_remaining = parser.unicode_remaining - 1
+            return
+        }
+        if parser.escape {
+            parser.escape = false
+            parser.token_plain = false
+            if b == 117 {
+                parser.unicode_remaining = 4
+                return
+            }
+            if b == 34 || b == 92 || b == 47 || b == 98 || b == 102 ||
+                b == 110 || b == 114 || b == 116 {
+                return
+            }
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        if b == 92 {
+            parser.escape = true
+            return
+        }
+        if b == 34 {
+            arm_string_complete(parser)
+            return
+        }
+        if b < 32 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        arm_token_push(parser, b)
+        return
+    }
+
+    if parser.primitive_active {
+        if arm_is_ws(b) || b == 44 || b == 93 || b == 125 {
+            arm_primitive_complete(parser)
+            if parser.error != PIREUS_AARCHMRS_OK { return }
+            if arm_is_ws(b) { return }
+        } else {
+            arm_token_push(parser, b)
+            return
+        }
+    }
+
+    if arm_is_ws(b) { return }
+    if b == 34 {
+        arm_string_start(parser)
+        return
+    }
+    if b == 123 {
+        arm_push_container(parser, 1)
+        return
+    }
+    if b == 91 {
+        arm_push_container(parser, 2)
+        return
+    }
+    if b == 125 {
+        arm_close_container(parser, 1)
+        return
+    }
+    if b == 93 {
+        arm_close_container(parser, 2)
+        return
+    }
+    if b == 58 {
+        if parser.depth <= 0 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        let slot = parser.depth - 1
+        if parser.container_kind[slot as usize] != 1 ||
+            parser.container_state[slot as usize] != 1 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 2
+        return
+    }
+    if b == 44 {
+        if parser.depth <= 0 {
+            parser.error = PIREUS_AARCHMRS_ERR_JSON
+            return
+        }
+        let slot = parser.depth - 1
+        let kind = parser.container_kind[slot as usize]
+        if kind == 1 && parser.container_state[slot as usize] == 3 {
+            parser.container_state[slot as usize] = 0
+            parser.key_kind[slot as usize] = 0
+            return
+        }
+        if kind == 2 && parser.container_state[slot as usize] == 1 {
+            parser.container_state[slot as usize] = 0
+            return
+        }
+        parser.error = PIREUS_AARCHMRS_ERR_JSON
+        return
+    }
+    arm_primitive_start(parser, b)
+}
+
+fn arm_parser_finish(parser: &!PireusAarchmrsParser)
+with Mut, Panic, Div {
+    if parser.error != PIREUS_AARCHMRS_OK { return }
+    if parser.primitive_active { arm_primitive_complete(parser) }
+    if parser.error != PIREUS_AARCHMRS_OK { return }
+    if parser.in_string || parser.escape || parser.unicode_remaining != 0 ||
+        parser.depth != 0 || !parser.root_seen || !parser.root_done {
+        parser.error = PIREUS_AARCHMRS_ERR_JSON
+    }
+}
+
+fn arm_chunk_path(prefix: string, index: i64) -> string
+with Mut, Panic, Div, Alloc {
+    var out: [i8; 512] = [0; 512]
+    let n = str_len(prefix)
+    if n > 500 { return "" }
+    var i: i64 = 0
+    while i < n {
+        out[i as usize] = str_char_at(prefix, i) as i8
+        i = i + 1
+    }
+    let hundreds = (index / 100) - ((index / 1000) * 10)
+    let tens = (index / 10) - ((index / 100) * 10)
+    let ones = index - ((index / 10) * 10)
+    out[i as usize] = (48 + hundreds) as i8
+    out[(i + 1) as usize] = (48 + tens) as i8
+    out[(i + 2) as usize] = (48 + ones) as i8
+    out[(i + 3) as usize] = 46 as i8
+    out[(i + 4) as usize] = 112 as i8
+    out[(i + 5) as usize] = 97 as i8
+    out[(i + 6) as usize] = 114 as i8
+    out[(i + 7) as usize] = 116 as i8
+    str_from_bytes(out, i + 8)
+}
+
+fn arm_scan_chunk(
+    run: PireusAarchmrsRun, prefix: string, index: i64, expected_size: i64,
+) -> PireusAarchmrsRun with IO, Mut, Panic, Div, Alloc {
+    var next = run
+    if next.error != PIREUS_AARCHMRS_OK { return next }
+    let path = arm_chunk_path(prefix, index)
+    let size = file_size(path)
+    if size < 0 {
+        next.error = PIREUS_AARCHMRS_ERR_FILE
+        return next
+    }
+    if size != expected_size || size >= 1048576 {
+        next.error = PIREUS_AARCHMRS_ERR_LENGTH
+        return next
+    }
+    let raw = read_file(path)
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var b = raw[(pos + i) as usize] as i64
+            if b < 0 { b = b + 256 }
+            window[i as usize] = b as u8
+            arm_parser_feed(&!next.parser, b)
+            i = i + 1
+        }
+        next.sha = sha256_update(next.sha, window, count as i32)
+        pos = pos + count
+    }
+    next.total_bytes = next.total_bytes + size
+    next.chunks = next.chunks + 1
+    next
+}
+
+fn arm_digest_matches(digest: &SHA256Digest) -> bool with Panic {
+    let expected: [i64; 32] = [
+        0xbe, 0xdf, 0x5f, 0x8f, 0xc1, 0x42, 0xd6, 0x23,
+        0x2f, 0x15, 0xca, 0xaa, 0x17, 0x0b, 0x9f, 0xab,
+        0x99, 0x6a, 0x73, 0x2d, 0xb0, 0xb0, 0x4b, 0xf4,
+        0x60, 0x4e, 0x91, 0xfb, 0x10, 0xc3, 0x24, 0x4b
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn pireus_aarchmrs_import_chunks(prefix: string) -> PireusAarchmrsInventory
+with IO, Mut, Panic, Div, Alloc {
+    var run = arm_run_new()
+    var index: i64 = 0
+    while index < PIREUS_AARCHMRS_CHUNKS {
+        let expected = if index == PIREUS_AARCHMRS_CHUNKS - 1 {
+            PIREUS_AARCHMRS_LAST_CHUNK_BYTES
+        } else {
+            PIREUS_AARCHMRS_CHUNK_BYTES
+        }
+        run = arm_scan_chunk(run, prefix, index, expected)
+        if run.error != PIREUS_AARCHMRS_OK { break }
+        index = index + 1
+    }
+    arm_parser_finish(&!run.parser)
+    let digest = sha256_finalize(run.sha)
+    let digest_match = run.total_bytes == PIREUS_AARCHMRS_EXPECTED_BYTES &&
+        run.chunks == PIREUS_AARCHMRS_CHUNKS && arm_digest_matches(&digest)
+    var inv = run.parser.inventory
+    inv.total_bytes = run.total_bytes
+    inv.chunk_count = run.chunks
+    inv.digest_match = digest_match
+    if run.error != PIREUS_AARCHMRS_OK {
+        inv.error = run.error
+    } else {
+        if run.parser.error != PIREUS_AARCHMRS_OK {
+            inv.error = run.parser.error
+        } else {
+            if !digest_match { inv.error = PIREUS_AARCHMRS_ERR_HASH }
+        }
+    }
+    inv
+}
+
+fn arm_parser_scan_text(value: string) -> PireusAarchmrsParser
+with Mut, Panic, Div {
+    var parser = arm_parser_new()
+    let n = str_len(value)
+    var i: i64 = 0
+    while i < n {
+        arm_parser_feed(&!parser, str_char_at(value, i) as i64)
+        i = i + 1
+    }
+    arm_parser_finish(&!parser)
+    parser
+}
+
+pub fn pireus_aarchmrs_negative_duplicate_field() -> bool
+with Mut, Panic, Div {
+    let parser = arm_parser_scan_text(
+        "{\"_type\":\"Instruction.Instruction\",\"name\":\"tbl_z_zz_1\",\"operation_id\":\"tbl_z_zz\",\"operation_id\":\"tbl_z_zz\"}")
+    parser.error == PIREUS_AARCHMRS_ERR_DUPLICATE_FIELD
+}
+
+pub fn pireus_aarchmrs_negative_unknown_shape() -> bool
+with Mut, Panic, Div {
+    let parser = arm_parser_scan_text(
+        "{\"_type\":\"Instruction.Instruction\",\"name\":\"tbl_future\",\"operation_id\":\"tbl_z_zz\"}")
+    parser.error == PIREUS_AARCHMRS_ERR_SELECTED_SHAPE
+}
+
+pub fn pireus_aarchmrs_negative_malformed_json() -> bool
+with Mut, Panic, Div {
+    let parser = arm_parser_scan_text(
+        "{\"_type\":\"Instruction.Instruction\",\"name\":\"tbl_z_zz_1\"")
+    parser.error == PIREUS_AARCHMRS_ERR_JSON
+}
+
+pub fn pireus_aarchmrs_negative_empty_digest() -> bool
+with Mut, Panic, Div {
+    let digest = sha256_finalize(sha256_init())
+    !arm_digest_matches(&digest)
+}
+
+fn arm_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn arm_operation_iri(kind: i64) -> i64 {
+    if kind == PIREUS_ARM_OP_TBL_ADVSIMD {
+        return PIREUS_ARM_OP_IRI_TBL_ADVSIMD
+    }
+    if kind == PIREUS_ARM_OP_TBX_ADVSIMD {
+        return PIREUS_ARM_OP_IRI_TBX_ADVSIMD
+    }
+    if kind == PIREUS_ARM_OP_TBL_Z_ZZ {
+        return PIREUS_ARM_OP_IRI_TBL_Z_ZZ
+    }
+    PIREUS_ARM_OP_IRI_TBX_Z_ZZ
+}
+
+fn arm_vector_iri(kind: i64) -> i64 {
+    if kind == PIREUS_ARM_VECTOR_FIXED_128 {
+        return PIREUS_ARM_VECTOR_IRI_FIXED_128
+    }
+    PIREUS_ARM_VECTOR_IRI_SCALABLE
+}
+
+fn arm_tables_iri(count: i64) -> i64 {
+    if count == 1 { return PIREUS_ARM_TABLES_IRI_1 }
+    if count == 2 { return PIREUS_ARM_TABLES_IRI_2 }
+    if count == 3 { return PIREUS_ARM_TABLES_IRI_3 }
+    PIREUS_ARM_TABLES_IRI_4
+}
+
+fn arm_family_iri(kind: i64) -> i64 {
+    if kind == PIREUS_ARM_FAMILY_TBL { return PIREUS_ARM_FAMILY_IRI_TBL }
+    PIREUS_ARM_FAMILY_IRI_TBX
+}
+
+pub fn pireus_aarchmrs_inventory_store(
+    inv: &PireusAarchmrsInventory,
+) -> TripleStore with Mut {
+    var store = pireus_v01_store()
+    arm_add_class(&store, PIREUS_ARM_CLASS_INSTRUCTION_FORM)
+    arm_add_class(&store, PIREUS_ARM_CLASS_VENDOR_CORPUS)
+    arm_add_class(&store, PIREUS_ARM_CLASS_OPERATION_ID)
+    arm_add_class(&store, PIREUS_ARM_CLASS_VECTOR_SHAPE)
+    arm_add_class(&store, PIREUS_ARM_CLASS_TABLE_CARDINALITY)
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_ARM_CORPUS_AARCHMRS_FAT_2025_12,
+        PIREUS_RDF_TYPE, PIREUS_ARM_CLASS_VENDOR_CORPUS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_ARM_CORPUS_AARCHMRS_FAT_2025_12,
+        PIREUS_HAS_EVIDENCE_ROLE, PIREUS_ARM_EVIDENCE_NORMATIVE_VENDOR))
+    triple_store_add(&store, triple_iri(
+        PIREUS_ARM_EVIDENCE_NORMATIVE_VENDOR,
+        PIREUS_RDF_TYPE, PIREUS_CLASS_EVIDENCE_ROLE))
+
+    let operations: [i64; 4] = [
+        PIREUS_ARM_OP_IRI_TBL_ADVSIMD, PIREUS_ARM_OP_IRI_TBX_ADVSIMD,
+        PIREUS_ARM_OP_IRI_TBL_Z_ZZ, PIREUS_ARM_OP_IRI_TBX_Z_ZZ
+    ]
+    var oi: i64 = 0
+    while oi < 4 {
+        triple_store_add(&store, triple_iri(
+            operations[oi as usize], PIREUS_RDF_TYPE,
+            PIREUS_ARM_CLASS_OPERATION_ID))
+        oi = oi + 1
+    }
+    triple_store_add(&store, triple_iri(
+        PIREUS_ARM_VECTOR_IRI_FIXED_128, PIREUS_RDF_TYPE,
+        PIREUS_ARM_CLASS_VECTOR_SHAPE))
+    triple_store_add(&store, triple_iri(
+        PIREUS_ARM_VECTOR_IRI_SCALABLE, PIREUS_RDF_TYPE,
+        PIREUS_ARM_CLASS_VECTOR_SHAPE))
+
+    let cardinalities: [i64; 4] = [
+        PIREUS_ARM_TABLES_IRI_1, PIREUS_ARM_TABLES_IRI_2,
+        PIREUS_ARM_TABLES_IRI_3, PIREUS_ARM_TABLES_IRI_4
+    ]
+    var ci: i64 = 0
+    while ci < 4 {
+        triple_store_add(&store, triple_iri(
+            cardinalities[ci as usize], PIREUS_RDF_TYPE,
+            PIREUS_ARM_CLASS_TABLE_CARDINALITY))
+        ci = ci + 1
+    }
+
+    var i: i64 = 0
+    while i < inv.count {
+        let subject = 703300 + i
+        let form = inv.forms[i as usize]
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_RDF_TYPE, PIREUS_ARM_CLASS_INSTRUCTION_FORM))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_ARM_HAS_CORPUS,
+            PIREUS_ARM_CORPUS_AARCHMRS_FAT_2025_12))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_ARM_HAS_OPERATION_ID,
+            arm_operation_iri(form.operation_id_kind)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_ARM_HAS_VECTOR_SHAPE,
+            arm_vector_iri(form.vector_shape)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_ARM_HAS_TABLE_CARDINALITY,
+            arm_tables_iri(form.table_registers)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_ARM_HAS_RAW_FAMILY,
+            arm_family_iri(form.family)))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_HAS_EVIDENCE_ROLE,
+            PIREUS_ARM_EVIDENCE_NORMATIVE_VENDOR))
+        i = i + 1
+    }
+    store
+}
+
+pub fn pireus_aarchmrs_query_forms_by(
+    store: &TripleStore, predicate: i64, object: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1),
+        queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_ARM_CLASS_INSTRUCTION_FORM)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1),
+        queryterm_iri(predicate),
+        queryterm_iri(object)))
+    sparql_execute(store, &query)
+}

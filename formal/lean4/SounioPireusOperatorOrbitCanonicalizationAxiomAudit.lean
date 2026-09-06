@@ -1,0 +1,20 @@
+/- Axiom audit for every exported V13 orbit canonicalization parity theorem. -/
+import SounioPireusOperatorOrbitCanonicalization
+
+open SounioPireusOperatorOrbitCanonicalization
+
+#print axioms gl4_f2_enumeration_has_exactly_20160_matrices
+#print axioms every_invertible_4x4_code_is_in_the_scan
+#print axioms declared_linear_swap_view_census_is_40320
+#print axioms basis_fixed_gauge_codec_roundtrips_all_2048_words
+#print axioms every_11_bit_gauge_word_is_in_the_scan
+#print axioms interior_codec_is_a_225_cell_bijection
+#print axioms destination_major_microprogram_indexes_all_256_cells
+#print axioms exact_cell_separator_implies_distinct_tables
+#print axioms admission_accounting_is_33_minus_1_equals_32
+#print axioms class_accounting_is_30_plus_32_equals_62
+#print axioms separator_accounting_is_32_times_30_plus_choose_32_2
+#print axioms formal_parity_summary_matches_frozen_sounio_snapshot
+#print axioms formal_parity_is_bound_to_frozen_v13_hashes
+#print axioms formal_parity_remains_open_on_concrete_class_reconstruction
+#print axioms executable_scope_does_not_promote_broader_classification
