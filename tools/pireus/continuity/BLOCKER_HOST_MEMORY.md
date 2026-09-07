@@ -61,3 +61,5 @@ seconds. Raw observations, failed initial observer transport (missing Python
 in the observer image / pod replacement), receipts and transition summary
 are retained in validation/recovery-observer-live-2. This supports the
 concurrency investigation; it does not identify the exact failing predicate.
+
+Recovery update2026-09-07: content-address correction, exact observer migration and epoch15 canonical recovery passed; Slurm ownership restored. Fresh serving-capacity blocker is BLOCKER_TP2_CAPACITY.md. Historical failures above remain evidence.
