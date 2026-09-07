@@ -30,7 +30,7 @@ semantic_unknown_rejection() {
   local symbol="$3"
 
   [[ "$rc" -eq 1 ]] || return 1
-  grep -Eq "^error(\[E[0-9]+\])?: unknown identifier \`$symbol\` at " "$log" || return 1
+  grep -Eq "^error(\[E[0-9]+\])?: (unknown|undefined) identifier \`$symbol\` at " "$log" || return 1
   grep -Fxq 'typecheck: failed' "$log" || return 1
   if grep -Eiq 'segmentation fault|core dumped|terminated by signal|fatal:|bus error|illegal instruction' "$log"; then
     return 1
