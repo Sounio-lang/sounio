@@ -25,6 +25,7 @@ fi
 entrypoint=(-m sglang.launch_server)
 guard_args=()
 profile_args=()
+max_total_tokens=16384
 if [[ "${PIREUS_META_PROBE:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/profile_model_memory.py)
   if [[ "${PIREUS_META_SKIP_TOKENIZER:-0}" == "1" ]]; then
@@ -37,6 +38,7 @@ fi
 if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
   # Frozen offline profile must not depend on a parent tmux environment.
   export SGLANG_OPT_LINEARIZED_SHARED_SINK=0 NCCL_MAX_NCHANNELS=2 NCCL_BUFFSIZE=262144
+  max_total_tokens=6144
   entrypoint=(/scratch/pireus/runtime/offline_generate.py)
 fi
 if [[ "${PIREUS_CHECKPOINT_PATH_PROBE:-0}" == "1" ]]; then
@@ -57,4 +59,4 @@ exec python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scra
   --mamba-radix-cache-strategy extra_buffer --mem-fraction-static 0.85 \
   --swa-full-tokens-ratio 0.1 --mamba-full-memory-ratio 0.1 \
   --disable-prefill-cuda-graph --reasoning-parser inkling --tool-call-parser inkling \
-  --context-length 16384 --max-total-tokens 16384 --max-running-requests 1 --host 0.0.0.0 --port 30000 "${profile_args[@]}"
+  --context-length 16384 --max-total-tokens "$max_total_tokens" --max-running-requests 1 --host 0.0.0.0 --port 30000 "${profile_args[@]}"

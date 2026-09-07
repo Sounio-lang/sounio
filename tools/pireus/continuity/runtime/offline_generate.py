@@ -110,8 +110,11 @@ def main():
     if (server_args.tp_size != 2 or server_args.nnodes != 2 or server_args.node_rank != rank
         or not server_args.skip_tokenizer_init or server_args.context_length != 16384
         or server_args.max_running_requests != 1 or server_args.load_format == "dummy"
-        or server_args.disable_radix_cache):
+        or server_args.disable_radix_cache or server_args.max_total_tokens != 6144):
         raise ValueError("offline profile boundary")
+    for item in bundle["items"]:
+        if not item["input_ids"] or len(item["input_ids"]) + item["max_new_tokens"] > 6144:
+            raise ValueError("frozen request exceeds the6144-token offline cache budget")
     bench._set_envs_and_config(server_args)
     bench.initialize_moe_config(server_args)
     bench.initialize_fp8_gemm_config(server_args)
@@ -122,7 +125,8 @@ def main():
     emit("OFFLINE_MODEL_LOAD_BEGIN", one_batch_sha256=digest(Path(bench.__file__).read_bytes()),
          input_sha256=digest(raw), checkpoint_tensors_loaded=False)
     if os.environ.get("PIREUS_OFFLINE_INTERFACE") == "1":
-        emit("OFFLINE_INTERFACE_PASS", model_loaded=False, random_seed=server_args.random_seed)
+        emit("OFFLINE_INTERFACE_PASS", model_loaded=False, random_seed=server_args.random_seed,
+             max_total_tokens=server_args.max_total_tokens, context_length=server_args.context_length)
         return
     from sglang.srt.model_loader.loader import DefaultModelLoader
     original_iterator = DefaultModelLoader._get_all_weights
@@ -153,7 +157,7 @@ def main():
         tree_cache.reset()
         runner.clear()
         ids = item["input_ids"]
-        if not ids or len(ids) + item["max_new_tokens"] > 16384:
+        if not ids or len(ids) + item["max_new_tokens"] > min(16384,model.max_total_num_tokens):
             raise ValueError("request exceeds frozen context")
         params = SamplingParams(temperature=item["temperature"], max_new_tokens=item["max_new_tokens"],
                                 sampling_seed=item["seed"], stop_token_ids=set(item["stop_token_ids"]))
