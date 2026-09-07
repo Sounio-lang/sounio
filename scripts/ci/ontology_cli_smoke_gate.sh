@@ -148,7 +148,7 @@ compile_test_binary() {
         # WHY it could not build decides whether this is a skip or a failure.
         # An absent subject is not an environment limitation.
         local absent=""
-        if grep -qE "unknown identifier .?ontology_run_cli" "$TMP_DIR/build.log"; then
+        if grep -qE "(unknown|undefined) identifier .?ontology_run_cli" "$TMP_DIR/build.log"; then
             absent="ontology_run_cli"
         fi
         if [[ -z "$absent" ]]; then

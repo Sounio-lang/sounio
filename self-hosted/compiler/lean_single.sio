@@ -4823,8 +4823,29 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
     }
 }
 
+// The same finding as the E200 site in the x86 expression emitter, reached
+// from 40 call sites across both backends. #1634 gave that one site the code
+// and the `error:` prefix; this shared helper was missed, so which of the two
+// reported a given program decided whether the diagnostic carried an identity.
+//
+// a64_compile_fail_parity_gate.sh measured the consequence: 58 tests/compile-fail
+// cases where x86 reported `error[E200]` and aarch64 reported this uncoded
+// message for the SAME identifier at the SAME line. Both targets refused; only
+// one said under which rule.
+//
+// The wording is "undefined identifier", matching the catalog and the inline
+// x86 site. Keeping "unknown" here would have given E200 two spellings, and
+// scripts/ci/diagnostic_identity_gate.sh refuses exactly that -- a code must
+// name one thing. Its collision ratchet caught it at 31 against a ceiling of
+// 30. Raising that ceiling would have been the "add to the baseline to make
+// the gate pass" move those files forbid.
+//
+// The two gates that matched the old prose now accept either spelling:
+// scripts/ci/ontology_cli_smoke_gate.sh and
+// scripts/ci/lean_single_pub_use_reexport_gate.sh. Older logs still say
+// "unknown", so widening beats replacing.
 fn tc_undefined_var(tok: i64) -> i64 with IO, Mut, Panic {
-    print("error: unknown identifier `")
+    print("error[E200]: undefined identifier `")
     var uv_i: i64 = TS[tok as usize]
     while uv_i < TE[tok as usize] { print_char(SRC[uv_i as usize] as i64); uv_i = uv_i + 1 }
     print("` at ")
@@ -34578,7 +34599,27 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         // Parity with the x86-64 twin (~11443): a string literal has type `string`
         // (EXPR_TY = 3). The arm64 handler left EXPR_TY stale, so string-literal
         // arguments inherited the previous expression's type (int/bool) -> E001.
+        //
+        // EXPR_TY_HASH needed clearing for the same reason and did not get it.
+        // `string` is a builtin, so its hash is 0; leaving the previous
+        // expression's hash here gave the literal a nominal identity that was
+        // not its own. That only surfaces where the HASH is read rather than
+        // the type -- inside a tuple, whose synthetic hash packs the last
+        // element's hash. So `(Struct, string)` compared unequal to itself:
+        // the declared type hashed the string element as 0, the expression
+        // hashed it as the struct's, and ty_eq refused the pair on aarch64
+        // while x86 accepted it.
+        //
+        // Measured on `fn f() -> (O, string) { return (O { c: 1 }, "") }`:
+        //   x86  elem[1] ty=3 hash=0            -> tuple 494000000200001002
+        //   a64  elem[1] ty=3 hash=37749522494  -> tuple 494522494200001002
+        // and 37749522494 % 1000000 = 522494 -- the struct's own hash bleeding
+        // into the string's slot, which is the 522494 in the middle field.
+        //
+        // The sibling arm64 sites (emit_get_arg_a64, emit_read_file_a64) set
+        // both fields together already; this one is brought in line. (#2441)
         EXPR_TY = 3
+        EXPR_TY_HASH = 0
         return
     }
     // Identifier or function call

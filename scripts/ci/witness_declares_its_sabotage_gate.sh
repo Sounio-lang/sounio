@@ -84,8 +84,24 @@ total_w=${#ALL_WITNESSES[@]}
 n_decl=${#declared[@]}
 n_undecl=${#undeclared[@]}
 
-# Corpus identity digest: SHA-256 of sorted newline-joined paths (#2391).
-corpus_sha="$(printf '%s\n' "${ALL_WITNESSES[@]}" | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print $1}')"
+# Corpus identity digest: SHA-256 over sorted "path + content-hash" pairs.
+#
+# #2391 landed this as a digest of the sorted PATHS alone, which fixes
+# cardinality and naming but not identity: rewriting a witness's body while
+# keeping its filename leaves the digest unchanged. That is precisely the
+# "corpus swap with cardinality preserved" case this census is meant to make
+# impossible, so the content hash is folded in here. The digest necessarily
+# changes value when this line lands — it is a different, stronger claim, and
+# the pinned value in scripts/ci/fixtures/measured_claims.tsv is re-derived in
+# the same commit.
+# One hasher invocation over the whole (already sorted) list: its output is
+# "<content-hash>  <path>" per line, so the inner digest covers content AND
+# naming AND ordering in a single pass. Hashing file-by-file in a shell loop
+# would spawn ~1900 processes here and cost seconds per gate run.
+corpus_sha="$(
+  { sha256sum "${ALL_WITNESSES[@]}" 2>/dev/null || shasum -a 256 "${ALL_WITNESSES[@]}"; } \
+    | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print $1}'
+)"
 
 # Per-class counts of run-pass directives (#2391).
 n_check_only="$(grep -r -m1 -l '^//@ check-only' tests/run-pass 2>/dev/null | wc -l | tr -d ' ')"

@@ -12,6 +12,17 @@ def truthy(value: str | None) -> bool:
     return value == "true"
 
 
+def is_nightly() -> bool:
+    """True when this run is one that must actually execute the nightly jobs.
+
+    A scheduled run always is. A workflow_dispatch is only when the operator
+    ticked the `nightly` input, matching the `if:` on the r6-corpus-sweep job.
+    """
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        return True
+    return os.environ.get("NIGHTLY_INPUT", "").lower() == "true"
+
+
 def main() -> int:
     needs = json.loads(os.environ.get("NEEDS_JSON", "{}"))
     impact = needs.get("impact", {}).get("outputs", {})
@@ -37,6 +48,13 @@ def main() -> int:
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
         "lean-proofs": truthy(impact.get("lean")) or truthy(impact.get("full")),
         "website": truthy(impact.get("website")) or truthy(impact.get("full")),
+        # #2392 follow-up. R6 is selected by the EVENT, not by impact
+        # classification: it is nightly-only, so `skipped` is the correct
+        # outcome on a pull request and a non-evaluation on a scheduled run.
+        # Selecting it unconditionally would fail every PR; leaving it out of
+        # this dict entirely — the state this fixes — means a red R6 never
+        # reaches the verdict at all.
+        "r6-corpus-sweep": is_nightly(),
     }
 
     for job, selected in required.items():
