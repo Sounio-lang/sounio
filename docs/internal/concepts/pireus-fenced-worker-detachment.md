@@ -60,3 +60,14 @@ Native positive/negative controls and the existing 88-vector arbiter plus
 material/transaction regression pass. The old observer fails the stale-memory
 regression as expected. Independent Grok and Qwen reviews are retained under
 tools/pireus/continuity/reviews/migration-*.
+
+## Host transaction serialization boundary
+
+The subsequent host revision changes material synchronization, retaining
+Sounio's grant predicates. A bounded host-local lock spans watchdog decisions,
+grant mutations and compound reports. Failed or incomplete cycles cannot
+refresh the heartbeat. The exact revision is admitted by the same native
+observer-rebind frame through a separate hash-pinned transport. Its only
+configuration changes are the host-fence manifest and the content-addressed
+ConfigMap name in policy and three admission references. Sequential journal
+and lease CAS does not claim pair-wide atomicity or restored ownership.

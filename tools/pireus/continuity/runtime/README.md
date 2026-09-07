@@ -132,3 +132,38 @@ bash runtime/test_memory_observation.sh from the continuity directory;
 scripts/ci/spark_pair_arbiter_selftest.sh from the repository root.
 Raw independent reviews and live migration evidence are committed separately
 from subsequent canonical recovery and hardware acceptance.
+
+## Host grant transaction serialization
+
+A second recovery revision serializes host grant mutations, watchdog cycles
+and compound reports through the same host-local flock. Waiting is capped at
+10 seconds; the operation has a separate 45-second timeout plus a 2-second kill grace.
+flock --close keeps the lock descriptor out of child processes, and the flock
+parent stays outside timeout's process group. Emergency acquisition can wait
+60 seconds for a bounded external owner; systemd uses TimeoutStopSec=120 and
+KillMode=control-group. Only the already-managed legacy GPU containers use a bounded 5-second stop
+grace; protected services remain outside that stop set. Contention, timeout or any failed cycle
+does not refresh the watchdog heartbeat. Installation remains the canonical
+arbiter's responsibility; the lock does not admit a GPU grant.
+
+This prevents a watchdog that sampled FENCED from imposing that stale state
+after a concurrent Slurm commit. A temporary-root test with real competing
+processes reproduces the old interleaving and verifies that serialization
+preserves the later commit, rejects lock contention, kills a wedged operation,
+releases the lock, and refuses a failed daemon cycle's heartbeat.
+
+recovery_serialize.py reuses the frozen 19-field Sounio observer-rebind
+authority under recovery-serialization-lock.json. It admits only the exact
+new host-fence manifest, its content-addressed ConfigMap name in material
+policy, and the three occurrences of that name in admission rules. Every
+other policy field and every other byte of admission rules must match the
+old revision. Native decision predicates, memory floor and device barrier are unchanged.
+The canonical backend stages the old bridge under its old admission rules,
+installs the new exact rules, proves generic GPU admission still refuses,
+and only then creates the revised host Pods. Journal/lease updates are sequential CAS operations,
+not pair-wide atomicity. Installation and Slurm restoration are separate.
+
+Gate: python3 tools/pireus/continuity/runtime/test_host_transition_lock.py
+EXTRACTED_HOST_FENCE_SCRIPT. The fixture uses a temporary host root and never
+executes GPU operations. Use recovery_serialize.py with the same arguments
+as recovery_migrate.py and the preserved observer revision as --old-root.
