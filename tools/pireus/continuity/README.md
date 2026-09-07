@@ -145,3 +145,20 @@ failing against the worker's64MiB /dev/shm at the embedding all-reduce.
 Diagnostic11928 passes exact collective controls and two synthetic embedding/norm
 passes on both ranks using PyNCCL. Those controls load no checkpoint tensors and
 stop before the first transformer layer; they are not real generation evidence.
+
+
+The current offline profile places only the input embedding in a read-only local
+file-backed CPU mapping. After full checkpoint loading, the adapter streams the
+local BF16 GPU shard to an owned file in4MiB blocks, synchronizing and dropping
+clean file pages per block to bound write transients. Source/file hashes must
+match embedding-offload-lock.json before inference. CUDA receives only owned
+gathered token rows; original TP masking/all-reduce and the remaining weights
+retain their runtime paths and precision.
+
+Control11930 compares every201024 vocabulary row to the real fused GPU embedding
+on both ranks, plus344/1/boundary inputs and deliberate private COW corruption.
+All bytes match and823394304 CUDA bytes/rank are released. This is input-embedding
+qualification, not full inference acceptance. Completion receipts include the
+rank-specific embedding storage hashes and helper identity, and responses declare
+embedding_placement=file-backed-cpu. The importer rejects mismatched storage or
+precision claims.
