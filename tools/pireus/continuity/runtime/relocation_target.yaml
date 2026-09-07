@@ -1,0 +1,122 @@
+# Isolated relocation target. Apply only after the storage prerequisite passes.
+# Secret pireus-pg-relocation-bootstrap must be provisioned privately first.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pireus-pg-relocation-data
+  namespace: beagle
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ceph-rbd-ssd-checkpoints
+  resources:
+    requests:
+      storage: 64Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pireus-pg-relocation
+  namespace: beagle
+spec:
+  selector:
+    app: pireus-pg-relocation
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pireus-pg-relocation
+  namespace: beagle
+spec:
+  serviceName: pireus-pg-relocation
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pireus-pg-relocation
+  template:
+    metadata:
+      labels:
+        app: pireus-pg-relocation
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: r770-proxmox
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: sounio.dev/pool
+          operator: Equal
+          value: gpu-batch
+          effect: NoSchedule
+        - key: sounio.dev/compute
+          operator: Equal
+          value: heavy
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: postgres
+          image: paradedb/paradedb@sha256:ea4e8267016c929924a15df03eaf2ad9bb2cda9d194169e03eca232303898cc7
+          args:
+            - postgres
+            - -c
+            - shared_preload_libraries=pg_search,pg_cron,pg_stat_statements
+            - -c
+            - shared_buffers=12GB
+            - -c
+            - work_mem=128MB
+            - -c
+            - maintenance_work_mem=2GB
+            - -c
+            - cron.database_name=postgres
+            - -c
+            - cron.launch_active_jobs=off
+            - -c
+            - wal_level=replica
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: pireus-pg-relocation-bootstrap
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pireus-pg-relocation-bootstrap
+                  key: password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            requests:
+              cpu: "2"
+              memory: 24Gi
+            limits:
+              cpu: "8"
+              memory: 48Gi
+          startupProbe:
+            exec:
+              command: [sh, -c, 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_USER"']
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            exec:
+              command: [sh, -c, 'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_USER"']
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pireus-pg-relocation-data
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
