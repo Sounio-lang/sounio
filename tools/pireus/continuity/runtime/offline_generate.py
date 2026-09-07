@@ -110,11 +110,12 @@ def main():
     if (server_args.tp_size != 2 or server_args.nnodes != 2 or server_args.node_rank != rank
         or not server_args.skip_tokenizer_init or server_args.context_length != 16384
         or server_args.max_running_requests != 1 or server_args.load_format == "dummy"
-        or server_args.disable_radix_cache or server_args.max_total_tokens != 6144):
+        or server_args.disable_radix_cache or server_args.max_total_tokens != 6144
+        or server_args.swa_full_tokens_ratio != 0.15):
         raise ValueError("offline profile boundary")
     for item in bundle["items"]:
         if not item["input_ids"] or len(item["input_ids"]) + item["max_new_tokens"] > 6144:
-            raise ValueError("frozen request exceeds the6144-token offline cache budget")
+            raise ValueError("frozen request exceeds the 6144-token offline cache budget")
     bench._set_envs_and_config(server_args)
     bench.initialize_moe_config(server_args)
     bench.initialize_fp8_gemm_config(server_args)
