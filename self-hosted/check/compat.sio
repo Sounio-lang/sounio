@@ -889,10 +889,33 @@ pub fn is_float_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64
 }
 
-// Wide-float identity exists before its value semantics. Keep these types out
-// of is_numeric_type until operations, status, and rounding are implemented.
+// Wide-float format identity (TyF128/TyF256). Value ops are admitted for
+// same-format arithmetic/comparison as of V0-E.2 (see wide_float_binary_result_type).
 pub fn is_wide_float_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyF128 || ty.kind == TypeKind::TyF256
+}
+
+pub fn wide_float_binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    // Mixed f128/f256 or wide↔narrow stays rejected (no implicit conversion).
+    if !is_wide_float_type(left) || !is_wide_float_type(right) {
+        return ty_error()
+    }
+    if !types_compatible(left, right) {
+        return ty_error()
+    }
+    match op {
+        BinaryOp::OpAdd => left
+        BinaryOp::OpSub => left
+        BinaryOp::OpMul => left
+        BinaryOp::OpDiv => left
+        BinaryOp::OpEq => ty_bool()
+        BinaryOp::OpNe => ty_bool()
+        BinaryOp::OpLt => ty_bool()
+        BinaryOp::OpLe => ty_bool()
+        BinaryOp::OpGt => ty_bool()
+        BinaryOp::OpGe => ty_bool()
+        _ => ty_error()
+    }
 }
 
 pub fn f128_f256_compatibility_probe_code() -> i64 with Mut, Panic, Div, Alloc {
@@ -904,9 +927,20 @@ pub fn f128_f256_compatibility_probe_code() -> i64 with Mut, Panic, Div, Alloc {
     if types_compatible(t128, t256) || types_compatible(t256, t128) { return 42 }
     if types_compatible(t128, f64) || types_compatible(f64, t128) { return 43 }
     if types_compatible(t256, f64) || types_compatible(f64, t256) { return 44 }
+    // Still not in the generic is_numeric_type set — ops go through the
+    // wide_float_* dispatch (keeps f64/f32 numeric paths distinct).
     if is_numeric_type(t128) || is_numeric_type(t256) { return 45 }
     if is_float_type(t128) || is_float_type(t256) { return 46 }
     if !is_wide_float_type(t128) || !is_wide_float_type(t256) { return 47 }
+    // V0-E.2: same-format add typechecks; cross-format stays error.
+    let add128 = wide_float_binary_result_type(BinaryOp::OpAdd, t128, t128)
+    if add128.kind != TypeKind::TyF128 { return 48 }
+    let add256 = wide_float_binary_result_type(BinaryOp::OpAdd, t256, t256)
+    if add256.kind != TypeKind::TyF256 { return 49 }
+    let mixed = wide_float_binary_result_type(BinaryOp::OpAdd, t128, t256)
+    if mixed.kind != TypeKind::TyError { return 50 }
+    let cmp = wide_float_binary_result_type(BinaryOp::OpLt, t128, t128)
+    if cmp.kind != TypeKind::TyBool { return 51 }
     0
 }
 
@@ -943,7 +977,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         return right
     }
     if is_wide_float_type(left) || is_wide_float_type(right) {
-        return ty_error()
+        return wide_float_binary_result_type(op, left, right)
     }
 
     // Feature B: Invariant<T,G> arithmetic/comparison resolves on the inner T (an
@@ -1182,7 +1216,10 @@ pub fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Allo
         return operand
     }
     if is_wide_float_type(operand) {
-        return ty_error()
+        match op {
+            UnaryOp::OpNeg => return operand
+            _ => return ty_error()
+        }
     }
 
     match op {

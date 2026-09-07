@@ -150,8 +150,9 @@ PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_f
 
 | Slice | Gate | Status bar |
 |---|---|---|
-| **V0-E.1** print + limb stdlib API | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e` | Deterministic softfloat decimal/hex print; `stdlib/math/wide_float.sio`; Madaros `check` + seed-run hex wire smoke. Language `f128` `+` still E004; GUM/`Knowledge`/`MeasuredF256` deferred. |
-| **V0-E.2** source ops + builtin print + GUM | (future; umbrella `f128_f256_full_ladder_gate.sh`) | Lift E004, Madaros-run `print_f128`, `Knowledge`/`GUM` k95, `MeasuredF256=executable`. |
+| **V0-E.1** print + limb stdlib API | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e` | Deterministic softfloat decimal/hex print; `stdlib/math/wide_float.sio`; Madaros `check` + seed-run hex wire smoke. |
+| **V0-E.2** source ops through check | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e2` | Same-format `f128`/`f256` `+ - * /` and comparisons typecheck (no E004). Mixed/cast/implicit still rejected. Madaros-run softfloat lowering, builtin `print_f128`, GUM/`MeasuredF256` deferred. |
+| **V0-E.3** run + GUM | (future; umbrella `f128_f256_full_ladder_gate.sh`) | Lift to Madaros-run ops, `print_f128`, `Knowledge`/`GUM` k95, `MeasuredF256=executable`. |
 
 **Gate** (V0-E.1):
 ```bash
