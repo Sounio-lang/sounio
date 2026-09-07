@@ -14,6 +14,13 @@ class MemoryGuardTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return supervise(*args, **kwargs)
 
+    def test_cli_cannot_lower_guard_to_protected_floor(self):
+        env = os.environ | {"SLURM_JOB_ID": "test", "SLURM_PROCID": "0"}
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("memory_guard.py")),
+                                 "--reserve-gib", "32", "--", "/bin/true"],
+                                env=env, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+
     def test_child_status(self):
         self.assertEqual(self.quiet([sys.executable, "-c", "raise SystemExit(7)"],
                                    read_memory=lambda: 100, reserve=50), 7)

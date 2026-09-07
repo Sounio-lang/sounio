@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stop only this Slurm rank's process group before the host reserve is exhausted."""
+import argparse
 import json
 import os
 import signal
@@ -71,12 +72,16 @@ def main():
     if not os.environ.get("SLURM_JOB_ID") or not os.environ.get("SLURM_PROCID"):
         # Rank zero is the nonempty string "0".
         raise SystemExit("An owned Slurm allocation/rank is required")
-    command = sys.argv[1:]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--reserve-gib", type=int, choices=[33, 36], default=36)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command
     if command[:1] == ["--"]:
         command = command[1:]
     if not command:
         raise SystemExit("A child command is required")
-    raise SystemExit(supervise(command))
+    raise SystemExit(supervise(command, reserve=args.reserve_gib * 1024**3))
 
 if __name__ == "__main__":
     main()

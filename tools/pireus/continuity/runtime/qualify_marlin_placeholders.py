@@ -69,9 +69,27 @@ def deterministic_gemm(*args,**kwargs):
     kwargs["use_atomic_add"]=False
     return stock_gemm(*args,**kwargs)
 
+repack_test=os.environ.get("PIREUS_REPACK_TEST")=="1"
+repack_source_sha=None
+repack_patch_sha=None
+repack_candidate=None
+if repack_test:
+    import sglang.srt.layers.quantization.marlin_utils_fp4 as marlin_utils
+    from patch_marlin_repack import patched_source as patched_repack_source
+    repack_source=Path(marlin_utils.__file__).read_bytes()
+    repack_changed=patched_repack_source(repack_source)
+    repack_source_sha=hashlib.sha256(repack_source).hexdigest()
+    repack_patch_sha=hashlib.sha256(repack_changed).hexdigest()
+    fn=next(n for n in ast.parse(repack_changed).body if isinstance(n,ast.FunctionDef)
+            and n.name=="prepare_moe_nvfp4_layer_for_marlin")
+    repack_namespace={}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),
+                 "<custody-bound-in-place-repack>","exec"),vars(marlin_utils),repack_namespace)
+    repack_candidate=repack_namespace["prepare_moe_nvfp4_layer_for_marlin"]
+
 reports=[]
 with patch.object(quant,"get_moe_runner_backend",return_value=MoeRunnerBackend.MARLIN):
-    for experts,hidden,intermediate in [(8,256,128),(4,4096,1024)]:
+    for experts,hidden,intermediate in ([(8,256,128),(4,4096,1024),(256,4096,1024)] if repack_test else [(8,256,128),(4,4096,1024)]):
         torch.manual_seed(20260907)
         baseline=make(original,experts,hidden,intermediate)
         fill(baseline)
@@ -83,7 +101,19 @@ with patch.object(quant,"get_moe_runner_backend",return_value=MoeRunnerBackend.M
         for name,param in candidate.named_parameters():
             param.data.copy_(baseline.get_parameter(name).data)
         quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,baseline)
-        quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,candidate)
+        old_pointers={name:getattr(candidate,name).data_ptr() for name in
+                      ["w13_weight","w2_weight","w13_weight_scale","w2_weight_scale"]}
+        torch.cuda.synchronize()
+        before_repack=torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        if repack_test:
+            with patch.object(quant,"prepare_moe_nvfp4_layer_for_marlin",repack_candidate):
+                quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,candidate)
+            assert all(getattr(candidate,name).data_ptr()==pointer for name,pointer in old_pointers.items())
+        else:
+            quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,candidate)
+        torch.cuda.synchronize()
+        repack_peak_extra=torch.cuda.max_memory_allocated()-before_repack
         for name,param in candidate.named_parameters():
             assert torch.equal(bits(param),bits(baseline.get_parameter(name))),name
         compared=0
@@ -120,12 +150,15 @@ with patch.object(quant,"get_moe_runner_backend",return_value=MoeRunnerBackend.M
         assert not torch.equal(bits(a),bits(poisoned)),"Negative control missed consumed-scale corruption"
         reports.append(dict(experts=experts,hidden=hidden,intermediate=intermediate,
                             omitted_bytes=omitted,output_components_compared=compared,
+                            repack_peak_extra_bytes=repack_peak_extra,repack_preserved_storage=repack_test,
                             exact_non_atomic_output_pass=True,consumed_scale_negative_pass=True,
                             stock_atomic_repeat_observations=stock_repeat_differences,
                             production_atomic_bitwise_determinism_claimed=False))
         del baseline,candidate
         torch.cuda.empty_cache()
-print(json.dumps(dict(stage="MARLIN_PLACEHOLDER_GPU_PASS",job=os.environ["SLURM_JOB_ID"],
+print(json.dumps(dict(stage="MARLIN_INPLACE_GPU_PASS" if repack_test else "MARLIN_PLACEHOLDER_GPU_PASS",job=os.environ["SLURM_JOB_ID"],
                       rank=os.environ["PIREUS_RANK"],source_sha256=hashlib.sha256(source).hexdigest(),
                       patch_sha256=hashlib.sha256(changed).hexdigest(),reports=reports,
+                      repack_source_sha256=repack_source_sha,repack_patch_sha256=repack_patch_sha,
+                      test_source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                       full_model_serving_accepted=False)),flush=True)

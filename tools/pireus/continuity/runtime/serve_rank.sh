@@ -18,7 +18,22 @@ python3 -c 'import json,hashlib;from pathlib import Path;p=Path("/scratch/pireus
 PIREUS_MARLIN_OVERLAY=0 /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/install_marlin_overlay.py
 export PIREUS_MARLIN_OVERLAY=1
 /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/inspect_runtime.py
-exec python3 /scratch/pireus/runtime/memory_guard.py -- /scratch/pireus/runtime/run_in_container.sh python3 -m sglang.launch_server \
+export MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072
+entrypoint=(-m sglang.launch_server)
+guard_args=()
+profile_args=()
+if [[ "${PIREUS_META_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_model_memory.py)
+  if [[ "${PIREUS_META_SKIP_TOKENIZER:-0}" == "1" ]]; then
+    profile_args=(--skip-tokenizer-init)
+  fi
+fi
+if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
+  profile_args=(--skip-tokenizer-init --disable-cuda-graph --chunked-prefill-size 128
+                --max-mamba-cache-size 8 --disable-overlap-schedule)
+  guard_args=(--reserve-gib 33)
+fi
+exec python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scratch/pireus/runtime/run_in_container.sh python3 "${entrypoint[@]}" \
   --model-path "$MODEL" --trust-remote-code --tp 2 --nnodes 2 \
   --node-rank "${PIREUS_RANK:?explicit node rank required}" --dist-init-addr "$MASTER_ADDR:$MASTER_PORT" \
   --quantization modelopt_fp4 --attention-backend triton --page-size 128 \
@@ -26,4 +41,4 @@ exec python3 /scratch/pireus/runtime/memory_guard.py -- /scratch/pireus/runtime/
   --mamba-radix-cache-strategy extra_buffer --mem-fraction-static 0.85 \
   --swa-full-tokens-ratio 0.1 --mamba-full-memory-ratio 0.1 \
   --disable-prefill-cuda-graph --reasoning-parser inkling --tool-call-parser inkling \
-  --context-length 16384 --max-total-tokens 16384 --max-running-requests 1 --host 0.0.0.0 --port 30000
+  --context-length 16384 --max-total-tokens 16384 --max-running-requests 1 --host 0.0.0.0 --port 30000 "${profile_args[@]}"

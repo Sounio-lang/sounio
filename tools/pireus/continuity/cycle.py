@@ -88,6 +88,7 @@ def prepare(args):
         dependencies[name] = digest(data)
     manifest = dict(schema=1, condition=args.condition, budget=args.budget,
                     round=args.round, model=MODEL, revision=REVISION,
+                    transport=getattr(args, "transport", "openai-chat"),
                     dependencies=dependencies,
                     engine_sha256=args.engine_sha256,
                     admission_source_sha256=digest((HERE / "admission.sio").read_bytes()),
@@ -105,7 +106,27 @@ def proposal_template(context_hash):
                 fma=0, kind=1, lane_stride=1, lane_offset=0, load=1,
                 layout=0, unroll=1, context=context_hash)
 
+def request_body(manifest, context, index, served_model=MODEL):
+    base = proposal_template(digest(context))
+    facts = context.decode() if manifest["condition"] == "inkling-ontology" else "withheld"
+    prompt = (
+        "Propose one untrusted lowering plan as a JSON object only. "
+        "Do not add expected results, authority, claims, or new fields. "
+        "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
+        "You may vary lane_stride in odd integers 1..15; lane_offset 0..15; "
+        "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); "
+        "unroll in [1,2,4,8,16]. Output k accumulates ascending right operand j "
+        "with left i=k XOR j, separate f64 multiply/add, no reassociation. "
+        "Lane mapping k=(lane*lane_stride+lane_offset)%%16. "
+        "This is proposal %d in round %d. Frozen research context (declared ontology, not observed hardware facts): %s. Template: %s"
+        % (index, manifest["round"], facts, json.dumps(base)))
+    body = dict(model=served_model, messages=[dict(role="user", content=prompt)],
+                max_tokens=4096, temperature=0.7, seed=manifest["round"] * 1000 + index)
+    return body
+
 def generate(args, manifest):
+    if manifest.get("transport") == "sglang-token-ids":
+        raise ValueError("Use tokenized_cycle.py for the frozen token-ID transport")
     root = args.run
     context = (root / "context.json").read_bytes()
     base = proposal_template(digest(context))
@@ -126,20 +147,7 @@ def generate(args, manifest):
         else:
             if not args.endpoint:
                 raise ValueError("endpoint is required for Inkling")
-            facts = context.decode() if manifest["condition"] == "inkling-ontology" else "withheld"
-            prompt = (
-                "Propose one untrusted lowering plan as a JSON object only. "
-                "Do not add expected results, authority, claims, or new fields. "
-                "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
-                "You may vary lane_stride in odd integers 1..15; lane_offset 0..15; "
-                "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); "
-                "unroll in [1,2,4,8,16]. Output k accumulates ascending right operand j "
-                "with left i=k XOR j, separate f64 multiply/add, no reassociation. "
-                "Lane mapping k=(lane*lane_stride+lane_offset)%16. "
-                "This is proposal %d in round %d. Frozen hardware facts: %s. Template: %s"
-                % (index, manifest["round"], facts, json.dumps(base)))
-            body = dict(model=args.served_model, messages=[dict(role="user", content=prompt)],
-                        max_tokens=4096, temperature=0.7, seed=manifest["round"] * 1000 + index)
+            body = request_body(manifest, context, index, args.served_model)
             if not response.exists():
                 if request.exists():
                     raise RuntimeError("ambiguous interrupted generation; original request retained; "
@@ -238,6 +246,7 @@ def main():
     ap.add_argument("--gain-engine", type=Path)
     ap.add_argument("--endpoint")
     ap.add_argument("--served-model", default=MODEL)
+    ap.add_argument("--transport", choices=["openai-chat", "sglang-token-ids"], default="openai-chat")
     args = ap.parse_args()
     if args.command == "prepare":
         if bool(args.context) == bool(args.context_engine) or not args.evidence or not args.engine_sha256:
