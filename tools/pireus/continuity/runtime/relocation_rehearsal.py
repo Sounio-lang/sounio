@@ -29,8 +29,10 @@ def target(tool, db, extra=(), interactive=False):
 def literal(value):
     return "'" + value.replace("'", "''") + "'"
 
-def wait_file(path, deadline):
+def wait_file(path, deadline, producer=None):
     while not path.exists():
+        if producer is not None and producer.poll() is not None:
+            raise RuntimeError("Source backup exited before publishing required artifact; private diagnostic retained")
         if time.monotonic() > deadline:
             raise RuntimeError("Rehearsal artifact deadline exceeded")
         time.sleep(1)
@@ -43,8 +45,8 @@ def sql(statement, error_path):
         raise RuntimeError("Target SQL failed; private diagnostic retained")
     return p.stdout
 
-def compare(entry, source_dir, output, deadline):
-    wait_file(source_dir / "fingerprints.json", deadline)
+def compare(entry, source_dir, output, deadline, producer=None):
+    wait_file(source_dir / "fingerprints.json", deadline, producer)
     expected = json.loads((source_dir / "fingerprints.json").read_text())
     if expected["record_format"] != "postgres-record-sha256-v2":
         raise RuntimeError("Unexpected fingerprint representation")
@@ -113,10 +115,10 @@ def restore_database_settings(entry, source_directory, log_path):
     statements.append("COMMIT")
     sql(";\n".join(statements) + ";\n", log_path)
 
-def restore(entry, source, output, deadline):
+def restore(entry, source, output, deadline, producer=None):
     directory = source / entry["index"]
     # partial fingerprints only appear AFTER pg_dump has completed and closed the archive.
-    wait_file(directory / "fingerprints.partial.json", deadline)
+    wait_file(directory / "fingerprints.partial.json", deadline, producer)
     partial = json.loads((directory / "fingerprints.partial.json").read_text())
     archive = directory / "database.dump"
     if archive.stat().st_size != partial["dump_bytes"]:
@@ -170,7 +172,7 @@ def restore(entry, source, output, deadline):
     (output / (entry["index"] + "-restore.json")).write_text(json.dumps(report, indent=2))
     if p.returncode:
         raise RuntimeError("Restore failed; private diagnostic retained")
-    wait_file(directory / "fingerprints.json", deadline)
+    wait_file(directory / "fingerprints.json", deadline, producer)
     expected = json.loads((directory / "fingerprints.json").read_text())
     if "sequences" not in expected:
         raise RuntimeError("Complete sequence capture missing")
@@ -186,7 +188,7 @@ def restore(entry, source, output, deadline):
         raise RuntimeError("Complete sequence restore failed")
     report["sequences_restored"] = len(expected["sequences"])
     restore_database_settings(entry, source, log_path)
-    report["comparison"] = compare(entry, directory, output, deadline)
+    report["comparison"] = compare(entry, directory, output, deadline, producer)
     print(json.dumps(report), flush=True)
     return report
 
@@ -206,12 +208,14 @@ def main():
     policy = json.loads(kubectl("get", "networkpolicy", "pireus-pg-relocation-rehearsal", "-o", "json"))
     if policy["spec"].get("ingress") or policy["spec"]["podSelector"] != {"matchLabels": {"app": "pireus-pg-relocation"}}:
         raise RuntimeError("Target ingress isolation missing")
+    if json.loads(kubectl("get", "ciliumnetworkpolicy", "-o", "json"))["items"]:
+        raise RuntimeError("Unexpected additional target ingress policy")
     if args.bulk_prepared:
         with (args.output / "bulk-settings-private.log").open("ab") as errors:
             settings = subprocess.run(target("psql", ADMIN_DB, ["-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-c",
-                "SELECT current_setting('wal_level'),current_setting('max_wal_senders'),current_setting('archive_mode'),current_setting('fsync'),current_setting('full_page_writes'),current_setting('synchronous_commit')"]),
+                "SELECT current_setting('wal_level'),current_setting('max_wal_senders'),current_setting('archive_mode'),current_setting('fsync'),current_setting('full_page_writes'),current_setting('synchronous_commit'),current_setting('cron.launch_active_jobs')"]),
                 stdout=subprocess.PIPE, stderr=errors, timeout=30)
-        if settings.returncode or settings.stdout.strip() != b"minimal|0|off|on|on|on":
+        if settings.returncode or settings.stdout.strip() != b"minimal|0|off|on|on|on|off":
             raise RuntimeError("Bulk WAL/durability settings do not match")
     start = time.monotonic()
     deadline = start + 1800
@@ -219,7 +223,7 @@ def main():
         source_process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("relocation_dump.py")),
                                           "--output", str(args.source_output)], stdout=log, stderr=log)
         try:
-            wait_file(args.source_output / "db-0" / "database.dump", deadline)
+            wait_file(args.source_output / "db-0" / "database.dump", deadline, source_process)
             inventory = json.loads((args.source_output / "inventory.json").read_text())
             # Retain the original bootstrap role identity (OID10), then restore its attributes/password.
             globals_sql = (args.source_output / "globals-private.sql").read_text()
@@ -235,7 +239,7 @@ def main():
                        if db["datallowconn"]]
             # CREATE DATABASE and concurrent restores contend on shared checkpoints.
             # Backups still overlap this sequential destination restore pipeline.
-            reports = [restore(e, args.source_output, args.output, deadline) for e in entries]
+            reports = [restore(e, args.source_output, args.output, deadline, source_process) for e in entries]
             if source_process.wait(timeout=60):
                 raise RuntimeError("Source backup failed")
             with (args.output / "metadata-private.log").open("xb") as metadata_log:

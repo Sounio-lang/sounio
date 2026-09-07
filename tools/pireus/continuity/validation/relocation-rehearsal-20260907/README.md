@@ -95,3 +95,37 @@ mode off and zero WAL senders. fsync/full_page_writes/synchronous_commit stay
 on. Normal wal_level=replica must be restored, the target restarted, and
 functional acceptance repeated before any endpoint switch. This is not yet
 a validated production procedure.
+
+## Bulk and endpoint controls
+
+V3 core restore/metadata took 859.28 seconds and normal-runtime restoration,
+ANALYZE and functional controls took another 29.76 seconds. It lacked a
+measured complete endpoint/controller margin and crossed the OSD0 replica
+relief; it is not a stable post-repair acceptance run.
+
+V4 stopped during pg_dump on a Kubernetes WebSocket stream i/o timeout.
+The source stayed online. Its partial archive is retained privately.
+The rehearsal now detects an exited backup producer immediately instead
+of waiting for a missing artifact until the global deadline. Both the
+failed-producer negative control and completed-artifact control passed.
+
+V5 explicitly selected KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false. All189 table
+digests, 83 captured sequence states and schema/ACL/role metadata passed.
+Core time was866.22 seconds; normal restart/ANALYZE/functions added42.51
+seconds and network controls7.08 seconds:915.80 seconds total, excluding
+source pause/controller overhead. This exceeds900 seconds and is rejected.
+
+The forwarding controls passed authenticated queries through the Spark
+probe port15433, a Kubernetes client path, IPv4/IPv6 and unchanged SSL
+negotiation. Cilium remote-node ingress is paired with PostgreSQL HBA
+restriction to10.100.100.59/32; other TCP sources are rejected by HBA.
+Both a missing-network-policy negative and explicit HBA rejection passed.
+The temporary Cilium policy was removed and the owned probe unit stopped.
+Production5433 and the source database were never switched.
+
+The new target volume excludes OSD0 and passed independent volume controls.
+Only the isolated target was switched; the original Retain PVC remains.
+Cron stays off through a reloadable configuration-file setting, with its
+bootstrap command-line override removed. This avoids an extra restart
+when activation is eventually authorized by all migration gates.
+V6 is the first full rehearsal on that volume and remains pending.

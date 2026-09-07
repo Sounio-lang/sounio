@@ -1,6 +1,6 @@
 # Proposed Beagle memory database relocation to unblock Inkling TP2
 
-Status: AUTHORIZED; capacity corrected; isolated restore data parity passed; fresh OSD0 I/O latency blocks cutover.
+Status: AUTHORIZED; original pool full-procedure timing rejected; isolated OSD0-excluded volume qualified; full V6 rehearsal pending.
 User authorization: AUTORIZADO. Read-only discovery completed2026-09-07.
 This is a capacity proposal, not proof that the full Inkling load fits.
 
@@ -184,3 +184,26 @@ v2 procedure is under test. The real write load also reproduced fresh OSD0
 slow-operation alerts, so production cutover remains blocked on storage I/O.
 See ../validation/relocation-rehearsal-20260907/README.md for corrections,
 exact acceptance boundaries and the active I/O blocker. Authorization persists.
+
+## Isolated SSD continuation
+
+OSD0 still reproduced new slow writes after the bounded replica retirement.
+A full OSD0 evacuation simulation was rejected for projected destination
+capacity pressure. A new64 GiB Retain volume in `pireus_pg_ssd` now excludes
+OSD0 using a per-pool weight set. It preserves size3/min_size2 and three
+SSD host failure domains. Existing pool placement was verified unchanged.
+The automatic balancer excludes this new pool while preserving all previously
+eligible existing pools; future pool enrollment is now explicit.
+
+The old rehearsal volume and original source data remain intact. The new
+volume passed synced-write and fresh-pod read controls. V5 on the old pool
+passed data/metadata/functions/network but measured915.80 seconds before
+source pause overhead; it is rejected. V6 now exercises the isolated pool.
+Storage acceptance is scoped to every OSD serving this destination pool;
+it does not claim that the existing OSD0/global storage fault is repaired.
+
+Source pause, final snapshot and production5433 cutover have not occurred.
+A bounded, tested authority/rollback controller, closed-template0 content
+audit and fresh unsupported-source-shape guards remain required before
+production migration. Five connectable databases have data evidence;
+six-database catalog parity is not a content audit of closed template0.
