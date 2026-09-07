@@ -1,6 +1,6 @@
 # Proposed Beagle memory database relocation to unblock Inkling TP2
 
-Status: AUTHORIZED; execution precheck blocked on target storage health.
+Status: AUTHORIZED; capacity corrected; isolated restore data parity passed; fresh OSD0 I/O latency blocks cutover.
 User authorization: AUTORIZADO. Read-only discovery completed2026-09-07.
 This is a capacity proposal, not proof that the full Inkling load fits.
 
@@ -14,8 +14,8 @@ Resolved linux/amd64 child:
 sha256:ea4e8267016c929924a15df03eaf2ad9bb2cda9d194169e03eca232303898cc7.
 Resolved linux/arm64 child:
 sha256:e0fa7d3a1686e15bdd224f378c0f2c49c8d625def6b5d57b98ccc72cfdd50ad7.
-The common immutable index is verified. Target executable extension
-compatibility is NOT yet verified and must pass before cutover.
+The common immutable index is verified. Pinned AMD64 extension execution and the zero-existing-IMMV restore control passed.
+Real restored database/application and production endpoint acceptance remain gated.
 
 Installed extensions in the inspected database:
 pg_search0.24.2, pg_ivm1.13, vector0.8.2, postgis3.6.4,
@@ -82,7 +82,9 @@ After target writes: never point clients at a stale source. Pause writers
 and reverse-export/restore the new authoritative data before returning.
 A failure must preserve both data copies and custody, not discard target writes.
 
-No data copies, target workloads or source changes have been performed.
+At the original proposal checkpoint, no copies or target workloads existed.
+The current isolated target and private backups are described below; source
+endpoint and write authority have not changed.
 The explicit user approval now covers this Beagle service migration and its
 bounded write pause, subject to the gates above.
 
@@ -98,7 +100,8 @@ https://www.postgresql.org/docs/16/logical-replication-restrictions.html
 
 The user explicitly replied AUTORIZADO to this proposal. Authorization covers
 the gated migration and at most 15 minutes of write pause; it remains valid.
-The current stop is storage readiness, not missing user approval.
+The initial stop was storage readiness, not missing user approval.
+The observations in this subsection are retained as the initial checkpoint.
 
 The read-only precheck found the actual target pool rbd_ssd flagged nearfull,
 with percent_used 0.8972344994544983 and max_avail 477850009600 bytes.
@@ -158,3 +161,26 @@ Next-Action: resolve target pool capacity/I/O alerts in the storage operations s
 After storage acceptance, resume gates1–7 above. Approval is already present;
 do not repeat the migration approval request. Inkling serving and the eight
 actual LLM proposals remain pending, as does fresh post-migration memory proof.
+
+## Storage remediation checkpoint
+
+Following explicit RESOLVA authorization, the single-PG capacity correction
+cleared nearfull alerts and the new64GiB Retain PVC passed write/hash/fsync and
+fresh-pod read checks. The target is running on R770 with cron off. Retained
+24-hour I/O warnings remain visible; loaded observation found no new events.
+See ../validation/ceph-relief-20260907/README.md for exact evidence and limits.
+The earlier no-target/no-copy statements above describe the precheck checkpoint.
+Real source snapshot backup has now started into private storage; no source
+endpoint switch or write pause has occurred. Before rehearsal/final snapshot,
+require zero existing pg_ivm IMMVs: the synthetic existing-IMMV restore control
+fails, while the zero-IMMV source-shape control passes. See the sibling
+relocation-qualification-20260907 evidence.
+
+## Real restore and I/O checkpoint
+
+Typed-v1 restored five databases and compared 189 tables with zero mismatches,
+but took 1010.91 seconds. This exceeds the maintenance ceiling. The optimized
+v2 procedure is under test. The real write load also reproduced fresh OSD0
+slow-operation alerts, so production cutover remains blocked on storage I/O.
+See ../validation/relocation-rehearsal-20260907/README.md for corrections,
+exact acceptance boundaries and the active I/O blocker. Authorization persists.

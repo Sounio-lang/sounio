@@ -1,5 +1,11 @@
 # Ceph capacity relief and isolated target qualification
 
+Follow-up: subsequent real database restores reproduced fresh OSD0 slow-operation
+events. Capacity relief and the volume canary remain valid, but production
+cutover is blocked on I/O. See ../relocation-rehearsal-20260907/README.md.
+The historical-warning classification below applies only to its stated
+recovery and volume-canary observation windows.
+
 User authority: explicit RESOLVA following the authorized PostgreSQL relocation.
 The source database remained authoritative and serving throughout this operation.
 
