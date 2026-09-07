@@ -38,6 +38,24 @@ def write(path, value):
         os.fsync(f.fileno())
     return digest(raw)
 
+def release_loading_temporaries(model, label):
+    import ctypes
+    import gc
+    def state():
+        return dict(cuda_allocated_bytes=torch.cuda.memory_allocated(),
+                    cuda_reserved_bytes=torch.cuda.memory_reserved(),
+                    parameter_bytes=sum(p.numel()*p.element_size() for p in model.parameters()),
+                    buffer_bytes=sum(p.numel()*p.element_size() for p in model.buffers()))
+    emit("OFFLINE_RELEASE_BEGIN", phase=label, **state())
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    libc=ctypes.CDLL("libc.so.6")
+    libc.malloc_trim.argtypes=[ctypes.c_size_t]
+    libc.malloc_trim.restype=ctypes.c_int
+    result=libc.malloc_trim(0)
+    emit("OFFLINE_RELEASE_END", phase=label, malloc_trim_result=result, **state())
+
 def load_worker_and_cache(server_args, rank):
     # Same parallel layout as pinned one_batch.load_model; use the real worker
     # so the scheduler's hybrid cache builder receives its complete interface.
@@ -55,6 +73,7 @@ def load_worker_and_cache(server_args, rank):
     worker = TpModelWorker(server_args=server_args, gpu_id=0, ps=ps,
                            nccl_port=PortArgs.init_new(server_args).nccl_port)
     assert worker.tokenizer is None
+    release_loading_temporaries(worker.model_runner.model,"after_weight_load")
     worker.alloc_memory_pool()
     worker.init_attention_backends()
     worker.init_cuda_graphs()
@@ -68,6 +87,7 @@ def load_worker_and_cache(server_args, rank):
         enable_hierarchical_cache=False)
     if not result.tree_cache.supports_mamba() or not result.tree_cache.supports_swa():
         raise ValueError("Inkling requires its real hybrid cache")
+    release_loading_temporaries(model.model,"before_first_inference")
     return bench._TorchBenchRunner(model), result.tree_cache
 
 def main():
