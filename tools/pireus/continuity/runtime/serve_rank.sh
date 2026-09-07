@@ -42,9 +42,6 @@ if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
                 --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce)
   guard_args=(--reserve-gib 33)
 fi
-if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
-  profile_args+=(--disable-radix-cache)
-fi
 exec python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scratch/pireus/runtime/run_in_container.sh python3 "${entrypoint[@]}" \
   --model-path "$MODEL" --trust-remote-code --tp 2 --nnodes 2 \
   --node-rank "${PIREUS_RANK:?explicit node rank required}" --dist-init-addr "$MASTER_ADDR:$MASTER_PORT" \

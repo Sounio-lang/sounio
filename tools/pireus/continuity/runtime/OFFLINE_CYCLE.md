@@ -6,9 +6,9 @@ at the recorded stops. Metadata-only11894 identified640MiB per rank in
 linearized shared-expert copies; disabling the stock optimization removes those
 copies, but the server process structure still leaves too little margin.
 
-The offline profile runs the pinned SGLang one_batch load/extend/decode engine
+The offline profile runs the pinned SGLang TpModelWorker and one_batch extend/decode engine
 in one process per Slurm rank. It bypasses the benchmark CLI's multiprocessing
-launcher and suppresses only its trailing tokenizer construction. It uses the
+launcher. The real TpModelWorker honors skip_tokenizer_init directly. It uses the
 real checkpoint loader, ModelRunner, ScheduleBatch, attention backend, and
 sampler. It does not use dummy weights or benchmark synthetic input. Exact
 one_batch source SHA is frozen in runtime-lock.json.
@@ -23,7 +23,8 @@ These are explicitly offline responses, not fabricated HTTP envelopes.
 The profile retains NVFP4, TP2, context16384, max_total_tokens16384,
 concurrency1, max output4096, and native32GiB host reserve. It uses the same
 33GiB sampled guardian, graph/overlap disabling, prefill128 and Mamba cache8.
-Prefix caching and custom all-reduce are disabled. The stock
+The canonical hybrid prefix cache remains enabled; Inkling requires it.
+The cache is reset between independent requests. Custom all-reduce is disabled. The stock
 SGLANG_OPT_LINEARIZED_SHARED_SINK=0 configuration avoids the640MiB duplicate
 buffers. NCCL uses two channels and262144-byte buffers. CUDA memory caching
 stays enabled; the no-cache diagnostic11896 did not resolve capacity and its
@@ -62,3 +63,5 @@ continuous production serving, a performance gain, or formal V13/V14 closure.
 
 Pinned engine source:
 https://github.com/sgl-project/sglang/blob/a74222ef6e690f851e2e4ff1c0be7dc1357be313/python/sglang/benchmark/one_batch.py
+
+Attempt11900 stopped before parameters because Inkling rejects disable_radix_cache. The corrected adapter uses TpModelWorker plus the scheduler build_kv_cache path, initializes BF16/Mamba backends, and uses the real hybrid cache in one_batch.extend. Interface11901 passes on both nodes; it is not a model-load result.
