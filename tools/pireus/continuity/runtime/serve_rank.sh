@@ -39,6 +39,9 @@ if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
   export SGLANG_OPT_LINEARIZED_SHARED_SINK=0 NCCL_MAX_NCHANNELS=2 NCCL_BUFFSIZE=262144
   entrypoint=(/scratch/pireus/runtime/offline_generate.py)
 fi
+if [[ "${PIREUS_CHECKPOINT_PATH_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_checkpoint_path.py)
+fi
 if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
   profile_args=(--skip-tokenizer-init --disable-cuda-graph --chunked-prefill-size 128
                 --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce

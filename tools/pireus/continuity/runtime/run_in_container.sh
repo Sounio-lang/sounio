@@ -11,8 +11,8 @@ if [[ "${PIREUS_MARLIN_OVERLAY:-0}" == "1" ]]; then
   echo "2aa3b391d05cbead8c23c2dfc6fac88c425eae74938ce7e1cbae871b4b47a36e  $overlay" | sha256sum -c -
   repack_overlay=/scratch/pireus/cache/marlin-utils-2d3207f11b4c7a0023fa508666b447170ff8325e06248b4928f21df77b03fc0f.py
   echo "2d3207f11b4c7a0023fa508666b447170ff8325e06248b4928f21df77b03fc0f  $repack_overlay" | sha256sum -c -
-  copy_overlay=/scratch/pireus/cache/checkpoint-copy-3a195507bb20d4f2ea7af3035aa12b4b5cbd7bde384bc0937b7a4678d98a37d0.py
-  echo "3a195507bb20d4f2ea7af3035aa12b4b5cbd7bde384bc0937b7a4678d98a37d0  $copy_overlay" | sha256sum -c -
+  copy_overlay=/scratch/pireus/cache/checkpoint-copy-b6c6943894c234f0cf7aaf933ff227d8e089c81c3c253e684bd5561c5eda757b.py
+  echo "b6c6943894c234f0cf7aaf933ff227d8e089c81c3c253e684bd5561c5eda757b  $copy_overlay" | sha256sum -c -
   overlay_args=(--bind "$overlay:/sgl-workspace/sglang/python/sglang/srt/layers/quantization/modelopt_quant.py:ro"
                 --bind "$repack_overlay:/sgl-workspace/sglang/python/sglang/srt/layers/quantization/marlin_utils_fp4.py:ro"
                 --bind "$copy_overlay:/sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/layer.py:ro")

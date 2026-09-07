@@ -11,8 +11,12 @@ def _pireus_checkpoint_copy(destination, source):
         assert destination.shape == source.shape
         assert source.dtype == destination.dtype
         assert destination.shape[0] > 0
+        # CUDA reads an owned CPU staging buffer, never the checkpoint mmap.
+        # Reuse it only after the blocking copy returns.
+        staging = torch.empty(destination.shape[1:], dtype=destination.dtype, device="cpu")
         for index in range(destination.shape[0]):
-            destination[index].copy_(source[index])
+            staging.copy_(source[index])
+            destination[index].copy_(staging)
     else:
         destination.copy_(source)
 '''
