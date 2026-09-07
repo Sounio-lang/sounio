@@ -48,13 +48,26 @@ NATIVE_EXPECT=(
   "wire_recover=0000000000000000:3fbc79ca10c92420"
 )
 
-# Structural: stdlib softfloat helpers present
-if grep -Fq 'f128_bits_soft_add' stdlib/math/wide_float.sio \
-  && grep -Fq 'f128_bits_soft_sub' stdlib/math/wide_float.sio \
-  && grep -Fq 'f128_bits_approx_1e_neg20' stdlib/math/wide_float.sio; then
-  note_pass "stdlib_softfloat_helpers_present"
+# Structural: stdlib exact-case API (not overstated soft_add) + supported flag
+if grep -Fq 'f128_bits_exact_case_add' stdlib/math/wide_float.sio \
+  && grep -Fq 'f128_bits_exact_case_sub' stdlib/math/wide_float.sio \
+  && grep -Fq 'struct F128ExactCase' stdlib/math/wide_float.sio \
+  && grep -Fq 'supported: bool' stdlib/math/wide_float.sio \
+  && grep -Fq 'f128_exact_case_unsupported' stdlib/math/wide_float.sio \
+  && ! grep -Fq 'f128_bits_soft_add' stdlib/math/wide_float.sio; then
+  note_pass "stdlib_exact_case_api_present"
 else
-  note_fail "stdlib_softfloat_helpers_missing"
+  note_fail "stdlib_exact_case_api_missing_or_overstated"
+fi
+
+# Behavioral evidence must import stdlib — refuse fixture-local soft_add copies
+if grep -Fq 'use math::wide_float::' tests/run-pass/f128_v0e4_anti_f64_softfloat.sio \
+  && grep -Fq 'f128_bits_exact_case_add' tests/run-pass/f128_v0e4_anti_f64_softfloat.sio \
+  && ! grep -Fq 'fn f128_soft_add' tests/run-pass/f128_v0e4_anti_f64_softfloat.sio \
+  && ! grep -Fq 'fn f128_bits_exact_case_add' tests/run-pass/f128_v0e4_anti_f64_softfloat.sio; then
+  note_pass "smoke_calls_stdlib_not_local_copy"
+else
+  note_fail "smoke_must_import_stdlib_exact_case"
 fi
 
 SMOKE=tests/run-pass/f128_v0e4_anti_f64_softfloat.sio
@@ -156,7 +169,7 @@ echo "---"
 echo "PASS_COUNT=$PASS"
 echo "FAIL_COUNT=$FAIL"
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS f128_f256_v0e4_language_lower softfloat_sio=anti_f64_green lean_single_language=f64_greenwash_refused language_check=ok madaros_run=deferred"
+  echo "PASS f128_f256_v0e4_language_lower exact_case=stdlib anti_f64=green unsupported=explicit lean_single_language=f64_greenwash_refused language_check=ok madaros_run=deferred"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0e4"
   exit 0
 fi

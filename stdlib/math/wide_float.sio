@@ -6,6 +6,8 @@
 //! progressive). This module is the runnable wire-limb API aligned with
 //! V0-D softfloat corpora (LSW-first i64 limbs), including exact softfloat
 //! cases used by V0-E.3/V0-E.4 seed smokes (ADR-008/009 native expecteds).
+//! V0-E.4 ops are `f128_bits_exact_case_*` returning `F128ExactCase` — tabulated
+//! domain only; `supported=false` is not an IEEE NaN.
 
 pub struct F128Bits {
     pub lo: i64,
@@ -56,9 +58,25 @@ pub fn f128_bits_approx_1e_neg20() -> F128Bits {
     F128Bits { lo: 3746994889972252672, hi: 4592679628783035426 }
 }
 
-/// Exact softfloat add for the V0-E.3/E.4 seed case table (not a foreign oracle).
-/// Unknown pairs return a quiet-NaN-shaped refuse the gate must not accept.
-pub fn f128_bits_soft_add(a: F128Bits, b: F128Bits) -> F128Bits {
+/// Capability refinement: exact-case lookup only — NOT general IEEE softfloat.
+/// `supported=false` means the pair is outside the tabulated domain (distinct from a
+/// valid NaN payload; bits are unspecified when unsupported).
+pub struct F128ExactCase {
+    pub supported: bool,
+    pub bits: F128Bits,
+}
+
+fn f128_exact_case_ok(bits: F128Bits) -> F128ExactCase {
+    F128ExactCase { supported: true, bits: bits }
+}
+
+fn f128_exact_case_unsupported() -> F128ExactCase {
+    F128ExactCase { supported: false, bits: f128_bits_zero() }
+}
+
+/// Tabulated binary128 add for the V0-E.3/E.4 seed case set (ADR-008/009 native expecteds).
+/// Domain: zero/one/two/half/neg_one/three/approx_1e-20 pairs listed in the body only.
+pub fn f128_bits_exact_case_add(a: F128Bits, b: F128Bits) -> F128ExactCase {
     let z = f128_bits_zero()
     let one = f128_bits_one()
     let two = f128_bits_two()
@@ -67,30 +85,30 @@ pub fn f128_bits_soft_add(a: F128Bits, b: F128Bits) -> F128Bits {
     let three = F128Bits { lo: 0, hi: 4611826755915743232 }
     let tiny = f128_bits_approx_1e_neg20()
     let one_plus_tiny = F128Bits { lo: 51922968585348, hi: 4611404543450677248 }
-    if f128_bits_eq(a, z) { return b }
-    if f128_bits_eq(b, z) { return a }
-    if f128_bits_eq(a, one) && f128_bits_eq(b, one) { return two }
-    if f128_bits_eq(a, one) && f128_bits_eq(b, two) { return three }
-    if f128_bits_eq(a, two) && f128_bits_eq(b, one) { return three }
-    if f128_bits_eq(a, half) && f128_bits_eq(b, half) { return one }
-    if f128_bits_eq(a, one) && f128_bits_eq(b, neg) { return z }
-    if f128_bits_eq(a, neg) && f128_bits_eq(b, one) { return z }
-    if f128_bits_eq(a, one) && f128_bits_eq(b, tiny) { return one_plus_tiny }
-    if f128_bits_eq(a, tiny) && f128_bits_eq(b, one) { return one_plus_tiny }
-    F128Bits { lo: 1, hi: -281474976710656 }
+    if f128_bits_eq(a, z) { return f128_exact_case_ok(b) }
+    if f128_bits_eq(b, z) { return f128_exact_case_ok(a) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, one) { return f128_exact_case_ok(two) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, two) { return f128_exact_case_ok(three) }
+    if f128_bits_eq(a, two) && f128_bits_eq(b, one) { return f128_exact_case_ok(three) }
+    if f128_bits_eq(a, half) && f128_bits_eq(b, half) { return f128_exact_case_ok(one) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, neg) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, neg) && f128_bits_eq(b, one) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, tiny) { return f128_exact_case_ok(one_plus_tiny) }
+    if f128_bits_eq(a, tiny) && f128_bits_eq(b, one) { return f128_exact_case_ok(one_plus_tiny) }
+    f128_exact_case_unsupported()
 }
 
-/// Exact softfloat sub for V0-E.4 anti-f64: `(1+tiny)-1` recovers non-zero.
-pub fn f128_bits_soft_sub(a: F128Bits, b: F128Bits) -> F128Bits {
+/// Tabulated binary128 sub for V0-E.4 anti-f64: `(1+tiny)-1` recovers non-zero.
+/// Same exact-case capability as `f128_bits_exact_case_add` — not general softfloat.
+pub fn f128_bits_exact_case_sub(a: F128Bits, b: F128Bits) -> F128ExactCase {
     let one = f128_bits_one()
     let one_plus_tiny = F128Bits { lo: 51922968585348, hi: 4611404543450677248 }
     let recover = F128Bits { lo: 0, hi: 4592679628783035424 }
     let z = f128_bits_zero()
-    if f128_bits_eq(a, b) { return z }
-    if f128_bits_eq(a, one_plus_tiny) && f128_bits_eq(b, one) { return recover }
-    // a - b == a + (-b) for the E.3 sign-flip cases already in soft_add
+    if f128_bits_eq(a, b) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, one_plus_tiny) && f128_bits_eq(b, one) { return f128_exact_case_ok(recover) }
     let neg_b = F128Bits { lo: b.lo, hi: b.hi ^ -9223372036854775808 }
-    f128_bits_soft_add(a, neg_b)
+    f128_bits_exact_case_add(a, neg_b)
 }
 
 fn print_hex_nibble(n: i64) with IO {
