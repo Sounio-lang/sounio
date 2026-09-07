@@ -66,7 +66,7 @@ The "no f256 arithmetic is implemented" claim above holds only for Madaros:
 
 | Engine | `fn add(a: f256, b: f256) -> f256 { a + b }` |
 |---|---|
-| **Madaros** (default `bin/souc`) | Same-format source arithmetic typechecks (V0-E.2). Casts/implicit still refused. V0-E.4 proves F128Bits anti-f64 softfloat cases under seed; Madaros-run language softfloat lower and builtin `print_f128` remain deferred. |
+| **Madaros** (default `bin/souc`) | Same-format source arithmetic typechecks (V0-E.2). Casts/implicit still refused. V0-E.5 runs IEEE `F128Bits` add/sub (anti-f64) under seed and Madaros; language `f128` Madaros-run desugar and builtin `print_f128` remain deferred. |
 | **lean_single** (bootstrap seed) | **Compiles and executes.** No E249, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
 
 So `MeasuredF256` is unreachable under the engine this document otherwise treats as authoritative

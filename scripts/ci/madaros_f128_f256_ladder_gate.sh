@@ -42,7 +42,7 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3|v0e4|v0e41" >&2
+  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3|v0e4|v0e41|v0e5" >&2
   exit 64
 fi
 
@@ -74,8 +74,12 @@ if [[ "$STAGE" == "v0e41" ]]; then
   exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e41_fail_closed_lower_gate.sh" "$@"
 fi
 
+if [[ "$STAGE" == "v0e5" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e5_softfloat_add_gate.sh" "$@"
+fi
+
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3, v0e4, v0e41)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3, v0e4, v0e41, v0e5)" >&2
   exit 64
 fi
 

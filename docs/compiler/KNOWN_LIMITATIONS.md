@@ -751,9 +751,12 @@ whoever picks option 1, 2, or the remainder of option 3.
   limb surface green (`--stage v0e`).
 - **Madaros V0-E.2:** same-format source `f128`/`f256` arithmetic typechecks
   (`--stage v0e2`).
-- **Madaros V0-E.3/E.4:** seed-run `F128Bits` softfloat cases including anti-f64
+- **Madaros V0-E.3/E.4:** seed-run `F128Bits` exact-case softfloat including anti-f64
   (`--stage v0e3` / `--stage v0e4`); claim clock `sounio_native_expected`.
-  Madaros-run language softfloat lowering, builtin `print_f128`, and
+- **Madaros V0-E.4.1:** language `f128` compile is fail-closed (no f64 greenwash ELF).
+- **Madaros V0-E.5:** general IEEE binary128 add/sub in `stdlib/math/softfloat_f128.sio`
+  (`--stage v0e5`), seed-run and Madaros-run of `F128Bits` (not language `f128` ops).
+  Language desugar, mul/div, f256, builtin `print_f128`, and
   GUM/`Knowledge`/`MeasuredF256` remain deferred.
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
