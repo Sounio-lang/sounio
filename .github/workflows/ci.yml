@@ -988,6 +988,38 @@ jobs:
             /tmp/sounio-native-acceptance-macos-arm64
           retention-days: 1
 
+  pireus-slow-stdlib:
+    name: Pireus slow witness (${{ matrix.test }})
+    runs-on: ubuntu-24.04
+    needs: [impact, native-selfhost-linux-x86_64]
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success'
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_pireus_cubic_operator_forge.sio
+          - test_pireus_multiprobe_block_certification.sio
+          - test_pireus_operator_discovery_engine.sio
+          - test_pireus_operator_morphogenesis.sio
+          - test_pireus_operator_novelty_feedback.sio
+          - test_pireus_operator_novelty_frontier.sio
+          - test_pireus_operator_orbit_canonicalization.sio
+          - test_pireus_quotient_novelty_forge.sio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-compiler-linux-x86_64
+          path: /tmp
+      - name: Execute original semantic assertions with their declared deadline
+        env:
+          SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
+          PIREUS_TEST: ${{ matrix.test }}
+        run: |
+          chmod +x /tmp/souc-stage2
+          bash scripts/run_sio_test_suite.sh --filter-exact "$PIREUS_TEST" --jobs 1
+
   full-test-suite:
     name: Full Test Suite
     runs-on: ubuntu-24.04
@@ -1001,13 +1033,18 @@ jobs:
         with:
           name: native-compiler-linux-x86_64
           path: /tmp
+      - name: Prepare byte-pinned Pireus historical inputs
+        run: python3 tools/pireus/continuity/ci/prepare_historical_inputs.py
       - name: Run full test suite
         env:
           SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
           SOUNIO_TEST_JOBS: 4
         run: |
           chmod +x /tmp/souc-stage2
-          bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+          bash scripts/run_sio_test_suite.sh --list-tests > "$RUNNER_TEMP/all-tests.list"
+          python3 tools/pireus/continuity/ci/route_slow_tests.py \
+            --input "$RUNNER_TEMP/all-tests.list" --output "$RUNNER_TEMP/ordinary-tests.list"
+          bash scripts/run_sio_test_suite.sh --test-list "$RUNNER_TEMP/ordinary-tests.list" --format junit --jobs 4
       # Numeric accuracy is not something the run-pass harness above can
       # measure: a transcendental that quietly degrades from 212 bits of
       # mantissa to 106 still exits 0 on every identity test. This replays the
@@ -1203,6 +1240,18 @@ jobs:
             scripts/ci/parser_keyword_classification_gate.sh \
             scripts/ci/compile_fail_harness_contract_gate.sh \
             | bash scripts/ci/run_gate_list.sh wave0
+      - name: Current Pireus compiler semantics against this source build
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/madaros-wave0.elf
+          SOUNIO_SOUC_ENGINE: madaros
+          SOUC: bin/souc
+        run: |
+          bash scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
+          bash scripts/ci/pireus_twist_gauge_factorization_gate.sh
+          bash scripts/ci/pireus_cross_arch_synthesizer_gate.sh
+          bash scripts/ci/pireus_typed_xor_gpu_gate.sh
+          bash scripts/ci/pireus_xor_hlir_contract_gate.sh
+          bash scripts/ci/pireus_sedenion_operator_gate.sh
       - name: Upload Wave 0 gate artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -1331,6 +1380,7 @@ jobs:
       - madaros-current-source-deref-f64
       - native-selfhost-macos-arm64
       - full-test-suite
+      - pireus-slow-stdlib
       - madaros-witness-gate
       - gate-wave-0
       - sounio-lint

@@ -5,11 +5,27 @@ on:
     paths:
       - '.github/workflows/pireus-continuity.yml'
       - 'tools/pireus/continuity/**'
+      - 'scripts/dev/run_sio_test_suite*'
+      - 'scripts/ci/souc-native-wrapper.sh'
+      - 'tests/stdlib/hardware/*.sio.args'
+      - 'tests/stdlib/hardware/*.sio.timeout'
+      - 'scripts/ci/evaluate_ci_decision.py'
+      - '.github/workflows/ci.yml'
+      - 'stdlib/crypto/sha256.sio'
+      - 'stdlib/hardware/pireus/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/pireus-continuity.yml'
       - 'tools/pireus/continuity/**'
+      - 'scripts/dev/run_sio_test_suite*'
+      - 'scripts/ci/souc-native-wrapper.sh'
+      - 'tests/stdlib/hardware/*.sio.args'
+      - 'tests/stdlib/hardware/*.sio.timeout'
+      - 'scripts/ci/evaluate_ci_decision.py'
+      - '.github/workflows/ci.yml'
+      - 'stdlib/crypto/sha256.sio'
+      - 'stdlib/hardware/pireus/**'
   workflow_dispatch:
 
 permissions:
@@ -26,6 +42,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Required slow-witness routing controls
+        run: python3 tools/pireus/continuity/ci/test_ci_test_routing.py
+      - name: Literal argv through current runner and native wrapper
+        run: python3 tools/pireus/continuity/ci/test_runner_arguments.py
+      - name: Historical input corruption controls and cold downloads
+        run: python3 tools/pireus/continuity/ci/test_historical_inputs.py
+      - name: Verify pinned historical inputs and original parent commits
+        run: python3 tools/pireus/continuity/ci/prepare_historical_inputs.py --verify-history
+      - name: Execute historical input tests against current stdlib
+        env:
+          SOUNIO_TEST_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import os
+          paths = sorted(Path('tests/stdlib/hardware').glob('*.sio.args'))
+          assert len(paths) == 11
+          Path(os.environ['RUNNER_TEMP'], 'pireus-argv-tests.list').write_text(
+              '\n'.join(str(p).removesuffix('.args') for p in paths) + '\n')
+          PYTHON
+          bash scripts/dev/run_sio_test_suite.sh --test-list "$RUNNER_TEMP/pireus-argv-tests.list" --jobs 2
+      - name: Execute restored SHA256 accessor and existing crypto vectors
+        env:
+          SOUNIO_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_TEST_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+        run: |
+          bash scripts/ci/souc-native-wrapper.sh run tools/pireus/continuity/witnesses/sha256_digest_accessor.sio
+          bash scripts/dev/run_sio_test_suite.sh --filter-exact test_sha256.sio --jobs 1
       - name: Current transport controls
         run: python3 -m unittest discover -s tools/pireus/continuity -p test_tokenized_cycle.py -v
       - name: Recovered preflight binding controls
