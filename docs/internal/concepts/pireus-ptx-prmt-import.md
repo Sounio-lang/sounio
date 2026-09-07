@@ -10,7 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 # Pireus PTX `prmt` Import
 
 **Concept-ID:** `SOUNIO-PIREUS-PTX-PRMT-IMPORT`
-**Status:** executable candidate; Loom acceptance required
+Status: executable
+
+Historical-Lane-State: executable candidate; Loom acceptance required
+Evidence-Pass: examples/pireus_ptx_prmt_import.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 **Owner:** Pireus hardware ontology
 **Semantic authority:** Sounio
 
@@ -86,3 +93,9 @@ used, and disposable languages do not supply expected results.
 | `CLAIM_READY` | False. |
 
 Registration must not promote this concept beyond the accepted evidence stage.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

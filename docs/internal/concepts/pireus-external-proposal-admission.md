@@ -12,7 +12,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 Concept-ID: `SOUNIO-PIREUS-EXTERNAL-PROPOSAL-ADMISSION`
 Semantic-Lane-ID: `continuity-20260906`
 Owner: `codex-pireus`
-Status: native admission and two-node material parity pass; live Inkling and timing acceptance pending.
+Status: executable
+
+Historical-Lane-State: native admission and two-node material parity pass; live Inkling and timing acceptance pending.
+Evidence-Pass: tools/pireus/continuity/test_admission.py
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 The founder-authorized boundary accepts LLM suggestions as untrusted data.
 The Sounio executable `tools/pireus/continuity/admission.sio` parses and admits
@@ -62,6 +69,15 @@ Sparks. The finite-bits-nan-class-v1 contract compares exact non-NaN bits and
 NaN class without claiming payload preservation or general FP proof.
 benchmark_decision.sio requires four paired comparisons (both controls on both
 nodes), median gain >= 5% and positive lower bootstrap bounds.
-Pending acceptance: a real Inkling batch; integrated live performance trial;
-new-operator grammar and classification; GRPO corpus. Historical V0–V14 producers
+Recorded acceptance: the eight-proposal frozen Inkling canary completed native
+admission, two-Spark material parity and timing with eight NO_GAIN decisions.
+Evidence: tools/pireus/continuity/validation/real-inkling-cycle-20260907/archive-summary.json.
+Pending acceptance: the full 288-proposal pilot; new-operator grammar and
+classification; GRPO corpus. Historical V0–V14 producers
 and their authority boundaries remain distinct and retained.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-GRAPH-IDENTITY-COMPOSITION`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: examples/pireus_graph_identity_composition.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-graph-identity-20260827`
 
@@ -73,3 +80,9 @@ claim.
 
 Lean, Koka, C++, Haskell, and external review cannot redefine this registry or
 its expected result. `PARITY_OPEN` remains closed.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

@@ -12,8 +12,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 Concept-ID: `SOUNIO-PIREUS-FENCED-WORKER-DETACHMENT`
 Semantic-Lane-ID: `continuity-20260906`
 Owner: `codex-pireus`
-Status: native controls and independent review pass; both workers detached with
-FENCED postconditions. Complete canonical recovery still refuses HOST_MEMORY_FLOOR.
+Status: executable
+
+Historical-Lane-State: native controls and review passed; both workers detached with FENCED postconditions.
+Evidence-Pass: tools/pireus/continuity/runtime/test_recovery_detach.py
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
+
+Recovery at that historical checkpoint refused HOST_MEMORY_FLOOR. Subsequent epoch15 recovery and Slurm ownership
+are recorded separately in tools/pireus/continuity/status.json and
+tools/pireus/continuity/validation/content-address-recovery-live-2/recover.log.
 
 The Sounio continuity task exposed a recovery ordering failure: the existing
 frozen arbiter tries to prove worker cgroups empty while kubelet recreates
@@ -71,3 +81,9 @@ observer-rebind frame through a separate hash-pinned transport. Its only
 configuration changes are the host-fence manifest and the content-addressed
 ConfigMap name in policy and three admission references. Sequential journal
 and lease CAS does not claim pair-wide atomicity or restored ownership.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

@@ -12,7 +12,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 Concept-ID:
 `SOUNIO-PIREUS-APPLE-CPU-DEPENDENCY-LATENCY-INTERFACE-FEASIBILITY`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_apple_cpu_dependency_latency_interface_feasibility.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Canonical surface:
 `stdlib/hardware/pireus/apple_cpu_dependency_latency_interface_feasibility.sio`
@@ -171,3 +178,9 @@ Conflicting-Lanes: none observed at phase start
 
 Next-Semantic-Interface: hash-bound C++ candidate-manifest and interface probe,
 followed by Sounio classification of returned material evidence
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

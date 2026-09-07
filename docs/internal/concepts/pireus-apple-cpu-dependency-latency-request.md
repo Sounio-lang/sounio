@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-APPLE-CPU-DEPENDENCY-LATENCY-REQUEST`
 
-Status: `executable`
+Status: executable
+
+Historical-Lane-State: `executable`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_apple_cpu_dependency_latency_request.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Canonical surface:
 `stdlib/hardware/pireus/apple_cpu_dependency_latency_request.sio`

@@ -9,7 +9,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Pireus Material Ontology
 
-Status: proposed executable concept
+Status: executable
+
+Historical-Lane-State: proposed executable concept
+Evidence-Pass: examples/pireus_vector_capability_query.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Authority: founder
 
