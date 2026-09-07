@@ -10,7 +10,7 @@ MODEL="/scratch/pireus/models/Inkling-Small-NVFP4/"+REVISION
 SIF_SHA="3dbfccad3355b27d8a09bd4c0c5895d02a43e1b64203960905b810bbb6bccbe3"
 def kube(*args):return subprocess.check_output(["kubectl",*args],text=True)
 def main():
- ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify","qualify-model","serve"]);ap.add_argument("--minutes",type=int,default=30);args=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify","qualify-model","inspect-runtime","qualify-marlin","serve"]);ap.add_argument("--minutes",type=int,default=30);args=ap.parse_args()
  if not os.environ.get("TMUX"):raise SystemExit("Use remote tmux for a disconnect-safe allocation")
  if not 1<=args.minutes<=240:raise SystemExit("minutes must be 1..240")
  if kube("-n","beagle","get","lease","pireus-spark-pair","-o","jsonpath={.spec.holderIdentity}")!="slurm-owned":
@@ -24,7 +24,7 @@ def main():
   selected.append(matches[0])
  for pod in selected:
   base=["kubectl","-n","slurm-pilot","exec",pod["metadata"]["name"],"-c","slurmd","--"]
-  for name in ["run_in_container.sh","qualify_tp2.py","qualify_model.py","serve_rank.sh","memory_guard.py","worker_prerequisites.py","inkling-files.json"]:
+  for name in ["run_in_container.sh","qualify_tp2.py","inspect_runtime.py","qualify_marlin_placeholders.py","patch_marlin_placeholders.py","install_marlin_overlay.py","qualify_model.py","serve_rank.sh","memory_guard.py","worker_prerequisites.py","inkling-files.json"]:
    subprocess.run(base[:4]+["-i"]+base[4:]+["python3","-c","from pathlib import Path;import sys;p=Path(sys.argv[1]);p.write_bytes(sys.stdin.buffer.read());p.chmod(0o755)","/scratch/pireus/runtime/"+name],input=(HERE/name).read_bytes(),check=True)
   subprocess.run(base+["python3","/scratch/pireus/runtime/worker_prerequisites.py"],check=True)
   subprocess.run(base+["python3","-c","from pathlib import Path;import os;paths=[Path('/scratch/pireus/receipts'),Path('/scratch/pireus/cache')];[(p.mkdir(exist_ok=True),os.chown(p,1000,1000)) for p in paths]"],check=True)
@@ -35,6 +35,10 @@ def main():
  check='echo "'+SIF_SHA+'  /scratch/pireus/images/inkling-spark.sif" | sha256sum -c -\n'
  if args.mode=="qualify":
   command="exec /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/qualify_tp2.py"
+ elif args.mode=="qualify-marlin":
+  command="exec python3 /scratch/pireus/runtime/memory_guard.py -- /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/qualify_marlin_placeholders.py"
+ elif args.mode=="inspect-runtime":
+  command="exec /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/inspect_runtime.py"
  elif args.mode=="qualify-model":
   command="exec python3 /scratch/pireus/runtime/qualify_model.py "+MODEL+" /scratch/pireus/runtime/inkling-files.json --receipt /scratch/pireus/receipts/inkling-model.json"
  else:command="python3 /scratch/pireus/runtime/qualify_model.py "+MODEL+" /scratch/pireus/runtime/inkling-files.json --receipt /scratch/pireus/receipts/inkling-model.json\nexec /scratch/pireus/runtime/serve_rank.sh"
