@@ -104,7 +104,26 @@ def main():
     if os.environ.get("PIREUS_OFFLINE_INTERFACE") == "1":
         emit("OFFLINE_INTERFACE_PASS", model_loaded=False, random_seed=server_args.random_seed)
         return
-    runner, tree_cache = load_worker_and_cache(server_args, rank)
+    from sglang.srt.model_loader.loader import DefaultModelLoader
+    original_iterator = DefaultModelLoader._get_all_weights
+    def traced_weights(loader, model_config, loaded_model):
+        emit("OFFLINE_PARAMETERS_CONSTRUCTED",
+             parameter_bytes=sum(p.numel()*p.element_size() for p in loaded_model.parameters()),
+             checkpoint_tensors_loaded=False)
+        for name, weight in original_iterator(loader, model_config, loaded_model):
+            size = weight.numel()*weight.element_size()
+            if size >= 64*1024**2:
+                emit("OFFLINE_CHECKPOINT_TENSOR_BEGIN", name=name, shape=list(weight.shape),
+                     dtype=str(weight.dtype), bytes=size)
+            yield name, weight
+            if size >= 64*1024**2:
+                emit("OFFLINE_CHECKPOINT_TENSOR_END", name=name)
+        emit("OFFLINE_CHECKPOINT_ITERATOR_COMPLETE")
+    DefaultModelLoader._get_all_weights = traced_weights
+    try:
+        runner, tree_cache = load_worker_and_cache(server_args, rank)
+    finally:
+        DefaultModelLoader._get_all_weights = original_iterator
     model = runner.torch_runner
     bench.TreeCacheNamespace = lambda **kwargs: tree_cache
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
