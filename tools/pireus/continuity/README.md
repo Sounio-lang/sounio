@@ -162,3 +162,16 @@ qualification, not full inference acceptance. Completion receipts include the
 rank-specific embedding storage hashes and helper identity, and responses declare
 embedding_placement=file-backed-cpu. The importer rejects mismatched storage or
 precision claims.
+
+
+Inductor compilation is limited to one worker and asserted in the offline
+profile. The container home is bound to the owned local SSD cache because TVM-FFI
+uses ~/.cache even when XDG_CACHE_HOME is set; its former session-backed path
+failed with ENOSPC in11934 despite ample SSD space.
+
+runtime/warmup_offline_kernels.py is a separately named compilation diagnostic:
+it constructs zero/one synthetic parameters with shape-based storage aliases,
+reads no checkpoint tensors, and discards all outputs. Job11935 completes all42
+layers for a344-token prefill and one decode on both ranks. This does not qualify
+real model generation. The subsequent real run still verifies every checkpoint
+file, qualified embedding hashes, resource/profile bounds and paired responses.
