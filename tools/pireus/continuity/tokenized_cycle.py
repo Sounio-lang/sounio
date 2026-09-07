@@ -139,8 +139,8 @@ def finalize(root, manifest, receipts):
         event(root, "generate", proposal)
 
 def pack_offline(root, manifest):
-    if manifest.get("transport") != "sglang-offline-token-ids" or manifest["budget"] != 8:
-        raise ValueError("offline path requires its own frozen eight-proposal manifest")
+    if manifest.get("transport") != "sglang-offline-token-ids" or manifest["budget"] not in (8, 32):
+        raise ValueError("offline path requires its own frozen 8- or 32-proposal manifest")
     enc = pair(root, "encode", [root / ("encode-rank-" + str(i) + ".json") for i in (0, 1)], manifest)
     items = []
     for item in enc["items"]:
@@ -166,7 +166,7 @@ def accept_offline(root, manifest, worker_dir):
             raise ValueError("offline completion receipt identity")
     for receipt in receipts:
         profile = receipt.get("execution_profile", {})
-        expected_profile = dict(schema=1, scope="frozen-offline-canary",
+        expected_profile = dict(schema=1, scope=("frozen-offline-pilot-batch" if manifest["budget"] == 32 else "frozen-offline-canary"),
             transport="sglang-offline-token-ids", tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=16384,
             max_total_tokens=6144, actual_full_tokens=6144, swa_full_tokens_ratio=0.15,
             page_size=128, max_running_requests=1, max_new_tokens=4096,

@@ -136,8 +136,10 @@ def main():
     path = Path(os.environ["PIREUS_OFFLINE_INPUT"])
     raw = path.read_bytes()
     bundle = json.loads(raw)
-    if bundle["revision"] != REVISION or bundle["mode"] != "offline-generate" or len(bundle["items"]) != 8:
-        raise ValueError("unrecognized frozen eight-proposal bundle")
+    if bundle["revision"] != REVISION or bundle["mode"] != "offline-generate" or len(bundle["items"]) not in (8, 32):
+        raise ValueError("unrecognized frozen 8- or 32-proposal bundle")
+    if [item["index"] for item in bundle["items"]] != list(range(len(bundle["items"]))):
+        raise ValueError("frozen offline request indices differ")
     if digest(Path(bench.__file__).read_bytes()) != "f831549fc4c8163aa878c3dac1dff6f4f853227d607942befae8971bf6908f35":
         raise ValueError("unrecognized pinned one_batch source")
     server_args = prepare_server_args(sys.argv[1:] + ["--random-seed", "20260907"])
@@ -217,7 +219,7 @@ def main():
     inference_memory("OFFLINE_LM_HEAD_OFFLOAD_END", lm_head_storage=lm_head_storage)
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
-    profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
+    profile = dict(schema=1, scope=("frozen-offline-pilot-batch" if len(bundle["items"]) == 32 else "frozen-offline-canary"), transport="sglang-offline-token-ids",
                    tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,

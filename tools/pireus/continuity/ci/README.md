@@ -19,7 +19,9 @@ two external Intel inputs against pinned SHA-256 values. Existing corrupt files
 are refused without overwrite. Download failures remain failures.
 
 Eight larger semantic witnesses retain their original assertions and source
-bytes. Their .sio.timeout files declare a 1200-second execution ceiling. This is
+bytes. Their .sio.timeout files declare a 1200-second execution ceiling, with a
+3600-second ceiling for the exhaustive discovery/frontier witnesses that
+exceeded the 1200-second diagnostic. Successful execution is still required. This is
 an execution budget, not a performance result. route_slow_tests.py partitions
 the actual full-suite inventory into ordinary tests and exactly these eight
 witnesses. The eight matrix jobs use the same native compiler artifact as the

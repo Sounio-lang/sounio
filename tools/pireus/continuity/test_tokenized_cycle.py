@@ -23,14 +23,20 @@ class TokenTransportTests(unittest.TestCase):
                 self.assertFalse(response.exists())
 
     def test_pair_binding_and_exact_invalid_text(self):
+        self.exercise_pair_binding(8)
+
+    def test_pilot32_pair_binding_and_exact_invalid_text(self):
+        self.exercise_pair_binding(32)
+
+    def exercise_pair_binding(self, budget):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            manifest = dict(budget=8, condition="inkling-ontology", round=0)
+            manifest = dict(budget=budget, condition="inkling-ontology", round=0)
             (root / "context.json").write_bytes(b'{"research":"declared"}')
             pack_encode(root, manifest)
             bundle = root / "encode-bundle.json"
             items = [dict(index=i, input_ids=[1, 2, i], stop_token_ids=[3],
-                          rendered_sha256="a" * 64) for i in range(8)]
+                          rendered_sha256="a" * 64) for i in range(budget)]
             base = dict(schema=1, stage="TOKENIZER_TRANSPORT", job="123", mode="encode",
                         revision=REVISION, input_sha256=digest(bundle.read_bytes()),
                         helper_sha256=digest((HERE / "runtime/tokenizer_transport.py").read_bytes()),
@@ -51,13 +57,13 @@ class TokenTransportTests(unittest.TestCase):
             worker = root / "worker"
             worker.mkdir()
             input_sha = digest((root / "offline-bundle.json").read_bytes())
-            profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
+            profile = dict(schema=1, scope=("frozen-offline-pilot-batch" if budget == 32 else "frozen-offline-canary"), transport="sglang-offline-token-ids",
                 tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
                 actual_swa_tokens=896, swa_full_tokens_ratio=0.15, page_size=128,
                 max_running_requests=1, max_new_tokens=4096, native_host_floor_gib=32,
                 early_stop_gib=33, http_serving=False, general_16k_inference_accepted=False)
             results = []
-            for i in range(8):
+            for i in range(budget):
                 response = dict(schema=1, transport="sglang-offline-token-ids", index=i,
                                 output_ids=[1, i], job="fixture-123", revision=REVISION,
                                 input_sha256=input_sha, execution_profile=profile)
@@ -87,7 +93,7 @@ class TokenTransportTests(unittest.TestCase):
             receipt_path = worker / "rank-0-complete.json"
             original_receipt = receipt_path.read_bytes()
             for mutation in [None, profile | dict(max_total_tokens=16384),
-                             profile | dict(http_serving=True), profile | dict(actual_swa_tokens=512)]:
+                             profile | dict(http_serving=True), profile | dict(scope="general-serving"), profile | dict(actual_swa_tokens=512)]:
                 mutated = json.loads(original_receipt)
                 if mutation is None:
                     del mutated["execution_profile"]
@@ -124,7 +130,7 @@ class TokenTransportTests(unittest.TestCase):
             text = "  invalid model JSON\n{not repaired}\n"
             decode_items = [dict(index=i, text=text, text_with_special_tokens="<marker>" + text,
                                 token_response_sha256=digest((root / ("%03d.token.response.json" % i)).read_bytes()))
-                            for i in range(8)]
+                            for i in range(budget)]
             base.update(mode="decode", input_sha256=digest((root / "decode-bundle.json").read_bytes()),
                         items=decode_items)
             for i, p in enumerate(paths):

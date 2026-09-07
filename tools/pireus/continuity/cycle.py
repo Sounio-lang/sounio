@@ -93,6 +93,7 @@ def prepare(args):
                     engine_sha256=args.engine_sha256,
                     admission_source_sha256=digest((HERE / "admission.sio").read_bytes()),
                     code_dependencies={p.relative_to(HERE).as_posix():digest(p.read_bytes()) for p in [*sorted(HERE.glob("*.py")),*sorted(HERE.glob("*.sio")),*sorted((HERE/"runtime").glob("*.py")),*sorted((HERE/"runtime").glob("*.sio")),*sorted((HERE/"runtime").glob("*.sh")),*sorted((HERE/"runtime").glob("*.json"))]},
+                    deduplicate_material=getattr(args,"deduplicate_material",False),
                     context_origin="Sounio ontology producer" if args.context_engine else "supplied frozen context",
                     context_engine_sha256=digest(args.context_engine.read_bytes()) if args.context_engine else None,
                     semantic_authority="Sounio", promotion_threshold_percent=5,
@@ -238,6 +239,7 @@ def main():
     ap.add_argument("--condition", choices=["deterministic", "inkling-no-ontology", "inkling-ontology"],
                     default="deterministic")
     ap.add_argument("--budget", type=int, choices=[8,32], default=8)
+    ap.add_argument("--deduplicate-material", action="store_true")
     ap.add_argument("--round", type=int, choices=[0,1,2], default=0)
     ap.add_argument("--engine-sha256")
     ap.add_argument("--engine", type=Path)

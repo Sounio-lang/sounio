@@ -87,6 +87,23 @@ def native(executable,*args):
  if value.get("authority")!="Sounio":raise ValueError("invalid native authority stream")
  return run.returncode,run.stdout,value
 
+def deduplicate_candidates(candidates, plan_ids):
+ # Sounio supplies semantic plan identity. Transport only checks material bytes
+ # and retains the earliest raw proposal as the representative within this run.
+ representatives={};aliases={};selected=[]
+ for item in candidates:
+  identity=plan_ids[item["id"]]
+  signature=(item["layout"],item["ptx_sha256"])
+  if identity in representatives:
+   first,expected=representatives[identity]
+   if signature!=expected:raise ValueError("same native plan identity has different material bytes")
+   aliases[item["id"]]=first
+  else:
+   representatives[identity]=(item["id"],signature)
+   aliases[item["id"]]=item["id"]
+   selected.append(item)
+ return selected,aliases
+
 def main():
  ap=argparse.ArgumentParser()
  for flag in ["run","engine","fixture-engine","parity-engine","gain-engine"]:ap.add_argument("--"+flag,type=Path,required=True)
@@ -104,7 +121,7 @@ def main():
  atomic(root/"benchmark-contract.json",encoded(config));event(root,"benchmark-contract",root/"benchmark-contract.json")
  fixture=subprocess.run([str(a.fixture_engine.resolve())],capture_output=True,check=True,timeout=120).stdout
  atomic(root/"numeric-fixtures.jsonl",fixture)
- controls=[];candidates=[]
+ controls=[];candidates=[];plan_ids={}
  control_root=root/"controls";control_root.mkdir(exist_ok=True)
  for name,load in [("direct",0),("shuffle",1)]:
   proposal=proposal_template(digest((root/"context.json").read_bytes()))|{"load":load}
@@ -124,6 +141,12 @@ def main():
   if not artifact.exists():raise ValueError("materialization incomplete")
   proposal=json.loads(prefix.with_suffix(".proposal.json").read_text())
   candidates.append(dict(id="%03d"%i,layout=proposal["layout"],ptx=artifact.name,ptx_sha256=digest(artifact.read_bytes())))
+  plan_ids["%03d"%i]=receipt["plan_id"]
+ admitted_proposals=len(candidates)
+ if manifest.get("deduplicate_material",False):
+  candidates,aliases=deduplicate_candidates(candidates,plan_ids)
+  mapping=dict(schema=1,scope="within-condition-and-round",authority="native-Sounio-plan-id-and-identical-PTX",aliases=aliases)
+  atomic(root/"material-deduplication.json",encoded(mapping));event(root,"material-deduplication",root/"material-deduplication.json")
  gpu_manifest=dict(schema=1,fixtures_sha256=digest(fixture),candidates=controls+candidates)
  atomic(root/"gpu-manifest.json",encoded(gpu_manifest));event(root,"gpu-manifest",root/"gpu-manifest.json")
  remote_root="/scratch/pireus/runs/cycle-"+digest((root/"manifest.json").read_bytes())[:20]
@@ -166,6 +189,8 @@ def main():
  result=dict(schema=1,semantic_authority="Sounio",material_candidates=len(candidates),
    material_pass=len(eligible),material_refused=len(candidates)-len(eligible),decisions=decisions,
    gain_eligible=sum(x["receipt"]["gain_gate"]=="PASS" for x in decisions),claim_ready=False)
+ if manifest.get("deduplicate_material",False):
+  result.update(admitted_proposals=admitted_proposals,duplicate_material_elided=admitted_proposals-len(candidates),deduplication_scope="within-condition-and-round")
  atomic(root/"benchmark-report.json",encoded(result));event(root,"benchmark-report",root/"benchmark-report.json")
  print(json.dumps(result,indent=2))
 if __name__=="__main__":main()

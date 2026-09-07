@@ -224,3 +224,30 @@ manifest/receipts remain unchanged, and source_snapshot_complete_at_original_com
 remains false in the custody report. Missing/forged recovery evidence refuses.
 The original CI failures (Contracts and Full Test Suite) remain independent
 integration obligations; this workflow does not suppress or reclassify them.
+
+## Full pilot driver
+
+pilot.py prepares nine immutable cells, rotates condition order across three
+rounds, and fixes 32 proposals per condition and round (288 total). The offline
+transport accepts exactly 8 or 32 requests. The 32-request receipt scope is
+frozen-offline-pilot-batch; context remains 16384, physical cache 6144 tokens,
+native floor 32 GiB and early stop 33 GiB. This adds a request-budget path, not
+new runtime acceptance. The first 32-request hardware run remains required.
+
+Pilot material measurements deduplicate only within a condition and round.
+Native Sounio plan identity and identical PTX bytes are both required, raw model
+outputs remain intact, and material-deduplication.json records every alias.
+Separate rounds retain independent measurements. The canary's eight archived
+proposals reduce to four material representatives under this exact rule.
+
+The driver requires CI Decision, continuity transport/archive CI, and gate
+custody CI green on the frozen PR head before launching a pilot job. It binds
+five native engine hashes and all cycle source dependencies. A stage records
+its launch intent before submission. Recovery may adopt an observed completed
+paired job, but never silently submits an interrupted request again.
+
+Use pilot.py prepare with --run, --engine, --context-engine, --fixture-engine,
+--parity-engine, --gain-engine and --evidence after committing the source. Run
+pilot.py run --run in remote tmux. pilot.py report --run reports partial state
+without claiming completion. The current pilot is not started while integration
+validation remains open.
