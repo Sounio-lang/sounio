@@ -12,8 +12,8 @@ from relocation_dump import SOURCE_POD, SOURCE_CONTAINER
 from relocation_rehearsal import kubectl, target, ADMIN_DB, POD
 
 HOST = ["kubectl", "-n", "beagle", "exec", SOURCE_POD, "--", "nsenter", "-t", "1", "-m", "-p", "-n", "--"]
-ROOT = "/opt/pireus/pg-relocation-probe2-20260907"
-UNIT = "pireus-pg-forwarder-probe2.service"
+ROOT = "/opt/pireus/pg-relocation-probe3-20260907"
+UNIT = "pireus-pg-forwarder-probe3.service"
 
 def restrict_target_hba(output):
     result = subprocess.run(target("psql", ADMIN_DB, ["-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-c", "SHOW hba_file"]),

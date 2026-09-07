@@ -129,3 +129,24 @@ Cron stays off through a reloadable configuration-file setting, with its
 bootstrap command-line override removed. This avoids an extra restart
 when activation is eventually authorized by all migration gates.
 V6 is the first full rehearsal on that volume and remains pending.
+
+## Isolated-pool V6 acceptance
+
+V6 completed data/metadata restore in509.75 seconds, normal restart/ANALYZE/
+functional controls in63.47 seconds, and endpoint controls in7.33 seconds:
+580.54 seconds total. All189 tables,83 sequence states and metadata passed.
+The dedicated pool's nine serving OSDs had zero fresh slow/stalled events
+over30 samples spanning the entire run. Every PG kept clean, three-host
+placement and excluded OSD0. The destination storage/timing blocker is
+resolved for this scoped path; the global OSD0 fault remains open.
+
+Closed template0 was audited using source/target temporary clones with
+matching schema, properties and typed content: zero user tables/sequences/
+large objects. Both owned temporary databases were removed, and original
+template0 was never opened. This was an explicit transient administrator
+catalog operation; it did not pause source application writers.
+
+Fresh source-shape checks found no replication slots/origins/clients,
+prepared transactions, foreign tables, publications, subscriptions,
+custom tablespaces, collation-version mismatch, existing IMMVs or cron jobs.
+These guards must run again immediately before final maintenance.

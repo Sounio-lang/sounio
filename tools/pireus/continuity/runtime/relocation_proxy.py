@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import contextlib
 import signal
+import ipaddress
+from pathlib import Path
 
 async def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -12,7 +14,26 @@ async def main():
     ap.add_argument("--target-host", required=True)
     ap.add_argument("--target-port", type=int, default=5432)
     ap.add_argument("--source-host")
+    ap.add_argument("--activation-file", type=Path)
+    ap.add_argument("--activation-value")
+    ap.add_argument("--maintenance-client", action="append", default=[])
     args = ap.parse_args()
+    if bool(args.activation_file) != bool(args.activation_value):
+        ap.error("Activation file and value must be specified together")
+    if args.maintenance_client and not args.activation_file:
+        ap.error("Maintenance clients require an activation gate")
+    allowed = {ipaddress.ip_address(value) for value in args.maintenance_client}
+    def admitted(writer):
+        if args.activation_file is None:
+            return True
+        peer = ipaddress.ip_address(writer.get_extra_info("peername")[0])
+        peer = getattr(peer, "ipv4_mapped", None) or peer
+        if peer in allowed:
+            return True
+        try:
+            return args.activation_file.read_text().strip() == args.activation_value
+        except OSError:
+            return False
     active = set()
     async def pump(reader, writer):
         while chunk := await reader.read(65536):
@@ -22,6 +43,11 @@ async def main():
             writer.write_eof()
             await writer.drain()
     async def connection(reader, writer):
+        if not admitted(writer):
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+            return
         task = asyncio.current_task()
         active.add(task)
         upstream = None

@@ -21,10 +21,14 @@ def main():
     policy = json.loads(kubectl("get", "networkpolicy", "pireus-pg-relocation-rehearsal", "-o", "json"))
     if policy["spec"].get("ingress") or policy["spec"]["podSelector"] != {"matchLabels": {"app": "pireus-pg-relocation"}}:
         raise RuntimeError("Destination is not isolated")
+    if json.loads(kubectl("get", "ciliumnetworkpolicy", "-o", "json"))["items"]:
+        raise RuntimeError("Target has additional ingress; cannot empty databases")
     pod = json.loads(kubectl("get", "pod", POD, "-o", "json"))
     if pod["spec"]["nodeName"] != "r770-proxmox":
         raise RuntimeError("Wrong destination node")
     sts = json.loads(kubectl("get", "statefulset", "pireus-pg-relocation", "-o", "json"))
+    if sts["metadata"].get("annotations", {}).get("pireus.sounio.dev/database-authority") == "TARGET":
+        raise RuntimeError("Authoritative target cannot be prepared as a rehearsal")
     if args.normal_statefile:
         sts = json.loads(args.normal_statefile.read_text())
     (args.output / "normal-statefulset-private.json").write_text(json.dumps(sts))

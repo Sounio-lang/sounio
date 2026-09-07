@@ -10,7 +10,7 @@ import select
 import subprocess
 import sys
 import time
-from relocation_dump import fingerprint, ident
+from relocation_dump import fingerprint, ident, SOURCE_POD
 
 POD = "pireus-pg-relocation-0"
 ADMIN_DB = "pireus_migration_admin_20260907"
@@ -192,12 +192,24 @@ def restore(entry, source, output, deadline, producer=None):
     print(json.dumps(report), flush=True)
     return report
 
+def verify_final_source(token):
+    result = subprocess.run(["kubectl", "-n", "beagle", "exec", SOURCE_POD, "--",
+        "nsenter", "-t", "1", "-m", "-p", "-n", "--", "python3",
+        "/var/lib/pireus/pg-relocation-20260907/controller.py", "status", "--token", token],
+        capture_output=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError("Final source authority/fence observation failed")
+    state = json.loads(result.stdout)
+    if state["state"] != "FENCED" or state["remaining_seconds"] <= 0:
+        raise RuntimeError("Final source is no longer fenced within its deadline")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-output", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--globals-already-restored", action="store_true")
     parser.add_argument("--bulk-prepared", action="store_true")
+    parser.add_argument("--final-cutover-token")
     args = parser.parse_args()
     os.umask(0o077)
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -217,6 +229,8 @@ def main():
                 stdout=subprocess.PIPE, stderr=errors, timeout=30)
         if settings.returncode or settings.stdout.strip() != b"minimal|0|off|on|on|on|off":
             raise RuntimeError("Bulk WAL/durability settings do not match")
+    if args.final_cutover_token:
+        verify_final_source(args.final_cutover_token)
     start = time.monotonic()
     deadline = start + 1800
     with (args.output / "source-private.log").open("xb") as log:
@@ -248,12 +262,14 @@ def main():
                     "--archive-prefix", args.output.name], stdout=metadata_log, stderr=metadata_log,
                     check=True, timeout=300)
             metadata = json.loads((args.output / "metadata" / "summary.json").read_text())
+            if args.final_cutover_token:
+                verify_final_source(args.final_cutover_token)
             elapsed = time.monotonic() - start
             summary = {"elapsed_seconds": elapsed, "overhead_allowance_seconds": 120,
                        "core_within_780_seconds": elapsed <= 780,
                        "database_count": len(reports), "tables_compared": sum(r["comparison"]["tables"] for r in reports),
                        "mismatches": sum(r["comparison"]["mismatches"] for r in reports),
-                       "record_format": "postgres-record-sha256-v2", "source_write_pause": False,
+                       "record_format": "postgres-record-sha256-v2", "source_write_pause": bool(args.final_cutover_token),
                        "schema_acl_sequence_acceptance": metadata["metadata_equal"],
                        "application_acceptance": False, "bulk_prepared": args.bulk_prepared,
                        "final_runtime_mode_restored": not args.bulk_prepared, "reports": reports}

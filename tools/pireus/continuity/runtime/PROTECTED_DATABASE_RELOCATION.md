@@ -1,6 +1,6 @@
 # Proposed Beagle memory database relocation to unblock Inkling TP2
 
-Status: AUTHORIZED; original pool full-procedure timing rejected; isolated OSD0-excluded volume qualified; full V6 rehearsal pending.
+Status: AUTHORIZED; original pool full-procedure timing rejected; isolated OSD0-excluded V6 rehearsal passed; protected final cutover controller prepared in code.
 User authorization: AUTORIZADO. Read-only discovery completed2026-09-07.
 This is a capacity proposal, not proof that the full Inkling load fits.
 
@@ -207,3 +207,11 @@ A bounded, tested authority/rollback controller, closed-template0 content
 audit and fresh unsupported-source-shape guards remain required before
 production migration. Five connectable databases have data evidence;
 six-database catalog parity is not a content audit of closed template0.
+
+## Final-maintenance readiness
+
+The scoped destination V6 gate passed in580.54 seconds with no fresh slow or
+stalled events on its serving OSDs. Closed template0 content parity and
+cleanup passed. The controller and failure fixtures are described in
+PROTECTED_DATABASE_CUTOVER.md. Production migration has not yet run at
+this checkpoint; source authority and the900-second ceiling remain intact.

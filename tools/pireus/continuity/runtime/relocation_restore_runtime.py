@@ -6,13 +6,14 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from relocation_rehearsal import target, kubectl, ADMIN_DB
+from relocation_rehearsal import target, kubectl, ADMIN_DB, verify_final_source
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--prepared-output", type=Path, required=True)
     p.add_argument("--source-output", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--final-cutover-token")
     args = p.parse_args()
     os.umask(0o077)
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -24,6 +25,8 @@ def main():
     current_args = current["spec"]["template"]["spec"]["containers"][0]["args"]
     if current_args.count("wal_level=minimal") != 1 or current_args.count("max_wal_senders=0") != 1:
         raise RuntimeError("Target is not in the expected isolated bulk mode")
+    if args.final_cutover_token:
+        verify_final_source(args.final_cutover_token)
     started = time.monotonic()
     patch = {"spec": {"template": {"spec": {"containers": [{"name": "postgres", "args": normal_args}]}}}}
     with (args.output / "runtime-private.log").open("xb") as log:
@@ -52,11 +55,13 @@ def main():
                        input=Path(__file__).with_name("relocation_functional.sql").read_bytes(),
                        stdout=log, stderr=log, check=True, timeout=180)
         functional_seconds = time.monotonic() - functional_started
+    if args.final_cutover_token:
+        verify_final_source(args.final_cutover_token)
     report = {"runtime_mode_restored": True, "settings": "replica|10|off|on|on|on|off",
               "restart_seconds": restart_seconds, "analyzed_databases": analyzed,
               "analyze_seconds": analyze_seconds, "functional_seconds": functional_seconds,
               "elapsed_seconds": time.monotonic() - started, "functional_pass": True,
-              "source_write_pause": False, "production_cutover_accepted": False}
+              "source_write_pause": bool(args.final_cutover_token), "production_cutover_accepted": False}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2))
     print("NORMAL_RUNTIME_AND_FUNCTIONAL_PASS " + json.dumps(report), flush=True)
 
