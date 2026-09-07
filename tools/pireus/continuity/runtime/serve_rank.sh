@@ -39,7 +39,9 @@ if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
 fi
 if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
   profile_args=(--skip-tokenizer-init --disable-cuda-graph --chunked-prefill-size 128
-                --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce)
+                --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce
+                --model-loader-extra-config '{"enable_multithread_load":false}'
+                --weight-loader-drop-cache-after-load)
   guard_args=(--reserve-gib 33)
 fi
 exec python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scratch/pireus/runtime/run_in_container.sh python3 "${entrypoint[@]}" \
