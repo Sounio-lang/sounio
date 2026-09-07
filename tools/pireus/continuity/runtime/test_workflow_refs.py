@@ -10,7 +10,7 @@ def main():
  for reference,exists,executable,expected in cases:
   with tempfile.TemporaryDirectory() as directory:
    root=Path(directory);checker=root/"scripts/dev/check_workflow_script_refs.sh"
-   checker.parent.mkdir(parents=True);checker.write_bytes(source)
+   checker.parent.mkdir(parents=True);checker.write_bytes(source);checker.chmod(0o755)
    target=root/"scripts/ci/gate.sh";target.parent.mkdir(parents=True)
    if exists:target.write_text("#!/bin/sh\nexit 0\n");target.chmod(0o755 if executable else 0o644)
    workflows=root/".github/workflows";workflows.mkdir(parents=True)
@@ -19,4 +19,3 @@ def main():
    assert run.returncode==expected,(reference,run.returncode,run.stdout,run.stderr)
  print("PIREUS_WORKFLOW_REF_GLOBS_PASS existing_glob=1 missing_glob_refused=1 literals_preserved=1 nonexecutable_refused=1 recursive_glob=1")
 if __name__=="__main__":main()
-
