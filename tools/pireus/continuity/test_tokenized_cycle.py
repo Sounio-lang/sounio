@@ -52,7 +52,7 @@ class TokenTransportTests(unittest.TestCase):
             worker.mkdir()
             input_sha = digest((root / "offline-bundle.json").read_bytes())
             profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                tp_size=2, context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
+                tp_size=2, collective_backend="existing-pynccl", context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
                 actual_swa_tokens=896, swa_full_tokens_ratio=0.15, page_size=128,
                 max_running_requests=1, max_new_tokens=4096, native_host_floor_gib=32,
                 early_stop_gib=33, http_serving=False, general_16k_inference_accepted=False)

@@ -164,7 +164,7 @@ def main():
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
     profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                   tp_size=2, context_length=server_args.context_length,
+                   tp_size=2, collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,
                    actual_swa_tokens=model.swa_max_total_num_tokens,
@@ -186,6 +186,9 @@ def main():
         if name.startswith("llm.layers.") and name.count(".") == 2:
             hooks.extend([module.register_forward_pre_hook(trace_before(name)),
                           module.register_forward_hook(trace_after(name))])
+    comm = model.tp_group.pynccl_comm
+    if comm is None or not comm.available:
+        raise ValueError("offline TP2 requires its initialized PyNCCL communicator")
     results = []
     for item in bundle["items"]:
         inference_memory("OFFLINE_REQUEST_BEGIN", index=item["index"])
@@ -206,7 +209,8 @@ def main():
         req.set_extend_range(len(req.prefix_indices), len(req.origin_input_ids))
         started = time.monotonic()
         inference_memory("OFFLINE_EXTEND_BEGIN", index=item["index"])
-        next_ids, logits, batch = runner.extend([req])
+        with comm.change_state(enable=True):
+            next_ids, logits, batch = runner.extend([req])
         for hook in hooks:
             hook.remove()
         hooks.clear()
@@ -216,7 +220,8 @@ def main():
         for step in range(item["max_new_tokens"]):
             # The TP model has one sampling authority: rank zero. Both ranks
             # consume the same chosen token on the next decode iteration.
-            dist.broadcast(next_ids, src=0, group=model.tp_group.device_group)
+            with comm.change_state(enable=True):
+                comm.broadcast(next_ids, src=0)
             token = int(next_ids.item())
             if step == 0:
                 emit("OFFLINE_FIRST_TOKEN", index=item["index"], token_id=token)
@@ -226,7 +231,8 @@ def main():
                 finish = "stop"
                 break
             if step + 1 < item["max_new_tokens"]:
-                next_ids, logits = runner.decode(next_ids, batch)
+                with comm.change_state(enable=True):
+                    next_ids, logits = runner.decode(next_ids, batch)
         torch.cuda.synchronize()
         response = dict(schema=1, transport="sglang-offline-token-ids", index=item["index"],
                         output_ids=output, finish_reason=finish,
@@ -239,7 +245,7 @@ def main():
              seconds=time.monotonic()-started, finish_reason=finish, response_sha256=response_sha)
         runner.cleanup(batch)
         del batch, req, logits, next_ids
-    dist.barrier()
+    dist.barrier(group=model.tp_group.cpu_group)
     receipt = dict(schema=1, stage="OFFLINE_CYCLE_COMPLETE", job=job, rank=str(rank),
                    revision=REVISION, input_sha256=digest(raw),
                    helper_sha256=digest(Path(__file__).read_bytes()),

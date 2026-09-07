@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Diagnostic: real hybrid request preparation with meta-only model parameters.
-Never reads checkpoint tensors, runs a model layer, samples, or emits proposals.
+"""Diagnostic: hybrid preparation and synthetic embedding with remaining weights meta.
+Never reads checkpoint tensors, runs transformer layers, samples, or emits proposals.
 """
 from array import array
 import json
@@ -46,14 +46,24 @@ def main():
     def stop_before_model(*args, **kwargs):
         offline.inference_memory("META_PREPARATION_REACHED_MODEL_BOUNDARY")
         raise StopBeforeModel()
-    model.forward = stop_before_model
+    original_forward = model.model.forward
+    model.model.forward = stop_before_model
     item = bundle["items"][0]
     params = offline.SamplingParams(temperature=item["temperature"],
         max_new_tokens=item["max_new_tokens"], sampling_seed=item["seed"],
         stop_token_ids=set(item["stop_token_ids"]))
     params.normalize(None)
     params.verify(model.model_config.vocab_size)
-    for iteration in range(2):
+    for iteration in range(3):
+        scope = "model-entry" if iteration == 0 else "synthetic-embedding-only"
+        if iteration == 1:
+            model.model.forward = original_forward
+            for module, fill in [(model.model.llm.embed_tokens, 0),
+                                 (model.model.llm.embed_norm, 1)]:
+                old = module.weight
+                module.weight = torch.nn.Parameter(torch.full(old.shape, fill,
+                    dtype=old.dtype, device="cuda"), requires_grad=False)
+            model.model.llm.layers[0].forward = stop_before_model
         cache.reset()
         runner.clear()
         req = offline.Req(rid=str(iteration), origin_input_text="",
@@ -61,16 +71,25 @@ def main():
         req.init_next_round_input(cache)
         req.logprob_start_len = -1
         req.set_extend_range(len(req.prefix_indices), len(req.origin_input_ids))
-        offline.inference_memory("META_PREPARATION_BEGIN", iteration=iteration)
+        offline.inference_memory("META_PREPARATION_BEGIN", iteration=iteration, scope=scope)
         try:
-            runner.extend([req])
+            comm = model.tp_group.pynccl_comm
+            assert comm is not None and comm.available
+            with comm.change_state(enable=True):
+                control = torch.tensor([rank+1.0], device="cuda")
+                comm.all_reduce(control)
+                assert control.item() == 3.0
+                control.fill_(17.0 if rank == 0 else -1.0)
+                comm.broadcast(control, src=0)
+                assert control.item() == 17.0
+                runner.extend([req])
         except StopBeforeModel:
-            offline.inference_memory("META_PREPARATION_PASS", iteration=iteration,
-                checkpoint_tensors_loaded=False, model_forward_executed=False,
+            offline.inference_memory("META_PREPARATION_PASS", iteration=iteration, scope=scope,
+                checkpoint_tensors_loaded=False, transformer_layer_executed=False,
                 inference_accepted=False, input_tokens=len(item["input_ids"]))
         else:
             raise RuntimeError("preparation control escaped model boundary")
-    dist.barrier()
+    dist.barrier(group=model.tp_group.cpu_group)
 
 if __name__ == "__main__":
     main()
