@@ -51,11 +51,16 @@ class TokenTransportTests(unittest.TestCase):
             worker = root / "worker"
             worker.mkdir()
             input_sha = digest((root / "offline-bundle.json").read_bytes())
+            profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
+                tp_size=2, context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
+                actual_swa_tokens=896, swa_full_tokens_ratio=0.15, page_size=128,
+                max_running_requests=1, max_new_tokens=4096, native_host_floor_gib=32,
+                early_stop_gib=33, http_serving=False, general_16k_inference_accepted=False)
             results = []
             for i in range(8):
                 response = dict(schema=1, transport="sglang-offline-token-ids", index=i,
                                 output_ids=[1, i], job="fixture-123", revision=REVISION,
-                                input_sha256=input_sha)
+                                input_sha256=input_sha, execution_profile=profile)
                 raw = encoded(response)
                 for rank in range(2):
                     (worker / ("rank-%d-%03d.json" % (rank, i))).write_bytes(raw)
@@ -63,8 +68,21 @@ class TokenTransportTests(unittest.TestCase):
             for rank in range(2):
                 completion = dict(rank=str(rank), input_sha256=input_sha, revision=REVISION,
                     helper_sha256=digest((HERE / "runtime/offline_generate.py").read_bytes()),
-                    model_loaded=True, job="fixture-123", results=results)
+                    model_loaded=True, job="fixture-123", execution_profile=profile, results=results)
                 (worker / ("rank-%d-complete.json" % rank)).write_bytes(encoded(completion))
+            receipt_path = worker / "rank-0-complete.json"
+            original_receipt = receipt_path.read_bytes()
+            for mutation in [None, profile | dict(max_total_tokens=16384),
+                             profile | dict(http_serving=True), profile | dict(actual_swa_tokens=512)]:
+                mutated = json.loads(original_receipt)
+                if mutation is None:
+                    del mutated["execution_profile"]
+                else:
+                    mutated["execution_profile"] = mutation
+                receipt_path.write_bytes(encoded(mutated))
+                with self.assertRaisesRegex(ValueError, "execution profile"):
+                    accept_offline(root, manifest, worker)
+            receipt_path.write_bytes(original_receipt)
             bad = worker / "rank-1-000.json"
             good = bad.read_bytes()
             bad.write_bytes(good + b" ")

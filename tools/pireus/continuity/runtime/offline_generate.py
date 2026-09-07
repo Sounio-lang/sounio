@@ -56,6 +56,16 @@ def release_loading_temporaries(model, label):
     result=libc.malloc_trim(0)
     emit("OFFLINE_RELEASE_END", phase=label, malloc_trim_result=result, **state())
 
+def inference_memory(stage, **fields):
+    # Read only process accounting; never dump mappings, environment or tensors.
+    accounting = {}
+    for line in Path("/proc/self/smaps_rollup").read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == "kB":
+            accounting[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    emit(stage, cuda_allocated_bytes=torch.cuda.memory_allocated(),
+         cuda_reserved_bytes=torch.cuda.memory_reserved(), process_memory=accounting, **fields)
+
 def load_worker_and_cache(server_args, rank):
     # Same parallel layout as pinned one_batch.load_model; use the real worker
     # so the scheduler's hybrid cache builder receives its complete interface.
@@ -153,8 +163,32 @@ def main():
     bench.TreeCacheNamespace = lambda **kwargs: tree_cache
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
+    profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
+                   tp_size=2, context_length=server_args.context_length,
+                   max_total_tokens=server_args.max_total_tokens,
+                   actual_full_tokens=model.full_max_total_num_tokens,
+                   actual_swa_tokens=model.swa_max_total_num_tokens,
+                   swa_full_tokens_ratio=server_args.swa_full_tokens_ratio,
+                   page_size=server_args.page_size, max_running_requests=1,
+                   max_new_tokens=4096, native_host_floor_gib=32, early_stop_gib=33,
+                   http_serving=False, general_16k_inference_accepted=False)
+    emit("OFFLINE_EXECUTION_PROFILE", execution_profile=profile)
+    hooks = []
+    def trace_before(name):
+        def hook(module, args):
+            inference_memory("OFFLINE_FIRST_FORWARD_LAYER_BEGIN", layer=name)
+        return hook
+    def trace_after(name):
+        def hook(module, args, output):
+            inference_memory("OFFLINE_FIRST_FORWARD_LAYER_END", layer=name)
+        return hook
+    for name, module in model.model.named_modules():
+        if name.startswith("llm.layers.") and name.count(".") == 2:
+            hooks.extend([module.register_forward_pre_hook(trace_before(name)),
+                          module.register_forward_hook(trace_after(name))])
     results = []
     for item in bundle["items"]:
+        inference_memory("OFFLINE_REQUEST_BEGIN", index=item["index"])
         tree_cache.reset()
         runner.clear()
         ids = item["input_ids"]
@@ -171,7 +205,12 @@ def main():
         req.logprob_start_len = -1
         req.set_extend_range(len(req.prefix_indices), len(req.origin_input_ids))
         started = time.monotonic()
+        inference_memory("OFFLINE_EXTEND_BEGIN", index=item["index"])
         next_ids, logits, batch = runner.extend([req])
+        for hook in hooks:
+            hook.remove()
+        hooks.clear()
+        inference_memory("OFFLINE_EXTEND_END", index=item["index"])
         output = []
         finish = "length"
         for step in range(item["max_new_tokens"]):
@@ -179,6 +218,8 @@ def main():
             # consume the same chosen token on the next decode iteration.
             dist.broadcast(next_ids, src=0, group=model.tp_group.device_group)
             token = int(next_ids.item())
+            if step == 0:
+                emit("OFFLINE_FIRST_TOKEN", index=item["index"], token_id=token)
             output.append(token)
             req.output_ids.append(token)
             if token in item["stop_token_ids"]:
@@ -190,7 +231,7 @@ def main():
         response = dict(schema=1, transport="sglang-offline-token-ids", index=item["index"],
                         output_ids=output, finish_reason=finish,
                         prompt_tokens=len(ids), completion_tokens=len(output),
-                        sampling_authority_rank=0, input_sha256=digest(raw), job=job, revision=REVISION)
+                        sampling_authority_rank=0, execution_profile=profile, input_sha256=digest(raw), job=job, revision=REVISION)
         out = Path("/scratch/pireus/receipts") / f"offline-{job}-{rank}-{item['index']:03d}.json"
         response_sha = write(out, response)
         results.append(dict(index=item["index"], response_sha256=response_sha, output_tokens=len(output)))
@@ -202,7 +243,7 @@ def main():
     receipt = dict(schema=1, stage="OFFLINE_CYCLE_COMPLETE", job=job, rank=str(rank),
                    revision=REVISION, input_sha256=digest(raw),
                    helper_sha256=digest(Path(__file__).read_bytes()),
-                   model_loaded=True, http_serving=False, results=results)
+                   model_loaded=True, http_serving=False, execution_profile=profile, results=results)
     out = Path("/scratch/pireus/receipts") / f"offline-{job}-{rank}-complete.json"
     write(out, receipt)
     emit("OFFLINE_CYCLE_COMPLETE", count=len(results), http_serving=False)

@@ -164,6 +164,18 @@ def accept_offline(root, manifest, worker_dir):
             or receipt["helper_sha256"] != digest((HERE / "runtime/offline_generate.py").read_bytes())
             or receipt["model_loaded"] is not True or len(receipt["results"]) != manifest["budget"]):
             raise ValueError("offline completion receipt identity")
+    for receipt in receipts:
+        profile = receipt.get("execution_profile", {})
+        expected_profile = dict(schema=1, scope="frozen-offline-canary",
+            transport="sglang-offline-token-ids", tp_size=2, context_length=16384,
+            max_total_tokens=6144, actual_full_tokens=6144, swa_full_tokens_ratio=0.15,
+            page_size=128, max_running_requests=1, max_new_tokens=4096,
+            native_host_floor_gib=32, early_stop_gib=33,
+            http_serving=False, general_16k_inference_accepted=False)
+        if (any(profile.get(k) != v for k,v in expected_profile.items())
+            or type(profile.get("actual_swa_tokens")) is not int
+            or profile["actual_swa_tokens"] < 639):
+            raise ValueError("offline execution profile identity")
     comparable = [{k: v for k, v in r.items() if k != "rank"} for r in receipts]
     if comparable[0] != comparable[1]:
         raise ValueError("offline two-rank receipt disagreement")
@@ -174,7 +186,8 @@ def accept_offline(root, manifest, worker_dir):
         response = json.loads(raw[0])
         if (response["index"] != i or response["job"] != receipts[0]["job"]
             or response["input_sha256"] != expected or response["revision"] != REVISION
-            or response["transport"] != "sglang-offline-token-ids"):
+            or response["transport"] != "sglang-offline-token-ids"
+            or response.get("execution_profile") != receipts[0]["execution_profile"]):
             raise ValueError("offline token response identity")
         for receipt in receipts:
             matches = [x for x in receipt["results"] if x["index"] == i]
