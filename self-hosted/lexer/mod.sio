@@ -272,6 +272,70 @@ fn keyword_lookup_code(text: [i8; 256], len: i64) -> i64 {
 // NUMBER SCANNING (int, float, hex, bin, oct, suffixes)
 // ============================================================================
 
+// V0-B: absorb C99 hex-float tails left after a HexLit scan (0x1 + p+exp).
+// Takes scalar start/end/kind — NEVER pass ScanResult into this helper
+// (IS_SPTR struct-arg corruption; ScanResult::new comment).
+fn extend_c99_hex_float(start: i64, end: i64, kind0: TokenKind, source_len: i64, line0: i64, col0: i64) -> ScanResult with Mut, Div, Panic {
+    if start + 1 >= source_len {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    if CURSOR_SOURCE[start as usize] != 48 as i8 {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    let xch = CURSOR_SOURCE[(start + 1) as usize]
+    if xch != 120 as i8 && xch != 88 as i8 {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    var pos: i64 = end
+    var col: i64 = col0
+    var line: i64 = line0
+    var kind = kind0
+    var changed = 0
+    var current: i8 = 0 as i8
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+    if pos < source_len && current == 46 as i8 {
+        var after_dot: i8 = 0 as i8
+        if pos + 1 < source_len { after_dot = CURSOR_SOURCE[(pos + 1) as usize] }
+        if is_hex_digit(after_dot) {
+            changed = 1
+            kind = TokenKind::FloatLit
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+        }
+    }
+    if pos < source_len && (current == 112 as i8 || current == 80 as i8) {
+        var after_p: i8 = 0 as i8
+        if pos + 1 < source_len { after_p = CURSOR_SOURCE[(pos + 1) as usize] }
+        if is_digit(after_p) || after_p == 43 as i8 || after_p == 45 as i8 {
+            changed = 1
+            kind = TokenKind::FloatLit
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if pos < source_len && (current == 43 as i8 || current == 45 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+            while pos < source_len && is_digit(current) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+        }
+    }
+    if changed == 0 {
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+        let cur0 = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    let suf = skip_numeric_suffix(tmp_c)
+    pos = suf.pos; col = suf.col; line = suf.line
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, pos)
+}
+
 fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
     var pos: i64 = c.pos
     let source_len: i64 = c.source_len
@@ -288,13 +352,42 @@ fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
         if next == 120 as i8 || next == 88 as i8 {  // 'x' or 'X'
             col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
-            while pos < source_len && is_hex_digit(current) {
-                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
-            }
+            // Hex integer or C99 hex-float (0x1.8p+0 / 0x1p-10 / 0x.1p+4).
+            // Mirror the decimal '.' / 'e' paths below: mutate `kind` in place,
+            // no bool flag (boot4/lean_single has bitten bool locals in large fns).
+            kind = TokenKind::HexLit
             while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
                 col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
-            kind = TokenKind::HexLit
+            // Resync from CURSOR_SOURCE — do not trust a stale `current` local.
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            // Optional hex fractional part: '.' + hex digit
+            if pos < source_len && current == 46 as i8 {  // '.'
+                var after_dot: i8 = 0 as i8
+                if pos + 1 < source_len { after_dot = CURSOR_SOURCE[(pos + 1) as usize] }
+                if is_hex_digit(after_dot) {
+                    kind = TokenKind::FloatLit
+                    col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                }
+            }
+            // Binary exponent: 'p'/'P' + optional sign + decimal digits (required for C99 hex-float)
+            if pos < source_len && (current == 112 as i8 || current == 80 as i8) {  // 'p'/'P'
+                var after_p: i8 = 0 as i8
+                if pos + 1 < source_len { after_p = CURSOR_SOURCE[(pos + 1) as usize] }
+                if is_digit(after_p) || after_p == 43 as i8 || after_p == 45 as i8 {
+                    kind = TokenKind::FloatLit
+                    col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    if pos < source_len && (current == 43 as i8 || current == 45 as i8) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                    while pos < source_len && is_digit(current) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                }
+            }
             let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
             let suf = skip_numeric_suffix(tmp_c)
             pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
@@ -397,6 +490,17 @@ fn skip_numeric_suffix(c: Cursor) -> Cursor with Mut, Div, Panic {
     if ch == 102 as i8 {  // 'f'
         if n1 == 51 as i8 && n2 == 50 as i8 { skip = 3 }       // "f32"
         else if n1 == 54 as i8 && n2 == 52 as i8 { skip = 3 }  // "f64"
+        else if n1 == 49 as i8 && n2 == 50 as i8 {
+            // "f128"
+            var n3: i8 = 0 as i8
+            if pos0 + 3 < source_len { n3 = CURSOR_SOURCE[(pos0 + 3) as usize] }
+            if n3 == 56 as i8 { skip = 4 }
+        } else if n1 == 50 as i8 && n2 == 53 as i8 {
+            // "f256"
+            var n3b: i8 = 0 as i8
+            if pos0 + 3 < source_len { n3b = CURSOR_SOURCE[(pos0 + 3) as usize] }
+            if n3b == 54 as i8 { skip = 4 }
+        }
     }
     if ch == 105 as i8 {  // 'i'
         if n1 == 56 as i8 { skip = 2 }                                  // "i8"
@@ -1005,7 +1109,13 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         if is_digit(ch) {
             let line = cur.line
             let col = cur.col
-            let result = scan_number(cur)
+            let source_len = cur.source_len
+            let scanned = scan_number(cur)
+            // Extract scalars BEFORE any struct-arg helper (IS_SPTR).
+            let s0 = scanned.start
+            let e0 = scanned.end
+            let k0 = scanned.kind
+            let result = extend_c99_hex_float(s0, e0, k0, source_len, line, col)
             cur = result.cursor
             let nv = parse_numeric(result.start, result.end, result.kind)
             var tok = Token::with_kind(result.kind, result.start, result.end, line, col)

@@ -2701,12 +2701,8 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
     }
-    if checker_type_expr_contains_reserved_wide_float(&te) {
-        checker_report_error_at_inplace(c, te.span, 249, 0, 0, 0)
-        checker_exit_type_expr_mut(c)
-        return ty_error()
-    }
-
+    // V0-B: f128/f256 type spellings lower to TyF128/TyF256. Value ops stay
+    // rejected via is_wide_float_type / E248; do not re-emit E249 here.
     let kind_tag = checker_type_expr_kind_tag(te)
     if kind_tag == 13 {
         let lowered = checker_lower_exactly_private_type_mut(c, te.inner, te.type_args, te.span)
@@ -18462,7 +18458,10 @@ fn checker_expr_list_all_int_literals(opt: Option<Box<ExprList> >) -> bool with 
 }
 
 fn checker_expected_accepts_int_literal(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
-    actual_ty.kind == TypeKind::TyI64 && is_integer_type(expected_ty)
+    if actual_ty.kind != TypeKind::TyI64 { return false }
+    if is_integer_type(expected_ty) { return true }
+    // V0-B: integer literals may bind as f128/f256 (check-only; no arithmetic).
+    is_wide_float_type(expected_ty)
 }
 
 // Float-literal contextual coercion, the mirror of the int-literal path above.
@@ -18503,6 +18502,11 @@ fn checker_float_literal_magnitude(e: Expr) -> f64 {
 fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
     if actual_ty.kind != TypeKind::TyF64 {
         return false
+    }
+    // V0-B: f64-born float literals may bind as f128/f256 through check.
+    // Softfloat limb identity is V0-D; here we only accept the spelling.
+    if is_wide_float_type(expected_ty) {
+        return true
     }
     if !is_float_type(expected_ty) {
         return false
@@ -18645,10 +18649,7 @@ impl Checker {
         if !complexity_pair.1 {
             return (c.exit_type_depth(), ty_error())
         }
-        if checker_type_expr_contains_reserved_wide_float(&te) {
-            let blocked = c.report_error_at(te.span, 249, 0, 0, 0)
-            return (blocked.exit_type_depth(), ty_error())
-        }
+        // V0-B: wide-float names lower normally (see checker_lower_type_expr_mut).
         let result = match te.kind {
             TypeExprKind::TypeNamed => c.lower_named_type_with_args(te.path, te.type_args)
             TypeExprKind::TypeUnit => (c, ty_unit())
