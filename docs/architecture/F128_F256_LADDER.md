@@ -156,6 +156,7 @@ PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_f
 | **V0-E.4** anti-f64 exact-case + lower prep | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e4` | Seed-run **stdlib** `f128_bits_exact_case_add/sub` (`F128ExactCase.supported`) with anti-f64 (`(1+~1e-20)-1 ≠ 0`); lean_single language `f128` proven f64-greenwash (negative). **Not** general softfloat. Claim clock = `sounio_native_expected`. Madaros-run language softfloat lower still deferred. |
 | **V0-E.4.1** fail-closed Madaros lower | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e41` | Madaros **check** still admits same-format ops; Madaros **compile** refuses with V0-E.4.1 sentinel (no f64 greenwash ELF). Softfloat language desugar still deferred. |
 | **V0-E.5** general F128Bits add/sub | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e5` | IEEE binary128 **add/sub** in `stdlib/math/softfloat_f128.sio` (not the V0-E.4 table). Seed-run anti-f64 + off-table `0.5+1` / `2+tiny`. Language `f128` desugar / mul/div / f256 / `print_f128` / GUM still deferred. |
+| **V0-E.5.1** language f128 +/− | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e51` | Madaros-run language `f128` `+`/`−` desugars to stdlib softfloat (2×i64 limbs, no f64 payload). Honest dyadic literals + `f128_from_limbs` for ~1e-20. Params/mul/div/f256/`print_f128`/GUM still deferred. lean_single language `f128` remains f64 greenwash. |
 
 **Gate** (V0-E.1):
 ```bash
