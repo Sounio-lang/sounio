@@ -20,7 +20,11 @@ if [[ "${PIREUS_MARLIN_OVERLAY:-0}" == "1" ]]; then
                 --bind "$copy_overlay:/sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/layer.py:ro"
                 --bind "$vocab_overlay:/sgl-workspace/sglang/python/sglang/srt/layers/vocab_parallel_embedding.py:ro")
 fi
-exec /scratch/pireus/runtime/apptainer-1.5.3/usr/bin/apptainer exec --nv "${overlay_args[@]}" \
+# Libraries such as TVM-FFI use ~/.cache rather than XDG_CACHE_HOME.
+# Keep that cache on the owned SSD, outside Apptainer's small session filesystem.
+mkdir -p /scratch/pireus/cache/container-home
+exec /scratch/pireus/runtime/apptainer-1.5.3/usr/bin/apptainer exec --nv \
+  --home /scratch/pireus/cache/container-home:/home/openvscode-server "${overlay_args[@]}" \
   --bind /scratch/pireus:/scratch/pireus \
   --env LD_LIBRARY_PATH=/.singularity.d/libs \
   /scratch/pireus/images/inkling-spark.sif "$@"

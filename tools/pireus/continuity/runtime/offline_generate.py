@@ -203,7 +203,7 @@ def main():
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
     profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                   tp_size=2, inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
+                   tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,
                    actual_swa_tokens=model.swa_max_total_num_tokens,
