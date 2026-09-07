@@ -44,12 +44,11 @@ def main():
         raise ValueError("unrecognized frozen eight-proposal bundle")
     if digest(Path(bench.__file__).read_bytes()) != "f831549fc4c8163aa878c3dac1dff6f4f853227d607942befae8971bf6908f35":
         raise ValueError("unrecognized pinned one_batch source")
-    server_args = prepare_server_args(sys.argv[1:])
+    server_args = prepare_server_args(sys.argv[1:] + ["--random-seed", "20260907"])
     if (server_args.tp_size != 2 or server_args.nnodes != 2 or server_args.node_rank != rank
         or not server_args.skip_tokenizer_init or server_args.context_length != 16384
         or server_args.max_running_requests != 1 or server_args.load_format == "dummy"):
         raise ValueError("offline profile boundary")
-    server_args.random_seed = 20260907
     bench._set_envs_and_config(server_args)
     bench.initialize_moe_config(server_args)
     bench.initialize_fp8_gemm_config(server_args)
@@ -60,6 +59,9 @@ def main():
     bench.get_tokenizer = lambda *a, **kw: None
     emit("OFFLINE_MODEL_LOAD_BEGIN", one_batch_sha256=digest(Path(bench.__file__).read_bytes()),
          input_sha256=digest(raw), checkpoint_tensors_loaded=False)
+    if os.environ.get("PIREUS_OFFLINE_INTERFACE") == "1":
+        emit("OFFLINE_INTERFACE_PASS", model_loaded=False, random_seed=server_args.random_seed)
+        return
     runner, tokenizer = bench.load_model(server_args, PortArgs.init_new(server_args), 0, rank)
     assert tokenizer is None
     model = runner.torch_runner
