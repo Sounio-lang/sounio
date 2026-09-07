@@ -73,6 +73,12 @@ def load_worker_and_cache(server_args, rank):
 def main():
     assert os.environ.get("SLURM_JOB_ID") and os.environ.get("PIREUS_OFFLINE_MODE") == "generate"
     job, rank = os.environ["SLURM_JOB_ID"], int(os.environ["PIREUS_RANK"])
+    required_env = {"SGLANG_OPT_LINEARIZED_SHARED_SINK": "0",
+                    "NCCL_MAX_NCHANNELS": "2", "NCCL_BUFFSIZE": "262144"}
+    if any(os.environ.get(k) != v for k, v in required_env.items()):
+        raise ValueError("offline memory profile environment mismatch")
+    emit("OFFLINE_PROFILE_ENV_VERIFIED", environment=required_env)
+
     path = Path(os.environ["PIREUS_OFFLINE_INPUT"])
     raw = path.read_bytes()
     bundle = json.loads(raw)

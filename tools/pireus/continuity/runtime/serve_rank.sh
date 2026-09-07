@@ -35,6 +35,8 @@ if [[ "${PIREUS_CUDA_PROBE:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/profile_cuda_memory.py)
 fi
 if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
+  # Frozen offline profile must not depend on a parent tmux environment.
+  export SGLANG_OPT_LINEARIZED_SHARED_SINK=0 NCCL_MAX_NCHANNELS=2 NCCL_BUFFSIZE=262144
   entrypoint=(/scratch/pireus/runtime/offline_generate.py)
 fi
 if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
