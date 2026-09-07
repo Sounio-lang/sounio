@@ -21,6 +21,8 @@ fail() {
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+. "$ROOT_DIR/scripts/lib/gate_assert.sh"
+gate_name "dgx_ptx_shfl_material_parity_futhark_gate"
 SOURCE="$ROOT_DIR/tools/pireus/dgx_ptx_shfl_material_parity.fut"
 EXPECTED_FUTHARK_VERSION="0.25.27"
 
@@ -30,10 +32,14 @@ command -v futhark >/dev/null 2>&1 || \
   fail "futhark not on PATH; install ${EXPECTED_FUTHARK_VERSION} from https://github.com/diku-dk/futhark/releases"
 
 observed_version="$(futhark -V | sed -n '1s/^Futhark \([0-9.]*\)\.$/\1/p')"
+require_nonempty "$observed_version" "Futhark version extraction is empty"
 [[ "$observed_version" == "$EXPECTED_FUTHARK_VERSION" ]] || \
   fail "futhark version drift: expected $EXPECTED_FUTHARK_VERSION, observed ${observed_version:-unknown}"
 
 source_sha256="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
+
+require_nonempty "$source_sha256" "Futhark source hash is empty"
+[[ "$source_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "Futhark source hash is malformed"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/dgx-ptx-shfl-futhark.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -44,7 +50,9 @@ futhark c "$SOURCE" -o "$work/oracle" >/dev/null 2>&1 || \
 output="$(printf '' | "$work/oracle" -e standalone 2>&1)" || \
   fail "oracle execution failed: $output"
 
+require_nonempty "$output" "Futhark execution produced no output"
 involution_holds="$(printf '%s\n' "$output" | sed -n '1p')"
+require_nonempty "$involution_holds" "Futhark involution result is empty"
 [[ "$involution_holds" == "true" ]] || \
   fail "involution self-check failed (butterfly law is not its own inverse under the frozen semantics)"
 

@@ -26,6 +26,8 @@ class GateCustody(unittest.TestCase):
     def test_corrupt_source_or_promoted_claim_refuses(self):
         mutations = [
             lambda m: m["gates"][0].update(sha256="0" * 64),
+            lambda m: m["gates"][0]["current_revision"].update(sha256="0" * 64),
+            lambda m: m["gates"][0]["current_revision"].update(reason=""),
             lambda m: m.update(runtime_replay=True),
             lambda m: m["gates"][0].update(custody_verification_executes_gate=True),
             lambda m: m.update(baseline_commit="HEAD"),

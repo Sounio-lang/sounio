@@ -58,14 +58,27 @@ def verify(named, manifest=None):
         if p.is_absolute() or ".." in p.parts or "\n" in path or ":" in path:
             raise ValueError("invalid repository path")
     blobs = git_blobs([*paths, *deps])
+    revisions = []
     for gate in gates:
         if gate["scope"] not in {"frozen-authority-replay", "current-or-material-gate"}:
             raise ValueError("unrecognized execution scope")
         if gate["custody_verification_executes_gate"] is not False:
             raise ValueError("custody cannot promote a gate to behavioral execution")
         path = gate["path"]
-        if sha(blobs[path]) != gate["sha256"] or sha((ROOT / path).read_bytes()) != gate["sha256"]:
+        if sha(blobs[path]) != gate["sha256"]:
             raise ValueError("historical gate script differs: " + path)
+        expected = gate["sha256"]
+        if "current_revision" in gate:
+            revision = gate["current_revision"]
+            if (not revision.get("reason") or revision.get("validation") !=
+                    "tools/pireus/continuity/ci/test_gate_extractions.py"
+                    or not (ROOT / revision["validation"]).is_file()):
+                raise ValueError("current gate revision lacks scoped validation")
+            expected = revision["sha256"]
+            revisions.append(dict(path=path, historical_sha256=gate["sha256"],
+                                  current_sha256=expected, reason=revision["reason"]))
+        if sha((ROOT / path).read_bytes()) != expected:
+            raise ValueError("current gate script differs: " + path)
     drift = []
     for path, expected in deps.items():
         if sha(blobs[path]) != expected:
@@ -77,6 +90,7 @@ def verify(named, manifest=None):
                 verified_original_snapshot_dependencies=len(deps),
                 scopes=dict(Counter(g["scope"] for g in gates)),
                 current_tree_dependency_drift=sorted(drift),
+                explicitly_revised_current_scripts=revisions,
                 dependency_inventory_complete=False,
                 dependency_inventory_scope=manifest["dependency_scope"],
                 runtime_replay=False, behavioral_gate_execution=False,

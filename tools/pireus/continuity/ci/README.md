@@ -56,3 +56,11 @@ These now join the same mandatory matrix with a 1200-second budget.
 The host-exclusive-store E035 witness explicitly requires Madaros; the
 current-source typed GPU gate executes it and requires the missing-Mut diagnostic.
 The lean_single parser produces a different error and cannot qualify that witness.
+
+Two current gate scripts now carry explicit extraction guards. Their original
+script SHA256 values remain bound to the historical Git snapshot; current_revision
+records each changed script hash, rationale and synthetic extraction controls
+separately. Custody reports these revisions and refuses unrecorded script drift.
+The controls cover empty hashes/version/output, missing material identity and
+duplicate job IDs. Their synthetic tool outputs do not establish GPU or
+Futhark numerical acceptance. No vacuity baseline exception was added.
