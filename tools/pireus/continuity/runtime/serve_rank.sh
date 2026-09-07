@@ -19,6 +19,9 @@ PIREUS_MARLIN_OVERLAY=0 /scratch/pireus/runtime/run_in_container.sh python3 /scr
 export PIREUS_MARLIN_OVERLAY=1
 /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/inspect_runtime.py
 export MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072
+if [[ "${PIREUS_COLD_CHECKPOINT:-0}" == "1" ]]; then
+  python3 /scratch/pireus/runtime/evict_checkpoint_cache.py
+fi
 entrypoint=(-m sglang.launch_server)
 guard_args=()
 profile_args=()
@@ -28,10 +31,19 @@ if [[ "${PIREUS_META_PROBE:-0}" == "1" ]]; then
     profile_args=(--skip-tokenizer-init)
   fi
 fi
+if [[ "${PIREUS_CUDA_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_cuda_memory.py)
+fi
+if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
+  entrypoint=(/scratch/pireus/runtime/offline_generate.py)
+fi
 if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
   profile_args=(--skip-tokenizer-init --disable-cuda-graph --chunked-prefill-size 128
-                --max-mamba-cache-size 8 --disable-overlap-schedule)
+                --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce)
   guard_args=(--reserve-gib 33)
+fi
+if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
+  profile_args+=(--disable-radix-cache)
 fi
 exec python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scratch/pireus/runtime/run_in_container.sh python3 "${entrypoint[@]}" \
   --model-path "$MODEL" --trust-remote-code --tp 2 --nnodes 2 \

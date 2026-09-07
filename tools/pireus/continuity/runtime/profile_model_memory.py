@@ -39,6 +39,7 @@ def profile_initialize(model_config, load_config, quant_config=None):
         group=".".join(parts[:3]) if len(parts)>2 and parts[1]=="layers" else ".".join(parts[:2])
         groups[group]+=size
         dtypes[str(param.dtype)]+=size
+    buffers=[dict(name=n, shape=list(p.shape), dtype=str(p.dtype), bytes=p.numel()*p.element_size(), device=str(p.device)) for n,p in model.named_buffers()]
     memory={}
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith(("MemTotal:","MemAvailable:")):
@@ -48,7 +49,7 @@ def profile_initialize(model_config, load_config, quant_config=None):
         pre_trim_available_bytes=pre_trim,post_trim_available_bytes=post_trim,malloc_trim_result=trim_result,
         tokenizer_skipped=os.environ.get("PIREUS_META_SKIP_TOKENIZER")=="1",
         parameter_storage_bytes=sum(t["bytes"] for t in tensors),
-        groups_bytes=dict(groups),dtype_bytes=dict(dtypes),
+        groups_bytes=dict(groups),dtype_bytes=dict(dtypes),buffers=buffers,buffer_storage_bytes=sum(p["bytes"] for p in buffers),
         host_bytes=memory,cuda_allocated_delta_bytes=torch.cuda.memory_allocated()-before,
         checkpoint_tensors_loaded=False,serving_accepted=False,
         meta_parameter_devices_only=True,tensors=tensors)

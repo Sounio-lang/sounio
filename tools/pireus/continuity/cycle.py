@@ -125,7 +125,7 @@ def request_body(manifest, context, index, served_model=MODEL):
     return body
 
 def generate(args, manifest):
-    if manifest.get("transport") == "sglang-token-ids":
+    if manifest.get("transport") in ("sglang-token-ids", "sglang-offline-token-ids"):
         raise ValueError("Use tokenized_cycle.py for the frozen token-ID transport")
     root = args.run
     context = (root / "context.json").read_bytes()
@@ -246,7 +246,7 @@ def main():
     ap.add_argument("--gain-engine", type=Path)
     ap.add_argument("--endpoint")
     ap.add_argument("--served-model", default=MODEL)
-    ap.add_argument("--transport", choices=["openai-chat", "sglang-token-ids"], default="openai-chat")
+    ap.add_argument("--transport", choices=["openai-chat", "sglang-token-ids", "sglang-offline-token-ids"], default="openai-chat")
     args = ap.parse_args()
     if args.command == "prepare":
         if bool(args.context) == bool(args.context_engine) or not args.evidence or not args.engine_sha256:

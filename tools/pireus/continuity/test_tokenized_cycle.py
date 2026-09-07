@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 from cycle import HERE, REVISION, digest, encoded, verify
-from tokenized_cycle import pack_encode, pair, pack_decode, finalize, issue_once
+from tokenized_cycle import pack_encode, pair, pack_decode, finalize, issue_once, pack_offline, accept_offline
 
 class TokenTransportTests(unittest.TestCase):
     def test_interrupted_http_request_is_never_replayed(self):
@@ -45,8 +45,33 @@ class TokenTransportTests(unittest.TestCase):
                 pair(root, "encode", paths, manifest)
             paths[1].write_bytes(encoded(base | dict(rank="1")))
             pair(root, "encode", paths, manifest)
+            manifest["transport"] = "sglang-offline-token-ids"
+            (root / "manifest.json").write_bytes(encoded(manifest))
+            pack_offline(root, manifest)
+            worker = root / "worker"
+            worker.mkdir()
+            input_sha = digest((root / "offline-bundle.json").read_bytes())
+            results = []
             for i in range(8):
-                (root / ("%03d.token.response.json" % i)).write_bytes(encoded(dict(output_ids=[1, i])))
+                response = dict(schema=1, transport="sglang-offline-token-ids", index=i,
+                                output_ids=[1, i], job="fixture-123", revision=REVISION,
+                                input_sha256=input_sha)
+                raw = encoded(response)
+                for rank in range(2):
+                    (worker / ("rank-%d-%03d.json" % (rank, i))).write_bytes(raw)
+                results.append(dict(index=i, response_sha256=digest(raw)))
+            for rank in range(2):
+                completion = dict(rank=str(rank), input_sha256=input_sha, revision=REVISION,
+                    helper_sha256=digest((HERE / "runtime/offline_generate.py").read_bytes()),
+                    model_loaded=True, job="fixture-123", results=results)
+                (worker / ("rank-%d-complete.json" % rank)).write_bytes(encoded(completion))
+            bad = worker / "rank-1-000.json"
+            good = bad.read_bytes()
+            bad.write_bytes(good + b" ")
+            with self.assertRaisesRegex(ValueError, "token response disagreement"):
+                accept_offline(root, manifest, worker)
+            bad.write_bytes(good)
+            accept_offline(root, manifest, worker)
             pack_decode(root, manifest)
             text = "  invalid model JSON\n{not repaired}\n"
             decode_items = [dict(index=i, text=text, text_with_special_tokens="<marker>" + text,

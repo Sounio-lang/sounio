@@ -13,11 +13,12 @@ import sglang.srt.layers.quantization.modelopt_quant as quant
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
 from patch_marlin_placeholders import patched_source
+from patch_marlin_deinterleave import patched_source as patched_deinterleave_source
 
 assert os.environ.get("SLURM_JOB_ID")
 assert torch.cuda.get_device_capability() == (12, 1)
 source = Path(quant.__file__).read_bytes()
-changed = patched_source(source)
+changed = patched_deinterleave_source(patched_source(source))
 tree = ast.parse(changed)
 cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=="ModelOptNvFp4FusedMoEMethod")
 method = next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=="create_weights")
@@ -25,6 +26,13 @@ module = ast.fix_missing_locations(ast.Module(body=[method],type_ignores=[]))
 namespace = {}
 exec(compile(module,"<custody-bound-marlin-create-weights>","exec"),vars(quant),namespace)
 challenger = namespace["create_weights"]
+postprocess_node = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "process_weights_after_loading")
+helper_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_pireus_expert_deinterleave")
+post_namespace = {}
+exec(compile(ast.fix_missing_locations(ast.Module(body=[helper_node, postprocess_node],type_ignores=[])),
+             "<custody-bound-expert-deinterleave>", "exec"), vars(quant), post_namespace)
+deinterleave_candidate = post_namespace["_pireus_expert_deinterleave"]
+postprocess_candidate = post_namespace["process_weights_after_loading"]
 original = quant.ModelOptNvFp4FusedMoEMethod.create_weights
 config = SimpleNamespace(is_checkpoint_nvfp4_serialized=True, group_size=16)
 runner = SimpleNamespace(is_gated=True, activation="silu")
@@ -38,6 +46,7 @@ def make(create, experts, hidden, intermediate):
     layer = torch.nn.Module()
     layer.num_experts = layer.num_local_experts = experts
     layer.moe_runner_config = runner
+    layer.inference_moe_w13_interleaved = True
     with torch.device("cuda"):
         create(q,layer,experts,hidden,intermediate,torch.bfloat16,weight_loader=lambda *a,**k:None)
     return layer
@@ -107,8 +116,8 @@ with patch.object(quant,"get_moe_runner_backend",return_value=MoeRunnerBackend.M
         before_repack=torch.cuda.memory_allocated()
         torch.cuda.reset_peak_memory_stats()
         if repack_test:
-            with patch.object(quant,"prepare_moe_nvfp4_layer_for_marlin",repack_candidate):
-                quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,candidate)
+            with patch.object(quant,"prepare_moe_nvfp4_layer_for_marlin",repack_candidate), patch.object(quant,"_pireus_expert_deinterleave",deinterleave_candidate,create=True):
+                postprocess_candidate(q,candidate)
             assert all(getattr(candidate,name).data_ptr()==pointer for name,pointer in old_pointers.items())
         else:
             quant.ModelOptNvFp4FusedMoEMethod.process_weights_after_loading(q,candidate)

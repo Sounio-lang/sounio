@@ -6,13 +6,14 @@ import json
 import os
 from pathlib import Path
 from patch_marlin_placeholders import patched_source
+from patch_marlin_deinterleave import patched_source as patched_deinterleave_source
 from patch_marlin_repack import patched_source as patched_repack_source
 
-PATCHED_SHA256 = "26b999da4d72fd238c32331782f72b6aa110165adec96fb8885f4252a5a7099c"
+PATCHED_SHA256 = "2aa3b391d05cbead8c23c2dfc6fac88c425eae74938ce7e1cbae871b4b47a36e"
 assert os.environ.get("SLURM_JOB_ID")
 root = Path(importlib.util.find_spec("sglang").origin).parent
 source = root / "srt/layers/quantization/modelopt_quant.py"
-changed = patched_source(source.read_bytes())
+changed = patched_deinterleave_source(patched_source(source.read_bytes()))
 assert hashlib.sha256(changed).hexdigest() == PATCHED_SHA256
 out = Path("/scratch/pireus/cache") / ("modelopt-" + PATCHED_SHA256 + ".py")
 if out.exists():

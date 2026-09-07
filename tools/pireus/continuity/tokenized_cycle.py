@@ -70,6 +70,8 @@ def issue_once(root, request, response, endpoint, body):
     atomic(response, raw)
 
 def generate(root, manifest, endpoint, job):
+    if manifest.get("transport") != "sglang-token-ids":
+        raise ValueError("HTTP generation cannot service an offline manifest")
     pair_receipts = [root / ("encode-rank-" + str(rank) + ".json") for rank in (0, 1)]
     receipt = pair(root, "encode", pair_receipts, manifest)
     if not endpoint:
@@ -136,23 +138,76 @@ def finalize(root, manifest, receipts):
         atomic(proposal, item["text"].encode())
         event(root, "generate", proposal)
 
+def pack_offline(root, manifest):
+    if manifest.get("transport") != "sglang-offline-token-ids" or manifest["budget"] != 8:
+        raise ValueError("offline path requires its own frozen eight-proposal manifest")
+    enc = pair(root, "encode", [root / ("encode-rank-" + str(i) + ".json") for i in (0, 1)], manifest)
+    items = []
+    for item in enc["items"]:
+        logical = json.loads((root / ("%03d.request.json" % item["index"])).read_bytes())
+        value = dict(index=item["index"], input_ids=item["input_ids"],
+                     stop_token_ids=item["stop_token_ids"], temperature=logical["temperature"],
+                     seed=logical["seed"], max_new_tokens=logical["max_tokens"])
+        items.append(value)
+        save(root, "%03d.token.request.json" % item["index"], value, "offline-token-request")
+    save(root, "offline-bundle.json", dict(schema=1, mode="offline-generate", revision=REVISION,
+         manifest_sha256=digest((root / "manifest.json").read_bytes()), items=items), "offline-bundle")
+
+def accept_offline(root, manifest, worker_dir):
+    if manifest.get("transport") != "sglang-offline-token-ids" or worker_dir is None:
+        raise ValueError("offline worker evidence required")
+    receipts = [json.loads((worker_dir / ("rank-" + str(i) + "-complete.json")).read_bytes()) for i in (0, 1)]
+    expected = digest((root / "offline-bundle.json").read_bytes())
+    for rank, receipt in enumerate(receipts):
+        if (receipt["rank"] != str(rank) or receipt["input_sha256"] != expected
+            or receipt["revision"] != REVISION
+            or receipt["helper_sha256"] != digest((HERE / "runtime/offline_generate.py").read_bytes())
+            or receipt["model_loaded"] is not True or len(receipt["results"]) != manifest["budget"]):
+            raise ValueError("offline completion receipt identity")
+    comparable = [{k: v for k, v in r.items() if k != "rank"} for r in receipts]
+    if comparable[0] != comparable[1]:
+        raise ValueError("offline two-rank receipt disagreement")
+    for i in range(manifest["budget"]):
+        raw = [(worker_dir / ("rank-%d-%03d.json" % (rank, i))).read_bytes() for rank in (0, 1)]
+        if raw[0] != raw[1]:
+            raise ValueError("offline two-rank token response disagreement")
+        response = json.loads(raw[0])
+        if (response["index"] != i or response["job"] != receipts[0]["job"]
+            or response["input_sha256"] != expected or response["revision"] != REVISION
+            or response["transport"] != "sglang-offline-token-ids"):
+            raise ValueError("offline token response identity")
+        for receipt in receipts:
+            matches = [x for x in receipt["results"] if x["index"] == i]
+            if len(matches) != 1 or matches[0]["response_sha256"] != digest(raw[0]):
+                raise ValueError("offline response hash mismatch")
+        path = root / ("%03d.token.response.json" % i)
+        atomic(path, raw[0])
+        event(root, "offline-token-response", path)
+    for rank, receipt in enumerate(receipts):
+        save(root, "offline-rank-" + str(rank) + "-complete.json", receipt, "offline-completion")
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["pack-encode", "accept-encode", "generate", "pack-decode", "finalize"])
+    ap.add_argument("command", choices=["pack-encode", "accept-encode", "pack-offline", "accept-offline", "generate", "pack-decode", "finalize"])
     ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--receipts", type=Path, nargs=2)
+    ap.add_argument("--worker-dir", type=Path)
     ap.add_argument("--endpoint")
     ap.add_argument("--serving-job")
     args = ap.parse_args()
     with (args.run / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         manifest = verify(args.run)
-        if manifest.get("transport") != "sglang-token-ids":
+        if manifest.get("transport") not in ("sglang-token-ids", "sglang-offline-token-ids"):
             raise ValueError("wrong frozen transport")
         if args.command == "pack-encode":
             pack_encode(args.run, manifest)
         elif args.command == "accept-encode":
             pair(args.run, "encode", args.receipts or [], manifest)
+        elif args.command == "pack-offline":
+            pack_offline(args.run, manifest)
+        elif args.command == "accept-offline":
+            accept_offline(args.run, manifest, args.worker_dir)
         elif args.command == "generate":
             generate(args.run, manifest, args.endpoint, args.serving_job)
         elif args.command == "pack-decode":
