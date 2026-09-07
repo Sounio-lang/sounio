@@ -53,3 +53,13 @@ Independent progress: deterministic-live-baseline-20260907 completed native
 admission, materialization, pair parity and30-block paired timing. All8
 candidates passed material parity; native decisions were8 NO_GAIN,0 eligible.
 The requested8 real Inkling proposals remain pending.
+
+Update: the explicit token-ID and offline profiles now use33GiB early stop;
+the default HTTP profile remains36GiB and the native floor remains32GiB.
+The offline rank entrypoint fixes NCCL_MAX_NCHANNELS=2, NCCL_BUFFSIZE=262144
+and SGLANG_OPT_LINEARIZED_SHARED_SINK=0; its engine validates these settings.
+They must not depend on the launching tmux session. The pinned loader uses
+single-threaded mmap and releases completed file cache. Job11904 is the
+first trial combining that loader with the self-contained bounded profile.
+Job11903 is a confounded failure (64 channels and constructor stop), retained
+in validation/offline-profile-regression-11903.json. No real proposals yet.
