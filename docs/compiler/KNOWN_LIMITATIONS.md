@@ -748,8 +748,10 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-D:** limb softfloat bit-identity vs `tests/vectors/f128_f256_v0d/`
   is green (`--stage v0d`); source arithmetic remains refused.
 - **Madaros V0-E.1:** deterministic print oracle + `stdlib/math/wide_float.sio`
-  limb surface green (`--stage v0e`); GUM/`Knowledge`/`MeasuredF256` and
-  language `f128` `+` remain deferred (V0-E.2).
+  limb surface green (`--stage v0e`).
+- **Madaros V0-E.2:** same-format source `f128`/`f256` arithmetic typechecks
+  (`--stage v0e2`); Madaros-run softfloat lowering, builtin `print_f128`, and
+  GUM/`Knowledge`/`MeasuredF256` remain deferred (V0-E.3).
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
 - **lean_single** history: earlier measurements showed silent f64 under the name
