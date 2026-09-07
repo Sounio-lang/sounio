@@ -1042,9 +1042,12 @@ host_mask_from_facts() {
     mask="$(bit_add "$mask" "$power" "$truth")"
   done
   truth=0
+  # Host reports enforce the frozen MemAvailable floor. Slurm FreeMem can
+  # remain stale while workers are detached, so it is supplementary telemetry.
+  # Report/watchdog freshness remains independently required by the Sounio
+  # host_heartbeat_fresh predicate before any handoff or recovery is admitted.
   if [[ "$(frame_field "$report0" memory 2>/dev/null || true)" == 1 &&
-        "$(frame_field "$report1" memory 2>/dev/null || true)" == 1 ]] &&
-      slurm_free_memory_ready "$slurm_nodes"; then truth=1; fi
+        "$(frame_field "$report1" memory 2>/dev/null || true)" == 1 ]]; then truth=1; fi
   mask="$(bit_add "$mask" 4096 "$truth")"
   truth=0
   if [[ "$(frame_field "$report0" protected 2>/dev/null || true)" == 1 &&
@@ -2304,6 +2307,18 @@ install_host_fence() {
   guard_mutation host-fence "$holder" "$epoch" "$receipt"
   [[ "$(policy_value "$POLICY" host_runtime_restart_required)" == false ]] || \
     fail 'host fence installation would require a forbidden runtime restart'
+  # A content-addressed host script revision also changes the exact admission
+  # references. Stage the existing bridge while its old rules still apply,
+  # then install the new fail-closed rules before creating the new host Pods.
+  if ! admission_current; then
+    stage_existing_host_fence_for_bootstrap "$holder" "$epoch"
+    kubectl apply --server-side --force-conflicts \
+      --field-manager=pireus-spark-pair \
+      -f "$(repo_root)/$(policy_value "$POLICY" admission_manifest)" >/dev/null
+    sync_admission_projection
+    wait_for 'current fail-closed host revision admission' admission_current "$holder" "$epoch"
+    bootstrap_gpu_admission_denied || fail 'generic GPU admission opened during host revision install'
+  fi
   manifest="$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)"
   bootstrap_key="$(policy_value "$POLICY" host_fence_bootstrap_selector_key)"
   bootstrap_value="$(policy_value "$POLICY" host_fence_bootstrap_selector_value)"
