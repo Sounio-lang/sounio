@@ -780,6 +780,39 @@ parameter unchecked.
 - Working rule until fixed: bound every loop that exits on a float comparison
   and range-check `x >= lo && x < hi` after it; see `ulp()` in
   `examples/chemistry/rep_stagnation.sio`.
+
+## `&Seq<T>` as a parameter does not deliver the Seq (measured 2026-09-06)
+
+Wrong code, not a rejection: `souc check` accepts the program. A `Seq<T>` passed
+to a function **by reference** arrives as the address of the handle rather than
+the handle, so the callee reads one indirection level off.
+
+Measured on Madaros built from `39d72a37a9`, `Seq<i64>` holding `10, 20, 30`:
+
+| shape | by reference | by value |
+|---|---|---|
+| `s.len().unwrap(...)` | `4201410`, same every run | `3` |
+| `s.get(0)` | a stack address, different every run (`140731733008109`, `140729505455853`, ...) | `10` |
+| accumulating loop over both | **SIGSEGV** (rc 139) | `60` |
+
+Both wrong results are addresses rather than data, which is the tell: `len`
+returns the same static address on every run, and `get(0)` returns a stack
+address that moves under ASLR. Measured five runs each.
+The element type is irrelevant — this reproduces on `Seq<i64>`, so it is not the
+float-classification defect closed by
+`docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md`; it is that record's
+residual, filed here because it is still live.
+
+- Working rule: **take `Seq<T>` by value.** Every signature migrated in #2413
+  does, for this reason. A `Seq` handle is cheap to pass; the reference form is
+  the broken one.
+- A struct field of type `Seq<T>` read through a `&Self` receiver *is* correct —
+  that path was fixed. It is the bare `&Seq<T>` parameter that is not.
+- Repro: `tests/known-gaps/language/seq_ref_param_loses_handle.sio`. Ratchet:
+  `scripts/ci/language_gap_ratchet_gate.sh`, which asserts the defect and fails
+  on purpose when it is fixed.
+- Not investigated: where the missing dereference is. No fix is proposed here.
+
 ## Reading a rejection: E035 and E137 are not language limitations
 
 Measured 2026-09-03 over `stdlib/`, `examples/` and `tests/run-pass/` — 4539
