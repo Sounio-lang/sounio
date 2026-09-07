@@ -50,6 +50,9 @@ fi
 if [[ "${PIREUS_EMBEDDING_OFFLOAD_PROBE:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/qualify_embedding_offload.py)
 fi
+if [[ "${PIREUS_LM_HEAD_TILING_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/qualify_lm_head_tiling.py)
+fi
 if [[ "${PIREUS_KERNEL_WARMUP:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/warmup_offline_kernels.py)
 fi

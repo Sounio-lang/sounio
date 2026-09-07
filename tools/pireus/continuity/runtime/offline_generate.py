@@ -200,10 +200,25 @@ def main():
         or embedding_storage["bytes"] != lock["bytes"]):
         raise ValueError("embedding bytes differ from qualified pinned TP shard")
     inference_memory("OFFLINE_EMBEDDING_OFFLOAD_END", embedding_storage=embedding_storage)
+
+    import offload_lm_head
+    lm_lock = json.loads(Path(__file__).with_name("lm-head-offload-lock.json").read_bytes())
+    if lm_lock["revision"] != REVISION:
+        raise ValueError("LM-head lock revision mismatch")
+    inference_memory("OFFLINE_LM_HEAD_OFFLOAD_BEGIN")
+    lm_head_storage = offload_lm_head.offload(model.model.llm.lm_head,
+        model.model.llm.logits_processor, "/scratch/pireus/cache/lm-head-offload")
+    lm_head_storage["helper_sha256"] = digest(Path(offload_lm_head.__file__).read_bytes())
+    if (lm_head_storage["source_gpu_sha256"] != lm_lock["rank_sha256"][str(rank)]
+        or lm_head_storage["file_sha256"] != lm_lock["rank_sha256"][str(rank)]
+        or lm_head_storage["bytes"] != lm_lock["bytes"]
+        or lm_head_storage["tile_rows"] != lm_lock["tile_rows"]):
+        raise ValueError("LM-head bytes/profile differ from qualified pinned TP shard")
+    inference_memory("OFFLINE_LM_HEAD_OFFLOAD_END", lm_head_storage=lm_head_storage)
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
     profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                   tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
+                   tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,
                    actual_swa_tokens=model.swa_max_total_num_tokens,
@@ -290,7 +305,7 @@ def main():
                    revision=REVISION, input_sha256=digest(raw),
                    helper_sha256=digest(Path(__file__).read_bytes()),
                    model_loaded=True, http_serving=False, execution_profile=profile,
-                   embedding_storage=embedding_storage, results=results)
+                   embedding_storage=embedding_storage, lm_head_storage=lm_head_storage, results=results)
     out = Path("/scratch/pireus/receipts") / f"offline-{job}-{rank}-complete.json"
     write(out, receipt)
     emit("OFFLINE_CYCLE_COMPLETE", count=len(results), http_serving=False)

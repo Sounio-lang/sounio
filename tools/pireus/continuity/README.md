@@ -175,3 +175,18 @@ reads no checkpoint tensors, and discards all outputs. Job11935 completes all42
 layers for a344-token prefill and one decode on both ranks. This does not qualify
 real model generation. The subsequent real run still verifies every checkpoint
 file, qualified embedding hashes, resource/profile bounds and paired responses.
+
+The real warmed run11936 reached transformer layers2/3 before the33GiB guards
+stopped both ranks above the32GiB floor. No first token was generated.
+
+The offline LM-head now streams original BF16 weights from a local file into
+4096-row GPU tiles. Job11938 qualifies the complete file-backed path against
+the stock LogitsProcessor GPU projection on21 synthetic hidden-state vectors per
+rank using the actual checkpoint shards: all compared bytes match, deliberate
+private corruption is detected/reverted, and unsupported multirow inputs refuse.
+823394304 CUDA bytes/rank are released. This is observed equivalence on the
+controls, not a universal numerical proof. The8192-row alternative differs on
+the same controls and is rejected. LM-head placement, tile rows, M1 scope and
+rank-specific weight/helper hashes are carried by completion receipts and checked
+by the importer. Stock TP logits gathering and sampling remain in their original
+paths. The next real run must separately establish generation.

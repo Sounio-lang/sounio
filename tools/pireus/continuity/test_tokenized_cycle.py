@@ -52,7 +52,7 @@ class TokenTransportTests(unittest.TestCase):
             worker.mkdir()
             input_sha = digest((root / "offline-bundle.json").read_bytes())
             profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
+                tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=16384, max_total_tokens=6144, actual_full_tokens=6144,
                 actual_swa_tokens=896, swa_full_tokens_ratio=0.15, page_size=128,
                 max_running_requests=1, max_new_tokens=4096, native_host_floor_gib=32,
                 early_stop_gib=33, http_serving=False, general_16k_inference_accepted=False)
@@ -66,6 +66,7 @@ class TokenTransportTests(unittest.TestCase):
                     (worker / ("rank-%d-%03d.json" % (rank, i))).write_bytes(raw)
                 results.append(dict(index=i, response_sha256=digest(raw)))
             embedding_lock = json.loads((HERE/"runtime/embedding-offload-lock.json").read_bytes())
+            lm_head_lock = json.loads((HERE/"runtime/lm-head-offload-lock.json").read_bytes())
             for rank in range(2):
                 storage = dict(rank=str(rank), job="fixture-123", placement="file-backed-cpu",
                     dtype=embedding_lock["dtype"], shape=embedding_lock["shape"],
@@ -73,9 +74,15 @@ class TokenTransportTests(unittest.TestCase):
                     source_gpu_sha256=embedding_lock["rank_sha256"][str(rank)],
                     file_sha256=embedding_lock["rank_sha256"][str(rank)],
                     helper_sha256=digest((HERE/"runtime/offload_embedding.py").read_bytes()))
+                lm_storage = dict(rank=str(rank), job="fixture-123", placement="file-backed-gpu-tiles", tile_rows=4096, hidden_rows=1,
+                    dtype=lm_head_lock["dtype"], shape=lm_head_lock["shape"],
+                    bytes=lm_head_lock["bytes"], checkpoint_precision_changed=False,
+                    source_gpu_sha256=lm_head_lock["rank_sha256"][str(rank)],
+                    file_sha256=lm_head_lock["rank_sha256"][str(rank)],
+                    helper_sha256=digest((HERE/"runtime/offload_lm_head.py").read_bytes()))
                 completion = dict(rank=str(rank), input_sha256=input_sha, revision=REVISION,
                     helper_sha256=digest((HERE / "runtime/offline_generate.py").read_bytes()),
-                    model_loaded=True, job="fixture-123", execution_profile=profile, embedding_storage=storage, results=results)
+                    model_loaded=True, job="fixture-123", execution_profile=profile, embedding_storage=storage, lm_head_storage=lm_storage, results=results)
                 (worker / ("rank-%d-complete.json" % rank)).write_bytes(encoded(completion))
             receipt_path = worker / "rank-0-complete.json"
             original_receipt = receipt_path.read_bytes()
@@ -95,6 +102,15 @@ class TokenTransportTests(unittest.TestCase):
                 mutated["embedding_storage"][key] = value
                 receipt_path.write_bytes(encoded(mutated))
                 with self.assertRaisesRegex(ValueError, "embedding storage"):
+                    accept_offline(root, manifest, worker)
+
+            for key, value in [("file_sha256", "0"*64), ("rank", "1"),
+                               ("checkpoint_precision_changed", True),
+                               ("tile_rows",8192), ("hidden_rows",2)]:
+                mutated = json.loads(original_receipt)
+                mutated["lm_head_storage"][key] = value
+                receipt_path.write_bytes(encoded(mutated))
+                with self.assertRaisesRegex(ValueError, "LM-head storage"):
                     accept_offline(root, manifest, worker)
             receipt_path.write_bytes(original_receipt)
             bad = worker / "rank-1-000.json"

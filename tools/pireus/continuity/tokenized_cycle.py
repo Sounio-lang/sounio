@@ -167,7 +167,7 @@ def accept_offline(root, manifest, worker_dir):
     for receipt in receipts:
         profile = receipt.get("execution_profile", {})
         expected_profile = dict(schema=1, scope="frozen-offline-canary",
-            transport="sglang-offline-token-ids", tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=16384,
+            transport="sglang-offline-token-ids", tp_size=2, jit_cache_storage="local-ssd", inductor_compile_threads=1, embedding_placement="file-backed-cpu", lm_head_placement="file-backed-gpu-tiles", lm_head_tile_rows=4096, lm_head_hidden_rows=1, lm_head_numerical_scope="qualified-controls-only", collective_backend="existing-pynccl", context_length=16384,
             max_total_tokens=6144, actual_full_tokens=6144, swa_full_tokens_ratio=0.15,
             page_size=128, max_running_requests=1, max_new_tokens=4096,
             native_host_floor_gib=32, early_stop_gib=33,
@@ -190,7 +190,22 @@ def accept_offline(root, manifest, worker_dir):
             or storage.get("checkpoint_precision_changed") is not False
             or storage.get("helper_sha256") != digest((HERE/"runtime/offload_embedding.py").read_bytes())):
             raise ValueError("offline embedding storage identity")
-    comparable = [{k: v for k, v in r.items() if k not in ("rank", "embedding_storage")} for r in receipts]
+    lm_head_lock = json.loads((HERE/"runtime/lm-head-offload-lock.json").read_bytes())
+    for rank, receipt in enumerate(receipts):
+        storage = receipt.get("lm_head_storage", {})
+        if (lm_head_lock["revision"] != REVISION
+            or storage.get("rank") != str(rank) or storage.get("job") != receipt["job"]
+            or storage.get("placement") != "file-backed-gpu-tiles"
+            or storage.get("tile_rows") != 4096 or storage.get("hidden_rows") != 1
+            or storage.get("dtype") != lm_head_lock["dtype"]
+            or storage.get("shape") != lm_head_lock["shape"]
+            or storage.get("bytes") != lm_head_lock["bytes"]
+            or storage.get("source_gpu_sha256") != lm_head_lock["rank_sha256"][str(rank)]
+            or storage.get("file_sha256") != lm_head_lock["rank_sha256"][str(rank)]
+            or storage.get("checkpoint_precision_changed") is not False
+            or storage.get("helper_sha256") != digest((HERE/"runtime/offload_lm_head.py").read_bytes())):
+            raise ValueError("offline LM-head storage identity")
+    comparable = [{k: v for k, v in r.items() if k not in ("rank", "embedding_storage", "lm_head_storage")} for r in receipts]
     if comparable[0] != comparable[1]:
         raise ValueError("offline two-rank receipt disagreement")
     for i in range(manifest["budget"]):
