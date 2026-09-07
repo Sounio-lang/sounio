@@ -61,7 +61,19 @@ ART_DIR="$ROOT_DIR/artifacts/gates"
 mkdir -p "$ART_DIR"
 ART="$ART_DIR/witness_declares_its_sabotage.json"
 
-mapfile -t ALL_WITNESSES < <(find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort)
+# Prefer tracked witnesses so Finder "foo 2.sio" duplicates cannot inflate the
+# census. Fall back to find(1) for temp-tree selftests that are not a git worktree.
+mapfile -t ALL_WITNESSES < <(
+  tracked=""
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked="$(git -C "$ROOT_DIR" ls-files 'tests/run-pass/*.sio' | LC_ALL=C sort || true)"
+  fi
+  if [[ -n "$tracked" ]]; then
+    printf '%s\n' "$tracked"
+  else
+    find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort
+  fi
+)
 
 # Map declared witnesses quickly without spawning thousands of separate subshells.
 declare -A DECL_MAP=()
