@@ -130,3 +130,18 @@ and production database relocation subsequently passed. Full initialization
 now passes, but first-request memory acceptance remains pending as described
 above. The historical recovery also exposed a race between
 worker recreation and proving the fenced cgroup set empty.
+
+
+Offline completion receipts and every token response explicitly carry execution_profile:
+configured context16384, requested/actual full cache6144, actual SWA capacity,
+SWA/full ratio0.15, page128, TP2, concurrency1, output4096, host floor32GiB,
+guard33GiB, and existing-pynccl collective backend. Admission refuses an absent
+or incompatible profile, including an HTTP or general16K acceptance claim.
+
+The eager offline path enables the already initialized PyNCCL communicator for
+forward/decode and rank-zero token broadcast. Its final barrier uses the existing
+CPU group. Diagnostic11927 reproduced a lazy torch.distributed NCCL communicator
+failing against the worker's64MiB /dev/shm at the embedding all-reduce.
+Diagnostic11928 passes exact collective controls and two synthetic embedding/norm
+passes on both ranks using PyNCCL. Those controls load no checkpoint tensors and
+stop before the first transformer layer; they are not real generation evidence.
