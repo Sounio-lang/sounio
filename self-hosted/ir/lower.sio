@@ -3521,23 +3521,6 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
     }
 }
 
-var LOWER_PRESEED_ITEM_PTRS: [i64; 16384] = [0; 16384]
-var LOWER_PRESEED_ENUM_DEF_PTRS: [i64; 16384] = [0; 16384]
-
-fn lower_collect_preseed_item_ptrs(items: Option<Box<ItemList>>, count: i64) -> i64 with Mut, Alloc {
-    if count >= IR_MAX_FUNCS { return count }
-    match items {
-        Some(list) => {
-            let ptr = list as *mut ItemList
-            LOWER_PRESEED_ITEM_PTRS[count as usize] = ptr as i64
-            let ed_ptr = item_enum_def_ptr(&(*list).head)
-            LOWER_PRESEED_ENUM_DEF_PTRS[count as usize] = ed_ptr as i64
-            lower_collect_preseed_item_ptrs((*list).tail, count + 1)
-        }
-        None => count,
-    }
-}
-
 fn lowerer_preseed_program_metadata_owned_mut(
     lo: &! Lowerer,
     items: Option<Box<ItemList>>
@@ -3562,127 +3545,176 @@ fn lowerer_preseed_program_metadata_owned_mut(
     }
 }
 
+fn lowerer_preseed_one_item_mut(
+    lo: &! Lowerer,
+    head: &Item,
+    skip_name: &Name
+) with Mut, Panic, Div, Alloc, IO {
+    // Per-item dispatch, split out of lowerer_preseed_program_items_mut so the
+    // list walk itself runs in a TINY stack frame. See that function's comment
+    // for why: this dispatch has an enormous frame (many by-value IR-struct
+    // locals below), and passing the item list BY VALUE into a frame this size
+    // was miscompiled -- the owned `Option<Box<ItemList>>` argument arrived
+    // EMPTY at the callee's first instruction (measured: a borrow-count at the
+    // very entry saw 0 of 1552 items), so every struct/enum/fn declaration in
+    // the seed module silently vanished from the preseed. The fix is to never
+    // pass an aggregate by value into a large frame: the walk lives in a small
+    // frame and hands each item here BY REFERENCE (`&Item`, `&Name` -- 8-byte
+    // pointer args, which pass correctly regardless of this frame's size).
+    let kind = head.kind
+    let name = head.name
+    if kind == ItemKind::ItemFn {
+        if !ir_name_eq(name, *skip_name) {
+            match head.fn_def {
+                Some(fd) => {
+                    let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
+                    if fn_id_sig >= 0 {
+                        let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
+                        var module_box_sig = (*lo).module
+                        var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
+                        fn_slot_sig.compile_strategy = strategy_sig
+                        fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                        fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+                        fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                        fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                        fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
+                        if strategy_sig == IR_STRATEGY_INSTRUMENTED {
+                            fn_slot_sig.param_count = fn_slot_sig.param_count + 1
+                            if fn_slot_sig.prof_counter_id < 0 {
+                                let ctr_idx_sig = (*module_box_sig).prof_counter_count
+                                if ctr_idx_sig < 64 {
+                                    (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
+                                        fn_id: fn_id_sig,
+                                        fn_name: name,
+                                        counter_id: ctr_idx_sig,
+                                    }
+                                    (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
+                                    fn_slot_sig.prof_counter_id = ctr_idx_sig
+                                } else {
+                                    lo.error_count = lo.error_count + 1
+                                    lo.had_error = true
+                                    lower_note_error(2810, (*lo.current_func).name)
+                                }
+                            }
+                        }
+                        if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
+                        ir_fn_set(&! (*module_box_sig), fn_id_sig as usize, fn_slot_sig)
+                        (*lo).module = module_box_sig
+                    }
+                    let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
+                    if fn_id_ps >= 0 {
+                        if (*fd).is_kernel {
+                            { var mbox_k = (*lo).module
+                            var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
+                            slot_k.compile_strategy = 6
+                            ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
+                            (*lo).module = mbox_k }
+                        } else if visibility_to_bool(head.visibility) {
+                            { var mbox_e = (*lo).module
+                            var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
+                            slot_e.compile_strategy = 7
+                            ir_fn_set(&! (*mbox_e), fn_id_ps as usize, slot_e)
+                            (*lo).module = mbox_e }
+                            let exp_count = (*(*lo).module).export_count
+                            if exp_count < 64 {
+                                (*(*lo).module).export_names[exp_count as usize] = name
+                                (*(*lo).module).export_count = exp_count + 1
+                            }
+                        }
+                    }
+                }
+                None => {
+                    let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+                    if bss_fn_id >= 0 {
+                        lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
+                        var mbox2 = (*lo).module
+                        var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
+                        let bss_off = (*mbox2).bss_total_size
+                        let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                        let aligned_size = ((bss_size + 7) / 8) * 8
+                        bss_slot.compile_strategy = 99
+                        bss_slot.param_count = bss_off
+                        bss_slot.bss_size = bss_size
+                        bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
+                        lower_apply_global_var_init(&! bss_slot, name)
+                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
+                        ir_fn_set(&! (*mbox2), bss_fn_id as usize, bss_slot)
+                        (*mbox2).bss_total_size = bss_off + aligned_size
+                        (*lo).module = mbox2
+                    }
+                }
+            }
+        }
+    } else if kind == ItemKind::ItemImpl {
+        match head.impl_def {
+            Some(id) => {
+                lowerer_preseed_impl_method_summaries_mut(lo, name, &(*id).methods, *skip_name)
+            }
+            None => {}
+        }
+    }
+}
+
 fn lowerer_preseed_program_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
     skip_name: Name
 ) with Mut, Panic, Div, Alloc, IO {
-    // Traverse the linked list in the same small recursive shape used by
-    // module_frontend_count_fn_items, then keep this large dispatch scalar.
-    let item_count = lower_collect_preseed_item_ptrs(*items, 0)
+    // Small-frame list walk. The heavy per-item work lives in
+    // lowerer_preseed_one_item_mut, which is entered fresh per item and only
+    // ever receives references -- see its comment for the miscompile this
+    // structure works around (aggregate-by-value into a huge frame arrived
+    // empty). This function itself keeps essentially no by-value aggregates,
+    // so its frame stays small and the `&(*list).head` borrow it hands down
+    // stays valid for the duration of each call.
+    var current = items
     var item_n: i64 = 0
-    while item_n < item_count {
-                let current = LOWER_PRESEED_ITEM_PTRS[item_n as usize] as *mut ItemList
-                let head = &(*current).head
-                let kind = head.kind
-                let name = head.name
+    while true {
+        match *current {
+            Some(list) => {
                 item_n = item_n + 1
-                // Safety only — real multi-fn modules need the full walk.
                 if item_n > IR_MAX_FUNCS {
                     return
                 }
-                if kind == ItemKind::ItemFn {
-                    if !ir_name_eq(name, skip_name) {
-                        match head.fn_def {
-                            Some(fd) => {
-                                let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
-                                if fn_id_sig >= 0 {
-                                    let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
-                                    var module_box_sig = (*lo).module
-                                    var fn_slot_sig = ir_fn_get(&(*module_box_sig), fn_id_sig as usize)
-                                    fn_slot_sig.compile_strategy = strategy_sig
-                                    fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                                    fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
-                                    fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
-                                    fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
-                                    fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
-                                    if strategy_sig == IR_STRATEGY_INSTRUMENTED {
-                                        fn_slot_sig.param_count = fn_slot_sig.param_count + 1
-                                        if fn_slot_sig.prof_counter_id < 0 {
-                                            let ctr_idx_sig = (*module_box_sig).prof_counter_count
-                                            if ctr_idx_sig < 64 {
-                                                (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
-                                                    fn_id: fn_id_sig,
-                                                    fn_name: name,
-                                                    counter_id: ctr_idx_sig,
-                                                }
-                                                (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
-                                                fn_slot_sig.prof_counter_id = ctr_idx_sig
-                                            } else {
-                                                lo.error_count = lo.error_count + 1
-                                                lo.had_error = true
-                                                lower_note_error(2810, (*lo.current_func).name)
-                                            }
-                                        }
-                                    }
-                                    if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
-                                    ir_fn_set(&! (*module_box_sig), fn_id_sig as usize, fn_slot_sig)
-                                    (*lo).module = module_box_sig
-                                }
-                                let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
-                                if fn_id_ps >= 0 {
-                                    if (*fd).is_kernel {
-                                        { var mbox_k = (*lo).module
-                                        var slot_k = ir_fn_get(&(*mbox_k), fn_id_ps as usize)
-                                        slot_k.compile_strategy = 6
-                                        ir_fn_set(&! (*mbox_k), fn_id_ps as usize, slot_k)
-                                        (*lo).module = mbox_k }
-                                    } else if visibility_to_bool(head.visibility) {
-                                        { var mbox_e = (*lo).module
-                                        var slot_e = ir_fn_get(&(*mbox_e), fn_id_ps as usize)
-                                        slot_e.compile_strategy = 7
-                                        ir_fn_set(&! (*mbox_e), fn_id_ps as usize, slot_e)
-                                        (*lo).module = mbox_e }
-                                        let exp_count = (*(*lo).module).export_count
-                                        if exp_count < 64 {
-                                            (*(*lo).module).export_names[exp_count as usize] = name
-                                            (*(*lo).module).export_count = exp_count + 1
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
-                                if bss_fn_id >= 0 {
-                                    lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
-                                    var mbox2 = (*lo).module
-                                    var bss_slot = ir_fn_get(&(*mbox2), bss_fn_id as usize)
-                                    let bss_off = (*mbox2).bss_total_size
-                                    let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
-                                    let aligned_size = ((bss_size + 7) / 8) * 8
-                                    bss_slot.compile_strategy = 99
-                                    bss_slot.param_count = bss_off
-                                    bss_slot.bss_size = bss_size
-                                    bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
-                                    lower_apply_global_var_init(&! bss_slot, name)
-                                    if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
-                                    ir_fn_set(&! (*mbox2), bss_fn_id as usize, bss_slot)
-                                    (*mbox2).bss_total_size = bss_off + aligned_size
-                                    (*lo).module = mbox2
-                                }
-                            }
-                        }
-                    }
-                } else if kind == ItemKind::ItemStruct {
-                    match head.struct_def {
+                // Struct and enum registration is done INLINE here, from this
+                // small frame, reading (*list).head directly. It must NOT be
+                // delegated to lowerer_preseed_one_item_mut: passing the
+                // `&(*list).head` reference into that (large-frame) helper is
+                // miscompiled for struct discrimination -- measured on a full
+                // main.sio self-compile, an inline `(*list).head.kind ==
+                // ItemStruct` test found all 8 of main.sio's structs, while the
+                // identical test on the `head: &Item` argument INSIDE the helper
+                // found 0. That silent miss is the whole ArgList bug: with no
+                // struct registered in the preseed, field_idx_from_name later
+                // resolves `lst.len` for a struct it cannot find and returns a
+                // legacy first-byte-hash slot (48), the wrong byte offset the
+                // gen2 --version SIGSEGV audit traced. The register helpers
+                // themselves take the field/variant lists by reference and are
+                // already proven to work from this and the external-preseed
+                // callers (they registered the 709 dependency structs), so the
+                // fix is simply to call them from here, where the read is sound.
+                let ik = (*list).head.kind
+                if ik == ItemKind::ItemStruct {
+                    match (*list).head.struct_def {
                         Some(sd) => {
-                            lowerer_register_struct_fields_direct_mut(lo, name, &(*sd).fields)
+                            lowerer_register_struct_fields_direct_mut(lo, (*list).head.name, &(*sd).fields)
                         }
                         None => {}
                     }
-                } else if kind == ItemKind::ItemEnum {
-                    let ed = LOWER_PRESEED_ENUM_DEF_PTRS[(item_n - 1) as usize] as *mut EnumDef
+                } else if ik == ItemKind::ItemEnum {
+                    let ed = item_enum_def_ptr(&(*list).head)
                     if ed != (0 as *mut EnumDef) {
-                        lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                        lowerer_register_enum_variants_mut(lo, (*list).head.name, &(*ed).variants, 0)
                     }
-                } else if kind == ItemKind::ItemImpl {
-                    match head.impl_def {
-                        Some(id) => {
-                            lowerer_preseed_impl_method_summaries_mut(lo, name, &(*id).methods, skip_name)
-                        }
-                        None => {}
-                    }
+                } else {
+                    // Functions and impl blocks: heavy per-item work, its own
+                    // fresh frame, reference args only.
+                    lowerer_preseed_one_item_mut(lo, &(*list).head, &skip_name)
                 }
+                current = &(*list).tail
+            }
+            None => break
+        }
     }
 }
 
@@ -22462,10 +22494,24 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     // non-function metadata from the original AST before that aggregate copy.
     // Global cross-module DCE and local specialized-collapse DCE use separate
     // mark tables, but both rebuild the item list before this summary path.
-    // Skip the extra walk only when neither mode is active.
-    if spec_dce_global_marks_ready() || spec_mono_marker_count() > 0 {
-        lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
-    }
+    //
+    // Bug (gen2 --version SIGSEGV, third-bug residual, 2026-09-06): this used
+    // to run ONLY when spec_dce_global_marks_ready() OR spec_mono_marker_count()
+    // > 0 -- on the unverified assumption that with neither DCE mode active,
+    // prog.items already carries every struct/enum untouched, so the separate
+    // preserve-metadata walk would be redundant. Measured false for the real
+    // self-hosted main.sio compile: with both conditions false, this call was
+    // skipped entirely, and main.sio's OWN struct declarations (e.g. ArgList)
+    // were never registered by any path -- the loop below only preseeds
+    // EXTERNAL programs, by design excluding the self program's own items.
+    // Confirmed via address-probe instrumentation: arg_list_get's compiling
+    // Lowerer used a struct_layouts table with 709 entries (all from the
+    // external loop) that never included ArgList, so field_idx_from_name fell
+    // through to the raw byte-hash fallback (44 instead of the real index 1)
+    // and corrupted arg_list_get's bounds check, crashing gen2 --version via
+    // str_eq dereferencing garbage. Struct/enum metadata registration should
+    // not depend on DCE readiness -- run it unconditionally.
+    lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
