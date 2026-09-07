@@ -1701,6 +1701,16 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
     } else if name_is_dsep_proof(name) {
         ty_dsep_proof()
     } else {
+        // A registered unit name is f64 carrying that unit_id, never an opaque
+        // nominal type. The by-value spine (lower_named_type) has always done
+        // this; this in-place spine is the one the checker actually runs, and
+        // without it every unit annotation became ty_named: a float literal no
+        // longer fit its own unit (E001 "expected mg, found f64") and two values
+        // of the SAME unit failed to combine (E004 "expected mg, found mg").
+        let unit_idx = (*c).units.find(name)
+        if unit_idx >= 0 {
+            return ty_with_unit(ty_f64(), unit_idx)
+        }
         let bound_ty = (*c).env.lookup(name)
         // A type-position name resolves against the VALUE environment first so
         // that type aliases and ontology bindings win. But `use m::{S}` binds
@@ -8425,7 +8435,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
     if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
         (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
     }
-    if arg_ty.kind == param_info.ty.kind {
+    if arg_ty.kind == param_info.ty.kind && arg_ty.unit_id < 0 && param_info.ty.unit_id < 0 {
         if arg_ty.kind == TypeKind::TyI64
         || arg_ty.kind == TypeKind::TyF64
         || arg_ty.kind == TypeKind::TyBool
@@ -23413,7 +23423,7 @@ impl Checker {
                     let prod = unit_dim_mul(ld, rd)
                     // For now, result is f64 with no named unit (product unit)
                     // A future pass could register the product unit
-                    (c, result)
+                    (c, ty_with_unit(result, 0 - 1))
                 } else {
                     // One side has units, other is scalar — keep the unit
                     let uid = if lu >= 0 { lu } else { ru }
@@ -23428,10 +23438,10 @@ impl Checker {
                     let quot = unit_dim_div(ld, rd)
                     if unit_dim_is_dimensionless(quot) {
                         // Units cancel out — result is dimensionless
-                        (c, result)
+                        (c, ty_with_unit(result, 0 - 1))
                     } else {
                         // Quotient has dimensions — result is f64 (unnamed unit)
-                        (c, result)
+                        (c, ty_with_unit(result, 0 - 1))
                     }
                 } else if lu >= 0 {
                     // numerator has units, denominator is scalar — keep unit
@@ -23442,12 +23452,12 @@ impl Checker {
                 }
             }
             // Comparison operators: units must match
-            BinaryOp::OpEq => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpNe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpEq => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpNe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLt => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGt => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
             // Other operators: pass through
             _ => (c, result)
         }
