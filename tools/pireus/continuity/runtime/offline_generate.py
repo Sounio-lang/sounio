@@ -161,10 +161,25 @@ def main():
         DefaultModelLoader._get_all_weights = original_iterator
     model = runner.torch_runner
     bench.TreeCacheNamespace = lambda **kwargs: tree_cache
+    import offload_embedding
+    lock = json.loads(Path(__file__).with_name("embedding-offload-lock.json").read_bytes())
+    if lock["revision"] != REVISION:
+        raise ValueError("embedding lock revision mismatch")
+    if model.model.llm.embed_tokens.weight.data_ptr() == model.model.llm.lm_head.weight.data_ptr():
+        raise ValueError("tied embedding storage requires separate qualification")
+    inference_memory("OFFLINE_EMBEDDING_OFFLOAD_BEGIN")
+    embedding_storage = offload_embedding.offload(model.model.llm.embed_tokens,
+        "/scratch/pireus/cache/embedding-offload")
+    embedding_storage["helper_sha256"] = digest(Path(offload_embedding.__file__).read_bytes())
+    if (embedding_storage["source_gpu_sha256"] != lock["rank_sha256"][str(rank)]
+        or embedding_storage["file_sha256"] != lock["rank_sha256"][str(rank)]
+        or embedding_storage["bytes"] != lock["bytes"]):
+        raise ValueError("embedding bytes differ from qualified pinned TP shard")
+    inference_memory("OFFLINE_EMBEDDING_OFFLOAD_END", embedding_storage=embedding_storage)
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
     profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                   tp_size=2, collective_backend="existing-pynccl", context_length=server_args.context_length,
+                   tp_size=2, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,
                    actual_swa_tokens=model.swa_max_total_num_tokens,
@@ -249,7 +264,8 @@ def main():
     receipt = dict(schema=1, stage="OFFLINE_CYCLE_COMPLETE", job=job, rank=str(rank),
                    revision=REVISION, input_sha256=digest(raw),
                    helper_sha256=digest(Path(__file__).read_bytes()),
-                   model_loaded=True, http_serving=False, execution_profile=profile, results=results)
+                   model_loaded=True, http_serving=False, execution_profile=profile,
+                   embedding_storage=embedding_storage, results=results)
     out = Path("/scratch/pireus/receipts") / f"offline-{job}-{rank}-complete.json"
     write(out, receipt)
     emit("OFFLINE_CYCLE_COMPLETE", count=len(results), http_serving=False)

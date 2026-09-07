@@ -167,7 +167,7 @@ def accept_offline(root, manifest, worker_dir):
     for receipt in receipts:
         profile = receipt.get("execution_profile", {})
         expected_profile = dict(schema=1, scope="frozen-offline-canary",
-            transport="sglang-offline-token-ids", tp_size=2, collective_backend="existing-pynccl", context_length=16384,
+            transport="sglang-offline-token-ids", tp_size=2, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=16384,
             max_total_tokens=6144, actual_full_tokens=6144, swa_full_tokens_ratio=0.15,
             page_size=128, max_running_requests=1, max_new_tokens=4096,
             native_host_floor_gib=32, early_stop_gib=33,
@@ -176,7 +176,21 @@ def accept_offline(root, manifest, worker_dir):
             or type(profile.get("actual_swa_tokens")) is not int
             or profile["actual_swa_tokens"] < 639):
             raise ValueError("offline execution profile identity")
-    comparable = [{k: v for k, v in r.items() if k != "rank"} for r in receipts]
+    embedding_lock = json.loads((HERE/"runtime/embedding-offload-lock.json").read_bytes())
+    for rank, receipt in enumerate(receipts):
+        storage = receipt.get("embedding_storage", {})
+        if (embedding_lock["revision"] != REVISION
+            or storage.get("rank") != str(rank) or storage.get("job") != receipt["job"]
+            or storage.get("placement") != "file-backed-cpu"
+            or storage.get("dtype") != embedding_lock["dtype"]
+            or storage.get("shape") != embedding_lock["shape"]
+            or storage.get("bytes") != embedding_lock["bytes"]
+            or storage.get("source_gpu_sha256") != embedding_lock["rank_sha256"][str(rank)]
+            or storage.get("file_sha256") != embedding_lock["rank_sha256"][str(rank)]
+            or storage.get("checkpoint_precision_changed") is not False
+            or storage.get("helper_sha256") != digest((HERE/"runtime/offload_embedding.py").read_bytes())):
+            raise ValueError("offline embedding storage identity")
+    comparable = [{k: v for k, v in r.items() if k not in ("rank", "embedding_storage")} for r in receipts]
     if comparable[0] != comparable[1]:
         raise ValueError("offline two-rank receipt disagreement")
     for i in range(manifest["budget"]):

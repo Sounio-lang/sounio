@@ -46,6 +46,9 @@ fi
 if [[ "${PIREUS_PREPARATION_PROBE:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/qualify_offline_preparation.py)
 fi
+if [[ "${PIREUS_EMBEDDING_OFFLOAD_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/qualify_embedding_offload.py)
+fi
 if [[ "${PIREUS_CHECKPOINT_PATH_PROBE:-0}" == "1" ]]; then
   entrypoint=(/scratch/pireus/runtime/profile_checkpoint_path.py)
 fi
