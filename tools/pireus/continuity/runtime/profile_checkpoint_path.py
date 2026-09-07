@@ -20,7 +20,9 @@ def initialize(model_config, load_config, quant_config=None):
     with torch.device("meta"):
         model = original_initialize(model_config,load_config,quant_config)
     vocab_probe = os.environ.get("PIREUS_VOCAB_PATH_PROBE") == "1"
-    name = "llm.lm_head.weight" if vocab_probe else "llm.layers.23.mlp.experts.w13_weight"
+    bf16_probe = os.environ.get("PIREUS_BF16_PATH_PROBE") == "1"
+    name = "llm.lm_head.weight" if vocab_probe else ("llm.layers.2.mlp.experts.w2_weight"
+            if bf16_probe else "llm.layers.23.mlp.experts.w13_weight")
     checkpoint_name = "model.llm.unembed.weight" if vocab_probe else "model."+name
     module_path, parameter_name = name.rsplit(".",1)
     module = model.get_submodule(module_path)
@@ -67,7 +69,7 @@ def initialize(model_config, load_config, quant_config=None):
         emit("CHECKPOINT_PATH_LOADED",loaded=sorted(loaded),minimum_available_bytes=minimum[0],
              peak_extra_cuda_bytes=torch.cuda.max_memory_allocated()-initial)
         rank=int(os.environ["PIREUS_RANK"])
-        dim = 0 if vocab_probe else 1
+        dim = 0 if vocab_probe else (2 if bf16_probe else 1)
         expected=weight.narrow(dim,rank*real.shape[dim],real.shape[dim])
         block = 512 if vocab_probe else 1
         for i in range(0,real.shape[0],block):

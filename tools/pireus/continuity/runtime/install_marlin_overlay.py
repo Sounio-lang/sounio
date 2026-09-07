@@ -49,7 +49,7 @@ print(json.dumps(dict(stage="MARLIN_REPACK_OVERLAY_STAGED",job=os.environ["SLURM
 # Third overlay bounds offline packed checkpoint copies; original SIF retained.
 from patch_checkpoint_copy import patched_source as patched_checkpoint_source
 copy_changed = patched_checkpoint_source((root / "srt/layers/moe/fused_moe_triton/layer.py").read_bytes())
-copy_sha = "b6c6943894c234f0cf7aaf933ff227d8e089c81c3c253e684bd5561c5eda757b"
+copy_sha = "8f97a3bcb419e4a48d6d94245e5747fd918b4ab7e0c785f036099e7ff96e6112"
 assert hashlib.sha256(copy_changed).hexdigest() == copy_sha
 copy_out = Path("/scratch/pireus/cache") / ("checkpoint-copy-" + copy_sha + ".py")
 if copy_out.exists():

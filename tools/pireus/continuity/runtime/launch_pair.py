@@ -10,7 +10,7 @@ MODEL="/scratch/pireus/models/Inkling-Small-NVFP4/"+REVISION
 SIF_SHA="3dbfccad3355b27d8a09bd4c0c5895d02a43e1b64203960905b810bbb6bccbe3"
 def kube(*args):return subprocess.check_output(["kubectl",*args],text=True)
 def main():
- ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify-vocab-path","qualify-vocab-copy","qualify-checkpoint-path","qualify-checkpoint-copy","qualify","qualify-model","inspect-runtime","qualify-marlin","qualify-overlay","profile-memory","profile-cuda-memory","qualify-repack","tokenize","qualify-offline-interface","offline-generate","serve-token-ids","serve"]);ap.add_argument("--minutes",type=int,default=30);ap.add_argument("--tokenizer-input","--input-bundle",dest="tokenizer_input",type=Path);args=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify-bf16-path","qualify-vocab-path","qualify-vocab-copy","qualify-checkpoint-path","qualify-checkpoint-copy","qualify","qualify-model","inspect-runtime","qualify-marlin","qualify-overlay","profile-memory","profile-cuda-memory","qualify-repack","tokenize","qualify-offline-interface","offline-generate","serve-token-ids","serve"]);ap.add_argument("--minutes",type=int,default=30);ap.add_argument("--tokenizer-input","--input-bundle",dest="tokenizer_input",type=Path);args=ap.parse_args()
  if args.mode in ("tokenize","qualify-offline-interface","offline-generate") and not args.tokenizer_input:raise SystemExit("tokenize requires --tokenizer-input")
  if args.tokenizer_input and args.mode not in ("tokenize","qualify-offline-interface","offline-generate"):raise SystemExit("tokenizer input is only for tokenize")
  if not os.environ.get("TMUX"):raise SystemExit("Use remote tmux for a disconnect-safe allocation")
@@ -47,6 +47,8 @@ def main():
   command="exec /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/qualify_tp2.py"
  elif args.mode=="qualify-offline-interface":
   command="PIREUS_OFFLINE_INTERFACE=1 PIREUS_OFFLINE_MODE=generate PIREUS_OFFLINE_INPUT="+shlex.quote(token_path)+" PIREUS_TOKEN_IDS=1 exec /scratch/pireus/runtime/serve_rank.sh"
+ elif args.mode=="qualify-bf16-path":
+  command="PIREUS_BF16_PATH_PROBE=1 PIREUS_CHECKPOINT_PATH_PROBE=1 PIREUS_OFFLINE_MODE=generate PIREUS_TOKEN_IDS=1 exec /scratch/pireus/runtime/serve_rank.sh"
  elif args.mode=="qualify-vocab-path":
   command="PIREUS_VOCAB_PATH_PROBE=1 PIREUS_CHECKPOINT_PATH_PROBE=1 PIREUS_OFFLINE_MODE=generate PIREUS_TOKEN_IDS=1 exec /scratch/pireus/runtime/serve_rank.sh"
  elif args.mode=="qualify-checkpoint-path":

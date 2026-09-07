@@ -30,14 +30,15 @@ layer = SimpleNamespace(
 reports = []
 with patch.object(fused, "get_moe_runner_backend", return_value=MoeRunnerBackend.MARLIN):
     namespace["get_moe_runner_backend"] = fused.get_moe_runner_backend
-    for experts, rows, cols in [(8,64,32), (256,4096,1024)]:
+    for experts, rows, cols, dtype in [(8,64,32,torch.uint8), (256,4096,1024,torch.uint8),
+                                        (8,64,32,torch.bfloat16), (256,2048,4096,torch.bfloat16)]:
         for shard_id, dim in [("w13",1),("w2",2)]:
             shape = [experts,rows,cols]
             source_shape = list(shape);source_shape[dim] *= 2
             torch.manual_seed(20260907)
-            source = torch.randint(0,256,source_shape,dtype=torch.uint8,device="cpu")
+            source = torch.randint(0,127,source_shape,dtype=torch.uint8,device="cpu").to(dtype)
             for rank in (0,1):
-                expected = torch.empty(shape,dtype=torch.uint8,device="cuda")
+                expected = torch.empty(shape,dtype=dtype,device="cuda")
                 stock = getattr(fused.FusedMoE, "_load_"+shard_id)
                 if shard_id == "w13":
                     stock(layer, expert_data=expected, shard_dim=dim, shard_id=shard_id,
@@ -71,10 +72,10 @@ with patch.object(fused, "get_moe_runner_backend", return_value=MoeRunnerBackend
                 narrow = source.narrow(dim,rank*shape[dim],shape[dim])
                 for index in range(experts):
                     assert torch.equal(candidate[index].cpu(),narrow[index])
-                candidate[0,0,0] ^= 1
+                candidate.view(torch.uint8)[0,0,0] ^= 1
                 assert not torch.equal(candidate,expected)
                 reports.append(dict(experts=experts,shape=shape,shard=shard_id,
-                    tp_rank=rank,exact=True,negative_control=True,
+                    tp_rank=rank,dtype=str(dtype),exact=True,negative_control=True,
                     original_storage_retained=True,peak_extra_cuda_bytes=peak))
                 del expected,candidate
                 torch.cuda.empty_cache()

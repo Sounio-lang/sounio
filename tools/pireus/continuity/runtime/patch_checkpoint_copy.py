@@ -6,17 +6,23 @@ SOURCE_SHA256 = "c0d571f5b327e36139479a05b1ac530eeac341fd2fe54584d09b5339b4c530a
 HELPER = '''
 def _pireus_checkpoint_copy(destination, source):
     if (get_moe_runner_backend().is_marlin() and destination.ndim == 3
-        and destination.dtype == torch.uint8 and source.device.type == "cpu"
+        and destination.dtype in (torch.uint8, torch.bfloat16) and source.device.type == "cpu"
         and destination.device.type == "cuda"):
         assert destination.shape == source.shape
         assert source.dtype == destination.dtype
         assert destination.shape[0] > 0
         # CUDA reads an owned CPU staging buffer, never the checkpoint mmap.
         # Reuse it only after the blocking copy returns.
-        staging = torch.empty(destination.shape[1:], dtype=destination.dtype, device="cpu")
+        row_bytes = destination.shape[2] * destination.element_size()
+        assert 0 < row_bytes <= 4*1024**2 and destination.shape[1] > 0
+        rows = min(destination.shape[1], (4*1024**2)//row_bytes)
+        staging = torch.empty((rows,destination.shape[2]),dtype=destination.dtype,device="cpu")
         for index in range(destination.shape[0]):
-            staging.copy_(source[index])
-            destination[index].copy_(staging)
+            for start in range(0,destination.shape[1],rows):
+                stop = min(start+rows,destination.shape[1])
+                slab = staging[:stop-start]
+                slab.copy_(source[index,start:stop])
+                destination[index,start:stop].copy_(slab)
     else:
         destination.copy_(source)
 '''
@@ -42,7 +48,8 @@ def patched_source(data):
             and not (
                 get_moe_runner_backend().is_marlin()
                 and expert_data.dim() == loaded_weight.dim() == 3
-                and expert_data.dtype == loaded_weight.dtype == torch.uint8
+                and expert_data.dtype == loaded_weight.dtype
+                and expert_data.dtype in (torch.uint8, torch.bfloat16)
                 and shard_dim == 2 and not is_bias
             )"""
             body = body.replace(old, new)
