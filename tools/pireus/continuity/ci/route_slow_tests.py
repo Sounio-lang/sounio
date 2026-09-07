@@ -11,7 +11,7 @@ MANIFEST = Path(__file__).with_name("slow-tests.json")
 def partition(paths):
     spec = json.loads(MANIFEST.read_text())
     slow = {row["path"] for row in spec["tests"]}
-    if len(slow) != 8 or len(spec["tests"]) != 8:
+    if len(slow) != 11 or len(spec["tests"]) != 11:
         raise ValueError("slow witness inventory changed")
     for row in spec["tests"]:
         source = ROOT / row["path"]

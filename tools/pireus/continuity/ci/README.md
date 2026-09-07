@@ -18,13 +18,13 @@ path and byte hash. prepare_historical_inputs.py verifies these copies and the
 two external Intel inputs against pinned SHA-256 values. Existing corrupt files
 are refused without overwrite. Download failures remain failures.
 
-Eight larger semantic witnesses retain their original assertions and source
+Eleven larger semantic witnesses retain their original assertions and source
 bytes. Their .sio.timeout files declare a 1200-second execution ceiling, with a
 3600-second ceiling for the exhaustive discovery/frontier witnesses that
 exceeded the 1200-second diagnostic. Successful execution is still required. This is
 an execution budget, not a performance result. route_slow_tests.py partitions
-the actual full-suite inventory into ordinary tests and exactly these eight
-witnesses. The eight matrix jobs use the same native compiler artifact as the
+the actual full-suite inventory into ordinary tests and exactly these eleven
+witnesses. The eleven matrix jobs use the same native compiler artifact as the
 ordinary suite and are required by evaluate_ci_decision.py. A failed, missing,
 cancelled or skipped selected slow job keeps CI Decision red.
 
@@ -49,3 +49,10 @@ to custody verification. It must not be described as 81 new runtime gates.
 No result here proves a fresh Spark run, speedup, HTTP serving, general 16K
 inference, or closure of V13/V14. The full 3-condition × 3-round × 32-proposal
 pilot remains dependent on successful current integration validation.
+
+The 7e41 CI completed all original eight slow jobs. Its ordinary suite exposed
+three further 30-second timeouts: genesis_bilinear, genesis_gl4 and genome.
+These now join the same mandatory matrix with a 1200-second budget.
+The host-exclusive-store E035 witness explicitly requires Madaros; the
+current-source typed GPU gate executes it and requires the missing-Mut diagnostic.
+The lean_single parser produces a different error and cannot qualify that witness.
