@@ -17,7 +17,10 @@ and resume. The integrated benchmark coordinator completed the live deterministi
 eight distinct plans, exact pair parity,30 paired blocks per node, eight
 NO_GAIN decisions and zero promotion-eligible plans. New operators and the
 GRPO corpus remain pending.
-Do not mistake this implemented admission stage for completed M3–M6.
+The real Inkling eight-request canary also completed in11939–11942: eight
+admitted/materialized outputs, four distinct plans, exact pair parity and eight
+NO_GAIN decisions. This completes a real canary cycle; the production pilot,
+new operators and GRPO corpus remain pending.
 
 Compile admission.sio through bin/souc with the rebuilt engine on the R770.
 Run test_admission.py and test_cycle.py against that actual executable.
@@ -48,8 +51,9 @@ and reports remaining stages; it does not mutate the frozen research context.
 
 The production pilot still requires the founder's fixed three conditions,
 three rounds, 32 proposals per condition, 30 interleaved measurement blocks
-per node, and the existing promotion criteria. Only the deterministic baseline
-has a measured result; no Inkling performance or completed pilot is claimed.
+per node, and the existing promotion criteria. The deterministic baseline
+and the real Inkling eight-request canary have measured results; both conclude
+NO_GAIN. The full production pilot is not complete.
 
 
 ## Owned offline Inkling batch
@@ -58,10 +62,12 @@ The current transport is sglang-offline-token-ids. It preserves the pinned
 checkpoint/SIF, original mixed NVFP4 and BF16 weights, configured context16384,
 one request at a time and at most4096 output tokens. Four hash-bound source
 overlays reduce unused Marlin allocation and bound expert/vocabulary copies.
-Production kernels are unchanged. Actual stock/candidate GPU controls and
+Original Marlin kernels are unchanged; the LM-head uses the explicitly qualified
+4096-row projection shape described below. Actual stock/candidate GPU controls and
 real checkpoint-tensor loader controls are in validation/.
 
-The owned CPU staging slabs are at most4MiB. This matters on the Sparks:
+Checkpoint CPU staging slabs are at most4MiB. The separate file-backed LM-head
+projection stages4096 BF16 rows (32MiB) at a time. This matters on the Sparks:
 direct CUDA reads from an mmap-backed packed tensor reduced host availability
 by about1.1GB per rank, while the staged real-tensor controls preserved exact
 TP slices with MB-scale overhead. Checkpoint files and the original SIF remain
@@ -152,8 +158,8 @@ file-backed CPU mapping. After full checkpoint loading, the adapter streams the
 local BF16 GPU shard to an owned file in4MiB blocks, synchronizing and dropping
 clean file pages per block to bound write transients. Source/file hashes must
 match embedding-offload-lock.json before inference. CUDA receives only owned
-gathered token rows; original TP masking/all-reduce and the remaining weights
-retain their runtime paths and precision.
+gathered token rows; original TP masking/all-reduce and expert weights retain
+their runtime paths and precision. The separate LM-head placement is described below.
 
 Control11930 compares every201024 vocabulary row to the real fused GPU embedding
 on both ranks, plus344/1/boundary inputs and deliberate private COW corruption.
@@ -190,3 +196,13 @@ the same controls and is rejected. LM-head placement, tile rows, M1 scope and
 rank-specific weight/helper hashes are carried by completion receipts and checked
 by the importer. Stock TP logits gathering and sampling remain in their original
 paths. The next real run must separately establish generation.
+
+The first real complete cycle is archived in validation/real-inkling-cycle-20260907.
+Generation11939 emits943 tokens across eight requests, both ranks complete and
+exit0; paired decode11940 preserves exact model text. Native Sounio admission
+accepts8 outputs with4 distinct normalized plans. Material job11941 passes all
+16 candidate-node comparisons (5120 exact components each); timing11942 measures
+30 interleaved blocks per node against direct and shuffle controls. All8
+decisions are NO_GAIN. Layout conversion is outside this resident-layout-kernel
+timing scope. No scientific novelty, promotion, general FP proof, HTTP serving,
+general16K inference or full pilot acceptance follows from this result.
