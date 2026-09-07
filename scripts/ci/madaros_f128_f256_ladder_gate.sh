@@ -42,7 +42,7 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b|v0c|v0d|v0e" >&2
+  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3" >&2
   exit 64
 fi
 
@@ -58,8 +58,16 @@ if [[ "$STAGE" == "v0e" ]]; then
   exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e_surface_gate.sh" "$@"
 fi
 
+if [[ "$STAGE" == "v0e2" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e2_source_ops_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e3" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e3_run_ops_gate.sh" "$@"
+fi
+
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3)" >&2
   exit 64
 fi
 
@@ -317,11 +325,10 @@ done
 
 # ---------------------------------------------------------------------------
 # V0-B negative witnesses — must NOT reach check: OK.
-# Pins the boundary so V0-B cannot silently grow into V0-D arithmetic.
+# Casts/implicit stay refused. Same-format arithmetic is V0-E.2 (no longer
+# pinned here as E004).
 # ---------------------------------------------------------------------------
 NEGATIVE_SOURCES=(
-  tests/compile-fail/f128_v0b_arithmetic_rejected.sio
-  tests/compile-fail/f256_v0b_arithmetic_rejected.sio
   tests/compile-fail/f128_v0b_cast_rejected.sio
   tests/compile-fail/f128_v0b_implicit_conversion_rejected.sio
 )
