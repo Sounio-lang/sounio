@@ -15,6 +15,11 @@ import offload_embedding
 def main():
     assert os.environ.get("PIREUS_EMBEDDING_OFFLOAD_PROBE") == "1"
     rank = int(os.environ["PIREUS_RANK"])
+    import torch._inductor.config as inductor_config
+    if inductor_config.compile_threads != 1:
+        raise ValueError("bounded offline compiler worker profile")
+    print(json.dumps(dict(stage="INDUCTOR_COMPILE_PROFILE", job=os.environ["SLURM_JOB_ID"],
+                         rank=str(rank), compile_threads=inductor_config.compile_threads)), flush=True)
     args = offline.prepare_server_args(sys.argv[1:] + ["--random-seed", "20260907"])
     bench = offline.bench
     bench._set_envs_and_config(args)
@@ -75,7 +80,7 @@ def main():
         vocabulary_rows=vocab, output_components=vocab*embed.embedding_dim,
         full_vocabulary_byte_exact=True, token_shapes=[344,1,4],
         corruption_detected=True, private_corruption_reverted=True,
-        model_layers_executed=False, inference_accepted=False,
+        transformer_layers_executed=False, inference_accepted=False, inductor_compile_threads=inductor_config.compile_threads,
         helper_sha256=offload_embedding.file_digest(Path(offload_embedding.__file__)))
     offline.write(Path("/scratch/pireus/receipts")/("embedding-offload-control-"+receipt["job"]+"-"+str(rank)+".json"), receipt)
     print(json.dumps(receipt), flush=True)

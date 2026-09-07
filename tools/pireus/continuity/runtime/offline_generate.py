@@ -63,6 +63,26 @@ def inference_memory(stage, **fields):
         parts = line.split()
         if len(parts) == 3 and parts[2] == "kB":
             accounting[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    pending = [os.getpid()]
+    seen = set()
+    child_rss = 0
+    while pending:
+        parent = pending.pop()
+        try:
+            children = Path(f"/proc/{parent}/task/{parent}/children").read_text().split()
+        except FileNotFoundError:
+            continue
+        for child in children:
+            if child in seen:
+                continue
+            seen.add(child)
+            pending.append(int(child))
+            try:
+                status = Path(f"/proc/{child}/status").read_text().splitlines()
+                child_rss += next((int(l.split()[1])*1024 for l in status if l.startswith("VmRSS:")), 0)
+            except FileNotFoundError:
+                pass
+    fields.update(owned_descendant_count=len(seen), owned_descendant_rss_bytes=child_rss)
     emit(stage, cuda_allocated_bytes=torch.cuda.memory_allocated(),
          cuda_reserved_bytes=torch.cuda.memory_reserved(), process_memory=accounting, **fields)
 
@@ -104,9 +124,13 @@ def main():
     assert os.environ.get("SLURM_JOB_ID") and os.environ.get("PIREUS_OFFLINE_MODE") == "generate"
     job, rank = os.environ["SLURM_JOB_ID"], int(os.environ["PIREUS_RANK"])
     required_env = {"SGLANG_OPT_LINEARIZED_SHARED_SINK": "0",
-                    "NCCL_MAX_NCHANNELS": "2", "NCCL_BUFFSIZE": "262144"}
+                    "NCCL_MAX_NCHANNELS": "2", "NCCL_BUFFSIZE": "262144",
+                    "TORCHINDUCTOR_COMPILE_THREADS": "1"}
     if any(os.environ.get(k) != v for k, v in required_env.items()):
         raise ValueError("offline memory profile environment mismatch")
+    import torch._inductor.config as inductor_config
+    if inductor_config.compile_threads != 1:
+        raise ValueError("offline Inductor compiler concurrency mismatch")
     emit("OFFLINE_PROFILE_ENV_VERIFIED", environment=required_env)
 
     path = Path(os.environ["PIREUS_OFFLINE_INPUT"])
@@ -179,7 +203,7 @@ def main():
     emit("OFFLINE_MODEL_READY", max_total_num_tokens=model.max_total_num_tokens,
          checkpoint_tensors_loaded=True, http_serving=False)
     profile = dict(schema=1, scope="frozen-offline-canary", transport="sglang-offline-token-ids",
-                   tp_size=2, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
+                   tp_size=2, inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=server_args.context_length,
                    max_total_tokens=server_args.max_total_tokens,
                    actual_full_tokens=model.full_max_total_num_tokens,
                    actual_swa_tokens=model.swa_max_total_num_tokens,
@@ -198,7 +222,8 @@ def main():
             inference_memory("OFFLINE_FIRST_FORWARD_LAYER_END", layer=name)
         return hook
     for name, module in model.model.named_modules():
-        if name.startswith("llm.layers.") and name.count(".") == 2:
+        if (name.startswith("llm.layers.") and name.count(".") == 2
+            or name.startswith("llm.layers.0.") and name.count(".") <= 5):
             hooks.extend([module.register_forward_pre_hook(trace_before(name)),
                           module.register_forward_hook(trace_after(name))])
     comm = model.tp_group.pynccl_comm

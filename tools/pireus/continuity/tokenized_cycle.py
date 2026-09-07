@@ -167,7 +167,7 @@ def accept_offline(root, manifest, worker_dir):
     for receipt in receipts:
         profile = receipt.get("execution_profile", {})
         expected_profile = dict(schema=1, scope="frozen-offline-canary",
-            transport="sglang-offline-token-ids", tp_size=2, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=16384,
+            transport="sglang-offline-token-ids", tp_size=2, inductor_compile_threads=1, embedding_placement="file-backed-cpu", collective_backend="existing-pynccl", context_length=16384,
             max_total_tokens=6144, actual_full_tokens=6144, swa_full_tokens_ratio=0.15,
             page_size=128, max_running_requests=1, max_new_tokens=4096,
             native_host_floor_gib=32, early_stop_gib=33,

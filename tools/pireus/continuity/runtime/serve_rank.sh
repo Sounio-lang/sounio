@@ -39,6 +39,7 @@ fi
 if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
   # Frozen offline profile must not depend on a parent tmux environment.
   export SGLANG_OPT_LINEARIZED_SHARED_SINK=0 NCCL_MAX_NCHANNELS=2 NCCL_BUFFSIZE=262144
+  export TORCHINDUCTOR_COMPILE_THREADS=1
   max_total_tokens=6144
   swa_full_tokens_ratio=0.15
   entrypoint=(/scratch/pireus/runtime/offline_generate.py)
