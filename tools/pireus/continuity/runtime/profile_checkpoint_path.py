@@ -19,15 +19,24 @@ def emit(stage, **kw):
 def initialize(model_config, load_config, quant_config=None):
     with torch.device("meta"):
         model = original_initialize(model_config,load_config,quant_config)
-    name = "llm.layers.23.mlp.experts.w13_weight"
-    checkpoint_name = "model."+name
+    vocab_probe = os.environ.get("PIREUS_VOCAB_PATH_PROBE") == "1"
+    name = "llm.lm_head.weight" if vocab_probe else "llm.layers.23.mlp.experts.w13_weight"
+    checkpoint_name = "model.llm.unembed.weight" if vocab_probe else "model."+name
     module_path, parameter_name = name.rsplit(".",1)
     module = model.get_submodule(module_path)
     old = module.get_parameter(parameter_name)
-    real = type(old)(data=torch.empty(old.shape,dtype=old.dtype,device="cuda"),
-                     input_dim=old.input_dim,output_dim=old.output_dim,weight_loader=old.weight_loader)
+    from sglang.srt.layers.parameter import BasevLLMParameter
+    if isinstance(old,BasevLLMParameter):
+        real = type(old)(data=torch.empty(old.shape,dtype=old.dtype,device="cuda"),
+                         input_dim=old.input_dim,output_dim=old.output_dim,weight_loader=old.weight_loader)
+    else:
+        real = type(old)(data=torch.empty(old.shape,dtype=old.dtype,device="cuda"),requires_grad=False)
+        real.__dict__.update(old.__dict__)
     module.register_parameter(parameter_name,real)
-    original_copy = fused._pireus_checkpoint_copy
+    import sglang.srt.layers.vocab_parallel_embedding as vocab
+    copy_module = vocab if vocab_probe else fused
+    copy_name = "_pireus_vocab_copy" if vocab_probe else "_pireus_checkpoint_copy"
+    original_copy = getattr(copy_module,copy_name)
     def traced_copy(destination, source):
         emit("CHECKPOINT_COPY_PATH_ENTER",destination_device=str(destination.device),
              source_device=str(source.device),destination_shape=list(destination.shape),
@@ -35,13 +44,13 @@ def initialize(model_config, load_config, quant_config=None):
         result=original_copy(destination,source)
         emit("CHECKPOINT_COPY_PATH_EXIT")
         return result
-    fused._pireus_checkpoint_copy=traced_copy
+    setattr(copy_module,copy_name,traced_copy)
     index=json.loads((Path(model_config.model_path)/"model.safetensors.index.json").read_bytes())
     source_file=Path(model_config.model_path)/index["weight_map"][checkpoint_name]
     emit("CHECKPOINT_PATH_META_READY",parameter=name,shape=list(real.shape),
          weight_loader=real.weight_loader.__qualname__,
          config_interleaved=model.text_config.inference_moe_w13_interleaved,
-         expert_interleaved=module.inference_moe_w13_interleaved)
+         expert_interleaved=getattr(module,"inference_moe_w13_interleaved",None))
     with safetensors.safe_open(str(source_file),framework="pt",device="cpu") as f:
         weight=f.get_tensor(checkpoint_name)
         torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
@@ -58,9 +67,11 @@ def initialize(model_config, load_config, quant_config=None):
         emit("CHECKPOINT_PATH_LOADED",loaded=sorted(loaded),minimum_available_bytes=minimum[0],
              peak_extra_cuda_bytes=torch.cuda.max_memory_allocated()-initial)
         rank=int(os.environ["PIREUS_RANK"])
-        expected=weight.narrow(1,rank*real.shape[1],real.shape[1])
-        for i in range(real.shape[0]):
-            assert torch.equal(real[i].cpu(),expected[i])
+        dim = 0 if vocab_probe else 1
+        expected=weight.narrow(dim,rank*real.shape[dim],real.shape[dim])
+        block = 512 if vocab_probe else 1
+        for i in range(0,real.shape[0],block):
+            assert torch.equal(real[i:i+block].cpu(),expected[i:i+block])
     emit("CHECKPOINT_PATH_PASS",exact_tp_slice=True,full_model_loaded=False)
     from sglang.srt.distributed import get_world_group
     torch.distributed.barrier(group=get_world_group().cpu_group)

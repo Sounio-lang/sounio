@@ -63,3 +63,21 @@ else:
 print(json.dumps(dict(stage="CHECKPOINT_COPY_OVERLAY_STAGED",job=os.environ["SLURM_JOB_ID"],
                      rank=os.environ["PIREUS_RANK"],patched_sha256=copy_sha,
                      original_sif_modified=False)),flush=True)
+
+# Vocabulary copies retain stock shard selection and padding.
+from patch_vocab_copy import patched_source as patched_vocab_source
+vocab_changed = patched_vocab_source((root / "srt/layers/vocab_parallel_embedding.py").read_bytes())
+vocab_sha = "fda7e7fdc854100a6250e2e24fd3242cdbee919546b66185f6920af72ee1f194"
+assert hashlib.sha256(vocab_changed).hexdigest() == vocab_sha
+vocab_out = Path("/scratch/pireus/cache") / ("vocab-copy-" + vocab_sha + ".py")
+if vocab_out.exists():
+    assert not vocab_out.is_symlink() and vocab_out.read_bytes() == vocab_changed
+else:
+    with vocab_out.open("xb") as stream:
+        stream.write(vocab_changed)
+        stream.flush()
+        os.fsync(stream.fileno())
+    vocab_out.chmod(0o444)
+print(json.dumps(dict(stage="VOCAB_COPY_OVERLAY_STAGED",job=os.environ["SLURM_JOB_ID"],
+                     rank=os.environ["PIREUS_RANK"],patched_sha256=vocab_sha,
+                     original_sif_modified=False)),flush=True)
