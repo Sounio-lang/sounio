@@ -74,7 +74,9 @@ the33GiB early guard. The native host floor remains32GiB. Releasing unused
 allocator pages in11919 was insufficient. These results do not constitute
 completed generation or general HTTP-serving acceptance.
 
-For the frozen eight-request canary, the offline cache capacity is6144 tokens.
+For the frozen eight-request canary, the offline cache capacity is 6144 tokens. Its SWA/full ratio is 0.15: the prior 0.1 ratio
+produced only 512 SWA tokens and was refused by the runtime admission floor
+(511 sliding-window tokens plus one 128-token page) in job11922.
 Each encoded prompt is344 tokens plus an unchanged4096-token output allowance.
 Oversized requests refuse before loading, and actual pool capacity is checked
 again before each request. The model context setting remains16384, but this
