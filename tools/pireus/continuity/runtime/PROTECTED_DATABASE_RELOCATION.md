@@ -1,7 +1,7 @@
 # Proposed Beagle memory database relocation to unblock Inkling TP2
 
-Status: REVIEWABLE PROPOSAL; not executed; authorization required for
-protected-service migration. Read-only discovery completed2026-09-07.
+Status: AUTHORIZED; execution precheck blocked on target storage health.
+User authorization: AUTORIZADO. Read-only discovery completed2026-09-07.
 This is a capacity proposal, not proof that the full Inkling load fits.
 
 ## Observed source and destination
@@ -34,7 +34,7 @@ CPU request2/limit8, memory request24GiB/limit48GiB. Recheck real capacity
 and existing reservations before scheduling. Preserve source DB settings
 initially; stress/rehearsal decides acceptance, not this resource estimate.
 
-## Authorized execution would follow these gates
+## Authorized execution gates
 
 1. Create isolated target with immutable amd64 image, durable volume and
    private credentials. Verify PostgreSQL and every extension version in
@@ -82,10 +82,9 @@ After target writes: never point clients at a stale source. Pause writers
 and reverse-export/restore the new authoritative data before returning.
 A failure must preserve both data copies and custody, not discard target writes.
 
-No migrations, credentials, data copies, target workloads or source changes
-have been performed. Approval must explicitly cover this Beagle service
-migration and its bounded write pause; ordinary Pireus recovery authority did
-not authorize changing a protected application.
+No data copies, target workloads or source changes have been performed.
+The explicit user approval now covers this Beagle service migration and its
+bounded write pause, subject to the gates above.
 
 ## Sources
 
@@ -94,3 +93,68 @@ transfer, per-database snapshot consistency and separate global objects:
 https://www.postgresql.org/docs/16/backup-dump.html
 Logical replication restrictions for schemas, sequences and large objects:
 https://www.postgresql.org/docs/16/logical-replication-restrictions.html
+
+## Authorized execution update — 2026-09-07
+
+The user explicitly replied AUTORIZADO to this proposal. Authorization covers
+the gated migration and at most 15 minutes of write pause; it remains valid.
+The current stop is storage readiness, not missing user approval.
+
+The read-only precheck found the actual target pool rbd_ssd flagged nearfull,
+with percent_used 0.8972344994544983 and max_avail 477850009600 bytes.
+Nominal free bytes exceed the requested64GiB, but do not resolve the pool
+nearfull condition or the concurrent BlueStore slow operations (osd.0/osd.1)
+and BlueFS DB stalled reads (osd.0). Their exact relationship to a future
+volume's PG placement is not established. No storage health PASS is claimed.
+The CSI identity can read health/df but osd df returned EACCES; no wider
+credentials or permissions were installed.
+
+All available approved RBD Retain classes use this target pool. The local
+R770 runtime class had no existing PV; /scratch remains staging only.
+No PVC, target database, logical backup, endpoint change, source stop or
+write pause was performed. No Ceph rebalancing, deletion, threshold changes,
+or daemon restarts were performed.
+
+Source catalog inventory:6 databases,5 connectable,16 roles,3 memberships,
+83 sequences,0 large objects and0 catalogued cron jobs across connectable
+databases. This is a sequential catalog observation, NOT a matched-snapshot
+backup or proof of application consistency. External scheduled writers and
+client paths remain to be inventoried. pg_cron1.6 is installed in another
+database and must be included in the eventual compatibility rehearsal.
+Private details are under
+/workspace/.cache/pireus-continuity/protected-db-relocation-20260907/
+with directory0700 and source-catalog-private.json0600; no role passwords or
+application rows were queried. The committed summary contains aggregate
+counts and extension versions only.
+
+Reproduce the storage observation from this worktree:
+`python3 tools/pireus/continuity/runtime/inspect_relocation_storage.py`
+It returns2 for an observed storage stop; a zero result only means additional
+provisioning and I/O validation may proceed, never full migration acceptance.
+
+```text
+Blocker-ID: BLK-20260907-pireus-relocation-storage
+Status: classified
+Severity: B1
+Class: platform-resource
+Owner: codex-pireus
+Lane: continuity-20260906
+Worktree: /workspace/.wt/pireus-integration-20260906
+Branch: codex/pireus-inkling-cycle-20260906
+Files-Owned: tools/pireus/continuity/**
+Do-Not-Touch: source database data; protected host daemons; Ceph placement/thresholds
+Repro: python3 tools/pireus/continuity/runtime/inspect_relocation_storage.py
+Observed: STOP; target_pool_nearfull; BlueStore slow ops; BlueFS stalled reads
+Expected: healthy durable target storage followed by provisioning and I/O acceptance
+Acceptance-Gate: approved plan storage prerequisite, then isolated restore rehearsal
+Evidence-Level: E3
+Evidence: relocation-storage-20260907.json; relocation-inventory-summary-20260907.json
+Fallback-Path: none
+Legacy-Kept: yes; original source database remains authoritative
+LLM-Offload: not-required; operational observations, no semantic or mathematical changes
+Next-Action: resolve target pool capacity/I/O alerts in the storage operations scope, then rerun precheck before creating the isolated target
+```
+
+After storage acceptance, resume gates1–7 above. Approval is already present;
+do not repeat the migration approval request. Inkling serving and the eight
+actual LLM proposals remain pending, as does fresh post-migration memory proof.
