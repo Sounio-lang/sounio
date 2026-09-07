@@ -746,7 +746,12 @@ whoever picks option 1, 2, or the remainder of option 3.
   (`madaros_f128_f256_ladder_gate.sh --stage v0b`). Arithmetic/casts/implicit
   conversion remain rejected (E004 / E248 / type mismatch).
 - **Madaros V0-D:** limb softfloat bit-identity vs `tests/vectors/f128_f256_v0d/`
-  is green (`--stage v0d`); source arithmetic and **print** remain out of scope.
+  is green (`--stage v0d`); source arithmetic remains refused.
+- **Madaros V0-E.1:** deterministic print oracle + `stdlib/math/wide_float.sio`
+  limb surface green (`--stage v0e`); GUM/`Knowledge`/`MeasuredF256` and
+  language `f128` `+` remain deferred (V0-E.2).
+- **print** of language-level `f128` values and full stdlib GUM surface are
+  still out of scope.
 - **lean_single** history: earlier measurements showed silent f64 under the name
   `f128` (#2387); the seed-side fix is tracked separately from this Madaros V0-B
   landing. Repro probe: `examples/numerics/f128_is_f64_probe.sio`.

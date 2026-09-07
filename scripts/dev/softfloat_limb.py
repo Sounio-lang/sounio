@@ -490,3 +490,81 @@ def apply_op(op: str, a: list[int], b: list[int] | None, fmt: Fmt) -> list[int]:
         assert b is not None
         return soft_rump1988(a, b, fmt)
     raise ValueError(f"unknown op {op}")
+
+
+def limbs_to_hex_wire(limbs: list[int], fmt: Fmt) -> str:
+    """Deterministic LSW-first hex wire: limb0:limb1:... as 16-digit lowercase."""
+    parts = [f"{i64_to_u64(L):016x}" for L in limbs]
+    return ":".join(parts)
+
+
+def format_decimal(limbs: list[int], fmt: Fmt, digits: int = 36) -> str:
+    """Deterministic scientific decimal of a finite wide float (no host float).
+
+    Form: [+-]d.dddde[+-]exp with exactly `digits` significant digits, RHE on
+    the decimal coefficient. Specials: nan / inf / -inf / 0 / -0.
+    """
+    from decimal import Decimal, getcontext, ROUND_HALF_EVEN
+
+    d = decode_limbs(limbs, fmt)
+    if d.is_nan:
+        return "nan"
+    if d.is_inf:
+        return "-inf" if d.sign else "inf"
+    if d.is_zero:
+        return "-0" if d.sign else "0"
+
+    getcontext().prec = max(digits + 16, fmt.sig_bits // 3 + 32)
+    getcontext().rounding = ROUND_HALF_EVEN
+    ea, sa = _sig_from_decoded(d)
+    p = fmt.sig_bits
+    val = Decimal(sa) * (Decimal(2) ** (ea - (p - 1)))
+    if d.sign:
+        val = -val
+
+    sign_str = "-" if val < 0 else ""
+    aval = abs(val)
+    # Normalized scientific: coefficient in [1, 10)
+    adj = 0
+    norm = aval
+    while norm >= Decimal(10):
+        norm /= Decimal(10)
+        adj += 1
+    while 0 < norm < Decimal(1):
+        norm *= Decimal(10)
+        adj -= 1
+
+    scale = Decimal(10) ** (digits - 1)
+    coef_i = int((norm * scale).to_integral_value(rounding=ROUND_HALF_EVEN))
+    if coef_i >= 10 * int(scale):
+        coef_i //= 10
+        adj += 1
+    coef_s = str(coef_i).zfill(digits)
+    mantissa = coef_s[0] + ("." + coef_s[1:] if digits > 1 else "")
+    return f"{sign_str}{mantissa}e{adj:+d}"
+
+
+def format_decimal_plain(limbs: list[int], fmt: Fmt, max_places: int = 50) -> str:
+    """Plain decimal for modest magnitudes; else scientific (format_decimal)."""
+    from decimal import Decimal, getcontext, ROUND_HALF_EVEN
+
+    d = decode_limbs(limbs, fmt)
+    if d.is_nan:
+        return "nan"
+    if d.is_inf:
+        return "-inf" if d.sign else "inf"
+    if d.is_zero:
+        return "-0" if d.sign else "0"
+    getcontext().prec = max(max_places + 8, fmt.sig_bits // 3 + 16)
+    getcontext().rounding = ROUND_HALF_EVEN
+    ea, sa = _sig_from_decoded(d)
+    p = fmt.sig_bits
+    val = Decimal(sa) * (Decimal(2) ** (ea - (p - 1)))
+    if d.sign:
+        val = -val
+    if abs(val) >= Decimal(10) ** 12 or (abs(val) > 0 and abs(val) < Decimal(10) ** -6):
+        return format_decimal(limbs, fmt, digits=min(36, max_places))
+    text = format(val, f".{max_places}f").rstrip("0").rstrip(".")
+    if text in ("", "-"):
+        return "-0" if d.sign else "0"
+    return text
