@@ -24,7 +24,7 @@ def main():
   selected.append(matches[0])
  for pod in selected:
   base=["kubectl","-n","slurm-pilot","exec",pod["metadata"]["name"],"-c","slurmd","--"]
-  for name in ["run_in_container.sh","qualify_tp2.py","qualify_model.py","serve_rank.sh","worker_prerequisites.py","inkling-files.json"]:
+  for name in ["run_in_container.sh","qualify_tp2.py","qualify_model.py","serve_rank.sh","memory_guard.py","worker_prerequisites.py","inkling-files.json"]:
    subprocess.run(base[:4]+["-i"]+base[4:]+["python3","-c","from pathlib import Path;import sys;p=Path(sys.argv[1]);p.write_bytes(sys.stdin.buffer.read());p.chmod(0o755)","/scratch/pireus/runtime/"+name],input=(HERE/name).read_bytes(),check=True)
   subprocess.run(base+["python3","/scratch/pireus/runtime/worker_prerequisites.py"],check=True)
   subprocess.run(base+["python3","-c","from pathlib import Path;import os;paths=[Path('/scratch/pireus/receipts'),Path('/scratch/pireus/cache')];[(p.mkdir(exist_ok=True),os.chown(p,1000,1000)) for p in paths]"],check=True)

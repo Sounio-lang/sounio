@@ -42,3 +42,26 @@ the context-length and single-request smoke. This cap limits cache sizing;
 it does not reserve host memory or prove the model fits. TP2 qualification
 now emits post-collective CUDA free/total and allocator counters alongside
 host MemTotal/MemAvailable, all in bytes and bound to the Slurm job and rank.
+
+## Protected-database migration and bounded serving canary
+
+The production database moved off Spark3c59 on 2026-09-07, with final
+endpoint/scheduler activation in 559.823 seconds and all migration gates
+passing. Fresh Slurm job11877 passed TP2/InfiniBand on both ranks with
+NCCL_MAX_NCHANNELS=8 and NCCL_BUFFSIZE=1048576. Post-collective host
+MemAvailable was121450905600 bytes on3c59 and121386692608 bytes on8e54.
+CUDA free memory differed (90431643648 and84970627072 bytes respectively);
+host and CUDA availability are distinct observations.
+
+Serving now uses a rank-local memory guardian outside Apptainer. It samples
+host MemAvailable every50ms and kills only its owned child process group
+below36GiB, causing srun's existing kill-on-bad-exit policy to stop the pair.
+Missing observations or interruption also kill the owned group. Four tests
+cover refusal, child exit status, low-memory cancellation without touching
+an unrelated process, and failed observation cleanup. This is an additional
+early-stop mechanism, not an atomic reservation or proof that the immutable
+32GiB native host floor can never be crossed between samples.
+
+The pinned Inkling implementation builds audio/vision towers only when
+enable_multimodal is true; the current text-only launch omits that option.
+Source: https://github.com/sgl-project/sglang/blob/a74222ef6e690f851e2e4ff1c0be7dc1357be313/python/sglang/srt/models/inkling.py#L1036
