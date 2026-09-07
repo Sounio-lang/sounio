@@ -36,3 +36,9 @@ runtime qualification, account for the unchanged 32768 MiB host floor,
 inspect the pinned loader's transient allocations, and cap cache tokens for
 the 16384-context/concurrency-one smoke. A successful paper budget or the
 upstream two-Spark recipe is not local serving acceptance.
+
+The next serving canary explicitly caps max-total-tokens at 16384, matching
+the context-length and single-request smoke. This cap limits cache sizing;
+it does not reserve host memory or prove the model fits. TP2 qualification
+now emits post-collective CUDA free/total and allocator counters alongside
+host MemTotal/MemAvailable, all in bytes and bound to the Slurm job and rank.

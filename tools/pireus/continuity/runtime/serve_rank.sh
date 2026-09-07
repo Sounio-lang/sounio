@@ -23,4 +23,4 @@ exec /scratch/pireus/runtime/run_in_container.sh python3 -m sglang.launch_server
   --mamba-radix-cache-strategy extra_buffer --mem-fraction-static 0.85 \
   --swa-full-tokens-ratio 0.1 --mamba-full-memory-ratio 0.1 \
   --disable-prefill-cuda-graph --reasoning-parser inkling --tool-call-parser inkling \
-  --context-length 16384 --max-running-requests 1 --host 0.0.0.0 --port 30000
+  --context-length 16384 --max-total-tokens 16384 --max-running-requests 1 --host 0.0.0.0 --port 30000
