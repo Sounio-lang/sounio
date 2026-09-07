@@ -215,3 +215,25 @@ stalled events on its serving OSDs. Closed template0 content parity and
 cleanup passed. The controller and failure fixtures are described in
 PROTECTED_DATABASE_CUTOVER.md. Production migration has not yet run at
 this checkpoint; source authority and the900-second ceiling remain intact.
+
+## Accepted production migration, 2026-09-07
+
+The protected cutover completed with TARGET authority at 07:32:19 UTC.
+Endpoint and scheduler activation took 559.823 seconds (9m19.82s), within
+the authorized 900-second limit. All 189 tables matched; 83 sequences,
+schemas, ACLs, roles and database properties passed final comparison.
+Normal WAL/durability settings and rolled-back extension controls passed.
+The original 5433 endpoint now forwards to the R770 target. Normal-client
+activation, IPv4/IPv6 SSL behavior, target cron and protected-host preflight
+passed. The old source container is stopped; its original data directory
+and private final backups are retained. The temporary maintenance client
+was removed after UID verification.
+
+The destination pool had no fresh slow/stalled events during final migration.
+Global OSD0 repair remains open. Do not rerun destructive rehearsal or
+bootstrap manifests on the authoritative target. Stale-source rollback is
+refused after TARGET; reversal requires a new protected reverse migration.
+
+Evidence: ../validation/relocation-production-20260907/summary.json.
+Inkling serving and eight actual model proposals still require fresh memory
+qualification and execution; database migration is not model acceptance.
