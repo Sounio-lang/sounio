@@ -4759,7 +4759,10 @@ fn lowerer_lower_fn_params_mut(
                 // f64 params at kind 0 so `x as i64` bitcasts (IEEE payload) instead of
                 // truncating. Bind any word-size integer (i32/i64/u64/…) → 1 so
                 // println of int params stays on print_int (i64-only left i32 at 0).
-                if lower_type_expr_is_f64(&(*list).head.ty) {
+                if lower_type_expr_is_wide_float(&(*list).head.ty) {
+                    // V0-E.4.1: do not mark as f64 (kind 2) — that is the greenwash path.
+                    lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 5)
+                } else if lower_type_expr_is_f64(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 2)
                 } else if lower_type_expr_fn_returns_f64(&(*list).head.ty) {
                     lowerer_mark_local_fn_ptr_ret_float_mut(lo, (*list).head.name)
@@ -5449,6 +5452,31 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
     let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
     is_64 || is_32
+}
+
+// V0-E.4.1: f128/f256 must NOT ride the f64 scalar_kind=2 path (lean_single
+// greenwash). scalar_kind=5 marks wide-float locals/params so binary lower
+// can fail-closed until softfloat language lowering lands.
+fn lower_type_expr_is_wide_float(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    let seg = (*te).path.segments
+    if seg.head_len != 4 { return false }
+    if seg.head_buf[0] as i64 != 102 { return false } // f
+    let c1 = seg.head_buf[1] as i64
+    let c2 = seg.head_buf[2] as i64
+    let c3 = seg.head_buf[3] as i64
+    // f128
+    if c1 == 49 && c2 == 50 && c3 == 56 { return true }
+    // f256
+    if c1 == 50 && c2 == 53 && c3 == 54 { return true }
+    false
+}
+
+fn lower_opt_type_is_wide_float(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_wide_float(&(*te)),
+        None => false,
+    }
 }
 
 fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
@@ -13399,6 +13427,30 @@ impl Lowerer {
         }
     }
 
+    fn opt_expr_result_is_wide_float_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_result_is_wide_float_ref(&(*expr)),
+            _ => false,
+        }
+    }
+
+    fn expr_result_is_wide_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 5
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_opt_type_is_wide_float(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.opt_expr_result_is_wide_float_ref(&(*e).left)
+                || self.opt_expr_result_is_wide_float_ref(&(*e).right)
+        }
+        if (*e).kind == ExprKind::ExprUnary {
+            return self.opt_expr_result_is_wide_float_ref(&(*e).left)
+        }
+        false
+    }
+
     // String-ness of an expression result, for routing `+`/`++` on strings to the
     // str_concat builtin (string locals are tracked with scalar_kind 3) AND for
     // routing `s[i]` to raw-byte IndexGet (label_id=3) instead of the GC-handle
@@ -16562,6 +16614,15 @@ impl Lowerer {
             }
             _ => {}
         }
+        // V0-E.4.1: annotated f128/f256 locals are scalar_kind=5 (not f64=2).
+        match s.ty {
+            Some(ann_ty_wide) => {
+                if lower_type_expr_is_wide_float(&(*ann_ty_wide)) {
+                    lo = lo.bind_local_scalar_kind(s.name, 5)
+                }
+            }
+            _ => {}
+        }
         // Annotation TypeKnowledge[T] → bind local as Knowledge for FO GUM field/variance paths
         match s.ty {
             Some(ann_ty) => {
@@ -19552,6 +19613,13 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
+        if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
+            print("error: f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)\n")
+            var lo_refuse = self
+            lowerer_mark_hard_error(&! lo_refuse)
+            return (lo_refuse, 0)
+        }
         let wide_bits = self.expr_wide_bits_ref(e)
         let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
         let pair_l = self.lower_opt_expr_ref(&e.left)
@@ -20318,6 +20386,13 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // V0-E.4.1 fail-closed: unary on f128/f256 must not use f64 neg.
+        if self.opt_expr_result_is_wide_float_ref(&e.left) {
+            print("error: f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)\n")
+            var lo_refuse = self
+            lowerer_mark_hard_error(&! lo_refuse)
+            return (lo_refuse, 0)
+        }
         // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
         // ref_array_* then does load[slot] → resolve_handle → +object_header.
         // Stash (bss_addr - header) in the slot so the +header step lands on the
