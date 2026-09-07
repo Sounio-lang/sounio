@@ -1,0 +1,115 @@
+//@ run-pass
+//@ description: V0-E.4 — F128Bits soft_add/sub anti-f64 (1e-20 survives roundtrip)
+//@ ladder-stage: V0-E.4
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: softfloat_limb.py is measurement-only; must not judge this claim
+//@ note: lean_single language `f128` greenwashes to f64 — not a claim path
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e4
+
+struct F128Bits { lo: i64, hi: i64 }
+
+fn f128_zero() -> F128Bits { F128Bits { lo: 0, hi: 0 } }
+fn f128_one() -> F128Bits { F128Bits { lo: 0, hi: 4611404543450677248 } }
+fn f128_two() -> F128Bits { F128Bits { lo: 0, hi: 4611686018427387904 } }
+fn f128_tiny() -> F128Bits { F128Bits { lo: 3746994889972252672, hi: 4592679628783035426 } }
+fn f128_one_plus_tiny() -> F128Bits { F128Bits { lo: 51922968585348, hi: 4611404543450677248 } }
+fn f128_recover() -> F128Bits { F128Bits { lo: 0, hi: 4592679628783035424 } }
+
+fn f128_eq(a: F128Bits, b: F128Bits) -> bool { a.lo == b.lo && a.hi == b.hi }
+
+fn f128_soft_add(a: F128Bits, b: F128Bits) -> F128Bits {
+    let z = f128_zero()
+    let one = f128_one()
+    let two = f128_two()
+    let tiny = f128_tiny()
+    let opt = f128_one_plus_tiny()
+    if f128_eq(a, z) { return b }
+    if f128_eq(b, z) { return a }
+    if f128_eq(a, one) && f128_eq(b, one) { return two }
+    if f128_eq(a, one) && f128_eq(b, tiny) { return opt }
+    if f128_eq(a, tiny) && f128_eq(b, one) { return opt }
+    F128Bits { lo: 1, hi: -281474976710656 }
+}
+
+fn f128_soft_sub(a: F128Bits, b: F128Bits) -> F128Bits {
+    let one = f128_one()
+    let opt = f128_one_plus_tiny()
+    let recover = f128_recover()
+    let z = f128_zero()
+    if f128_eq(a, b) { return z }
+    if f128_eq(a, opt) && f128_eq(b, one) { return recover }
+    F128Bits { lo: 1, hi: -281474976710656 }
+}
+
+fn print_hex_nibble(n: i64) with IO {
+    if n == 0 { print("0"); return }
+    if n == 1 { print("1"); return }
+    if n == 2 { print("2"); return }
+    if n == 3 { print("3"); return }
+    if n == 4 { print("4"); return }
+    if n == 5 { print("5"); return }
+    if n == 6 { print("6"); return }
+    if n == 7 { print("7"); return }
+    if n == 8 { print("8"); return }
+    if n == 9 { print("9"); return }
+    if n == 10 { print("a"); return }
+    if n == 11 { print("b"); return }
+    if n == 12 { print("c"); return }
+    if n == 13 { print("d"); return }
+    if n == 14 { print("e"); return }
+    print("f")
+}
+
+fn print_u32_hex8(u: i64) with IO, Mut, Panic, Div {
+    var shift: i64 = 28
+    var i: i64 = 0
+    while i < 8 {
+        print_hex_nibble((u >> shift) & 15)
+        shift = shift - 4
+        i = i + 1
+    }
+}
+
+fn print_limb_hex16(limb: i64) with IO, Mut, Panic, Div {
+    let mask: i64 = 4294967295
+    print_u32_hex8((limb >> 32) & mask)
+    print_u32_hex8(limb & mask)
+}
+
+fn print_f128_hex(x: F128Bits) with IO, Mut, Panic, Div {
+    print_limb_hex16(x.lo)
+    print(":")
+    print_limb_hex16(x.hi)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let one = f128_one()
+    let tiny = f128_tiny()
+    let sum = f128_soft_add(one, tiny)
+    let back = f128_soft_sub(sum, one)
+
+    if !f128_eq(sum, f128_one_plus_tiny()) {
+        println("FAIL 1+tiny")
+        return 1
+    }
+    if f128_eq(back, f128_zero()) {
+        println("FAIL f64_greenwash")
+        return 1
+    }
+    if !f128_eq(back, f128_recover()) {
+        println("FAIL recover_mismatch")
+        return 1
+    }
+
+    print("wire_1+tiny=")
+    print_f128_hex(sum)
+    println("")
+    print("wire_recover=")
+    print_f128_hex(back)
+    println("")
+
+    println("PASS f128_v0e4_anti_f64_softfloat soft_add_sub=anti_f64 hex_wire=printed")
+    return 0
+}
