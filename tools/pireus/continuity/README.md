@@ -206,3 +206,21 @@ accepts8 outputs with4 distinct normalized plans. Material job11941 passes all
 decisions are NO_GAIN. Layout conversion is outside this resident-layout-kernel
 timing scope. No scientific novelty, promotion, general FP proof, HTTP serving,
 general16K inference or full pilot acceptance follows from this result.
+
+## Continuous custody verification
+
+.github/workflows/pireus-continuity.yml runs current transport controls,
+preflight binding controls and archive corruption controls on pull requests.
+ci/verify_archive.py verifies204 archived artifacts, the exact decoded text,
+paired token responses and105 source dependencies against Git history.
+It is archive/source custody validation; it does not rerun inference, numerical
+parity or timing and cannot grant fresh hardware acceptance.
+
+This audit found one originally untracked dependency: runtime/test_preflight_binding.py
+was accidentally matched by the broad test_*_bin* ignore pattern. Its existing
+bytes exactly match the frozen manifest hash and were recovered in9680b520d2.
+ci/source-recoveries.json binds that recovery explicitly; the original run
+manifest/receipts remain unchanged, and source_snapshot_complete_at_original_commit
+remains false in the custody report. Missing/forged recovery evidence refuses.
+The original CI failures (Contracts and Full Test Suite) remain independent
+integration obligations; this workflow does not suppress or reclassify them.
