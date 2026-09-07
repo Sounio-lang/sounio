@@ -34,11 +34,20 @@ checkpoint/runtime and32GiB floor including loading peak and caches, then
 actual TP2 serving and generation. Do not accept serialized-half arithmetic
 or successful NCCL as serving evidence.
 
-Next action: establish viable capacity while preserving the protected
-database, or prove a supported runtime memory reduction with the exact
-checkpoint. Maintenance or relocation of the protected service requires a
-concrete reviewable change and explicit authorization. Do not lower the
-floor or silently change the model/quantization.
+Next action: complete the bounded post-migration serving canary against the
+exact checkpoint and runtime, measuring loading peak and cache residency.
+Explicit authorization for the protected migration and storage repair was
+provided and used; no renewed permission request is needed. Do not lower
+the floor or silently change the model/quantization.
+
+Update 2026-09-07: production database relocation passed all final gates in
+559.823 seconds, with TARGET authority and the original source data retained.
+Fresh exclusive TP2 job11877 passed both ranks. Post-collective host available
+memory was113.110/113.050 GiB (3c59/8e54), so the historical negative arithmetic
+above no longer describes the live baseline. Actual serving still must pass.
+The serving rank guardian samples every50ms and stops its owned process group
+below36GiB, while the native32GiB floor remains unchanged. This early-stop
+mechanism does not make transient allocation atomic.
 
 Independent progress: deterministic-live-baseline-20260907 completed native
 admission, materialization, pair parity and30-block paired timing. All8
