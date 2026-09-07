@@ -61,7 +61,8 @@ ART_DIR="$ROOT_DIR/artifacts/gates"
 mkdir -p "$ART_DIR"
 ART="$ART_DIR/witness_declares_its_sabotage.json"
 
-mapfile -t ALL_WITNESSES < <(find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort)
+# Tracked witnesses only — Finder "foo 2.sio" duplicates must not inflate the census.
+mapfile -t ALL_WITNESSES < <(git -C "$ROOT_DIR" ls-files 'tests/run-pass/*.sio' | LC_ALL=C sort)
 
 # Map declared witnesses quickly without spawning thousands of separate subshells.
 declare -A DECL_MAP=()
