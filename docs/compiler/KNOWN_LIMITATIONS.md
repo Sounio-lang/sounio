@@ -750,13 +750,15 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-E.1:** deterministic print oracle + `stdlib/math/wide_float.sio`
   limb surface green (`--stage v0e`).
 - **Madaros V0-E.2:** same-format source `f128`/`f256` arithmetic typechecks
-  (`--stage v0e2`); Madaros-run softfloat lowering, builtin `print_f128`, and
-  GUM/`Knowledge`/`MeasuredF256` remain deferred (V0-E.3).
+  (`--stage v0e2`).
+- **Madaros V0-E.3/E.4:** seed-run `F128Bits` softfloat cases including anti-f64
+  (`--stage v0e3` / `--stage v0e4`); claim clock `sounio_native_expected`.
+  Madaros-run language softfloat lowering, builtin `print_f128`, and
+  GUM/`Knowledge`/`MeasuredF256` remain deferred.
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
-- **lean_single** history: earlier measurements showed silent f64 under the name
-  `f128` (#2387); the seed-side fix is tracked separately from this Madaros V0-B
-  landing. Repro probe: `examples/numerics/f128_is_f64_probe.sio`.
+- **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
+  control); not a claim path. Repro: `examples/numerics/f128_is_f64_probe.sio`.
 - Consequence for `benchmarks/chemistry/RESULTS.md` §7.7 remains blocked on a
   genuine reference integration path (V0-D+), not on V0-B literals alone.
 
