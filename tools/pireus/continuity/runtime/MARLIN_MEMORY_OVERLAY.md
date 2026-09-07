@@ -33,3 +33,9 @@ not part of the production overlay. Jobs11880 and11881 remain failed evidence.
 
 The full model still requires a fresh guarded load, cache allocation and
 generation. No serving or eight-proposal acceptance follows from this layer test.
+
+The overlay is staged in the Slurm user-owned /scratch/pireus/cache;
+the root-owned runtime-tools directory remains read-only to the job.
+Job11884 verified the mounted patched source hash on both nodes while the
+other inspected source hashes stayed unchanged. Job11883 was cancelled
+during checkpoint hashing to correct this installation-path issue.

@@ -13,7 +13,7 @@ root = Path(importlib.util.find_spec("sglang").origin).parent
 source = root / "srt/layers/quantization/modelopt_quant.py"
 changed = patched_source(source.read_bytes())
 assert hashlib.sha256(changed).hexdigest() == PATCHED_SHA256
-out = Path("/scratch/pireus/runtime") / ("modelopt-" + PATCHED_SHA256 + ".py")
+out = Path("/scratch/pireus/cache") / ("modelopt-" + PATCHED_SHA256 + ".py")
 if out.exists():
     assert not out.is_symlink() and out.read_bytes() == changed
 else:

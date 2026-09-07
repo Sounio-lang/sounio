@@ -10,7 +10,7 @@ MODEL="/scratch/pireus/models/Inkling-Small-NVFP4/"+REVISION
 SIF_SHA="3dbfccad3355b27d8a09bd4c0c5895d02a43e1b64203960905b810bbb6bccbe3"
 def kube(*args):return subprocess.check_output(["kubectl",*args],text=True)
 def main():
- ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify","qualify-model","inspect-runtime","qualify-marlin","serve"]);ap.add_argument("--minutes",type=int,default=30);args=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument("mode",choices=["qualify","qualify-model","inspect-runtime","qualify-marlin","qualify-overlay","serve"]);ap.add_argument("--minutes",type=int,default=30);args=ap.parse_args()
  if not os.environ.get("TMUX"):raise SystemExit("Use remote tmux for a disconnect-safe allocation")
  if not 1<=args.minutes<=240:raise SystemExit("minutes must be 1..240")
  if kube("-n","beagle","get","lease","pireus-spark-pair","-o","jsonpath={.spec.holderIdentity}")!="slurm-owned":
@@ -35,6 +35,8 @@ def main():
  check='echo "'+SIF_SHA+'  /scratch/pireus/images/inkling-spark.sif" | sha256sum -c -\n'
  if args.mode=="qualify":
   command="exec /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/qualify_tp2.py"
+ elif args.mode=="qualify-overlay":
+  command="PIREUS_MARLIN_OVERLAY=0 /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/install_marlin_overlay.py\nPIREUS_MARLIN_OVERLAY=1 exec /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/inspect_runtime.py"
  elif args.mode=="qualify-marlin":
   command="exec python3 /scratch/pireus/runtime/memory_guard.py -- /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/qualify_marlin_placeholders.py"
  elif args.mode=="inspect-runtime":

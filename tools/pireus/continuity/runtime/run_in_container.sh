@@ -7,7 +7,7 @@ export APPTAINER_CACHEDIR=/tmp/pireus-apptainer-cache
 export APPTAINER_TMPDIR=/tmp
 overlay_args=()
 if [[ "${PIREUS_MARLIN_OVERLAY:-0}" == "1" ]]; then
-  overlay=/scratch/pireus/runtime/modelopt-26b999da4d72fd238c32331782f72b6aa110165adec96fb8885f4252a5a7099c.py
+  overlay=/scratch/pireus/cache/modelopt-26b999da4d72fd238c32331782f72b6aa110165adec96fb8885f4252a5a7099c.py
   echo "26b999da4d72fd238c32331782f72b6aa110165adec96fb8885f4252a5a7099c  $overlay" | sha256sum -c -
   overlay_args=(--bind "$overlay:/sgl-workspace/sglang/python/sglang/srt/layers/quantization/modelopt_quant.py:ro")
 fi
