@@ -142,9 +142,11 @@ Madaros accepts `f128`/`f256` type spellings and decimal/hex/binary literals thr
 `souc check` (gate receipt `f128_f256_v0b_literals … parser=E249_lifted` from
 `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b`). Arithmetic still fails
 closed (`error[E004]`), casts with `error[E248]`, and implicit widen/narrow with
-type mismatch — pinned by the V0-B negative fixtures. Limb-identity / softfloat
-ops remain V0-D. Compiler-owned descriptors and the V0-C wire codec stay
-scaffolding only. Do not claim “Sounio supports `f128` arithmetic” from V0-B alone.
+type mismatch — pinned by the V0-B negative fixtures. Compiler-owned limb
+softfloat (V0-D) is green on the MPFR hard corpus via
+`scripts/dev/ws_g_v0d_softfloat_corpus_runner.py`; Madaros **source** `+`/`-` on
+`f128`/`f256` remains refused until a later surface stage. Do not claim
+“Sounio supports user-visible `f128` arithmetic” from V0-B/V0-D alone.
 
 **Unary `~` is accepted by `lean_single` and refused by Madaros (2026-08-24, OPEN).**
 `tests/run-pass/bitwise_not_bootstrap_regression.sio` compiles and returns 0
@@ -743,8 +745,8 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-B:** source type spellings + literals through `check` are green
   (`madaros_f128_f256_ladder_gate.sh --stage v0b`). Arithmetic/casts/implicit
   conversion remain rejected (E004 / E248 / type mismatch).
-- **Madaros V0-D** (softfloat ops + limb identity) and **print** paths are still
-  out of scope.
+- **Madaros V0-D:** limb softfloat bit-identity vs `tests/vectors/f128_f256_v0d/`
+  is green (`--stage v0d`); source arithmetic and **print** remain out of scope.
 - **lean_single** history: earlier measurements showed silent f64 under the name
   `f128` (#2387); the seed-side fix is tracked separately from this Madaros V0-B
   landing. Repro probe: `examples/numerics/f128_is_f64_probe.sio`.
