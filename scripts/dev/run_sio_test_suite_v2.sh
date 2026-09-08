@@ -519,8 +519,12 @@ run_test() {
                 # Keep the numeric verdict AND a snippet of compiler/program
                 # output. "run exited 1" alone hid compile-fail vs main().
                 # No pipeline: pipefail + head -c would fail on long output.
-                snippet="${output//$'\n'/ | }"
-                snippet="${snippet:0:160}"
+                raw="${output//$'\n'/ | }"
+                if ((${#raw} > 160)); then
+                    snippet="${raw: -160}"
+                else
+                    snippet="$raw"
+                fi
                 test_output="run exited $exit_code"
                 if [[ -n "$snippet" ]]; then
                     test_output="$test_output | $snippet"

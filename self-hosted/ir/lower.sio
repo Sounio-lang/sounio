@@ -19709,20 +19709,22 @@ impl Lowerer {
     }
 
     fn lower_f128_emit_limbs(self, lo_bits: i64, hi_bits: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.fresh_wide_reg(2)
-        var lo = pair.0
-        let dst = pair.1
-        lo = lo.emit(ir_load_imm(dst, lo_bits))
-        lo = lo.emit(ir_load_imm(dst + 1, hi_bits))
-        (lo, dst)
+        let pair_l = self.fresh_reg()
+        var lo = pair_l.0
+        let lo_reg = pair_l.1
+        lo = lo.emit(ir_load_imm(lo_reg, lo_bits))
+        let pair_h = lo.fresh_reg()
+        lo = pair_h.0
+        let hi_reg = pair_h.1
+        lo = lo.emit(ir_load_imm(hi_reg, hi_bits))
+        lo.lower_f128_materialize_bits(lo_reg, hi_reg)
     }
 
     fn lower_f128_copy_limbs(self, src: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.fresh_wide_reg(2)
+        let pair = self.fresh_reg()
         var lo = pair.0
         let dst = pair.1
         lo = lo.emit(ir_copy(dst, src))
-        lo = lo.emit(ir_copy(dst + 1, src + 1))
         (lo, dst)
     }
 
@@ -19737,34 +19739,23 @@ impl Lowerer {
     }
 
     fn lower_f128_call_soft_limbs(self, add_not_sub: bool, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        // V0-E.5 Madaros-run proved f128_bits_soft_add(F128Bits, F128Bits) + .lo/.hi.
-        // The first V0-E.5.1 attempt injected ir_call of four i64s and field_get on
-        // the return handle; Current-Source compiled but the language smoke exited 1.
+        // Language f128 values are F128Bits handles (same as V0-E.5). Current-Source
+        // exit 11: source-level f128_bits_soft_add in the same main passed, but
+        // 2-limb dest/dest+1 + to_lo/to_hi missed the payload.
         var lo = self
         let fname = if add_not_sub { make_name("f128_bits_soft_add") } else { make_name("f128_bits_soft_sub") }
         let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, fname)
         if fn_id < 0 {
             return lower_f128_fail(lo, "language f128 add/sub requires `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub}` (V0-E.5.1)")
         }
-        let pair_a = lo.lower_f128_materialize_bits(a, a + 1)
-        lo = pair_a.0
-        let a_bits = pair_a.1
-        let pair_b = lo.lower_f128_materialize_bits(b, b + 1)
-        lo = pair_b.0
-        let b_bits = pair_b.1
-        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a_bits, Some(Box::new(ir_reg_list_single(b_bits))))))
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a, Some(Box::new(ir_reg_list_single(b))))))
         let pair_call = lo.ir_lower_prepend_validated_arg(fn_id, args, 2)
         lo = pair_call.lo
         lo.pending_variance_reg = -1
         let pair_s = lo.fresh_reg()
         lo = pair_s.0
-        let struct_dst = pair_s.1
-        lo = lo.emit(ir_call(struct_dst, fn_id, fname, pair_call.args, pair_call.argc))
-        let pair_w = lo.fresh_wide_reg(2)
-        lo = pair_w.0
-        let dst = pair_w.1
-        lo = lo.emit(ir_field_get(dst, struct_dst, 0, make_name("lo")))
-        lo = lo.emit(ir_field_get(dst + 1, struct_dst, 1, make_name("hi")))
+        let dst = pair_s.1
+        lo = lo.emit(ir_call(dst, fn_id, fname, pair_call.args, pair_call.argc))
         (lo, dst)
     }
 
@@ -19780,7 +19771,7 @@ impl Lowerer {
             if self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128 {
                 return (self, self.lookup_local((*e).name))
             }
-            return lower_f128_fail(self, "f128 operand is not a 2-limb local (params/f256 stay V0-E.4.1 fail-closed)")
+            return lower_f128_fail(self, "f128 operand is not a language f128 local (params/f256 stay V0-E.4.1 fail-closed)")
         }
         if (*e).kind == ExprKind::ExprBinary {
             return self.lower_f128_binary_ref(e)
@@ -19832,10 +19823,17 @@ impl Lowerer {
             match e.args {
                 Some(args) => {
                     let pair_x = self.lower_f128_value_ref(&(*args).head)
+                    var lo = pair_x.0
+                    let handle = pair_x.1
+                    let pair_d = lo.fresh_reg()
+                    lo = pair_d.0
+                    let dst = pair_d.1
                     if ir_name_eq(callee_name, make_name("f128_to_lo")) {
-                        return (pair_x.0, pair_x.1)
+                        lo = lo.emit(ir_field_get(dst, handle, 0, make_name("lo")))
+                    } else {
+                        lo = lo.emit(ir_field_get(dst, handle, 1, make_name("hi")))
                     }
-                    return (pair_x.0, pair_x.1 + 1)
+                    return (lo, dst)
                 }
                 None => {}
             }
@@ -19845,12 +19843,7 @@ impl Lowerer {
     }
 
     fn lower_f128_emit_limbs_from_regs(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.fresh_wide_reg(2)
-        var lo = pair.0
-        let dst = pair.1
-        lo = lo.emit(ir_copy(dst, lo_reg))
-        lo = lo.emit(ir_copy(dst + 1, hi_reg))
-        (lo, dst)
+        self.lower_f128_materialize_bits(lo_reg, hi_reg)
     }
 
     fn lower_let_stmt_f128_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -19867,6 +19860,7 @@ impl Lowerer {
                 lo = lo.bind_local(s.name, dest, is_mut)
                 lo = lo.bind_local_scalar_kind(s.name, 5)
                 lo = lo.bind_local_wide_type(s.name, 128, 0)
+                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"))
                 (lo, dest)
             }
             None => lower_f128_fail(self, "f128 let requires an initializer (V0-E.5.1)"),
