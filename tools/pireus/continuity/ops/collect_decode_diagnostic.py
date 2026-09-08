@@ -59,7 +59,7 @@ def collect(attempt, start_path, output):
                 raise ValueError("receipt job/input mismatch")
             if name.endswith("-complete.json"):
                 complete = row
-                if str(row["rank"]) != str(rank) or row["helper_sha256"] != manifest["probe_sha256"]:
+                if str(row["rank"]) != str(rank) or row["helper_sha256"] != (manifest.get("runtime_sha256") or manifest["probe_sha256"]):
                     raise ValueError("completion runtime/rank mismatch")
             else:
                 i = row["index"]
@@ -97,7 +97,8 @@ def collect(attempt, start_path, output):
                   output_tokens=sum(len(all_receipts[0][i][0]["output_ids"]) for i in common),
                   issues=issues, pilot_acceptance=False, performance_evidence=False,
                   root_cause_established=False, source_commit=manifest["source_commit"],
-                  runtime_probe_sha256=manifest["probe_sha256"],
+                  runtime_sha256=(manifest.get("runtime_sha256") or manifest["probe_sha256"]),
+                  instrumentation=manifest.get("instrumentation", True),
                   input_sha256=manifest["input_sha256"],
                   file_hashes={str(p.relative_to(output)): digest(p.read_bytes())
                                for p in output.rglob("*") if p.is_file()})

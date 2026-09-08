@@ -15,12 +15,15 @@ def raw(value):
 
 
 class CollectionControls(unittest.TestCase):
-    def exercise(self, state="COMPLETED", exitcode="0:0", partial=False, mismatch=False):
+    def exercise(self, state="COMPLETED", exitcode="0:0", partial=False, mismatch=False, uninstrumented=False):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             attempt = root / "attempt"
             attempt.mkdir()
             manifest = dict(input_sha256="input", probe_sha256="probe", source_commit="source")
+            if uninstrumented:
+                manifest["runtime_sha256"] = manifest.pop("probe_sha256")
+                manifest["instrumentation"] = False
             m = raw(manifest)
             (attempt / "manifest.json").write_bytes(m)
             log = b"preserved diagnostic log\n"
@@ -68,6 +71,13 @@ class CollectionControls(unittest.TestCase):
         self.assertEqual(r["paired_responses"], 32)
         self.assertFalse(r["pilot_acceptance"])
         self.assertFalse(r["performance_evidence"])
+
+    def test_uninstrumented_control_preserves_identity_and_no_promotion(self):
+        r = self.exercise(uninstrumented=True)
+        self.assertTrue(r["diagnostic_batch_complete"])
+        self.assertFalse(r["instrumentation"])
+        self.assertEqual(r["runtime_sha256"], "probe")
+        self.assertFalse(r["pilot_acceptance"])
 
     def test_partial_and_mismatched_receipts_do_not_qualify(self):
         for kwargs in (dict(partial=True), dict(mismatch=True)):
