@@ -516,7 +516,15 @@ run_test() {
             if [[ $exit_code -eq 124 ]]; then
                 test_output="run timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
+                # Keep the numeric verdict AND a snippet of compiler/program
+                # output. "run exited 1" alone hid compile-fail vs main().
+                # No pipeline: pipefail + head -c would fail on long output.
+                snippet="${output//$'\n'/ | }"
+                snippet="${snippet:0:160}"
                 test_output="run exited $exit_code"
+                if [[ -n "$snippet" ]]; then
+                    test_output="$test_output | $snippet"
+                fi
             fi
         fi
         

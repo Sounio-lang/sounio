@@ -81,6 +81,7 @@ if grep -Fq 'use math::softfloat_f128::{' "$SMOKE" \
   && grep -Fq 'f128_bits_soft_add' "$SMOKE" \
   && grep -Fq 'f128_bits_soft_sub' "$SMOKE" \
   && grep -Fq 'let one: f128' "$SMOKE" \
+  && grep -Fq 'v0e51_main_entered' "$SMOKE" \
   && grep -Fq 'f128_from_limbs' "$SMOKE" \
   && grep -Fq 'one + tiny' "$SMOKE" \
   && grep -Fq 'one_plus_tiny - one' "$SMOKE" \
