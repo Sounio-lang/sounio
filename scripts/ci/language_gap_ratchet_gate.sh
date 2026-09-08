@@ -26,6 +26,7 @@ expect() { # label, want, got
 rc() { "$@" >/dev/null 2>&1; echo $?; }
 UNITS=tests/known-gaps/units
 NUM=tests/known-gaps/numerics
+LANG_GAPS=tests/known-gaps/language
 
 # #2387 -- f128 is f64 on lean_single (53 halvings until 1+e == 1); refused by Madaros
 h=$(lean run examples/numerics/f128_is_f64_probe.sio 2>/dev/null | tail -1 | tr -d '[:space:]')
@@ -58,6 +59,20 @@ done
 expect "println(inf) hangs on lean_single" "124" "$(timeout 20 env SOUNIO_SOUC_ENGINE=lean_single "$SOUC" run $NUM/print_inf_never_returns.sio >/dev/null 2>&1; echo $?)"
 expect "println(inf) on Madaros" "9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_inf_never_returns.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
 expect "println(nan) on Madaros" "-9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_nan_is_garbage.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
+
+# `&Seq<T>` as a PARAMETER does not deliver the Seq (measured 2026-09-06, the
+# residual left open by BLK-20260904). The callee sees the address of the handle
+# instead of the handle: len -> a fixed static address (4201410), get(0) -> a
+# per-run stack address, and a loop over both segfaults, while the same shapes
+# taking Seq by value are correct. The witness compares against the true length
+# rather than any literal, because one of the two wrong values moves per run.
+# `souc check` accepts it, so this is wrong code rather than a rejection, and it
+# is why every signature migrated in #2413 takes Seq by value.
+#
+# got=1 means the gap is present -- either the wrong value or a crash. It flips
+# to 0 only when the parameter path actually delivers the handle.
+seqref=$(timeout 120 "$SOUC" run $LANG_GAPS/seq_ref_param_loses_handle.sio 2>/dev/null | grep -E '^[01]$' | tail -1)
+expect "&Seq<T> parameter loses the handle (Madaros)" "1" "$([[ "$seqref" == "0" ]] && echo 0 || echo 1)"
 
 echo "[ratchet] $((N-FAILS))/$N witnesses hold the measured gap"
 [[ $FAILS -eq 0 ]]

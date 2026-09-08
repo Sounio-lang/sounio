@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20
 
 ```text
 Blocker-ID: BLK-20260903-specializer-nested-targ-collision
-Status: open
+Status: closed
 Severity: B1
 Class: compiler-semantics
 Owner: lang-limits-20260903
@@ -26,12 +26,16 @@ Observed: two instantiations of one generic template whose type arguments are
 Expected: distinct type arguments produce distinct instantiations, or the
   template is left unspecialized — never silently shared.
 Acceptance-Gate: scripts/ci/madaros_specializer_nested_targ_gate.sh
-Evidence-Level: E3
+Evidence-Level: E4
+Evidence: scripts/ci/madaros_specializer_nested_targ_gate.sh ->
+  MADAROS_SPECIALIZER_NESTED_TARG_GATE_OK, run 2026-09-06 against two engines
+  built from source: 39d72a37a9 (md5 54eccf3d), the merge of PR #2413, and
+  main 6b2b7ff9b0 (md5 593ab4c9), two merges later.
 Fallback-Path: fail closed — refuse the compilation when a poisoned template's
   instantiations carry non-scalar type arguments.
 LLM-Offload: not-required
-Next-Action: rebuild with the fail-closed refusal and re-run the generics
-  differential plus the repro.
+Next-Action: none. Residuals are not part of this blocker and are recorded
+  where they stay visible; see Closure.
 ```
 
 ## Context
@@ -176,3 +180,56 @@ build refuses it.
   `_Rb_` can still alias another instantiation's mangled name. Far narrower
   than dropping arguments entirely, but not zero.
 - Unrenderable shapes are refused, not supported.
+
+## Closure (2026-09-06)
+
+Closed as fixed, not waived. Landed in PR #2413, merged to `main` as
+`0f46f7c3dc`.
+
+What closes it: `scripts/ci/madaros_specializer_nested_targ_gate.sh`, the
+acceptance gate named in the record above, returns
+`MADAROS_SPECIALIZER_NESTED_TARG_GATE_OK`. Re-run on 2026-09-06 against a
+Madaros built from the merged commit `39d72a37a9`, engine md5 `54eccf3d`, with
+`SOUNIO_MADAROS_BIN` pinned and the worktree's own `stdlib/` — the two-variable
+mistake corrected earlier in this document.
+
+Re-run again against a Madaros built from `main` at `6b2b7ff9b0`, engine md5
+`593ab4c9`, two merges after this work landed: still green. That second run is
+the one that matters for a closure, because it says the fix survives on the
+branch it landed on rather than only on the commit that made it.
+
+The gate is load-bearing in both directions. It asserts the nested shape
+compiles and runs (`SPECIALIZER_NESTED_TARG_OK`) **and** that
+`tests/compile-fail/specializer_multi_instantiation_struct_args.sio` is refused
+with the diagnostic naming the constraint. That second half is the one that
+matters: on the compiler before this work the same file compiled `rc=0` and
+printed zeros, so a gate checking only the nested shape would have passed
+against the defect.
+
+The gate is wired into `.github/workflows/ci.yml` (job "Madaros Current-Source
+f64 Lowering"), so it runs on every PR reaching that job rather than only by
+hand.
+
+### Remote confirmation (E4)
+
+GitHub CI run 34030342462, on `main` at `6b2b7ff9b0`, job "Madaros
+Current-Source f64 Lowering": the gate step reports success on a runner-built
+compiler, with no local environment involved. That is what lifts this record
+from E3 (gate-bound) to E4 (remote-confirmed).
+
+The same job fails at a later, unrelated step — "Run changed Madaros tests with
+the current-source compiler", an intermittent exit 137 (killed) while rechecking
+a fixed list of 20 known-failure tests. It fails identically on `main` and has
+failed at other commits, so it is not attributable to this work and is not
+claimed fixed here.
+
+### What is NOT closed by this
+
+The residuals listed above stand exactly as written — multi-instantiation
+monomorphization, scalar-argument poisoning being measured rather than proved,
+marker aliasing, and unrenderable shapes being refused rather than supported.
+Closing this record closes the *collision*: two distinct instantiations no
+longer silently share one specialization. It does not add the capability.
+
+To re-open: `bash scripts/ci/madaros_specializer_nested_targ_gate.sh`. A
+non-zero exit or a missing sentinel re-opens this blocker.
