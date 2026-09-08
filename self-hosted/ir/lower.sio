@@ -5515,6 +5515,29 @@ fn lower_f128_fail(lo: Lowerer, msg: string) -> (Lowerer, i64) with Mut, Panic, 
     (lo2, 0)
 }
 
+// Import spellings may be Ident or Path. expr_to_callee_name_ref mangles a
+// two-segment path into Type_method, which would miss f128_to_lo intercept
+// and run the placeholder body (always 0) — FAIL 1+1 at runtime.
+fn lower_f128_expr_callee_short(callee: &Expr) -> Name with Mut, Panic, Div, Alloc {
+    if (*callee).kind == ExprKind::ExprIdent {
+        return (*callee).name
+    }
+    if (*callee).kind == ExprKind::ExprPath {
+        let last = ir_path_last_name((*callee).path)
+        if last.len > 0 {
+            return last
+        }
+        return ir_path_first_name((*callee).path)
+    }
+    if (*callee).kind == ExprKind::ExprFieldAccess {
+        return (*callee).name
+    }
+    if (*callee).kind == ExprKind::ExprMethodCall {
+        return (*callee).name
+    }
+    ir_empty_name()
+}
+
 fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeFn { return false }
     match (*te).inner {
@@ -13480,7 +13503,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(c) => {
-                    return ir_name_eq(self.expr_to_callee_name_ref(&(*c)), make_name("f128_from_limbs"))
+                    return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
                 }
                 None => {}
             }
@@ -14312,7 +14335,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(callee_expr) => {
-                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let callee_name = lower_f128_expr_callee_short(&(*callee_expr))
                     if ir_name_eq(callee_name, make_name("f128_from_limbs")) { return 5 }
                     if ir_name_eq(callee_name, make_name("f128_to_lo")) || ir_name_eq(callee_name, make_name("f128_to_hi")) {
                         return 1
@@ -19703,22 +19726,40 @@ impl Lowerer {
         (lo, dst)
     }
 
+    fn lower_f128_materialize_bits(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(2)))
+        lo = lo.emit(ir_field_set(dst, 0, lo_reg, make_name("lo")))
+        lo = lo.emit(ir_field_set(dst, 1, hi_reg, make_name("hi")))
+        (lo, dst)
+    }
+
     fn lower_f128_call_soft_limbs(self, add_not_sub: bool, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // V0-E.5 Madaros-run proved f128_bits_soft_add(F128Bits, F128Bits) + .lo/.hi.
+        // The first V0-E.5.1 attempt injected ir_call of four i64s and field_get on
+        // the return handle; Current-Source compiled but the language smoke exited 1.
         var lo = self
-        let fname = if add_not_sub { make_name("f128_soft_add_limbs") } else { make_name("f128_soft_sub_limbs") }
+        let fname = if add_not_sub { make_name("f128_bits_soft_add") } else { make_name("f128_bits_soft_sub") }
         let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, fname)
         if fn_id < 0 {
-            return lower_f128_fail(lo, "language f128 add/sub requires `use math::softfloat_f128::{f128_soft_add_limbs, f128_soft_sub_limbs}` (V0-E.5.1)")
+            return lower_f128_fail(lo, "language f128 add/sub requires `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub}` (V0-E.5.1)")
         }
-        let t3 = ir_reg_list_single(b + 1)
-        let t2 = ir_reg_list_cons(b, Some(Box::new(t3)))
-        let t1 = ir_reg_list_cons(a + 1, Some(Box::new(t2)))
-        let t0 = ir_reg_list_cons(a, Some(Box::new(t1)))
-        let args: Option<Box<IrRegList>> = Some(Box::new(t0))
+        let pair_a = lo.lower_f128_materialize_bits(a, a + 1)
+        lo = pair_a.0
+        let a_bits = pair_a.1
+        let pair_b = lo.lower_f128_materialize_bits(b, b + 1)
+        lo = pair_b.0
+        let b_bits = pair_b.1
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a_bits, Some(Box::new(ir_reg_list_single(b_bits))))))
+        let pair_call = lo.ir_lower_prepend_validated_arg(fn_id, args, 2)
+        lo = pair_call.lo
+        lo.pending_variance_reg = -1
         let pair_s = lo.fresh_reg()
         lo = pair_s.0
         let struct_dst = pair_s.1
-        lo = lo.emit(ir_call(struct_dst, fn_id, fname, args, 4))
+        lo = lo.emit(ir_call(struct_dst, fn_id, fname, pair_call.args, pair_call.argc))
         let pair_w = lo.fresh_wide_reg(2)
         lo = pair_w.0
         let dst = pair_w.1
@@ -19768,7 +19809,7 @@ impl Lowerer {
 
     fn lower_f128_intrinsic_call_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let callee_name = match e.left {
-            Some(c) => self.expr_to_callee_name_ref(&(*c)),
+            Some(c) => lower_f128_expr_callee_short(&(*c)),
             None => ir_empty_name(),
         }
         if ir_name_eq(callee_name, make_name("f128_from_limbs")) {
@@ -19845,7 +19886,7 @@ impl Lowerer {
                 if (*e).kind == ExprKind::ExprCall {
                     match (*e).left {
                         Some(c) => {
-                            return ir_name_eq(self.expr_to_callee_name_ref(&(*c)), make_name("f128_from_limbs"))
+                            return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
                         }
                         None => {}
                     }
@@ -20207,13 +20248,13 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        let callee_name = match e.left {
-            Some(c) => lo.expr_to_callee_name_ref(&(*c)),
+        let callee_short = match e.left {
+            Some(c) => lower_f128_expr_callee_short(&(*c)),
             None => ir_empty_name(),
         }
-        if ir_name_eq(callee_name, make_name("f128_from_limbs"))
-            || ir_name_eq(callee_name, make_name("f128_to_lo"))
-            || ir_name_eq(callee_name, make_name("f128_to_hi")) {
+        if ir_name_eq(callee_short, make_name("f128_from_limbs"))
+            || ir_name_eq(callee_short, make_name("f128_to_lo"))
+            || ir_name_eq(callee_short, make_name("f128_to_hi")) {
             return lo.lower_f128_intrinsic_call_ref(e)
         }
         if lo.call_expr_uses_special_a_ref(e) {

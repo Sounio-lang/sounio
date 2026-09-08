@@ -65,7 +65,9 @@ else
 fi
 
 if grep -Fq 'fn lower_f128_call_soft_limbs' self-hosted/ir/lower.sio \
+  && grep -Fq 'fn lower_f128_materialize_bits' self-hosted/ir/lower.sio \
   && grep -Fq 'fn lower_let_stmt_f128_ref' self-hosted/ir/lower.sio \
+  && grep -Fq 'f128_bits_soft_add' self-hosted/ir/lower.sio \
   && grep -Fq 'no f64 widen' self-hosted/ir/lower.sio; then
   note_pass "lower_f128_desugar_markers"
 else
@@ -76,6 +78,8 @@ SMOKE=tests/run-pass/f128_v0e51_language_add_sub.sio
 if grep -Fq 'use math::softfloat_f128::{' "$SMOKE" \
   && grep -Fq 'f128_soft_add_limbs' "$SMOKE" \
   && grep -Fq 'f128_soft_sub_limbs' "$SMOKE" \
+  && grep -Fq 'f128_bits_soft_add' "$SMOKE" \
+  && grep -Fq 'f128_bits_soft_sub' "$SMOKE" \
   && grep -Fq 'let one: f128' "$SMOKE" \
   && grep -Fq 'f128_from_limbs' "$SMOKE" \
   && grep -Fq 'one + tiny' "$SMOKE" \
