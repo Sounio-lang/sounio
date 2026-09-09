@@ -54,11 +54,15 @@ NATIVE_EXPECT=(
 )
 
 LOWER=self-hosted/ir/lower.sio
-if grep -Fq 'fn lower_f128_sig_record' "$LOWER" \
-  && grep -Fq 'fn lower_f128_sig_param_mask' "$LOWER" \
-  && grep -Fq 'fn lower_f128_sig_returns' "$LOWER" \
-  && grep -Fq 'LOWER_F128_ARG_MASK' "$LOWER" \
-  && grep -Fq 'fn lowerer_mark_local_wide_bits_mut' "$LOWER"; then
+# The semantic ABI rides on the callee's own IrFunction (f128_param_mask +
+# return_struct_name), never on a name-keyed side table or a global handoff.
+if grep -Fq 'pub f128_param_mask: i64' self-hosted/ir/ir.sio \
+  && grep -Fq 'fn lower_f128_param_mask_of' "$LOWER" \
+  && grep -Fq 'fn lower_callee_returns_f128_ref' "$LOWER" \
+  && grep -Fq 'fn lower_expr_args_masked_ref' "$LOWER" \
+  && grep -Fq 'fn lowerer_mark_local_wide_bits_mut' "$LOWER" \
+  && ! grep -Fq 'LOWER_F128_SIG_HASH' "$LOWER" \
+  && ! grep -Fq 'LOWER_F128_ARG_MASK' "$LOWER"; then
   note_pass "lower_f128_abi_markers"
 else
   note_fail "lower_f128_abi_markers_missing"
