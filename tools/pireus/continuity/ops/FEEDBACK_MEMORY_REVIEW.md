@@ -91,3 +91,33 @@ Any stopped diagnostic remains negative evidence with no automatic retry.
 
 Original pilot stays1/9 cells,32/288,0 gain-qualified;11956 is unchanged.
 M5/M6, V13/V14, native gain and HTTP/general16K acceptance are not promoted.
+
+## Diagnostic implementation receipt
+
+ops/build_lifecycle_diagnostic.py now generates a separate offline_generate.py
+from the exact fa4fb62f... source, embedding ops/lifecycle_observer.py.
+Artifact and identity: validation/lifecycle-diagnostic-20260909/manifest.json.
+The qualified runtime and all11969/11970 input files remain unchanged.
+
+Hooks cover extend entry, decode entry, every16 decode steps, decode exit,
+proposal save, cleanup before/after, and references released. Each hook records
+monotonic time, request/token index, process PSS/RSS, child RSS and CUDA
+allocated/reserved/lifetime peak counters. No counters are reset.
+A separate daemon observer samples host meminfo every1second, records the last
+runtime context, sample gaps and observation duration. It does not run in or
+change the50ms guardian. The journal is exclusively created per job/rank at
+/scratch/pireus/receipts/lifecycle-JOB-RANK.jsonl.
+Unavailable cgroup/device accounting is explicitly null and named unavailable.
+A stopped process may leave no OBSERVER_END; missing tail samples must remain
+missing. Hook durations do not measure all scheduling/GIL overhead, and GPU
+counters are not synchronized here; hardware impact is still unmeasured.
+
+Five local controls PASS: missing data is null; live observer lifecycle and
+counter capture; refusal of existing journal and invalid interval; modified
+base refusal; generated AST matches the original after removing observation
+hooks. These establish local construction/control behavior, not GPU acceptance.
+
+Next: freeze a complete separately identified runtime and the unchanged paired
+inputs, qualify its source and observer artifacts, then obtain fresh host
+preflight before any hardware diagnostic. Neither instrumentation performance
+nor a new serving/inference profile is qualified by this implementation.
