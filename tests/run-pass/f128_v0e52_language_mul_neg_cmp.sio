@@ -1,0 +1,287 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.2 — language f128 *, unary -, and comparisons desugar to stdlib softfloat (no f64 payload)
+//@ ladder-stage: V0-E.5.2
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e52
+//
+// Lower desugars `*` → f128_bits_soft_mul, unary `-` → f128_bits_soft_neg and
+// `< <= > >= == !=` → f128_bits_soft_lt/le/gt/ge/eq/ne (bool). `/` stays
+// V0-E.4.1 fail-closed. Source-level F128Bits calls at the start of main pin
+// the stdlib routines and anchor the language results against them.
+// Distinct non-zero exits: 21=bits_2*3 22=bits_neg 23=bits_cmp 24=bits_predicates
+// 11=2*3 12=half*half 13=1.5*1.5 14=two*tiny 15=tiny*tiny 16=(1+tiny)^2
+// 17=greenwash_square 18=-one 19=-zero 20=-(-one) 25=neg*1.5
+// 31..45=comparison / composition cases (see labels)
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+    f128_soft_mul_limbs,
+    f128_bits_soft_mul,
+    f128_bits_soft_neg,
+    f128_bits_soft_cmp,
+    f128_bits_soft_lt,
+    f128_bits_soft_le,
+    f128_bits_soft_gt,
+    f128_bits_soft_ge,
+    f128_bits_soft_eq,
+    f128_bits_soft_ne,
+}
+use math::wide_float::{print_limb_hex16, F128Bits}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e52_main_entered")
+    let bits_two = F128Bits { lo: 0, hi: 4611686018427387904 }
+    let bits_three = F128Bits { lo: 0, hi: 4611826755915743232 }
+    let bits_six = f128_bits_soft_mul(bits_two, bits_three)
+    if bits_six.lo != 0 || bits_six.hi != 4612108230892453888 {
+        println("FAIL bits_2*3")
+        return 21
+    }
+    let bits_neg_two = f128_bits_soft_neg(bits_two)
+    if bits_neg_two.lo != 0 || bits_neg_two.hi != 0 - 4611686018427387904 {
+        println("FAIL bits_neg")
+        return 22
+    }
+    if f128_bits_soft_cmp(bits_two, bits_three) != 0 - 1 || f128_bits_soft_cmp(bits_three, bits_two) != 1 || f128_bits_soft_cmp(bits_two, bits_two) != 0 {
+        println("FAIL bits_cmp")
+        return 23
+    }
+    if !f128_bits_soft_lt(bits_two, bits_three) || f128_bits_soft_le(bits_three, bits_two)
+        || !f128_bits_soft_gt(bits_three, bits_two) || !f128_bits_soft_ge(bits_two, bits_two)
+        || !f128_bits_soft_eq(bits_two, bits_two) || !f128_bits_soft_ne(bits_two, bits_three) {
+        println("FAIL bits_predicates")
+        return 24
+    }
+    let bits_limbs = f128_soft_mul_limbs(0, 4611686018427387904, 0, 4611826755915743232)
+    if bits_limbs.hi != 4612108230892453888 {
+        println("FAIL bits_limbs_abi")
+        return 26
+    }
+
+    let zero: f128 = 0.0
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let three: f128 = 3.0
+    let half: f128 = 0.5
+    let one_and_half: f128 = 1.5
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    // --- multiplication -----------------------------------------------------
+    let six: f128 = two * three
+    print("got_2*3=")
+    print_limb_hex16(f128_to_lo(six))
+    print(":")
+    print_limb_hex16(f128_to_hi(six))
+    println("")
+    if f128_to_lo(six) != 0 || f128_to_hi(six) != 4612108230892453888 {
+        println("FAIL 2*3")
+        return 11
+    }
+    let quarter: f128 = half * half
+    print("got_half*half=")
+    print_limb_hex16(f128_to_lo(quarter))
+    print(":")
+    print_limb_hex16(f128_to_hi(quarter))
+    println("")
+    if f128_to_lo(quarter) != 0 || f128_to_hi(quarter) != 4610841593497255936 {
+        println("FAIL half*half")
+        return 12
+    }
+    let nine_quarters: f128 = one_and_half * one_and_half
+    print("got_1.5*1.5=")
+    print_limb_hex16(f128_to_lo(nine_quarters))
+    print(":")
+    print_limb_hex16(f128_to_hi(nine_quarters))
+    println("")
+    if f128_to_lo(nine_quarters) != 0 || f128_to_hi(nine_quarters) != 4611721202799476736 {
+        println("FAIL 1.5*1.5")
+        return 13
+    }
+    let two_tiny: f128 = two * tiny
+    print("got_two*tiny=")
+    print_limb_hex16(f128_to_lo(two_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(two_tiny))
+    println("")
+    if f128_to_lo(two_tiny) != 3746994889972252672 || f128_to_hi(two_tiny) != 4592961103759746082 {
+        println("FAIL two*tiny")
+        return 14
+    }
+    // Full 113x113-bit product with RNE (~1e-40): every limb bit is exercised.
+    let tiny_sq: f128 = tiny * tiny
+    print("got_tiny*tiny=")
+    print_limb_hex16(f128_to_lo(tiny_sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(tiny_sq))
+    println("")
+    if f128_to_lo(tiny_sq) != 0 - 4406758321204695736 || f128_to_hi(tiny_sq) != 4573993395679622521 {
+        println("FAIL tiny*tiny")
+        return 15
+    }
+    // Anti-f64: (1+tiny)^2 = 1 + 2·tiny + tiny² keeps the 2·tiny limb; f64 gives 1.0.
+    let one_plus_tiny: f128 = one + tiny
+    let square: f128 = one_plus_tiny * one_plus_tiny
+    print("got_(1+tiny)^2=")
+    print_limb_hex16(f128_to_lo(square))
+    print(":")
+    print_limb_hex16(f128_to_hi(square))
+    println("")
+    if f128_to_lo(square) == 0 && f128_to_hi(square) == 4611404543450677248 {
+        println("FAIL f64_greenwash_square")
+        return 17
+    }
+    if f128_to_lo(square) != 103845937170696 || f128_to_hi(square) != 4611404543450677248 {
+        println("FAIL (1+tiny)^2")
+        return 16
+    }
+
+    // --- negation -----------------------------------------------------------
+    let neg_one: f128 = -one
+    print("got_-one=")
+    print_limb_hex16(f128_to_lo(neg_one))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_one))
+    println("")
+    if f128_to_lo(neg_one) != 0 || f128_to_hi(neg_one) != 0 - 4611967493404098560 {
+        println("FAIL -one")
+        return 18
+    }
+    let neg_zero: f128 = -zero
+    print("got_-zero=")
+    print_limb_hex16(f128_to_lo(neg_zero))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_zero))
+    println("")
+    if f128_to_lo(neg_zero) != 0 || f128_to_hi(neg_zero) != 0 - 9223372036854775807 - 1 {
+        println("FAIL -zero")
+        return 19
+    }
+    let neg_neg: f128 = -neg_one
+    if f128_to_lo(neg_neg) != 0 || f128_to_hi(neg_neg) != 4611404543450677248 {
+        println("FAIL -(-one)")
+        return 20
+    }
+    let neg_mul: f128 = neg_one * one_and_half
+    print("got_-1*1.5=")
+    print_limb_hex16(f128_to_lo(neg_mul))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_mul))
+    println("")
+    if f128_to_lo(neg_mul) != 0 || f128_to_hi(neg_mul) != 0 - 4611826755915743232 {
+        println("FAIL -1*1.5")
+        return 25
+    }
+
+    // --- comparisons ----------------------------------------------------------
+    if !(one < two) {
+        println("FAIL 1<2")
+        return 31
+    }
+    if two < one {
+        println("FAIL 2<1 true")
+        return 32
+    }
+    if !(one <= one) || !(one <= two) || two <= one {
+        println("FAIL <=")
+        return 33
+    }
+    if !(two > one) || one > two {
+        println("FAIL >")
+        return 34
+    }
+    if !(one >= one) || one >= two {
+        println("FAIL >=")
+        return 35
+    }
+    if !(one == one) || one == two {
+        println("FAIL ==")
+        return 36
+    }
+    if !(one != two) || one != one {
+        println("FAIL !=")
+        return 37
+    }
+    if !(neg_one < one) || neg_one > one {
+        println("FAIL sign order")
+        return 38
+    }
+    if !(neg_one < zero) || !(zero < tiny) || !(tiny < one) {
+        println("FAIL chain order")
+        return 39
+    }
+    if !(zero == neg_zero) || zero != neg_zero || zero < neg_zero {
+        println("FAIL +0==-0")
+        return 40
+    }
+    // Anti-f64: 1+1e-20 > 1 must hold (f64 collapses to equality).
+    if !(one_plus_tiny > one) || one_plus_tiny == one {
+        println("FAIL f64_greenwash_cmp")
+        return 41
+    }
+    let nan: f128 = f128_from_limbs(0, 9223231299366420480)
+    if nan == nan || !(nan != nan) || nan < one || nan > one || nan <= one || nan >= one {
+        println("FAIL nan unordered")
+        return 42
+    }
+    let lt_flag = one < two
+    let eq_flag = six == two * three
+    if !lt_flag || !eq_flag {
+        println("FAIL cmp as bool local")
+        return 43
+    }
+    if (two * three) != six || !(half * half == quarter) {
+        println("FAIL cmp of products")
+        return 44
+    }
+    // Composition: -(2*3) + 6 = +0
+    let back_to_zero: f128 = -(two * three) + six
+    print("got_-(2*3)+6=")
+    print_limb_hex16(f128_to_lo(back_to_zero))
+    print(":")
+    print_limb_hex16(f128_to_hi(back_to_zero))
+    println("")
+    if f128_to_lo(back_to_zero) != 0 || f128_to_hi(back_to_zero) != 0 {
+        println("FAIL -(2*3)+6")
+        return 45
+    }
+
+    print("wire_2*3=")
+
+    print_limb_hex16(f128_to_lo(six))
+
+    print(":")
+
+    print_limb_hex16(f128_to_hi(six))
+
+    println("")
+    print("wire_tiny*tiny=")
+    print_limb_hex16(f128_to_lo(tiny_sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(tiny_sq))
+    println("")
+    print("wire_(1+tiny)^2=")
+    print_limb_hex16(f128_to_lo(square))
+    print(":")
+    print_limb_hex16(f128_to_hi(square))
+    println("")
+    print("wire_-1*1.5=")
+    print_limb_hex16(f128_to_lo(neg_mul))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_mul))
+    println("")
+    print("wire_two*tiny=")
+    print_limb_hex16(f128_to_lo(two_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(two_tiny))
+    println("")
+
+    println("PASS f128_v0e52_language_mul_neg_cmp general=ieee754 rne anti_f64=green language_desugar=madaros")
+    return 0
+}
