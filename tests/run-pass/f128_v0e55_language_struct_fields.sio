@@ -1,0 +1,174 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.5 — language f128 struct fields and f128 assignment: the field slot holds the F128Bits handle (no f64 payload)
+//@ ladder-stage: V0-E.5.5
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e55
+//
+// A struct field declared `f128` is a one-word slot holding an F128Bits handle,
+// exactly like any struct-typed field, so the layout is unchanged. V0-E.5.5
+// teaches the lowerer that such a field is an f128 expression: readable as a
+// ready softfloat operand (`v.x + v.y`, nested `b.lo.x`), a `let` RHS (annotated
+// or not), initialisable in a struct literal (a bare `1.0` there is binary128,
+// never f64 bits), and assignable (`v.x = expr`). The same store rule now covers
+// plain f128 locals: `acc = 2.0` was a V0-E.5.1 gap (f64 bits into a handle
+// slot); `acc = y` copies the limbs like `let`. Methods (`v.norm2()`), arrays of
+// f128, and compound assignment (`+=`) stay deferred / fail-closed.
+// Distinct non-zero exits:
+// 11=literal_init 12=expr_init 13=read_sum 14=unannotated_let 15=nested
+// 16=ref_param_dot 17=byval_param 18=returned_struct 19=field_assign
+// 20=local_assign_literal 21=local_assign_copy_no_alias 22=greenwash_sq 23=sq
+// 24=cmp_fields 25=struct_copy_shares_value
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::wide_float::{print_limb_hex16}
+
+struct Vec2 { x: f128, y: f128 }
+struct Box2 { lo: Vec2, hi: Vec2, tag: i64 }
+
+fn dot(a: &Vec2, b: &Vec2) -> f128 { a.x * b.x + a.y * b.y }
+fn sum_xy(v: Vec2) -> f128 { v.x + v.y }
+fn mk(x: f128, y: f128) -> Vec2 { Vec2 { x: x, y: y } }
+fn x_lt_y(v: &Vec2) -> bool { v.x < v.y }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e55_main_entered")
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let three: f128 = 3.0
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    // Literal initialisers are binary128.
+    let a = Vec2 { x: 1.0, y: 2.0 }
+    if f128_to_lo(a.x) != 0 || f128_to_hi(a.x) != 4611404543450677248
+        || f128_to_lo(a.y) != 0 || f128_to_hi(a.y) != 4611686018427387904 {
+        println("FAIL literal_init")
+        return 11
+    }
+    // Expression / ident initialisers: (3, 1*2+1 = 3).
+    let b = Vec2 { x: three, y: one * two + one }
+    if f128_to_hi(b.x) != 4611826755915743232 || f128_to_hi(b.y) != 4611826755915743232 || f128_to_lo(b.y) != 0 {
+        println("FAIL expr_init")
+        return 12
+    }
+    // Fields as operands: 1 + 2 = 3.
+    let s: f128 = a.x + a.y
+    if f128_to_lo(s) != 0 || f128_to_hi(s) != 4611826755915743232 {
+        println("FAIL read_sum")
+        return 13
+    }
+    // Unannotated let from a field.
+    let ay = a.y
+    if f128_to_lo(ay) != 0 || f128_to_hi(ay) != 4611686018427387904 {
+        println("FAIL unannotated_let")
+        return 14
+    }
+    // Nested fields, mixed with an i64 field: lo.x * hi.y = 1 * 0.5.
+    let bx = Box2 { lo: a, hi: Vec2 { x: 3.0, y: 0.5 }, tag: 7 }
+    let half: f128 = bx.lo.x * bx.hi.y
+    if f128_to_lo(half) != 0 || f128_to_hi(half) != 4611123068473966592 || bx.tag != 7 {
+        println("FAIL nested")
+        return 15
+    }
+    // &Struct params: dot((1,2),(3,3)) = 3 + 6 = 9.
+    let d: f128 = dot(&a, &b)
+    if f128_to_lo(d) != 0 || f128_to_hi(d) != 4612284152752898048 {
+        println("FAIL ref_param_dot")
+        return 16
+    }
+    // By-value struct param: 1 + 2 = 3.
+    let sx: f128 = sum_xy(a)
+    if f128_to_lo(sx) != 0 || f128_to_hi(sx) != 4611826755915743232 {
+        println("FAIL byval_param")
+        return 17
+    }
+    // Struct returned from a fn with f128 params.
+    let m = mk(two, three)
+    if f128_to_hi(m.x) != 4611686018427387904 || f128_to_hi(m.y) != 4611826755915743232 {
+        println("FAIL returned_struct")
+        return 18
+    }
+    // Field assignment: literal, then expression over fields. (3, 3+3 = 6)
+    var v = Vec2 { x: 0.0, y: 0.0 }
+    v.x = 3.0
+    v.y = v.x + three
+    if f128_to_hi(v.x) != 4611826755915743232 || f128_to_hi(v.y) != 4612108230892453888 || f128_to_lo(v.y) != 0 {
+        println("FAIL field_assign")
+        return 19
+    }
+    // Plain f128 local assignment: literal store must be binary128.
+    var acc: f128 = 0.0
+    acc = acc + one
+    acc = 2.0
+    if f128_to_lo(acc) != 0 || f128_to_hi(acc) != 4611686018427387904 {
+        println("FAIL local_assign_literal")
+        return 20
+    }
+    // `acc = y` copies the value; a later store into acc leaves y untouched.
+    var y: f128 = 1.0
+    acc = y
+    acc = 3.0
+    if f128_to_hi(y) != 4611404543450677248 || f128_to_hi(acc) != 4611826755915743232 {
+        println("FAIL local_assign_copy_no_alias")
+        return 21
+    }
+    // Anti-f64 through a field: (1+~1e-20)^2 keeps the 2*tiny term.
+    let w = Vec2 { x: one + tiny, y: one }
+    let sq: f128 = w.x * w.x
+    print("got_field_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    if f128_to_lo(sq) == 0 && f128_to_hi(sq) == 4611404543450677248 {
+        println("FAIL f64_greenwash_field_sq")
+        return 22
+    }
+    if f128_to_lo(sq) != 103845937170696 || f128_to_hi(sq) != 4611404543450677248 {
+        println("FAIL field_sq")
+        return 23
+    }
+    // Comparisons over fields, directly and through a &Struct fn.
+    if !(a.x < a.y) || !(w.x > w.y) || !(b.x == b.y) || !x_lt_y(&a) || x_lt_y(&b) {
+        println("FAIL cmp_fields")
+        return 24
+    }
+    // Struct copy shares the (immutable) f128 values: c.x reads 1.0.
+    let c = a
+    if f128_to_hi(c.x) != 4611404543450677248 || !(c.y == a.y) {
+        println("FAIL struct_copy_shares_value")
+        return 25
+    }
+
+    print("wire_dot=")
+    print_limb_hex16(f128_to_lo(d))
+    print(":")
+    print_limb_hex16(f128_to_hi(d))
+    println("")
+    print("wire_field_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    print("wire_nested_half=")
+    print_limb_hex16(f128_to_lo(half))
+    print(":")
+    print_limb_hex16(f128_to_hi(half))
+    println("")
+    print("wire_field_assign_y=")
+    print_limb_hex16(f128_to_lo(v.y))
+    print(":")
+    print_limb_hex16(f128_to_hi(v.y))
+    println("")
+
+    println("PASS f128_v0e55_language_struct_fields general=ieee754 anti_f64=green language_fields=madaros")
+    return 0
+}

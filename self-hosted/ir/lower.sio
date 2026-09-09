@@ -13586,6 +13586,10 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIdent {
             return self.lookup_local_scalar_kind((*e).name) == 5
         }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            // V0-E.5.5: an f128 struct field.
+            return self.lower_field_is_f128_ref(&(*e).left, (*e).name)
+        }
         if (*e).kind == ExprKind::ExprCast {
             return lower_opt_type_is_wide_float(&(*e).cast_type)
         }
@@ -14513,6 +14517,8 @@ impl Lowerer {
             }
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // V0-E.5.5: an f128 field reads as a wide-float handle.
+            if self.lower_field_is_f128_ref(&(*e).left, (*e).name) { return 5 }
             if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
                 return 1
             }
@@ -16723,7 +16729,9 @@ impl Lowerer {
                         // Restricted to Call/MethodCall so an indexed struct element
                         // cannot be misclassified as int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
-                    } else if (*expr_box_sk).kind == ExprKind::ExprCall && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprFieldAccess)
+                        && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
+                        // `let v = f128_call(..)` / `let v = p.x` (V0-E.5.4 / V0-E.5.5).
                         lo = lo.bind_local_scalar_kind(s.name, 5)
                         lo = lo.bind_local_wide_type(s.name, 128, 0)
                     } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
@@ -17172,7 +17180,33 @@ impl Lowerer {
     }
 
     fn lower_assign_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair_rhs = self.lower_opt_expr_ref(&s.expr)
+        // V0-E.5.5: a store into an f128 slot (2-limb local, f128 param, f128
+        // struct field) takes an F128Bits handle. `x = 1.0` lowered through the
+        // generic path would store f64 bits into the handle slot; `x = y` copies
+        // the limbs like `let`, so a later store into `y` cannot alias `x`.
+        // Compound assignment on f128 stays V0-E.4.1 fail-closed.
+        let target_is_f128 = match s.target {
+            Some(t) => self.lower_expr_is_f128_slot_ref(&(*t)),
+            None => false,
+        }
+        if target_is_f128 && s.assign_op != AssignOp::AssignEq {
+            return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
+        }
+        let pair_rhs = if target_is_f128 {
+            match s.expr {
+                Some(rhs_f128) => {
+                    let pv = self.lower_f128_value_ref(&(*rhs_f128))
+                    if (*rhs_f128).kind == ExprKind::ExprIdent || (*rhs_f128).kind == ExprKind::ExprFieldAccess {
+                        pv.0.lower_f128_copy_limbs(pv.1)
+                    } else {
+                        pv
+                    }
+                }
+                None => self.lower_opt_expr_ref(&s.expr),
+            }
+        } else {
+            self.lower_opt_expr_ref(&s.expr)
+        }
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
         var rhs_variance: i64 = -1
@@ -17182,7 +17216,8 @@ impl Lowerer {
                 let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
                 lo = rhs_var_pair.0
                 rhs_variance = rhs_var_pair.1
-                rhs_is_float = lo.expr_result_is_float_ref(&(*rhs_expr_var))
+                // An f128 slot never flips to f64 kind, whatever the RHS looks like.
+                rhs_is_float = !target_is_f128 && lo.expr_result_is_float_ref(&(*rhs_expr_var))
             }
             _ => {}
         }
@@ -17922,7 +17957,15 @@ impl Lowerer {
                     } else {
                         field_idx
                     }
-                    let pair = lo.lower_expr_ref(&(*list).head.value)
+                    // V0-E.5.5: an f128 field initializer must produce an F128Bits
+                    // handle — a bare `1.0` here is binary128, never f64 bits.
+                    let field_is_f128 = struct_name.len > 0
+                        && ir_name_eq(lo.field_named_type_for_struct(struct_name, (*list).head.name), make_name("f128"))
+                    let pair = if field_is_f128 {
+                        lo.lower_f128_value_ref(&(*list).head.value)
+                    } else {
+                        lo.lower_expr_ref(&(*list).head.value)
+                    }
                     lo = pair.0
                     let vreg = pair.1
                     lo = lo.emit(ir_field_set(base_reg, named_field_idx, vreg, (*list).head.name))
@@ -19929,6 +19972,13 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBinary {
             return self.lower_f128_binary_ref(e)
         }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            // V0-E.5.5: the field slot holds the F128Bits handle; IrFieldGet is it.
+            if self.lower_field_is_f128_ref(&(*e).left, (*e).name) {
+                return self.lower_expr_ref(e)
+            }
+            return lower_f128_fail(self, "struct field in f128 position is not declared f128 (V0-E.5.5)")
+        }
         if (*e).kind == ExprKind::ExprUnary {
             return self.lower_f128_unary_ref(e)
         }
@@ -19945,6 +19995,53 @@ impl Lowerer {
             return lower_f128_fail(self, "call in f128 position does not return f128 (V0-E.5.4)")
         }
         lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1..V0-E.5.3: literal, from_limbs, ident, + - * / unary-, comparisons)")
+    }
+
+    // V0-E.5.5: static struct type of a field-access base. An ident carries the
+    // struct type it was bound with (params via lower_param_struct_type_name,
+    // which unwraps &T / &!T); a nested field access resolves through the
+    // enclosing struct's layout. Empty when unknown.
+    fn lower_expr_struct_type_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(base) => {
+                    let base_ty = self.lower_expr_struct_type_name_ref(&(*base))
+                    return self.field_named_type_for_struct(base_ty, (*e).name)
+                }
+                None => return ir_empty_name(),
+            }
+        }
+        ir_empty_name()
+    }
+
+    // V0-E.5.5: `base.field` where the field is declared `f128`. The slot holds an
+    // F128Bits handle (one word, like any struct-typed field), so reading it is
+    // the plain IrFieldGet and the result is a ready softfloat operand.
+    fn lower_field_is_f128_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base) => {
+                let base_ty = self.lower_expr_struct_type_name_ref(&(*base))
+                if base_ty.len == 0 { return false }
+                ir_name_eq(self.field_named_type_for_struct(base_ty, field_name), make_name("f128"))
+            }
+            None => false,
+        }
+    }
+
+    // V0-E.5.5: is `e` an assignable slot holding a language f128 (a 2-limb local
+    // / f128 param, or an f128 struct field)? Such a store must take an F128Bits
+    // handle, so the RHS is lowered through lower_f128_value_ref.
+    fn lower_expr_is_f128_slot_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            return self.lower_field_is_f128_ref(&(*e).left, (*e).name)
+        }
+        false
     }
 
     // V0-E.5.4: resolve a call's callee in the IR fn table (pre-seeded before any
@@ -20091,6 +20188,10 @@ impl Lowerer {
                 if (*e).kind == ExprKind::ExprFloatLit { return true }
                 if (*e).kind == ExprKind::ExprIdent {
                     return self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128
+                }
+                if (*e).kind == ExprKind::ExprFieldAccess {
+                    // V0-E.5.5: an f128 struct field is a handle slot, ready as-is.
+                    return self.lower_field_is_f128_ref(&(*e).left, (*e).name)
                 }
                 if (*e).kind == ExprKind::ExprBinary {
                     // Only value-producing ops feed another f128 op; a comparison
