@@ -1268,10 +1268,43 @@ pub fn simulate_enzyme_crn(init: &[f64; 4], dt: f64, steps: i64) -> [f64; 4] wit
     [y[0], y[1], y[2], y[3]]
 }
 
+// CORRECTED 2026-09-09. This test previously asserted P ~ 0.7 on the direct
+// path and P > 0.4 on the general path, and BOTH were wrong -- by a factor of
+// about 4.5. Two separate defects, and the second is why the first survived:
+//
+//   1. The direct-path check was DEAD CODE. `check_near(out[3], 0.7, 0.25)
+//      && out[0] > 0.01` sat as a bare expression in statement position; the
+//      function's actual return value was the last expression, the general-
+//      path line. The direct check was computed and discarded.
+//   2. Neither number is reachable. Michaelis-Menten bounds it analytically:
+//      Km = (kr + kcat) / kf = 1.1 / 1.2 = 0.9167, Vmax = kcat * E0 = 0.04,
+//      so v ~ 0.04 * 2.0 / 2.9167 = 0.0274 and P <= ~0.165 at t = 6.0. The
+//      true value is 0.154054667769.
+//
+// That value is now confirmed FOUR independent ways, none of them a
+// translation of another: stdlib/chemistry/oracles/catalysis_cycle.kk (Koka,
+// hand-rolled RK4), stdlib/chemistry/oracles/catalysis_oracle.cpp (C++23),
+// stdlib/chemistry/catalysis.sio's own test_turnover_bookkeeping (executed
+// under Madaros v0.80.0), and THIS FILE'S OWN two integrators, extracted
+// verbatim into standalone probes and executed under Madaros v0.80.0
+// (bin/madaros-linux-x86_64, md5 92f2c566) on 2026-09-09:
+//
+//   direct  (enzyme_rhs + rk4_step):        E=0.016743 S=1.812689 ES=0.033257 P=0.154055
+//   general (compute_rates_general path):   E=0.016743 S=1.812689 ES=0.033257 P=0.154055
+//   mass balance S+ES+P = 2.000000 exactly
+//
+// The two paths agree to displayed precision, which is what the general-path
+// line was evidently reaching for; it now says so as a cross-check between
+// the two integrators instead of asserting a loose, unverified constant.
+//
+// Why a wrong assertion survived in merged, trusted code: this file's driver,
+// tests/stdlib/chemistry/test_kinetics_core.sio, is `//@ check-only`. The
+// test was type-checked and never executed. Had it ever run, it would have
+// failed.
 pub fn test_enzyme_crn() -> bool with Mut, Div, Panic {
     let enzyme_init: [f64; 4] = [0.05, 2.0, 0.0, 0.0];
     let out = simulate_enzyme_crn(&enzyme_init, 0.02, 300);
-    check_near(out[3], 0.7, 0.25) && out[0] > 0.01  // P formed, E not depleted
+    let direct_ok = check_near(out[3], 0.154054667769, 1.0e-6) && out[0] > 0.01
     // also via general for super mix
     var nu_e = matnm_new(4 as i64, 3 as i64);
     nu_e = matnm_set(nu_e, 0 as i64, 0 as i64, -1.0); nu_e = matnm_set(nu_e, 1 as i64, 0 as i64, -1.0); nu_e = matnm_set(nu_e, 2 as i64, 0 as i64, 1.0); // E+S -> ES
@@ -1285,7 +1318,9 @@ pub fn test_enzyme_crn() -> bool with Mut, Div, Panic {
     let s_chebi = substrate_chebi();
     let p_chebi = product_chebi();
     let _k_h2o: CHEBI_15377 = chebi_water();  // FULL Knowledge<CHEBI_15377>
-    outg[3] > 0.4 && e_chebi.id > 0 && s_chebi.id > 0 && p_chebi.id > 0
+    let general_ok = check_near(outg[3], 0.154054667769, 1.0e-6)
+    let paths_agree = check_near(outg[3], out[3], 1.0e-9)
+    direct_ok && general_ok && paths_agree && e_chebi.id > 0 && s_chebi.id > 0 && p_chebi.id > 0
 }
 
 // Extended metabolic (richer than basic pbpk)
