@@ -5539,9 +5539,8 @@ var LOWER_F128_SIG_MASK: [i64; 512] = [0; 512]
 // Per-call handoff into lower_expr_args_ref (consumed and cleared on entry so
 // nested calls in argument position cannot inherit it).
 var LOWER_F128_ARG_MASK: i64 = 0
-// Set while lowering a function body whose declared return type is f128 so a
-// bare literal in tail/return position lowers as binary128.
-var LOWER_F128_CUR_FN_RETURNS: bool = false
+// A bare literal in tail/return position of an `-> f128` fn is rejected by the
+// checker (E008: literal is f64), so only argument position needs the mask.
 
 fn lower_f128_sig_bit_returns() -> i64 {
     4611686018427387904 // 1 << 62
@@ -16134,13 +16133,7 @@ impl Lowerer {
                         let expr_opt_ref = &stmt_ref.expr
                         match *expr_opt_ref {
                             Some(expr_box) => {
-                                // V0-E.5.4: a literal in tail position of an f128 fn
-                                // (or of a branch block feeding its tail) is binary128.
-                                if (*expr_box).kind == ExprKind::ExprFloatLit && lo.lower_current_fn_returns_f128() {
-                                    lo.lower_f128_value_ref(&(*expr_box))
-                                } else {
-                                    lo.lower_expr_ref(&(*expr_box))
-                                }
+                                lo.lower_expr_ref(&(*expr_box))
                             }
                             _ => {
                                 lo.emit_unit()
@@ -21946,27 +21939,8 @@ impl Lowerer {
         }
     }
 
-    // V0-E.5.4: is the function being lowered declared `-> f128`? Its tail /
-    // `return` value must then be an F128Bits handle: idents, arithmetic, calls
-    // already are; a bare literal would otherwise lower as f64 bits.
-    fn lower_current_fn_returns_f128(self) -> bool with Mut, Panic, Div {
-        ir_name_eq((*self.current_func).return_struct_name, make_name("f128"))
-    }
-
-    fn lower_opt_expr_f128_return_aware_ref(self, opt: &Option<Box<Expr>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        match *opt {
-            Some(v) => {
-                if (*v).kind == ExprKind::ExprFloatLit && self.lower_current_fn_returns_f128() {
-                    return self.lower_f128_value_ref(&(*v))
-                }
-                self.lower_expr_ref(&(*v))
-            }
-            None => self.lower_opt_expr_ref(opt),
-        }
-    }
-
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_opt_expr_f128_return_aware_ref(&e.left)
+        let pair = self.lower_opt_expr_ref(&e.left)
         let lo = pair.0
         let reg = pair.1
         // Inside a kernel lane loop, `return` ends the lane, not the launch.
