@@ -107,3 +107,15 @@ After the job and launcher are terminal, use collect with the exact job ID, then
 qualify with the SHA256 of collection.json. A failed collection is retained and
 cannot qualify. The unchanged frozen manifest is the sole CPU runtime source;
 new orchestration code is separately hashed in start.json.
+
+## CI wiring
+
+The continuity workflow now runs all 91 observer/handoff/CPU-oracle/attempt
+controls, verifies this frozen packet and executes the small Linux resource-reader
+control. The reader receipt is included with the existing custody artifact.
+All those commands passed locally. No YAML linter was available locally; actual
+execution of the new workflow steps remains a separate CI gate after publication.
+
+This workflow edit does not change the frozen runtime or the waiting driver's
+orchestration hashes. It is queued behind the exact-source run 34415603204 rather
+than replacing that validation with a new head.
