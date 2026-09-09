@@ -11,7 +11,7 @@
 #   - 117-bit restoring long division with RNE: 1/3, 1/tiny (~1e20), -1/3, tiny/2
 #   - Anti-f64: 1/(1+~1e-20) = 1-~1e-20 (f64 gives 1.0)
 #   - IEEE corners: x/0 → ±inf, 0/0 → NaN unordered, (1/3)*3 RNE tie → 1
-#   - Language f128 `%` and params (f128_v0e2) still V0-E.4.1 fail-closed
+#   - Language f128 params (f128_v0e2) and inexact literals (0.1) still fail-closed
 #
 # Explicitly NOT claimed:
 #   - lean_single language f128 (still f64 greenwash)
@@ -162,14 +162,16 @@ else
   fi
 fi
 
-cat >"$TMP_DIR/lang_rem.sio" <<'EOF'
+# `%` on f128 is refused earlier by check (E050), so the lowering-level
+# fail-closed negative is an inexact literal: 0.1 must never be f64-widened.
+cat >"$TMP_DIR/lang_inexact.sio" <<'EOF'
 use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi, f128_bits_soft_mul}
 
 fn main() -> i32 with IO, Mut, Panic, Div {
-    let one: f128 = 1.0
+    let tenth: f128 = 0.1
     let two: f128 = 2.0
-    let q: f128 = one % two
-    if f128_to_hi(q) == 0 { return 1 }
+    let fifth: f128 = tenth * two
+    if f128_to_hi(fifth) == 0 { return 1 }
     return 0
 }
 EOF
@@ -187,14 +189,14 @@ if [[ -x "$SOUC" ]]; then
   fi
 
   set +e
-  "$SOUC" compile "$TMP_DIR/lang_rem.sio" -o "$TMP_DIR/lang_rem.elf" >"$TMP_DIR/lang_rem.compile.log" 2>&1
+  "$SOUC" compile "$TMP_DIR/lang_inexact.sio" -o "$TMP_DIR/lang_inexact.elf" >"$TMP_DIR/lang_inexact.compile.log" 2>&1
   d_rc=$?
   set -e
-  if [[ "$d_rc" -ne 0 ]] && grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/lang_rem.compile.log"; then
-    note_pass "language_f128_rem_still_fail_closed"
+  if [[ "$d_rc" -ne 0 ]] && grep -Fq 'no f64 widen' "$TMP_DIR/lang_inexact.compile.log"; then
+    note_pass "language_f128_inexact_literal_still_fail_closed"
   else
-    note_fail "language_f128_rem_fail_closed_regression"
-    tail -30 "$TMP_DIR/lang_rem.compile.log" >&2 || true
+    note_fail "language_f128_inexact_literal_fail_closed_regression"
+    tail -30 "$TMP_DIR/lang_inexact.compile.log" >&2 || true
   fi
 
   set +e
