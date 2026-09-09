@@ -5479,6 +5479,65 @@ fn lower_opt_type_is_wide_float(opt: &Option<Box<TypeExpr>>) -> bool with Mut, P
     }
 }
 
+fn lower_type_expr_is_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    let seg = (*te).path.segments
+    if seg.head_len != 4 { return false }
+    if seg.head_buf[0] as i64 != 102 { return false }
+    seg.head_buf[1] as i64 == 49 && seg.head_buf[2] as i64 == 50 && seg.head_buf[3] as i64 == 56
+}
+
+fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_f128(&(*te)),
+        None => false,
+    }
+}
+
+// V0-E.5.1: only dyadic values that are exact in both f64 and f128. Anything
+// else (including 1e-20) must use f128_from_limbs — never f64 widen.
+fn lower_f128_exact_literal_limbs(v: f64) -> (i64, i64, i64) {
+    if v == 0.0 { return (1, 0, 0) }
+    if v == 1.0 { return (1, 0, 4611404543450677248) }
+    if v == 2.0 { return (1, 0, 4611686018427387904) }
+    if v == 0.5 { return (1, 0, 4611123068473966592) }
+    if v == 1.5 { return (1, 0, 4611545280939032576) }
+    if v == 0.0 - 1.0 { return (1, 0, 0 - 4611967493404098560) }
+    (0, 0, 0)
+}
+
+fn lower_f128_fail(lo: Lowerer, msg: string) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    print("error: ")
+    print(msg)
+    print("\n")
+    var lo2 = lo
+    lowerer_mark_hard_error(&! lo2)
+    (lo2, 0)
+}
+
+// Import spellings may be Ident or Path. expr_to_callee_name_ref mangles a
+// two-segment path into Type_method, which would miss f128_to_lo intercept
+// and run the placeholder body (always 0) — FAIL 1+1 at runtime.
+fn lower_f128_expr_callee_short(callee: &Expr) -> Name with Mut, Panic, Div, Alloc {
+    if (*callee).kind == ExprKind::ExprIdent {
+        return (*callee).name
+    }
+    if (*callee).kind == ExprKind::ExprPath {
+        let last = ir_path_last_name((*callee).path)
+        if last.len > 0 {
+            return last
+        }
+        return ir_path_first_name((*callee).path)
+    }
+    if (*callee).kind == ExprKind::ExprFieldAccess {
+        return (*callee).name
+    }
+    if (*callee).kind == ExprKind::ExprMethodCall {
+        return (*callee).name
+    }
+    ir_empty_name()
+}
+
 fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeFn { return false }
     match (*te).inner {
@@ -13441,6 +13500,14 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCast {
             return lower_opt_type_is_wide_float(&(*e).cast_type)
         }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(c) => {
+                    return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
+                }
+                None => {}
+            }
+        }
         if (*e).kind == ExprKind::ExprBinary {
             return self.opt_expr_result_is_wide_float_ref(&(*e).left)
                 || self.opt_expr_result_is_wide_float_ref(&(*e).right)
@@ -14264,6 +14331,22 @@ impl Lowerer {
     fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
             return 1
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = lower_f128_expr_callee_short(&(*callee_expr))
+                    if ir_name_eq(callee_name, make_name("f128_from_limbs")) { return 5 }
+                    if ir_name_eq(callee_name, make_name("f128_to_lo")) || ir_name_eq(callee_name, make_name("f128_to_hi")) {
+                        return 1
+                    }
+                }
+                None => {}
+            }
+        }
+        if ((*e).kind == ExprKind::ExprBinary || (*e).kind == ExprKind::ExprUnary)
+            && self.expr_result_is_wide_float_ref(e) {
+            return 5
         }
         if (*e).kind == ExprKind::ExprFloatLit {
             return 2
@@ -16118,6 +16201,9 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lower_opt_type_is_f128(&s.ty) {
+            return self.lower_let_stmt_f128_ref(s, is_mut)
+        }
         var lhs_lo = self
         match s.expr {
             Some(expr_box_closure) => {
@@ -16542,6 +16628,9 @@ impl Lowerer {
                         // Restricted to Call/MethodCall so an indexed struct element
                         // cannot be misclassified as int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprCall && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
+                        lo = lo.bind_local_scalar_kind(s.name, 5)
+                        lo = lo.bind_local_wide_type(s.name, 128, 0)
                     } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
                         // `let y = x + 1` / `let y = 0 - x` without an integer annotation:
                         // expr_result_scalar_kind_ref now positively returns 1 for int
@@ -16551,6 +16640,9 @@ impl Lowerer {
                         let sk_bin = lo.expr_result_scalar_kind_ref(&(*expr_box_sk))
                         if sk_bin == 1 || sk_bin == 2 || sk_bin == 3 {
                             lo = lo.bind_local_scalar_kind(s.name, sk_bin)
+                        } else if sk_bin == 5 {
+                            lo = lo.bind_local_scalar_kind(s.name, 5)
+                            lo = lo.bind_local_wide_type(s.name, 128, 0)
                         }
                     }
                 }
@@ -16615,9 +16707,13 @@ impl Lowerer {
             _ => {}
         }
         // V0-E.4.1: annotated f128/f256 locals are scalar_kind=5 (not f64=2).
+        // V0-E.5.1: f128 locals additionally occupy two i64 limbs (wide_bits=128).
         match s.ty {
             Some(ann_ty_wide) => {
-                if lower_type_expr_is_wide_float(&(*ann_ty_wide)) {
+                if lower_type_expr_is_f128(&(*ann_ty_wide)) {
+                    lo = lo.bind_local_scalar_kind(s.name, 5)
+                    lo = lo.bind_local_wide_type(s.name, 128, 0)
+                } else if lower_type_expr_is_wide_float(&(*ann_ty_wide)) {
                     lo = lo.bind_local_scalar_kind(s.name, 5)
                 }
             }
@@ -19612,9 +19708,198 @@ impl Lowerer {
         (lo5, dst)
     }
 
+    fn lower_f128_emit_limbs(self, lo_bits: i64, hi_bits: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_l = self.fresh_reg()
+        var lo = pair_l.0
+        let lo_reg = pair_l.1
+        lo = lo.emit(ir_load_imm(lo_reg, lo_bits))
+        let pair_h = lo.fresh_reg()
+        lo = pair_h.0
+        let hi_reg = pair_h.1
+        lo = lo.emit(ir_load_imm(hi_reg, hi_bits))
+        lo.lower_f128_materialize_bits(lo_reg, hi_reg)
+    }
+
+    fn lower_f128_copy_limbs(self, src: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        lo = lo.emit(ir_copy(dst, src))
+        (lo, dst)
+    }
+
+    fn lower_f128_materialize_bits(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(2)))
+        lo = lo.emit(ir_field_set(dst, 0, lo_reg, make_name("lo")))
+        lo = lo.emit(ir_field_set(dst, 1, hi_reg, make_name("hi")))
+        (lo, dst)
+    }
+
+    fn lower_f128_call_soft_limbs(self, add_not_sub: bool, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Language f128 values are F128Bits handles (same as V0-E.5). Current-Source
+        // exit 11: source-level f128_bits_soft_add in the same main passed, but
+        // 2-limb dest/dest+1 + to_lo/to_hi missed the payload.
+        var lo = self
+        let fname = if add_not_sub { make_name("f128_bits_soft_add") } else { make_name("f128_bits_soft_sub") }
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, fname)
+        if fn_id < 0 {
+            return lower_f128_fail(lo, "language f128 add/sub requires `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub}` (V0-E.5.1)")
+        }
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a, Some(Box::new(ir_reg_list_single(b))))))
+        let pair_call = lo.ir_lower_prepend_validated_arg(fn_id, args, 2)
+        lo = pair_call.lo
+        lo.pending_variance_reg = -1
+        let pair_s = lo.fresh_reg()
+        lo = pair_s.0
+        let dst = pair_s.1
+        lo = lo.emit(ir_call(dst, fn_id, fname, pair_call.args, pair_call.argc))
+        (lo, dst)
+    }
+
+    fn lower_f128_value_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprFloatLit {
+            let limbs = lower_f128_exact_literal_limbs((*e).float_val)
+            if limbs.0 == 0 {
+                return lower_f128_fail(self, "f128 literal is not an exact table value; use f128_from_limbs(lo, hi) (V0-E.5.1; no f64 widen)")
+            }
+            return self.lower_f128_emit_limbs(limbs.1, limbs.2)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128 {
+                return (self, self.lookup_local((*e).name))
+            }
+            return lower_f128_fail(self, "f128 operand is not a language f128 local (params/f256 stay V0-E.4.1 fail-closed)")
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.lower_f128_binary_ref(e)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            return self.lower_f128_intrinsic_call_ref(e)
+        }
+        lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1: literal, from_limbs, ident, + -)")
+    }
+
+    fn lower_f128_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.bin_op != BinaryOp::OpAdd && e.bin_op != BinaryOp::OpSub {
+            return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
+        }
+        let pair_l = self.lower_opt_f128_operand_ref(&e.left)
+        let pair_r = pair_l.0.lower_opt_f128_operand_ref(&e.right)
+        pair_r.0.lower_f128_call_soft_limbs(e.bin_op == BinaryOp::OpAdd, pair_l.1, pair_r.1)
+    }
+
+    fn lower_opt_f128_operand_ref(self, opt: &Option<Box<Expr>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *opt {
+            Some(e) => self.lower_f128_value_ref(&(*e)),
+            None => lower_f128_fail(self, "missing f128 operand"),
+        }
+    }
+
+    fn lower_f128_intrinsic_call_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let callee_name = match e.left {
+            Some(c) => lower_f128_expr_callee_short(&(*c)),
+            None => ir_empty_name(),
+        }
+        if ir_name_eq(callee_name, make_name("f128_from_limbs")) {
+            match e.args {
+                Some(args) => {
+                    let pair_a = self.lower_expr_ref(&(*args).head)
+                    match (*args).tail {
+                        Some(tail) => {
+                            let pair_b = pair_a.0.lower_expr_ref(&(*tail).head)
+                            return pair_b.0.lower_f128_emit_limbs_from_regs(pair_a.1, pair_b.1)
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+            return lower_f128_fail(self, "f128_from_limbs expects two i64 arguments")
+        }
+        if ir_name_eq(callee_name, make_name("f128_to_lo")) || ir_name_eq(callee_name, make_name("f128_to_hi")) {
+            match e.args {
+                Some(args) => {
+                    let pair_x = self.lower_f128_value_ref(&(*args).head)
+                    var lo = pair_x.0
+                    let handle = pair_x.1
+                    let pair_d = lo.fresh_reg()
+                    lo = pair_d.0
+                    let dst = pair_d.1
+                    if ir_name_eq(callee_name, make_name("f128_to_lo")) {
+                        lo = lo.emit(ir_field_get(dst, handle, 0, make_name("lo")))
+                    } else {
+                        lo = lo.emit(ir_field_get(dst, handle, 1, make_name("hi")))
+                    }
+                    return (lo, dst)
+                }
+                None => {}
+            }
+            return lower_f128_fail(self, "f128_to_lo/hi expects one f128 argument")
+        }
+        lower_f128_fail(self, "unsupported f128 call")
+    }
+
+    fn lower_f128_emit_limbs_from_regs(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        self.lower_f128_materialize_bits(lo_reg, hi_reg)
+    }
+
+    fn lower_let_stmt_f128_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match s.expr {
+            Some(rhs) => {
+                let pair = self.lower_f128_value_ref(&(*rhs))
+                var lo = pair.0
+                var dest = pair.1
+                if (*rhs).kind == ExprKind::ExprIdent {
+                    let copied = lo.lower_f128_copy_limbs(dest)
+                    lo = copied.0
+                    dest = copied.1
+                }
+                lo = lo.bind_local(s.name, dest, is_mut)
+                lo = lo.bind_local_scalar_kind(s.name, 5)
+                lo = lo.bind_local_wide_type(s.name, 128, 0)
+                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"))
+                (lo, dest)
+            }
+            None => lower_f128_fail(self, "f128 let requires an initializer (V0-E.5.1)"),
+        }
+    }
+
+    fn lower_f128_expr_ready_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprFloatLit { return true }
+                if (*e).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128
+                }
+                if (*e).kind == ExprKind::ExprBinary {
+                    return self.lower_f128_expr_ready_ref(&(*e).left) && self.lower_f128_expr_ready_ref(&(*e).right)
+                }
+                if (*e).kind == ExprKind::ExprCall {
+                    match (*e).left {
+                        Some(c) => {
+                            return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
+                        }
+                        None => {}
+                    }
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
+        // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
         if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
+            if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub)
+                && self.lower_f128_expr_ready_ref(&e.left)
+                && self.lower_f128_expr_ready_ref(&e.right) {
+                return self.lower_f128_binary_ref(e)
+            }
             print("error: f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)\n")
             var lo_refuse = self
             lowerer_mark_hard_error(&! lo_refuse)
@@ -19957,6 +20242,15 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        let callee_short = match e.left {
+            Some(c) => lower_f128_expr_callee_short(&(*c)),
+            None => ir_empty_name(),
+        }
+        if ir_name_eq(callee_short, make_name("f128_from_limbs"))
+            || ir_name_eq(callee_short, make_name("f128_to_lo"))
+            || ir_name_eq(callee_short, make_name("f128_to_hi")) {
+            return lo.lower_f128_intrinsic_call_ref(e)
+        }
         if lo.call_expr_uses_special_a_ref(e) {
             return lo.lower_call_expr_special_a_ref(e)
         }

@@ -756,7 +756,9 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-E.4.1:** language `f128` compile is fail-closed (no f64 greenwash ELF).
 - **Madaros V0-E.5:** general IEEE binary128 add/sub in `stdlib/math/softfloat_f128.sio`
   (`--stage v0e5`), seed-run and Madaros-run of `F128Bits` (not language `f128` ops).
-  Language desugar, mul/div, f256, builtin `print_f128`, and
+- **Madaros V0-E.5.1:** language `f128` `+`/`−` Madaros-run desugars to that softfloat
+  (`--stage v0e51`) on 2-limb locals (exact dyadic literals or `f128_from_limbs`).
+  Params/returns ABI, mul/div/neg/cmp, f256, builtin `print_f128`, and
   GUM/`Knowledge`/`MeasuredF256` remain deferred.
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.

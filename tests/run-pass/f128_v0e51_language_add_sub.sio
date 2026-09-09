@@ -1,0 +1,137 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.1 — language f128 +/− desugars to stdlib softfloat (no f64 payload)
+//@ ladder-stage: V0-E.5.1
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e51
+//
+// Lower looks up f128_bits_soft_add / f128_bits_soft_sub. A source-level
+// F128Bits call at the start of main forces those names into the module
+// (unused `use` items can be dropped before lookup). Limb ABI wrappers stay
+// imported for the seed gate; they are not the language desugar target.
+// Distinct non-zero exits: 21=bits_1+1 22=bits_2-1
+// 11=1+1 12=half+one 13=1+tiny 14=greenwash_zero
+// 15=greenwash_identity 16=recover_mismatch 17=two+tiny
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+    f128_soft_add_limbs,
+    f128_soft_sub_limbs,
+    f128_bits_soft_add,
+    f128_bits_soft_sub,
+}
+use math::wide_float::{print_limb_hex16, F128Bits}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e51_main_entered")
+    let bits_one = F128Bits { lo: 0, hi: 4611404543450677248 }
+    let bits_sum = f128_bits_soft_add(bits_one, bits_one)
+    if bits_sum.lo != 0 || bits_sum.hi != 4611686018427387904 {
+        println("FAIL bits_1+1")
+        return 21
+    }
+    let bits_sub = f128_bits_soft_sub(bits_sum, bits_one)
+    if bits_sub.lo != 0 || bits_sub.hi != 4611404543450677248 {
+        println("FAIL bits_2-1")
+        return 22
+    }
+
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let half: f128 = 0.5
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    let one_plus_one: f128 = one + one
+    print("got_1+1=")
+    print_limb_hex16(f128_to_lo(one_plus_one))
+    print(":")
+    print_limb_hex16(f128_to_hi(one_plus_one))
+    println("")
+    if f128_to_lo(one_plus_one) != 0 || f128_to_hi(one_plus_one) != 4611686018427387904 {
+        println("FAIL 1+1")
+        return 11
+    }
+
+    // Outside the V0-E.4 exact-case table: 0.5+1 = 1.5
+    let half_plus_one: f128 = half + one
+    print("got_half+one=")
+    print_limb_hex16(f128_to_lo(half_plus_one))
+    print(":")
+    print_limb_hex16(f128_to_hi(half_plus_one))
+    println("")
+    if f128_to_lo(half_plus_one) != 0 || f128_to_hi(half_plus_one) != 4611545280939032576 {
+        println("FAIL half+one")
+        return 12
+    }
+
+    let one_plus_tiny: f128 = one + tiny
+    print("got_1+tiny=")
+    print_limb_hex16(f128_to_lo(one_plus_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(one_plus_tiny))
+    println("")
+    if f128_to_lo(one_plus_tiny) != 51922968585348 || f128_to_hi(one_plus_tiny) != 4611404543450677248 {
+        println("FAIL 1+tiny")
+        return 13
+    }
+
+    let recover: f128 = one_plus_tiny - one
+    print("got_recover=")
+    print_limb_hex16(f128_to_lo(recover))
+    print(":")
+    print_limb_hex16(f128_to_hi(recover))
+    println("")
+    if f128_to_lo(recover) == 0 && f128_to_hi(recover) == 0 {
+        println("FAIL f64_greenwash_zero")
+        return 14
+    }
+    if f128_to_hi(recover) == 4611404543450677248 {
+        println("FAIL f64_greenwash_identity")
+        return 15
+    }
+    if f128_to_lo(recover) != 0 || f128_to_hi(recover) != 4592679628783035424 {
+        println("FAIL recover_mismatch")
+        return 16
+    }
+
+    let two_plus_tiny: f128 = two + tiny
+    print("got_two+tiny=")
+    print_limb_hex16(f128_to_lo(two_plus_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(two_plus_tiny))
+    println("")
+    if f128_to_lo(two_plus_tiny) != 25961484292674 || f128_to_hi(two_plus_tiny) != 4611686018427387904 {
+        println("FAIL two+tiny")
+        return 17
+    }
+
+    print("wire_half+one=")
+    print_limb_hex16(f128_to_lo(half_plus_one))
+    print(":")
+    print_limb_hex16(f128_to_hi(half_plus_one))
+    println("")
+    print("wire_1+tiny=")
+    print_limb_hex16(f128_to_lo(one_plus_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(one_plus_tiny))
+    println("")
+    print("wire_recover=")
+    print_limb_hex16(f128_to_lo(recover))
+    print(":")
+    print_limb_hex16(f128_to_hi(recover))
+    println("")
+    print("wire_two+tiny=")
+    print_limb_hex16(f128_to_lo(two_plus_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(two_plus_tiny))
+    println("")
+
+    println("PASS f128_v0e51_language_add_sub general=ieee754 rne anti_f64=green language_desugar=madaros")
+    return 0
+}
