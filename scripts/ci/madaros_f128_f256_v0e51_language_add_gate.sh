@@ -159,14 +159,30 @@ else
   fi
 fi
 
+# V0-E.5.4 landed the f128 params/returns ABI, so the V0-E.2 fixture is no
+# longer a fail-closed negative. The lowering-level negative for "wide float
+# through a fn boundary" is now f256: same-format ops typecheck, no payload.
+cat >"$TMP_DIR/lang_f256_params.sio" <<'EOF'
+use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
+
+fn add256(a: f256, b: f256) -> f256 { a + b }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let x: f256 = 1.0
+    let y: f256 = add256(x, x)
+    let z: f256 = y * x
+    return 0
+}
+EOF
+
 if [[ -x "$SOUC" ]]; then
   set +e
-  "$SOUC" compile tests/run-pass/f128_v0e2_arith_check.sio -o "$TMP_DIR/lang.elf" >"$TMP_DIR/lang.compile.log" 2>&1
+  "$SOUC" compile "$TMP_DIR/lang_f256_params.sio" -o "$TMP_DIR/lang.elf" >"$TMP_DIR/lang.compile.log" 2>&1
   set -e
   if grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/lang.compile.log"; then
-    note_pass "language_f128_params_mul_still_fail_closed"
+    note_pass "language_f256_params_still_fail_closed"
   else
-    note_fail "language_f128_v0e2_fail_closed_regression"
+    note_fail "language_f256_params_fail_closed_regression"
     tail -30 "$TMP_DIR/lang.compile.log" >&2 || true
   fi
 
@@ -193,7 +209,7 @@ else
   note_fail "souc_missing"
 fi
 
-echo "NOTE v0e51_deferred mul_div_neg_cmp=pending f256=pending params_returns_abi=pending print_builtin=pending gum=pending"
+echo "NOTE v0e51_deferred mul_div_neg_cmp=see_v0e52 f256=pending params_returns_abi=see_v0e54 print_builtin=pending gum=pending"
 echo "NOTE adr009 python_softfloat=not_claim_clock rust=not_claim_clock lean_single_language=greenwash"
 
 echo "---"

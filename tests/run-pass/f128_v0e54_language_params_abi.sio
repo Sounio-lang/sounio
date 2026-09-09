@@ -1,0 +1,193 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.4 — language f128 params/returns ABI: f128 crosses user fn boundaries as an F128Bits handle (no f64 payload)
+//@ ladder-stage: V0-E.5.4
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e54
+//
+// A language f128 value is an F128Bits handle (one GPR word). V0-E.5.4 makes
+// that the params/returns ABI: an f128 param is a ready softfloat operand, a
+// `-> f128` fn returns the handle, a call to it is an f128 expression (so it can
+// be a `let` RHS, an operand, or an argument), and a bare literal passed to an
+// f128 param lowers as binary128 — never f64 bits.
+// f256 params/returns stay V0-E.4.1 fail-closed.
+// Distinct non-zero exits:
+// 11=add(1.0,2.0) 12=nested_7 13=recursion_8 14=zero_param_return 15=pick_early_return
+// 16=horner_15 17=neg 18=cmp_fn 19=greenwash_(1+tiny)^2 20=(1+tiny)^2
+// 21=1/(1+tiny) 22=half_of 23=hi_of 24=sub 25=from_limbs_arg 26=twice_6
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::wide_float::{print_limb_hex16}
+
+fn add128(a: f128, b: f128) -> f128 { a + b }
+fn sub128(a: f128, b: f128) -> f128 { a - b }
+fn mul128(a: f128, b: f128) -> f128 { a * b }
+fn div128(a: f128, b: f128) -> f128 { a / b }
+fn neg128(a: f128) -> f128 { -a }
+fn lt128(a: f128, b: f128) -> bool { a < b }
+
+// Zero-param f128 return (a bare `1.0` tail is E008 in check: literals are f64).
+fn one128() -> f128 {
+    let r: f128 = 1.0
+    r
+}
+
+// Mixed param kinds (bool + f128) and an early `return` of an f128 param.
+fn pick128(c: bool, a: f128, b: f128) -> f128 {
+    if c { return a }
+    b
+}
+
+// Recursion with an i64 and an f128 param: doubles x n times.
+fn scale_i(n: i64, x: f128) -> f128 {
+    if n == 0 { return x }
+    scale_i(n - 1, x + x)
+}
+
+// Four f128 params, composite body.
+fn horner(a: f128, b: f128, c: f128, x: f128) -> f128 { (a * x + b) * x + c }
+
+// Local f128 operand mixed with a param, explicit `return`.
+fn half_of(x: f128) -> f128 {
+    let two: f128 = 2.0
+    return x / two
+}
+
+// f128 param handed straight to an intrinsic.
+fn hi_of(x: f128) -> i64 { f128_to_hi(x) }
+
+// f128 result flowing through two user-fn levels.
+fn twice(x: f128) -> f128 { add128(x, x) }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e54_main_entered")
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    // Literal args to f128 params.
+    let three: f128 = add128(1.0, 2.0)
+    if f128_to_lo(three) != 0 || f128_to_hi(three) != 4611826755915743232 {
+        println("FAIL add(1.0,2.0)")
+        return 11
+    }
+    // Nested calls, unannotated let: 2*3+1 = 7.
+    let seven = add128(mul128(two, three), one)
+    if f128_to_lo(seven) != 0 || f128_to_hi(seven) != 4612178599636631552 {
+        println("FAIL nested_7")
+        return 12
+    }
+    // Recursion through the ABI: 1 doubled 3 times = 8.
+    let eight: f128 = scale_i(3, one)
+    if f128_to_lo(eight) != 0 || f128_to_hi(eight) != 4612248968380809216 {
+        println("FAIL recursion_8")
+        return 13
+    }
+    let lit_one: f128 = one128()
+    if f128_to_lo(lit_one) != 0 || f128_to_hi(lit_one) != 4611404543450677248 {
+        println("FAIL zero_param_return")
+        return 14
+    }
+    if !(pick128(true, one, two) == one) || !(pick128(false, one, two) == two) {
+        println("FAIL pick_early_return")
+        return 15
+    }
+    // (2*2+3)*2+1 = 15.
+    let fifteen: f128 = horner(two, three, one, two)
+    if f128_to_lo(fifteen) != 0 || f128_to_hi(fifteen) != 4612495258985431040 {
+        println("FAIL horner_15")
+        return 16
+    }
+    let neg_one: f128 = neg128(one)
+    if f128_to_lo(neg_one) != 0 || f128_to_hi(neg_one) != 0 - 4611967493404098560 {
+        println("FAIL neg")
+        return 17
+    }
+    if !lt128(one, two) || lt128(two, one) || lt128(one, one) {
+        println("FAIL cmp_fn")
+        return 18
+    }
+    // Anti-f64 through the ABI: (1+~1e-20)^2 keeps the 2*tiny term; f64 gives 1.0.
+    let one_plus_tiny: f128 = add128(one, tiny)
+    let square: f128 = mul128(one_plus_tiny, one_plus_tiny)
+    print("got_(1+tiny)^2=")
+    print_limb_hex16(f128_to_lo(square))
+    print(":")
+    print_limb_hex16(f128_to_hi(square))
+    println("")
+    if f128_to_lo(square) == 0 && f128_to_hi(square) == 4611404543450677248 {
+        println("FAIL f64_greenwash_square")
+        return 19
+    }
+    if f128_to_lo(square) != 103845937170696 || f128_to_hi(square) != 4611404543450677248 {
+        println("FAIL (1+tiny)^2")
+        return 20
+    }
+    // Call result as an argument: 1/(1+tiny) lands in [0.5,1).
+    let recip: f128 = div128(one, add128(one, tiny))
+    print("got_1/(1+tiny)=")
+    print_limb_hex16(f128_to_lo(recip))
+    print(":")
+    print_limb_hex16(f128_to_hi(recip))
+    println("")
+    if f128_to_lo(recip) != 0 - 103845937170696 || f128_to_hi(recip) != 4611404543450677247 {
+        println("FAIL 1/(1+tiny)")
+        return 21
+    }
+    let one_half: f128 = half_of(three)
+    if f128_to_lo(one_half) != 0 || f128_to_hi(one_half) != 4611545280939032576 {
+        println("FAIL half_of")
+        return 22
+    }
+    if hi_of(two) != 4611686018427387904 || hi_of(tiny) != 4592679628783035426 {
+        println("FAIL hi_of")
+        return 23
+    }
+    if !(sub128(three, one) == two) {
+        println("FAIL sub")
+        return 24
+    }
+    // Intrinsic call and literal 0.0 as arguments.
+    let tiny_again: f128 = add128(f128_from_limbs(3746994889972252672, 4592679628783035426), 0.0)
+    if f128_to_lo(tiny_again) != 3746994889972252672 || f128_to_hi(tiny_again) != 4592679628783035426 {
+        println("FAIL from_limbs_arg")
+        return 25
+    }
+    let six: f128 = twice(three)
+    if f128_to_lo(six) != 0 || f128_to_hi(six) != 4612108230892453888 {
+        println("FAIL twice_6")
+        return 26
+    }
+
+    print("wire_(1+tiny)^2=")
+    print_limb_hex16(f128_to_lo(square))
+    print(":")
+    print_limb_hex16(f128_to_hi(square))
+    println("")
+    print("wire_1/(1+tiny)=")
+    print_limb_hex16(f128_to_lo(recip))
+    print(":")
+    print_limb_hex16(f128_to_hi(recip))
+    println("")
+    print("wire_horner=")
+    print_limb_hex16(f128_to_lo(fifteen))
+    print(":")
+    print_limb_hex16(f128_to_hi(fifteen))
+    println("")
+    print("wire_neg1=")
+    print_limb_hex16(f128_to_lo(neg_one))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_one))
+    println("")
+
+    println("PASS f128_v0e54_language_params_abi general=ieee754 rne anti_f64=green language_abi=madaros")
+    return 0
+}

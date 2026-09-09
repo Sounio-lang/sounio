@@ -760,8 +760,15 @@ whoever picks option 1, 2, or the remainder of option 3.
   (`--stage v0e51`) on 2-limb locals (exact dyadic literals or `f128_from_limbs`).
 - **Madaros V0-E.5.2:** language `f128` `*`, unary `-`, and `< <= > >= == !=`
   Madaros-run desugar to the same softfloat (`--stage v0e52`; IEEE RNE product,
-  +0 == -0, NaN unordered). Params/returns ABI, `/`, f256, builtin `print_f128`,
-  and GUM/`Knowledge`/`MeasuredF256` remain deferred.
+  +0 == -0, NaN unordered).
+- **Madaros V0-E.5.3:** language `f128` `/` Madaros-run desugars to softfloat long
+  division (`--stage v0e53`; 117-bit restoring, RNE, x/0 → ±inf, 0/0 → NaN).
+- **Madaros V0-E.5.4:** language `f128` params/returns ABI (`--stage v0e54`): user
+  fns take `f128` params and return `f128` as an `F128Bits` handle; calls to them
+  are f128 expressions; bare literal args to f128 params lower as binary128.
+  `%`, f256 params/returns, `f128` struct fields/arrays, builtin `print_f128`, and
+  GUM/`Knowledge`/`MeasuredF256` remain deferred. A bare literal in tail/return
+  position of an `-> f128` fn is rejected by check (E008: literals are f64).
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative

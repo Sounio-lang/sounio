@@ -2127,6 +2127,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                                        fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                                             fn_slot_sig.param_count = fn_slot_sig.param_count + 1
@@ -2666,6 +2667,7 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
+    fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -3577,6 +3579,7 @@ fn lowerer_preseed_one_item_mut(
                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                        fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
                             fn_slot_sig.param_count = fn_slot_sig.param_count + 1
@@ -3761,6 +3764,7 @@ fn ir_fast_summary_preseed_fn_signature(
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
+    fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -3892,6 +3896,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
+    fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
         fn_slot.param_count = fn_slot.param_count + 1
@@ -4212,6 +4217,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
+                                fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
                                     fn_slot.param_count = fn_slot.param_count + 1
@@ -4308,6 +4314,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
+                                                        fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
                                                             fn_slot.param_count = fn_slot.param_count + 1
@@ -4461,6 +4468,24 @@ fn lowerer_mark_local_scalar_kind_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).scalar_kind).values[i as usize] = kind
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+fn lowerer_mark_local_wide_bits_mut(
+    lo: &! Lowerer,
+    name: Name,
+    bits: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).wide_bits).values[i as usize] = bits
+            (*(*locals_box).wide_signed).values[i as usize] = 0
             (*lo).locals = locals_box
             return
         }
@@ -4762,6 +4787,12 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_wide_float(&(*list).head.ty) {
                     // V0-E.4.1: do not mark as f64 (kind 2) — that is the greenwash path.
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 5)
+                    // V0-E.5.4: an f128 param is an F128Bits handle — the same shape as
+                    // an annotated f128 local, so mark wide_bits=128 and it is a ready
+                    // operand for the softfloat desugar. f256 params stay fail-closed.
+                    if lower_type_expr_is_f128(&(*list).head.ty) {
+                        lowerer_mark_local_wide_bits_mut(lo, (*list).head.name, 128)
+                    }
                 } else if lower_type_expr_is_f64(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 2)
                 } else if lower_type_expr_fn_returns_f64(&(*list).head.ty) {
@@ -5029,6 +5060,7 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
+    (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
     (*lo).current_func = strategy_func_box
 
     // #1547: an extern "C" declaration has no body. Flush it now as an
@@ -5494,6 +5526,38 @@ fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, 
     }
 }
 
+// V0-E.5.4 language f128 params/returns ABI. A language f128 value is an
+// F128Bits handle (one GPR word), so passing/returning it is the plain
+// struct-handle ABI. The semantic fact a call site needs — WHICH params are
+// f128, so a bare `1.0` argument lowers as binary128 and never as f64 bits —
+// lives on the callee's IrFunction (f128_param_mask, next to return_struct_name
+// which already says `-> f128`), stamped by every signature pre-seed site.
+fn lower_f128_param_mask_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var mask: i64 = 0
+    var bit: i64 = 1
+    var idx: i64 = 0
+    var cur = params
+    var going = true
+    while going {
+        match *cur {
+            Some(list) => {
+                if idx < 62 && lower_type_expr_is_f128(&(*list).head.ty) {
+                    mask = mask | bit
+                }
+                bit = bit * 2
+                idx = idx + 1
+                cur = &(*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    mask
+}
+
+fn lower_fn_returns_f128(func: &IrFunction) -> bool with Mut, Panic, Div {
+    ir_name_eq((*func).return_struct_name, make_name("f128"))
+}
+
 // V0-E.5.1: only dyadic values that are exact in both f64 and f128. Anything
 // else (including 1e-20) must use f128_from_limbs — never f64 widen.
 //
@@ -5536,6 +5600,13 @@ fn lower_f128_fail(lo: Lowerer, msg: string) -> (Lowerer, i64) with Mut, Panic, 
 // Import spellings may be Ident or Path. expr_to_callee_name_ref mangles a
 // two-segment path into Type_method, which would miss f128_to_lo intercept
 // and run the placeholder body (always 0) — FAIL 1+1 at runtime.
+fn lower_f128_expr_callee_short_opt(callee: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+    match *callee {
+        Some(c) => lower_f128_expr_callee_short(&(*c)),
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_f128_expr_callee_short(callee: &Expr) -> Name with Mut, Panic, Div, Alloc {
     if (*callee).kind == ExprKind::ExprIdent {
         return (*callee).name
@@ -13519,12 +13590,9 @@ impl Lowerer {
             return lower_opt_type_is_wide_float(&(*e).cast_type)
         }
         if (*e).kind == ExprKind::ExprCall {
-            match (*e).left {
-                Some(c) => {
-                    return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
-                }
-                None => {}
-            }
+            let callee_short = lower_f128_expr_callee_short_opt(&(*e).left)
+            return ir_name_eq(callee_short, make_name("f128_from_limbs"))
+                || self.lower_callee_returns_f128_ref(&(*e).left)
         }
         if (*e).kind == ExprKind::ExprBinary {
             // V0-E.5.2: `a < b` on f128 operands is a bool, not a wide float.
@@ -14357,6 +14425,8 @@ impl Lowerer {
                 Some(callee_expr) => {
                     let callee_name = lower_f128_expr_callee_short(&(*callee_expr))
                     if ir_name_eq(callee_name, make_name("f128_from_limbs")) { return 5 }
+                    // V0-E.5.4: user fn declared `-> f128` yields an F128Bits handle.
+                    if self.lower_callee_returns_f128_ref(&(*e).left) { return 5 }
                     if ir_name_eq(callee_name, make_name("f128_to_lo")) || ir_name_eq(callee_name, make_name("f128_to_hi")) {
                         return 1
                     }
@@ -15005,6 +15075,7 @@ impl Lowerer {
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
         func.param_count = ir_param_list_count_ref(params)
+        func.f128_param_mask = lower_f128_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
         func.instr_count = 0
@@ -15434,7 +15505,9 @@ impl Lowerer {
                         (*(*locals).array_elem_float).values[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
-                        (*(*locals).wide_bits).values[idx as usize] = 0
+                        // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
+                        // below) so they are ready softfloat operands; f256 stays kind 5 only.
+                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
                         (*(*locals).wide_signed).values[idx as usize] = 0
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
@@ -15451,7 +15524,9 @@ impl Lowerer {
                         // word-size integer params (i8..i64/u8..u64/isize/usize) → kind 1
                         // (println safety). Bare int `as i64` stays identity because only
                         // kind 2 triggers IrFloatToInt. i32 was previously left at 0.
-                        (*(*locals).scalar_kind).values[idx as usize] = if lower_type_expr_is_f64(&(*list).head.ty) {
+                        (*(*locals).scalar_kind).values[idx as usize] = if lower_type_expr_is_wide_float(&(*list).head.ty) {
+                            5
+                        } else if lower_type_expr_is_f64(&(*list).head.ty) {
                             2
                         } else if lower_type_expr_is_integer(&(*list).head.ty) {
                             1
@@ -17326,14 +17401,26 @@ impl Lowerer {
     }
 
     fn lower_expr_args_ref(self, opt: &Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        self.lower_expr_args_masked_ref(opt, 0)
+    }
+
+    // V0-E.5.4: `f128_mask` bit i set ⇔ callee param i is f128; that argument is
+    // lowered as an f128 value (binary128 literal / handle), the rest as usual.
+    fn lower_expr_args_masked_ref(self, opt: &Option<Box<ExprList>>, f128_mask: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = opt
         var regs: [i64; 64] = [0; 64]
         var reg_count: i64 = 0
+        var f128_bit: i64 = 1
         while true {
             match *current {
                 Some(list) => {
-                    let pair_head = lo.lower_expr_ref(&(*list).head)
+                    let pair_head = if (f128_mask & f128_bit) != 0 {
+                        lo.lower_f128_value_ref(&(*list).head)
+                    } else {
+                        lo.lower_expr_ref(&(*list).head)
+                    }
+                    f128_bit = f128_bit * 2
                     lo = pair_head.0
                     if reg_count < 64 {
                         regs[reg_count as usize] = pair_head.1
@@ -19668,10 +19755,19 @@ impl Lowerer {
         // handle by value. Auto-unwrap &buf / &!buf / ref-typed slots so both
         // shapes share the handle unpack path (no builtin-body always-deref).
         let handle_buf_idx = lower_handle_buf_arg_index(callee_name)
+        // V0-E.5.4: tell lower_expr_args_ref which positions are f128 params so a
+        // bare literal argument lowers as binary128 (consumed+cleared on entry).
+        // V0-E.5.4: which argument positions are f128 params, read off the
+        // resolved callee so a bare literal argument lowers as binary128.
+        let f128_arg_mask: i64 = if fn_id >= 0 && fn_id < lo1.module.fn_count {
+            ir_fn_get(&(*lo1.module), fn_id as usize).f128_param_mask
+        } else {
+            0
+        }
         let pair_args: LowerExprArgsResult = if handle_buf_idx >= 0 {
             lo1.lower_expr_args_handle_buf_ref(&e.args, handle_buf_idx)
         } else {
-            lo1.lower_expr_args_ref(&e.args)
+            lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask)
         }
         let lo2 = pair_args.lowerer
         let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
@@ -19791,7 +19887,7 @@ impl Lowerer {
         // itself call f128_bits_soft_add before the first `+`.
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, fname)
         if fn_id < 0 {
-            return lower_f128_fail(lo, "language f128 ops require `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub, f128_bits_soft_mul, f128_bits_soft_neg, f128_bits_soft_lt, ...}` (V0-E.5.1 / V0-E.5.2)")
+            return lower_f128_fail(lo, "language f128 ops require `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub, f128_bits_soft_mul, f128_bits_soft_div, f128_bits_soft_neg, f128_bits_soft_lt, ...}` (V0-E.5.1 .. V0-E.5.3)")
         }
         var args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a)))
         if argc != 1 {
@@ -19828,7 +19924,7 @@ impl Lowerer {
             if self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128 {
                 return (self, self.lookup_local((*e).name))
             }
-            return lower_f128_fail(self, "f128 operand is not a language f128 local (params/f256 stay V0-E.4.1 fail-closed)")
+            return lower_f128_fail(self, "f128 operand is not a language f128 local/param (f256 stays V0-E.4.1 fail-closed)")
         }
         if (*e).kind == ExprKind::ExprBinary {
             return self.lower_f128_binary_ref(e)
@@ -19837,17 +19933,55 @@ impl Lowerer {
             return self.lower_f128_unary_ref(e)
         }
         if (*e).kind == ExprKind::ExprCall {
-            return self.lower_f128_intrinsic_call_ref(e)
+            if self.lower_f128_call_is_intrinsic_ref(e) {
+                return self.lower_f128_intrinsic_call_ref(e)
+            }
+            // V0-E.5.4: a user fn declared `-> f128` returns an F128Bits handle;
+            // the generic call path lowers it (args to f128 params are lowered
+            // through the callee's f128_param_mask so literals stay binary128).
+            if self.lower_callee_returns_f128_ref(&(*e).left) {
+                return self.lower_call_expr_ref(e)
+            }
+            return lower_f128_fail(self, "call in f128 position does not return f128 (V0-E.5.4)")
         }
-        lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1/V0-E.5.2: literal, from_limbs, ident, + - * unary-, comparisons)")
+        lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1..V0-E.5.3: literal, from_limbs, ident, + - * / unary-, comparisons)")
+    }
+
+    // V0-E.5.4: resolve a call's callee in the IR fn table (pre-seeded before any
+    // body is lowered) and read its declared `-> f128` / f128 param mask. -1 / 0
+    // when the callee is not a known function (builtin, closure, unresolved).
+    fn lower_callee_fn_id_ref(self, callee: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *callee {
+            Some(c) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*c))
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                if fn_id >= 0 && fn_id < self.module.fn_count { fn_id } else { 0 - 1 }
+            }
+            None => 0 - 1,
+        }
+    }
+
+    fn lower_callee_returns_f128_ref(self, callee: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        let fn_id = self.lower_callee_fn_id_ref(callee)
+        if fn_id < 0 { return false }
+        let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
+        lower_fn_returns_f128(&callee_fn)
+    }
+
+    fn lower_f128_call_is_intrinsic_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let callee_short = lower_f128_expr_callee_short_opt(&e.left)
+        ir_name_eq(callee_short, make_name("f128_from_limbs"))
+            || ir_name_eq(callee_short, make_name("f128_to_lo"))
+            || ir_name_eq(callee_short, make_name("f128_to_hi"))
     }
 
     // Softfloat desugar target for a language f128 binary op, or empty when the
-    // op stays V0-E.4.1 fail-closed (`/`, `%`, bitwise, ...).
+    // op stays V0-E.4.1 fail-closed (`%`, bitwise, shifts, ...).
     fn lower_f128_binary_target(self, op: BinaryOp) -> Name with Mut, Panic, Div {
         if op == BinaryOp::OpAdd { return make_name("f128_bits_soft_add") }
         if op == BinaryOp::OpSub { return make_name("f128_bits_soft_sub") }
         if op == BinaryOp::OpMul { return make_name("f128_bits_soft_mul") }
+        if op == BinaryOp::OpDiv { return make_name("f128_bits_soft_div") }
         if op == BinaryOp::OpLt { return make_name("f128_bits_soft_lt") }
         if op == BinaryOp::OpLe { return make_name("f128_bits_soft_le") }
         if op == BinaryOp::OpGt { return make_name("f128_bits_soft_gt") }
@@ -19863,7 +19997,7 @@ impl Lowerer {
 
     fn lower_f128_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // V0-E.5.1: + −. V0-E.5.2: * and the six comparisons (bool result).
-        // `/` stays fail-closed until the softfloat divide lands.
+        // V0-E.5.3: / (restoring long division in stdlib). `%` stays fail-closed.
         let fname = self.lower_f128_binary_target(e.bin_op)
         if ir_name_eq(fname, ir_empty_name()) {
             return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
@@ -19970,12 +20104,9 @@ impl Lowerer {
                     return (*e).un_op == UnaryOp::OpNeg && self.lower_f128_expr_ready_ref(&(*e).left)
                 }
                 if (*e).kind == ExprKind::ExprCall {
-                    match (*e).left {
-                        Some(c) => {
-                            return ir_name_eq(lower_f128_expr_callee_short(&(*c)), make_name("f128_from_limbs"))
-                        }
-                        None => {}
-                    }
+                    let callee_short = lower_f128_expr_callee_short_opt(&(*e).left)
+                    return ir_name_eq(callee_short, make_name("f128_from_limbs"))
+                        || self.lower_callee_returns_f128_ref(&(*e).left)
                 }
                 false
             }
@@ -19986,7 +20117,7 @@ impl Lowerer {
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
         // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
-        // V0-E.5.2: * and the six comparisons (bool result) too; `/` still refuses.
+        // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. `%` still refuses.
         if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
             if self.lower_f128_binary_op_supported(e.bin_op)
                 && self.lower_f128_expr_ready_ref(&e.left)
