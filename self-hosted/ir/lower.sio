@@ -13902,6 +13902,11 @@ impl Lowerer {
                     return (tuple_mask >> (tuple_idx as i32)) % 2 == 1
                 }
             }
+            // V0-E.5.5: an f128 field is a wide-float handle, never an f64 —
+            // whatever a same-named f64 field elsewhere says.
+            if self.lower_field_is_f128_ref(&(*e).left, (*e).name) {
+                return false
+            }
             if self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name) {
                 return true
             }
@@ -14587,7 +14592,13 @@ impl Lowerer {
                                 var fi_existing: i64 = 0
                                 while fi_existing < (*lo.struct_layouts).entries[si as usize].field_count {
                                     if ir_name_eq(ir_name_at((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].name_id), (*list_existing).head.name) {
-                                        (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float = literal_float_kind
+                                        // V0-E.5.5: `P { x: 1.0 }` on a field declared
+                                        // `f128` is a binary128 initialiser, not evidence
+                                        // that the slot is an f64. Flipping is_float here
+                                        // reclassified every later `p.x` as f64.
+                                        if !ir_name_eq(ir_name_at((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].named_type_name_id), make_name("f128")) {
+                                            (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float = literal_float_kind
+                                        }
                                     }
                                     fi_existing = fi_existing + 1
                                 }
@@ -16715,6 +16726,13 @@ impl Lowerer {
                         // params correctly carry kind 2 the cross-fn variance/float-reg
                         // tables (or cast path) could treat the counter as float.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprFieldAccess)
+                        && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
+                        // `let v = f128_call(..)` / `let v = p.x` (V0-E.5.4 / V0-E.5.5).
+                        // Ahead of the f64/string classifiers: a wide-float handle
+                        // must never be reclassified by a same-named f64 field.
+                        lo = lo.bind_local_scalar_kind(s.name, 5)
+                        lo = lo.bind_local_wide_type(s.name, 128, 0)
                     } else if lo.expr_result_is_float_ref(&(*expr_box_sk)) {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
@@ -16729,11 +16747,6 @@ impl Lowerer {
                         // Restricted to Call/MethodCall so an indexed struct element
                         // cannot be misclassified as int.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
-                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprFieldAccess)
-                        && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
-                        // `let v = f128_call(..)` / `let v = p.x` (V0-E.5.4 / V0-E.5.5).
-                        lo = lo.bind_local_scalar_kind(s.name, 5)
-                        lo = lo.bind_local_wide_type(s.name, 128, 0)
                     } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
                         // `let y = x + 1` / `let y = 0 - x` without an integer annotation:
                         // expr_result_scalar_kind_ref now positively returns 1 for int
@@ -20002,19 +20015,19 @@ impl Lowerer {
     // which unwraps &T / &!T); a nested field access resolves through the
     // enclosing struct's layout. Empty when unknown.
     fn lower_expr_struct_type_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
-        if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_struct_type((*e).name)
-        }
         if (*e).kind == ExprKind::ExprFieldAccess {
             match (*e).left {
                 Some(base) => {
                     let base_ty = self.lower_expr_struct_type_name_ref(&(*base))
+                    if base_ty.len == 0 { return ir_empty_name() }
                     return self.field_named_type_for_struct(base_ty, (*e).name)
                 }
                 None => return ir_empty_name(),
             }
         }
-        ir_empty_name()
+        // The resolver the receiver path already trusts: ident, `*p`, `a[i]`,
+        // method-call results. One answer to "which struct is this", not two.
+        self.expr_receiver_struct_type_ref(e)
     }
 
     // V0-E.5.5: `base.field` where the field is declared `f128`. The slot holds an
