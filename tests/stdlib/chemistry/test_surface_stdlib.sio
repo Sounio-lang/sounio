@@ -1,0 +1,96 @@
+// tests/stdlib/chemistry/test_surface_stdlib.sio
+//
+// Driver for stdlib/chemistry/surface.sio. NOT `//@ check-only`: this file
+// is executed. See docs/audit/CHEMISTRY_MADAROS_ENGINE_MEASUREMENT_2026-09-09.md
+// for why that is worth saying out loud in this directory.
+//
+// Beyond running surface.sio's own seven tests, this driver does the one
+// check neither module can do alone: it puts chemistry::surface's integrated
+// elementary mechanism, chemistry::surface's closed form, and
+// chemistry::catalysis's INDEPENDENTLY WRITTEN closed form
+// (rate_law_eval kind 5, dual-site Langmuir-Hinshelwood) against each other
+// at the same conditions.
+//
+// The two closed forms were written months apart, in different modules, by
+// different reasoning -- catalysis.sio's from a rate-law taxonomy,
+// surface.sio's from the quasi-equilibrium limit of a mechanism. That they
+// agree to machine precision, and that a four-step mechanism integrated to
+// steady state lands on the same number without being told the formula, is
+// three independent routes to one value.
+
+use chemistry::surface::*
+use chemistry::catalysis::{RateLaw, rate_law_eval}
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+// KA pA = 2.0 * 0.5 = 1, KB pB = 4.0 * 0.25 = 1, k = 0.001
+// closed form = 0.001 * 1 * 1 / (1 + 1 + 1)^2 = 0.001 / 9
+fn test_three_routes_agree() -> bool with IO, Mut, Div, Panic {
+    // Route 1: chemistry::catalysis closed form, kind 5.
+    var c: [f64; 16] = [0.0; 16]
+    c[0] = 0.5     // p_A
+    c[1] = 0.25    // p_B
+    let law = RateLaw { kind: 5, k_rate: 0.001, vmax: 0.0, km1: 2.0, km2: 4.0,
+                        hill_n: 1.0, sub_idx: 0, sub2_idx: 1, cat_idx: -1 }
+    let r_catalysis = rate_law_eval(law, &c)
+
+    // Route 2: chemistry::surface closed form.
+    let r_surface_closed = lh_dual_site_rate(0.001, 2.0, 0.5, 4.0, 0.25)
+
+    // Route 3: chemistry::surface elementary mechanism, integrated.
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 100.0, 50.0)
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 100.0, 25.0)
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 0.001, 0.0)
+    steps[3 as usize] = desorption(2 as i64, 2 as i64, 1000.0, 0.0)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0);        nu_set(&! nu, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0);        nu_set(&! nu, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0);  nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 1.0);        nu_set(&! nu, 2 as i64, 3 as i64, 1.0)
+    nu_set(&! nu, 3 as i64, 2 as i64, 0.0 - 1.0);  nu_set(&! nu, 3 as i64, 3 as i64, 1.0)
+
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.5; p_gas[1] = 0.25; p_gas[2] = 0.0
+
+    let theta0 = clean_surface(4 as i64)
+    let ss = simulate_surface_mkm(&theta0, &steps, 4 as i64, &nu, 4 as i64, &p_gas,
+                                  3 as i64, 0.0002, 20000 as i64)
+    let rates = compute_surface_rates(&steps, 4 as i64, &ss, &p_gas, 3 as i64)
+    let r_mechanism = rates[2]
+
+    // The two closed forms are the same algebra reached independently, so
+    // they must agree to machine precision, not to a tolerance.
+    let closed_forms_identical = ae(r_catalysis, r_surface_closed) < 1.0e-18
+    // The mechanism is not required to match exactly -- the surface reaction
+    // drains the adsorbates while it runs, so it sits slightly off the exact
+    // quasi-equilibrium point the closed forms assume. That gap is the error
+    // of the closed-form assumption at these rate constants.
+    let mechanism_agrees = ae(r_mechanism, r_surface_closed) < 1.0e-8
+    let analytic = ae(r_surface_closed, 0.001 / 9.0) < 1.0e-18
+
+    if !closed_forms_identical { println("FAIL closed forms disagree") }
+    if !mechanism_agrees { println("FAIL mechanism does not reduce to closed form") }
+    if !analytic { println("FAIL closed form is not k/9") }
+
+    closed_forms_identical && mechanism_agrees && analytic
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    if !test_sqrt_exact() { fail = fail + 1; println("FAIL sqrt_exact") }
+    if !test_langmuir_isotherm_exact() { fail = fail + 1; println("FAIL langmuir_isotherm_exact") }
+    if !test_dissociative_isotherm_exact() { fail = fail + 1; println("FAIL dissociative_isotherm_exact") }
+    if !test_sites_conserved_detects_a_leak() { fail = fail + 1; println("FAIL sites_conserved_detects_a_leak") }
+    if !test_site_balance_preserved_under_integration() { fail = fail + 1; println("FAIL site_balance_preserved") }
+    if !test_lh_reduces_to_closed_form() { fail = fail + 1; println("FAIL lh_reduces_to_closed_form") }
+    if !test_turnover_frequency_definition() { fail = fail + 1; println("FAIL turnover_frequency_definition") }
+    if !test_three_routes_agree() { fail = fail + 1; println("FAIL three_routes_agree") }
+    if fail == 0 {
+        println("SURFACE_STDLIB_OK")
+        return 0
+    }
+    print("SURFACE_STDLIB: ") print(fail) println(" failures")
+    fail
+}

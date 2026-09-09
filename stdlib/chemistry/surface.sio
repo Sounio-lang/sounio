@@ -1,0 +1,679 @@
+// stdlib/chemistry/surface.sio -- elementary surface microkinetics with an
+// EXPLICIT vacant site.
+//
+// WHY THIS EXISTS, given catalysis.sio already has Langmuir-Hinshelwood.
+// catalysis.sio's LH rate laws (rate_law_eval kinds 4 and 5) are CLOSED
+// FORMS: the adsorption equilibria and the site balance are folded into the
+// denominator, implicit and unavailable for inspection. That is the right
+// shape when the quasi-equilibrium assumption holds and you only want the
+// rate. It is the wrong shape when the question is which step controls, what
+// the surface actually looks like under operating conditions, or whether the
+// closed form applies at all.
+//
+// This module carries the elementary steps and the coverages as state, with
+// the free site as a REAL SPECIES at its own index rather than an implicit
+// `1 - sum(theta)`. That single decision is what makes site conservation a
+// CHECKABLE STRUCTURAL PROPERTY instead of an assumption: if the vacant site
+// occupies a column of the stoichiometry matrix, then "sites are conserved"
+// is exactly "every row of nu sums to zero", and sites_conserved() below
+// tests it. It is the same move catalyst_conserved() (catalysis.sio:377)
+// makes for a catalytic cycle, applied to the surface.
+//
+// NO MatNM, AND THAT IS A MEASURED DECISION, NOT A STYLE ONE.
+// catalysis.sio routes its stoichiometry through MatNM, which carries
+// `data: [f64; 4096]` -- 32 KiB per value regardless of the declared
+// rows/cols -- and allocates about twenty of them per derivative evaluation.
+// Measured on Madaros v0.80.0: ~2.7 MiB per RK4 step, ~800 steps before the
+// generated runtime's non-reclaiming 2 GiB arena is exhausted (bisected: 750
+// steps run, 850 do not). A microkinetic model integrated to steady state
+// needs far more steps than that. This module uses a flat `[f64; 256]`
+// stoichiometry indexed as nu[r * SURF_MAX + s] and allocates nothing per
+// step. Full measurement:
+// docs/audit/CHEMISTRY_MADAROS_ENGINE_MEASUREMENT_2026-09-09.md
+//
+// NO UNIT TYPES IN THIS FILE, ALSO MEASURED. Unit brands do not survive
+// arithmetic on either engine that ships on main: Madaros v0.80.0 rejects
+// every arithmetic operation on a branded value including addition of two
+// values of the SAME brand, and the lean_single seed accepts everything
+// including addition of mol/s to mol/m. Working dimensional analysis exists
+// -- gen3.elf on feat/w1-qd128-transcend both computes correctly and refuses
+// incompatible dimensions -- but it is not merged. Keeping this file
+// unbranded is what makes it portable across all three; the dimensional
+// layer is separate and declares which binary it needs.
+//
+// LANGUAGE CONSTRAINTS OBSERVED THROUGHOUT, each already paid for once in
+// catalysis.sio's header: negative module-level constants are `var`, never
+// `let` (a module-level `let` f64 holding a negative value is silently
+// wrong); no closures, so helpers precede callers; `pow` with a
+// non-literal exponent silently returns 0.0, so powers are written out or
+// use the local helpers; a whole-struct literal per array index, never
+// per-field mutation across indices.
+
+module chemistry::surface
+
+// ============================================================================
+// 0. SHAPE
+// ============================================================================
+//
+// State layout. `theta` is a [f64; 16] whose first n_ads entries are the
+// fractional coverages of the adsorbates and whose entry at index n_ads is
+// the free-site fraction. There is no separate "vacant" variable anywhere in
+// this module; the free site is species number n_ads and is written to,
+// integrated, and conserved like any other.
+//
+// nspecies = n_ads + 1 throughout. Callers pass nspecies, not n_ads, so the
+// vacant site is never accidentally left out of a loop bound.
+
+pub fn surf_max() -> i64 { 16 }
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+
+// Square root by Newton iteration. Hand-rolled for the same reason
+// catalysis.sio hand-rolls pow_f64: the extern "C" route is not trustworthy
+// here, and dissociative adsorption needs a square root in its exact
+// isotherm, so this is on the critical path of a checked identity rather
+// than a convenience.
+pub fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x / 2.0 } else { g = 1.0 }
+    var i: i64 = 0
+    while i < 60 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// ============================================================================
+// 1. ELEMENTARY STEPS
+// ============================================================================
+//
+// kind, and the rate expression each one carries. `vac` below is
+// theta[vac_idx], read from the state like any other coverage.
+//
+//   0  non-dissociative adsorption   A(g) + *  <-> A*
+//        r = kf * p_A * vac  -  kr * theta_A
+//   1  dissociative adsorption       A2(g) + 2* <-> 2A*
+//        r = kf * p_A2 * vac^2  -  kr * theta_A^2
+//        This is the hydrogen case. H2 + 2* <-> 2H* is why the equilibrium
+//        coverage goes as sqrt(K p) rather than K p, and it is checked
+//        exactly in test_dissociative_isotherm_exact.
+//   2  Langmuir-Hinshelwood          A* + B* <-> C* + *
+//        r = kf * theta_A * theta_B  -  kr * theta_C * vac
+//   3  desorption                    C* <-> C(g) + *
+//        r = kf * theta_C  -  kr * p_C * vac
+//   4  Eley-Rideal                   A(g) + B* <-> C*
+//        r = kf * p_A * theta_B  -  kr * theta_C
+//
+// Every kind is written as a NET rate (forward minus reverse) so that
+// microscopic reversibility is expressible and a step can be driven either
+// way by the state, rather than a mechanism needing two rows per reversible
+// step and two chances to get the stoichiometry inconsistent.
+
+pub struct SurfaceStep {
+    kind: i64,
+    k_fwd: f64,
+    k_rev: f64,
+    gas_idx: i64,
+    a_idx: i64,
+    b_idx: i64,
+    c_idx: i64
+}
+
+pub fn surface_step_none() -> SurfaceStep {
+    SurfaceStep { kind: -1, k_fwd: 0.0, k_rev: 0.0, gas_idx: -1, a_idx: -1, b_idx: -1, c_idx: -1 }
+}
+
+pub fn adsorption(gas_idx: i64, ads_idx: i64, k_ads: f64, k_des: f64) -> SurfaceStep {
+    SurfaceStep { kind: 0, k_fwd: k_ads, k_rev: k_des, gas_idx: gas_idx, a_idx: ads_idx, b_idx: -1, c_idx: -1 }
+}
+
+pub fn dissociative_adsorption(gas_idx: i64, ads_idx: i64, k_ads: f64, k_des: f64) -> SurfaceStep {
+    SurfaceStep { kind: 1, k_fwd: k_ads, k_rev: k_des, gas_idx: gas_idx, a_idx: ads_idx, b_idx: -1, c_idx: -1 }
+}
+
+pub fn lh_reaction(a_idx: i64, b_idx: i64, c_idx: i64, k_fwd: f64, k_rev: f64) -> SurfaceStep {
+    SurfaceStep { kind: 2, k_fwd: k_fwd, k_rev: k_rev, gas_idx: -1, a_idx: a_idx, b_idx: b_idx, c_idx: c_idx }
+}
+
+pub fn desorption(ads_idx: i64, gas_idx: i64, k_des: f64, k_ads: f64) -> SurfaceStep {
+    SurfaceStep { kind: 3, k_fwd: k_des, k_rev: k_ads, gas_idx: gas_idx, a_idx: -1, b_idx: -1, c_idx: ads_idx }
+}
+
+pub fn eley_rideal(gas_idx: i64, b_idx: i64, c_idx: i64, k_fwd: f64, k_rev: f64) -> SurfaceStep {
+    SurfaceStep { kind: 4, k_fwd: k_fwd, k_rev: k_rev, gas_idx: gas_idx, a_idx: -1, b_idx: b_idx, c_idx: c_idx }
+}
+
+pub fn surface_step_rate(step: SurfaceStep, theta: &[f64; 16], p_gas: &[f64; 16], vac_idx: i64) -> f64 with Mut, Div, Panic {
+    let vac = theta[vac_idx]
+    if step.kind == 0 {
+        if step.gas_idx < 0 || step.a_idx < 0 { return 0.0 }
+        return step.k_fwd * p_gas[step.gas_idx] * vac - step.k_rev * theta[step.a_idx]
+    }
+    if step.kind == 1 {
+        if step.gas_idx < 0 || step.a_idx < 0 { return 0.0 }
+        let ta = theta[step.a_idx]
+        return step.k_fwd * p_gas[step.gas_idx] * vac * vac - step.k_rev * ta * ta
+    }
+    if step.kind == 2 {
+        if step.a_idx < 0 || step.b_idx < 0 || step.c_idx < 0 { return 0.0 }
+        return step.k_fwd * theta[step.a_idx] * theta[step.b_idx] - step.k_rev * theta[step.c_idx] * vac
+    }
+    if step.kind == 3 {
+        if step.c_idx < 0 || step.gas_idx < 0 { return 0.0 }
+        return step.k_fwd * theta[step.c_idx] - step.k_rev * p_gas[step.gas_idx] * vac
+    }
+    if step.kind == 4 {
+        if step.gas_idx < 0 || step.b_idx < 0 || step.c_idx < 0 { return 0.0 }
+        return step.k_fwd * p_gas[step.gas_idx] * theta[step.b_idx] - step.k_rev * theta[step.c_idx]
+    }
+    0.0
+}
+
+pub fn compute_surface_rates(steps: &[SurfaceStep; 16], nstep: i64, theta: &[f64; 16],
+                             p_gas: &[f64; 16], vac_idx: i64) -> [f64; 16] with Mut, Div, Panic {
+    var rates: [f64; 16] = [0.0; 16]
+    var r: i64 = 0
+    while r < nstep {
+        rates[r] = surface_step_rate(steps[r as usize], theta, p_gas, vac_idx)
+        r = r + 1
+    }
+    rates
+}
+
+// ============================================================================
+// 2. STOICHIOMETRY, AND SITE CONSERVATION AS A CHECKED PROPERTY
+// ============================================================================
+//
+// nu is FLAT: nu[r * 16 + s] is the stoichiometric coefficient of species s
+// in step r, species n_ads being the free site. Flat rather than MatNM for
+// the measured reason in this file's header.
+//
+// The point of giving the free site a column: "this mechanism conserves
+// surface sites" stops being a claim in a comment and becomes
+//
+//     for every step r:  sum over all species s of nu[r][s]  ==  0
+//
+// which sites_conserved() decides. A mechanism that adsorbs a molecule onto
+// one site and releases two, or that quietly forgets to return a site on
+// desorption, fails it -- and would otherwise show up only as a slow drift
+// in total coverage that a plot at the wrong scale hides.
+
+pub fn nu_index(r: i64, s: i64) -> i64 { r * 16 + s }
+
+pub fn nu_zero() -> [f64; 256] { [0.0; 256] }
+
+pub fn nu_set(nu: &![f64; 256], r: i64, s: i64, v: f64) with Mut {
+    nu[r * 16 + s] = v
+}
+
+pub fn nu_get(nu: &[f64; 256], r: i64, s: i64) -> f64 { nu[r * 16 + s] }
+
+// Structural site conservation: every step's coefficients sum to zero once
+// the free site is counted. Returns true only if EVERY step passes.
+pub fn sites_conserved(nu: &[f64; 256], nspecies: i64, nstep: i64, tol: f64) -> bool with Mut {
+    var r: i64 = 0
+    var ok = true
+    while r < nstep {
+        var acc = 0.0
+        var s: i64 = 0
+        while s < nspecies {
+            acc = acc + nu[r * 16 + s]
+            s = s + 1
+        }
+        if abs_f64(acc) > tol { ok = false }
+        r = r + 1
+    }
+    ok
+}
+
+// Runtime site balance on a state: the coverages plus the free-site fraction
+// must total one. This is the dynamic counterpart of sites_conserved --
+// structural conservation is what makes it hold under integration, and this
+// is what catches an integrator, an initial condition, or a step rate that
+// broke it anyway.
+pub fn site_balance(theta: &[f64; 16], nspecies: i64) -> f64 with Mut {
+    var acc = 0.0
+    var s: i64 = 0
+    while s < nspecies { acc = acc + theta[s]; s = s + 1 }
+    acc
+}
+
+pub fn site_balance_holds(theta: &[f64; 16], nspecies: i64, tol: f64) -> bool with Mut {
+    check_near(site_balance(theta, nspecies), 1.0, tol)
+}
+
+// A coverage outside [0,1] is unphysical even when the total still sums to
+// one -- two errors can cancel. Checked separately for that reason.
+pub fn coverages_physical(theta: &[f64; 16], nspecies: i64, tol: f64) -> bool with Mut {
+    var s: i64 = 0
+    var ok = true
+    while s < nspecies {
+        if theta[s] < (0.0 - tol) { ok = false }
+        if theta[s] > 1.0 + tol { ok = false }
+        s = s + 1
+    }
+    ok
+}
+
+// A bare-surface initial state: everything on the free site.
+pub fn clean_surface(nspecies: i64) -> [f64; 16] with Mut {
+    var theta: [f64; 16] = [0.0; 16]
+    theta[nspecies - 1] = 1.0
+    theta
+}
+
+// ============================================================================
+// 3. INTEGRATION
+// ============================================================================
+//
+// RK4, hand-rolled inline for the same reason catalysis.sio does it: Sounio
+// has no closures, so a fixed-signature callback cannot be parameterised by
+// an arbitrary mechanism without module-level mutable state, which would
+// make this non-reentrant. Allocates nothing per step -- no MatNM, no
+// intermediate matrices, only the four stack arrays RK4 needs.
+
+fn surface_dtheta(nu: &[f64; 256], rates: &[f64; 16], nspecies: i64, nstep: i64) -> [f64; 16] with Mut {
+    var d: [f64; 16] = [0.0; 16]
+    var s: i64 = 0
+    while s < nspecies {
+        var acc = 0.0
+        var r: i64 = 0
+        while r < nstep {
+            acc = acc + nu[r * 16 + s] * rates[r]
+            r = r + 1
+        }
+        d[s] = acc
+        s = s + 1
+    }
+    d
+}
+
+pub fn surface_derivative(theta: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                          nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                          vac_idx: i64) -> [f64; 16] with Mut, Div, Panic {
+    let rates = compute_surface_rates(steps, nstep, theta, p_gas, vac_idx)
+    surface_dtheta(nu, &rates, nspecies, nstep)
+}
+
+pub fn simulate_surface_mkm(theta0: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                            nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                            vac_idx: i64, dt: f64, nsteps: i64) -> [f64; 16] with Mut, Div, Panic {
+    var y: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < nspecies { y[i] = theta0[i]; i = i + 1 }
+    var n: i64 = 0
+    while n < nsteps {
+        let k1 = surface_derivative(&y, steps, nstep, nu, nspecies, p_gas, vac_idx)
+        var y2: [f64; 16] = [0.0; 16]
+        var j: i64 = 0
+        while j < nspecies { y2[j] = y[j] + 0.5 * dt * k1[j]; j = j + 1 }
+        let k2 = surface_derivative(&y2, steps, nstep, nu, nspecies, p_gas, vac_idx)
+        var y3: [f64; 16] = [0.0; 16]
+        j = 0
+        while j < nspecies { y3[j] = y[j] + 0.5 * dt * k2[j]; j = j + 1 }
+        let k3 = surface_derivative(&y3, steps, nstep, nu, nspecies, p_gas, vac_idx)
+        var y4: [f64; 16] = [0.0; 16]
+        j = 0
+        while j < nspecies { y4[j] = y[j] + dt * k3[j]; j = j + 1 }
+        let k4 = surface_derivative(&y4, steps, nstep, nu, nspecies, p_gas, vac_idx)
+        j = 0
+        while j < nspecies {
+            y[j] = y[j] + (dt / 6.0) * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j])
+            j = j + 1
+        }
+        n = n + 1
+    }
+    y
+}
+
+// Largest absolute time derivative across all species -- the steady-state
+// residual. Reported rather than hidden inside a convergence flag, so a
+// caller can say how converged a "steady state" actually is.
+pub fn steady_state_residual(theta: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                             nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                             vac_idx: i64) -> f64 with Mut, Div, Panic {
+    let d = surface_derivative(theta, steps, nstep, nu, nspecies, p_gas, vac_idx)
+    var worst = 0.0
+    var s: i64 = 0
+    while s < nspecies {
+        let a = abs_f64(d[s])
+        if a > worst { worst = a }
+        s = s + 1
+    }
+    worst
+}
+
+// ============================================================================
+// 4. CLOSED FORMS, AS TARGETS THE MECHANISM MUST REPRODUCE
+// ============================================================================
+//
+// These are not an alternative implementation to be used instead of the
+// mechanism. They are what the mechanism must reduce to in its own limit,
+// and the tests below check that reduction rather than assuming it. That is
+// the whole argument for carrying the elementary steps: if the closed form
+// and the mechanism disagree, the quasi-equilibrium assumption behind the
+// closed form does not hold at those conditions, and the closed form is the
+// one that is wrong.
+
+// Langmuir isotherm, non-dissociative:  theta = K p / (1 + K p)
+pub fn langmuir_isotherm(k_eq: f64, p: f64) -> f64 with Div, Panic {
+    let kp = k_eq * p
+    let denom = 1.0 + kp
+    if denom == 0.0 { return 0.0 }
+    kp / denom
+}
+
+// Langmuir isotherm, dissociative:  theta = sqrt(K p) / (1 + sqrt(K p))
+//
+// The square root is the whole content: a diatomic that dissociates on
+// adsorption occupies two sites, so its equilibrium coverage goes as the
+// square root of pressure, not linearly. For H2 + 2* <-> 2H* this is the
+// difference between a surface that saturates and one that does not, at the
+// pressures underground hydrogen storage actually operates at.
+pub fn langmuir_dissociative(k_eq: f64, p: f64) -> f64 with Mut, Div, Panic {
+    let s = sqrt_f64(k_eq * p)
+    let denom = 1.0 + s
+    if denom == 0.0 { return 0.0 }
+    s / denom
+}
+
+// Dual-site Langmuir-Hinshelwood, both reactants adsorbed and in
+// quasi-equilibrium, surface reaction rate-determining:
+//
+//   r = k KA pA KB pB / (1 + KA pA + KB pB)^2
+//
+// Identical in form to chemistry::catalysis::rate_law_eval kind 5, which is
+// the point: this module's elementary mechanism is checked against that
+// module's closed form in test_lh_reduces_to_closed_form.
+pub fn lh_dual_site_rate(k: f64, ka: f64, pa: f64, kb: f64, pb: f64) -> f64 with Div, Panic {
+    let a = ka * pa
+    let b = kb * pb
+    let denom = 1.0 + a + b
+    if denom == 0.0 { return 0.0 }
+    k * a * b / (denom * denom)
+}
+
+// ============================================================================
+// 5. TURNOVER
+// ============================================================================
+//
+// TOF is products per active site per unit time. With coverages normalised
+// so that the site total is one, the "per site" divisor is the fraction of
+// the surface that is catalytically active -- the whole surface for a
+// single-site-type model, less than that when only one facet or one
+// promoted site turns over. Kept as an explicit parameter rather than
+// assumed to be one, because assuming it is one is how a TOF silently
+// becomes a rate.
+
+pub fn turnover_frequency_per_site(product_rate: f64, active_site_fraction: f64) -> f64 with Div, Panic {
+    if active_site_fraction == 0.0 { return 0.0 }
+    product_rate / active_site_fraction
+}
+
+// Net production rate of one species at the current state -- the numerator
+// of a TOF, read off the mechanism rather than differenced from a
+// trajectory.
+pub fn species_net_rate(theta: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                        nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                        vac_idx: i64, species_idx: i64) -> f64 with Mut, Div, Panic {
+    let d = surface_derivative(theta, steps, nstep, nu, nspecies, p_gas, vac_idx)
+    d[species_idx]
+}
+
+// ============================================================================
+// 6. TESTS
+// ============================================================================
+//
+// Every test here is an EXACT algebraic identity or a conservation law, not
+// a tolerance around a number someone once printed. Where a tolerance
+// appears it is the integrator's convergence to an analytic fixed point,
+// and the analytic value is written out so the reader can check the
+// arithmetic without running anything.
+
+// --- 6.1 Langmuir isotherm, non-dissociative, reached by integration ---
+//
+// A(g) + * <-> A*,  kf = 2.0, kr = 0.5, so K = 4.0. At p = 0.25, Kp = 1.0
+// and the exact equilibrium coverage is 1/(1+1) = 0.5.
+pub fn test_langmuir_isotherm_exact() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 2.0, 0.5)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0)      // A* produced
+    nu_set(&! nu, 0 as i64, 1 as i64, 0.0 - 1.0) // one free site consumed
+
+    let nspecies: i64 = 2
+    let vac_idx: i64 = 1
+    let structural = sites_conserved(&nu, nspecies, 1 as i64, 1.0e-15)
+
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.25
+
+    let theta0 = clean_surface(nspecies)
+    let out = simulate_surface_mkm(&theta0, &steps, 1 as i64, &nu, nspecies, &p_gas,
+                                   vac_idx, 0.01, 4000 as i64)
+
+    let exact = langmuir_isotherm(4.0, 0.25)   // = 0.5
+    structural
+        && check_near(exact, 0.5, 1.0e-15)
+        && check_near(out[0], exact, 1.0e-12)
+        && site_balance_holds(&out, nspecies, 1.0e-12)
+        && coverages_physical(&out, nspecies, 1.0e-12)
+}
+
+// --- 6.2 Dissociative adsorption: the hydrogen case ---
+//
+// H2(g) + 2* <-> 2H*,  kf = 2.0, kr = 0.5, K = 4.0. At p = 1.0, sqrt(Kp) = 2
+// and the exact equilibrium coverage is 2/(1+2) = 2/3.
+//
+// This is the identity that distinguishes a dissociating diatomic from a
+// molecular adsorbate, and it is the reason a hydrogen coverage cannot be
+// read off a non-dissociative isotherm. The mechanism is never told the
+// square root; it emerges from theta^2 against vac^2.
+pub fn test_dissociative_isotherm_exact() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = dissociative_adsorption(0 as i64, 0 as i64, 2.0, 0.5)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 2.0)       // two H* produced
+    nu_set(&! nu, 0 as i64, 1 as i64, 0.0 - 2.0)  // two free sites consumed
+
+    let nspecies: i64 = 2
+    let vac_idx: i64 = 1
+    let structural = sites_conserved(&nu, nspecies, 1 as i64, 1.0e-15)
+
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 1.0
+
+    let theta0 = clean_surface(nspecies)
+    let out = simulate_surface_mkm(&theta0, &steps, 1 as i64, &nu, nspecies, &p_gas,
+                                   vac_idx, 0.005, 8000 as i64)
+
+    let exact = langmuir_dissociative(4.0, 1.0)  // sqrt(4)=2 -> 2/3
+    let two_thirds = 2.0 / 3.0
+    structural
+        && check_near(exact, two_thirds, 1.0e-12)
+        && check_near(out[0], exact, 1.0e-11)
+        && site_balance_holds(&out, nspecies, 1.0e-12)
+}
+
+// --- 6.3 Site conservation is decided, not assumed ---
+//
+// The same mechanism, once correct and once with a single coefficient
+// broken. A checker that cannot fail is not a checker, so this asserts both
+// directions.
+pub fn test_sites_conserved_detects_a_leak() -> bool with Mut, Div, Panic {
+    var good: [f64; 256] = [0.0; 256]
+    nu_set(&! good, 0 as i64, 0 as i64, 1.0)
+    nu_set(&! good, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! good, 1 as i64, 1 as i64, 1.0)
+    nu_set(&! good, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! good, 2 as i64, 0 as i64, 0.0 - 1.0)
+    nu_set(&! good, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! good, 2 as i64, 2 as i64, 1.0)
+    nu_set(&! good, 2 as i64, 3 as i64, 1.0)
+
+    var leaky: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 256 { leaky[i] = good[i]; i = i + 1 }
+    // Desorption that forgets to hand the site back.
+    nu_set(&! leaky, 2 as i64, 3 as i64, 0.0)
+
+    sites_conserved(&good, 4 as i64, 3 as i64, 1.0e-15)
+        && !sites_conserved(&leaky, 4 as i64, 3 as i64, 1.0e-15)
+}
+
+// --- 6.4 The integrator preserves the site total ---
+//
+// Structural conservation says the mechanism cannot create or destroy sites.
+// This says the RK4 driving it does not either, over a full four-step
+// mechanism run far past its transient.
+pub fn test_site_balance_preserved_under_integration() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 10.0, 5.0)
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 10.0, 2.5)
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 0.5, 0.0)
+    steps[3 as usize] = desorption(2 as i64, 2 as i64, 20.0, 0.0)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0);        nu_set(&! nu, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0);        nu_set(&! nu, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0);  nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 1.0);        nu_set(&! nu, 2 as i64, 3 as i64, 1.0)
+    nu_set(&! nu, 3 as i64, 2 as i64, 0.0 - 1.0);  nu_set(&! nu, 3 as i64, 3 as i64, 1.0)
+
+    let nspecies: i64 = 4
+    let vac_idx: i64 = 3
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.5; p_gas[1] = 0.25; p_gas[2] = 0.0
+
+    let theta0 = clean_surface(nspecies)
+    let out = simulate_surface_mkm(&theta0, &steps, 4 as i64, &nu, nspecies, &p_gas,
+                                   vac_idx, 0.002, 10000 as i64)
+
+    sites_conserved(&nu, nspecies, 4 as i64, 1.0e-15)
+        && site_balance_holds(&out, nspecies, 1.0e-12)
+        && coverages_physical(&out, nspecies, 1.0e-12)
+}
+
+// --- 6.5 The elementary mechanism reduces to the closed form ---
+//
+// Four steps: A and B adsorb fast and reversibly, react slowly on the
+// surface, and the product desorbs fast. Those are exactly the conditions
+// the dual-site Langmuir-Hinshelwood closed form assumes, so the mechanism
+// integrated to steady state must reproduce it -- and does, without ever
+// being told the formula.
+//
+// KA = k_ads/k_des = 100/50 = 2, pA = 0.5, so KA pA = 1.
+// KB = 100/25 = 4,               pB = 0.25, so KB pB = 1.
+// denominator (1 + 1 + 1) = 3, and with k = 0.001 the closed form gives
+// 0.001 * 1 * 1 / 9 = 1.111...e-4, at coverages theta_A = theta_B = vac = 1/3.
+//
+// The tolerance below is not decorative: the surface reaction drains A* and
+// B* while it runs, so the mechanism sits slightly off the exact
+// quasi-equilibrium point. The gap IS the error of the closed-form
+// assumption at these rate constants, and reporting it is the point.
+pub fn test_lh_reduces_to_closed_form() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 100.0, 50.0)
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 100.0, 25.0)
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 0.001, 0.0)
+    steps[3 as usize] = desorption(2 as i64, 2 as i64, 1000.0, 0.0)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0);        nu_set(&! nu, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0);        nu_set(&! nu, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0);  nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 1.0);        nu_set(&! nu, 2 as i64, 3 as i64, 1.0)
+    nu_set(&! nu, 3 as i64, 2 as i64, 0.0 - 1.0);  nu_set(&! nu, 3 as i64, 3 as i64, 1.0)
+
+    let nspecies: i64 = 4
+    let vac_idx: i64 = 3
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.5; p_gas[1] = 0.25; p_gas[2] = 0.0
+
+    let theta0 = clean_surface(nspecies)
+    let ss = simulate_surface_mkm(&theta0, &steps, 4 as i64, &nu, nspecies, &p_gas,
+                                  vac_idx, 0.0002, 20000 as i64)
+
+    let rates = compute_surface_rates(&steps, 4 as i64, &ss, &p_gas, vac_idx)
+    let r_mech = rates[2]
+    let r_closed = lh_dual_site_rate(0.001, 2.0, 0.5, 4.0, 0.25)
+
+    let third = 1.0 / 3.0
+    sites_conserved(&nu, nspecies, 4 as i64, 1.0e-15)
+        && site_balance_holds(&ss, nspecies, 1.0e-12)
+        && check_near(r_closed, 0.001 / 9.0, 1.0e-15)
+        && check_near(ss[0], third, 1.0e-4)
+        && check_near(ss[1], third, 1.0e-4)
+        && check_near(r_mech, r_closed, 1.0e-8)
+}
+
+// --- 6.6 Turnover frequency is a definition, and is tested as one ---
+//
+// At steady state the surface reaction and the desorption that follows it
+// must carry the same flux, or the intermediate is accumulating and it is
+// not a steady state. TOF is that flux per active site: with the whole
+// surface active it equals the rate; with half of it active it is twice the
+// rate. Both directions are checked, because a TOF that silently equals a
+// rate is the most common way the quantity is got wrong.
+pub fn test_turnover_frequency_definition() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 100.0, 50.0)
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 100.0, 25.0)
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 0.001, 0.0)
+    steps[3 as usize] = desorption(2 as i64, 2 as i64, 1000.0, 0.0)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0);        nu_set(&! nu, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0);        nu_set(&! nu, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0);  nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 1.0);        nu_set(&! nu, 2 as i64, 3 as i64, 1.0)
+    nu_set(&! nu, 3 as i64, 2 as i64, 0.0 - 1.0);  nu_set(&! nu, 3 as i64, 3 as i64, 1.0)
+
+    let nspecies: i64 = 4
+    let vac_idx: i64 = 3
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.5; p_gas[1] = 0.25; p_gas[2] = 0.0
+
+    let theta0 = clean_surface(nspecies)
+    let ss = simulate_surface_mkm(&theta0, &steps, 4 as i64, &nu, nspecies, &p_gas,
+                                  vac_idx, 0.0002, 20000 as i64)
+    let rates = compute_surface_rates(&steps, 4 as i64, &ss, &p_gas, vac_idx)
+
+    let flux_matches = check_near(rates[2], rates[3], 1.0e-9)
+    let tof_full = turnover_frequency_per_site(rates[2], 1.0)
+    let tof_half = turnover_frequency_per_site(rates[2], 0.5)
+    let residual = steady_state_residual(&ss, &steps, 4 as i64, &nu, nspecies, &p_gas, vac_idx)
+
+    flux_matches
+        && check_near(tof_full, rates[2], 1.0e-15)
+        && check_near(tof_half, 2.0 * rates[2], 1.0e-15)
+        && residual < 1.0e-8
+}
+
+// --- 6.7 sqrt_f64 is on the critical path of 6.2, so it is tested ---
+pub fn test_sqrt_exact() -> bool with Mut, Div, Panic {
+    check_near(sqrt_f64(4.0), 2.0, 1.0e-14)
+        && check_near(sqrt_f64(2.0) * sqrt_f64(2.0), 2.0, 1.0e-14)
+        && check_near(sqrt_f64(1.0e-8), 1.0e-4, 1.0e-16)
+        && check_near(sqrt_f64(0.0), 0.0, 1.0e-18)
+}
+
+pub fn main() -> i32 with Mut, Div, Panic, IO {
+    var p: i64 = 0
+    var f: i64 = 0
+    if test_sqrt_exact() { p = p + 1 } else { f = f + 1; println("FAIL sqrt_exact") }
+    if test_langmuir_isotherm_exact() { p = p + 1 } else { f = f + 1; println("FAIL langmuir_isotherm_exact") }
+    if test_dissociative_isotherm_exact() { p = p + 1 } else { f = f + 1; println("FAIL dissociative_isotherm_exact") }
+    if test_sites_conserved_detects_a_leak() { p = p + 1 } else { f = f + 1; println("FAIL sites_conserved_detects_a_leak") }
+    if test_site_balance_preserved_under_integration() { p = p + 1 } else { f = f + 1; println("FAIL site_balance_preserved") }
+    if test_lh_reduces_to_closed_form() { p = p + 1 } else { f = f + 1; println("FAIL lh_reduces_to_closed_form") }
+    if test_turnover_frequency_definition() { p = p + 1 } else { f = f + 1; println("FAIL turnover_frequency_definition") }
+    print("SURFACE: ") print(p) print(" passed, ") print(f) println(" failed")
+    if f == 0 { println("SURFACE ALL PASS") return 0 }
+    1
+}
