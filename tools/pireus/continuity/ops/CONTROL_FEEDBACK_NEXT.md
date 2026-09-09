@@ -80,3 +80,18 @@ floating-point parity, or gain claim follows from this export.
 Next executable task: add a digest-bound optional feedback attachment to the
 new-experiment request builder, with fail-closed controls, then freeze the
 two eight-request arms. Do not modify the old pilot manifests.
+
+## Attachment implementation receipt
+
+ops/feedback_smoke.py now stages both eight-request arms with identical base
+prompts and paired seeds0..7. The feedback arm appends an explicitly versioned
+compact projection of18 plan IDs and their five lowering fields, scoped native
+ADMIT/NO_GAIN observations, and the full feedback digest. Raw receipts,
+confidence intervals and occurrence mapping are omitted from the prompt and
+preserved in the attached full packet. This is a declared projection before
+tokenization, not an implicit truncation.
+
+Eight local controls PASS across the exporter and request builder. Requests
+are staged at validation/feedback-smoke-requests-20260908. Token budget and
+execution-profile freeze remain pending real paired tokenization. The request
+manifest records these states as false and refuses existing attempt roots.
