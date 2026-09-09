@@ -20907,6 +20907,50 @@ impl Lowerer {
     //   - chained method receivers (`a.add(&b).get()`) via return_struct_name
     //   - associated/free call receivers (`E::of(3.0).get()`)
     //   - primitive index receivers (`a.c[i].er_add(...)`)
+    // A `&Seq<T>` receiver holds the ADDRESS of the handle slot, not the handle.
+    // Every Seq method below is an intrinsic that takes the handle BY VALUE, so
+    // the reference has to be loaded first. `&T` is a raw address (unlike Box,
+    // which is a GC handle resolved by IrFieldGet(0)), and a raw address is
+    // exactly what IrUnaryOp(OpDeref) reads.
+    //
+    // Without this the callee reads one indirection level off and the program
+    // still type-checks: measured on e90e7307dd, `s.len()` through a
+    // `&Seq<i64>` parameter returned a static address, `s.get(0)` a stack
+    // address, and a loop over both segfaulted. Writing the deref by hand
+    // (`let t: Seq<i64> = *s`) already produced the right answer, which is what
+    // identified the missing load.
+    //
+    // This became reachable when checker_check_method_call_with_base_ty_inplace
+    // started unwrapping a TyRef receiver to its TyNamed pointee: before that,
+    // `s.len()` on a `&Seq<T>` was refused with E019 and never reached lowering.
+    // The type-level unwrap had no lowering-level counterpart.
+    //
+    // Only an ident receiver can be a bare `&Seq<T>` binding. A field access
+    // (`self.xs.len()` through `&Self`) resolves the handle through the field
+    // load and must NOT be dereferenced again -- that path is measured correct.
+    fn lower_seq_recv_base_ref(self, left: &Option<Box<Expr>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let recv_is_ref = match *left {
+            Some(recv) => {
+                if (*recv).kind == ExprKind::ExprIdent {
+                    self.lookup_local_is_ref((*recv).name)
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
+        let pair_recv = self.lower_opt_expr_ref(left)
+        var lo_recv = pair_recv.0
+        let base_recv = pair_recv.1
+        if !recv_is_ref {
+            return (lo_recv, base_recv)
+        }
+        let pair_deref = lo_recv.fresh_reg()
+        lo_recv = pair_deref.0
+        let dst_deref = pair_deref.1
+        (lo_recv.emit(ir_unaryop(dst_deref, UnaryOp::OpDeref, base_recv)), dst_deref)
+    }
+
     fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
         match *left {
             Some(recv) => {
@@ -21204,7 +21248,7 @@ impl Lowerer {
             if ir_name_eq(e.name, make_name("count")) || ir_name_eq(e.name, make_name("len")) {
                 match e.args {
                     None => {
-                        let pair_b_seq = self.lower_opt_expr_ref(&e.left)
+                        let pair_b_seq = self.lower_seq_recv_base_ref(&e.left)
                         var lo_seq = pair_b_seq.0
                         let base_reg_seq = pair_b_seq.1
                         if ir_name_eq(e.name, make_name("len")) {
@@ -21223,7 +21267,7 @@ impl Lowerer {
                 }
             }
             if ir_name_eq(e.name, make_name("push")) {
-                let pair_b_seq_push = self.lower_opt_expr_ref(&e.left)
+                let pair_b_seq_push = self.lower_seq_recv_base_ref(&e.left)
                 var lo_seq_push = pair_b_seq_push.0
                 let base_reg_seq_push = pair_b_seq_push.1
                 let pair_args_seq_push: LowerExprArgsResult = lo_seq_push.lower_expr_args_raw_ref(&e.args)
@@ -21244,7 +21288,7 @@ impl Lowerer {
                 return (lo_seq_push.emit(ir_call(dst_seq_push, fn_id_seq_push, call_name_seq_push, call_args_seq_push, 2)), dst_seq_push)
             }
             if ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
-                let pair_b_seq_access = self.lower_opt_expr_ref(&e.left)
+                let pair_b_seq_access = self.lower_seq_recv_base_ref(&e.left)
                 var lo_seq_access = pair_b_seq_access.0
                 let base_reg_seq_access = pair_b_seq_access.1
                 let pair_args_seq_access: LowerExprArgsResult = lo_seq_access.lower_expr_args_raw_ref(&e.args)
