@@ -486,6 +486,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.zero-second-gate-sabotage-2026-08-23 | repo_only | docs/audit/ZERO_SECOND_GATE_SABOTAGE_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.font-licenses | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/FONT_LICENSES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.readme | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.chemistry.sounio-for-surface-microkinetics | repo_only | docs/chemistry/SOUNIO_FOR_SURFACE_MICROKINETICS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.competitive-position-2026 | repo_only | docs/COMPETITIVE_POSITION_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.async-design | repo_only | docs/compiler/ASYNC_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.closure-type-theory | repo_only | docs/compiler/CLOSURE_TYPE_THEORY.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
