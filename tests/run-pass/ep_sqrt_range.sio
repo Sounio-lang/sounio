@@ -1,0 +1,82 @@
+//@ run-pass
+//@ expect-stdout-contains: EP_SQRT_RANGE_OK
+// ep_sqrt must be a square root across the whole f64 range, not only near 1.
+//
+// It used to run ten Heron steps from y = x. Heron converges quadratically only
+// once the iterate is near the root; from y = x it first needs ~log2(sqrt(x))
+// halving steps just to get close, so a fixed step count silently bounds the
+// range over which the result is a square root at all.
+//
+// Measured 2026-09-09 before the fix, as relative residual |y*y - x| / x:
+//   x = 1e-12  > 1000      x = 1e-8   95
+//   x = 1e-4   5e-9        x = 1e0    0
+//   x = 1e4    5e-9        x = 1e6    0.68
+//   x = 1e8    95          x = 1e12   > 1000
+// Accurate only for x in about [1e-4, 1e4] and catastrophically wrong outside,
+// which reached ep_std, ep_sqrt_ep, ep_rel_uncertainty and ep_budget -- all of
+// them thin wrappers over ep_sqrt(variance). A variance of 1e-6, an ordinary
+// measurement uncertainty, made ep_std report a standard deviation 29.6% off.
+//
+// The oracle here is the residual, not a table of expected digits: y is a
+// square root of x exactly when y*y == x to within rounding, and that is
+// checkable without an external sqrt (ADR-008 keeps the oracle in Sounio).
+//
+// Tolerance is 1e-12 relative. After the fix the measured residual is at most
+// ~1 ulp (2.2e-16) at every point below -- exactly 0 only where x is a perfect
+// square in f64 -- so the bound leaves ~4 orders of magnitude of slack while
+// still being ~7e11 times tighter than the old behaviour at 1e6.
+//
+// It is deliberately NOT an equality check. y*y == x holds for 1, 4, 1e6 and
+// the other f64-representable squares, and fails for 2 (residual 2.2e-16), 3
+// and 1e-6. A first draft of this file's notes claimed a residual of 0
+// everywhere; that was truncation in the measurement, not exactness, and the
+// mandatory math-review offload caught it.
+
+use epistemic::knowledge::{ep_sqrt}
+
+fn residual_ok(x: f64) -> bool with Mut, Div, Panic {
+    let y = ep_sqrt(x)
+    let d = y * y - x
+    let a = if d < 0.0 { 0.0 - d } else { d }
+    return a / x < 0.000000000001
+}
+
+fn check(x: f64, label: i64) -> bool with IO, Mut, Div, Panic {
+    if residual_ok(x) { return true }
+    print("FAIL ep_sqrt at 1e")
+    print_int(label)
+    print("\n")
+    return false
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Across the f64 range, including the magnitudes the old form got wrong.
+    if !check(5.0e-324, -324) { return 1 }
+    if !check(1.0e-310, -310) { return 1 }
+    if !check(1.0e-300, -300) { return 1 }
+    if !check(1.0e-100, -100) { return 1 }
+    if !check(1.0e-12, -12) { return 1 }
+    if !check(1.0e-8, -8) { return 1 }
+    if !check(1.0e-6, -6) { return 1 }
+    if !check(1.0e-4, -4) { return 1 }
+    if !check(1.0, 0) { return 1 }
+    if !check(2.0, 0) { return 1 }
+    if !check(1.0e4, 4) { return 1 }
+    if !check(1.0e6, 6) { return 1 }
+    if !check(1.0e8, 8) { return 1 }
+    if !check(1.0e12, 12) { return 1 }
+    if !check(1.0e100, 100) { return 1 }
+    if !check(1.0e300, 300) { return 1 }
+    if !check(1.7976931348623157e308, 308) { return 1 }
+
+    // Non-squares: these are where the residual is nonzero but bounded.
+    if !check(3.0, 0) { return 1 }
+    if !check(7.0, 0) { return 1 }
+
+    // Contract for the non-positive domain is unchanged: 0.0, not a trap.
+    if ep_sqrt(0.0) != 0.0 { print("FAIL ep_sqrt(0)\n") return 1 }
+    if ep_sqrt(0.0 - 1.0) != 0.0 { print("FAIL ep_sqrt(-1)\n") return 1 }
+
+    print("EP_SQRT_RANGE_OK\n")
+    return 0
+}
