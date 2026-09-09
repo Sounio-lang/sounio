@@ -1674,6 +1674,32 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
     }
 }
 
+// `let x: f128 = ...` (TypeNamed, single segment "f128").
+fn spec_dce_opt_type_is_f128(opt: Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return false }
+            let seg = (*te).path.segments
+            if seg.head_len != 4 { return false }
+            if seg.head_buf[0] as i64 != 102 { return false }
+            seg.head_buf[1] as i64 == 49 && seg.head_buf[2] as i64 == 50 && seg.head_buf[3] as i64 == 56
+        }
+        None => false,
+    }
+}
+
+// V0-E.5.1: language `f128` `+`/`-` on annotated locals is desugared by
+// ir/lower.sio into IrCall f128_bits_soft_add / f128_bits_soft_sub. Those calls
+// do not exist in the AST this pass walks, so with only source-visible callees
+// marked the two bodies were deleted as unreachable, the lowerer's find-or-add
+// left a body-less stub, and the backend refused it with ud2 (SIGILL, exit 132
+// on Linux x86_64) unless main happened to call one of them itself. An f128
+// let is the AST-visible trigger for that desugar, so it marks both names.
+fn spec_dce_mark_f128_desugar_targets(marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+    var _a = spec_dce_hash_insert(marks, count, ast_name_hash(make_name("f128_bits_soft_add")))
+    var _b = spec_dce_hash_insert(marks, count, ast_name_hash(make_name("f128_bits_soft_sub")))
+}
+
 fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     var cur = b.stmts
     var going = true
@@ -1681,6 +1707,11 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut
         match cur {
             None => { going = false }
             Some(list) => {
+                if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                    if spec_dce_opt_type_is_f128((*list).head.ty) {
+                        spec_dce_mark_f128_desugar_targets(marks, count)
+                    }
+                }
                 match (*list).head.expr {
                     Some(ex) => spec_dce_scan_expr(*ex, marks, count)
                     None => {}
