@@ -9,10 +9,12 @@ from build_control_feedback import require
 
 FREEZE_SHA = "d1d45b4c0a2a846b6f1e62eccacb15205988c3a9deb1fc35135b8d6ea7dd433d"
 
+KNOWN_FREEZE_SHA256 = {FREEZE_SHA, "c75f94a648e8dd52c599e5d1ce722888b7c33389e8201c2256e7316aacf5827b"}
+
 
 def inputs(root):
     raw = (root / "execution-freeze.json").read_bytes()
-    require(digest(raw) == FREEZE_SHA, "freeze identity mismatch")
+    require(digest(raw) in KNOWN_FREEZE_SHA256, "freeze identity mismatch")
     spec = json.loads(raw)
     for table, prefix in (("runtime_sha256", "runtime/"), ("files_sha256", "")):
         for name, expected in spec[table].items():
@@ -43,7 +45,8 @@ def readiness(root):
     checks = [json.loads(line) for line in raw.splitlines() if line.strip()]
     selected = source_checks(spec, checks)
     return dict(schema="pireus-feedback-readiness-v1", source_commit=spec["source_commit"],
-                freeze_sha256=FREEZE_SHA, runtime_files=len(spec["runtime_sha256"]),
+                freeze_sha256=digest((root / "execution-freeze.json").read_bytes()),
+                helper_sha256=digest(Path(__file__).read_bytes()), runtime_files=len(spec["runtime_sha256"]),
                 input_artifacts=len(spec["files_sha256"]), source_checks=selected,
                 source_and_inputs_ready=True, live_host_preflight_required=True,
                 runtime_receipts_required=True, inference_completed=False,

@@ -54,6 +54,18 @@ class ReadinessControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "frozen artifact"):
                 inputs(root)
 
+    def test_diagnostic_refreeze_requires_its_own_ci(self):
+        canonical = HERE / "validation/feedback-smoke-freeze-v2-20260909"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "attempt"
+            shutil.copytree(canonical, root)
+            shutil.copytree(HERE / "runtime", root / "runtime",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            spec = inputs(root)
+            self.assertNotEqual(spec["source_commit"], SPEC["source_commit"])
+            with self.assertRaisesRegex(ValueError, "missing"):
+                source_checks(spec, checks())
+
     def test_runtime_mutation_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
