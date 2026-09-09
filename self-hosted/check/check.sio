@@ -321,6 +321,12 @@ pub struct Checker {
     enforce_visibility: bool,
     current_return_type: TypeEntry,
     current_impl_type: TypeEntry,
+    // Type parameters of the declaration whose types are being lowered right
+    // now. Consulted by the unit branch of checker_lower_named_type_mut so a
+    // generic parameter is never mistaken for a unit of measure: `K` is both
+    // the conventional second generic name and the SI symbol for kelvin, and
+    // `struct Map<K, V>` broke the moment units were wired up.
+    current_type_params: TypeParamBuf,
     current_effects: [i64; 8],
     current_effect_count: i64,
     // Which function is being checked. current_module was already tracked (it is
@@ -1356,6 +1362,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         enforce_visibility: true,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
+        current_type_params: empty_type_param_buf(),
         current_effects: [0; 8],
         current_effect_count: 0,
         current_fn_name: empty_name(),
@@ -1700,7 +1707,41 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else if name_is_dsep_proof(name) {
         ty_dsep_proof()
+    } else if checker_name_is_type_param_in_scope(c, name) {
+        // A generic parameter shadows a unit of measure. Without this, wiring
+        // units up turned `struct Map<K, V>` into a struct whose first field
+        // is an f64 in kelvin -- K is the SI symbol for kelvin as well as the
+        // conventional second generic name, and the unit branch below fired
+        // first. Measured: tests/run-pass/generic_struct_instantiate.sio went
+        // from passing to "expected f64, found i64", the single regression in
+        // a 1928-fixture sweep.
+        ty_named(name)
     } else {
+        // ONE registry lookup, bound to a local, mirroring the by-value spine.
+        let uidx = checker_unit_index_for(c, name)
+        if uidx >= 0 {
+        // UNITS OF MEASURE, ported here 2026-09-09 from the by-value spine
+        // (lower_named_type), which has had this branch all along.
+        //
+        // This function is the *mut transcription, and it is the one the
+        // modular compiler actually calls. Without this branch a declared
+        // unit name fell through to env.lookup and then to ty_named, so
+        // `unit dosage;` followed by `let x: dosage = 42.0` compared a
+        // TyNamed annotation against an f64 initialiser and reported
+        // "expected dosage, found f64". Everything downstream of that --
+        // the unit registry, unit_dim_mul/unit_dim_div, the add/sub
+        // matching rule in check_binary_units, the conversion-compatibility
+        // check in check_cast_expr -- was live code reachable only through
+        // the by-value spine, and therefore dead on the default engine.
+        //
+        // Measured before the fix: 11 of the 14 unit fixtures in
+        // tests/run-pass/ failed to type-check on Madaros and all 14 passed
+        // on lean_single; the 3 that passed do not use a unit type in a
+        // binding (units.sio says in its own header "full units not yet
+        // implemented"). Confirmed by instrumenting a source build: neither
+        // collect_unit_decl nor the by-value units branch was ever reached.
+        ty_with_unit(ty_f64(), uidx)
+        } else {
         let bound_ty = (*c).env.lookup(name)
         // A type-position name resolves against the VALUE environment first so
         // that type aliases and ontology bindings win. But `use m::{S}` binds
@@ -1731,6 +1772,7 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
             bound_ty
         } else {
             ty_named(name)
+        }
         }
     }
 }
@@ -4652,7 +4694,13 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
     match opt {
         Some(sd) => {
             let tp_result = collect_type_params((*sd).type_params)
+            // In scope for the field types below: a generic parameter must win
+            // over a same-named unit. Saved and restored rather than cleared,
+            // so a nested lowering cannot lose an outer declaration's params.
+            let saved_tp = (*c).current_type_params
+            (*c).current_type_params = tp_result
             let fc = checker_collect_field_defs_mut(c, (*sd).fields)
+            (*c).current_type_params = saved_tp
             if struct_field_list_has_direct_self_ref(fc.fields, name) {
                 checker_report_error_at_inplace(c, (*sd).span, 216, 0, 0, 0)
             }
@@ -4831,6 +4879,105 @@ fn checker_collect_policy_def_inplace(c: *mut Checker, name: Name, opt: Option<B
     }
 }
 
+// One place that touches the unit registry, for a measured reason.
+//
+// UnitRegistry holds `entries: [UnitEntry; 32]` and every UnitEntry embeds a
+// Name with `buf: [0; 384]`, so the whole registry is about 12.5 KB and it is
+// passed BY VALUE -- `fn find(self, ...)` copies all of it. The by-value
+// checker spine calls find exactly once per type name and binds the result;
+// a first version of the *mut port here called it twice in the same
+// expression (once in the guard, once in the body) and the extra copy was
+// enough to segfault the compiler on six of the unit fixtures, turning clean
+// diagnostics into SIGSEGV. The build already warns about oversized stack
+// frames elsewhere in this tree, so this is not a surprising failure mode --
+// it is the same one, reached from a new place.
+fn checker_name_is_type_param_in_scope(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < (*c).current_type_params.count && i < 8 {
+        if name_eq((*c).current_type_params.names[i as usize], name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_unit_index_for(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    (*c).units.find(name)
+}
+
+
+// Decode the derived-unit expression the parser already stores, into a real
+// SI dimension vector.
+//
+// `unit ua = mol / s;` has always been parsed: parse_unit_item walks the
+// `= <type> (('/'|'*') <type>)*` tail and stores the result in the item's
+// type_alias_ty slot, encoding `/` as TypeExprKind::TypeReference and `*` as
+// TypeExprKind::TypeRefMut, with the left operand in type_args.head and the
+// right in inner. Nothing ever read it back: collect_unit_decl registered
+// unit_dim_dimensionless() for every user unit, with the comment "For now,
+// user-defined units get a generic dimension".
+//
+// The consequence was that units were IDENTITIES, not dimensions. `mol/s`
+// and `mol/m` were distinguishable only because they are different names;
+// `mol/s` divided by `mol` produced an unnamed f64 rather than `1/s`; and
+// unit_dim_mul / unit_dim_div / unit_dim_compatible -- all present, all
+// correct, all carrying the seven SI exponents and a rational scale factor --
+// could never fire on anything a user declared, because every user dimension
+// was the zero vector.
+//
+// An unknown name resolves to dimensionless rather than to an error, which
+// keeps `unit dosage;` (no derived expression at all) working exactly as
+// before: a fresh brand with no dimensional content.
+fn unit_dim_from_type_expr(reg: UnitRegistry, te: TypeExpr, depth: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    if depth > 16 {
+        return unit_dim_dimensionless()
+    }
+    if te.kind == TypeExprKind::TypeNamed {
+        let nm = checker_copy_string_list_to_name(te.path.segments)
+        let idx = reg.find(nm)
+        if idx >= 0 {
+            return reg.get_dim(idx)
+        }
+        return unit_dim_dimensionless()
+    }
+    // TypeReference is the parser's marker for '/', TypeRefMut for '*'.
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        var lhs = unit_dim_dimensionless()
+        match te.type_args {
+            Some(args) => { lhs = unit_dim_from_type_expr(reg, (*args).head, depth + 1) }
+            None => {}
+        }
+        var rhs = unit_dim_dimensionless()
+        match te.inner {
+            Some(bx) => { rhs = unit_dim_from_type_expr(reg, *bx, depth + 1) }
+            None => {}
+        }
+        if te.kind == TypeExprKind::TypeReference {
+            return unit_dim_div(lhs, rhs)
+        }
+        return unit_dim_mul(lhs, rhs)
+    }
+    unit_dim_dimensionless()
+}
+
+fn unit_dim_for_decl(reg: UnitRegistry, conv: Option<Box<TypeExpr> >) -> UnitDim with Mut, Panic, Div, Alloc {
+    match conv {
+        Some(te) => unit_dim_from_type_expr(reg, *te, 0)
+        None => unit_dim_dimensionless()
+    }
+}
+
+fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    // *mut transcription of Checker::collect_unit_decl. Registers a
+    // user-declared unit of measure so that a type annotation naming it
+    // lowers to ty_with_unit(ty_f64(), idx) instead of an opaque ty_named --
+    // and now with the REAL dimension decoded from the `= mol / s` tail the
+    // parser has always stored, instead of the zero vector.
+    let dim = unit_dim_for_decl((*c).units, conv)
+    (*c).units = (*c).units.register(name, dim)
+}
+
 fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     // Dispatch via explicit `if item.kind == ItemKind::X`, NOT `match item.kind`: bin/souc
     // miscompiles a `match <enum-field>` inside a *mut fn (discriminant-0 → wildcard;
@@ -4858,6 +5005,28 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_impl_item_bridge(c, item.impl_def)
     } else if item.kind == ItemKind::ItemTypeAlias {
         checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
+    } else if item.kind == ItemKind::ItemUnit {
+        // Until 2026-09-09 this arm did not exist, and every `unit X;`
+        // declaration was INERT in the Madaros checker -- exactly the shape
+        // of the ItemAlgebra bug recorded a week earlier a few lines below.
+        // The by-value collect pass has had `ItemUnit => collect_unit_decl`
+        // all along; this *mut transcription, which is the one the modular
+        // compiler runs, did not, so a user-declared unit never reached the
+        // registry and every annotation naming it fell through to ty_named.
+        //
+        // Measured by instrumenting a source build: a print placed inside
+        // collect_unit_decl never fired on tests/run-pass/unit_decl_keyword.sio.
+        // Only the SI names seeded by register_builtin_units were ever
+        // present, which is why the two fixtures using `mg`/`kg` behaved and
+        // the ones declaring their own unit did not.
+        //
+        // The module-item parser also emits ItemUnit (with an empty name)
+        // for `module a::b`, so the guard on a non-empty name is load-bearing
+        // and not defensive: without it every module declaration would
+        // register an anonymous unit.
+        if !name_is_empty(item.name) {
+            checker_collect_unit_decl_inplace(c, item.name, item.type_alias_ty)
+        }
     } else if item.kind == ItemKind::ItemModels {
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
@@ -6380,15 +6549,173 @@ fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: Binary
     }
 }
 
+// Read one dimension out of the registry inside a leaf frame.
+//
+// `(*c).units` is a by-value field and UnitRegistry is about 12.5 KB
+// (32 entries, each embedding a Name with a 384-byte buffer), so every
+// method call on it materialises a copy. Doing that inside a deep,
+// recursive expression-checking frame is what a small leaf function like
+// this one avoids.
+// Brand a result with a derived dimension. A dimensionless outcome -- which
+// is what mg/mg genuinely is -- drops the brand entirely; anything else is
+// interned so the dimension survives into the next operation.
+// The dimension of a possibly-unbranded operand. An index below zero is a
+// plain number, which is dimensionless with unit scale -- not "no answer".
+fn checker_dim_of(c: *mut Checker, uid: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    if uid < 0 {
+        return unit_dim_dimensionless()
+    }
+    checker_unit_dim_at(c, uid)
+}
+
+// May these two operands be added, subtracted or compared?
+//
+// The test is on DIMENSION AND SCALE, not on the registry index. Comparing
+// indices was wrong in both directions. It rejected `dosage + 1.0` where
+// `unit dosage;` is a brand with no dimension at all -- the diagnostic read
+// "left unit: dimensionless, right unit: (dimensionless)", which is an
+// error message arguing with itself. And it would have accepted nothing it
+// should not, only because every other case happened to coincide.
+//
+// Scale is part of the test and deliberately so: mg and kg are both mass^1
+// and adding them is still wrong, because 200 mg + 1 kg is not 201 of
+// anything. unit_dim_compatible checks the seven exponents; the scale
+// numerator and denominator are checked here beside it.
+fn checker_units_addable(c: *mut Checker, lu: i64, ru: i64) -> bool with Mut, Panic, Div, Alloc {
+    let ld = checker_dim_of(c, lu)
+    let rd = checker_dim_of(c, ru)
+    if !unit_dim_compatible(ld, rd) {
+        return false
+    }
+    ld.scale_num == rd.scale_num && ld.scale_den == rd.scale_den
+}
+
+fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if unit_dim_is_dimensionless(d) {
+        return ty_with_unit(result, 0 - 1)
+    }
+    let pair = unit_registry_intern_dim((*c).units, d)
+    (*c).units = pair.0
+    ty_with_unit(result, pair.1)
+}
+
+fn checker_unit_dim_at(c: *mut Checker, idx: i64) -> UnitDim with Mut, Panic, Div, Alloc {
+    (*c).units.get_dim(idx)
+}
+
+// *mut transcription of Checker::report_unit_mismatch, printing the same
+// diagnostic without round-tripping a whole Checker by value.
+fn checker_report_unit_mismatch_inplace(c: *mut Checker, span: Span, left_uid: i64, right_uid: i64) with Mut, Panic, Div, Alloc, IO {
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    print("error[E041]: unit mismatch in arithmetic operation\n")
+    print("  left unit: ")
+    if left_uid >= 0 {
+        print_unit_dim(checker_unit_dim_at(c, left_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n  right unit: ")
+    if right_uid >= 0 {
+        print_unit_dim(checker_unit_dim_at(c, right_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n")
+}
+
+// A REAL *mut transcription of check_binary_units, replacing a bridge that
+// could not survive being reached.
+//
+// The previous body read:
+//
+//     if lu < 0 && ru < 0 { return result }
+//     let pair = (*c).check_binary_units(span, op, left, right, result)
+//     checker_store_from_value(c, pair.0)
+//
+// which dereferences the Checker and calls the by-value method -- copying
+// the entire Checker onto the stack (172 fields, among them a TypeEnv, a
+// BorrowEnv, a 12.5 KB UnitRegistry and a RefinementTable), receiving
+// another full copy back, and storing it. Inside the expression checker
+// that is fatal, and it segfaults.
+//
+// It never fired. On the modular engine every unit_id was -1, because the
+// units branch was missing from checker_lower_named_type_mut and the
+// ItemUnit arm was missing from checker_collect_item_inplace, so the guard
+// on the first line returned before the bridge could run. The moment those
+// two ports made unit_id real, this line was reached for the first time and
+// took the compiler down with it -- a latent crash that was unreachable
+// precisely because the feature it serves was dead.
+//
+// The whole point of the *mut spine is to not copy the Checker. Bridging
+// back to the by-value spine from inside it defeats that, so this is
+// transcribed properly instead.
 fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let lu = left.unit_id
     let ru = right.unit_id
     if lu < 0 && ru < 0 {
         return result
     }
-    let pair = (*c).check_binary_units(span, op, left, right, result)
-    checker_store_from_value(c, pair.0)
-    pair.1
+    match op {
+        // Addition and subtraction require the SAME unit, not merely the
+        // same dimension: adding mg to kg is a scale error, and the scale
+        // factor lives in the registry rather than in the exponent vector.
+        BinaryOp::OpAdd => {
+            if !checker_units_addable(c, lu, ru) {
+                checker_report_unit_mismatch_inplace(c, span, lu, ru)
+                result
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        BinaryOp::OpSub => {
+            if !checker_units_addable(c, lu, ru) {
+                checker_report_unit_mismatch_inplace(c, span, lu, ru)
+                result
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        // Multiplication and division COMBINE dimensions, and the combined
+        // dimension is interned so it can be carried.
+        //
+        // The subtlety that made a first version of this wrong: `result`
+        // comes from binary_result_type, which returns the LEFT operand's
+        // type -- unit_id included. Passing it through unchanged therefore
+        // left `mg / mg` branded as mass^1 instead of cancelling, and left
+        // `mg * mg` branded mass^1 instead of mass^2. Every branch below
+        // sets the brand explicitly rather than inheriting it.
+        BinaryOp::OpMul => {
+            if lu >= 0 && ru >= 0 {
+                let d = unit_dim_mul(checker_unit_dim_at(c, lu), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            } else {
+                let uid = if lu >= 0 { lu } else { ru }
+                ty_with_unit(result, uid)
+            }
+        }
+        BinaryOp::OpDiv => {
+            if lu >= 0 && ru >= 0 {
+                let d = unit_dim_div(checker_unit_dim_at(c, lu), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            } else if lu >= 0 {
+                ty_with_unit(result, lu)
+            } else {
+                // scalar / unit -- the inverse dimension
+                let d = unit_dim_div(unit_dim_dimensionless(), checker_unit_dim_at(c, ru))
+                checker_brand_with_dim(c, result, d)
+            }
+        }
+        BinaryOp::OpEq => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpNe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        _ => result
+    }
 }
 
 // R6 Correlated, second (unconditional) exemption: `k1 + k2` for two DIFFERENT
@@ -6529,7 +6856,22 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // generic identity check rejects `a + b` between two different claims over
     // the same f64 before the unwrap ever runs.
     let either_cond_indep = left_ty.kind == TypeKind::TyCondIndep || right_ty.kind == TypeKind::TyCondIndep
-    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // Units are the THIRD case of the exemption the two lines above already
+    // make twice, and for the identical reason: this generic identity check
+    // runs BEFORE binary_result_type, so a rule that says "two branded f64
+    // must carry the same brand" rejects `distance / time` -- metres over
+    // seconds -- as "these types cannot be combined with this operator",
+    // before any unit logic can look at it. Dividing unlike units is the
+    // point of having units.
+    //
+    // compat_numeric_ignoring_units answers the question this check should
+    // be asking -- are these the same KIND of number -- and leaves unit
+    // policy to checker_finish_binary_units_inplace, which knows that
+    // addition needs one dimension and one scale while division needs
+    // neither. Found by instrumenting a source build: the site fifteen lines
+    // below reported ignunits=1 and reskind=1 (not an error) for exactly the
+    // operand pair this line was rejecting.
+    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -19895,7 +20237,7 @@ impl Checker {
             ItemKind::ItemValidation => self.collect_validation_def(item.name, item.validation_def)
             ItemKind::ItemAudit => self.collect_audit_def(item.name, item.audit_def)
             ItemKind::ItemUse => self
-            ItemKind::ItemUnit => self.collect_unit_decl(item.name)
+            ItemKind::ItemUnit => self.collect_unit_decl(item.name, item.type_alias_ty)
             ItemKind::ItemEffect => self.collect_item_effect(item.effect_def)
             ItemKind::ItemSession => self  // Session protocol registered in collect pass (no-op for now)
             ItemKind::ItemTrait => self.collect_trait_def(item.name, item.trait_def)
@@ -20087,11 +20429,15 @@ impl Checker {
         }
     }
 
-    fn collect_unit_decl(self, name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn collect_unit_decl(self, name: Name, conv: Option<Box<TypeExpr> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
-        // Register user-defined unit as a mass-like dimension (f64 base)
-        // For now, user-defined units get a generic dimension
-        c.units = c.units.register(name, unit_dim_dimensionless())
+        // The dimension is DECODED from the declaration's own `= mol / s`
+        // tail. It used to be discarded -- "For now, user-defined units get
+        // a generic dimension" -- which made every user unit the zero
+        // vector, so mol/s and mol/m differed only by name and unit_dim_mul
+        // and unit_dim_div could never fire on anything a user wrote.
+        let dim = unit_dim_for_decl(c.units, conv)
+        c.units = c.units.register(name, dim)
         c
     }
 
