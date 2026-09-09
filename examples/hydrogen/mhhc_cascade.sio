@@ -1,0 +1,160 @@
+// examples/hydrogen/mhhc_cascade.sio
+//
+// The seven-stage metal-hydride compressor of Gkanas et al. 2020, run as a
+// COUPLED cascade on the paper's own measured thermodynamics, with no
+// fitted efficiency anywhere.
+//
+// THE QUESTION THIS ASKS. The existing Sounio demo (demos/hydrogen/
+// mh7_reliability.sio) reproduces the paper's headline ratios by fitting
+// three quantities to them -- a lumped eta, a swing exponent, and a supply
+// pressure back-solved from the target. Fed the paper's MEASURED Table 3,
+// that same ratio-chain model returns 6640x instead of 18.7x, which says
+// the model form is wrong rather than its parameters. This file asks what
+// the coupled model gives instead, and reports the answer whatever it is.
+//
+// WHAT IS MEASURED AND WHAT IS CHOSEN, before any number is printed:
+//
+//   MEASURED, from the paper (data/gkanas2020_seven_stage.md):
+//     per-stage dH and dS, absorption and desorption, all seven stages
+//     alloy masses 31 kg (S1) and 29.5 kg (S2-S7)
+//     SS 316L shell 136 kg per stage
+//     0.425 kg H2 per cycle, from which the capacity is derived
+//     bed geometry L = 12 m, R = 21.4 mm
+//     supply 20 bar; the reference results 374 bar / 18.7x / 6625 s at 80 C
+//
+//   SOURCED ELSEWHERE, because the paper cites its kinetics to a reference
+//   without giving values:
+//     C_a = 59.187 1/s, E_a = 21179.6 J/mol
+//     C_d = 9.57 1/s,   E_d = 16420 J/mol
+//   These are the LaNi5 constants of Jemni & Ben Nasrallah (Int. J.
+//   Hydrogen Energy 1995), the standard set in this literature. They are
+//   NOT the AB2 constants of the paper's stages 2-7, and that substitution
+//   is the single largest declared approximation in this file.
+//
+//   CHOSEN, and varied below rather than tuned:
+//     the bed-to-fluid conductance UA, from the bed area 2*pi*R*L = 1.61 m2
+//     and a water-side coefficient in the usual range
+//     the interconnector volume V_ic, which the paper does not state
+//
+// Nothing here is adjusted to make an output match. Where the model misses,
+// the miss is printed.
+
+use hydride::mhhc::*
+
+fn print_fix3(x: f64) with IO, Mut, Div, Panic {
+    let neg = x < 0.0
+    var v = if neg { 0.0 - x } else { x }
+    let scaled = v * 1000.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 1000
+    let milli = n - whole * 1000
+    if neg { print("-") }
+    print(whole) print(".")
+    if milli < 100 { print("0") }
+    if milli < 10 { print("0") }
+    print(milli)
+}
+
+fn bed_for(stage: i64, ua: f64) -> HydrideBed with Mut, Div, Panic {
+    gkanas_bed(stage, 419.0, 500.0, ua)
+}
+
+// One coupling: bed `hot` desorbing at t_hot into bed `cold` absorbing at
+// t_cold, through v_ic. Returns, through `rep`, what run_coupling reports.
+fn couple(stage_hot: i64, stage_cold: i64, x_hot0: f64, x_cold0: f64,
+          n_ic0: f64, t_hot: f64, t_cold: f64, ua: f64, v_ic: f64,
+          kin: HydrideKinetics, shape: PlateauShape,
+          out: &![f64; 8], rep: &![f64; 8]) with Mut, Div, Panic {
+    var s0: [f64; 8] = [0.0; 8]
+    s0[0] = x_hot0
+    s0[1] = x_cold0
+    s0[2] = n_ic0
+    s0[3] = t_hot
+    s0[4] = t_cold
+    run_coupling(&s0, bed_for(stage_hot, ua), bed_for(stage_cold, ua), kin, shape,
+                 v_ic, 300.0, t_hot, t_cold, 0.02, 600000 as i64, 1.0e-10, out, rep)
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let kin = HydrideKinetics { c_abs: 59.187, e_abs: 21179.6, c_des: 9.57, e_des: 16420.0 }
+    let shape = flat_plateau()
+    let t_cold = 283.15    // 10 C, the paper's hydrogenation temperature
+    let t_hot = 353.15     // 80 C, the paper's Case 1
+    let ua = 2420.0        // W/K, from 2*pi*R*L = 1.61 m2 at h = 1500 W/m2K
+    let v_ic = 0.005       // m3, NOT given by the paper
+
+    println("SEVEN-STAGE MH COMPRESSOR, COUPLED MODEL, MEASURED THERMODYNAMICS")
+    println("Gkanas et al. 2020, Renewable Energy 147:164-178. Case 1, 10 -> 80 C.")
+    println("")
+    println("Reference results from the paper: 374 bar, ratio 18.7, cycle 6625 s.")
+    println("No fitted efficiency is used anywhere below.")
+    println("")
+
+    println("-- per-stage plateau pressures from the measured Table 3 --")
+    var s: i64 = 0
+    while s < 7 {
+        let pa = p_eq_flat(gkanas_dh_abs(s), gkanas_ds_abs(s), t_cold)
+        let pd = p_eq_flat(gkanas_dh_des(s), gkanas_ds_des(s), t_hot)
+        print("  S") print(s + 1)
+        print("  P_abs(10C)= ") print_fix3(pa)
+        print(" bar   P_des(80C)= ") print_fix3(pd)
+        println(" bar")
+        s = s + 1
+    }
+    println("")
+
+    println("-- the six couplings, integrated --")
+    var out: [f64; 8] = [0.0; 8]
+    var rep: [f64; 8] = [0.0; 8]
+    var total_time = 0.0
+    var total_drift = 0.0
+    var unconverged: i64 = 0
+    var x_prev = 1.0        // stage 1 arrives fully loaded from the 20 bar supply
+    var k: i64 = 0
+    while k < 6 {
+        couple(k, k + 1, x_prev, 0.0, 0.05, t_hot, t_cold, ua, v_ic, kin, shape, &! out, &! rep)
+        print("  S") print(k + 1) print(" -> S") print(k + 2)
+        print("   P= ") print_fix3(rep[1]) print(" bar")
+        print("   moved= ") print_fix3(rep[2]) print(" mol")
+        print("   t= ") print_fix3(rep[0]) print(" s")
+        print("   drift= ") print_fix3(rep[3] * 1000000.0) print(" ppm")
+        if rep[4] > 0.5 { println("   [converged]") } else { unconverged = unconverged + 1; println("   [NOT CONVERGED]") }
+        total_time = total_time + rep[0]
+        if rep[3] > total_drift { total_drift = rep[3] }
+        x_prev = out[1]
+        k = k + 1
+    }
+    println("")
+
+    // Stage 7 delivers by desorbing at t_hot; its plateau at the loading it
+    // reached is the pressure it can hold against the delivery line.
+    let p_deliver = p_eq_sloped(gkanas_dh_des(6), gkanas_ds_des(6), t_hot, x_prev, shape, false)
+    print("  S7 loading after the cascade : ") print_fix3(x_prev) println("")
+    print("  S7 delivery plateau at 80 C  : ") print_fix3(p_deliver) println(" bar")
+    print("  ratio against the 20 bar feed: ") print_fix3(p_deliver / 20.0) println("")
+    print("  summed coupling time         : ") print_fix3(total_time) println(" s")
+    print("  worst inventory drift        : ") print_fix3(total_drift * 1000000.0) println(" ppm")
+    println("")
+
+    println("-- against the paper --")
+    print("  delivery  model ") print_fix3(p_deliver) print(" bar   vs paper 374 bar")
+    println("")
+    print("  ratio     model ") print_fix3(p_deliver / 20.0) print("      vs paper 18.7")
+    println("")
+    print("  couplings model ") print_fix3(total_time) print(" s     vs paper 6625 s (full cycle,")
+    println(" which also includes heating and cooling this model does not time)")
+    println("")
+
+    if unconverged > 0 {
+        print("  REFUSING TO INTERPRET: ") print(unconverged) println(" coupling(s) did not converge.")
+        return 1
+    }
+    if total_drift > 1.0e-9 {
+        println("  REFUSING TO INTERPRET: hydrogen inventory drifted.")
+        return 1
+    }
+    println("MHHC_CASCADE_OK")
+    0
+}
