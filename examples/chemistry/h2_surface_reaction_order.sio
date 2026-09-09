@@ -1,0 +1,254 @@
+// examples/chemistry/h2_surface_reaction_order.sio
+//
+// HOW ABIOTIC HYDROGEN LOSS SCALES WITH STORAGE PRESSURE, WITHOUT KNOWING
+// THE RATE CONSTANT.
+//
+// The problem this answers is a real, stated gap. A pre-registered study of
+// H2 loss in underground hydrogen storage (sounio-uhs-coupled) decomposes
+// the abiotic loss into four channels and reports that channel (c), abiotic
+// methanation CO2 + 4 H2 -> CH4 + 2 H2O, is thermodynamically enormous --
+// K(T) between 1e28 and 1e37 across the reservoir temperature range -- so
+// "the barrier is ENTIRELY KINETIC. A rate is needed and NOT SUPPLIED BY ANY
+// SOURCE IN THIS STUDY." That module refuses to emit a total abiotic band
+// rather than treat the unmeasured channels as zero.
+//
+// A rate constant cannot be invented. But the rate constant is not the only
+// thing a mechanism determines, and it is not the thing an operator most
+// needs. The APPARENT REACTION ORDER in hydrogen -- how the loss rate scales
+// when you raise the storage pressure -- follows from the MECHANISM alone,
+// and specifically from how H2 sits on the mineral surface. This example
+// derives it numerically from the elementary steps, with no fitted rate and
+// no assumed rate law.
+//
+// THE RESULT, AND IT IS NOT THE INTUITIVE ONE.
+//
+// H2 is diatomic and dissociates on adsorption: H2 + 2* <-> 2H*. That single
+// structural fact makes the surface hydrogen coverage go as sqrt(K p), not
+// K p, and it changes the pressure scaling of the loss channel in two ways
+// that both matter operationally:
+//
+//   1. In the dilute limit the order is 1/2, not 1. Doubling the storage
+//      pressure does not double this loss channel; it multiplies it by
+//      sqrt(2) ~ 1.41.
+//   2. At high pressure the order goes NEGATIVE. Hydrogen crowds CO2 off the
+//      surface, and the reaction needs both. Beyond the maximum, raising the
+//      pressure LOWERS this loss rate.
+//
+// A model that assumed H2 adsorbs molecularly gets order 1 in the dilute
+// limit instead of 1/2 -- a factor that compounds across the pressure range
+// a reservoir actually cycles over.
+//
+// Analytically, with u = sqrt(K_H p_H2) and w = K_C p_CO2:
+//
+//     theta_H = u / (1 + u + w),   theta_C = w / (1 + u + w)
+//     r = k theta_H theta_C
+//     d(ln r)/d(ln p_H2) = 1/2 - u/(1 + u + w)
+//
+// so the order runs from +1/2 down through 0 at u = (1+w)/1 ... to -1/2.
+// Nothing below assumes that expression: the orders printed are finite
+// differences of the rate produced by integrating the elementary mechanism
+// to steady state, and the analytic value is printed beside each one as a
+// check on the integration rather than as its source.
+//
+// ENGINE. Runs under Madaros v0.80.0 (the default `bin/souc` engine) and
+// under gen3.elf. No unit types, because unit brands do not survive
+// arithmetic on either engine that ships on main -- see
+// docs/audit/CHEMISTRY_MADAROS_ENGINE_MEASUREMENT_2026-09-09.md.
+
+use chemistry::surface::*
+
+// --- mechanism, shared by both variants -------------------------------------
+// species: 0 = H* (or H2* in the molecular variant), 1 = CO2*, 2 = free site
+// gas:     0 = H2, 1 = CO2
+
+fn build_nu(dissociative: bool) -> [f64; 256] with Mut {
+    var nu: [f64; 256] = [0.0; 256]
+    if dissociative {
+        // H2 + 2* -> 2H*
+        nu_set(&! nu, 0 as i64, 0 as i64, 2.0)
+        nu_set(&! nu, 0 as i64, 2 as i64, 0.0 - 2.0)
+    } else {
+        // H2 + * -> H2*   (the counterfactual)
+        nu_set(&! nu, 0 as i64, 0 as i64, 1.0)
+        nu_set(&! nu, 0 as i64, 2 as i64, 0.0 - 1.0)
+    }
+    // CO2 + * -> CO2*
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0)
+    nu_set(&! nu, 1 as i64, 2 as i64, 0.0 - 1.0)
+    // H* + CO2* -> gas products + 2*   (lumped, irreversible, rate-determining)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 2.0)
+    nu
+}
+
+fn build_steps(dissociative: bool) -> [SurfaceStep; 16] with Mut {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    if dissociative {
+        steps[0 as usize] = dissociative_adsorption(0 as i64, 0 as i64, 1.0, 1.0)
+    } else {
+        steps[0 as usize] = adsorption(0 as i64, 0 as i64, 1.0, 1.0)
+    }
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 1.0, 10.0)
+    // c_idx is the free site with k_rev = 0: the reverse term vanishes, so
+    // this is the irreversible lumped step "H* + CO2* -> products + 2*",
+    // and the stoichiometry above is what returns both sites.
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 1.0e-6, 0.0)
+    steps
+}
+
+// Integrated to a REPORTED residual, not to a fixed step count. The first
+// version of this example used a fixed 40000 steps and produced a visibly
+// wrong order at the lowest pressure: dissociative adsorption relaxes with a
+// time constant near 50 there, and 40000 steps at dt = 0.002 is t = 80, about
+// 1.6 time constants. The measured order came out 0.622 against an analytic
+// 0.490 -- and the only reason that was caught is that the analytic value was
+// printed beside it. `converged` below is returned to the caller and asserted
+// before any order is reported.
+fn steady_rate(dissociative: bool, p_h2: f64, p_co2: f64, conv_out: &![f64; 2]) -> f64 with Mut, Div, Panic {
+    let steps = build_steps(dissociative)
+    let nu = build_nu(dissociative)
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = p_h2
+    p_gas[1] = p_co2
+    let theta0 = clean_surface(3 as i64)
+    var ss: [f64; 16] = [0.0; 16]
+    var res: [f64; 2] = [0.0; 2]
+    // dt from the fastest rate in the mechanism, not a constant. The
+    // adsorption pseudo-first-order rate is k_ads * p, which spans eight
+    // decades across this sweep; a fixed dt that is stable at p = 1e-4 is
+    // wildly unstable at p = 1e4.
+    let fastest = 1.0 + (1.0 * p_h2) + 10.0 + (1.0 * p_co2)
+    let dt = 0.2 / fastest
+    // Tolerance 1e-3 on the RELATIVE residual, and the number is measured
+    // rather than picked. Two facts fix it:
+    //
+    //   The achievable floor is 1e-6 at the low-pressure end and 4.5e-4 at
+    //   the high-pressure end, and it does NOT improve with more time --
+    //   measured, unchanged from t = 7e3 to t = 7e4 and from t = 80 to
+    //   t = 400. It is finite-dt truncation, not incomplete relaxation, and
+    //   the coverages at that floor match the analytic Langmuir values
+    //   exactly (theta_H = 0.0098039 at p = 1e-4, 0.990010 at p = 1e4).
+    //
+    //   The configuration that produced the wrong order -- dt = 0.002 for
+    //   40000 steps, t = 80, about 1.6 time constants -- gives a relative
+    //   residual of 1.999994 and theta_H = 0.009019, eight per cent off.
+    //
+    // Six orders of magnitude separate the two, so any threshold in between
+    // discriminates. 1e-3 sits above every achievable floor and four
+    // thousand times below the known failure.
+    integrate_to_steady_state(&theta0, &steps, 3 as i64, &nu, 3 as i64, &p_gas, 2 as i64,
+                              dt, 4000000 as i64, 1.0e-3, &! ss, &! res)
+    conv_out[0] = res[0]
+    conv_out[1] = res[1]
+    var rates: [f64; 16] = [0.0; 16]
+    compute_surface_rates_into(&steps, 3 as i64, &ss, &p_gas, 2 as i64, &! rates)
+    rates[2]
+}
+
+// Apparent order as a central finite difference in ln p, which is what an
+// experimenter measures: two pressures a factor 1.02 apart, the slope of
+// ln r against ln p between them.
+fn apparent_order(dissociative: bool, p_h2: f64, p_co2: f64, conv_out: &![f64; 2]) -> f64 with Mut, Div, Panic {
+    let lo = p_h2 / 1.02
+    let hi = p_h2 * 1.02
+    var c_lo: [f64; 2] = [0.0; 2]
+    var c_hi: [f64; 2] = [0.0; 2]
+    let r_lo = steady_rate(dissociative, lo, p_co2, &! c_lo)
+    let r_hi = steady_rate(dissociative, hi, p_co2, &! c_hi)
+    // Both endpoints must have converged, and the worse residual is carried
+    // out so the report can show it.
+    if c_lo[0] > c_hi[0] { conv_out[0] = c_lo[0] } else { conv_out[0] = c_hi[0] }
+    if c_lo[1] < c_hi[1] { conv_out[1] = c_lo[1] } else { conv_out[1] = c_hi[1] }
+    if r_lo <= 0.0 { return 0.0 }
+    if r_hi <= 0.0 { return 0.0 }
+    (ln_f64(r_hi) - ln_f64(r_lo)) / (ln_f64(hi) - ln_f64(lo))
+}
+
+// order = d(ln r)/d(ln p) with u = sqrt(K_H p_H2), so d(ln u)/d(ln p) = 1/2
+// and d(ln D)/d(ln p) = (u/2)/D, giving 1/2 - u/D.
+fn analytic_order_dissociative(p_h2: f64, p_co2: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_f64(1.0 * p_h2)
+    let w = 0.1 * p_co2
+    0.5 - u / (1.0 + u + w)
+}
+
+// order = d(ln r)/d(ln p) with u = K_H p_H2 (no square root here), so
+// d(ln u)/d(ln p) = 1 and d(ln D)/d(ln p) = u/D, giving 1 - 2u/D.
+//
+// The factor of two was missing when this was first written, and the
+// mechanism caught it: at p = 1, the integrated mechanism reported 0.004975
+// where this function claimed 0.502488. 1 - 2/2.01 = 0.00498. The mechanism
+// was right and the closed form was wrong -- which is the direction this
+// pairing is meant to work in as much as the other.
+fn analytic_order_molecular(p_h2: f64, p_co2: f64) -> f64 with Mut, Div, Panic {
+    let u = 1.0 * p_h2
+    let w = 0.1 * p_co2
+    1.0 - (2.0 * u) / (1.0 + u + w)
+}
+
+fn report(p_h2: f64, p_co2: f64) -> i64 with Mut, Div, Panic, IO {
+    var cd: [f64; 2] = [0.0; 2]
+    var cm: [f64; 2] = [0.0; 2]
+    let od = apparent_order(true, p_h2, p_co2, &! cd)
+    let om = apparent_order(false, p_h2, p_co2, &! cm)
+    print("  p_H2=") print(p_h2)
+    print("  DISSOC measured ") print(od)
+    print(" analytic ") print(analytic_order_dissociative(p_h2, p_co2))
+    print("  |  MOLEC measured ") print(om)
+    print(" analytic ") print(analytic_order_molecular(p_h2, p_co2))
+    if cd[1] > 0.5 && cm[1] > 0.5 {
+        println("   [converged]")
+        return 0
+    }
+    print("   [NOT CONVERGED  dissoc_resid=") print(cd[0])
+    print(" molec_resid=") print(cm[0]) println("]")
+    1
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let p_co2 = 0.1
+
+    println("ABIOTIC METHANATION ON A MINERAL SURFACE:")
+    println("apparent reaction order in H2, from the mechanism, no fitted rate")
+    println("")
+    println("K_H = 1 (k_ads/k_des = 1.0/1.0), K_CO2 = 0.1 (1.0/10.0), p_CO2 = 0.1")
+    println("surface step k = 1e-6, slow enough not to perturb the adsorption equilibria")
+    println("")
+    println("'measured' = finite difference of the integrated mechanism's steady-state rate")
+    println("'analytic' = the closed-form order, printed as a check on the integration")
+    println("")
+
+    var unconverged: i64 = 0
+    unconverged = unconverged + report(1.0e-4, p_co2)
+    unconverged = unconverged + report(1.0e-2, p_co2)
+    unconverged = unconverged + report(1.0, p_co2)
+    unconverged = unconverged + report(1.0e2, p_co2)
+    unconverged = unconverged + report(1.0e4, p_co2)
+
+    println("")
+    println("WHAT THIS SAYS FOR STORAGE:")
+    println("  In the dilute limit the dissociative order is 1/2 and the molecular")
+    println("  order is 1. An operator who models H2 as adsorbing molecularly")
+    println("  overstates how fast this loss channel grows with pressure.")
+    println("")
+    println("  Both orders go negative at high pressure: hydrogen crowds CO2 off")
+    println("  the surface and the reaction needs both. Past the maximum, raising")
+    println("  the pressure LOWERS this loss rate.")
+    println("")
+    println("  None of this needs the rate constant the source literature does not")
+    if unconverged > 0 {
+        print("  REFUSING TO INTERPRET: ") print(unconverged)
+        println(" pressure point(s) did not converge.")
+        return 1
+    }
+    println("  supply. It needs the mechanism, and the mechanism is checkable:")
+    let nu = build_nu(true)
+    if sites_conserved(&nu, 3 as i64, 3 as i64, 1.0e-15) {
+        println("  site conservation: every step's stoichiometry sums to zero -- PASS")
+    } else {
+        println("  site conservation: FAILED -- the mechanism leaks sites")
+        return 1
+    }
+    0
+}

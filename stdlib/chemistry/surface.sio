@@ -27,8 +27,18 @@
 // generated runtime's non-reclaiming 2 GiB arena is exhausted (bisected: 750
 // steps run, 850 do not). A microkinetic model integrated to steady state
 // needs far more steps than that. This module uses a flat `[f64; 256]`
-// stoichiometry indexed as nu[r * SURF_MAX + s] and allocates nothing per
-// step. Full measurement:
+// stoichiometry indexed as nu[r * SURF_MAX + s].
+//
+// That was necessary and not sufficient, and the shortfall was found by
+// running out of memory rather than by reasoning: a returned `[f64; 16]` is
+// a heap handle on Madaros, not a stack copy, so the by-value derivative
+// functions still allocate twice per call and eight times per RK4 step.
+// Measured: `madaros: handles full` after roughly 2.5 integrations of 40000
+// steps -- a DIFFERENT limit from the arena, reached sooner.
+// integrate_to_steady_state() below hoists every buffer out of the step loop
+// and writes through `&![f64; 16]` output parameters, allocating nothing
+// inside the loop. Anything integrating to convergence should use it. Full
+// measurement:
 // docs/audit/CHEMISTRY_MADAROS_ENGINE_MEASUREMENT_2026-09-09.md
 //
 // NO UNIT TYPES IN THIS FILE, ALSO MEASURED. Unit brands do not survive
@@ -84,6 +94,32 @@ pub fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
         i = i + 1
     }
     g
+}
+
+// Natural logarithm, by range reduction onto [1/sqrt2, sqrt2] and the
+// atanh series ln(v) = 2 * sum z^(2n+1)/(2n+1) with z = (v-1)/(v+1). Present
+// for the same reason sqrt_f64 is: it sits on the critical path of a checked
+// claim -- the apparent reaction order in section 7 is a ratio of logarithms
+// -- and `log` is not available on every engine this module targets
+// (Madaros v0.80.0 rejects it outright). |z| <= 0.1716 after reduction, so
+// thirty terms is far past f64 precision.
+pub fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 745.0 }
+    var v = x
+    var k = 0.0
+    while v > 1.4142135623730951 { v = v / 2.0; k = k + 1.0 }
+    while v < 0.7071067811865476 { v = v * 2.0; k = k - 1.0 }
+    let z = (v - 1.0) / (v + 1.0)
+    let z2 = z * z
+    var term = z
+    var sum = 0.0
+    var n: i64 = 0
+    while n < 30 {
+        sum = sum + term / (((2 * n) + 1) as f64)
+        term = term * z2
+        n = n + 1
+    }
+    (2.0 * sum) + (k * 0.6931471805599453)
 }
 
 // ============================================================================
@@ -296,6 +332,136 @@ pub fn surface_derivative(theta: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i
                           vac_idx: i64) -> [f64; 16] with Mut, Div, Panic {
     let rates = compute_surface_rates(steps, nstep, theta, p_gas, vac_idx)
     surface_dtheta(nu, &rates, nspecies, nstep)
+}
+
+// ALLOCATION-FREE VARIANTS, and the measurement that forced them.
+//
+// The by-value forms above return `[f64; 16]`, and a returned fixed-size
+// array is a heap handle on Madaros, not a stack copy. RK4 calls the
+// derivative four times per step and each call allocates twice (the rates
+// array and the derivative array), so a long integration exhausts the
+// generated runtime's handle table -- measured, `madaros: handles full`,
+// after roughly 2.5 integrations of 40000 steps. That is a different limit
+// from the 2 GiB arena documented in this file's header and it is reached
+// sooner.
+//
+// These write through `&![f64; 16]` output parameters into scratch the
+// caller owns, allocating nothing inside the step loop. The by-value forms
+// are kept because they read better in a test that runs a few thousand
+// steps; anything integrating to a converged steady state should use these.
+pub fn compute_surface_rates_into(steps: &[SurfaceStep; 16], nstep: i64, theta: &[f64; 16],
+                                  p_gas: &[f64; 16], vac_idx: i64,
+                                  out: &![f64; 16]) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < nstep {
+        out[r] = surface_step_rate(steps[r as usize], theta, p_gas, vac_idx)
+        r = r + 1
+    }
+}
+
+pub fn surface_derivative_into(theta: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                               nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                               vac_idx: i64, rate_scratch: &![f64; 16],
+                               out: &![f64; 16]) with Mut, Div, Panic {
+    compute_surface_rates_into(steps, nstep, theta, p_gas, vac_idx, rate_scratch)
+    var s: i64 = 0
+    while s < nspecies {
+        var acc = 0.0
+        var r: i64 = 0
+        while r < nstep {
+            acc = acc + nu[r * 16 + s] * rate_scratch[r]
+            r = r + 1
+        }
+        out[s] = acc
+        s = s + 1
+    }
+}
+
+// RK4 with every buffer hoisted out of the step loop. Integrates until the
+// RELATIVE steady-state residual falls below `tol` or `max_steps` is spent,
+// and reports which happened by writing the achieved residual into
+// residual_out[0] and a converged flag into residual_out[1] -- so a caller
+// can say how converged its "steady state" actually is instead of assuming
+// the loop was long enough. That assumption is exactly what produced a wrong
+// reaction order the first time this was used at low pressure: dissociative
+// adsorption relaxes there with a time constant near 50, and a fixed
+// 40000-step run at dt = 0.002 reached t = 80, about 1.6 time constants, and
+// reported an order of 0.622 against a true 0.490.
+//
+// The residual is relative to the largest step flux, not absolute. See the
+// comment at the check itself for why that is the only question worth
+// asking of a microkinetic steady state.
+pub fn integrate_to_steady_state(theta0: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
+                                 nu: &[f64; 256], nspecies: i64, p_gas: &[f64; 16],
+                                 vac_idx: i64, dt: f64, max_steps: i64, tol: f64,
+                                 out: &![f64; 16], residual_out: &![f64; 2]) with Mut, Div, Panic {
+    var y: [f64; 16] = [0.0; 16]
+    var y2: [f64; 16] = [0.0; 16]
+    var k1: [f64; 16] = [0.0; 16]
+    var k2: [f64; 16] = [0.0; 16]
+    var k3: [f64; 16] = [0.0; 16]
+    var k4: [f64; 16] = [0.0; 16]
+    var rs: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < nspecies { y[i] = theta0[i]; i = i + 1 }
+
+    var n: i64 = 0
+    var residual = 1.0e300
+    var done = false
+    while n < max_steps {
+        if !done {
+            surface_derivative_into(&y, steps, nstep, nu, nspecies, p_gas, vac_idx, &! rs, &! k1)
+            var j: i64 = 0
+            while j < nspecies { y2[j] = y[j] + 0.5 * dt * k1[j]; j = j + 1 }
+            surface_derivative_into(&y2, steps, nstep, nu, nspecies, p_gas, vac_idx, &! rs, &! k2)
+            j = 0
+            while j < nspecies { y2[j] = y[j] + 0.5 * dt * k2[j]; j = j + 1 }
+            surface_derivative_into(&y2, steps, nstep, nu, nspecies, p_gas, vac_idx, &! rs, &! k3)
+            j = 0
+            while j < nspecies { y2[j] = y[j] + dt * k3[j]; j = j + 1 }
+            surface_derivative_into(&y2, steps, nstep, nu, nspecies, p_gas, vac_idx, &! rs, &! k4)
+            j = 0
+            while j < nspecies {
+                y[j] = y[j] + (dt / 6.0) * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j])
+                j = j + 1
+            }
+            // k1 at the new point is the residual, and is needed next
+            // iteration anyway -- checked every 256 steps so the check does
+            // not dominate the loop.
+            if (n % 256) == 0 {
+                surface_derivative_into(&y, steps, nstep, nu, nspecies, p_gas, vac_idx, &! rs, &! k1)
+                var worst = 0.0
+                var s2: i64 = 0
+                while s2 < nspecies {
+                    let a = abs_f64(k1[s2])
+                    if a > worst { worst = a }
+                    s2 = s2 + 1
+                }
+                // RELATIVE residual, and the choice matters. Steady state in
+                // a microkinetic model is not "nothing is happening" -- the
+                // individual steps carry large, equal and opposite fluxes.
+                // It is "the NET imbalance is negligible against those
+                // fluxes". An absolute threshold asks the wrong question and
+                // can never be satisfied by a system whose fluxes are large,
+                // nor challenged by one whose fluxes are tiny.
+                var flux = 0.0
+                var r2: i64 = 0
+                while r2 < nstep {
+                    let fa = abs_f64(rs[r2])
+                    if fa > flux { flux = fa }
+                    r2 = r2 + 1
+                }
+                if flux <= 0.0 { flux = 1.0 }
+                residual = worst / flux
+                if residual < tol { done = true }
+            }
+        }
+        n = n + 1
+    }
+    var c: i64 = 0
+    while c < nspecies { out[c] = y[c]; c = c + 1 }
+    residual_out[0] = residual
+    if done { residual_out[1] = 1.0 } else { residual_out[1] = 0.0 }
 }
 
 pub fn simulate_surface_mkm(theta0: &[f64; 16], steps: &[SurfaceStep; 16], nstep: i64,
@@ -656,6 +822,15 @@ pub fn test_turnover_frequency_definition() -> bool with Mut, Div, Panic {
 }
 
 // --- 6.7 sqrt_f64 is on the critical path of 6.2, so it is tested ---
+pub fn test_ln_exact() -> bool with Mut, Div, Panic {
+    check_near(ln_f64(1.0), 0.0, 1.0e-15)
+        && check_near(ln_f64(2.718281828459045), 1.0, 1.0e-14)
+        && check_near(ln_f64(2.0), 0.6931471805599453, 1.0e-14)
+        && check_near(ln_f64(1024.0), 10.0 * 0.6931471805599453, 1.0e-13)
+        && check_near(ln_f64(0.5), 0.0 - 0.6931471805599453, 1.0e-14)
+        && check_near(ln_f64(1.0e-6), 0.0 - 13.815510557964274, 1.0e-12)
+}
+
 pub fn test_sqrt_exact() -> bool with Mut, Div, Panic {
     check_near(sqrt_f64(4.0), 2.0, 1.0e-14)
         && check_near(sqrt_f64(2.0) * sqrt_f64(2.0), 2.0, 1.0e-14)
@@ -663,16 +838,71 @@ pub fn test_sqrt_exact() -> bool with Mut, Div, Panic {
         && check_near(sqrt_f64(0.0), 0.0, 1.0e-18)
 }
 
+// --- 6.8 The allocation-free integrator agrees with the by-value one, and
+// reports its own convergence ---
+//
+// Same mechanism as 6.5, integrated both ways. The residual is asserted,
+// not just computed: a "steady state" that never says how steady it is
+// invites exactly the error that produced a wrong reaction order the first
+// time integrate_to_steady_state's fixed-length predecessor was used at low
+// pressure.
+pub fn test_steady_state_integrator_converges() -> bool with Mut, Div, Panic {
+    var steps: [SurfaceStep; 16] = [surface_step_none(); 16]
+    steps[0 as usize] = adsorption(0 as i64, 0 as i64, 100.0, 50.0)
+    steps[1 as usize] = adsorption(1 as i64, 1 as i64, 100.0, 25.0)
+    steps[2 as usize] = lh_reaction(0 as i64, 1 as i64, 2 as i64, 0.001, 0.0)
+    steps[3 as usize] = desorption(2 as i64, 2 as i64, 1000.0, 0.0)
+
+    var nu: [f64; 256] = [0.0; 256]
+    nu_set(&! nu, 0 as i64, 0 as i64, 1.0);        nu_set(&! nu, 0 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 1 as i64, 1 as i64, 1.0);        nu_set(&! nu, 1 as i64, 3 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 0 as i64, 0.0 - 1.0);  nu_set(&! nu, 2 as i64, 1 as i64, 0.0 - 1.0)
+    nu_set(&! nu, 2 as i64, 2 as i64, 1.0);        nu_set(&! nu, 2 as i64, 3 as i64, 1.0)
+    nu_set(&! nu, 3 as i64, 2 as i64, 0.0 - 1.0);  nu_set(&! nu, 3 as i64, 3 as i64, 1.0)
+
+    let nspecies: i64 = 4
+    let vac_idx: i64 = 3
+    var p_gas: [f64; 16] = [0.0; 16]
+    p_gas[0] = 0.5; p_gas[1] = 0.25; p_gas[2] = 0.0
+
+    let theta0 = clean_surface(nspecies)
+    let by_value = simulate_surface_mkm(&theta0, &steps, 4 as i64, &nu, nspecies, &p_gas,
+                                        vac_idx, 0.0002, 20000 as i64)
+
+    var ss: [f64; 16] = [0.0; 16]
+    var res: [f64; 2] = [0.0; 2]
+    // Tolerance 1e-8 on the relative residual, measured rather than wished
+    // for. The floor at this mechanism and dt is 1.24e-9 and it does not
+    // improve with more steps -- it is finite-dt truncation. This test was
+    // first written asking for 1e-12 and failed on BOTH engines for that
+    // reason, which is the same mistake, made in the same week, that the
+    // reaction-order example documents at its own convergence gate: a
+    // threshold below the achievable floor is not a strict test, it is a
+    // broken one.
+    integrate_to_steady_state(&theta0, &steps, 4 as i64, &nu, nspecies, &p_gas, vac_idx,
+                              0.0002, 200000 as i64, 1.0e-8, &! ss, &! res)
+
+    let converged = res[1] > 0.5
+    let residual_small = res[0] < 1.0e-8
+    let agree = check_near(ss[0], by_value[0], 1.0e-6)
+        && check_near(ss[1], by_value[1], 1.0e-6)
+        && check_near(ss[3], by_value[3], 1.0e-6)
+
+    converged && residual_small && agree && site_balance_holds(&ss, nspecies, 1.0e-12)
+}
+
 pub fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i64 = 0
     var f: i64 = 0
     if test_sqrt_exact() { p = p + 1 } else { f = f + 1; println("FAIL sqrt_exact") }
+    if test_ln_exact() { p = p + 1 } else { f = f + 1; println("FAIL ln_exact") }
     if test_langmuir_isotherm_exact() { p = p + 1 } else { f = f + 1; println("FAIL langmuir_isotherm_exact") }
     if test_dissociative_isotherm_exact() { p = p + 1 } else { f = f + 1; println("FAIL dissociative_isotherm_exact") }
     if test_sites_conserved_detects_a_leak() { p = p + 1 } else { f = f + 1; println("FAIL sites_conserved_detects_a_leak") }
     if test_site_balance_preserved_under_integration() { p = p + 1 } else { f = f + 1; println("FAIL site_balance_preserved") }
     if test_lh_reduces_to_closed_form() { p = p + 1 } else { f = f + 1; println("FAIL lh_reduces_to_closed_form") }
     if test_turnover_frequency_definition() { p = p + 1 } else { f = f + 1; println("FAIL turnover_frequency_definition") }
+    if test_steady_state_integrator_converges() { p = p + 1 } else { f = f + 1; println("FAIL steady_state_integrator_converges") }
     print("SURFACE: ") print(p) print(" passed, ") print(f) println(" failed")
     if f == 0 { println("SURFACE ALL PASS") return 0 }
     1
