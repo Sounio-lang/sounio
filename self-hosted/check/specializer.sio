@@ -1688,6 +1688,42 @@ fn spec_dce_opt_type_is_f128(opt: Option<Box<TypeExpr>>) -> bool with Mut, Panic
     }
 }
 
+// V0-E.5.4: an f128 param or `-> f128` return is another AST-visible trigger
+// for the lowering-introduced softfloat calls (`fn add128(a: f128, b: f128) ->
+// f128 { a + b }` has no f128 let at all), so a scanned fn body whose signature
+// mentions f128 marks the desugar targets before its statements are walked.
+fn spec_dce_fn_sig_uses_f128(fd: &FnDef) -> bool with Mut, Panic, Div {
+    if spec_dce_opt_type_is_f128((*fd).return_type) { return true }
+    var cur = (*fd).params
+    var going = true
+    var found = false
+    while going {
+        match cur {
+            Some(list) => {
+                if spec_dce_type_expr_is_f128(&(*list).head.ty) { found = true }
+                cur = (*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    found
+}
+
+fn spec_dce_type_expr_is_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    let seg = (*te).path.segments
+    if seg.head_len != 4 { return false }
+    if seg.head_buf[0] as i64 != 102 { return false }
+    seg.head_buf[1] as i64 == 49 && seg.head_buf[2] as i64 == 50 && seg.head_buf[3] as i64 == 56
+}
+
+fn spec_dce_scan_fn_def(fd: &FnDef, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+    if spec_dce_fn_sig_uses_f128(fd) {
+        spec_dce_mark_f128_desugar_targets(marks, count)
+    }
+    spec_dce_scan_block((*fd).body, marks, count)
+}
+
 // V0-E.5.1: language `f128` `+`/`-` on annotated locals is desugared by
 // ir/lower.sio into IrCall f128_bits_soft_add / f128_bits_soft_sub. Those calls
 // do not exist in the AST this pass walks, so with only source-visible callees
@@ -1752,7 +1788,7 @@ fn spec_dce_scan_item_if_marked(
         let h = ast_name_hash(it.name)
         if spec_dce_hash_find(marks, *count, h) {
             match it.fn_def {
-                Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                Some(fd) => spec_dce_scan_fn_def(&(*fd), marks, count)
                 None => {}
             }
         }
@@ -1782,7 +1818,7 @@ fn spec_dce_scan_item_if_marked(
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
                                 match mit.fn_def {
-                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    Some(fd) => spec_dce_scan_fn_def(&(*fd), marks, count)
                                     None => {}
                                 }
                             }
@@ -1808,7 +1844,7 @@ fn spec_dce_scan_item_if_marked(
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
                                 match mit.fn_def {
-                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    Some(fd) => spec_dce_scan_fn_def(&(*fd), marks, count)
                                     None => {}
                                 }
                             }
