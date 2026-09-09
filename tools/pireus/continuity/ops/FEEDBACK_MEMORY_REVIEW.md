@@ -121,3 +121,17 @@ Next: freeze a complete separately identified runtime and the unchanged paired
 inputs, qualify its source and observer artifacts, then obtain fresh host
 preflight before any hardware diagnostic. Neither instrumentation performance
 nor a new serving/inference profile is qualified by this implementation.
+
+## Frozen diagnostic source acceptance
+
+Source 0cbf8267d42c4e8d2ea27ce4f18734259cb6b042 completed CI run34334985264 successfully.
+Readiness and raw CI/Madaros evidence: validation/lifecycle-diagnostic-freeze-20260909/.
+The readiness checker accepted all three required exact-source checks. The101-file runtime
+and20 input artifacts were reverified; only the declared offline_generate.py differs from
+the parent runtime. This is source/input acceptance, not hardware qualification.
+
+Token custody now verifies the frozen runtime and retains prior two-rank/profile/storage
+checks. Terminal collection preserves journals byte-for-byte, including truncated tails,
+and explicitly inventories missing files. Nine local transport/custody/collection tests
+pass; altered historical copies used by tests are synthetic, never new GPU evidence.
+Fresh host preflight and the separately identified diagnostic hardware attempt remain pending.
