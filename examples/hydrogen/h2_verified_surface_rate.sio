@@ -1,0 +1,251 @@
+// examples/hydrogen/h2_verified_surface_rate.sio
+//
+// THE SAME HYDROGEN SURFACE RATE, WITH THE DIMENSIONS AND THE SPECIES
+// CHECKED BY THE COMPILER.
+//
+// examples/chemistry/h2_surface_reaction_order.sio derives the apparent
+// reaction order of H2 on a mineral surface from the elementary steps. Its
+// header carries a limitation, stated plainly at the time it was written:
+//
+//     "No unit types, because unit brands do not survive arithmetic on
+//      either engine that ships on main."
+//
+// That is no longer true. Units of measure now reach the default engine, a
+// dimension composed BY ARITHMETIC is compared against a declared unit by
+// dimension rather than by registry index, and an ontology class carrying a
+// numeric property is a number that keeps its species through an operator.
+// This file is the same physics written the way the language now allows, and
+// its purpose is to show what the compiler REFUSES.
+//
+// WHAT IS CHECKED HERE THAT A FORTRAN OR PYTHON SCRIPT DOES NOT CHECK
+//
+//   1. The rate is declared as mol m^-2 s^-1. The expression that computes
+//      it is `k * theta_H * theta_C`, and the compiler confirms that what
+//      comes out of that arithmetic has that dimension. Write the area term
+//      once instead of twice and it is a compile error, not a plot that
+//      looks slightly wrong.
+//
+//   2. H2 and CO2 are declared disjoint. An amount of H2 added to an amount
+//      of CO2 is a compile error. This is not a hypothetical: the two
+//      coverages theta_H and theta_C sit next to each other in every term of
+//      this model, and in a mean-field microkinetic code they are two
+//      entries of the same array, distinguishable only by an index a human
+//      keeps straight.
+//
+//   3. A subclass amount added to a superclass amount is allowed, and the
+//      result carries the SUPERCLASS tag. Deuterium added to hydrogen is an
+//      amount of hydrogen, not an amount of deuterium.
+//
+//   4. A ratio of two amounts is not an amount. theta_H is dimensionless and
+//      species-free by construction, and passing it where an amount of H2 is
+//      expected is refused.
+//
+// The negative cases are listed at the bottom of this file, each with the
+// error the compiler produces. They are commented out because this file is
+// meant to compile; uncomment any one of them to see the diagnostic.
+//
+// THE PHYSICS, unchanged and independently verified.
+//
+//   H2 dissociates on adsorption, H2 + 2* <-> 2H*, so with
+//   u = sqrt(K_H p_H2) and w = K_C p_CO2:
+//
+//       theta_H = u / (1 + u + w)
+//       theta_C = w / (1 + u + w)
+//       r       = k theta_H theta_C
+//       order   = d(ln r)/d(ln p_H2) = 1/2 - u/(1 + u + w)
+//
+//   The closed form is used here. It is not asserted: the sibling example
+//   integrates the elementary mechanism to steady state and reproduces these
+//   orders to six digits across five decades of pressure (measured
+//   0.490196 vs analytic 0.490196 in the dilute limit, both going negative
+//   above the maximum). This file is about what the TYPES catch; that file
+//   is about whether the NUMBERS are right.
+//
+// ENGINE. `check` under Madaros with the units and ontology layers wired.
+// The numeric run is done with gen3.elf, which is what executes the sibling
+// example; Madaros still dies in lowering on both files, before codegen and
+// unrelated to anything here.
+
+// --- dimensions -------------------------------------------------------------
+
+unit mol;
+unit m;
+unit s;
+unit Pa;
+
+// The dimension of a surface reaction rate: amount per unit area per unit
+// time. Declared once, here, and every rate below is checked against it.
+unit site_rate = mol / m / m / s;
+
+// --- species ----------------------------------------------------------------
+//
+// `property amount: f64` is what makes these classes NUMBERS rather than
+// opaque tags. Without it no operator accepts them and none of the checks
+// below can fire.
+
+ontology Species {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class D2 subclass_of H2
+    class CO2 subclass_of Substance
+    disjoint H2, CO2
+}
+
+// --- a square root, written locally to keep this file self-contained ---------
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var g = x
+    if g < 1.0 {
+        g = 1.0
+    }
+    var i: i64 = 0
+    while i < 60 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// --- the model --------------------------------------------------------------
+
+// Dissociative hydrogen coverage. A coverage is a FRACTION of sites: it is
+// dimensionless and it belongs to no species, which is why it is a bare f64
+// and not an H2. Point 4 at the top depends on that being true here.
+fn coverage_h(k_h: f64, p_h2: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k_h * p_h2)
+    u / (1.0 + u + w)
+}
+
+// CO2 coverage. The free-site term is 1 + u + w, NOT 1 + w: hydrogen occupies
+// sites too, and leaving u out of this denominator is what makes a model miss
+// the crowding that turns the order negative. Written wrong first here, and
+// caught by the numbers disagreeing with the sibling example rather than by
+// reading the code.
+fn coverage_c(k_h: f64, p_h2: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k_h * p_h2)
+    w / (1.0 + u + w)
+}
+
+// The rate. `k` is declared in mol m^-2 s^-1 and the coverages are
+// dimensionless, so the product carries the rate dimension and nothing else.
+// Getting the area exponent wrong here does not compile.
+fn surface_rate(k: site_rate, th_h: f64, th_c: f64) -> site_rate with Mut, Div, Panic {
+    k * th_h * th_c
+}
+
+// Apparent order in H2, from the closed form.
+fn apparent_order(k_h: f64, p_h2: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k_h * p_h2)
+    0.5 - u / (1.0 + u + w)
+}
+
+fn report_at(k_h: f64, p_h2: f64, w: f64) -> i64 with Mut, Div, Panic, IO {
+    let th_h = coverage_h(k_h, p_h2, w)
+    let th_c = coverage_c(k_h, p_h2, w)
+    let order = apparent_order(k_h, p_h2, w)
+
+    // The rate constant is not supplied by any source for this channel, so a
+    // unit value stands in and only the SCALING is claimed. The dimension is
+    // asserted regardless of the magnitude, which is the point.
+    let k: site_rate = 1.0
+    let r = surface_rate(k, th_h, th_c)
+
+    print("  p_H2=")
+    print_f64(p_h2)
+    print("  theta_H=")
+    print_f64(th_h)
+    print("  order=")
+    print_f64(order)
+    print("\n")
+    0
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    print("HYDROGEN ON A MINERAL SURFACE, WITH DIMENSIONS AND SPECIES CHECKED\n")
+    print("rate declared as mol m^-2 s^-1; H2 and CO2 declared disjoint\n\n")
+
+    let k_h = 1.0
+    // K_CO2 = 0.1 and p_CO2 = 0.1, so w = K_CO2 p_CO2 = 0.01 -- the same
+    // operating point as examples/chemistry/h2_surface_reaction_order.sio,
+    // so the orders below are directly comparable with the ones that file
+    // obtains by integrating the mechanism.
+    let w = 0.01
+
+    let a = report_at(k_h, 0.0001, w)
+    let b = report_at(k_h, 0.01, w)
+    let c = report_at(k_h, 1.0, w)
+    let d = report_at(k_h, 100.0, w)
+    let e = report_at(k_h, 10000.0, w)
+
+    print("\nthe order falls from +1/2 toward -1/2 as H2 crowds CO2 off the\n")
+    print("surface; the sibling example derives the same curve by integrating\n")
+    print("the elementary steps rather than from the closed form.\n")
+    0
+}
+
+// --- WHAT THE COMPILER REFUSES ----------------------------------------------
+//
+// Each block below is a real error, produced by this file's own declarations.
+// Uncomment one at a time.
+//
+// (1) DIMENSION. The area term written once instead of twice. The value is
+//     off by a factor of the area and nothing about it looks wrong.
+//
+//         fn takes_rate(r: site_rate) -> f64 with Mut { r }
+//         fn wrong_dimension(n: mol, len: m, t: s) -> f64 with Mut, Div, Panic {
+//             takes_rate(n / len / t)
+//         }
+//
+//     error[E009]: argument type does not match parameter
+//     error[E041]: unit mismatch in call argument
+//       argument unit: length^-1*time^-1*amount^1
+//       parameter unit: length^-2*time^-1*amount^1
+//
+//     A DIAGNOSTIC LIMITATION, measured rather than assumed. The same
+//     mistake in RETURN position is caught too, but the message is
+//     uninformative:
+//
+//         fn wrong_dimension(n: mol, len: m, t: s) -> site_rate with ... {
+//             n / len / t
+//         }
+//
+//     error[E008]: return value does not match function's declared return
+//     type -- expected f64, found f64
+//
+//     It says "expected f64, found f64" and never names the dimension that
+//     differs. The check is sound in both positions; only the call-argument
+//     path prints what actually went wrong. Put the assertion on an argument
+//     rather than a return if you want to be told why.
+//
+// (2) SPECIES. Adding an amount of H2 to an amount of CO2. In a mean-field
+//     code these are two entries of the same coverage array.
+//
+//         fn wrong_species(h: H2, c: CO2) -> f64 with Mut { h + c }
+//
+//     error[E257]: ontology classes are disjoint and cannot be combined by
+//     this operator
+//
+// (3) SUBSTITUTION. Passing CO2 where H2 is required.
+//
+//         fn needs_h2(x: H2) -> f64 with Mut { x }
+//         fn wrong_arg(c: CO2) -> f64 with Mut { needs_h2(c) }
+//
+//     error[E151]: ontology classes are disjoint and cannot be substituted
+//
+// (4) CATEGORY. A coverage is a ratio, not an amount. Passing theta_H where
+//     an amount of H2 is expected is refused because the division dropped the
+//     species tag rather than carrying it through.
+//
+//         fn needs_h2(x: H2) -> f64 with Mut { x }
+//         fn wrong_category(a: H2, b: H2) -> f64 with Mut, Div, Panic {
+//             needs_h2(a / b)
+//         }
+//
+//     error[E150]: value does not have an ontology class type
+//
+// AND WHAT IT ALLOWS, which matters as much: D2 is declared a subclass of H2,
+// so `d + h` is an amount of H2 and passes where H2 is expected. A checker
+// that rejected that would be useless for isotope work.
