@@ -22,38 +22,65 @@
 #                (11 of 14 unit fixtures failed on Madaros, 14 of 14 passed
 #                on lean_single)
 #
-# ItemOntology is the confirmed-broken one, and an attempt to wire it on
-# 2026-09-09 was REVERTED. What that attempt measured is the useful part:
+#   ItemOntology wired 2026-09-09, after the whole subsystem was found inert
+#
+# ItemOntology was the one this ledger called confirmed-broken, and the note
+# it carried is kept below because what that failed attempt measured is the
+# reason the second one worked.
 #
 #   Wiring the STRUCTURAL layer alone -- class registration, superclasses,
 #   property refinements, disjointness, closure, and binding class names into
 #   the type environment -- took the ontology fixtures from 40 of 42 passing
-#   to 11, with a mix of E152 "cannot prove ontology subsumption" and
-#   SIGSEGV.
+#   to 11. ontology_inference_query_subclass reads the KERNEL structures,
+#   which only ontology_inference_collect_kernel populates, so wiring the
+#   class table without the kernel makes every subsumption query answer false.
 #
-#   The E152s explain the whole picture. ontology_inference_query_subclass
-#   reads the KERNEL structures, which only ontology_inference_collect_kernel
-#   populates. Wire the class table without the kernel and every subsumption
-#   query answers false, so `fn accept(d: Drug)` rejects a Rapamycin that is
-#   declared its subclass.
-#
-#   And it explains why those 40 fixtures were green to begin with: with
+#   And that explains why those 40 fixtures were green to begin with: with
 #   ItemOntology uncollected, ontology_id was never set on any type, so every
 #   ontology boundary check early-returned and passed. THE SUBSYSTEM WAS
-#   INERT AND THE TESTS WERE PASSING BECAUSE OF IT. Turning half of it on is
-#   worse than leaving it off, because the checks then fire against an empty
-#   kernel.
+#   INERT AND THE TESTS WERE PASSING BECAUSE OF IT.
 #
 #   Reaching the kernel through a by-value bridge is not an option either:
 #   the Checker is ~8 MB and copying it onto the stack segfaults regardless of
-#   call depth. That was tried in the same attempt and produced SIGSEGV on 40
-#   of the 42 fixtures.
+#   call depth. That was tried and produced SIGSEGV on 40 of the 42 fixtures.
 #
-# SO: ItemOntology is all-or-nothing. Closing it means transcribing the axiom
-# layer too -- ontology_inference_collect_kernel, its four collectors, and the
-# two validation passes, about 270 lines -- and landing the whole thing at
-# once. The arithmetic-level rule that layer would then enable is drafted in
-# scratchpad/layer3_ontology_arithmetic.sio.txt.
+# Closing it took the axiom layer as well -- ontology_inference_collect_kernel,
+# its four collectors and the two validation passes -- landed at once, plus
+# three defects that only appear once the subsystem actually runs. Each was
+# measured before it was fixed, and none of the three was the cause guessed
+# beforehand:
+#
+#   1. Per-field assignment through a nested place, `(*c).ontologies
+#      .entries[i].disjoint_count = ...`. Issue #1471: the store lands
+#      somewhere else in the Checker. Whole-entry read-modify-write instead.
+#      SEGV 30 -> 26 of 42.
+#   2. One recursive frame per declared class overflowed the 8 MiB stack.
+#      Measured: 18 classes OK, 19 SEGV, and BOTH pass under
+#      `ulimit -s 524288`. The four list walks are iterative now.
+#      SEGV 26 -> 0.
+#   3. Single-pass superclass resolution against a list that parse_ontology_def
+#      builds by PREPENDING, so it arrives in reverse source order and a
+#      subclass is linked before its parent exists. The axiom was dropped in
+#      silence. Measured with a probe build: `class Drug` then
+#      `class Rapamycin subclass_of Drug` gave kaxioms=0, the same two
+#      declarations in the other order gave kaxioms=1. Both walks resolve
+#      names in a second pass now, which makes them order-independent.
+#      OK 14 -> 41 of 42.
+#
+# Result: 41 of 42 ontology fixtures pass, against 40 of 42 on the committed
+# baseline, and the one failure -- ontology_axiom_conjunction, refinement
+# discharge from property axioms -- fails identically on that baseline.
+#
+# ANTI-VACUITY, because 40 of these were green while the subsystem did
+# nothing: the wired checker was measured on rejection too. Subclass passed
+# where the superclass is expected is accepted; superclass passed where the
+# subclass is expected is rejected with E152; a disjointness violation is
+# rejected. A green fixture list is not evidence on its own.
+#
+# STILL OPEN, stated rather than hidden: the by-value spine keeps the
+# one-pass superclass resolution and therefore keeps defect 3. It is inert
+# under Madaros, which is why the defect survived unnoticed in the first
+# place. Fixing it is a separate measured change.
 
 ItemAcquisitionPolicy
 ItemAlternativeFrontier
@@ -65,7 +92,6 @@ ItemDecisionPolicy
 ItemDeferralPolicy
 ItemEffect
 ItemMonitoringPolicy
-ItemOntology
 ItemRecoursePolicy
 ItemSession
 ItemStudy

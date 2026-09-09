@@ -4968,6 +4968,523 @@ fn unit_dim_for_decl(reg: UnitRegistry, conv: Option<Box<TypeExpr> >) -> UnitDim
     }
 }
 
+// ============================================================================
+// ONTOLOGY, *mut transcription -- structural layer AND axiom kernel
+// ============================================================================
+//
+// Until 2026-09-09 ItemOntology had no arm in checker_collect_item_inplace, so
+// on the default engine an `ontology { class ... }` declaration was collected
+// by nobody. Every ontology type carried ontology_id = -1, every boundary
+// check early-returned, and 40 of the 42 ontology fixtures passed BECAUSE the
+// subsystem was inert. Fourth instance of the two-spine divergence that
+// scripts/ci/checker_spine_parity_gate.sh now guards.
+//
+// A first attempt wired only the structural layer and took those fixtures from
+// 40 passing to 11: ontology_inference_query_subclass reads the KERNEL, which
+// only the axiom layer populates, so every subsumption query answered false and
+// `fn accept(d: Drug)` rejected a declared Rapamycin subclass. Reaching the
+// kernel through a by-value bridge was tried too and segfaulted 40 of 42 -- the
+// Checker is ~8 MB and copying it onto the stack is fatal with no recursion
+// required. ItemOntology is all-or-nothing, so both layers are transcribed
+// here.
+
+// The by-value ontology_role_decl_count takes `self` and never reads a field --
+// it uses it only to recurse, copying ~8 MB per list element for nothing. Free
+// function here.
+fn ontology_role_decl_count_free(roles: Option<Box<OntologyRoleDeclList> >, target: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => 0
+        Some(list) => {
+            let count_here = if name_eq((*list).head.name, target) { 1 } else { 0 }
+            count_here + ontology_role_decl_count_free((*list).tail, target)
+        }
+    }
+}
+
+fn checker_collect_ontology_kernel_add_axiom_inplace(c: *mut Checker, span: Span, axiom: OntologyAxiom) with Mut, Panic, Div, Alloc, IO {
+    if ontology_kernel_can_add_axiom((*c).ontology_kernel) {
+        (*c).ontology_kernel = ontology_kernel_add_axiom((*c).ontology_kernel, axiom)
+    } else {
+        checker_report_error_at_inplace(c, span, 160, 0, 0, 0)
+    }
+}
+
+fn checker_collect_ontology_kernel_classes_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    // TWO PASSES, and the second one is not an optimisation -- it is the whole
+    // reason subsumption works. parse_ontology_def builds this list by
+    // PREPENDING, so it arrives in reverse source order: a program written
+    //
+    //     class Drug
+    //     class Rapamycin subclass_of Drug
+    //
+    // reaches this walk as Rapamycin first. The single-pass form resolved
+    // `Drug` against a kernel that did not hold it yet, `sc_idx` came back -1,
+    // and the subclass_of axiom was dropped in silence -- every later query
+    // answered false and every ontology fixture died on E152. Measured with an
+    // instrumented build: the program above produced kaxioms=0, and the same
+    // two declarations written in the other order produced kaxioms=1. Register
+    // every class first, resolve superclasses second, and the walk stops caring
+    // about order in either direction.
+    //
+    // The by-value spine (collect_ontology_kernel_classes) still carries the
+    // one-pass form and therefore still carries this bug. It is inert under
+    // Madaros, which is why the defect survived: see the note in
+    // scripts/ci/checker_spine_parity.frozen.
+    var cursor = classes
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                if ontology_kernel_can_add_class((*c).ontology_kernel) {
+                    let pair = ontology_kernel_add_class((*c).ontology_kernel, decl.name, ont_name)
+                    (*c).ontology_kernel = pair.0
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+
+    var link_cursor = classes
+    while true {
+        match link_cursor {
+            Some(link_list) => {
+                let link_decl = (*link_list).head
+                let class_idx = ontology_kernel_find_class((*c).ontology_kernel, link_decl.name)
+                if class_idx >= 0 {
+                    var i: i64 = 0
+                    while i < link_decl.superclass_count && i < 8 {
+                        let sc_name = link_decl.superclass_names[i as usize]
+                        let sc_idx = ontology_kernel_find_class((*c).ontology_kernel, sc_name)
+                        if sc_idx >= 0 {
+                            checker_collect_ontology_kernel_add_axiom_inplace(c, link_decl.span, OntologyAxiom {
+                                axiom_type: owl_subclass_of(),
+                                subject_idx: class_idx,
+                                object_idx: sc_idx,
+                                refinement_ref_id: -1,
+                                property_name: empty_name(),
+                                is_property_axiom: false,
+                            })
+                        }
+                        i = i + 1
+                    }
+                }
+                link_cursor = (*link_list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_kernel_property_axioms_from_legacy_inplace(c: *mut Checker, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontologies.count {
+        let cls = (*c).ontologies.entries[i as usize]
+        if cls.is_valid && name_eq(cls.ontology_name, ont_name) {
+            var j: i64 = 0
+            while j < cls.property_count {
+                let ref_id = cls.property_ref_ids[j as usize]
+                if ref_id >= 0 && ref_id < 128 {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, Span { file_id: 0, start: 0, end: 0 }, OntologyAxiom {
+                        axiom_type: owl_data_property_constraint(),
+                        subject_idx: i,
+                        object_idx: -1,
+                        refinement_ref_id: ref_id,
+                        property_name: cls.property_names[j as usize],
+                        is_property_axiom: false,
+                    })
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn checker_collect_ontology_kernel_disjoints_inplace(c: *mut Checker, disjoints: Option<Box<OntologyDisjointDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = disjoints
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let a_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.name_a)
+                let b_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_disjoint_classes(),
+                        subject_idx: a_idx,
+                        object_idx: b_idx,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: false,
+                    })
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyRoleDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    match roles {
+        None => {}
+        Some(list) => {
+            let decl = (*list).head
+            let duplicate_in_tail = ontology_role_decl_count_free((*list).tail, decl.name) > 0
+            let already_registered = ontology_kernel_find_property((*c).ontology_kernel, decl.name) >= 0
+
+            if !already_registered && ontology_kernel_can_add_property((*c).ontology_kernel) {
+                let pair = ontology_kernel_add_property((*c).ontology_kernel, decl.name)
+                (*c).ontology_kernel = pair.0
+            }
+
+            if already_registered || decl.duplicate_modifier_bits != 0 {
+                checker_report_error_at_inplace(c, decl.span, 159, 0, 0, 0)
+            }
+
+            checker_collect_ontology_roles_inplace(c, (*list).tail)
+
+            if already_registered || duplicate_in_tail || decl.duplicate_modifier_bits != 0 {
+                return
+            }
+
+            let prop_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.name)
+            if prop_idx >= 0 {
+                if decl.has_domain {
+                    let domain_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.domain_name)
+                    if domain_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_domain(),
+                            subject_idx: prop_idx,
+                            object_idx: domain_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 156, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_range {
+                    let range_idx = ontology_kernel_find_class((*c).ontology_kernel, decl.range_name)
+                    if range_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_object_property_range(),
+                            subject_idx: prop_idx,
+                            object_idx: range_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
+                    }
+                }
+
+                if decl.has_inverse {
+                    let inverse_idx = ontology_kernel_find_property((*c).ontology_kernel, decl.inverse_name)
+                    if inverse_idx >= 0 {
+                        checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                            axiom_type: owl_inverse_object_properties(),
+                            subject_idx: prop_idx,
+                            object_idx: inverse_idx,
+                            refinement_ref_id: -1,
+                            property_name: empty_name(),
+                            is_property_axiom: true,
+                        })
+                    } else {
+                        checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
+                    }
+                }
+
+                if decl.is_transitive {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_transitive_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_symmetric {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_symmetric_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+                if decl.is_functional {
+                    checker_collect_ontology_kernel_add_axiom_inplace(c, decl.span, OntologyAxiom {
+                        axiom_type: owl_functional_property(),
+                        subject_idx: prop_idx,
+                        object_idx: -1,
+                        refinement_ref_id: -1,
+                        property_name: empty_name(),
+                        is_property_axiom: true,
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn checker_ontology_inference_collect_kernel_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, disjoints: Option<Box<OntologyDisjointDeclList> >, roles: Option<Box<OntologyRoleDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_ontology_kernel_classes_inplace(c, classes, ont_name)
+    checker_collect_ontology_kernel_property_axioms_from_legacy_inplace(c, ont_name)
+    checker_collect_ontology_kernel_disjoints_inplace(c, disjoints)
+    checker_collect_ontology_roles_inplace(c, roles)
+    (*c).ontology_kernel = ontology_kernel_materialize((*c).ontology_kernel)
+    (*c).ontology_kernel.profile = ontology_kernel_check_profile((*c).ontology_kernel)
+}
+
+fn checker_validate_ontology_kernel_inverse_consistency_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontology_kernel.properties.count {
+        let prop_info = (*c).ontology_kernel.properties.entries[i as usize]
+        let inverse_idx = prop_info.inverse_property_idx
+        if inverse_idx >= 0 && inverse_idx < (*c).ontology_kernel.properties.count {
+            let inverse_info = (*c).ontology_kernel.properties.entries[inverse_idx as usize]
+            if inverse_info.inverse_property_idx != i {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+            if prop_info.domain_class_idx >= 0 && inverse_info.range_class_idx >= 0 && prop_info.domain_class_idx != inverse_info.range_class_idx {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+            if prop_info.range_class_idx >= 0 && inverse_info.domain_class_idx >= 0 && prop_info.range_class_idx != inverse_info.domain_class_idx {
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 159, 0, 0, 0)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn checker_validate_ontology_kernel_strengthening_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var child_idx: i64 = 0
+    while child_idx < (*c).ontology_kernel.classes.count {
+        let child_property_count = (*c).ontology_kernel.materialized.class_property_counts[child_idx as usize]
+        if child_property_count > 0 {
+            var ancestor_idx: i64 = 0
+            while ancestor_idx < (*c).ontology_kernel.classes.count {
+                if child_idx != ancestor_idx && ontology_kernel_is_subclass((*c).ontology_kernel, child_idx, ancestor_idx) {
+                    let ancestor_property_count = (*c).ontology_kernel.materialized.class_property_counts[ancestor_idx as usize]
+                    var ci: i64 = 0
+                    while ci < child_property_count {
+                        let child_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(child_idx * 8 + ci) as usize]
+                        if child_axiom_idx >= 0 && child_axiom_idx < (*c).ontology_kernel.axioms.count {
+                            let child_axiom = (*c).ontology_kernel.axioms.axioms[child_axiom_idx as usize]
+                            var pi: i64 = 0
+                            while pi < ancestor_property_count {
+                                let ancestor_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(ancestor_idx * 8 + pi) as usize]
+                                if ancestor_axiom_idx >= 0 && ancestor_axiom_idx < (*c).ontology_kernel.axioms.count {
+                                    let ancestor_axiom = (*c).ontology_kernel.axioms.axioms[ancestor_axiom_idx as usize]
+                                    if name_eq(child_axiom.property_name, ancestor_axiom.property_name) {
+                                        let child_ref_id = child_axiom.refinement_ref_id
+                                        let ancestor_ref_id = ancestor_axiom.refinement_ref_id
+                                        if child_ref_id >= 0 && child_ref_id < 128 && ancestor_ref_id >= 0 && ancestor_ref_id < 128 {
+                                            let child_pred = (*c).refinements.entries[child_ref_id as usize].predicate
+                                            let ancestor_pred = (*c).refinements.entries[ancestor_ref_id as usize].predicate
+                                            if !pred_implies(child_pred, ancestor_pred) {
+                                                checker_report_warning_at_mut(c, Span { file_id: 0, start: 0, end: 0 }, 41, 0, 0, 0)
+                                            }
+                                        }
+                                    }
+                                }
+                                pi = pi + 1
+                            }
+                        }
+                        ci = ci + 1
+                    }
+                }
+                ancestor_idx = ancestor_idx + 1
+            }
+        }
+        child_idx = child_idx + 1
+    }
+}
+
+fn checker_collect_ontology_classes_inplace(c: *mut Checker, classes: Option<Box<OntologyClassDeclList> >, ont_name: Name) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = classes
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let idx = (*c).ontologies.count
+                if idx >= 64 {
+                    checker_report_error_at_inplace(c, decl.span, 153, 0, 0, 0)
+                    return
+                }
+
+                var info = empty_ontology_class_info()
+                info.name = decl.name
+                info.ontology_name = ont_name
+                info.class_index = idx
+                info.is_valid = true
+
+
+                var i: i64 = 0
+                while i < decl.property_count && i < 8 {
+                    let prop = decl.properties[i as usize]
+                    info.property_names[info.property_count as usize] = prop.name
+                    if prop.pred_op > 0 {
+                        let pred = RefinementPred {
+                            op: prop.pred_op,
+                            var_name: prop.name,
+                            rhs_int: prop.pred_rhs_int,
+                            rhs_float: prop.pred_rhs_float,
+                            is_float: prop.is_float,
+                            left: None,
+                            right: None,
+                        }
+                        let base_ty = if prop.is_float { ty_f64() } else { ty_i64() }
+                        let rt = RefinementType {
+                            base_type: base_ty,
+                            var_name: prop.name,
+                            predicate: pred,
+                        }
+                        let synth_name = make_refinement_synth_name((*c).refinements.count)
+                        (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
+                        info.property_ref_ids[info.property_count as usize] = (*c).refinements.count - 1
+                    }
+                    info.property_count = info.property_count + 1
+                    i = i + 1
+                }
+
+                (*c).ontologies.entries[idx as usize] = info
+                (*c).ontologies.count = idx + 1
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+
+    // Second pass: resolve superclass names now that every class in this
+    // ontology has an index. Same reason as in
+    // checker_collect_ontology_kernel_classes_inplace -- the declaration list
+    // arrives in reverse source order, so a one-pass resolve silently loses
+    // every `subclass_of` whose parent is declared above it in the file, and
+    // ontology_table_compute_closure then has nothing to close over.
+    var link_cursor = classes
+    while true {
+        match link_cursor {
+            Some(link_list) => {
+                let link_decl = (*link_list).head
+                let link_idx = ontology_table_find((*c).ontologies, link_decl.name)
+                if link_idx >= 0 {
+                    // Whole-entry read-modify-write, never per-field through the
+                    // pointer -- issue #1471, same as the disjoint walk below.
+                    var entry = (*c).ontologies.entries[link_idx as usize]
+                    var j: i64 = 0
+                    while j < link_decl.superclass_count && j < 8 {
+                        let sc_name = link_decl.superclass_names[j as usize]
+                        let sc_idx = ontology_table_find((*c).ontologies, sc_name)
+                        if sc_idx >= 0 && entry.superclass_count < 8 {
+                            entry.superclass_indices[entry.superclass_count as usize] = sc_idx
+                            entry.superclass_count = entry.superclass_count + 1
+                        }
+                        j = j + 1
+                    }
+                    (*c).ontologies.entries[link_idx as usize] = entry
+                }
+                link_cursor = (*link_list).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_collect_ontology_disjoints_inplace(c: *mut Checker, disjoints: Option<Box<OntologyDisjointDeclList> >) with Mut, Panic, Div, Alloc, IO {
+    // Iterative list walk, not recursion. A generated ontology carries up
+    // to 64 class declarations, and each frame of this walk is large enough
+    // that the recursive form smashed the default 8 MiB stack at 19 classes
+    // (measured against madaros-k2: 18 OK, 19 SEGV, and both pass under
+    // `ulimit -s 524288`). Same cursor idiom as
+    // checker_collect_import_item_list_inplace above.
+    var cursor = disjoints
+    while true {
+        match cursor {
+            Some(list) => {
+                let decl = (*list).head
+                let a_idx = ontology_table_find((*c).ontologies, decl.name_a)
+                let b_idx = ontology_table_find((*c).ontologies, decl.name_b)
+                if a_idx >= 0 && b_idx >= 0 {
+                    // READ-MODIFY-WRITE THE WHOLE ENTRY, not per-field through the
+                    // pointer. `(*c).ontologies.entries[i].disjoint_indices[j] = x`
+                    // is the struct-array field-mutation shape this tree already
+                    // documents as broken -- stdlib/chemistry/catalysis.sio's
+                    // header records that sequential per-field mutation across
+                    // struct-array indices aliases every write to one slot, and
+                    // the fix there was one whole-struct literal per index.
+                    // Through a *mut it does not merely alias: it segfaults.
+                    // Measured -- two classes plus one `disjoint` was enough,
+                    // while three classes without one were fine.
+                    var ea = (*c).ontologies.entries[a_idx as usize]
+                    if ea.disjoint_count < 8 {
+                        ea.disjoint_indices[ea.disjoint_count as usize] = b_idx
+                        ea.disjoint_count = ea.disjoint_count + 1
+                        (*c).ontologies.entries[a_idx as usize] = ea
+                    }
+                    var eb = (*c).ontologies.entries[b_idx as usize]
+                    if eb.disjoint_count < 8 {
+                        eb.disjoint_indices[eb.disjoint_count as usize] = a_idx
+                        eb.disjoint_count = eb.disjoint_count + 1
+                        (*c).ontologies.entries[b_idx as usize] = eb
+                    }
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+// Bind every valid class name into the type environment as an ontology-tagged
+// named type. Without this a class cannot be used as a type at all.
+fn checker_ontology_bind_named_types_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < (*c).ontologies.count {
+        if (*c).ontologies.entries[i as usize].is_valid {
+            let cls_name = (*c).ontologies.entries[i as usize].name
+            let ty = ty_with_ontology(ty_named(cls_name), i)
+            (*c).env = (*c).env.bind(cls_name, ty, false)
+        }
+        i = i + 1
+    }
+}
+
+fn checker_collect_ontology_def_inplace(c: *mut Checker, opt: Option<Box<OntologyDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(odef) => {
+            let ont_name = (*odef).name
+            checker_collect_ontology_classes_inplace(c, (*odef).classes, ont_name)
+            checker_collect_ontology_disjoints_inplace(c, (*odef).disjoints)
+            (*c).ontologies = ontology_table_compute_closure((*c).ontologies)
+            checker_ontology_inference_collect_kernel_inplace(c, (*odef).classes, (*odef).disjoints, (*odef).roles, ont_name)
+            checker_validate_ontology_kernel_inverse_consistency_inplace(c)
+            checker_validate_ontology_kernel_strengthening_inplace(c)
+            checker_ontology_bind_named_types_inplace(c)
+        }
+    }
+}
+
 fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
     // *mut transcription of Checker::collect_unit_decl. Registers a
     // user-declared unit of measure so that a type annotation naming it
@@ -5027,6 +5544,8 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         if !name_is_empty(item.name) {
             checker_collect_unit_decl_inplace(c, item.name, item.type_alias_ty)
         }
+    } else if item.kind == ItemKind::ItemOntology {
+        checker_collect_ontology_def_inplace(c, item.ontology_def)
     } else if item.kind == ItemKind::ItemModels {
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
