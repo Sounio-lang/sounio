@@ -54,7 +54,8 @@ def collect(frozen,stage,output,arm,job,run=subprocess.check_output):
         before=run(KUBE+["get","pod",w["pod"],"-o","json"])
         require(json.loads(before)["metadata"]["uid"]==w["uid"],"worker UID changed")
         (output/f"worker-{rank}-before.json").write_bytes(before)
-        paths={f"worker-receipts/rank-{rank}-complete.json":f"/scratch/pireus/receipts/offline-{job}-{rank}-complete.json",
+        paths={f"rank-{rank}/runtime-before.json":f"/scratch/pireus/receipts/overhead-runtime-{job}-{rank}.json",
+               f"worker-receipts/rank-{rank}-complete.json":f"/scratch/pireus/receipts/offline-{job}-{rank}-complete.json",
                f"worker-receipts/lifecycle-{job}-{rank}.jsonl":f"/scratch/pireus/receipts/lifecycle-{job}-{rank}.jsonl",
                f"rank-{rank}/boot-id.txt":"/proc/sys/kernel/random/boot_id"}
         paths.update({f"worker-receipts/rank-{rank}-{i:03d}.json":f"/scratch/pireus/receipts/offline-{job}-{rank}-{i:03d}.json" for i in range(8)})
@@ -132,6 +133,10 @@ def arm_data(frozen,root,pin,arm):
         require(complete["job"]==job and complete["stage"]=="OFFLINE_CYCLE_COMPLETE"
                 and complete["execution_profile"]["actual_swa_tokens"]==896,"completion identity")
         rows=[json.loads(s) for s in (worker/f"lifecycle-{job}-{rank}.jsonl").read_text().splitlines()]
+        barrier=json.loads((root/f"rank-{rank}/runtime-before.json").read_bytes())
+        require(barrier["stage"]=="OVERHEAD_RUNTIME_VERIFIED" and barrier["job"]==job and barrier["rank"]==str(rank),"runtime barrier identity")
+        require(barrier["runtime_sha256"]==spec["runtime_sha256"][arm] and barrier["input_sha256"]==start["input_sha256"],"runtime barrier hashes")
+        require(barrier["boot_id"]==w["boot_id"] and barrier["worker_uid"]==w["uid"] and barrier["monotonic_ns"]<rows[0]["monotonic_ns"],"runtime barrier worker/time")
         lifecycle_span(rows,job,rank);data["lifecycle"].append(rows)
         data["responses"].append([(worker/f"rank-{rank}-{i:03d}.json").read_bytes() for i in range(8)])
         if arm=="observed":data["external"].append(external_identity(root/f"rank-{rank}/external",w,job,rank,rows,spec["runtime_sha256"][arm]))
