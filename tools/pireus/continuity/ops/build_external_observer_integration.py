@@ -9,7 +9,7 @@ SERVE_SHA="e8e44e63d2662f93c38f44018c23ec4a4aa389976458154c83420da6b6640b7c"
 GUARD_SHA="7a5f24ef3863cc1b12c9a219ec25bf7b1a952a21624721ce0c62f58f777abbd8"
 CONTAINER_SHA="4a1a5cc6825752c864b27ea6669f380215f35a45f66907ab1a5db743cabafdc1"
 ENTRY_SHA="8794694d22b4319a8e8df719eabdce9a89115fa2d1d11e630780bf3c9d867d5d"
-OBSERVER_SHA="1fe71f5247ab8b2ab35c05b5a6c98e980ffd115bac9a76d53a99f8c6213bd71c"
+OBSERVER_SHA="f4f64cceb4fd29fe85ac2f236e4a4c723071c5b3189f80ed62cd5a7178eb99bd"
 def digest(raw):return hashlib.sha256(raw).hexdigest()
 
 def generate(raw):
@@ -44,7 +44,9 @@ def build(output):
     output.mkdir(exist_ok=False)
     for name,value in files.items():(output/name).write_bytes(value)
     manifest=dict(schema="pireus-external-observer-integration-build-v1",
-        identity="feedback-lifecycle-external-observer-limits-v2",files_sha256={n:digest(b) for n,b in files.items()},
+        identity="feedback-lifecycle-external-observer-deadline-v3",
+        observer_profile="external-observer-deadline-v3",observer_schema="pireus-external-memory-observation-v2",
+        scheduling="actual-start-deadline-no-catchup",observer_resource_scope="observer-process-only",files_sha256={n:digest(b) for n,b in files.items()},
         base_serve_sha256=SERVE_SHA,entry_sha256=ENTRY_SHA,guard_sha256=GUARD_SHA,
         original_guard_unchanged=True,original_container_launcher_unchanged=True,
         lifecycle_inference_algorithm_unchanged=True,offline_only=True,

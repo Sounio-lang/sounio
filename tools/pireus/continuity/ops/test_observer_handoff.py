@@ -60,6 +60,9 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(complete_rows(p)),1)
     def test_build_preserves_guardian_and_entry(self):
         out=self.root/"build";m=build(out)
+        self.assertEqual(m["identity"],"feedback-lifecycle-external-observer-deadline-v3")
+        self.assertFalse(m["container_control_qualified"])
+        self.assertFalse(m["loaded_model_overhead_qualified"])
         self.assertEqual(digest((out/"memory_guard.py").read_bytes()),GUARD_SHA)
         self.assertEqual(digest((out/"offline_generate.py").read_bytes()),ENTRY_SHA)
         self.assertIn("external_rank_supervisor.py",(out/"serve_rank.sh").read_text())

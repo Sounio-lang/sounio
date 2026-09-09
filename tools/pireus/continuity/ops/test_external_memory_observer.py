@@ -128,5 +128,73 @@ class ObserverTests(unittest.TestCase):
         self.assertIsNone(r["metrics"]["process_smaps_rollup"]["value"])
         self.assertEqual(r["metrics"]["process_smaps_rollup"]["error"],"PermissionError")
 
+    def timed_journal(self,durations,seconds=1.0,oversleep_ns=0):
+        binding=self.binding();clock=[0];starts=[];sleeps=[]
+        def sample(*args):
+            began=clock[0];starts.append(began)
+            duration=durations[min(len(starts)-1,len(durations)-1)]
+            clock[0]+=duration
+            return dict(stage="SAMPLE",monotonic_ns=began,duration_ns=duration,
+                        identity_valid=True,metrics={})
+        def sleep(seconds):
+            ns=round(seconds*1e9);self.assertGreater(ns,0)
+            sleeps.append(ns);clock[0]+=ns+oversleep_ns
+        p=self.root/"timing.jsonl"
+        with patch.object(observer,"sample",side_effect=sample), \
+             patch.object(observer.time,"monotonic_ns",side_effect=lambda:clock[0]), \
+             patch.object(observer.time,"sleep",side_effect=sleep):
+            self.assertEqual(observer.observe(binding,p,0.2,seconds,self.proc),0)
+        return starts,sleeps,[json.loads(s) for s in p.read_text().splitlines()]
+
+    def test_slow_read_consumes_wait_without_catchup_burst(self):
+        starts,sleeps,rows=self.timed_journal([410_000_000,64_000_000,50_000_000])
+        self.assertEqual(starts,[0,410_000_000,610_000_000,810_000_000])
+        self.assertEqual(sleeps,[136_000_000,150_000_000,140_000_000])
+        self.assertEqual([r["sample_gap_ns"] for r in rows if r["stage"]=="SAMPLE"],
+                         [None,410_000_000,200_000_000,200_000_000])
+        self.assertEqual(rows[0]["observer_profile"],"external-observer-deadline-v3")
+        self.assertEqual(rows[0]["schema"],"pireus-external-memory-observation-v2")
+
+    def test_read_overrun_remains_visible(self):
+        starts,_,rows=self.timed_journal([700_000_000,10_000_000])
+        self.assertEqual(starts,[0,700_000_000,900_000_000])
+        samples=[r for r in rows if r["stage"]=="SAMPLE"]
+        self.assertEqual(samples[1]["sample_gap_ns"],700_000_000)
+        self.assertGreater(samples[1]["sample_gap_ns"],500_000_000)
+
+    def test_scheduler_oversleep_reanchors_actual_start(self):
+        starts,_,_=self.timed_journal([50_000_000],oversleep_ns=80_000_000)
+        self.assertEqual(starts,[0,280_000_000,560_000_000,840_000_000])
+
+    def test_read_past_end_does_not_start_another_sample(self):
+        starts,sleeps,rows=self.timed_journal([1_200_000_000])
+        self.assertEqual(starts,[0]);self.assertEqual(sleeps,[])
+        self.assertEqual(rows[-1]["stage"],"OBSERVER_END")
+        self.assertEqual(rows[-1]["monotonic_ns"],1_200_000_000)
+
+    def test_fast_reads_preserve_configured_cadence(self):
+        starts,_,_=self.timed_journal([10_000_000])
+        self.assertEqual(starts,[0,200_000_000,400_000_000,600_000_000,800_000_000])
+
+    def test_observer_resources_are_separate_and_in_bytes(self):
+        self.write("self/status","VmRSS: 23 kB\nVmHWM: 31 kB\n")
+        with patch.object(observer.time,"process_time_ns",return_value=4321):
+            row=observer.sample(self.binding(),self.proc)
+        own=row["observer_resources"]
+        self.assertEqual(own["observer_pid"],observer.os.getpid())
+        self.assertEqual(own["process_cpu_ns"],4321)
+        self.assertEqual(own["status"]["value"],{"VmRSS":23552,"VmHWM":31744})
+        self.assertEqual(row["metrics"]["process_status"]["value"]["VmRSS"],65536)
+        self.assertNotIn("observer_resources",row["metrics"])
+
+    def test_missing_observer_rss_is_unknown_not_zero(self):
+        for value in ("Name: observer\n","VmRSS: 12 kB\n"):
+            self.write("self/status",value)
+            own=observer.observer_resources(self.proc)
+            self.assertIsNone(own["status"]["value"])
+            self.assertEqual(own["status"]["error"],"MissingObserverRSSFields")
+        (self.proc/"self/status").unlink()
+        self.assertEqual(observer.observer_resources(self.proc)["status"]["error"],"FileNotFoundError")
+
 if __name__=="__main__":
     unittest.main()

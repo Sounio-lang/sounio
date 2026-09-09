@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 import re
 import time
 
+OBSERVER_PROFILE = "external-observer-deadline-v3"
+
 class IdentityError(ValueError):
     pass
 
@@ -115,6 +117,19 @@ def metric(path, kind):
     return dict(value=value,error=error,format=kind,monotonic_ns=started,
                 duration_ns=time.monotonic_ns()-started)
 
+def observer_resources(proc=Path("/proc")):
+    """Observer process only; RSS is separate from target/cgroup accounting."""
+    status=metric(proc/"self/status","kB-fields")
+    if status["error"] is None and not {"VmRSS","VmHWM"} <= status["value"].keys():
+        status.update(value=None,error="MissingObserverRSSFields")
+    return dict(observer_pid=os.getpid(),process_cpu_ns=time.process_time_ns(),
+                status=status,scope="observer-process-only")
+
+def next_sample_deadline(started_ns, finished_ns, interval_ns, end_ns):
+    """Anchor to actual start; overruns create no catch-up debt."""
+    due=started_ns+interval_ns
+    return min(end_ns,max(due,finished_ns))
+
 def sample(binding, proc=Path("/proc")):
     started=time.monotonic_ns()
     if binding.get("schema")!="pireus-external-observer-binding-v1" or binding.get("observer_helper_sha256")!=sha(Path(__file__).read_bytes()):
@@ -132,10 +147,11 @@ def sample(binding, proc=Path("/proc")):
     for name in ("memory.max","memory.high","memory.swap.max"):
         sources["cgroup_"+name]=(cg/name,"bytes-or-max")
     values={key:metric(path,kind) for key,(path,kind) in sources.items()}
+    own=observer_resources(proc)
     if capture(binding["expected"],proc)!=binding["observed"]:
         raise IdentityError("target changed during sample; sampled values discarded")
     return dict(stage="SAMPLE",monotonic_ns=started,duration_ns=time.monotonic_ns()-started,
-        identity_valid=True,metrics=values)
+        identity_valid=True,metrics=values,observer_resources=own)
 
 def observe(binding, output, interval=0.25, seconds=30, proc=Path("/proc")):
     if not 0.1<=interval<=5 or not 0<seconds<=3600:
@@ -144,7 +160,8 @@ def observe(binding, output, interval=0.25, seconds=30, proc=Path("/proc")):
         raise IdentityError("invalid identity before journal creation")
     if binding.get("observer_helper_sha256")!=sha(Path(__file__).read_bytes()):
         raise IdentityError("binding helper mismatch")
-    common=dict(schema="pireus-external-memory-observation-v1",
+    common=dict(schema="pireus-external-memory-observation-v2",
+        observer_profile=OBSERVER_PROFILE,
         binding_sha256=sha(json.dumps(binding,sort_keys=True).encode()),
         job=binding["expected"]["job"],rank=binding["expected"]["rank"],
         target_pid=binding["expected"]["pid"],observer_pid=os.getpid())
@@ -153,7 +170,8 @@ def observe(binding, output, interval=0.25, seconds=30, proc=Path("/proc")):
         def emit(row):
             out.write(json.dumps(common|row,sort_keys=True)+"\n");out.flush()
         emit(dict(stage="OBSERVER_START",monotonic_ns=began,interval_seconds=interval,
-            duration_limit_seconds=seconds,loaded_model_overhead_qualified=False))
+            duration_limit_seconds=seconds,loaded_model_overhead_qualified=False,
+            scheduling="actual-start-deadline-no-catchup",observer_resource_scope="observer-process-only"))
         while time.monotonic_ns()<deadline:
             try: row=sample(binding,proc)
             except IdentityError as exc:
@@ -163,8 +181,15 @@ def observe(binding, output, interval=0.25, seconds=30, proc=Path("/proc")):
             row["sample_gap_ns"]=None if previous is None else row["monotonic_ns"]-previous
             previous=row["monotonic_ns"]
             emit(row)
-            # The actual interval includes read cost; gaps are measured, never assumed.
-            time.sleep(min(interval,max(0,(deadline-time.monotonic_ns())/1e9)))
+            # Read and serialization time consume the interval. An overrun starts
+            # one sample immediately, then anchors its next deadline to that actual
+            # start; no missed slots are replayed and actual gaps remain visible.
+            wake=next_sample_deadline(row["monotonic_ns"],time.monotonic_ns(),
+                                      int(interval*1e9),deadline)
+            remaining=wake-time.monotonic_ns()
+            while remaining>0:
+                time.sleep(remaining/1e9)
+                remaining=wake-time.monotonic_ns()
         emit(dict(stage="OBSERVER_END",monotonic_ns=time.monotonic_ns(),reason="duration_limit"))
     return 0
 
