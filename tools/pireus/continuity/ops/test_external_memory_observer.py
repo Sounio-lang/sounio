@@ -104,5 +104,29 @@ class ObserverTests(unittest.TestCase):
         for member,table in (("0::/outside\n",mount),("0::/slurm/../other\n",mount),("0::/slurm/job_713\n",mount+mount)):
             with self.assertRaises(observer.IdentityError):observer.resolve_cgroup(member,table)
 
+    def test_cgroup_directory_replacement_refused(self):
+        b=self.binding()
+        self.target.rename(self.target.with_name("old-step"))
+        self.target.mkdir()
+        with self.assertRaisesRegex(observer.IdentityError,"identity or cgroup"):
+            observer.sample(b,self.proc)
+
+    def test_namespace_change_refused(self):
+        b=self.binding();link=self.proc/"123/ns/cgroup"
+        link.unlink();link.symlink_to("cgroup:[99]")
+        with self.assertRaisesRegex(observer.IdentityError,"identity or cgroup"):
+            observer.sample(b,self.proc)
+
+    def test_permission_denial_is_missing_not_zero(self):
+        b=self.binding();original=Path.read_text
+        forbidden=self.proc/"123/smaps_rollup"
+        def read(path,*args,**kwargs):
+            if path==forbidden:raise PermissionError("control")
+            return original(path,*args,**kwargs)
+        with patch.object(Path,"read_text",read):
+            r=observer.sample(b,self.proc)
+        self.assertIsNone(r["metrics"]["process_smaps_rollup"]["value"])
+        self.assertEqual(r["metrics"]["process_smaps_rollup"]["error"],"PermissionError")
+
 if __name__=="__main__":
     unittest.main()
