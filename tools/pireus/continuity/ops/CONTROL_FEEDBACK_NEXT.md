@@ -1,7 +1,7 @@
 # Control feedback and next experiment — 2026-09-08
 
 Owner: codex-pireus / continuity-20260906.
-State: attachment implemented, paired tokenization qualified, and execution profile frozen at v2; exact-source CI accepted; source and frozen inputs ready; inference not launched.
+State: v2 source and inputs accepted; immutable two-arm attempt executed and stopped on second-arm memory guard. First arm qualified; paired inference incomplete.
 
 ## Result carried forward
 
@@ -77,10 +77,9 @@ M4 lowering loop. These18 materials are exposed training/feedback data, not
 holdout. V13/V14 remain OPEN. No HTTP/general16K, memory root-cause, universal
 floating-point parity, or gain claim follows from this export.
 
-Next executable task: capture live pair ownership and memory preflight before
-any separately recorded feedback-smoke inference. Source and frozen-input
-readiness is archived; no inference acceptance follows from that receipt.
-Do not modify the old pilot manifests.
+Next executable task: review the memory envelope from the completed first arm
+and stopped second arm before declaring any new profile or attempt. Preserve
+this partial pair and the original pilot; do not retry or promote it.
 
 ## Attachment implementation receipt
 
@@ -143,5 +142,29 @@ does not establish why the two prior runners shut down.
 
 The preparation deliverables are complete: receipt-bound attachment, refusal
 controls, paired requests and tokenizer receipts, exact runtime/input freeze,
-and exact-source acceptance. Feedback inference and its downstream native
-admission, material comparison, parity and timing remain unexecuted.
+and exact-source acceptance. The inference attempt is recorded below. Its downstream native admission,
+material comparison, parity and timing remain unexecuted.
+
+## Immutable two-arm attempt — terminal evidence
+
+Attempt: /workspace/.cache/pireus-continuity/feedback-smoke-inference-20260909-v1.
+Live bound host preflight passed before each arm under SLURM_OWNED epoch15.
+Both jobs used exclusive allocation of both Sparks and the frozen runtime.
+No automatic retry was performed.
+
+Without-feedback job11969 completed0:0,8/8 requests,943 output tokens.
+Raw response bytes match across ranks. Completion receipts, profile, storage
+identity, log hashes and durable accounting passed validation. Guardian minima:
+rank0=35455930368 bytes, rank1=35732586496 bytes.
+
+With-feedback job11970 failed75:0 after5/8 saved requests (605 output tokens).
+The five raw responses match across ranks, but neither completion receipt exists.
+Rank1 triggered the immutable33GiB guard at35412488192 bytes, above the protected
+32GiB floor34359738368. Archive:
+validation/feedback-smoke-inference-20260909/with-feedback-11970/negative-evidence.json.
+
+The operational attempt is closed with negative evidence. Paired inference
+completion is false; do not interpret5/8 as a completed feedback arm, compare
+truncated-arm diversity as if balanced, or claim feedback caused the stop.
+This attempt does not resume the original pilot or establish any gain.
+Any future attempt requires a separately declared and qualified profile.
