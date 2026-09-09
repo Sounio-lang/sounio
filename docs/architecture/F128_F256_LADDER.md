@@ -158,6 +158,7 @@ PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_f
 | **V0-E.5** general F128Bits add/sub | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e5` | IEEE binary128 **add/sub** in `stdlib/math/softfloat_f128.sio` (not the V0-E.4 table). Seed-run anti-f64 + off-table `0.5+1` / `2+tiny`. Language `f128` desugar / mul/div / f256 / `print_f128` / GUM still deferred. |
 | **V0-E.5.1** language f128 +/− | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e51` | Madaros-run language `f128` `+`/`−` desugars to stdlib softfloat (2×i64 limbs, no f64 payload). Honest dyadic literals + `f128_from_limbs` for ~1e-20. Params/mul/div/f256/`print_f128`/GUM still deferred. lean_single language `f128` remains f64 greenwash. |
 | **V0-E.5.2** language f128 * / unary − / cmp | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e52` | Madaros-run language `f128` `*`, unary `-`, `< <= > >= == !=` desugar to stdlib softfloat (`f128_bits_soft_mul/neg/lt..ne`; IEEE RNE 113×113-bit product, +0 == -0, NaN unordered). Anti-f64 `(1+~1e-20)^2 ≠ 1`, `(1+~1e-20) > 1`. `/`, params/f256/`print_f128`/GUM still deferred. |
+| **V0-E.5.3** language f128 / | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e53` | Madaros-run language `f128` `/` desugars to `f128_bits_soft_div` (117-bit restoring long division, RNE; x/0 → ±inf, 0/0 → qNaN). Anti-f64 `1/(1+~1e-20) ≠ 1`; RNE tie `(1/3)*3 == 1`. `%`, params/f256/`print_f128`/GUM still deferred. |
 
 **Gate** (V0-E.1):
 ```bash

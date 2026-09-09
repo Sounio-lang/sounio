@@ -1,4 +1,4 @@
-//! stdlib/math/softfloat_f128.sio — IEEE binary128 add/sub/mul/neg/cmp in sio (V0-E.5 / V0-E.5.2)
+//! stdlib/math/softfloat_f128.sio — IEEE binary128 add/sub/mul/div/neg/cmp in sio (V0-E.5 / V0-E.5.2 / V0-E.5.3)
 //!
 //! Semantic-Lane-ID: WS-G-V0E-STDLIB-GUM-SURFACE
 //! Claim clock: ADR-008 / ADR-009 — callers must judge with sounio_native_expected
@@ -549,6 +549,77 @@ pub fn f128_bits_soft_mul(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic,
     let prod = sf_u128_mul_wide(pair_a.1, pair_b.1)
     let sig_wide = sf_u256_shr109_sticky(prod)
     sf_pack_wide(sign, pair_a.0 + pair_b.0, sig_wide)
+}
+
+/// Restoring long division of significands: Q = floor(sig_a · 2^116 / sig_b)
+/// (117 quotient bits, leading bit 115 or 116 since sig_a/sig_b ∈ (1/2, 2)),
+/// with the non-zero remainder folded into bit 0 as sticky. Both operands are
+/// normalised 113-bit significands (bit 112 set), so rem < 2·sig_b < 2^114
+/// always fits the 128-bit store.
+fn sf_u128_div_wide(sig_a: SfU128, sig_b: SfU128) -> SfU128 with Mut {
+    var rem = sig_a
+    var q = sf_u128_zero()
+    var i: i64 = 0
+    while i < 117 {
+        q = sf_u128_shl1(q)
+        if sf_u128_cmp(rem, sig_b) >= 0 {
+            rem = sf_u128_sub(rem, sig_b)
+            q = SfU128 { w0: q.w0 | 1, w1: q.w1, w2: q.w2, w3: q.w3 }
+        }
+        rem = sf_u128_shl1(rem)
+        i = i + 1
+    }
+    if !sf_u128_is_zero(rem) {
+        q = SfU128 { w0: q.w0 | 1, w1: q.w1, w2: q.w2, w3: q.w3 }
+    }
+    q
+}
+
+/// IEEE binary128 division, round-to-nearest-even. x/0 → ±inf, 0/0 and
+/// inf/inf → qNaN (no trapping; flags are not modelled).
+pub fn f128_bits_soft_div(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.hi)
+    let ea = sf_unpack_exp(a.hi)
+    let fa = sf_unpack_frac(a.lo, a.hi)
+    let sb = sf_unpack_sign(b.hi)
+    let eb = sf_unpack_exp(b.hi)
+    let fb = sf_unpack_frac(b.lo, b.hi)
+    let exp_ones: i64 = 32767
+    let sign = if sa == sb { 0 } else { 1 }
+    if sf_is_nan(ea, fa) {
+        var f = fa
+        if sf_u128_is_zero(f) { f = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f)
+    }
+    if sf_is_nan(eb, fb) {
+        var f2 = fb
+        if sf_u128_is_zero(f2) { f2 = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f2)
+    }
+    let inf_a = sf_is_inf(ea, fa)
+    let inf_b = sf_is_inf(eb, fb)
+    let zero_a = sf_is_zero(ea, fa)
+    let zero_b = sf_is_zero(eb, fb)
+    if (inf_a && inf_b) || (zero_a && zero_b) {
+        return sf_pack(0, exp_ones, sf_qnan_frac())
+    }
+    if inf_a || zero_b {
+        return sf_pack(sign, exp_ones, sf_u128_zero())
+    }
+    if zero_a || inf_b {
+        return sf_pack(sign, 0, sf_u128_zero())
+    }
+    let pair_a = sf_sig_from(ea, fa)
+    let pair_b = sf_sig_from(eb, fb)
+    // value = (sig_a/sig_b) · 2^(ea_u-eb_u) = Q · 2^-116 · 2^(ea_u-eb_u)
+    //       = Q · 2^(exp_u - 115)  with exp_u = ea_u - eb_u - 1.
+    let q = sf_u128_div_wide(pair_a.1, pair_b.1)
+    sf_pack_wide(sign, pair_a.0 - pair_b.0 - 1, q)
+}
+
+/// Four-limb ABI for V0-E.5.3 language `f128` `/` (seed-run gate surface).
+pub fn f128_soft_div_limbs(a_lo: i64, a_hi: i64, b_lo: i64, b_hi: i64) -> F128Bits with Mut, Panic, Div {
+    f128_bits_soft_div(F128Bits { lo: a_lo, hi: a_hi }, F128Bits { lo: b_lo, hi: b_hi })
 }
 
 /// IEEE negate: flips the sign bit only (NaN payload preserved).

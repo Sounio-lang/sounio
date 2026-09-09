@@ -1,0 +1,187 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.3 — language f128 `/` desugars to stdlib softfloat long division (no f64 payload)
+//@ ladder-stage: V0-E.5.3
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e53
+//
+// Lower desugars `/` → f128_bits_soft_div (117-bit restoring long division,
+// RNE). `%` stays V0-E.4.1 fail-closed. Source-level F128Bits calls at the
+// start of main pin the stdlib routine and anchor the language results.
+// Distinct non-zero exits: 21=bits_1/3 22=bits_6/3 23=bits_limbs_abi
+// 11=1/3 12=6/3 13=1/2 14=tiny/2 15=1/tiny 16=2/3 17=-1/3 18=1/(1+tiny)
+// 19=greenwash_1/(1+tiny) 20=(1+tiny)/1 24=tiny/tiny 25=inf 26=nan 27=div_cmp
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+    f128_soft_div_limbs,
+    f128_bits_soft_div,
+}
+use math::wide_float::{print_limb_hex16, F128Bits}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e53_main_entered")
+    let bits_one = F128Bits { lo: 0, hi: 4611404543450677248 }
+    let bits_three = F128Bits { lo: 0, hi: 4611826755915743232 }
+    let bits_third = f128_bits_soft_div(bits_one, bits_three)
+    if bits_third.lo != 6148914691236517205 || bits_third.hi != 4610935418489492821 {
+        println("FAIL bits_1/3")
+        return 21
+    }
+    let bits_six = F128Bits { lo: 0, hi: 4612108230892453888 }
+    let bits_two = f128_bits_soft_div(bits_six, bits_three)
+    if bits_two.lo != 0 || bits_two.hi != 4611686018427387904 {
+        println("FAIL bits_6/3")
+        return 22
+    }
+    let bits_limbs = f128_soft_div_limbs(0, 4611404543450677248, 0, 4611686018427387904)
+    if bits_limbs.lo != 0 || bits_limbs.hi != 4611123068473966592 {
+        println("FAIL bits_limbs_abi")
+        return 23
+    }
+
+    let zero: f128 = 0.0
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let three: f128 = 3.0
+    let six: f128 = two * three
+    let neg_one: f128 = -one
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    // Inexact quotient: 1/3 = 0x3ffd5555…5555 (RNE on the repeating pattern).
+    let third: f128 = one / three
+    print("got_1/3=")
+    print_limb_hex16(f128_to_lo(third))
+    print(":")
+    print_limb_hex16(f128_to_hi(third))
+    println("")
+    if f128_to_lo(third) != 6148914691236517205 || f128_to_hi(third) != 4610935418489492821 {
+        println("FAIL 1/3")
+        return 11
+    }
+    let six_over_three: f128 = six / three
+    if f128_to_lo(six_over_three) != 0 || f128_to_hi(six_over_three) != 4611686018427387904 {
+        println("FAIL 6/3")
+        return 12
+    }
+    let half: f128 = one / two
+    if f128_to_lo(half) != 0 || f128_to_hi(half) != 4611123068473966592 {
+        println("FAIL 1/2")
+        return 13
+    }
+    let half_tiny: f128 = tiny / two
+    print("got_tiny/2=")
+    print_limb_hex16(f128_to_lo(half_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(half_tiny))
+    println("")
+    if f128_to_lo(half_tiny) != 3746994889972252672 || f128_to_hi(half_tiny) != 4592398153806324770 {
+        println("FAIL tiny/2")
+        return 14
+    }
+    // ~1e20: full 113-bit quotient of two non-trivial significands.
+    let big: f128 = one / tiny
+    print("got_1/tiny=")
+    print_limb_hex16(f128_to_lo(big))
+    print(":")
+    print_limb_hex16(f128_to_hi(big))
+    println("")
+    if f128_to_lo(big) != 121251744985081957 || f128_to_hi(big) != 4630081886663432388 {
+        println("FAIL 1/tiny")
+        return 15
+    }
+    let two_thirds: f128 = two / three
+    if f128_to_lo(two_thirds) != 6148914691236517205 || f128_to_hi(two_thirds) != 4611216893466203477 {
+        println("FAIL 2/3")
+        return 16
+    }
+    let neg_third: f128 = neg_one / three
+    print("got_-1/3=")
+    print_limb_hex16(f128_to_lo(neg_third))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_third))
+    println("")
+    if f128_to_lo(neg_third) != 6148914691236517205 || f128_to_hi(neg_third) != 0 - 4612436618365282987 {
+        println("FAIL -1/3")
+        return 17
+    }
+    // Anti-f64: 1/(1+~1e-20) = 1 - ~1e-20 lands in the [0.5,1) binade; f64 gives 1.0.
+    let one_plus_tiny: f128 = one + tiny
+    let recip: f128 = one / one_plus_tiny
+    print("got_1/(1+tiny)=")
+    print_limb_hex16(f128_to_lo(recip))
+    print(":")
+    print_limb_hex16(f128_to_hi(recip))
+    println("")
+    if f128_to_lo(recip) == 0 && f128_to_hi(recip) == 4611404543450677248 {
+        println("FAIL f64_greenwash_recip")
+        return 19
+    }
+    if f128_to_lo(recip) != 0 - 103845937170696 || f128_to_hi(recip) != 4611404543450677247 {
+        println("FAIL 1/(1+tiny)")
+        return 18
+    }
+    let same: f128 = one_plus_tiny / one
+    if f128_to_lo(same) != 51922968585348 || f128_to_hi(same) != 4611404543450677248 {
+        println("FAIL (1+tiny)/1")
+        return 20
+    }
+    let unit: f128 = tiny / tiny
+    if f128_to_lo(unit) != 0 || f128_to_hi(unit) != 4611404543450677248 {
+        println("FAIL tiny/tiny")
+        return 24
+    }
+    // x/0 → ±inf (no trap); 0/0 → NaN (unordered).
+    let pos_inf: f128 = one / zero
+    let neg_inf: f128 = neg_one / zero
+    if f128_to_lo(pos_inf) != 0 || f128_to_hi(pos_inf) != 9223090561878065152
+        || f128_to_lo(neg_inf) != 0 || f128_to_hi(neg_inf) != 0 - 281474976710656 {
+        println("FAIL x/0")
+        return 25
+    }
+    let nan: f128 = zero / zero
+    if nan == nan || !(nan != nan) || nan < one {
+        println("FAIL 0/0 unordered")
+        return 26
+    }
+    // Division composed with comparison and further arithmetic.
+    if !(one / three < one / two) || !(six / three == two) || (one / three) * three > one {
+        println("FAIL div compositions")
+        return 27
+    }
+
+    print("wire_1/3=")
+    print_limb_hex16(f128_to_lo(third))
+    print(":")
+    print_limb_hex16(f128_to_hi(third))
+    println("")
+    print("wire_1/tiny=")
+    print_limb_hex16(f128_to_lo(big))
+    print(":")
+    print_limb_hex16(f128_to_hi(big))
+    println("")
+    print("wire_1/(1+tiny)=")
+    print_limb_hex16(f128_to_lo(recip))
+    print(":")
+    print_limb_hex16(f128_to_hi(recip))
+    println("")
+    print("wire_-1/3=")
+    print_limb_hex16(f128_to_lo(neg_third))
+    print(":")
+    print_limb_hex16(f128_to_hi(neg_third))
+    println("")
+    print("wire_tiny/2=")
+    print_limb_hex16(f128_to_lo(half_tiny))
+    print(":")
+    print_limb_hex16(f128_to_hi(half_tiny))
+    println("")
+
+    println("PASS f128_v0e53_language_div general=ieee754 rne anti_f64=green language_desugar=madaros")
+    return 0
+}
