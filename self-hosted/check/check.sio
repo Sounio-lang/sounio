@@ -5363,6 +5363,7 @@ fn checker_collect_ontology_classes_inplace(c: *mut Checker, classes: Option<Box
                         (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
                         info.property_ref_ids[info.property_count as usize] = (*c).refinements.count - 1
                     }
+                    if prop.is_float { info.has_float_property = true }
                     info.property_count = info.property_count + 1
                     i = i + 1
                 }
@@ -5457,12 +5458,42 @@ fn checker_collect_ontology_disjoints_inplace(c: *mut Checker, disjoints: Option
 
 // Bind every valid class name into the type environment as an ontology-tagged
 // named type. Without this a class cannot be used as a type at all.
+fn checker_ontology_class_is_numeric(c: *mut Checker, idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    // A class is represented by a number when it, or anything it inherits from,
+    // declares an f64 property. Inheritance matters: in
+    // tests/run-pass/ontology_axiom_conjunction, mTORi declares nothing and gets
+    // its representation from Compound. This runs after
+    // ontology_table_compute_closure, so all_ancestor_indices is populated.
+    let entry = (*c).ontologies.entries[idx as usize]
+    if entry.has_float_property { return true }
+    var a: i64 = 0
+    while a < entry.all_ancestor_count && a < 64 {
+        let anc = entry.all_ancestor_indices[a as usize]
+        if anc >= 0 && anc < (*c).ontologies.count {
+            if (*c).ontologies.entries[anc as usize].has_float_property { return true }
+        }
+        a = a + 1
+    }
+    false
+}
+
 fn checker_ontology_bind_named_types_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
     var i: i64 = 0
     while i < (*c).ontologies.count {
         if (*c).ontologies.entries[i as usize].is_valid {
             let cls_name = (*c).ontologies.entries[i as usize].name
-            let ty = ty_with_ontology(ty_named(cls_name), i)
+            // A class carrying an f64 property IS that f64, tagged with the
+            // class. Binding it to an opaque ty_named instead is what made
+            // `let drug: mTORi = 1.2` an E001, made every operator on an
+            // ontology value an E004 -- measured on all three of `H2 + CO2`,
+            // `H2 + H2` and `H2 + 1` -- and so made the
+            // ontology-across-an-operator rule unreachable: not one of the 32
+            // ontology fixtures contains a single arithmetic operation, because
+            // none was expressible. Classes with no numeric property keep the
+            // opaque representation; `0 as Rapamycin` in
+            // tests/run-pass/ontology_type_bridge depends on it.
+            let base = if checker_ontology_class_is_numeric(c, i) { ty_f64() } else { ty_named(cls_name) }
+            let ty = ty_with_ontology(base, i)
             (*c).env = (*c).env.bind(cls_name, ty, false)
         }
         i = i + 1
@@ -7169,6 +7200,132 @@ fn checker_report_unit_mismatch_inplace(c: *mut Checker, span: Span, left_uid: i
 // The whole point of the *mut spine is to not copy the Checker. Bridging
 // back to the by-value spine from inside it defeats that, so this is
 // transcribed properly instead.
+// Ontology across an operator: the third layer, after units of measure.
+//
+// Until the ontology kernel was wired, a class tag was checked at ONE place
+// only -- the call-argument boundary -- and evaporated through every
+// arithmetic operation. Measured, executed, on lean_single where the
+// subsystem does work:
+//
+//     let a: H2  = 1.0
+//     let b: CO2 = 2.0
+//     let mixed  = a + b        -> accepted in silence
+//     needs_h2(mixed)           -> accepted; the SUM PASSES AS H2
+//
+// Two classes declared disjoint were added together and the result re-entered
+// the type system as one of them. The ontology carries subclass inference and
+// disjointness and none of it reached the operator.
+//
+// THE RULE, and why each case is what it is.
+//
+//   Neither side tagged            no-op, and this early-out is load-bearing:
+//                                  it keeps the whole layer off the hot path
+//                                  for every ordinary arithmetic expression.
+//
+//   Same class, or one a subclass  keep the tag. Amounts of the same substance
+//   of the other                   add; a subclass amount added to a superclass
+//                                  amount is an amount of the superclass, so the
+//                                  result carries the MORE GENERAL tag.
+//
+//   Disjoint classes               E257. This is the case the probe above got
+//                                  wrong, and it is the whole point.
+//
+//   Unrelated classes              E258. Not provably combinable. Reported
+//                                  rather than assumed, on the same reasoning
+//                                  the call boundary already uses for E152.
+//
+//   One side untagged (a scalar)   keep the tag, for + - * /. A bare number
+//                                  scaling or offsetting an amount of H2 is
+//                                  still an amount of H2. This differs
+//                                  DELIBERATELY from the unit rule, where
+//                                  `mg + 1.0` is an error: a dimension is a
+//                                  claim about what the number measures, while
+//                                  a species tag is a claim about what it is
+//                                  made of, and a dimensionless literal has no
+//                                  dimension but is not made of nothing.
+//
+//   Division of two tagged values  drops the tag. H2/H2 and H2/CO2 are both
+//                                  ratios, and a ratio is not an amount of a
+//                                  substance. Same shape as the unit rule where
+//                                  mg/mg cancels to dimensionless.
+//
+// Comparisons follow the add/sub rule: comparing amounts of disjoint species
+// is the same category error as adding them.
+//
+// NOTE ON INDICES. TypeEntry.ontology_id is an OntologyTable index and the
+// queries below take KERNEL indices. They coincide because both tables are
+// filled by the same walk over the same declaration list, and
+// check_call_arg_ontology_boundary already depends on that same coincidence.
+//
+// NOT A TRANSCRIPTION. The by-value spine has no equivalent of this layer --
+// the evaporation above was measured ON that spine. So this is the first rule
+// that exists in the *mut spine and not the by-value one, which is the
+// opposite direction from everything checker_spine_parity.frozen tracks, and
+// the gate is silent about it by construction.
+fn checker_ontology_relation(c: *mut Checker, lo: i64, ro: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    // 0 = same, or left subsumes right (left keeps); 1 = right subsumes left;
+    // 2 = disjoint; 3 = unrelated.
+    //
+    // These are the free kernel queries, NOT (*c).ontology_inference_query_*.
+    // Those are by-value `impl Checker` methods, and reaching them from here
+    // would copy the ~8 MB Checker on every binary operator in the program.
+    // The kernel itself is small enough to pass by value, which is exactly
+    // what the by-value methods do internally.
+    if lo == ro { return 0 }
+    if ontology_kernel_is_subclass((*c).ontology_kernel, lo, ro) { return 1 }
+    if ontology_kernel_is_subclass((*c).ontology_kernel, ro, lo) { return 0 }
+    if ontology_kernel_is_disjoint((*c).ontology_kernel, lo, ro) { return 2 }
+    3
+}
+
+fn checker_finish_binary_ontology_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lo = left.ontology_id
+    let ro = right.ontology_id
+    if lo < 0 && ro < 0 {
+        return result
+    }
+    match op {
+        BinaryOp::OpDiv => {
+            if lo >= 0 && ro >= 0 {
+                return ty_with_ontology(result, 0 - 1)
+            }
+            let uid = if lo >= 0 { lo } else { ro }
+            return ty_with_ontology(result, uid)
+        }
+        BinaryOp::OpAdd => {}
+        BinaryOp::OpSub => {}
+        BinaryOp::OpMul => {}
+        BinaryOp::OpEq => {}
+        BinaryOp::OpNe => {}
+        BinaryOp::OpLt => {}
+        BinaryOp::OpLe => {}
+        BinaryOp::OpGt => {}
+        BinaryOp::OpGe => {}
+        _ => { return result }
+    }
+    if lo < 0 || ro < 0 {
+        let uid = if lo >= 0 { lo } else { ro }
+        return ty_with_ontology(result, uid)
+    }
+    let rel = checker_ontology_relation(c, lo, ro)
+    if rel == 0 { return ty_with_ontology(result, lo) }
+    if rel == 1 { return ty_with_ontology(result, ro) }
+    if rel == 2 {
+        checker_report_error_at_inplace(c, span, 257, 0, 0, 0)
+        return result
+    }
+    checker_report_error_at_inplace(c, span, 258, 0, 0, 0)
+    result
+}
+
+// Units first, then ontology on the type units produced. Two orthogonal tags
+// on the same TypeEntry: a dimension and a species. Each layer reads the
+// operand types, never the other layer's verdict.
+fn checker_finish_binary_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let with_units = checker_finish_binary_units_inplace(c, span, op, left, right, result)
+    checker_finish_binary_ontology_inplace(c, span, op, left, right, with_units)
+}
+
 fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let lu = left.unit_id
     let ru = right.unit_id
@@ -7467,7 +7624,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if correlated_same_slot_add {
             knowledge_result.knowledge_epsilon = epsilon_combine_correlated(left_ty.knowledge_epsilon, right_ty.knowledge_epsilon)
         }
-        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let final_inner = if final_result.kind == TypeKind::TyKnowledge {
                 knowledge_inner(final_result)
@@ -7485,7 +7642,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
         checker_store_from_value(c, hr.0)
         let typed_result = hr.1
-        let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
+        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
         if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
             let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
             checker_store_from_value(c, rh)
@@ -7524,7 +7681,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
         }
     }
-    checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
+    checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -9395,6 +9552,37 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 primitive_exact = true
             }
         }
+        // A BRANDED primitive is not exact. A unit dimension and an ontology
+        // class both ride on TyF64, so `fn f(x: mg)` called with a `second`,
+        // and `fn f(x: H2)` called with a `CO2`, are TyF64-vs-TyF64 and took
+        // this fast path -- which skips ALL FIVE boundary checks below, the
+        // only place those brands are ever compared.
+        //
+        // This was invisible until the brands reached this engine. While
+        // `unit` was inert here, `mg` and `second` were unresolved named
+        // types and the mismatch fell out as E001/E009; waking the unit
+        // system turned both into TyF64 and the call-argument dimension
+        // check silently stopped running. Measured: needs_mg(t: second) is
+        // rejected by bin/madaros-linux-x86_64 and was ACCEPTED after the
+        // units commit. Same shape killed the ontology boundary the moment a
+        // class with an f64 property became an f64.
+        // Read the brand fields DIRECTLY off the two types already in scope: no
+        // new local, no call, nothing added to this frame. The loop this sits in
+        // is the one whose comment reads "no Checker locals -- ~12MB+ held across
+        // this fn's nested-call recursion". Four TypeEntry locals here took
+        // graphics_quality_band_smoke from 4 SIGSEGVs in 12 runs to 12 in 12;
+        // moving them into leaf helpers only got it back to 8 in 12, because the
+        // call still materialised two TypeEntry copies in THIS frame.
+        //
+        // Reading the outer type rather than call_ref_inner_or_self is exact
+        // here: primitive_exact is only true when both kinds are the SAME
+        // primitive, and a reference is never TyF64, so there is no inner to
+        // unwrap on this path.
+        if primitive_exact
+        && (arg_ty.unit_id >= 0 || param_info.ty.unit_id >= 0
+         || arg_ty.ontology_id >= 0 || param_info.ty.ontology_id >= 0) {
+            primitive_exact = false
+        }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
         if has_param_info && !primitive_exact {
             if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
@@ -11149,7 +11337,16 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
     if provided_ty.kind == TypeKind::TyError || provided_ty.kind == TypeKind::TyUnknown || provided_ty.kind == TypeKind::TyNever {
         return
     }
-    if expected_unit != provided_unit {
+    // Compare DIMENSIONS, not registry indices. A quantity derived by
+    // arithmetic -- `distance / time` in
+    // tests/run-pass/unit_derived_binding_keeps_value -- is branded with an
+    // anonymous interned entry, while `unit velocity = m / s` has its own
+    // named entry. Identical dimension, different index, and an index
+    // comparison rejects it while printing the SAME dimension on both
+    // lines of the diagnostic, which is how this surfaced. Same
+    // addability test the binary operator uses, so the two agree by
+    // construction.
+    if !checker_units_addable(c, provided_unit, expected_unit) {
         let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
         checker_store_from_value(c, t)
         return
@@ -16266,6 +16463,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 254 { print("is not a node of the declared causal graph") }
     else if code == 255 { print("is not d-separated from the other variable given the stated conditioning set: an active path remains open") }
     else if code == 256 { print("`d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`") }
+    else if code == 257 { print("ontology classes are disjoint and cannot be combined by this operator") }
+    else if code == 258 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
@@ -18258,7 +18457,39 @@ fn checker_onto_name_subclass_walk(items: Option<Box<ItemList> >, child_name: Na
     false
 }
 
+// LEAF HELPERS, and the leaf part is the point. Both of these hold TypeEntry
+// locals, and their callers are the call-argument loop, whose own comment reads
+// "no Checker locals -- ~12MB+ held across this fn's nested-call recursion ->
+// the stack overflow". Four TypeEntry locals were added to that frame directly
+// and turned eight intermittent SIGSEGVs into certain ones (graphics_quality_*
+// went from 1-6 of 12 to 12 of 12) and made test_lie crash 7 of 12 where it had
+// never crashed at all. Every one of them passes under `ulimit -s 524288`.
+// Keeping the locals down here costs one call and leaves that frame as it was.
+// -1 = not a pair of unit-branded f64s, so the caller should fall through to the
+// ordinary compatibility path; 0 = branded and dimensions disagree; 1 = branded
+// and dimensions agree.
+fn checker_call_arg_unit_verdict(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc {
+    let a = call_ref_inner_or_self(arg_ty)
+    let p = call_ref_inner_or_self(param_ty)
+    if a.kind != TypeKind::TyF64 || p.kind != TypeKind::TyF64 { return 0 - 1 }
+    if a.unit_id < 0 || p.unit_id < 0 { return 0 - 1 }
+    if checker_units_addable(c, a.unit_id, p.unit_id) { return 1 }
+    0
+}
+
 fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Two branded f64s are compatible when their DIMENSIONS agree, not when
+    // their registry indices do. types_compatible in compat.sio can only
+    // compare `a.unit_id == b.unit_id` -- that module deliberately imports
+    // nothing, so it cannot reach the registry -- and an arithmetic-derived
+    // quantity gets an anonymous entry that never equals the named one it
+    // matches. The dedicated unit boundary owns this question and answers
+    // it by dimension; this keeps the two from disagreeing and emitting a
+    // spurious E009 alongside a correct verdict.
+    let unit_verdict = checker_call_arg_unit_verdict(c, arg_ty, param_ty)
+    if unit_verdict >= 0 {
+        return unit_verdict == 1
+    }
     if checker_types_compatible_inplace(c, arg_ty, param_ty) {
         return true
     }
