@@ -1,7 +1,7 @@
 # Control feedback and next experiment — 2026-09-08
 
 Owner: codex-pireus / continuity-20260906.
-State: attachment implemented, paired tokenization qualified, and execution profile frozen at v2; exact-source CI pending; inference not launched.
+State: attachment implemented, paired tokenization qualified, and execution profile frozen at v2; exact-source CI accepted; source and frozen inputs ready; inference not launched.
 
 ## Result carried forward
 
@@ -77,10 +77,10 @@ M4 lowering loop. These18 materials are exposed training/feedback data, not
 holdout. V13/V14 remain OPEN. No HTTP/general16K, memory root-cause, universal
 floating-point parity, or gain claim follows from this export.
 
-Next executable task: await the v2 source checks, then run the readiness gate
-and archive its receipt before publishing the preparation closure. A launch
-still requires live pair ownership and memory preflight. Do not modify the
-old pilot manifests.
+Next executable task: capture live pair ownership and memory preflight before
+any separately recorded feedback-smoke inference. Source and frozen-input
+readiness is archived; no inference acceptance follows from that receipt.
+Do not modify the old pilot manifests.
 
 ## Attachment implementation receipt
 
@@ -107,7 +107,7 @@ requests, verifies source dependencies, log-bound receipt hashes, pair identity,
 durable accounting and physical6144 budget. No model was loaded during this
 tokenizer qualification.
 
-## Execution freeze v2 and remaining acceptance
+## Execution freeze v2 and source acceptance
 
 The current freeze is
 validation/feedback-smoke-freeze-v2-20260909/execution-freeze.json,
@@ -124,8 +124,9 @@ runner shutdowns during Madaros compilation. Preserve both failures; their
 cause remains unresolved. The new source adds a process/log observer without
 changing compiler arguments, return status, timeout, or gate assertions.
 
-CI run34304172437 checks the v2 source. Until its required exact-source checks
-pass, ops/check_frozen_feedback.py must refuse readiness. The required checks
+CI run34304172437 completed successfully on the v2 source.
+ops/check_frozen_feedback.py verified all required checks and emitted
+validation/feedback-smoke-freeze-v2-20260909/readiness.json. The required checks
 are CI Decision, transport-and-archive, and Archived script custody (no runtime
 replay). Seven local readiness controls cover source identity, latest-check
 selection, artifact integrity, and refusal to reuse v1 acceptance for v2.
@@ -134,3 +135,13 @@ A passing readiness receipt establishes source and frozen-input readiness only.
 Live host preflight and runtime receipts remain required for inference.
 No feedback-smoke generation, hardware result, gain, or pilot acceptance is
 established by tokenization, freezing, or CI.
+
+The source CI accepted its declared Madaros rung 'run'. The archived observer
+log records gen2 command_rc=0 and gen3 command_rc=139; this is not a compiler
+fixed-point claim. Fifty observation records were emitted. A successful run
+does not establish why the two prior runners shut down.
+
+The preparation deliverables are complete: receipt-bound attachment, refusal
+controls, paired requests and tokenizer receipts, exact runtime/input freeze,
+and exact-source acceptance. Feedback inference and its downstream native
+admission, material comparison, parity and timing remain unexecuted.
