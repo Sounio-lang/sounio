@@ -9,7 +9,7 @@ SERVE_SHA="e8e44e63d2662f93c38f44018c23ec4a4aa389976458154c83420da6b6640b7c"
 GUARD_SHA="7a5f24ef3863cc1b12c9a219ec25bf7b1a952a21624721ce0c62f58f777abbd8"
 CONTAINER_SHA="4a1a5cc6825752c864b27ea6669f380215f35a45f66907ab1a5db743cabafdc1"
 ENTRY_SHA="8794694d22b4319a8e8df719eabdce9a89115fa2d1d11e630780bf3c9d867d5d"
-OBSERVER_SHA="7ce949bb5e7fd9ef6cd3bb5e646062c55f3712a48969720d635243e68039c119"
+OBSERVER_SHA="1fe71f5247ab8b2ab35c05b5a6c98e980ffd115bac9a76d53a99f8c6213bd71c"
 def digest(raw):return hashlib.sha256(raw).hexdigest()
 
 def generate(raw):
@@ -44,7 +44,7 @@ def build(output):
     output.mkdir(exist_ok=False)
     for name,value in files.items():(output/name).write_bytes(value)
     manifest=dict(schema="pireus-external-observer-integration-build-v1",
-        identity="feedback-lifecycle-external-observer-v1",files_sha256={n:digest(b) for n,b in files.items()},
+        identity="feedback-lifecycle-external-observer-limits-v2",files_sha256={n:digest(b) for n,b in files.items()},
         base_serve_sha256=SERVE_SHA,entry_sha256=ENTRY_SHA,guard_sha256=GUARD_SHA,
         original_guard_unchanged=True,original_container_launcher_unchanged=True,
         lifecycle_inference_algorithm_unchanged=True,offline_only=True,
