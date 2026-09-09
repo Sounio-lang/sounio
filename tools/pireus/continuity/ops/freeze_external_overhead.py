@@ -28,10 +28,12 @@ def specification():
     baseline=dict(parent["runtime_sha256"])
     observed=baseline|build["files_sha256"]
     inputs={n:sha for n,sha in parent["files_sha256"].items() if n.startswith("without-feedback/")}
-    return dict(schema="pireus-external-overhead-freeze-v1",
+    return dict(schema="pireus-external-overhead-freeze-v2",
         source_commit=SOURCE,parent_source_commit=parent["source_commit"],
+        evaluation_helper_sha256=digest((HERE/"ops/evaluate_external_overhead.py").read_bytes()),
         parent_freeze_sha256=PARENT_SHA,integration_build_sha256=BUILD_SHA,
-        experiment="external-observer-loaded-overhead-screen-v1",
+        experiment="external-observer-loaded-overhead-screen-v2",
+        supersedes_unexecuted="external-overhead-freeze-20260909-v1; cross-job IDs require explicit exclusion",
         arm_order=["baseline","observed"],input_arm="without-feedback",
         batch_size_per_arm=8,files_sha256=inputs,
         runtime_sha256={"baseline":baseline,"observed":observed},
@@ -40,7 +42,7 @@ def specification():
         model_image_lock=parent["model_image_lock"],
         acceptance=dict(
             both_arms_complete_requests=8,rank_output_byte_parity=True,
-            cross_arm_output_byte_parity=True,
+            cross_arm_response_equality_except_fields=["job"],
             guardian_reserve_gib=33,protected_floor_gib=32,
             maximum_loss_minimum_host_available_bytes=256*1024**2,
             maximum_decode_elapsed_ratio=1.10,
