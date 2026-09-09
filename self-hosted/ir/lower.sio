@@ -5496,14 +5496,28 @@ fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, 
 
 // V0-E.5.1: only dyadic values that are exact in both f64 and f128. Anything
 // else (including 1e-20) must use f128_from_limbs — never f64 widen.
-fn lower_f128_exact_literal_limbs(v: f64) -> (i64, i64, i64) {
-    if v == 0.0 { return (1, 0, 0) }
-    if v == 1.0 { return (1, 0, 4611404543450677248) }
-    if v == 2.0 { return (1, 0, 4611686018427387904) }
-    if v == 0.5 { return (1, 0, 4611123068473966592) }
-    if v == 1.5 { return (1, 0, 4611545280939032576) }
-    if v == 0.0 - 1.0 { return (1, 0, 0 - 4611967493404098560) }
-    (0, 0, 0)
+//
+// Scalar helpers, not a `(i64, i64, i64)` tuple: this was the only 3-tuple
+// return in the compiler, and the seed-built Madaros read `.2` as a stack
+// address (Linux x86_64: f128_to_hi(1.0) = 00007fff1ff54180). Every table
+// value has lo = 0; hi is the IEEE binary128 MSW.
+fn lower_f128_literal_is_exact(v: f64) -> bool {
+    if v == 0.0 { return true }
+    if v == 1.0 { return true }
+    if v == 2.0 { return true }
+    if v == 0.5 { return true }
+    if v == 1.5 { return true }
+    if v == 0.0 - 1.0 { return true }
+    false
+}
+
+fn lower_f128_literal_hi(v: f64) -> i64 {
+    if v == 1.0 { return 4611404543450677248 }
+    if v == 2.0 { return 4611686018427387904 }
+    if v == 0.5 { return 4611123068473966592 }
+    if v == 1.5 { return 4611545280939032576 }
+    if v == 0.0 - 1.0 { return 0 - 4611967493404098560 }
+    0
 }
 
 fn lower_f128_fail(lo: Lowerer, msg: string) -> (Lowerer, i64) with Mut, Panic, Div, IO {
@@ -19728,13 +19742,27 @@ impl Lowerer {
         (lo, dst)
     }
 
+    // F128Bits field slots must be the SAME slots the softfloat callee reads and
+    // writes. Struct fields are addressed by the layout-table index (or, for an
+    // unregistered layout, the legacy first-byte hash: 'l'%64=44, 'h'%64=40) —
+    // never by declaration position. Positional 0/1 with a 16-byte alloc read
+    // heap garbage as `hi` (Current-Source: got_1+1=…:0000fffe43847880, exit 11)
+    // and wrote limbs past a 64-byte object.
+    fn lower_f128_bits_field_idx(self, field: string) -> i64 with Mut, Panic, Div {
+        self.field_idx_from_name(make_name("F128Bits"), make_name(field))
+    }
+
     fn lower_f128_materialize_bits(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.fresh_reg()
         var lo = pair.0
         let dst = pair.1
-        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(2)))
-        lo = lo.emit(ir_field_set(dst, 0, lo_reg, make_name("lo")))
-        lo = lo.emit(ir_field_set(dst, 1, hi_reg, make_name("hi")))
+        // Tag 0 = struct: the same 512-byte object a source-level
+        // `F128Bits { lo, hi }` literal gets, so hash-indexed slots stay in bounds.
+        lo = lo.emit(ir_alloc(dst, 0))
+        let lo_idx = lo.lower_f128_bits_field_idx("lo")
+        let hi_idx = lo.lower_f128_bits_field_idx("hi")
+        lo = lo.emit(ir_field_set(dst, lo_idx, lo_reg, make_name("lo")))
+        lo = lo.emit(ir_field_set(dst, hi_idx, hi_reg, make_name("hi")))
         (lo, dst)
     }
 
@@ -19744,7 +19772,11 @@ impl Lowerer {
         // 2-limb dest/dest+1 + to_lo/to_hi missed the payload.
         var lo = self
         let fname = if add_not_sub { make_name("f128_bits_soft_add") } else { make_name("f128_bits_soft_sub") }
-        let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, fname)
+        // find-or-add, exactly like a source-level call: the callee may not have
+        // been lowered yet (forward reference) — the slot is filled by name when
+        // the imported module merges. Lookup-only failed as soon as main did not
+        // itself call f128_bits_soft_add before the first `+`.
+        let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, fname)
         if fn_id < 0 {
             return lower_f128_fail(lo, "language f128 add/sub requires `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub}` (V0-E.5.1)")
         }
@@ -19761,11 +19793,10 @@ impl Lowerer {
 
     fn lower_f128_value_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFloatLit {
-            let limbs = lower_f128_exact_literal_limbs((*e).float_val)
-            if limbs.0 == 0 {
+            if !lower_f128_literal_is_exact((*e).float_val) {
                 return lower_f128_fail(self, "f128 literal is not an exact table value; use f128_from_limbs(lo, hi) (V0-E.5.1; no f64 widen)")
             }
-            return self.lower_f128_emit_limbs(limbs.1, limbs.2)
+            return self.lower_f128_emit_limbs(0, lower_f128_literal_hi((*e).float_val))
         }
         if (*e).kind == ExprKind::ExprIdent {
             if self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128 {
@@ -19829,9 +19860,11 @@ impl Lowerer {
                     lo = pair_d.0
                     let dst = pair_d.1
                     if ir_name_eq(callee_name, make_name("f128_to_lo")) {
-                        lo = lo.emit(ir_field_get(dst, handle, 0, make_name("lo")))
+                        let lo_idx = lo.lower_f128_bits_field_idx("lo")
+                        lo = lo.emit(ir_field_get(dst, handle, lo_idx, make_name("lo")))
                     } else {
-                        lo = lo.emit(ir_field_get(dst, handle, 1, make_name("hi")))
+                        let hi_idx = lo.lower_f128_bits_field_idx("hi")
+                        lo = lo.emit(ir_field_get(dst, handle, hi_idx, make_name("hi")))
                     }
                     return (lo, dst)
                 }
