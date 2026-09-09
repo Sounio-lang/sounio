@@ -792,37 +792,59 @@ parameter unchecked.
   and range-check `x >= lo && x < hi` after it; see `ulp()` in
   `examples/chemistry/rep_stagnation.sio`.
 
-## `&Seq<T>` as a parameter does not deliver the Seq (measured 2026-09-06)
+## `&Seq<T>` as a parameter (regressed 2026-09-06, fixed 2026-09-09)
 
-Wrong code, not a rejection: `souc check` accepts the program. A `Seq<T>` passed
-to a function **by reference** arrives as the address of the handle rather than
-the handle, so the callee reads one indirection level off.
+**Closed.** Recorded here because the defect was introduced by this project's
+own fix and shipped for three days, and because the shape of the mistake is
+worth keeping.
 
-Measured on Madaros built from `39d72a37a9`, `Seq<i64>` holding `10, 20, 30`:
+`Seq` methods are intrinsics that take the handle BY VALUE, but a `&Seq<T>`
+receiver holds the ADDRESS of the handle slot. `lower.sio` passed that address
+straight into `__sounio_seq_get` / `IrArrayLen`, so the callee read one
+indirection level off — and `souc check` accepted the program.
 
-| shape | by reference | by value |
+Measured on Madaros built from `e90e7307dd`, `Seq<i64>` holding `10, 20, 30`:
+
+| shape | before | after |
 |---|---|---|
-| `s.len().unwrap(...)` | `4201410`, same every run | `3` |
-| `s.get(0)` | a stack address, different every run (`140731733008109`, `140729505455853`, ...) | `10` |
-| accumulating loop over both | **SIGSEGV** (rc 139) | `60` |
+| `s.len()` through `&Seq<i64>` | `4204832`, a static address | `3` |
+| `s.get(0)` through `&Seq<i64>` | a stack address, moving per run | `10` |
+| accumulating loop over both | SIGSEGV (rc 139) | `60` |
+| `Seq<T>` by value | `3` | `3` |
+| `Seq<T>` field via `&Self` | `3` | `3` |
+| `s[0]` through `&Seq<i64>` | rejected E013 | rejected E013 |
 
-Both wrong results are addresses rather than data, which is the tell: `len`
-returns the same static address on every run, and `get(0)` returns a stack
-address that moves under ASLR. Measured five runs each.
-The element type is irrelevant — this reproduces on `Seq<i64>`, so it is not the
-float-classification defect closed by
-`docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md`; it is that record's
-residual, filed here because it is still live.
+**How it got in.** It was not a pre-existing path. Before PR #2413,
+`s.len()` on a `&Seq<T>` was refused with `E019` ("method calls are not
+supported for this type") — verified on a compiler built from that PR's
+merge-base `d8048c7ad9`. #2413 taught
+`checker_check_method_call_with_base_ty_inplace` to unwrap a `TyRef` receiver to
+its `TyNamed` pointee, which made the call resolve. That type-level unwrap
+shipped **without a lowering-level counterpart**, turning a clean rejection into
+silent wrong code. The lesson is narrow and reusable: making a receiver
+type-check is not making it lower.
 
-- Working rule: **take `Seq<T>` by value.** Every signature migrated in #2413
-  does, for this reason. A `Seq` handle is cheap to pass; the reference form is
-  the broken one.
-- A struct field of type `Seq<T>` read through a `&Self` receiver *is* correct —
-  that path was fixed. It is the bare `&Seq<T>` parameter that is not.
-- Repro: `tests/known-gaps/language/seq_ref_param_loses_handle.sio`. Ratchet:
-  `scripts/ci/language_gap_ratchet_gate.sh`, which asserts the defect and fails
-  on purpose when it is fixed.
-- Not investigated: where the missing dereference is. No fix is proposed here.
+**The fix.** `lower_seq_recv_base_ref` in `self-hosted/ir/lower.sio` emits
+`IrUnaryOp(OpDeref)` — the raw-address load, not the Box handle resolve — when a
+Seq method's receiver is an ident bound as a reference, at all three intrinsic
+sites (`len`/`count`, `push`, `get`/`set`). Field-access receivers are left
+alone: `self.xs.len()` through `&Self` already resolves the handle via the field
+load and was always correct. The `is_ref` flag it consults already existed for
+exactly this purpose — `lower.sio` marks a param "so field/index lowering can
+emit the extra dereference for `&P` / `&[T;N]` params"; the Seq method paths
+simply never consulted it.
+
+**Migration.** Nothing in the tree relied on the gap: `stdlib/graph` takes every
+`Seq` by value, deliberately, and the only `&Seq<` occurrences were comments
+warning against the shape. Passing `Seq<T>` by value remains correct and cheap;
+`&Seq<T>` and `&mut Seq<T>` parameters now also work. The hand-written
+workaround (`let t: Seq<T> = *s`) is no longer needed but still compiles.
+
+- Repro, now a passing fixture: `tests/run-pass/seq_ref_param_delivers_handle.sio`
+  (it asserts the by-value and `&Self`-field controls too, because a fix that
+  dereferenced those would break them).
+- Gate: `scripts/ci/madaros_seq_ref_param_gate.sh`, wired into `ci.yml`.
+- Blocker history: `docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md`.
 
 ## Reading a rejection: E035 and E137 are not language limitations
 
