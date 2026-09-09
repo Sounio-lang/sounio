@@ -1,7 +1,7 @@
 # Control feedback and next experiment — 2026-09-08
 
 Owner: codex-pireus / continuity-20260906.
-State: receipt export implemented and tested; next experiment specified, not frozen or launched.
+State: attachment implemented, paired tokenization qualified, and execution profile frozen at v2; exact-source CI pending; inference not launched.
 
 ## Result carried forward
 
@@ -77,9 +77,10 @@ M4 lowering loop. These18 materials are exposed training/feedback data, not
 holdout. V13/V14 remain OPEN. No HTTP/general16K, memory root-cause, universal
 floating-point parity, or gain claim follows from this export.
 
-Next executable task: add a digest-bound optional feedback attachment to the
-new-experiment request builder, with fail-closed controls, then freeze the
-two eight-request arms. Do not modify the old pilot manifests.
+Next executable task: await the v2 source checks, then run the readiness gate
+and archive its receipt before publishing the preparation closure. A launch
+still requires live pair ownership and memory preflight. Do not modify the
+old pilot manifests.
 
 ## Attachment implementation receipt
 
@@ -92,9 +93,10 @@ preserved in the attached full packet. This is a declared projection before
 tokenization, not an implicit truncation.
 
 Eight local controls PASS across the exporter and request builder. Requests
-are staged at validation/feedback-smoke-requests-20260908. Token budget and
-execution-profile freeze remain pending real paired tokenization. The request
-manifest records these states as false and refuses existing attempt roots.
+are staged at validation/feedback-smoke-requests-20260908. That immutable
+staging manifest records token budget and execution-profile freeze as false
+and refuses existing attempt roots. The later tokenizer and freeze receipts
+below establish these subsequent stages without rewriting the staging record.
 
 Paired tokenizer11965 completed0:0 on2026-09-09UTC (the request identity retains
 its original20260908 label). All16 items match across ranks. Input tokens are
@@ -102,5 +104,33 @@ its original20260908 label). All16 items match across ranks. Input tokens are
 validation/feedback-smoke-tokenizer-11965 preserves receipts, input, mapping,
 launcher log and accounting. ops/qualify_feedback_tokens.py reconstructs the
 requests, verifies source dependencies, log-bound receipt hashes, pair identity,
-durable accounting and physical6144 budget. Exact inference runtime/profile
-freeze and current-source acceptance remain pending; no model was loaded.
+durable accounting and physical6144 budget. No model was loaded during this
+tokenizer qualification.
+
+## Execution freeze v2 and remaining acceptance
+
+The current freeze is
+validation/feedback-smoke-freeze-v2-20260909/execution-freeze.json,
+SHA256 c75f94a648e8dd52c599e5d1ce722888b7c33389e8201c2256e7316aacf5827b,
+bound to source91553cbad3f0ef402e9c17e2c2435ff54b4ea11d.
+It binds101 runtime files and20 input artifacts. All16 token-request files
+and all runtime files are byte-identical to v1; source-bound manifests changed.
+The private immutable execution root is
+/workspace/.cache/pireus-continuity/feedback-smoke-execution-20260909-v2.
+
+The prior freeze in validation/feedback-smoke-freeze-20260909 remains
+unqualified. Its sourcee17959ac1238d3e0ceb5fbd9f94bd117e8ee8446 saw two hosted
+runner shutdowns during Madaros compilation. Preserve both failures; their
+cause remains unresolved. The new source adds a process/log observer without
+changing compiler arguments, return status, timeout, or gate assertions.
+
+CI run34304172437 checks the v2 source. Until its required exact-source checks
+pass, ops/check_frozen_feedback.py must refuse readiness. The required checks
+are CI Decision, transport-and-archive, and Archived script custody (no runtime
+replay). Seven local readiness controls cover source identity, latest-check
+selection, artifact integrity, and refusal to reuse v1 acceptance for v2.
+
+A passing readiness receipt establishes source and frozen-input readiness only.
+Live host preflight and runtime receipts remain required for inference.
+No feedback-smoke generation, hardware result, gain, or pilot acceptance is
+established by tokenization, freezing, or CI.
