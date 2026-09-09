@@ -46,8 +46,8 @@ The target allocates 64 MiB during baseline/allocated/released phases lasting
 Before any allocation:
 1. Required checks must pass on the exact frozen source: CI Decision,
    transport-and-archive, Archived script custody (no runtime replay).
-2. Verify this packet and prepare a launch contract plus terminal collector;
-   launcher/collector integration is not yet declared complete by this packet.
+2. Verify this packet and the locally tested cpu_v3_attempt.py launcher/collector.
+   Hardware custody remains unverified until the terminal collection qualifies.
 3. Fresh pair preflight must establish empty queue, exclusive ownership, exact
    worker pod UIDs/boot IDs, SIF hash and source bytes.
 4. Bind those identities and the sole launch command to an exclusive attempt
@@ -73,3 +73,37 @@ then verifies protocol/oracle agreement. Changing the observer source is rejecte
 
 Source CI is a separate live gate. A run being pending does not authorize
 allocation; no source-CI success or hardware qualification is recorded here.
+
+## Launch and terminal custody implementation
+
+cpu_v3_attempt.py provides launch, collect and qualify modes. The launcher requires
+remote tmux, exact-source CI, fresh pair preflight and an empty queue before staging.
+It uses an exclusive protocol-addressed directory on each worker, stages read-only
+source bytes, verifies worker UID/boot and all bytes again before entry inside the
+allocation, verifies the SIF hash, and runs only the CPU target through the unchanged
+container launcher and guardian. Existing attempt directories refuse replay.
+
+The start receipt binds the actual command, source protocol, workers and hashes of
+the launcher, source-readiness helper, preflight and freeze verifier. Qualification
+rechecks that command and those orchestration hashes. The terminal collector checks
+unique job accounting and worker identity before/after copying, preserves missing
+files explicitly, and hashes every collected artifact. It never submits a job.
+
+Qualification requires successful terminal accounting, complete collection, source
+checks, the job-bound pre-entry barriers, runtime bytes, target/observer handoff,
+expected and observed binding identities, journal bindings, supervisor completion
+and both guardian exits before running the frozen v3 oracle.
+
+14 synthetic launch/custody tests pass, including a full CPU-only custody fixture,
+failed partial collection, refusal outside tmux, duplicate attempt, pending CI,
+wrong worker, altered guard command, observed-binding mismatch and failed CI. These
+do not constitute a live Slurm/container test. The 12 v3 oracle tests also pass.
+
+Launch once from an owned remote tmux session:
+
+    python3 tools/pireus/continuity/ops/cpu_v3_attempt.py launch --frozen /workspace/.cache/pireus-continuity/external-container-cpu-v3-freeze-20260909 --stage /workspace/.cache/pireus-continuity/external-container-cpu-v3-driver-20260909/attempt
+
+After the job and launcher are terminal, use collect with the exact job ID, then
+qualify with the SHA256 of collection.json. A failed collection is retained and
+cannot qualify. The unchanged frozen manifest is the sole CPU runtime source;
+new orchestration code is separately hashed in start.json.
