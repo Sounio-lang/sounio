@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+sys.dont_write_bytecode = True  # Frozen receipt directories must remain read-only.
 
 PIN="bb52639973bede3905c7f991b79e57954adbd0ade53b2c4b359de78084d5841c"
 def verify(root):
