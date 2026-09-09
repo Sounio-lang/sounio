@@ -32,24 +32,65 @@ mis-evaluated the exp/log builtins — issue #1547, fixed.)
 
 ## The flagship (`mh7_reliability.sio`) — his seven-stage HRS compressor, reliability-quantified
 
-His first-author seven-stage paper (*Renewable Energy* 147 (2020) 164–178,
-DOI 10.1016/j.renene.2019.08.104) chains seven MH stages on 80 °C heat to
-reach 365 bar for 350-bar dispensing — and offers itself explicitly as a
-model and tool for sensitivity analysis. This demo takes the offer
-literally: the whole chain, plus the batch-to-batch alloy scatter no
-nominal-point run can see, as one deterministic receipt on both engines.
+The seven-stage paper he co-authored (Gkanas, Christodoulou, Tzamalis,
+**Stamatakis**, Chroneos, Deligiannis, Karagiorgis & Stubos, *Renewable
+Energy* 147 (2020) 164–178, DOI 10.1016/j.renene.2019.08.104) chains seven
+MH stages on 80 °C heat to reach **374 bar** from a 20 bar supply — and
+offers itself explicitly as a model and tool for sensitivity analysis. This
+demo takes the offer literally: the whole chain, plus the batch-to-batch
+alloy scatter no nominal-point run can see, as one deterministic receipt on
+both engines.
 
-The paper's per-stage alloy internals (its Table 3) sit behind a paywall,
-so the per-stage ΔH ladder (24–36 kJ/mol H2, batch half-widths
-±1.5–2.5 kJ/mol assigned by alloy maturity) is **representative — ours,
-labeled as such in the file header, with a swap slot for the real values**.
-What is his: both published system-level oracles reproduce exactly.
+> **Two corrections, 2026-09-09, from recovering the paper itself.** This
+> section previously called it "his first-author" paper: he is the **fourth**
+> author, E. Gkanas is first. And it quoted "delivery pressure 365 bar" as a
+> published oracle: 365 bar is the pressure at the paper's **third coupling
+> process** at 120 °C, not the system delivery, which is 374 bar in Case 1
+> and 830 bar in Case 6. The accepted post-print is open access
+> (Coventry University repository, CC-BY-NC-ND) and every table is now
+> transcribed in `demos/hydrogen/data/gkanas2020_seven_stage.md`.
 
-| oracle (his paper) | demo |
-| --- | --- |
-| overall compression ratio 18.7 @ 80 °C | 18.700002 |
-| delivery pressure 365 bar | 365.000037 bar |
-| ratio 41.5 @ 120 °C | 41.500004 |
+The paper's Table 3 was recorded here as paywalled, so the per-stage ΔH
+ladder (24–36 kJ/mol H2, batch half-widths ±1.5–2.5 kJ/mol assigned by
+alloy maturity) was **representative — ours, labeled as such in the file
+header, with a swap slot for the real values**.
+
+> **Table 3 has since been recovered** (see
+> `data/gkanas2020_seven_stage.md`), and it says the representative ladder
+> was not merely approximate but **inverted**. The measured ΔH(abs) ladder
+> *decreases* along the cascade — 25.24, 21.47, 20.35, 19.99, 18.20, 16.23,
+> 14.70 kJ/mol — because van 't Hoff (`ln P = ΔS/R − ΔH/(R·T)`) requires the
+> high-pressure stage to have the *lowest* ΔH. The ladder used here
+> increases. The paper also measures hysteresis per stage, as the
+> absorption/desorption enthalpy gap (3.0 kJ/mol at S1 widening to
+> 4.2 at S7), rather than as one lumped efficiency.
+>
+> **And the oracle table below is a fit, not a derivation.** The chain
+> carries three free quantities tuned to land on the published ratios — a
+> lumped `eta_nom = 0.90` ("assumption"), a swing exponent
+> `gamma = 0.613475` ("same fit"), and a supply pressure back-solved from
+> the oracle itself (`p0 = 365.0 / 18.7`). Fed the *measured* Table 3
+> values, this same ratio-chain model returns a compression ratio of
+> **6640×** rather than 18.7×, which shows the model FORM is wrong and not
+> just its parameters: the seven stages are coupled through an
+> interconnector (the paper's eq. 12), so each absorbs at whatever pressure
+> the previous one can deliver into it, and none achieves its free van 't
+> Hoff ratio. A ratio chain can only match the published numbers by being
+> fitted to them.
+>
+> The UQ machinery below — batch correlation, Sobol shares, the corner
+> p-box — is unaffected in structure and remains the point of the demo. What
+> is affected is the claim that it reproduces published physics; it
+> reproduces published *numbers*, from a fitted surrogate. A coupled
+> replacement built on the measured Table 3 is the correct fix and is the
+> current work.
+
+| oracle (the paper) | demo | status |
+| --- | --- | --- |
+| overall compression ratio 18.7 @ 80 °C | 18.700002 | fitted, not derived |
+| ratio 41.5 @ 120 °C | 41.500004 | fitted, not derived |
+| delivery pressure 374 bar @ 80 °C | not reproduced | demo targets the misattributed 365 bar |
+| cycle time 6625 s @ 80 °C | not modelled | no dynamics in this demo |
 
 Nominal chain: per-stage ratios 1.464–1.565 across overlapping temperature
 windows (20→35 … 65→80 °C), cumulative pressure 28.6 → 42.5 → 64.0 → 97.6 →
