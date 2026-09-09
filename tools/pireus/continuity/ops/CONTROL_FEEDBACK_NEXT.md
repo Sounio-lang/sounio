@@ -95,3 +95,12 @@ Eight local controls PASS across the exporter and request builder. Requests
 are staged at validation/feedback-smoke-requests-20260908. Token budget and
 execution-profile freeze remain pending real paired tokenization. The request
 manifest records these states as false and refuses existing attempt roots.
+
+Paired tokenizer11965 completed0:0 on2026-09-09UTC (the request identity retains
+its original20260908 label). All16 items match across ranks. Input tokens are
+344 without feedback and808 with feedback; totals with4096 output are4440 and4904.
+validation/feedback-smoke-tokenizer-11965 preserves receipts, input, mapping,
+launcher log and accounting. ops/qualify_feedback_tokens.py reconstructs the
+requests, verifies source dependencies, log-bound receipt hashes, pair identity,
+durable accounting and physical6144 budget. Exact inference runtime/profile
+freeze and current-source acceptance remain pending; no model was loaded.
