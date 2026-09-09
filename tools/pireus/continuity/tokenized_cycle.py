@@ -153,7 +153,9 @@ def pack_offline(root, manifest):
     save(root, "offline-bundle.json", dict(schema=1, mode="offline-generate", revision=REVISION,
          manifest_sha256=digest((root / "manifest.json").read_bytes()), items=items), "offline-bundle")
 
-def accept_offline(root, manifest, worker_dir):
+def accept_offline(root, manifest, worker_dir, *, runtime_root=None):
+    # Callers supplying a snapshot must independently verify its frozen identity.
+    runtime_root = HERE / "runtime" if runtime_root is None else Path(runtime_root)
     if manifest.get("transport") != "sglang-offline-token-ids" or worker_dir is None:
         raise ValueError("offline worker evidence required")
     receipts = [json.loads((worker_dir / ("rank-" + str(i) + "-complete.json")).read_bytes()) for i in (0, 1)]
@@ -161,7 +163,7 @@ def accept_offline(root, manifest, worker_dir):
     for rank, receipt in enumerate(receipts):
         if (receipt["rank"] != str(rank) or receipt["input_sha256"] != expected
             or receipt["revision"] != REVISION
-            or receipt["helper_sha256"] != digest((HERE / "runtime/offline_generate.py").read_bytes())
+            or receipt["helper_sha256"] != digest((runtime_root / "offline_generate.py").read_bytes())
             or receipt["model_loaded"] is not True or len(receipt["results"]) != manifest["budget"]):
             raise ValueError("offline completion receipt identity")
     for receipt in receipts:
@@ -176,7 +178,7 @@ def accept_offline(root, manifest, worker_dir):
             or type(profile.get("actual_swa_tokens")) is not int
             or profile["actual_swa_tokens"] < 639):
             raise ValueError("offline execution profile identity")
-    embedding_lock = json.loads((HERE/"runtime/embedding-offload-lock.json").read_bytes())
+    embedding_lock = json.loads((runtime_root/"embedding-offload-lock.json").read_bytes())
     for rank, receipt in enumerate(receipts):
         storage = receipt.get("embedding_storage", {})
         if (embedding_lock["revision"] != REVISION
@@ -188,9 +190,9 @@ def accept_offline(root, manifest, worker_dir):
             or storage.get("source_gpu_sha256") != embedding_lock["rank_sha256"][str(rank)]
             or storage.get("file_sha256") != embedding_lock["rank_sha256"][str(rank)]
             or storage.get("checkpoint_precision_changed") is not False
-            or storage.get("helper_sha256") != digest((HERE/"runtime/offload_embedding.py").read_bytes())):
+            or storage.get("helper_sha256") != digest((runtime_root/"offload_embedding.py").read_bytes())):
             raise ValueError("offline embedding storage identity")
-    lm_head_lock = json.loads((HERE/"runtime/lm-head-offload-lock.json").read_bytes())
+    lm_head_lock = json.loads((runtime_root/"lm-head-offload-lock.json").read_bytes())
     for rank, receipt in enumerate(receipts):
         storage = receipt.get("lm_head_storage", {})
         if (lm_head_lock["revision"] != REVISION
@@ -203,7 +205,7 @@ def accept_offline(root, manifest, worker_dir):
             or storage.get("source_gpu_sha256") != lm_head_lock["rank_sha256"][str(rank)]
             or storage.get("file_sha256") != lm_head_lock["rank_sha256"][str(rank)]
             or storage.get("checkpoint_precision_changed") is not False
-            or storage.get("helper_sha256") != digest((HERE/"runtime/offload_lm_head.py").read_bytes())):
+            or storage.get("helper_sha256") != digest((runtime_root/"offload_lm_head.py").read_bytes())):
             raise ValueError("offline LM-head storage identity")
     comparable = [{k: v for k, v in r.items() if k not in ("rank", "embedding_storage", "lm_head_storage")} for r in receipts]
     if comparable[0] != comparable[1]:
