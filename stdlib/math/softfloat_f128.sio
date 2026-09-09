@@ -1,4 +1,4 @@
-//! stdlib/math/softfloat_f128.sio — IEEE binary128 add/sub in sio (V0-E.5)
+//! stdlib/math/softfloat_f128.sio — IEEE binary128 add/sub/mul/neg/cmp in sio (V0-E.5 / V0-E.5.2)
 //!
 //! Semantic-Lane-ID: WS-G-V0E-STDLIB-GUM-SURFACE
 //! Claim clock: ADR-008 / ADR-009 — callers must judge with sounio_native_expected
@@ -400,6 +400,229 @@ pub fn f128_bits_soft_sub(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic,
     }
     let bneg = sf_pack(1 - sb, eb, fb)
     f128_bits_soft_add(a, bneg)
+}
+
+// ---------------------------------------------------------------------------
+// V0-E.5.2: mul / neg / cmp
+// ---------------------------------------------------------------------------
+
+/// Eight unsigned 32-bit words in i64 containers (256-bit product store).
+struct SfU256 {
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    w3: i64,
+    w4: i64,
+    w5: i64,
+    w6: i64,
+    w7: i64,
+}
+
+fn sf_u256_zero() -> SfU256 {
+    SfU256 { w0: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, w6: 0, w7: 0 }
+}
+
+fn sf_u256_add(a: SfU256, b: SfU256) -> SfU256 {
+    let s0 = a.w0 + b.w0
+    let s1 = a.w1 + b.w1 + (s0 >> 32)
+    let s2 = a.w2 + b.w2 + (s1 >> 32)
+    let s3 = a.w3 + b.w3 + (s2 >> 32)
+    let s4 = a.w4 + b.w4 + (s3 >> 32)
+    let s5 = a.w5 + b.w5 + (s4 >> 32)
+    let s6 = a.w6 + b.w6 + (s5 >> 32)
+    let s7 = a.w7 + b.w7 + (s6 >> 32)
+    SfU256 {
+        w0: s0 & 4294967295,
+        w1: s1 & 4294967295,
+        w2: s2 & 4294967295,
+        w3: s3 & 4294967295,
+        w4: s4 & 4294967295,
+        w5: s5 & 4294967295,
+        w6: s6 & 4294967295,
+        w7: s7 & 4294967295,
+    }
+}
+
+/// Shift left by 16 bits (one multiplier half-word).
+fn sf_u256_shl16(a: SfU256) -> SfU256 {
+    SfU256 {
+        w0: (a.w0 << 16) & 4294967295,
+        w1: ((a.w1 << 16) & 4294967295) | (a.w0 >> 16),
+        w2: ((a.w2 << 16) & 4294967295) | (a.w1 >> 16),
+        w3: ((a.w3 << 16) & 4294967295) | (a.w2 >> 16),
+        w4: ((a.w4 << 16) & 4294967295) | (a.w3 >> 16),
+        w5: ((a.w5 << 16) & 4294967295) | (a.w4 >> 16),
+        w6: ((a.w6 << 16) & 4294967295) | (a.w5 >> 16),
+        w7: ((a.w7 << 16) & 4294967295) | (a.w6 >> 16),
+    }
+}
+
+/// 128-bit × 16-bit → 144-bit partial product. Every 32×16 product is < 2^48,
+/// so nothing here depends on i64 wrap-around semantics.
+fn sf_u128_mul_u16(a: SfU128, h: i64) -> SfU256 {
+    let m = h & 65535
+    let p0 = a.w0 * m
+    let p1 = a.w1 * m + (p0 >> 32)
+    let p2 = a.w2 * m + (p1 >> 32)
+    let p3 = a.w3 * m + (p2 >> 32)
+    SfU256 {
+        w0: p0 & 4294967295,
+        w1: p1 & 4294967295,
+        w2: p2 & 4294967295,
+        w3: p3 & 4294967295,
+        w4: p3 >> 32,
+        w5: 0,
+        w6: 0,
+        w7: 0,
+    }
+}
+
+/// Full 128×128 → 256 product by Horner over the eight 16-bit halves of `b`
+/// (most significant half first).
+fn sf_u128_mul_wide(a: SfU128, b: SfU128) -> SfU256 with Mut {
+    var acc = sf_u256_zero()
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w3 >> 16))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w3))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w2 >> 16))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w2))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w1 >> 16))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w1))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w0 >> 16))
+    acc = sf_u256_shl16(acc)
+    acc = sf_u256_add(acc, sf_u128_mul_u16(a, b.w0))
+    acc
+}
+
+/// Drop the low 109 bits of a 226-bit significand product with sticky, leaving
+/// a 116/117-bit wide significand for `sf_pack_wide` (leading bit 115 or 116).
+fn sf_u256_shr109_sticky(p: SfU256) -> SfU128 {
+    var sticky: i64 = 0
+    if p.w0 != 0 || p.w1 != 0 || p.w2 != 0 { sticky = 1 }
+    if (p.w3 & 8191) != 0 { sticky = 1 }
+    let r0 = ((p.w3 >> 13) | ((p.w4 << 19) & 4294967295)) | sticky
+    let r1 = (p.w4 >> 13) | ((p.w5 << 19) & 4294967295)
+    let r2 = (p.w5 >> 13) | ((p.w6 << 19) & 4294967295)
+    let r3 = (p.w6 >> 13) | ((p.w7 << 19) & 4294967295)
+    SfU128 { w0: r0, w1: r1, w2: r2, w3: r3 }
+}
+
+/// IEEE binary128 multiplication, round-to-nearest-even.
+pub fn f128_bits_soft_mul(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.hi)
+    let ea = sf_unpack_exp(a.hi)
+    let fa = sf_unpack_frac(a.lo, a.hi)
+    let sb = sf_unpack_sign(b.hi)
+    let eb = sf_unpack_exp(b.hi)
+    let fb = sf_unpack_frac(b.lo, b.hi)
+    let exp_ones: i64 = 32767
+    let sign = if sa == sb { 0 } else { 1 }
+    if sf_is_nan(ea, fa) {
+        var f = fa
+        if sf_u128_is_zero(f) { f = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f)
+    }
+    if sf_is_nan(eb, fb) {
+        var f2 = fb
+        if sf_u128_is_zero(f2) { f2 = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f2)
+    }
+    if sf_is_inf(ea, fa) || sf_is_inf(eb, fb) {
+        if sf_is_zero(ea, fa) || sf_is_zero(eb, fb) {
+            return sf_pack(0, exp_ones, sf_qnan_frac())
+        }
+        return sf_pack(sign, exp_ones, sf_u128_zero())
+    }
+    if sf_is_zero(ea, fa) || sf_is_zero(eb, fb) {
+        return sf_pack(sign, 0, sf_u128_zero())
+    }
+    let pair_a = sf_sig_from(ea, fa)
+    let pair_b = sf_sig_from(eb, fb)
+    // value = (sig_a · 2^(ea_u-112)) · (sig_b · 2^(eb_u-112)) = P · 2^(ea_u+eb_u-224);
+    // P has its leading bit at 224 or 225, so P >> 109 sits at 115/116 with
+    // exp_u = ea_u + eb_u under the sf_pack_wide convention (bit 115 = 2^exp_u).
+    let prod = sf_u128_mul_wide(pair_a.1, pair_b.1)
+    let sig_wide = sf_u256_shr109_sticky(prod)
+    sf_pack_wide(sign, pair_a.0 + pair_b.0, sig_wide)
+}
+
+/// IEEE negate: flips the sign bit only (NaN payload preserved).
+pub fn f128_bits_soft_neg(a: F128Bits) -> F128Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.hi)
+    let ea = sf_unpack_exp(a.hi)
+    let fa = sf_unpack_frac(a.lo, a.hi)
+    sf_pack(1 - sa, ea, fa)
+}
+
+/// Three-way IEEE comparison: -1 (a < b), 0 (a == b, incl. ±0), 1 (a > b),
+/// 2 = unordered (either operand NaN).
+pub fn f128_bits_soft_cmp(a: F128Bits, b: F128Bits) -> i64 with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.hi)
+    let ea = sf_unpack_exp(a.hi)
+    let fa = sf_unpack_frac(a.lo, a.hi)
+    let sb = sf_unpack_sign(b.hi)
+    let eb = sf_unpack_exp(b.hi)
+    let fb = sf_unpack_frac(b.lo, b.hi)
+    if sf_is_nan(ea, fa) || sf_is_nan(eb, fb) { return 2 }
+    let za = sf_is_zero(ea, fa)
+    let zb = sf_is_zero(eb, fb)
+    if za && zb { return 0 }
+    if sa != sb {
+        if sa == 1 { return 0 - 1 }
+        return 1
+    }
+    var mag: i64 = 0
+    if ea > eb {
+        mag = 1
+    } else if ea < eb {
+        mag = 0 - 1
+    } else {
+        mag = sf_u128_cmp(fa, fb)
+    }
+    if sa == 1 { return 0 - mag }
+    mag
+}
+
+/// Language `f128` `<` (V0-E.5.2 desugar target). NaN → false.
+pub fn f128_bits_soft_lt(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    f128_bits_soft_cmp(a, b) == 0 - 1
+}
+
+/// Language `f128` `<=`. NaN → false.
+pub fn f128_bits_soft_le(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    let c = f128_bits_soft_cmp(a, b)
+    c == 0 - 1 || c == 0
+}
+
+/// Language `f128` `>`. NaN → false.
+pub fn f128_bits_soft_gt(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    f128_bits_soft_cmp(a, b) == 1
+}
+
+/// Language `f128` `>=`. NaN → false.
+pub fn f128_bits_soft_ge(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    let c = f128_bits_soft_cmp(a, b)
+    c == 1 || c == 0
+}
+
+/// Language `f128` `==`. NaN → false; +0 == -0.
+pub fn f128_bits_soft_eq(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    f128_bits_soft_cmp(a, b) == 0
+}
+
+/// Language `f128` `!=`. NaN → true.
+pub fn f128_bits_soft_ne(a: F128Bits, b: F128Bits) -> bool with Mut, Panic, Div {
+    f128_bits_soft_cmp(a, b) != 0
+}
+
+/// Four-limb ABI for V0-E.5.2 language `f128` `*` (seed-run gate surface).
+pub fn f128_soft_mul_limbs(a_lo: i64, a_hi: i64, b_lo: i64, b_hi: i64) -> F128Bits with Mut, Panic, Div {
+    f128_bits_soft_mul(F128Bits { lo: a_lo, hi: a_hi }, F128Bits { lo: b_lo, hi: b_hi })
 }
 
 /// Four-limb ABI for V0-E.5.1 language `f128` `+` (compiler desugar).
