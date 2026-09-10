@@ -1,0 +1,9 @@
+import SounioPireusOperatorNoveltyFeedbackShard13
+
+namespace SounioPireusOperatorNoveltyFeedback
+set_option maxHeartbeats 0
+set_option maxRecDepth 1000000
+
+theorem challenge_profile_exact : challengeProfile = frozenChallengeProfile := by decide
+
+end SounioPireusOperatorNoveltyFeedback
