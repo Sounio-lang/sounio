@@ -6,4 +6,4 @@ The declared command compiles gen2 only, preserving Madaros build argv through s
 
 Before launch, record fresh node/queue state and worker pod identity. Capture monotonic wall time, child process CPU usage, peak RSS, minor/major faults, host memory/swap/PSI and process identity. Preserve partial artifacts on timeout as unqualified evidence; never execute a partial output. A successful compile may subsequently undergo a bounded banner check, recorded separately. The runner must refuse an existing attempt marker.
 
-Preparation only: no job has been submitted by this packet. Runner implementation, transport verification, fresh preflight and launch are pending. No evidence of completed compilation is asserted.
+Job 11991 entered the verified worker at 2026-09-10T11:33:42 UTC. The packet passed hash verification on both ends of transport; fresh queue and host preflight passed. Execution runs under tmux pireus-gen2-cpu-v1. Twenty samples and compiler diagnostics confirmed execution in progress; no terminal result or completed compilation is asserted. See execution-state.json for the bounded observation.
