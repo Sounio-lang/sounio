@@ -4802,10 +4802,12 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
-                if lower_type_expr_is_array_of_f128(&(*list).head.ty) {
+                let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
+                if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
-                    // ready softfloat operands, stores take a handle.
-                    lowerer_mark_local_array_elem_wide_bits_mut(lo, (*list).head.name, 128)
+                    // ready softfloat operands, stores take a handle. 256 records a
+                    // `[f256; N]` param so its elements fail closed, not as integers.
+                    lowerer_mark_local_array_elem_wide_bits_mut(lo, (*list).head.name, param_elem_wide_bits)
                 }
                 if param_array_len >= 0 {
                     lowerer_bind_local_fixed_array_len_mut(lo, (*list).head.name, param_array_len)
@@ -5568,22 +5570,42 @@ fn lower_opt_type_is_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, 
     }
 }
 
-// V0-E.5.7: `[f128; N]`, or `&[f128; N]` / `&![f128; N]` (one reference layer,
-// the shape an array-by-reference param takes — mirrors
-// lower_type_expr_is_array_of_f64). Each slot holds an F128Bits handle. f256
-// arrays are NOT recognised here: they keep failing closed like any f256 value.
-fn lower_type_expr_is_array_of_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+// V0-E.5.7: element wide-float width of `[T; N]`, or of `&[T; N]` / `&![T; N]`
+// (one reference layer, the shape an array-by-reference param takes — mirrors
+// lower_type_expr_is_array_of_f64): 128 for `[f128; N]`, 256 for `[f256; N]`,
+// 0 otherwise. Recording 256 matters even though nothing lowers it: an element
+// of a `[f256; N]` must classify as a wide float so `xs[0] * xs[1]` reaches the
+// V0-E.4.1 refusal instead of the integer multiply it silently took before
+// (a latent greenwash on main for arrays of EITHER wide format).
+fn lower_type_expr_array_elem_wide_bits(te: &TypeExpr) -> i64 with Mut, Panic, Div {
     if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
         match (*te).inner {
-            Some(inner_ty) => return lower_type_expr_is_array_of_f128(&(*inner_ty)),
-            None => return false,
+            Some(inner_ty) => return lower_type_expr_array_elem_wide_bits(&(*inner_ty)),
+            None => return 0,
         }
     }
-    if (*te).kind != TypeExprKind::TypeArray { return false }
+    if (*te).kind != TypeExprKind::TypeArray { return 0 }
     match (*te).inner {
-        Some(inner_ty) => lower_type_expr_is_f128(&(*inner_ty)),
-        None => false,
+        Some(inner_ty) => {
+            if lower_type_expr_is_f128(&(*inner_ty)) { return 128 }
+            if lower_type_expr_is_wide_float(&(*inner_ty)) { return 256 }
+            0
+        }
+        None => 0,
     }
+}
+
+fn lower_opt_type_array_elem_wide_bits(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_array_elem_wide_bits(&(*te)),
+        None => 0,
+    }
+}
+
+// `[f128; N]` / `&[f128; N]`: each slot holds an F128Bits handle and the
+// element is a ready softfloat operand. f256 arrays are wide but NOT f128.
+fn lower_type_expr_is_array_of_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    lower_type_expr_array_elem_wide_bits(te) == 128
 }
 
 fn lower_opt_type_is_array_of_f128(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
@@ -13687,8 +13709,9 @@ impl Lowerer {
             return self.lower_field_is_f128_ref(&(*e).left, (*e).name)
         }
         if (*e).kind == ExprKind::ExprIndex {
-            // V0-E.5.7: an element of a `[f128; N]` array.
-            return self.lower_index_base_is_f128_array_ref(&(*e).left)
+            // V0-E.5.7: an element of a `[f128; N]` array (ready operand) or of a
+            // `[f256; N]` array (wide, never ready → V0-E.4.1 refusal downstream).
+            return self.lower_index_base_elem_wide_bits_ref(&(*e).left) > 64
         }
         if (*e).kind == ExprKind::ExprCast {
             return lower_opt_type_is_wide_float(&(*e).cast_type)
@@ -14025,9 +14048,10 @@ impl Lowerer {
             return false
         }
         if (*e).kind == ExprKind::ExprIndex {
-            // V0-E.5.7: an element of a `[f128; N]` array is a wide-float handle,
-            // never an f64 — whatever a same-named f64 array field elsewhere says.
-            if self.lower_index_base_is_f128_array_ref(&(*e).left) {
+            // V0-E.5.7: an element of a `[f128; N]` / `[f256; N]` array is a
+            // wide-float handle, never an f64 — whatever a same-named f64 array
+            // field elsewhere says.
+            if self.lower_index_base_elem_wide_bits_ref(&(*e).left) > 64 {
                 return false
             }
             return self.index_base_elem_is_float_ref(&(*e).left)
@@ -14645,8 +14669,9 @@ impl Lowerer {
         // the remaining numeric element to int. No test in the corpus prints a
         // string/pointer array element, so this cannot misroute an existing string.
         if (*e).kind == ExprKind::ExprIndex {
-            // V0-E.5.7: an element of a `[f128; N]` array reads as a wide-float handle.
-            if self.lower_index_base_is_f128_array_ref(&(*e).left) {
+            // V0-E.5.7: an element of a `[f128; N]` array reads as a wide-float
+            // handle; a `[f256; N]` element is wide too (kind 5, never ready).
+            if self.lower_index_base_elem_wide_bits_ref(&(*e).left) > 64 {
                 return 5
             }
             if self.index_base_elem_is_float_ref(&(*e).left) {
@@ -15636,8 +15661,10 @@ impl Lowerer {
                         (*(*locals).depths).values[idx as usize] = lo.scope_depth
                         (*(*locals).struct_types).values[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
                         (*(*locals).array_elem_float).values[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
-                        // V0-E.5.7: `[f128; N]` / `&[f128; N]` param slots hold F128Bits handles.
-                        (*(*locals).array_elem_wide_bits).values[idx as usize] = if lower_type_expr_is_array_of_f128(&(*list).head.ty) { 128 } else { 0 }
+                        // V0-E.5.7: `[f128; N]` / `&[f128; N]` param slots hold F128Bits
+                        // handles (128); a `[f256; N]` param records 256 so its elements
+                        // fail closed instead of lowering as integers.
+                        (*(*locals).array_elem_wide_bits).values[idx as usize] = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
@@ -16784,10 +16811,13 @@ impl Lowerer {
         rhs_array_elem_is_float: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array; the
-        // TypeArray form never reaches here (lower_let_stmt_f128_array_ref).
-        if lower_opt_type_is_array_of_f128(&s.ty) {
-            lo = lo.bind_local_array_elem_wide_bits(s.name, 128)
+        // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array (the
+        // TypeArray form never reaches here: lower_let_stmt_f128_array_ref), and
+        // `[f256; N]` / `&[f256; N]` annotations, whose elements must then fail
+        // closed as wide floats rather than lower as integers.
+        let annotated_elem_wide_bits = lower_opt_type_array_elem_wide_bits(&s.ty)
+        if annotated_elem_wide_bits > 0 {
+            lo = lo.bind_local_array_elem_wide_bits(s.name, annotated_elem_wide_bits)
         }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
@@ -16859,9 +16889,14 @@ impl Lowerer {
                         // `let v = f128_call(..)` / `let v = p.x` / `let v = xs[i]`
                         // (V0-E.5.4 / V0-E.5.5 / V0-E.5.7). Ahead of the f64/string
                         // classifiers: a wide-float handle must never be
-                        // reclassified by a same-named f64 field or array.
+                        // reclassified by a same-named f64 field or array. Only an
+                        // f128-READY source (f128 call / field / element) makes the
+                        // local a ready 128-bit operand; a `[f256; N]` element stays
+                        // kind 5 with no width, so any op on it fails closed.
                         lo = lo.bind_local_scalar_kind(s.name, 5)
-                        lo = lo.bind_local_wide_type(s.name, 128, 0)
+                        if lo.lower_f128_expr_ready_ref(&s.expr) {
+                            lo = lo.bind_local_wide_type(s.name, 128, 0)
+                        }
                     } else if lo.expr_result_is_float_ref(&(*expr_box_sk)) {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
                     } else if lo.expr_result_is_string_ref(&(*expr_box_sk)) {
@@ -17285,8 +17320,8 @@ impl Lowerer {
                     // (emit_fixed_array_value_copy above, handles per slot) is an
                     // f128 array too. Element identity travels with the binding.
                     let src_elem_wide = lo.lookup_local_array_elem_wide_bits((*expr_box).name)
-                    if src_elem_wide == 128 {
-                        lo = lo.bind_local_array_elem_wide_bits(s.name, 128)
+                    if src_elem_wide > 0 {
+                        lo = lo.bind_local_array_elem_wide_bits(s.name, src_elem_wide)
                     }
                 }
             }
@@ -20216,22 +20251,30 @@ impl Lowerer {
     // arrays, tuples) is not an f128 array here and falls to the generic path,
     // where a wide-float operand that is not ready fails closed.
     fn lower_index_base_is_f128_array_ref(self, base_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        self.lower_index_base_elem_wide_bits_ref(base_opt) == 128
+    }
+
+    // Element wide-float width of an index base: 128 (`[f128; N]`), 256
+    // (`[f256; N]` — recorded so the element classifies as a wide float and the
+    // V0-E.4.1 refusal fires instead of an integer op), 0 otherwise.
+    fn lower_index_base_elem_wide_bits_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
                 if (*base_expr).kind == ExprKind::ExprIdent {
-                    return self.lookup_local_array_elem_wide_bits((*base_expr).name) == 128
+                    return self.lookup_local_array_elem_wide_bits((*base_expr).name)
                 }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
-                    return ir_name_eq(
-                        self.field_array_elem_type_name_for_base_ref(&(*base_expr).left, (*base_expr).name),
-                        make_name("f128"))
+                    let elem_name = self.field_array_elem_type_name_for_base_ref(&(*base_expr).left, (*base_expr).name)
+                    if ir_name_eq(elem_name, make_name("f128")) { return 128 }
+                    if ir_name_eq(elem_name, make_name("f256")) { return 256 }
+                    return 0
                 }
                 if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
-                    return self.lower_index_base_is_f128_array_ref(&(*base_expr).left)
+                    return self.lower_index_base_elem_wide_bits_ref(&(*base_expr).left)
                 }
-                false
+                0
             }
-            None => false,
+            None => 0,
         }
     }
 
