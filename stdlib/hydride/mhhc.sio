@@ -47,7 +47,7 @@
 
 module hydride::mhhc
 
-use math::pure::{exp, ln, tan}
+use math::pure::{exp, ln}
 
 // ============================================================================
 // 0. CONSTANTS AND SHAPE
@@ -85,16 +85,50 @@ pub struct HydrideKinetics {
     e_des: f64        // J/mol
 }
 
-// Plateau shape. sigma is the slope-flatness factor and hyst the isotherm
-// hysteresis of the paper's eq. 11. Both zero recovers a flat, reversible
-// plateau -- which is the assumption this module is built to be able to
-// switch OFF, so its cost can be measured.
+// Plateau shape and the phase boundaries that bound it.
+//
+// sigma is the plateau slope as d(ln P)/dx, LINEAR and finite -- not the
+// coefficient of a tangent. hyst is the isotherm hysteresis of the paper's
+// eq. 11. x_alpha and x_beta are the loadings at which the solid-solution and
+// beta branches take over from the plateau.
+//
+// WHY THE TANGENT FORM IS GONE, measured rather than argued. The paper's
+// eq. 11 writes the whole isotherm as van 't Hoff plus
+// (sigma_s + sigma_0)*tan(pi*(X/X_max - 1/2)), which diverges at both ends of
+// the loading range. At x = 0.001 with sigma = 0.25 that gives
+// tan(pi*(-0.499)) ~ -318 and an equilibrium pressure of 3e-35 bar: the model
+// then says an empty bed absorbs hydrogen out of a vacuum of 1e-35 bar. It is
+// not a stiff problem to be integrated harder -- it is the tangent evaluated
+// outside the region it describes. Measured consequence, on p-box corner 101:
+// the interconnector is driven negative, the clamp that rescues it cannot
+// conserve, and 0.4% to 6% of the hydrogen disappears. Adaptive step
+// rejection does not help, because reaching the true asymptote means
+// resolving the gas inventory across 35 orders of magnitude.
+//
+// A real PCT isotherm has three regions and the tangent is a one-formula
+// caricature of all three. Modelling them separately makes every branch
+// finite: the terminal steepness becomes a POWER divergence in 1/(1-x)^2,
+// which is what "the last sites are hard to fill" actually means, instead of
+// an exponential of a tangent.
 pub struct PlateauShape {
-    sigma: f64,
-    hyst: f64
+    sigma: f64,       // d(ln P)/dx across the plateau
+    hyst: f64,        // isotherm hysteresis, ln P units
+    x_alpha: f64,     // upper edge of the alpha solid-solution branch
+    x_beta: f64       // lower edge of the beta branch
 }
 
-pub fn flat_plateau() -> PlateauShape { PlateauShape { sigma: 0.0, hyst: 0.0 } }
+// The flat, reversible, single-region idealisation: no slope, no hysteresis,
+// and phase boundaries pushed to the ends so the plateau covers everything.
+// This is what the module used before the branches existed, kept so its cost
+// can still be measured by switching it on.
+pub fn flat_plateau() -> PlateauShape {
+    PlateauShape { sigma: 0.0, hyst: 0.0, x_alpha: 0.0, x_beta: 1.0 }
+}
+
+// A sloped plateau with explicit phase boundaries.
+pub fn pct_plateau(sigma: f64, hyst: f64, x_alpha: f64, x_beta: f64) -> PlateauShape {
+    PlateauShape { sigma: sigma, hyst: hyst, x_alpha: x_alpha, x_beta: x_beta }
+}
 
 // ============================================================================
 // 1. EQUILIBRIUM PRESSURE
@@ -106,23 +140,63 @@ pub fn p_eq_flat(dh: f64, ds: f64, t_k: f64) -> f64 with Mut, Div, Panic {
     exp(ds / r_gas() - dh / (r_gas() * t_k))
 }
 
-// The paper's eq. 11: van 't Hoff plus a plateau-slope term that tilts the
-// isotherm with loading, plus half the hysteresis, signed by direction.
+// The equilibrium pressure across all three regions of the isotherm.
 //
-// The tangent is what makes a real plateau non-flat: at x = x_max/2 it
-// vanishes and the sloped isotherm agrees with the flat one exactly; toward
-// either end it diverges, which is the physical statement that the first
-// and last hydrogen into a lattice cost differently from the middle.
-pub fn p_eq_sloped(dh: f64, ds: f64, t_k: f64, x: f64, shape: PlateauShape,
-                   absorbing: bool) -> f64 with Mut, Div, Panic {
+//   x <= x_alpha   ALPHA, solid solution. Hydrogen dissolves atomically, so
+//                  the loading follows Sieverts' law x ~ sqrt(P) and the
+//                  pressure therefore goes as x^2. Anchored to meet the
+//                  plateau exactly at x_alpha.
+//
+//   in between     PLATEAU. van 't Hoff with a linear slope in loading,
+//                  centred on the middle of the plateau so that a zero slope
+//                  reproduces flat van 't Hoff exactly at every x.
+//
+//   x >= x_beta    BETA. The mirror of alpha: the remaining sites fill
+//                  against a pressure rising as 1/(1-x)^2. Divergent at full
+//                  loading, which is the physical statement that a lattice
+//                  cannot be overfilled -- but divergent as a POWER, so an
+//                  integrator can follow it.
+//
+// Continuity is by construction: each branch is anchored to the plateau value
+// at its own boundary, so the isotherm is continuous at x_alpha and x_beta for
+// every sigma. With x_alpha = 0 and x_beta = 1 the branches vanish and this is
+// the plateau alone, which is what flat_plateau() selects.
+pub fn p_eq_pct(dh: f64, ds: f64, t_k: f64, x: f64, shape: PlateauShape,
+                absorbing: bool) -> f64 with Mut, Div, Panic {
     if t_k <= 0.0 { return 0.0 }
     let base = ds / r_gas() - dh / (r_gas() * t_k)
-    var xc = x
-    if xc < 0.001 { xc = 0.001 }
-    if xc > 0.999 { xc = 0.999 }
-    let slope_term = shape.sigma * tan(3.14159265358979323846 * (xc - 0.5))
     let hyst_term = if absorbing { 0.0 - shape.hyst * 0.5 } else { shape.hyst * 0.5 }
-    exp(base + slope_term + hyst_term)
+    let xa = shape.x_alpha
+    let xb = shape.x_beta
+    let xm = 0.5 * (xa + xb)
+
+    if x <= xa {
+        if xa <= 0.0 {
+            return exp(base + shape.sigma * (x - xm) + hyst_term)
+        }
+        let p_a = exp(base + shape.sigma * (xa - xm) + hyst_term)
+        var xr = x
+        if xr < 0.0 { xr = 0.0 }
+        let r = xr / xa
+        return p_a * r * r
+    }
+
+    if x >= xb {
+        if xb >= 1.0 {
+            return exp(base + shape.sigma * (x - xm) + hyst_term)
+        }
+        let p_b = exp(base + shape.sigma * (xb - xm) + hyst_term)
+        var den = 1.0 - x
+        // A lattice at exactly full loading has an infinite equilibrium
+        // pressure. The floor here is a representational limit of f64, not a
+        // physical statement, and it is placed far enough out that the beta
+        // branch is many orders above any plateau before it is reached.
+        if den < 1.0e-9 { den = 1.0e-9 }
+        let r = (1.0 - xb) / den
+        return p_b * r * r
+    }
+
+    exp(base + shape.sigma * (x - xm) + hyst_term)
 }
 
 // ============================================================================
@@ -217,8 +291,8 @@ pub fn coupling_derivative(s: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
     let n_cap_b = bed_capacity_mol(bed_b)
     let p = interconnector_pressure(n_ic, v_ic, t_gas)
 
-    let peq_a = p_eq_sloped(bed_a.dh_des, bed_a.ds_des, t_a, x_a, shape, false)
-    let peq_b = p_eq_sloped(bed_b.dh_abs, bed_b.ds_abs, t_b, x_b, shape, true)
+    let peq_a = p_eq_pct(bed_a.dh_des, bed_a.ds_des, t_a, x_a, shape, false)
+    let peq_b = p_eq_pct(bed_b.dh_abs, bed_b.ds_abs, t_b, x_b, shape, true)
 
     let r_des = rate_des(kin, t_a, p, peq_a, x_a)   // fraction per second, >= 0
     let r_abs = rate_abs(kin, t_b, p, peq_b, x_b)   // fraction per second, >= 0
@@ -278,7 +352,13 @@ pub fn run_coupling(s0: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
     var worst_drift = 0.0
     var converged = false
     var n: i64 = 0
-    while n < max_steps {
+    // Stop when the transfer has converged instead of spinning out the
+    // remaining budget. With max_steps sized for the slowest corner, a
+    // fast coupling was running millions of empty iterations after it had
+    // already finished -- ~140k steps of work inside a 3e6 budget. This
+    // changes no result, only the time taken to reach it, which is what
+    // makes a cyclic-steady-state fixed point affordable inside a p-box.
+    while n < max_steps && !converged {
         if !converged {
             coupling_derivative(&y, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k1)
             var j: i64 = 0
@@ -423,11 +503,11 @@ pub fn test_hysteresis_is_per_stage() -> bool with Mut, Div, Panic {
 
 // --- 6.3 the plateau-slope term is exactly neutral at half loading ---
 pub fn test_plateau_slope_neutral_at_half() -> bool with Mut, Div, Panic {
-    let shape = PlateauShape { sigma: 0.35, hyst: 0.0 }
+    let shape = pct_plateau(0.35, 0.0, 0.10, 0.90)
     let flat = p_eq_flat(20000.0, 100.0, 313.15)
-    let sloped = p_eq_sloped(20000.0, 100.0, 313.15, 0.5, shape, true)
-    let low = p_eq_sloped(20000.0, 100.0, 313.15, 0.2, shape, true)
-    let high = p_eq_sloped(20000.0, 100.0, 313.15, 0.8, shape, true)
+    let sloped = p_eq_pct(20000.0, 100.0, 313.15, 0.5, shape, true)
+    let low = p_eq_pct(20000.0, 100.0, 313.15, 0.2, shape, true)
+    let high = p_eq_pct(20000.0, 100.0, 313.15, 0.8, shape, true)
     check_near(sloped, flat, 1.0e-9) && low < flat && high > flat
 }
 
