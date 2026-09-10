@@ -91,25 +91,15 @@ else
   # and run to rc=0. (Before V0-E.5.9 it was refused only because `4.0` was not
   # in the literal table — a refusal this gate misread as the wide-float
   # fail-closed path.)
-  F128_OUT="$TMP_DIR/lang_f128.elf"
   set +e
-  "$SOUC" compile "$LANG" -o "$F128_OUT" >"$TMP_DIR/compile_f128.log" 2>&1
-  f_rc=$?
+  "$SOUC" run "$LANG" >"$TMP_DIR/run_f128.log" 2>&1
+  r_rc=$?
   set -e
-  if [[ "$f_rc" -eq 0 && -s "$F128_OUT" ]]; then
-    set +e
-    "$F128_OUT" >"$TMP_DIR/run_f128.log" 2>&1
-    r_rc=$?
-    set -e
-    if [[ "$r_rc" -eq 0 ]]; then
-      note_pass "madaros_run_language_f128_arith_v0e5x"
-    else
-      note_fail "madaros_run_language_f128_arith_v0e5x rc=$r_rc"
-      tail -20 "$TMP_DIR/run_f128.log" >&2 || true
-    fi
+  if [[ "$r_rc" -eq 0 ]]; then
+    note_pass "madaros_run_language_f128_arith_v0e5x"
   else
-    note_fail "madaros_compile_language_f128_arith_v0e5x rc=$f_rc"
-    tail -30 "$TMP_DIR/compile_f128.log" >&2 || true
+    note_fail "madaros_run_language_f128_arith_v0e5x rc=$r_rc"
+    tail -30 "$TMP_DIR/run_f128.log" >&2 || true
   fi
 
   # The WIDE-FLOAT fail-closed path proper: the same program over f256, for
