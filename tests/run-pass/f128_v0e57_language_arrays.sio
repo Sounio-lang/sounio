@@ -1,0 +1,225 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.7 — language f128 in fixed arrays: every [f128; N] slot holds an F128Bits handle (no f64 payload)
+//@ ladder-stage: V0-E.5.7
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e57
+//
+// A `[f128; N]` is the ordinary fixed array (N boxed one-word slots); V0-E.5.7
+// teaches the lowerer that each slot holds an F128Bits handle. The element
+// identity lives in ONE place per binding — the local's array_elem_wide_bits
+// (stamped from the `[f128; N]` / `&[f128; N]` annotation, propagated by
+// `let zs = xs`) or, for `arr: [f128; N]` struct fields, the layout's element
+// type — and every consumer of `a[i]` reads it: operand readiness, `let` RHS
+// (annotated or not), scalar kind, store target. Array literals `[a, b, c]` and
+// repeat literals `[v; N]` in f128 position lower each element through the f128
+// value path (never the f64 array-literal classifier, which fires on the literal
+// shape alone). Stores `a[i] = 1.0` are binary128; `a[i] = y` copies. `&[f128; N]`
+// and by-value `[f128; N]` params, `let zs = xs` copies (no aliasing).
+//
+// Checker limit (documented, not worked around in the lowerer): bare float
+// literals inside a `[f128; N]` literal are rejected by `souc check` as [f64; N]
+// ("expected [f128; 4] / found [f64; 4]"), so this witness uses f128 idents as
+// elements. The lowerer accepts exact literals there; the checker does not yet.
+//
+// Distinct non-zero exits:
+// 11=literal_list 12=repeat_literal 13=read_sum 14=unannotated_let 15=loop_sum
+// 16=store_literal 17=store_expr 18=store_ident_no_alias 19=ref_param
+// 20=byval_param 21=array_copy_no_alias 22=cmp_elems 23=greenwash_elem_sq
+// 24=elem_sq 25=struct_field_arr 26=struct_field_arr_store 27=elem_literal
+// 28=annotated_let_from_elem 29=byval_param_no_alias
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::wide_float::{print_limb_hex16}
+
+struct Pair2 { arr: [f128; 2], tag: i64 }
+
+fn sum3(a: &[f128; 3]) -> f128 { a[0] + a[1] + a[2] }
+fn sum3_byval(a: [f128; 3]) -> f128 {
+    // The callee mutates its by-value copy; the caller's array must not change.
+    var b = a
+    b[0] = 0.0
+    a[0] + a[1] + a[2] + b[0]
+}
+fn first_lt_second(a: &[f128; 3]) -> bool { a[0] < a[1] }
+fn arr_prod2(p: &Pair2) -> f128 { p.arr[0] * p.arr[1] }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("v0e57_main_entered")
+    let half: f128 = 0.5
+    let one: f128 = 1.0
+    let two: f128 = 2.0
+    let three: f128 = 3.0
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+
+    // Array literal of f128 idents: [1, 2, 3].
+    let xs: [f128; 3] = [one, two, three]
+    if f128_to_lo(xs[0]) != 0 || f128_to_hi(xs[0]) != 4611404543450677248
+        || f128_to_lo(xs[1]) != 0 || f128_to_hi(xs[1]) != 4611686018427387904
+        || f128_to_lo(xs[2]) != 0 || f128_to_hi(xs[2]) != 4611826755915743232 {
+        println("FAIL literal_list")
+        return 11
+    }
+    // Repeat literal: every slot is the value (a null handle would not read 1.0).
+    var ys: [f128; 4] = [one; 4]
+    if f128_to_hi(ys[0]) != 4611404543450677248 || f128_to_hi(ys[1]) != 4611404543450677248
+        || f128_to_hi(ys[2]) != 4611404543450677248 || f128_to_hi(ys[3]) != 4611404543450677248
+        || f128_to_lo(ys[3]) != 0 {
+        println("FAIL repeat_literal")
+        return 12
+    }
+    // Elements as operands: 1 + 2 = 3.
+    let s: f128 = xs[0] + xs[1]
+    if f128_to_lo(s) != 0 || f128_to_hi(s) != 4611826755915743232 {
+        println("FAIL read_sum")
+        return 13
+    }
+    // Unannotated let from an element, then used as an operand: 3 + 1 = 4.
+    let v = xs[2]
+    let v1: f128 = v + one
+    if f128_to_hi(v) != 4611826755915743232 || f128_to_hi(v1) != 4611967493404098560 || f128_to_lo(v1) != 0 {
+        println("FAIL unannotated_let")
+        return 14
+    }
+    // Indexed by a loop counter: 1 + 2 + 3 = 6.
+    var acc: f128 = 0.0
+    var i: i64 = 0
+    while i < 3 {
+        acc = acc + xs[i]
+        i = i + 1
+    }
+    if f128_to_lo(acc) != 0 || f128_to_hi(acc) != 4612108230892453888 {
+        println("FAIL loop_sum")
+        return 15
+    }
+    // Store a literal: binary128 2.0, never f64 bits.
+    ys[1] = 2.0
+    if f128_to_lo(ys[1]) != 0 || f128_to_hi(ys[1]) != 4611686018427387904 {
+        println("FAIL store_literal")
+        return 16
+    }
+    // Store an expression over elements: 2 * 3 = 6. Slot 0 (shared repeat
+    // handle) must still read 1.0.
+    ys[2] = xs[1] * xs[2]
+    if f128_to_lo(ys[2]) != 0 || f128_to_hi(ys[2]) != 4612108230892453888 || f128_to_hi(ys[0]) != 4611404543450677248 {
+        println("FAIL store_expr")
+        return 17
+    }
+    // Store an ident: later stores into y do not reach ys[3].
+    var y: f128 = 0.5
+    ys[3] = y
+    y = 3.0
+    if f128_to_hi(ys[3]) != 4611123068473966592 || f128_to_hi(y) != 4611826755915743232 {
+        println("FAIL store_ident_no_alias")
+        return 18
+    }
+    // &[f128; 3] param: 6.
+    let t: f128 = sum3(&xs)
+    if f128_to_lo(t) != 0 || f128_to_hi(t) != 4612108230892453888 {
+        println("FAIL ref_param")
+        return 19
+    }
+    // By-value [f128; 3] param: 6 (+ 0 from the callee's own copy).
+    let tb: f128 = sum3_byval(xs)
+    if f128_to_lo(tb) != 0 || f128_to_hi(tb) != 4612108230892453888 {
+        println("FAIL byval_param")
+        return 20
+    }
+    // The callee's `b[0] = 0.0` must not have reached xs.
+    if f128_to_hi(xs[0]) != 4611404543450677248 {
+        println("FAIL byval_param_no_alias")
+        return 29
+    }
+    // Array copy: zs gets its own slots.
+    var zs = xs
+    zs[0] = 3.0
+    if f128_to_hi(zs[0]) != 4611826755915743232 || f128_to_hi(xs[0]) != 4611404543450677248 || f128_to_hi(zs[2]) != 4611826755915743232 {
+        println("FAIL array_copy_no_alias")
+        return 21
+    }
+    // Comparisons over elements, directly and through a &[f128; N] fn.
+    if !(xs[0] < xs[1]) || (xs[2] < xs[1]) || !(xs[1] == ys[1]) || !(xs[2] != ys[1])
+        || !first_lt_second(&xs) || first_lt_second(&zs) {
+        println("FAIL cmp_elems")
+        return 22
+    }
+    // Anti-f64 through an element: (1+~1e-20)^2 keeps the 2*tiny term.
+    let ws: [f128; 2] = [one + tiny, one]
+    let sq: f128 = ws[0] * ws[0]
+    print("got_elem_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    if f128_to_lo(sq) == 0 && f128_to_hi(sq) == 4611404543450677248 {
+        println("FAIL f64_greenwash_elem_sq")
+        return 23
+    }
+    if f128_to_lo(sq) != 103845937170696 || f128_to_hi(sq) != 4611404543450677248 {
+        println("FAIL elem_sq")
+        return 24
+    }
+    // Struct field `arr: [f128; 2]`: 2 + 3 = 5, 2 * 3 = 6 through &Pair2.
+    let p = Pair2 { arr: [two, three], tag: 7 }
+    let ps: f128 = p.arr[0] + p.arr[1]
+    let pp: f128 = arr_prod2(&p)
+    if f128_to_hi(ps) != 4612037862148276224 || f128_to_lo(ps) != 0
+        || f128_to_hi(pp) != 4612108230892453888 || p.tag != 7 {
+        println("FAIL struct_field_arr")
+        return 25
+    }
+    // Store into a struct-field element (literal-free, so the checker accepts
+    // the literal shape); q.arr[0] = 3 + 0.5 = 3.5.
+    var q = Pair2 { arr: [one, one], tag: 1 }
+    q.arr[1] = three
+    q.arr[0] = q.arr[1] + half
+    if f128_to_hi(q.arr[1]) != 4611826755915743232 || f128_to_hi(q.arr[0]) != 4611897124659920896 || f128_to_lo(q.arr[0]) != 0 {
+        println("FAIL struct_field_arr_store")
+        return 26
+    }
+    // Elements built from other elements: [3, 2] → 3 - 2 = 1.
+    let ts: [f128; 2] = [xs[2], ys[1]]
+    let d: f128 = ts[0] - ts[1]
+    if f128_to_lo(d) != 0 || f128_to_hi(d) != 4611404543450677248 {
+        println("FAIL elem_literal")
+        return 27
+    }
+    // Annotated let from an element.
+    let r: f128 = xs[1]
+    if f128_to_lo(r) != 0 || f128_to_hi(r) != 4611686018427387904 {
+        println("FAIL annotated_let_from_elem")
+        return 28
+    }
+
+    print("wire_sum3=")
+    print_limb_hex16(f128_to_lo(t))
+    print(":")
+    print_limb_hex16(f128_to_hi(t))
+    println("")
+    print("wire_loop_sum=")
+    print_limb_hex16(f128_to_lo(acc))
+    print(":")
+    print_limb_hex16(f128_to_hi(acc))
+    println("")
+    print("wire_elem_sq=")
+    print_limb_hex16(f128_to_lo(sq))
+    print(":")
+    print_limb_hex16(f128_to_hi(sq))
+    println("")
+    print("wire_field_arr_sum=")
+    print_limb_hex16(f128_to_lo(ps))
+    print(":")
+    print_limb_hex16(f128_to_hi(ps))
+    println("")
+
+    println("PASS f128_v0e57_language_arrays general=ieee754 anti_f64=green language_arrays=madaros")
+    return 0
+}
