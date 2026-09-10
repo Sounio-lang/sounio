@@ -139,3 +139,14 @@ remains one attempt, zero retries. No CPU/container or loaded-model
 qualification follows from this recovery setup.
 
 Recovery controls: six isolated subprocess controls passed, including existing-attempt, changed-source, changed-run-attempt, failed-CI and changed-driver refusals. Archived failure hashes also passed. These controls do not execute hardware. Replay with python3 tools/pireus/continuity/validation/external-container-cpu-v3-20260909/ci-recovery-controls.py.
+
+### CI recovery terminal refusal
+
+Attempt 2 ended in failure at the imported-capacity boundary gate. The wrapper
+timed out the compiler after 300 seconds (compiler status 124, gate status 1)
+on the 16383-function witness. Attempt 1 passed this gate on the same checkout
+merge ba65bbce7b2d19d051a507e6ec96eac29b0995f0. Semantic failure is not established.
+The recovery watcher stopped without invoking the original driver and no
+hardware attempt exists. source-ci-attempt-2/manifest.json pins this refusal.
+Next: measure the archived compiler and boundary workload independently before
+changing a timeout or interpreting the failure. No third CI rerun is scheduled.
