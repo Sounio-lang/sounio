@@ -1,0 +1,142 @@
+Review this bounded recovery extension before any live effect. Return CLEAR or concrete BLOCKER. Existing frozen Spark Pair Arbiter recover drains Slurm then fences all worker cgroups, THEN detaches node selector. During current incident workers are already fenced but kubelet recreates init/sidecar processes, so proving cgroups empty before detaching repeatedly fails. This extension does NOT modify existing frozen arbiter files or claim predecessor admission. It adds an explicitly distinct native Sounio decision to remove exactly the slurmd selector from the two policy-pinned nodes, only while same owned live lease is RECOVERY_REQUIRED and both hosts FENCED, watchdog/barrier and protected services intact, drained/zerojobs/zeroallocs observed, and fresh host MemAvailable >=32768MB. It never grants GPU, disables watchdog, changes memory floor, edits lease, resumes or trains. Then existing canonical recover must independently prove restoration. All observations and decision/effects retained; native/source hashes locked. Python transports observations and applies CAS labels; Sounio makes allow/refuse. Check race/scope/authority gaps and controls needed. Do not claim execution.
+
+FILE recovery_detach.sio
+// Bounded recovery authority: stop worker recreation only, never grant GPU access.
+// Input: schema=1, fifteen boolean facts and one predecessor Slurm observation mask, two MemAvailable MiB.
+// No grant, lease transition, barrier change, threshold override or resume action.
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 1 { return 2 }
+    let path = get_arg(0)
+    let size = file_size(path)
+    if size <= 0 || size > 256 { return 2 }
+    let raw = read_file(path)
+    if str_len(raw) != size { return 2 }
+    var values: [i64; 19] = [0; 19]
+    var p: i64 = 0
+    var i: i64 = 0
+    while i < 19 {
+        var digits: i64 = 0
+        var value: i64 = 0
+        while p < size {
+            let c = str_char_at(raw, p)
+            if c < 48 || c > 57 { break }
+            if digits >= 9 { return 2 }
+            value = value * 10 + c - 48
+            digits = digits + 1
+            p = p + 1
+        }
+        if digits == 0 || p >= size { return 2 }
+        if str_char_at(raw, p) != (if i == 18 { 10 } else { 32 }) { return 2 }
+        values[i as usize] = value
+        p = p + 1
+        i = i + 1
+    }
+    if p != size || values[0] != 1 { return 2 }
+    var allowed = true
+    i = 1
+    while i <= 16 {
+        if i == 15 {
+            if values[15] > 511 { return 2 }
+            if (values[15] & 30) != 30 { allowed = false }
+        } else {
+            if values[i as usize] > 1 { return 2 }
+            if values[i as usize] != 1 { allowed = false }
+        }
+        i = i + 1
+    }
+    if values[17] < 32768 || values[18] < 32768 { allowed = false }
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"action\":\"DETACH_FENCED_WORKERS\",\"decision\":\"")
+    if allowed { print("ALLOW") } else { print("REFUSE") }
+    println("\",\"gpu_grant\":false,\"resume\":false,\"minimum_free_memory_mb\":32768,\"claim_ready\":false}")
+    if allowed { 0 } else { 1 }
+}
+
+FILE recovery_detach.py
+#!/usr/bin/env python3
+"""Transport one bounded Sounio recovery decision into exact node label removal."""
+import argparse,datetime,hashlib,json,os,subprocess,time
+from pathlib import Path
+HERE=Path(__file__).resolve().parent
+ROOT=HERE.parents[3]
+NODES=("spark-3c59","spark-8e54")
+def sha(data):return hashlib.sha256(data).hexdigest()
+def fields(raw):return dict(x.split("=",1) for x in raw.split() if "=" in x)
+def kube(*args):return subprocess.check_output(["kubectl",*args],text=True,timeout=60)
+def jsonk(*args):return json.loads(kube(*args,"-o","json"))
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("--engine",type=Path,required=True)
+ ap.add_argument("--arbiter-root",type=Path,required=True);ap.add_argument("--evidence",type=Path,required=True)
+ ap.add_argument("--holder",required=True);ap.add_argument("--apply",action="store_true");a=ap.parse_args()
+ if not os.environ.get("TMUX"):raise ValueError("remote tmux required")
+ lock=json.loads((HERE/"recovery-detach-lock.json").read_text())
+ assert sha(a.engine.read_bytes())==lock["executable_sha256"],"native authority drift"
+ for name,expected in lock["sources"].items():assert sha((HERE/name).read_bytes())==expected,"source drift"
+ policy=a.arbiter_root/"tools/cluster/spark_pair_arbiter.policy.v1"
+ freeze=a.arbiter_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ cfg=fields(policy.read_text());frozen=fields(freeze.read_text())
+ assert sha(freeze.read_bytes())==lock["arbiter_freeze_sha256"],"unexpected predecessor freeze"
+ verified=subprocess.check_output([str(a.arbiter_root/"scripts/dev/spark_pair_arbiter.sh"),"verify"],text=True,timeout=60)
+ assert verified.startswith("SPARK_PAIR_VERIFY_PASS")
+ a.evidence.mkdir(parents=True,exist_ok=False)
+ def save(name,value):
+  data=value.encode() if isinstance(value,str) else (json.dumps(value,sort_keys=True,indent=2)+"\n").encode()
+  path=a.evidence/name;path.write_bytes(data);return path
+ base=[str(a.arbiter_root/"scripts/dev/spark_pair_arbiter_k8s_backend.sh"),"--policy",str(policy),"--freeze",str(freeze)]
+ raw_frame=subprocess.check_output(base+["facts","--holder",a.holder],text=True,timeout=190)
+ frame=fields(raw_frame);save("arbiter-frame.txt",raw_frame)
+ lease=jsonk("-n","beagle","get","lease","pireus-spark-pair")
+ save("lease.json",lease)
+ nodes=[jsonk("get","node",n) for n in NODES]
+ nodeset=jsonk("-n",cfg["nodeset_namespace"],"get","nodeset",cfg["nodeset_name"])
+ save("nodes.json",nodes);save("nodeset.json",nodeset)
+ pods=jsonk("-n","beagle","get","pods")["items"];reports=[]
+ for n in NODES:
+  found=[p for p in pods if p["spec"].get("nodeName")==n and p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(found)==1
+  raw=kube("-n","beagle","exec",found[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(n+".host-report.txt",raw);reports.append(fields(raw))
+ ann=lease["metadata"]["annotations"];epoch=ann[cfg["epoch_annotation"]]
+ expiry=datetime.datetime.fromisoformat(lease["spec"]["renewTime"].replace("Z","+00:00")).timestamp()+lease["spec"]["leaseDurationSeconds"]
+ checks=[
+  all(p["metadata"]["uid"]==cfg["node_"+str(i)+"_uid"] for i,p in enumerate(nodes)),
+  nodeset["metadata"]["uid"]==cfg["nodeset_uid"],
+  True,
+  ann[cfg["state_annotation"]]=="RECOVERY_REQUIRED" and frame["state"]=="RECOVERY_REQUIRED",
+  lease["spec"]["holderIdentity"]==a.holder,
+  expiry-time.time()>60,
+  frame["epoch"]==epoch and frame["observed_epoch"]==epoch and all(r["grant_epoch"]==epoch and r["grant_owner"]==a.holder for r in reports),
+  all(r["lease_uid"]==lease["metadata"]["uid"] for r in reports),
+  all(r["grant_mode"]=="FENCED" and r["grant_valid"]=="0" for r in reports),
+  all(r["source_sha256"]==frozen["authority_sha256"] and r["freeze_sha256"]==lock["arbiter_freeze_sha256"] for r in reports),
+  all(r["watchdog"]=="1" and 0<=int(r["reported_monotonic"])-int(r["watchdog_monotonic"])<=55 for r in reports),
+  all(r["device_barrier"]=="1" and r["device_barrier_source_sha256"]==frozen["device_barrier_source_sha256"] for r in reports),
+  all(r["protected"]=="1" for r in reports),
+  all(all(r[k]=="1" for k in ("inventory","services","restarts","docker_claims")) for r in reports),
+  int(frame["slurm_mask"]),
+  all(r["consumers"]=="1" for r in reports),
+ ]
+ values=[1]+[int(v) for v in checks]+[int(r["mem_available_mb"]) for r in reports]
+ input_path=save("facts.v1"," ".join(map(str,values))+"\n")
+ decision=subprocess.run([str(a.engine.resolve()),str(input_path.resolve())],capture_output=True,text=True,timeout=60)
+ save("decision.json",decision.stdout);save("decision.stderr.txt",decision.stderr)
+ receipt=json.loads(decision.stdout)
+ assert receipt["authority"]=="Sounio" and receipt["action"]=="DETACH_FENCED_WORKERS"
+ save("custody.json",dict(facts_sha256=sha(input_path.read_bytes()),engine_sha256=lock["executable_sha256"],apply=a.apply,contract=lock))
+ if decision.returncode or receipt["decision"]!="ALLOW":raise ValueError("Sounio refused recovery detachment")
+ if not a.apply:print("RECOVERY_DETACH_REVIEWABLE_ALLOW");return
+ # Compare-and-swap each exact node; no grant, barrier or lease mutation.
+ for node in nodes:
+  current=jsonk("-n","beagle","get","lease","pireus-spark-pair")
+  assert current["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"],"lease changed before effect"
+  assert expiry-time.time()>15,"lease too near expiry"
+  key=cfg["slurmd_selector_key"];assert node["metadata"]["labels"].get(key)==cfg["slurmd_selector_value"]
+  escaped=key.replace("~","~0").replace("/","~1")
+  patch=[dict(op="test",path="/metadata/uid",value=node["metadata"]["uid"]),
+    dict(op="test",path="/metadata/resourceVersion",value=node["metadata"]["resourceVersion"]),
+    dict(op="test",path="/metadata/labels/"+escaped,value=cfg["slurmd_selector_value"]),
+    dict(op="remove",path="/metadata/labels/"+escaped)]
+  save(node["metadata"]["name"]+".patch.json",patch)
+  result=kube("patch","node",node["metadata"]["name"],"--type=json","-p",json.dumps(patch))
+  save(node["metadata"]["name"]+".effect.txt",result)
+ print("RECOVERY_DETACH_APPLIED; GPU remains fenced; resume only through canonical arbiter")
+if __name__=="__main__":main()

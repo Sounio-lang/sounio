@@ -1,0 +1,262 @@
+Review new Pireus context producer and benchmark observation/decision code. Return CLEAR or concrete BLOCKER. Context uses existing target ontology plus explicitly DECLARED research-local primitive facts; it does not claim historical observed Spark triples. Negative controls remove/contradict required facts. Benchmark methods are being frozen BEFORE candidate timings: 30 paired alternating-order blocks per comparison, 32 captured kernel launches on 16384 resident vectors; both direct/shuffle controls on BOTH nodes; Sounio computes per-block fractional latency reduction ppm, median, deterministic paired percentile bootstrap 4000 samples (nearest-rank 2.5/97.5 percentiles indexes99/3899), median >=50000 and lowCI>0 for allfour comparisons. These are per-comparison exploratory bootstrap intervals, not familywise coverage or proof; scientific_novelty and claim_ready false. Material parity remains a required prior gate. Check integer bounds, parser, resampling, selection, synchronization and whether data/authority claims match implementation. Python may record durations but does not compute promotion statistics. Do not claim execution.
+
+FILE research_context.sio
+// Research-context producer over the existing Pireus target ontology.
+// New primitive declarations have research-local IRIs and declared provenance.
+// They do not turn the historical store's zero observed Sparks into observations.
+use ontology::query::{
+    TripleStore, triple_store_add, triple_iri, sparql_new, sparql_select,
+    sparql_add_pattern, sparql_execute, triple_pattern_new,
+    queryterm_iri, queryterm_variable, sparql_result_count,
+}
+use hardware::pireus::model::pireus_result_contains
+use hardware::pireus::target_profile::{
+    pireus_v01_store, pireus_query_canonical_targets, PIREUS_TARGET_DGX_SPARK,
+}
+const DECLARED_TRUE: i64 = 790001
+const DECLARED_FALSE: i64 = 790002
+const DECLARED_UNKNOWN: i64 = 790003
+// Predicates 790100..790105: f64 load, multiply, add, indexed select,
+// 16-lane shuffle, exact sign multiplication. Predicate 790106 is warp width.
+// Predicate 790107 is evidence role (declared=790004), not an observed GPU.
+fn query_state(store: &TripleStore, predicate: i64, state: i64) -> bool with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(PIREUS_TARGET_DGX_SPARK), queryterm_iri(predicate),
+        queryterm_variable(0)))
+    let result = sparql_execute(store, &query)
+    pireus_result_contains(&result, state)
+}
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // Optional integer control: 1 removes shuffle, 2 contradicts shuffle,
+    // 3 makes f64 load unknown. No control is used for research production.
+    var control: i64 = 0
+    if arg_count() > 1 { return 2 }
+    if arg_count() == 1 {
+        let arg = get_arg(0)
+        if str_len(arg) != 1 { return 2 }
+        control = str_char_at(arg, 0) - 48
+        if control < 1 || control > 3 { return 2 }
+    }
+    var store = pireus_v01_store()
+    let targets = pireus_query_canonical_targets(&store)
+    if !pireus_result_contains(&targets, PIREUS_TARGET_DGX_SPARK) { return 3 }
+    var bit: i64 = 0
+    while bit < 6 {
+        var state = DECLARED_TRUE
+        if bit == 3 { state = DECLARED_FALSE }
+        if control == 1 && bit == 4 { state = DECLARED_FALSE }
+        if control == 3 && bit == 0 { state = DECLARED_UNKNOWN }
+        triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790100 + bit, state))
+        bit = bit + 1
+    }
+    if control == 2 {
+        triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790104, DECLARED_FALSE))
+    }
+    triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790106, 790132))
+    triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790107, 790004))
+    var capabilities: i64 = 0
+    var facts_state: i64 = 1
+    bit = 0
+    while bit < 6 {
+        let yes = query_state(&store, 790100 + bit, DECLARED_TRUE)
+        let no = query_state(&store, 790100 + bit, DECLARED_FALSE)
+        let unknown = query_state(&store, 790100 + bit, DECLARED_UNKNOWN)
+        if yes && no { facts_state = 2 }
+        else if unknown || (!yes && !no) { if facts_state != 2 { facts_state = 0 } }
+        if yes { capabilities = capabilities | (1 << bit) }
+        bit = bit + 1
+    }
+    if !query_state(&store, 790107, 790004) { return 4 }
+    var width: i64 = 0
+    if query_state(&store, 790106, 790132) { width = 32 }
+    print("{\"schema\":1,\"target\":701202,\"dimension\":16,\"precision\":64,\"order\":1,\"fma\":0,\"capabilities\":")
+    print_int(capabilities); print(",\"lane_width\":"); print_int(width)
+    print(",\"facts_state\":"); print_int(facts_state); print("}\n")
+    0
+}
+
+FILE benchmark_decision.sio
+// Frozen material-gain rule, computed only in Sounio.
+// Four files: candidate/direct and candidate/shuffle on Spark3, then Spark8.
+// Each has 30 lines: block_index control_first candidate_total_ns control_total_ns.
+// Resident-layout kernel timing; per-block gain in ppm, paired percentile bootstrap.
+// 4000 deterministic resamples; 95% interval = sorted samples [99], [3899].
+// Both-node / both-control eligibility requires median >= 50000 and CI low > 0.
+// This finite experiment never closes formal/scientific claims.
+struct Gain { valid: bool, median: i64, low: i64, high: i64 }
+fn invalid() -> Gain { Gain { valid: false, median: 0, low: 0, high: 0 } }
+fn evaluate(path: string) -> Gain with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 || size > 8192 { return invalid() }
+    let text = read_file(path)
+    if str_len(text) != size { return invalid() }
+    var gains: [i64; 30] = [0; 30]
+    var position: i64 = 0
+    var block: i64 = 0
+    while block < 30 {
+        var values: [i64; 4] = [0; 4]
+        var field: i64 = 0
+        while field < 4 {
+            var value: i64 = 0
+            var digits: i64 = 0
+            while position < size {
+                let c = str_char_at(text, position)
+                if c < 48 || c > 57 { break }
+                if digits >= 9 { return invalid() }
+                value = value * 10 + c - 48
+                digits = digits + 1
+                position = position + 1
+            }
+            if digits == 0 || position >= size { return invalid() }
+            let delimiter = if field == 3 { 10 } else { 32 }
+            if str_char_at(text, position) != delimiter { return invalid() }
+            position = position + 1
+            values[field as usize] = value
+            field = field + 1
+        }
+        if values[0] != block || values[1] != (block % 2) { return invalid() }
+        if values[2] <= 0 || values[3] <= 0 { return invalid() }
+        gains[block as usize] = ((values[3] - values[2]) * 1000000) / values[3]
+        block = block + 1
+    }
+    if position != size { return invalid() }
+    var original: [i64; 30] = [0; 30]
+    var copy_index: i64 = 0
+    while copy_index < 30 { original[copy_index as usize] = gains[copy_index as usize]; copy_index = copy_index + 1 }
+    var i: i64 = 1
+    while i < 30 {
+        let key = original[i as usize]
+        var j = i
+        while j > 0 && original[(j - 1) as usize] > key {
+            original[j as usize] = original[(j - 1) as usize]
+            j = j - 1
+        }
+        original[j as usize] = key
+        i = i + 1
+    }
+    let median = (original[14] + original[15]) / 2
+    var boot: [i64; 4000] = [0; 4000]
+    var state: i64 = 20260906
+    var repetition: i64 = 0
+    while repetition < 4000 {
+        var sample: [i64; 30] = [0; 30]
+        i = 0
+        while i < 30 {
+            state = (state * 48271) % 2147483647
+            sample[i as usize] = gains[(state % 30) as usize]
+            i = i + 1
+        }
+        i = 1
+        while i < 30 {
+            let key = sample[i as usize]
+            var j = i
+            while j > 0 && sample[(j - 1) as usize] > key {
+                sample[j as usize] = sample[(j - 1) as usize]
+                j = j - 1
+            }
+            sample[j as usize] = key
+            i = i + 1
+        }
+        boot[repetition as usize] = (sample[14] + sample[15]) / 2
+        repetition = repetition + 1
+    }
+    i = 1
+    while i < 4000 {
+        let key = boot[i as usize]
+        var j = i
+        while j > 0 && boot[(j - 1) as usize] > key {
+            boot[j as usize] = boot[(j - 1) as usize]
+            j = j - 1
+        }
+        boot[j as usize] = key
+        i = i + 1
+    }
+    Gain { valid: true, median: median, low: boot[99], high: boot[3899] }
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 4 { return 2 }
+    var index: i64 = 0
+    var eligible = true
+    // Validate all files before emitting a receipt.
+    while index < 4 {
+        let result = evaluate(get_arg(index))
+        if !result.valid { return 2 }
+        index = index + 1
+    }
+    print("{\"authority\":\"Sounio\",\"method\":\"paired-median-ppm-bootstrap4000-v1\",\"scope\":\"resident-layout-kernel\",\"comparisons\":[")
+    index = 0
+    while index < 4 {
+        let result = evaluate(get_arg(index))
+        if index > 0 { print(",") }
+        print("{\"median_gain_ppm\":"); print_int(result.median)
+        print(",\"ci95_low_ppm\":"); print_int(result.low)
+        print(",\"ci95_high_ppm\":"); print_int(result.high); print("}")
+        if result.median < 50000 || result.low <= 0 { eligible = false }
+        index = index + 1
+    }
+    print("],\"gain_gate\":\""); if eligible { print("PASS") } else { print("NO_GAIN") }
+    print("\",\"requires_material_parity\":true,\"claim_ready\":false,\"scientific_novelty\":false}\n")
+    0
+}
+
+FILE gpu_benchmark.py
+#!/usr/bin/env python3
+"""Record paired CUDA-event durations; Sounio computes all gain decisions."""
+import argparse,hashlib,json,os,socket,time
+from pathlib import Path
+import numpy as np
+import torch
+from gpu_probe import Driver
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("--run",type=Path,required=True);a=ap.parse_args()
+ assert os.environ.get("SLURM_JOB_ID")
+ root=a.run;manifest=json.loads((root/"benchmark-manifest.json").read_text())
+ assert manifest["method"]=="paired-median-ppm-bootstrap4000-v1"
+ assert manifest["blocks"]==30 and manifest["vectors"]==16384 and manifest["replays"]==32
+ fixtures=(root/"numeric-fixtures.jsonl").read_bytes()
+ assert hashlib.sha256(fixtures).hexdigest()==manifest["fixtures_sha256"]
+ rows=[json.loads(line) for line in fixtures.splitlines()][256:288]
+ inputs={k:np.tile(np.array([r[k] for r in rows],dtype=np.int64),(512,1)).view(np.float64) for k in ("a_bits","b_bits")}
+ driver=Driver();graphs={};retained=[]
+ items=manifest["controls"]+manifest["candidates"]
+ for item in items:
+  p=root/item["ptx"];assert hashlib.sha256(p.read_bytes()).hexdigest()==item["ptx_sha256"]
+  module,function=driver.load(p)
+  tensors=[torch.from_numpy(np.ascontiguousarray(v.T if item["layout"] else v)).to("cuda") for v in inputs.values()]
+  out=torch.empty_like(tensors[0])
+  driver.launch(function,*tensors,out,16384);torch.cuda.synchronize()
+  graph=torch.cuda.CUDAGraph()
+  with torch.cuda.graph(graph):
+   for _ in range(32):driver.launch(function,*tensors,out,16384)
+  for _ in range(8):graph.replay()
+  torch.cuda.synchronize()
+  graphs[item["id"]]=graph;retained.append((module,function,tensors,out))
+ output=root/("timings-"+socket.gethostname());output.mkdir(exist_ok=True)
+ for candidate in manifest["candidates"]:
+  for control in manifest["controls"]:
+   target=output/(candidate["id"]+"."+control["id"]+".tsv")
+   if target.exists():raise ValueError("timing trial exists; use a distinct frozen run")
+   cg=graphs[candidate["id"]];bg=graphs[control["id"]]
+   for _ in range(8):cg.replay();bg.replay()
+   torch.cuda.synchronize()
+   with target.open("w") as log:
+    for block in range(30):
+     durations={}
+     order=[("control",bg),("candidate",cg)] if block%2 else [("candidate",cg),("control",bg)]
+     for label,graph in order:
+      start=torch.cuda.Event(enable_timing=True);end=torch.cuda.Event(enable_timing=True)
+      start.record();graph.replay();end.record();end.synchronize()
+      durations[label]=round(start.elapsed_time(end)*1000000)
+      assert 0<durations[label]<1000000000
+     log.write(f"{block} {block%2} {durations['candidate']} {durations['control']}\n")
+     log.flush();os.fsync(log.fileno())
+   print(json.dumps(dict(stage="PAIRED_TIMING_OBSERVED",candidate=candidate["id"],
+      control=control["id"],node=socket.gethostname(),job=os.environ["SLURM_JOB_ID"],
+      sha256=hashlib.sha256(target.read_bytes()).hexdigest(),blocks=30)),flush=True)
+ (output/"inventory.json").write_text(json.dumps(dict(job=os.environ["SLURM_JOB_ID"],
+  node=socket.gethostname(),gpu=torch.cuda.get_device_name(0),cuda=torch.version.cuda,
+  torch=str(torch.__version__),timing="CUDA events around 32 captured kernel launches",
+  vectors=16384,layout_conversion_included=False,observation_only=True),indent=2)+"\n")
+if __name__=="__main__":main()
