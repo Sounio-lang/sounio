@@ -828,6 +828,14 @@ whoever picks option 1, 2, or the remainder of option 3.
   literal (`let x: f64 = 0x1.8p+0`) still lowers the parser placeholder
   magnitude; checker E008/E001 still reject a bare literal in a `-> f128` tail
   position and as a `[f128; N]` element.
+- **Madaros, language `f128` without `use math::softfloat_f128`:** the softfloat
+  desugar targets (`f128_bits_soft_add` …) are stdlib fns; a program that uses
+  language `f128` arithmetic but imports nothing from `math::softfloat_f128`
+  compiles to an ELF whose desugared calls hit body-less stubs and trap (SIGILL,
+  exit 132) instead of being refused at compile time. Every ladder witness
+  imports the module. Making the lowerer refuse when a desugar target is not in
+  the module graph is a pending rung (found by the V0-E.4.1 gate rewrite in
+  V0-E.5.9).
 - Full stdlib GUM surface for `f128` is still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
   control); not a claim path. Repro: `examples/numerics/f128_is_f64_probe.sio`.

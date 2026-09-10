@@ -91,8 +91,14 @@ else
   # and run to rc=0. (Before V0-E.5.9 it was refused only because `4.0` was not
   # in the literal table — a refusal this gate misread as the wide-float
   # fail-closed path.)
+  # The softfloat desugar targets live in stdlib math::softfloat_f128; a
+  # program must import that module for the targets to be in its module graph
+  # (without the import the ELF traps on the body-less stub — documented gap,
+  # see KNOWN_LIMITATIONS). The run probe adds the import; nothing else changes.
+  LANG128="$TMP_DIR/arith_check_f128_imported.sio"
+  { echo 'use math::softfloat_f128::{f128_from_limbs}'; cat "$LANG"; } >"$LANG128"
   set +e
-  "$SOUC" run "$LANG" >"$TMP_DIR/run_f128.log" 2>&1
+  "$SOUC" run "$LANG128" >"$TMP_DIR/run_f128.log" 2>&1
   r_rc=$?
   set -e
   if [[ "$r_rc" -eq 0 ]]; then
