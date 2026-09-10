@@ -10,7 +10,7 @@
 # `scripts/ci/*.sh` invoke a higher-level subcommand interface:
 #
 #   <souc> check <file>             typecheck only, no execute
-#   <souc> run   <file>             typecheck + compile + execute
+#   <souc> run   <file> [args...]   typecheck + compile + execute with literal argv
 #   <souc> compile <file> -o <out>  typecheck + compile to <out>
 #   <souc> info                     print this wrapper's resolution path
 #   <souc> <file> <out>             raw positional passthrough
@@ -131,7 +131,7 @@ souc-native-wrapper.sh — subcommand wrapper around $RAW_SOUC
 
 Usage:
   $(basename "$0") check <file.sio>             typecheck only
-  $(basename "$0") run   <file.sio>             compile + execute
+  $(basename "$0") run   <file.sio> [args...]   compile + execute with program arguments
   $(basename "$0") compile <file.sio> -o <out>  compile to <out>
   $(basename "$0") info                          print resolution path
   $(basename "$0") <file.sio> <out>              raw positional passthrough
@@ -209,8 +209,8 @@ case "${1:-}" in
 
   run)
     shift
-    if [[ $# -ne 1 ]]; then
-      echo "error: run takes exactly 1 argument (file.sio)" >&2
+    if [[ $# -lt 1 ]]; then
+      echo "error: run requires a source file (file.sio) followed by optional program arguments" >&2
       usage >&2
       exit 2
     fi
@@ -227,7 +227,8 @@ case "${1:-}" in
     fi
     chmod +x "$tmp"
     set +e
-    "$tmp"
+    shift
+    "$tmp" "$@"
     rc=$?
     set -e
     rm -f "$tmp"
