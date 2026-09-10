@@ -63,6 +63,7 @@ cd "$ROOT_DIR"
 
 . "$ROOT_DIR/scripts/lib/gate_assert.sh"
 . "$ROOT_DIR/scripts/lib/souc_invoke.sh"
+. "$ROOT_DIR/scripts/lib/gate_process_observer.sh"
 gate_name "madaros_fixed_point"
 
 SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
@@ -154,7 +155,7 @@ else
 
   # ── rung: gen2 ──────────────────────────────────────────────────────────────
   echo "[rung gen2] gen1 compiles $SRC"
-  souc_compile "$MADAROS" "$SRC" "$GEN2" >"$WORK/gen2.log" 2>&1
+  gate_observe_command gen2 "$WORK/gen2.log" souc_compile "$MADAROS" "$SRC" "$GEN2"
   GEN2_RC=$?
   MERGED="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
@@ -201,7 +202,7 @@ else
 
       # ── rung: gen3 ──────────────────────────────────────────────────────────
       echo "[rung gen3] gen2 compiles $SRC"
-      souc_compile "$GEN2" "$SRC" "$GEN3" >"$WORK/gen3.log" 2>&1
+      gate_observe_command gen3 "$WORK/gen3.log" souc_compile "$GEN2" "$SRC" "$GEN3"
       GEN3_RC=$?
       echo "           rc=$GEN3_RC"
       if [[ "$GEN3_RC" -ne 0 || ! -s "$GEN3" ]]; then
