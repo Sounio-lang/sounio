@@ -786,10 +786,19 @@ whoever picks option 1, 2, or the remainder of option 3.
   element is still inferred `[f64; N]` and rejected (E001) — use f128 idents.
   Fns returning `[f128; N]`, `Seq<f128>`, `for x in xs` over f128 arrays, nested
   arrays, `%`, `+=` on f128, f256 fields/params/arrays, methods returning `f128`
-  (`v.norm2()`), builtin `print_f128`, and GUM/`Knowledge`/`MeasuredF256` remain
-  deferred.
-- **print** of language-level `f128` values and full stdlib GUM surface are
-  still out of scope.
+  (`v.norm2()`), and GUM/`Knowledge`/`MeasuredF256` remain deferred.
+- **Madaros V0-E.5.8:** exact textual output of a language `f128` (`--stage v0e58`)
+  as ordinary stdlib Sounio in `stdlib/math/softfloat_f128_fmt.sio`:
+  `print_f128` / `println_f128` / `f128_to_string` give the correctly rounded
+  (half-even) 36-significant-digit decimal `[-]d.ddd…e[+-]dddd` (zeros
+  `0.0e+0000`, `inf`/`-inf`/`nan`); `print_f128_hex` / `f128_to_hex_string` give
+  the exact C99 hex float. Exact base-10^9 big-integer scaling over the whole
+  binary128 range incl. subnormals; no f64 anywhere. Builtin `print`/`println`
+  of an `f128` value is still refused at lowering (`cannot safely lower
+  print/println argument with unresolved scalar kind`; check admits it, no ELF).
+  `print_f128` on f256/f64 is a checker error (E009). f256 printing, width /
+  precision options, and parsing from text are not provided.
+- Full stdlib GUM surface for `f128` is still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
   control); not a claim path. Repro: `examples/numerics/f128_is_f64_probe.sio`.
 - Consequence for `benchmarks/chemistry/RESULTS.md` §7.7 remains blocked on a
