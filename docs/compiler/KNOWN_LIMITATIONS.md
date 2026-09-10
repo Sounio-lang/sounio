@@ -772,6 +772,14 @@ whoever picks option 1, 2, or the remainder of option 3.
   slot holds the `F128Bits` handle; reads are f128 expressions, struct-literal
   literals are binary128, `v.x = expr` / `acc = 2.0` / `acc = y` stores take a
   handle (the V0-E.5.1 literal-store gap is closed).
+- **Madaros V0-E.5.6:** language `f128` through impl methods (`--stage v0e56`):
+  methods declared `-> f128` / taking `f128` params on `self`, `self: &T`,
+  `self: &!T` receivers; `v.norm2()` is an f128 expression (let, operand,
+  argument, comparison, assignment RHS, chained), and `v.scale(2.0)` lowers the
+  literal as binary128 through the callee's `f128_param_mask` with the receiver
+  bit shifted out. `%`, `+=` on f128, f256 fields/params/methods, and
+  GUM/`Knowledge`/`MeasuredF256` remain deferred. A bare literal in a binary op inside a method body (`k * 0.5`) is
+  rejected by check (E004: literals are f64) — bind it first (`let h: f128 = 0.5`).
 - **Madaros V0-E.5.7:** language `f128` in fixed arrays (`--stage v0e57`): every
   `[f128; N]` slot holds an `F128Bits` handle; `a[i]` is an f128 expression
   (operand, `let` RHS annotated or not, comparison), `a[i] = 2.0` / `a[i] = y`
