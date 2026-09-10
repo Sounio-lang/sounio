@@ -29,8 +29,12 @@ adsorbate–adsorbate lateral interaction beyond site blocking. Anything
 requiring the spatial statistics of a real surface needs a KMC code, and
 this is not one.
 
-It also does not do dimensional analysis, today, on the compiler you would
-install. That is measured in §5 and it is the sharpest limitation here.
+It DOES do dimensional analysis, as of this branch, on the compiler you
+would install -- which is a correction to what this document said on
+2026-09-09, when that was the sharpest limitation listed here. A rate
+declared `mol m^-2 s^-1` is checked against the arithmetic that produces
+it, and two amounts of species declared disjoint cannot be added. What
+that cost, and the defect it exposed in the process, is in S5.
 
 What it does is make a microkinetic model **checkable in ways a script is
 not**, and the rest of this document is the evidence for that claim,
@@ -206,28 +210,67 @@ rather than silently applied.
 
 ## 5. What does not work, measured
 
-### Unit types do not survive arithmetic on either shipping engine
+### Unit types now survive arithmetic on the default engine
 
-This is the sharpest limitation and it cost a headline claim. Probed on
-2026-09-09 across three compilers:
+**This section used to open by calling dimensional analysis the sharpest
+limitation here, and that is no longer true.** The table below replaces the
+one written on 2026-09-09; the old one is kept underneath it because the
+difference is the point.
 
-| operation | Madaros v0.80.0 (default) | lean_single seed | gen3.elf (unmerged branch) |
+Measured 2026-09-10 on `artifacts/self-hosted/madaros-l9`, built from this
+branch:
+
+| operation | Madaros, this branch |
+|---|---|
+| `unit + unit`, same brand | accepted |
+| `unit × f64` | accepted |
+| `unit + unit`, **incompatible dimensions** | **rejected, E041** |
+| `unit ÷ unit` against a declared derived unit | accepted |
+
+What changed, and it was three separate defects:
+
+1. **`ItemUnit` was never collected by the checker spine the default engine
+   runs.** Every `unit X;` declaration was inert. Waking it took the unit
+   system from 3 of 14 unit fixtures passing to 10, and from 4 of 15 to 11.
+2. **The call-argument dimension check compared registry INDICES, not
+   dimensions.** A quantity derived by arithmetic -- `distance / time` --
+   gets an anonymous interned entry that never equals the named
+   `unit velocity = m / s` it matches, so the diagnostic printed
+   `argument unit: length^1*time^-1 / parameter unit: length^1*time^-1` and
+   rejected it anyway. Both the boundary and the compatibility path now
+   compare dimensions, using the same addability test the binary operator
+   uses, so they agree by construction.
+3. **Waking the units then BROKE that check, silently.** With `mg` and
+   `second` both resolving to `TyF64`, a fast path keyed on `TypeKind` alone
+   skipped all five call-argument boundary checks. `needs_mg(t: second)` is
+   rejected by the committed baseline, was ACCEPTED after the units commit,
+   and is rejected again now -- with E041, the real dimension error, rather
+   than the E001 an unresolved name produced by accident.
+
+The third is the one worth carrying into any evaluation of this language: the
+checks are real, and turning a subsystem on can switch another one off
+without a single test failing. See
+`scripts/ci/checker_spine_parity_gate.sh`, which exists to make that class of
+silence impossible, and
+`docs/audit/SWEEP_STACK_LIMIT_CORRECTION_2026-09-09.md`, which corrects three
+commit messages on this branch whose sweep numbers were measured under a stack
+limit this project does not use.
+
+**The old table, 2026-09-09, for contrast:**
+
+| operation | Madaros v0.80.0 | lean_single seed | gen3.elf (unmerged) |
 |---|---|---|---|
-| `unit + unit`, same brand | **rejected** | accepted | accepted, 12.000000 correct |
-| `unit × f64` | **rejected** | accepted | accepted, 12.000000 correct |
-| `unit + unit`, **incompatible dimensions** | rejected | **accepted — unsafe** | **rejected — correct** |
-| `unit ÷ unit` | **rejected** | accepted | accepted, 2.000000 correct |
+| `unit + unit`, same brand | rejected | accepted | accepted |
+| `unit × f64` | rejected | accepted | accepted |
+| `unit + unit`, incompatible | rejected | **accepted — unsafe** | rejected |
+| `unit ÷ unit` | rejected | accepted | accepted |
 
-Working dimensional analysis exists in Sounio: `gen3.elf` on
-`feat/w1-qd128-transcend` both computes correctly and refuses to add mol/s
-to mol/m. **It is not merged.** On `main`, Madaros rejects every arithmetic
-operation on a branded value — including adding two values of the same
-brand — and the lean_single seed accepts everything, providing no
-dimensional safety at all.
-
-`surface.sio` is therefore written without unit types. That is what makes
-it portable across all three engines, and it is stated in the file header
-rather than left for a reader to discover.
+`surface.sio` is still written without unit types, because it is meant to run
+on the engines that ship on `main` and this work is not merged there yet.
+`examples/hydrogen/h2_verified_surface_rate.sio` is the same physics written
+WITH the rate declared as `mol m^-2 s^-1` and H2 and CO2 declared disjoint,
+and it lists the four mistakes the compiler now refuses, each produced by
+compiling the program rather than quoted from memory.
 
 ### Two limits on how far a model can be integrated
 
