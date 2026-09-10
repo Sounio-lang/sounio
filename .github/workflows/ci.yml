@@ -8,6 +8,16 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      current_source_runner:
+        description: "Explicit Current-Source execution profile"
+        type: choice
+        options: [github-hosted, pireus-cpu36-v1]
+        default: github-hosted
+        required: false
+      current_source_base_sha:
+        description: "Frozen PR comparison base SHA (required for CPU36)"
+        type: string
+        required: false
       nightly:
         description: "Run expensive nightly jobs (e.g. R6 corpus sweep)"
         type: boolean
@@ -801,7 +811,9 @@ jobs:
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && vars.PIREUS_CPU36_RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
     # Raised again to 35 here because this branch adds three more sub-gates to
@@ -814,7 +826,9 @@ jobs:
     # reaches this gate, measured 20+ min for that step alone on a 4-core
     # GH-hosted runner (it was previously never reached). 35 min was cancelled
     # mid-compile with rc=0 errors=0 already achieved for the cheaper check rung.
-    timeout-minutes: 75
+    # CPU36 is an explicit resource qualification, with the same gates.
+    # Prospective 150-minute budget: measured 85-minute gen2 plus other gates.
+    timeout-minutes: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && 150 || 75 }}
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -822,6 +836,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify explicit CPU36 execution profile
+        if: inputs.current_source_runner == 'pireus-cpu36-v1'
+        env:
+          PIREUS_RUNNER_LABEL: ${{ vars.PIREUS_CPU36_RUNNER_LABEL }}
+          PIREUS_BASE_SHA: ${{ inputs.current_source_base_sha }}
+        run: |
+          python3 -m unittest discover -s tools/pireus/continuity/ops/ci_runner_cpu36_v1 -p test_verify_profile.py -v
+          python3 tools/pireus/continuity/ops/ci_runner_cpu36_v1/verify_profile.py
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
@@ -898,8 +920,8 @@ jobs:
       - name: Run changed Madaros tests with the current-source compiler
         env:
           SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-          CI_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_EVENT_NAME: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && 'pull_request' || github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.current_source_base_sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
         run: bash scripts/ci/madaros_changed_tests_gate.sh

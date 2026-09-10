@@ -36,3 +36,20 @@ Official runner references:
 https://github.com/actions/runner/releases/tag/v2.337.0
 https://github.com/actions/runner/blob/main/src/Runner.Listener/Runner.cs
 https://docs.github.com/en/actions/reference/security/secure-use
+
+## Explicit workflow selection
+
+The CI workflow accepts current_source_runner=pireus-cpu36-v1 on manual dispatch.
+PIREUS_CPU36_RUNNER_LABEL must identify the prepared one-shot runner, and
+current_source_base_sha must pin the PR comparison base. The declared job budget
+is 150 minutes within the runner's 180-minute lifetime ceiling.
+
+The guard rejects absent routing configuration, a hosted fallback, the wrong
+CPU/memory cgroup, UID 0, a mounted service-account token, non-dispatch invocation
+or a missing/invalid comparison base. The changed-tests step uses the frozen PR
+base and actual dispatched head, preserving PR test selection instead of the
+manual dispatch's ordinary one-fixture fallback. Existing gate order and commands
+are unchanged. The default profile remains github-hosted.
+
+Registration and dispatch still require a restricted runner identity and raw
+receipt custody. Workflow routing code is not evidence that the job ran.
