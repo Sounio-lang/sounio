@@ -23,7 +23,7 @@ These examples demonstrate Sounio's ability to solve real scientific problems th
 - **Domain**: Pharmaceutical Sciences
 - **Features**: Epistemic types, GUM uncertainty propagation, safety bounds
 - **Problem**: Calculate drug dosage accounting for measurement uncertainty
-- **Output**: Dose = 700mg ± 40mg, safety verification within therapeutic window
+- **Output**: Dose = 700 mg (σ = 40.3 mg), safety verification within therapeutic window
 - **Unique**: Automatic variance propagation (σ²_total = y²σ²_x + x²σ²_y)
 
 ### Intermediate
