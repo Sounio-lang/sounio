@@ -110,9 +110,11 @@ fi
 
 # No host-float anywhere on the formatting path: no f64 casts, no f64-typed
 # bindings, no float literals, no f64 print helpers.
+FMT_CODE="$TMP_DIR/fmt_code_only.sio"
+grep -Ev '^\s*//' "$FMT" | sed 's/"[^"]*"//g' >"$FMT_CODE" || true
 if [[ -f "$FMT" ]] \
-  && ! grep -Eq 'as f64|as f32|: f64|: f32|-> f64|-> f32|print_float|format_f64|f64_to_str' "$FMT" \
-  && ! { grep -Ev '^\s*//' "$FMT" | sed 's/"[^"]*"//g' | grep -Eq '[0-9]\.[0-9]'; }; then
+  && ! grep -Eq 'f64|f32|print_float|format_f64' "$FMT_CODE" \
+  && ! grep -Eq '[0-9]\.[0-9]' "$FMT_CODE"; then
   note_pass "stdlib_f128_fmt_no_f64_path"
 else
   note_fail "stdlib_f128_fmt_touches_f64"
