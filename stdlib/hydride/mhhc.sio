@@ -337,6 +337,7 @@ pub fn run_coupling(s0: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
     var y: [f64; 8] = [0.0; 8]
     var y2: [f64; 8] = [0.0; 8]
     var k1: [f64; 8] = [0.0; 8]
+    var ytr: [f64; 8] = [0.0; 8]
     var k2: [f64; 8] = [0.0; 8]
     var k3: [f64; 8] = [0.0; 8]
     var k4: [f64; 8] = [0.0; 8]
@@ -350,39 +351,127 @@ pub fn run_coupling(s0: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
 
     var elapsed = 0.0
     var worst_drift = 0.0
+    var nonconserving_clamps: i64 = 0
     var converged = false
     var n: i64 = 0
-    // Stop when the transfer has converged instead of spinning out the
-    // remaining budget. With max_steps sized for the slowest corner, a
-    // fast coupling was running millions of empty iterations after it had
-    // already finished -- ~140k steps of work inside a 3e6 budget. This
-    // changes no result, only the time taken to reach it, which is what
-    // makes a cyclic-steady-state fixed point affordable inside a p-box.
+    // STEP SIZE IS SET BY THE GAS, not by the caller alone.
+    //
+    // The interconnector is the smallest reservoir in the system, and how fast
+    // it empties is what the step has to resolve. Its depletion timescale is
+    // n_ic divided by the rate the beds are draining it, and that scales with
+    // v_ic: a small manifold empties in a fraction of the time a large one
+    // does, at the same rates. A single global dt therefore cannot be right
+    // for every corner of a parameter box that varies v_ic.
+    //
+    // Measured on p-box corner 29 -- fast kinetics, v_ic at its low end, and a
+    // FLAT plateau so the isotherm singularity is not involved:
+    //
+    //     v_ic = 0.001   dt = 0.5    236570 ppm lost, "converged" at 288 s
+    //     v_ic = 0.001   dt = 0.1         0 ppm,      converged at 416 s
+    //     v_ic = 0.001   dt = 0.02        0 ppm,      converged at 412 s
+    //     v_ic = 0.005   dt = 0.5         0 ppm,      converged at 480 s
+    //
+    // The nominal volume is fine at dt = 0.5 and the small one is not, which
+    // is why a step-size study run only at v_ic = 0.005 -- as the one behind
+    // this module's dt = 0.5 was -- certifies nothing about the low corner.
+    // The cap below removes the need for that study to be repeated per corner:
+    // the step is bounded by the gas timescale wherever the run happens to be,
+    // recomputed at the same cadence as the conservation check.
+    // h carries across iterations: a rejected step halves it, an accepted one
+    // lets it grow back toward dt, so the trajectory is not paid for at the
+    // cost of its hardest instant.
+    var h = dt
+    let h_floor = dt * 0.000001
+    var accepted: i64 = 0
+    var rejected: i64 = 0
+    var n: i64 = 0
     while n < max_steps && !converged {
-        if !converged {
-            coupling_derivative(&y, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k1)
-            var j: i64 = 0
-            while j < 5 { y2[j] = y[j] + 0.5 * dt * k1[j]; j = j + 1 }
-            coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k2)
-            j = 0
-            while j < 5 { y2[j] = y[j] + 0.5 * dt * k2[j]; j = j + 1 }
-            coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k3)
-            j = 0
-            while j < 5 { y2[j] = y[j] + dt * k3[j]; j = j + 1 }
-            coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k4)
-            j = 0
-            while j < 5 {
-                y[j] = y[j] + (dt / 6.0) * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j])
-                j = j + 1
-            }
-            if y[0] < 0.0 { y[0] = 0.0 }
-            if y[0] > 1.0 { y[0] = 1.0 }
-            if y[1] < 0.0 { y[1] = 0.0 }
-            if y[1] > 1.0 { y[1] = 1.0 }
-            if y[2] < 0.0 { y[2] = 0.0 }
-            elapsed = elapsed + dt
+        n = n + 1
+        coupling_derivative(&y, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k1)
 
-            if (n % 64) == 0 {
+        // Cheap pre-cap by the gas timescale: the interconnector is the
+        // smallest reservoir, and bounding the step by a hundredth of the time
+        // it would take to empty at the current rate makes most steps
+        // admissible on the first try. It is a shortcut to fewer rejections,
+        // not the correctness argument -- that is the rejection test below.
+        let drain = abs_f64(k1[2])
+        if drain > 0.0 && y[2] > 0.0 {
+            let cap_gas = (y[2] / drain) * 0.01
+            if cap_gas < h { h = cap_gas }
+        }
+
+        var j: i64 = 0
+        while j < 5 { y2[j] = y[j] + 0.5 * h * k1[j]; j = j + 1 }
+        coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k2)
+        j = 0
+        while j < 5 { y2[j] = y[j] + 0.5 * h * k2[j]; j = j + 1 }
+        coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k3)
+        j = 0
+        while j < 5 { y2[j] = y[j] + h * k3[j]; j = j + 1 }
+        coupling_derivative(&y2, bed_a, bed_b, kin, shape, v_ic, t_gas, t_fluid_hot, t_fluid_cold, &! k4)
+        j = 0
+        while j < 5 {
+            ytr[j] = y[j] + (h / 6.0) * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j])
+            j = j + 1
+        }
+
+        // THE STEP IS REJECTED IF IT LEAVES THE ADMISSIBLE SET.
+        //
+        // A loading lies in [0, 1] and the interconnector cannot hold negative
+        // moles. With the three-region isotherm the true solution never leaves
+        // that set, so a step that lands outside it is the discretisation
+        // crossing a KINK: when the hot bed empties, r_des drops to zero at
+        // once and the drain on the gas jumps, and a step sized from the
+        // derivative at the START of that step walks through it.
+        //
+        // This was tried once BEFORE the isotherm was fixed and it stalled --
+        // elapsed time went to zero, because the tangent form put p_eq at
+        // 3e-35 bar and no step satisfied the test. It works now for the same
+        // reason the drift went to zero: the unreachable asymptote is gone.
+        //
+        // Capping by the BED timescales instead of rejecting was measured and
+        // rejected: with fast absorption it drives h so small the run crawls
+        // and the convergence test trips at 11 s of simulated time against
+        // 1960 s for the right answer. Shrinking a step out of caution is not
+        // event detection.
+        let admissible = ytr[0] >= 0.0 && ytr[0] <= 1.0
+                      && ytr[1] >= 0.0 && ytr[1] <= 1.0
+                      && ytr[2] >= 0.0
+
+        if !admissible && h > h_floor {
+            h = h * 0.5
+            rejected = rejected + 1
+        } else {
+            var m: i64 = 0
+            while m < 5 { y[m] = ytr[m]; m = m + 1 }
+
+            // CONSERVING CLAMPS, a safety net now that steps are rejected. The
+            // inventory is y[0]*n_cap_a + y[1]*n_cap_b + y[2], exactly what is
+            // clamped, so clamping in place destroys or creates hydrogen. A bed
+            // that cannot hold more puts it in the gas phase between the beds,
+            // which keeps the sum invariant by construction.
+            if y[0] < 0.0 { y[2] = y[2] + y[0] * n_cap_a  y[0] = 0.0 }
+            if y[0] > 1.0 { y[2] = y[2] + (y[0] - 1.0) * n_cap_a  y[0] = 1.0 }
+            if y[1] < 0.0 { y[2] = y[2] + y[1] * n_cap_b  y[1] = 0.0 }
+            if y[1] > 1.0 { y[2] = y[2] + (y[1] - 1.0) * n_cap_b  y[1] = 1.0 }
+            // The one clamp that cannot conserve: negative gas has nowhere to
+            // go. Reachable only if h hit the floor, meaning step control
+            // failed. report[7] is how a caller checks rather than assumes --
+            // and it does fire when it should, measured at 3 and then 30 on
+            // p-box corner 1 while the control was still wrong.
+            if y[2] < 0.0 {
+                y[2] = 0.0
+                nonconserving_clamps = nonconserving_clamps + 1
+            }
+
+            elapsed = elapsed + h
+            accepted = accepted + 1
+            if h < dt {
+                h = h * 2.0
+                if h > dt { h = dt }
+            }
+
+            if (accepted % 64) == 0 {
                 let inv = coupling_inventory(&y, n_cap_a, n_cap_b)
                 var drift = abs_f64(inv - inv0)
                 if inv0 > 0.0 { drift = drift / inv0 }
@@ -391,9 +480,7 @@ pub fn run_coupling(s0: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
                 if abs_f64(k1[1]) < tol && abs_f64(k1[0]) < tol { converged = true }
             }
         }
-        n = n + 1
     }
-
     var c: i64 = 0
     while c < 8 { out[c] = y[c]; c = c + 1 }
     report[0] = elapsed
@@ -403,7 +490,7 @@ pub fn run_coupling(s0: &[f64; 8], bed_a: HydrideBed, bed_b: HydrideBed,
     if converged { report[4] = 1.0 } else { report[4] = 0.0 }
     report[5] = y[3]
     report[6] = y[4]
-    report[7] = 0.0
+    report[7] = nonconserving_clamps as f64
 }
 
 // ============================================================================
