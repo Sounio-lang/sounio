@@ -35,6 +35,7 @@ EOF
     strip_file "$SOUNIO/lexer/cursor.sio"
     strip_file "$SOUNIO/lexer/mod.sio"
     strip_file "$SOUNIO/parser/ast.sio"
+    strip_file "$SOUNIO/parser/f128_literal.sio"
     strip_file "$SOUNIO/parser/parser.sio"
     strip_file "$SOUNIO/parser/types.sio"
     strip_file "$SOUNIO/parser/patterns.sio"

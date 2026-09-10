@@ -27,6 +27,7 @@ for f in \
   self-hosted/lexer/numparse.sio \
   self-hosted/lexer/mod.sio \
   self-hosted/parser/ast.sio \
+  self-hosted/parser/f128_literal.sio \
   self-hosted/parser/parser.sio \
   self-hosted/parser/exprs.sio \
   self-hosted/parser/items.sio \
