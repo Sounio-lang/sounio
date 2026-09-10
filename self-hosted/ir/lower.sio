@@ -5647,6 +5647,13 @@ fn lower_fn_returns_f128(func: &IrFunction) -> bool with Mut, Panic, Div {
     ir_name_eq((*func).return_struct_name, make_name("f128"))
 }
 
+// V0-E.5.6: `-> f256` has no Madaros payload yet. Its result must still be
+// CLASSIFIED wide so any arithmetic on it reaches the V0-E.4.1 refusal instead
+// of the f64 path; the f128-only predicates above keep it out of the desugar.
+fn lower_fn_returns_f256(func: &IrFunction) -> bool with Mut, Panic, Div {
+    ir_name_eq((*func).return_struct_name, make_name("f256"))
+}
+
 // V0-E.5.1: only dyadic values that are exact in both f64 and f128. Anything
 // else (including 1e-20) must use f128_from_limbs — never f64 widen.
 //
@@ -13705,8 +13712,13 @@ impl Lowerer {
             return self.lookup_local_scalar_kind((*e).name) == 5
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
-            // V0-E.5.5: an f128 struct field.
+            // V0-E.5.5: an f128 struct field. V0-E.5.6: an f256 field is wide
+            // too — it was invisible here, so `w.v * w.v` with BOTH operands
+            // f256 fields (no f256 local in sight) lowered as an f64 multiply
+            // and emitted an ELF. Classified wide, it reaches the V0-E.4.1
+            // refusal because only f128 fields are ready operands.
             return self.lower_field_is_f128_ref(&(*e).left, (*e).name)
+                || self.lower_field_is_f256_ref(&(*e).left, (*e).name)
         }
         if (*e).kind == ExprKind::ExprIndex {
             // V0-E.5.7: an element of a `[f128; N]` array (ready operand) or of a
@@ -13720,10 +13732,13 @@ impl Lowerer {
             let callee_short = lower_f128_expr_callee_short_opt(&(*e).left)
             return ir_name_eq(callee_short, make_name("f128_from_limbs"))
                 || self.lower_callee_returns_f128_ref(&(*e).left)
+                || self.lower_callee_returns_f256_ref(&(*e).left)
         }
         if (*e).kind == ExprKind::ExprMethodCall {
-            // V0-E.5.6: `v.norm2()` on a method declared `-> f128`.
+            // V0-E.5.6: `v.norm2()` on a method declared `-> f128` (ready) or
+            // `-> f256` (wide, so arithmetic on it refuses rather than f64).
             return self.lower_method_call_returns_f128_ref(e)
+                || self.lower_method_call_returns_f256_ref(e)
         }
         if (*e).kind == ExprKind::ExprBinary {
             // V0-E.5.2: `a < b` on f128 operands is a bool, not a wide float.
@@ -20311,6 +20326,19 @@ impl Lowerer {
         }
     }
 
+    // V0-E.5.6: `base.field` declared `f256`. No payload exists, so this only
+    // feeds the WIDE classification (V0-E.4.1 refusal), never a desugar.
+    fn lower_field_is_f256_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base) => {
+                let base_ty = self.lower_expr_struct_type_name_ref(&(*base))
+                if base_ty.len == 0 { return false }
+                ir_name_eq(self.field_named_type_for_struct(base_ty, field_name), make_name("f256"))
+            }
+            None => false,
+        }
+    }
+
     // V0-E.5.5: is `e` an assignable slot holding a language f128 (a 2-limb local
     // / f128 param, or an f128 struct field)? Such a store must take an F128Bits
     // handle, so the RHS is lowered through lower_f128_value_ref.
@@ -20370,6 +20398,20 @@ impl Lowerer {
         if fn_id < 0 { return false }
         let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
         lower_fn_returns_f128(&callee_fn)
+    }
+
+    fn lower_method_call_returns_f256_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let fn_id = self.lower_method_call_fn_id_ref(e)
+        if fn_id < 0 { return false }
+        let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
+        lower_fn_returns_f256(&callee_fn)
+    }
+
+    fn lower_callee_returns_f256_ref(self, callee: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        let fn_id = self.lower_callee_fn_id_ref(callee)
+        if fn_id < 0 { return false }
+        let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
+        lower_fn_returns_f256(&callee_fn)
     }
 
     fn lower_f128_call_is_intrinsic_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {

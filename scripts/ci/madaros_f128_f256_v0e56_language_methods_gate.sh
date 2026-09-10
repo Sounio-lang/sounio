@@ -174,8 +174,10 @@ if [[ -x "$SOUC" ]]; then
     fi
   done
 
+  # `run` writes ./a.out: run from TMP_DIR so a concurrent gate in the same
+  # checkout cannot swap the binary under us.
   set +e
-  "$SOUC" run "$TMP_DIR/method_only.sio" >"$TMP_DIR/method_only.run.log" 2>&1
+  ( cd "$TMP_DIR" && "$SOUC" run "$TMP_DIR/method_only.sio" ) >"$TMP_DIR/method_only.run.log" 2>&1
   mo_rc=$?
   set -e
   if [[ "$mo_rc" -eq 0 ]]; then
@@ -186,7 +188,7 @@ if [[ -x "$SOUC" ]]; then
   fi
 
   set +e
-  "$SOUC" run "$SMOKE" >"$TMP_DIR/madaros.run.log" 2>&1
+  ( cd "$TMP_DIR" && "$SOUC" run "$ROOT_DIR/$SMOKE" ) >"$TMP_DIR/madaros.run.log" 2>&1
   m_rc=$?
   set -e
   if [[ "$m_rc" -eq 0 ]] && grep -Fq 'PASS f128_v0e56_language_methods' "$TMP_DIR/madaros.run.log"; then
