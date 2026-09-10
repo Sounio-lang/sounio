@@ -169,3 +169,13 @@ This was separate raw-compiler troubleshooting. No Spark v3 CPU/container
 attempt occurred and no CI timeout, model-memory guard or frozen workload
 was changed. The compiler ZIP remains pinned in the persistent private cache.
 Diagnose step-manager initialization before submitting another capacity workload.
+
+Follow-up observation: the worker log path is a FIFO with three old tail/grep
+readers (two at least six days old, one at least two days old). The absence of
+step-start errors from pod stdout cannot establish their absence from the daemon.
+No existing reader or daemon was modified. The underlying step-start cause is
+still open. On published head 7617d6ff62, CI run 34424138904 job 102705970176
+completed the initial lowering gates successfully, including the imported-
+capacity gate, and reached the self-compile step. This does not supply a full
+CI verdict or CPU/container qualification. No timeout change is justified by
+these observations alone. See capacity-diagnostic-followup.json.
