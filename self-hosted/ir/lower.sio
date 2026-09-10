@@ -13721,6 +13721,10 @@ impl Lowerer {
             return ir_name_eq(callee_short, make_name("f128_from_limbs"))
                 || self.lower_callee_returns_f128_ref(&(*e).left)
         }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            // V0-E.5.6: `v.norm2()` on a method declared `-> f128`.
+            return self.lower_method_call_returns_f128_ref(e)
+        }
         if (*e).kind == ExprKind::ExprBinary {
             // V0-E.5.2: `a < b` on f128 operands is a bool, not a wide float.
             if lower_binary_op_is_compare((*e).bin_op) { return false }
@@ -14645,7 +14649,13 @@ impl Lowerer {
             let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, (*e).name) } else { (*e).name }
             let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
             if fn_id >= 0 && fn_id < self.module.fn_count {
-                if lower_name_is_integer_type(ir_fn_get(&(*self.module), fn_id as usize).return_struct_name) {
+                let method_fn = ir_fn_get(&(*self.module), fn_id as usize)
+                // V0-E.5.6: a method declared `-> f128` yields an F128Bits handle
+                // (kind 5), read off the same IrFunction as the integer case below.
+                if lower_fn_returns_f128(&method_fn) {
+                    return 5
+                }
+                if lower_name_is_integer_type(method_fn.return_struct_name) {
                     return 1
                 }
             }
@@ -16884,15 +16894,19 @@ impl Lowerer {
                         // params correctly carry kind 2 the cross-fn variance/float-reg
                         // tables (or cast path) could treat the counter as float.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
-                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall || (*expr_box_sk).kind == ExprKind::ExprFieldAccess || (*expr_box_sk).kind == ExprKind::ExprIndex)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprCall
+                            || (*expr_box_sk).kind == ExprKind::ExprFieldAccess
+                            || (*expr_box_sk).kind == ExprKind::ExprIndex
+                            || (*expr_box_sk).kind == ExprKind::ExprMethodCall)
                         && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 5 {
-                        // `let v = f128_call(..)` / `let v = p.x` / `let v = xs[i]`
-                        // (V0-E.5.4 / V0-E.5.5 / V0-E.5.7). Ahead of the f64/string
-                        // classifiers: a wide-float handle must never be
-                        // reclassified by a same-named f64 field or array. Only an
-                        // f128-READY source (f128 call / field / element) makes the
-                        // local a ready 128-bit operand; a `[f256; N]` element stays
-                        // kind 5 with no width, so any op on it fails closed.
+                        // `let v = f128_call(..)` / `let v = p.x` / `let v = xs[i]` /
+                        // `let v = p.norm2()` (V0-E.5.4 / V0-E.5.5 / V0-E.5.7 / V0-E.5.6).
+                        // Ahead of the f64/string classifiers: a wide-float handle
+                        // must never be reclassified by a same-named f64 field or
+                        // array. Only an f128-READY source (f128 call / field /
+                        // element / method) makes the local a ready 128-bit operand;
+                        // a `[f256; N]` element stays kind 5 with no width, so any
+                        // op on it fails closed.
                         lo = lo.bind_local_scalar_kind(s.name, 5)
                         if lo.lower_f128_expr_ready_ref(&s.expr) {
                             lo = lo.bind_local_wide_type(s.name, 128, 0)
@@ -20201,7 +20215,18 @@ impl Lowerer {
             }
             return lower_f128_fail(self, "call in f128 position does not return f128 (V0-E.5.4)")
         }
-        lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1..V0-E.5.3: literal, from_limbs, ident, + - * / unary-, comparisons)")
+        if (*e).kind == ExprKind::ExprMethodCall {
+            // V0-E.5.6: `v.norm2()` on an impl method declared `-> f128` returns
+            // the F128Bits handle through the plain struct-handle ABI; the
+            // method-call path lowers it (explicit args to f128 params go through
+            // the callee's shifted f128_param_mask so a bare literal stays
+            // binary128). Anything else in f128 position is refused, never f64.
+            if self.lower_method_call_returns_f128_ref(e) {
+                return self.lower_method_call_expr_ref(e)
+            }
+            return lower_f128_fail(self, "method call in f128 position does not return f128 (V0-E.5.6)")
+        }
+        lower_f128_fail(self, "unsupported f128 expression (V0-E.5.1..V0-E.5.6: literal, from_limbs, ident, field, call, method call, + - * / unary-, comparisons)")
     }
 
     // V0-E.5.5: static struct type of a field-access base. An ident carries the
@@ -20219,8 +20244,16 @@ impl Lowerer {
                 None => return ir_empty_name(),
             }
         }
-        // The resolver the receiver path already trusts: ident, `*p`, `a[i]`,
-        // method-call results. One answer to "which struct is this", not two.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            // V0-E.5.6: `v.scale(k).x` — the struct a method returns, read off
+            // the resolved method's IrFunction (return_struct_name), the same
+            // record the let-binding path uses for `let w = v.scale(k)`.
+            let fn_id = self.lower_method_call_fn_id_ref(e)
+            if fn_id < 0 { return ir_empty_name() }
+            return self.return_struct_name_for_fn_id(fn_id)
+        }
+        // The resolver the receiver path already trusts: ident, `*p`, `a[i]`.
+        // One answer to "which struct is this", not two.
         self.expr_receiver_struct_type_ref(e)
     }
 
@@ -20311,6 +20344,29 @@ impl Lowerer {
 
     fn lower_callee_returns_f128_ref(self, callee: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         let fn_id = self.lower_callee_fn_id_ref(callee)
+        if fn_id < 0 { return false }
+        let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
+        lower_fn_returns_f128(&callee_fn)
+    }
+
+    // V0-E.5.6: resolve `recv.method(..)` to the IR fn of the impl method — the
+    // SAME receiver resolution and mangling the method-call lowering uses
+    // (lower_method_recv_type + ir_mangle_method_name), so the f128 identity read
+    // off the IrFunction (return_struct_name == "f128", f128_param_mask) is the
+    // identity of the function that will actually be called. -1 when the
+    // receiver type is unknown or the mangled name is not a pre-seeded fn
+    // (intrinsics such as `.len()` / Seq methods, or an unresolved receiver).
+    fn lower_method_call_fn_id_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprMethodCall { return 0 - 1 }
+        let recv_type = self.lower_method_recv_type(&(*e).left)
+        if recv_type.len == 0 { return 0 - 1 }
+        let call_name = ir_mangle_method_name(recv_type, (*e).name)
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+        if fn_id >= 0 && fn_id < self.module.fn_count { fn_id } else { 0 - 1 }
+    }
+
+    fn lower_method_call_returns_f128_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let fn_id = self.lower_method_call_fn_id_ref(e)
         if fn_id < 0 { return false }
         let callee_fn = ir_fn_get(&(*self.module), fn_id as usize)
         lower_fn_returns_f128(&callee_fn)
@@ -20560,6 +20616,10 @@ impl Lowerer {
                     let callee_short = lower_f128_expr_callee_short_opt(&(*e).left)
                     return ir_name_eq(callee_short, make_name("f128_from_limbs"))
                         || self.lower_callee_returns_f128_ref(&(*e).left)
+                }
+                if (*e).kind == ExprKind::ExprMethodCall {
+                    // V0-E.5.6: a `-> f128` method call is a ready handle operand.
+                    return self.lower_method_call_returns_f128_ref(&(*e))
                 }
                 false
             }
@@ -22026,7 +22086,21 @@ impl Lowerer {
                 base_reg = areg
             }
         }
-        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
+        // V0-E.5.6: which EXPLICIT arguments are f128 params. The declared
+        // ParamList of an impl method carries the receiver as param 0 (`self`,
+        // `self: &T`, `self: &!T`), so the pre-seeded f128_param_mask has bit 0
+        // for the receiver and bit i+1 for the i-th explicit param — while
+        // `e.args` here holds only the explicit arguments. Shift the receiver
+        // bit out so bit i ⇔ call argument i is an f128 param, and `v.scale(2.0)`
+        // lowers the literal as binary128 (bit for `k`), never as f64 bits.
+        // Associated calls (`Vec2::mk(1.0, 2.0)`) go through lower_call_expr_ref
+        // with the unshifted mask, because their args ARE the full param list.
+        let f128_arg_mask_m: i64 = if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            ir_fn_get(&(*lo1.module), fn_id0 as usize).f128_param_mask / 2
+        } else {
+            0
+        }
+        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask_m)
         let lo2 = pair_args.lowerer
         let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let arg_count = pair_args.count
