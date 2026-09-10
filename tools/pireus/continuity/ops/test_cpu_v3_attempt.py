@@ -26,6 +26,36 @@ class AttemptTests(unittest.TestCase):
         return dict(schema="pireus-cpu-v3-start",source_commit=self.p["source_commit"],protocol_sha256=self.pin,
             runtime_sha256=self.p["runtime_files_sha256"],workers=self.ws,command=a.command(self.ws,self.p,self.pin),
             launcher_sha256=a.digest(Path(a.__file__).read_bytes()),orchestration_sha256=a.orchestration_hashes())
+    def test_source_rebinding_preserves_runtime_and_original_packet(self):
+        root=a.PACKET/"freeze-source-7617d6ff"
+        revised=a.packet(root)
+        self.assertEqual(revised["source_commit"],"7617d6ff6295a54e69e2030bf1da5a5055fe530b")
+        self.assertEqual(revised["runtime_files_sha256"],self.p["runtime_files_sha256"])
+        self.assertEqual(a.digest((FROZEN/"manifest.json").read_bytes()),a.freeze.PIN)
+        for name in revised["runtime_files_sha256"]:
+            self.assertEqual((root/"source"/name).read_bytes(),(FROZEN/"source"/name).read_bytes())
+        difference={key for key in set(revised)|set(self.p) if revised.get(key)!=self.p.get(key)}
+        self.assertEqual(difference,{"source_commit","source_binding_revision"})
+        self.assertNotEqual(a.remote_root(a.digest((root/"protocol.json").read_bytes())),a.remote_root(self.pin))
+    def test_rebound_protocol_tamper_refused(self):
+        root=self.root/"rebound"
+        shutil.copytree(a.PACKET/"freeze-source-7617d6ff",root)
+        with (root/"protocol.json").open("a") as out:out.write(" ")
+        with self.assertRaisesRegex(ValueError,"protocol changed"):a.packet(root)
+    def test_rebound_manifest_repin_cannot_authorize_other_source(self):
+        root=self.root/"rebound"
+        shutil.copytree(a.PACKET/"freeze-source-7617d6ff",root)
+        protocol=a.read(root/"protocol.json");protocol["source_commit"]="0"*40
+        (root/"protocol.json").write_text(json.dumps(protocol))
+        manifest=a.read(root/"manifest.json");manifest["source_commit"]=protocol["source_commit"]
+        manifest["protocol_sha256"]=a.digest((root/"protocol.json").read_bytes())
+        (root/"manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError,"freeze manifest changed"):a.packet(root)
+    def test_rebound_runtime_tamper_refused(self):
+        root=self.root/"rebound"
+        shutil.copytree(a.PACKET/"freeze-source-7617d6ff",root)
+        with (root/"source/memory_guard.py").open("a") as out:out.write("# changed")
+        with self.assertRaisesRegex(ValueError,"source changed"):a.packet(root)
     def test_command_cpu_only_guard_and_isolation(self):
         argv=a.command(self.ws,self.p,self.pin)
         for flag in ("--exclusive","--mem=512M","--time=5","-c2"):self.assertIn(flag,argv)

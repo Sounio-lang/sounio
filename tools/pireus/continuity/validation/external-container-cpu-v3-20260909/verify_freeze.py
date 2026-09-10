@@ -7,11 +7,12 @@ from pathlib import Path
 import sys
 sys.dont_write_bytecode=True
 PIN="33ae4e7ee290e0a7b11daa4649575053b2d1c56e9cb18235d7fd96fa74ed419d"
+ACCEPTED_PINS={PIN,"ec5146781cb8aedb6c3d68c535eaefe90b523fe9a75d8a6e29fdaa7af832775e"}
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def require(ok,message):
     if not ok:raise ValueError(message)
 def verify(root):
-    require(digest(root/"manifest.json")==PIN,"freeze manifest changed")
+    require(digest(root/"manifest.json") in ACCEPTED_PINS,"freeze manifest changed")
     manifest=json.loads((root/"manifest.json").read_bytes())
     require(digest(root/"protocol.json")==manifest["protocol_sha256"],"protocol changed")
     protocol=json.loads((root/"protocol.json").read_bytes())
