@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-XOR-SELECTOR-MATERIAL-ADMISSION`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_xor_selector_material_admission.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-xor-selector-material-admission-20260827`
 
@@ -118,7 +125,7 @@ seven boundary booleans, and all twenty-two negative witnesses. The seven are
 `material_files_valid`, `generic_instruction_cost`, `cross_isa_equivalence`,
 `transform_authorized`, `review_promoted`, `parity_open`, and `claim_ready`.
 
-## Closed Claims
+## Claims Forbidden
 
 This freeze does not establish:
 

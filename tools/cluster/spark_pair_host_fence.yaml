@@ -8,7 +8,7 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: pireus-spark-host-fence-1b67a02d2c88
+  name: pireus-spark-host-fence-b6ae432c7ec9
   namespace: beagle
 immutable: true
 data:
@@ -18,7 +18,9 @@ data:
 
     readonly NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
     readonly MINIMUM_FREE_MEMORY_MB=32768
+    readonly GPU_CONTAINER_STOP_GRACE_SECONDS=5
     readonly HOST_ROOT="${PIREUS_HOST_ROOT:-/host}"
+    readonly HOST_FENCE_SOURCE="${BASH_SOURCE[0]}"
     readonly GRANT_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-grant"
     readonly PREPARE_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-prepare"
     readonly PROTECTED_BASELINE="$HOST_ROOT/var/lib/pireus-spark-pair/protected-baseline"
@@ -40,6 +42,37 @@ data:
     readonly SYSTEMD_WATCHDOG_SECONDS=60
     readonly WATCHDOG_FRESH_SECONDS=55
     readonly CRI_RUNTIME_ENDPOINT=unix:///var/run/containerd/containerd.sock
+
+    # Cross-process serialization includes observations and every host grant mutation.
+    # Operations are bounded separately from lock acquisition. Emergency fencing
+    # can outwait a bounded pod-side owner; systemd stop includes that full budget.
+    with_host_transition_lock_wait() (
+      local wait_seconds="$1"
+      shift
+      umask 077
+      mkdir -p "$HOST_ROOT/var/lib/pireus-spark-pair"
+      # The flock parent stays outside timeout's process group and alone owns
+      # the descriptor. Escaped host children cannot retain the lock.
+      /usr/bin/flock --close --exclusive --wait "$wait_seconds" \
+        --conflict-exit-code 75 \
+        "$HOST_ROOT/var/lib/pireus-spark-pair/host-transition.lock" \
+        /usr/bin/timeout --kill-after=2s 45s \
+        /usr/bin/env PIREUS_HOST_FENCE_LIBRARY_MODE=1 /bin/bash -c \
+        'source "$1"; shift; "$@"' host-transition "$HOST_FENCE_SOURCE" "$@"
+    )
+
+    with_host_transition_lock() {
+      with_host_transition_lock_wait 10 "$@"
+    }
+
+    fence_and_status() {
+      fence_pair "$@"
+      status_once
+    }
+
+    emergency_fence_if_active() {
+      if [[ -r "$ACTIVATED_FILE" ]]; then fence_invalid_local; fi
+    }
 
     host_ns() {
       if [[ "$HOST_ROOT" == / ]]; then
@@ -196,7 +229,7 @@ data:
         docker_host update --restart=no "$id" >/dev/null
         running="$(docker_host inspect --format '{{.State.Running}}' "$id")"
         if [[ "$running" == true ]]; then
-          docker_host stop -t 30 "$id" >/dev/null
+          docker_host stop -t "$GPU_CONTAINER_STOP_GRACE_SECONDS" "$id" >/dev/null
         elif [[ "$running" != false ]]; then
           return 1
         fi
@@ -859,9 +892,9 @@ data:
     Restart=on-failure
     RestartSec=2
     TimeoutStartSec=60
-    TimeoutStopSec=8
+    TimeoutStopSec=120
     WatchdogSec=${SYSTEMD_WATCHDOG_SECONDS}s
-    KillMode=mixed
+    KillMode=control-group
 
     [Install]
     WantedBy=multi-user.target
@@ -881,7 +914,7 @@ data:
     Environment=NODE_NAME=$NODE_NAME
     Environment=PIREUS_HOST_ROOT=/
     ExecStart=/usr/local/lib/pireus/spark-pair-host-fence boot-fence
-    TimeoutStartSec=5
+    TimeoutStartSec=60
     RemainAfterExit=yes
 
     [Install]
@@ -1215,22 +1248,21 @@ data:
 
     case "${1:-}" in
       status)
-        status_once
+        with_host_transition_lock status_once
         ;;
       report)
-        report_once
+        with_host_transition_lock report_once
         ;;
       fence)
-        fence_pair "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
+        with_host_transition_lock fence_and_status "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
           "${6:-}" "${7:-}" "${8:-}" "${9:-}"
-        status_once
         ;;
       prepare)
-        prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+        with_host_transition_lock prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
           "${7:-}" "${8:-}" "${9:-}" "${10:-}"
         ;;
       commit)
-        commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+        with_host_transition_lock commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
           "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" \
           "${13:-}" "${14:-}"
         ;;
@@ -1238,7 +1270,7 @@ data:
         install_watchdog "${2:-}" "${3:-}" "${4:-}"
         ;;
       capture-baseline)
-        capture_protected_baseline
+        with_host_transition_lock capture_protected_baseline
         ;;
       probe)
         case "${2:-}" in
@@ -1255,22 +1287,30 @@ data:
         esac
         ;;
       boot-fence)
-        boot_fence
+        with_host_transition_lock boot_fence
         ;;
       emergency-fence)
-        if [[ -r "$ACTIVATED_FILE" ]]; then
-          fence_invalid_local
-        fi
+        with_host_transition_lock_wait 60 emergency_fence_if_active
         ;;
       enforce-notify)
-        capture_protected_baseline
+        with_host_transition_lock capture_protected_baseline
         ready=0
         while true; do
+          cycle_rc=0
           if [[ -r "$ACTIVATED_FILE" ]]; then
-            active_enforcement_cycle || true
+            with_host_transition_lock active_enforcement_cycle || cycle_rc=$?
           else
-            passive_armed_cycle
+            with_host_transition_lock passive_armed_cycle || cycle_rc=$?
           fi
+          case "$cycle_rc" in
+            0) ;;
+            *)
+              # A failed/incomplete cycle is not a fresh observation. Do not forge a
+              # fresh heartbeat; the next cycle or systemd watchdog handles recovery.
+              sleep 2
+              continue
+              ;;
+          esac
           if [[ $ready -eq 0 ]]; then
             watchdog_notify_ready
             ready=1
@@ -1364,7 +1404,7 @@ spec:
       volumes:
         - name: fence-script
           configMap:
-            name: pireus-spark-host-fence-1b67a02d2c88
+            name: pireus-spark-host-fence-b6ae432c7ec9
             defaultMode: 0555
         - name: device-barrier-source
           configMap:

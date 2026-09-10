@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-MATERIAL-ENGINE-ADMISSION`
 
-Status: `executable`
+Status: executable
+
+Historical-Lane-State: `executable`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_material_engine_admission.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Canonical surface:
 `stdlib/hardware/pireus/material_engine_admission.sio`

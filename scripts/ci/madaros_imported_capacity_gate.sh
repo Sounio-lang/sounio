@@ -118,7 +118,12 @@ emit_local_chain "$BOUNDARY_MAIN" "$((HALF - 1))"
 printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$BOUNDARY_MAIN"
 
 set +e
-MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$BOUNDARY_MAIN" -o "$BOUNDARY_OUT" >"$BOUNDARY_LOG" 2>&1
+# Byte-identical compiler/input witness completed in 544.401 s on DL380 job
+# 11986, consuming 543.420 CPU seconds. Keep a finite 600 s boundary budget;
+# the overflow rejection below retains the ordinary 300 s limit.
+# Receipt: tools/pireus/continuity/validation/external-overhead-v3-preparation-20260910/
+# host-decode-probe/dl380-capacity-measurement/result-11986/result.json
+MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS=600 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$BOUNDARY_MAIN" -o "$BOUNDARY_OUT" >"$BOUNDARY_LOG" 2>&1
 boundary_compile_rc=$?
 set -e
 
@@ -142,7 +147,7 @@ emit_local_chain "$OVERFLOW_MAIN" "$((LOCALS_OVER - 1))"
 printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$OVERFLOW_MAIN"
 
 set +e
-MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$OVERFLOW_MAIN" -o "$OUT" >"$LOG" 2>&1
+MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS=300 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$OVERFLOW_MAIN" -o "$OUT" >"$LOG" 2>&1
 compile_rc=$?
 set -e
 

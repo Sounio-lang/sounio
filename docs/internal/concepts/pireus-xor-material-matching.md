@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIREUS-XOR-MATERIAL-MATCHING`
 
-Status: `SEMANTICS_FROZEN`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN`
+Evidence-Pass: tests/stdlib/hardware/test_pireus_xor_material_matching.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-xor-material-20260827`
 
@@ -65,7 +72,7 @@ Darwin Xeon, Apple Silicon, and DGX remain canonical. The two-chunk plan is
 attached only to Darwin Xeon as an abstract candidate layout. All targets are
 unobserved; Apple Silicon and DGX plans remain unresolved.
 
-## Closed Claims
+## Claims Forbidden
 
 The result establishes no lowering for `TWIST_APPLY`, `MULTIPLY`, fixed-order
 `HORIZONTAL_REDUCE`, or `OUTPUT_LANE`. It records no emitted instruction,

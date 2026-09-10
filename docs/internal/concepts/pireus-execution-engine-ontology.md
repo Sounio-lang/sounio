@@ -11,7 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Proposed Concept-ID: `SOUNIO-PIREUS-EXECUTION-ENGINE`
 
-Status: `SEMANTICS_FROZEN_PENDING_REGISTRY_AND_LOOM_ACCEPTANCE`
+Status: executable
+
+Historical-Lane-State: `SEMANTICS_FROZEN_PENDING_REGISTRY_AND_LOOM_ACCEPTANCE`
+Evidence-Pass: examples/pireus_execution_engine_query.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 Semantic-Lane-ID: `pireus-execution-engine-20260827`
 
@@ -105,3 +112,9 @@ performance.
 No Python, Rust, Node, Ruby, `awk`, or `bc` participates in the semantic or
 expected-result path. `PARITY_OPEN` remains closed until registry and Loom
 acceptance.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- A bounded corpus or control establishes general hardware capability.
+- Registry metadata establishes performance gain, scientific novelty, or claim readiness.

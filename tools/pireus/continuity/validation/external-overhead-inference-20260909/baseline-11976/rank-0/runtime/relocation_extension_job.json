@@ -1,0 +1,58 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "pireus-pg-extension-qualification-20260907",
+    "namespace": "beagle"
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "activeDeadlineSeconds": 600,
+    "template": {
+      "spec": {
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": false,
+        "nodeSelector": {
+          "kubernetes.io/hostname": "r770-proxmox"
+        },
+        "tolerations": [
+          {
+            "key": "sounio.dev/pool",
+            "operator": "Equal",
+            "value": "gpu-batch",
+            "effect": "NoSchedule"
+          },
+          {
+            "key": "sounio.dev/compute",
+            "operator": "Equal",
+            "value": "heavy",
+            "effect": "NoSchedule"
+          }
+        ],
+        "containers": [
+          {
+            "name": "inspect",
+            "image": "paradedb/paradedb@sha256:ea4e8267016c929924a15df03eaf2ad9bb2cda9d194169e03eca232303898cc7",
+            "command": [
+              "/bin/bash",
+              "-ec"
+            ],
+            "args": [
+              "set -e\ninstall -d -o postgres -g postgres /tmp/pireus-qa\ngosu postgres initdb -D /tmp/pireus-qa/data --auth-local=trust --auth-host=reject > /tmp/init.log\ngosu postgres pg_ctl -D /tmp/pireus-qa/data -l /tmp/pireus-qa/postgres.log -o \"-c listen_addresses='' -c shared_preload_libraries=pg_search,pg_cron,pg_stat_statements -c cron.launch_active_jobs=off\" -w start\ntrap 'gosu postgres pg_ctl -D /tmp/pireus-qa/data -m fast -w stop' EXIT\ngosu postgres psql -X -v ON_ERROR_STOP=1 -d postgres -c 'CREATE EXTENSION pg_cron'\ngosu postgres createdb probe\ngosu postgres psql -X -v ON_ERROR_STOP=1 -d probe <<'SQL'\nCREATE EXTENSION pg_search;\nCREATE EXTENSION vector;\nCREATE EXTENSION pg_ivm;\nCREATE EXTENSION postgis;\nCREATE EXTENSION postgis_topology;\nCREATE EXTENSION fuzzystrmatch;\nCREATE EXTENSION postgis_tiger_geocoder;\nCREATE EXTENSION pg_stat_statements;\nCREATE TABLE public.probe_docs(id integer PRIMARY KEY, body text, v vector(3));\nINSERT INTO public.probe_docs VALUES (1,'pireus ontology','[1,2,3]'), (2,'unrelated sample','[1,2,4]');\nCREATE INDEX probe_bm25 ON public.probe_docs USING bm25(id,body) WITH(key_field='id');\nCREATE TABLE public.probe_base(id integer PRIMARY KEY);\nSELECT pgivm.create_immv('public.probe_immv','SELECT count(*) AS n FROM public.probe_base');\nINSERT INTO public.probe_base VALUES(1),(2);\nDO $check$\nBEGIN\n IF (SELECT count(*) FROM public.probe_docs WHERE body @@@ 'pireus') <> 1 THEN RAISE EXCEPTION 'BM25 mismatch'; END IF;\n IF ('[1,2,3]'::vector <-> '[1,2,4]'::vector) <> 1 THEN RAISE EXCEPTION 'vector mismatch'; END IF;\n IF ST_Distance(ST_Point(0,0),ST_Point(3,4)) <> 5 THEN RAISE EXCEPTION 'PostGIS mismatch'; END IF;\n IF (SELECT n FROM public.probe_immv) <> 2 THEN RAISE EXCEPTION 'IVM mismatch'; END IF;\nEND $check$;\nSELECT 'FUNCTIONAL_EXTENSIONS_PASS';\nSQL\ngosu postgres pg_dump -Fc -d probe -f /tmp/pireus-qa/probe.dump\ngosu postgres createdb replay\ngosu postgres pg_restore --exit-on-error -d replay /tmp/pireus-qa/probe.dump\ngosu postgres psql -X -v ON_ERROR_STOP=1 -d replay <<'SQL'\nINSERT INTO public.probe_base VALUES (3);\nDO $check$ BEGIN\n IF (SELECT n FROM public.probe_immv) <> 3 THEN RAISE EXCEPTION 'Restored IVM no longer maintains itself'; END IF;\n IF (SELECT count(*) FROM public.probe_docs WHERE body @@@ 'pireus') <> 1 THEN RAISE EXCEPTION 'Restored BM25 mismatch'; END IF;\nEND $check$;\nSELECT 'SYNTHETIC_RESTORE_PASS';\nSQL\n"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              },
+              "limits": {
+                "cpu": "2",
+                "memory": "4Gi"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

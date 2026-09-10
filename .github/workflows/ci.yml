@@ -8,6 +8,16 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      current_source_runner:
+        description: "Explicit Current-Source execution profile"
+        type: choice
+        options: [github-hosted, pireus-cpu36-v1]
+        default: github-hosted
+        required: false
+      current_source_base_sha:
+        description: "Frozen PR comparison base SHA (required for CPU36)"
+        type: string
+        required: false
       nightly:
         description: "Run expensive nightly jobs (e.g. R6 corpus sweep)"
         type: boolean
@@ -801,7 +811,9 @@ jobs:
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && vars.PIREUS_CPU36_RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
     # Raised again to 35 here because this branch adds three more sub-gates to
@@ -814,7 +826,9 @@ jobs:
     # reaches this gate, measured 20+ min for that step alone on a 4-core
     # GH-hosted runner (it was previously never reached). 35 min was cancelled
     # mid-compile with rc=0 errors=0 already achieved for the cheaper check rung.
-    timeout-minutes: 75
+    # CPU36 is an explicit resource qualification, with the same gates.
+    # Prospective 150-minute budget: measured 85-minute gen2 plus other gates.
+    timeout-minutes: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && 150 || 75 }}
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -822,6 +836,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify explicit CPU36 execution profile
+        if: inputs.current_source_runner == 'pireus-cpu36-v1'
+        env:
+          PIREUS_RUNNER_LABEL: ${{ vars.PIREUS_CPU36_RUNNER_LABEL }}
+          PIREUS_BASE_SHA: ${{ inputs.current_source_base_sha }}
+        run: |
+          python3 -m unittest discover -s tools/pireus/continuity/ops/ci_runner_cpu36_v1 -p test_verify_profile.py -v
+          python3 tools/pireus/continuity/ops/ci_runner_cpu36_v1/verify_profile.py
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
@@ -898,8 +920,8 @@ jobs:
       - name: Run changed Madaros tests with the current-source compiler
         env:
           SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-          CI_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_EVENT_NAME: ${{ inputs.current_source_runner == 'pireus-cpu36-v1' && 'pull_request' || github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.current_source_base_sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
         run: bash scripts/ci/madaros_changed_tests_gate.sh
@@ -988,6 +1010,41 @@ jobs:
             /tmp/sounio-native-acceptance-macos-arm64
           retention-days: 1
 
+  pireus-slow-stdlib:
+    name: Pireus slow witness (${{ matrix.test }})
+    runs-on: ubuntu-24.04
+    needs: [impact, native-selfhost-linux-x86_64]
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success'
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_pireus_cubic_operator_forge.sio
+          - test_pireus_multiprobe_block_certification.sio
+          - test_pireus_operator_discovery_engine.sio
+          - test_pireus_operator_genesis_bilinear.sio
+          - test_pireus_operator_genesis_gl4.sio
+          - test_pireus_operator_genome.sio
+          - test_pireus_operator_morphogenesis.sio
+          - test_pireus_operator_novelty_feedback.sio
+          - test_pireus_operator_novelty_frontier.sio
+          - test_pireus_operator_orbit_canonicalization.sio
+          - test_pireus_quotient_novelty_forge.sio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-compiler-linux-x86_64
+          path: /tmp
+      - name: Execute original semantic assertions with their declared deadline
+        env:
+          SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
+          PIREUS_TEST: ${{ matrix.test }}
+        run: |
+          chmod +x /tmp/souc-stage2
+          bash scripts/run_sio_test_suite.sh --filter-exact "$PIREUS_TEST" --jobs 1
+
   full-test-suite:
     name: Full Test Suite
     runs-on: ubuntu-24.04
@@ -1001,13 +1058,18 @@ jobs:
         with:
           name: native-compiler-linux-x86_64
           path: /tmp
+      - name: Prepare byte-pinned Pireus historical inputs
+        run: python3 tools/pireus/continuity/ci/prepare_historical_inputs.py
       - name: Run full test suite
         env:
           SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
           SOUNIO_TEST_JOBS: 4
         run: |
           chmod +x /tmp/souc-stage2
-          bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+          bash scripts/run_sio_test_suite.sh --list-tests > "$RUNNER_TEMP/all-tests.list"
+          python3 tools/pireus/continuity/ci/route_slow_tests.py \
+            --input "$RUNNER_TEMP/all-tests.list" --output "$RUNNER_TEMP/ordinary-tests.list"
+          bash scripts/run_sio_test_suite.sh --test-list "$RUNNER_TEMP/ordinary-tests.list" --format junit --jobs 4
       # Numeric accuracy is not something the run-pass harness above can
       # measure: a transcendental that quietly degrades from 212 bits of
       # mantissa to 106 still exits 0 on every identity test. This replays the
@@ -1203,6 +1265,20 @@ jobs:
             scripts/ci/parser_keyword_classification_gate.sh \
             scripts/ci/compile_fail_harness_contract_gate.sh \
             | bash scripts/ci/run_gate_list.sh wave0
+      - name: Install Pireus source-search dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Current Pireus compiler semantics against this source build
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/madaros-wave0.elf
+          SOUNIO_SOUC_ENGINE: madaros
+          SOUC: bin/souc
+        run: |
+          bash scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
+          bash scripts/ci/pireus_twist_gauge_factorization_gate.sh
+          bash scripts/ci/pireus_cross_arch_synthesizer_gate.sh
+          bash scripts/ci/pireus_typed_xor_gpu_gate.sh
+          bash scripts/ci/pireus_xor_hlir_contract_gate.sh
+          bash scripts/ci/pireus_sedenion_operator_gate.sh
       - name: Upload Wave 0 gate artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -1331,6 +1407,7 @@ jobs:
       - madaros-current-source-deref-f64
       - native-selfhost-macos-arm64
       - full-test-suite
+      - pireus-slow-stdlib
       - madaros-witness-gate
       - gate-wave-0
       - sounio-lint
