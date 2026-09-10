@@ -1674,18 +1674,33 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
     }
 }
 
-// `let x: f128 = ...` (TypeNamed, single segment "f128").
+// `let x: f128 = ...` (TypeNamed, single segment "f128"), or — V0-E.5.7 — a
+// `[f128; N]` / `&[f128; N]` array of them (see spec_dce_type_expr_mentions_f128).
 fn spec_dce_opt_type_is_f128(opt: Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match opt {
-        Some(te) => {
-            if (*te).kind != TypeExprKind::TypeNamed { return false }
-            let seg = (*te).path.segments
-            if seg.head_len != 4 { return false }
-            if seg.head_buf[0] as i64 != 102 { return false }
-            seg.head_buf[1] as i64 == 49 && seg.head_buf[2] as i64 == 50 && seg.head_buf[3] as i64 == 56
-        }
+        Some(te) => spec_dce_type_expr_mentions_f128(&(*te)),
         None => false,
     }
+}
+
+// V0-E.5.7: does a type expression carry a language f128 anywhere an element
+// read can surface as a softfloat operand? `f128` itself, `[f128; N]`, and one
+// or more reference layers over either (`&[f128; N]`, `&![f128; N]`, `&f128`).
+// A `[f128; N]` local/param/field is an AST-visible trigger for the desugar
+// exactly like a bare f128 (`fn sum(a: &[f128; 3]) -> i64 { if a[0] < a[1]
+// ... }` has no scalar f128 anywhere). Seq<f128> and tuples stay out: the
+// lowerer does not classify their elements as f128 yet, so marking for them
+// would claim a path that does not exist.
+fn spec_dce_type_expr_mentions_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeArray
+        || (*te).kind == TypeExprKind::TypeReference
+        || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner) => return spec_dce_type_expr_mentions_f128(&(*inner)),
+            None => return false,
+        }
+    }
+    spec_dce_type_expr_is_f128(te)
 }
 
 // V0-E.5.4: an f128 param or `-> f128` return is another AST-visible trigger
@@ -1700,7 +1715,8 @@ fn spec_dce_fn_sig_uses_f128(fd: &FnDef) -> bool with Mut, Panic, Div {
     while going {
         match cur {
             Some(list) => {
-                if spec_dce_type_expr_is_f128(&(*list).head.ty) { found = true }
+                // V0-E.5.7: `a: &[f128; N]` / `a: [f128; N]` params count too.
+                if spec_dce_type_expr_mentions_f128(&(*list).head.ty) { found = true }
                 cur = (*list).tail
             }
             None => { going = false }
@@ -1729,7 +1745,8 @@ fn spec_dce_struct_has_f128_field(sd: &StructDef) -> bool with Mut, Panic, Div {
     while going {
         match cur {
             Some(list) => {
-                if spec_dce_type_expr_is_f128(&(*list).head.ty) { found = true }
+                // V0-E.5.7: an `arr: [f128; N]` field is the same trigger.
+                if spec_dce_type_expr_mentions_f128(&(*list).head.ty) { found = true }
                 cur = (*list).tail
             }
             None => { going = false }

@@ -771,9 +771,23 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-E.5.5:** language `f128` struct fields (`--stage v0e55`): the field
   slot holds the `F128Bits` handle; reads are f128 expressions, struct-literal
   literals are binary128, `v.x = expr` / `acc = 2.0` / `acc = y` stores take a
-  handle (the V0-E.5.1 literal-store gap is closed). `%`, `+=` on f128, f256
-  fields/params, methods returning `f128` (`v.norm2()`), arrays of `f128`, builtin
-  `print_f128`, and GUM/`Knowledge`/`MeasuredF256` remain deferred.
+  handle (the V0-E.5.1 literal-store gap is closed).
+- **Madaros V0-E.5.7:** language `f128` in fixed arrays (`--stage v0e57`): every
+  `[f128; N]` slot holds an `F128Bits` handle; `a[i]` is an f128 expression
+  (operand, `let` RHS annotated or not, comparison), `a[i] = 2.0` / `a[i] = y`
+  stores take a handle, `[a, b]` / `[v; N]` initialisers fill handle slots,
+  `&[f128; N]` and by-value `[f128; N]` params, `let zs = xs` copies, and
+  `arr: [f128; N]` struct fields. Element identity is the local's
+  `array_elem_wide_bits` / the field layout's element type — one source of truth,
+  never the literal shape. The same column records 256 for `[f256; N]`, so an
+  f256 element now reaches the V0-E.4.1 refusal (on `main` before this rung
+  `xs[0] * xs[1]` on a `[f256; 2]` lowered as an integer multiply and emitted an
+  ELF — a latent greenwash, fixed here). Checker limit: a bare float literal as a `[f128; N]`
+  element is still inferred `[f64; N]` and rejected (E001) — use f128 idents.
+  Fns returning `[f128; N]`, `Seq<f128>`, `for x in xs` over f128 arrays, nested
+  arrays, `%`, `+=` on f128, f256 fields/params/arrays, methods returning `f128`
+  (`v.norm2()`), builtin `print_f128`, and GUM/`Knowledge`/`MeasuredF256` remain
+  deferred.
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
