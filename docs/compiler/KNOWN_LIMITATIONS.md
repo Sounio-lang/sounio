@@ -779,7 +779,10 @@ whoever picks option 1, 2, or the remainder of option 3.
   `&[f128; N]` and by-value `[f128; N]` params, `let zs = xs` copies, and
   `arr: [f128; N]` struct fields. Element identity is the local's
   `array_elem_wide_bits` / the field layout's element type — one source of truth,
-  never the literal shape. Checker limit: a bare float literal as a `[f128; N]`
+  never the literal shape. The same column records 256 for `[f256; N]`, so an
+  f256 element now reaches the V0-E.4.1 refusal (on `main` before this rung
+  `xs[0] * xs[1]` on a `[f256; 2]` lowered as an integer multiply and emitted an
+  ELF — a latent greenwash, fixed here). Checker limit: a bare float literal as a `[f128; N]`
   element is still inferred `[f64; N]` and rejected (E001) — use f128 idents.
   Fns returning `[f128; N]`, `Seq<f128>`, `for x in xs` over f128 arrays, nested
   arrays, `%`, `+=` on f128, f256 fields/params/arrays, methods returning `f128`
