@@ -150,3 +150,22 @@ The recovery watcher stopped without invoking the original driver and no
 hardware attempt exists. source-ci-attempt-2/manifest.json pins this refusal.
 Next: measure the archived compiler and boundary workload independently before
 changing a timeout or interpreting the failure. No third CI rerun is scheduled.
+
+### Separate capacity diagnostic: accounting correction
+
+The separate CPU timing diagnostic allocated jobs 11978, 11979 and 11980.
+All three were cancelled almost immediately with only an extern step recorded.
+No program-start receipt, compiler log, output ELF or result JSON exists on
+the staged worker. The configured client eventually reported that the node
+was still not ready. The step-start cause is not established.
+
+Earlier accounting queries ran as root without all-users selection and
+incorrectly returned no jobs for the sounio user. The previous no-diagnostic-
+allocation statement is superseded by capacity-diagnostic-transport/decision.json
+and its all-users accounting receipt. Original routing records are preserved
+even where that mistaken inference appears; they are not acceptance evidence.
+
+This was separate raw-compiler troubleshooting. No Spark v3 CPU/container
+attempt occurred and no CI timeout, model-memory guard or frozen workload
+was changed. The compiler ZIP remains pinned in the persistent private cache.
+Diagnose step-manager initialization before submitting another capacity workload.
