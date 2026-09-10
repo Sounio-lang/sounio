@@ -766,9 +766,14 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-E.5.4:** language `f128` params/returns ABI (`--stage v0e54`): user
   fns take `f128` params and return `f128` as an `F128Bits` handle; calls to them
   are f128 expressions; bare literal args to f128 params lower as binary128.
-  `%`, f256 params/returns, `f128` struct fields/arrays, builtin `print_f128`, and
-  GUM/`Knowledge`/`MeasuredF256` remain deferred. A bare literal in tail/return
-  position of an `-> f128` fn is rejected by check (E008: literals are f64).
+  A bare literal in tail/return position of an `-> f128` fn is rejected by check
+  (E008: literals are f64).
+- **Madaros V0-E.5.5:** language `f128` struct fields (`--stage v0e55`): the field
+  slot holds the `F128Bits` handle; reads are f128 expressions, struct-literal
+  literals are binary128, `v.x = expr` / `acc = 2.0` / `acc = y` stores take a
+  handle (the V0-E.5.1 literal-store gap is closed). `%`, `+=` on f128, f256
+  fields/params, methods returning `f128` (`v.norm2()`), arrays of `f128`, builtin
+  `print_f128`, and GUM/`Knowledge`/`MeasuredF256` remain deferred.
 - **print** of language-level `f128` values and full stdlib GUM surface are
   still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative

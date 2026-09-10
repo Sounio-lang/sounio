@@ -1717,6 +1717,27 @@ fn spec_dce_type_expr_is_f128(te: &TypeExpr) -> bool with Mut, Panic, Div {
     seg.head_buf[1] as i64 == 49 && seg.head_buf[2] as i64 == 50 && seg.head_buf[3] as i64 == 56
 }
 
+// V0-E.5.5: a struct with an f128 field is the third AST-visible trigger — its
+// fields are read/written as softfloat operands anywhere the struct flows, so
+// a program can reach the desugar with no f128 let, param, or return at all
+// (`fn lt(p: &P) -> bool { p.x < p.y }`). Structs are never deleted by this
+// pass, so the check is unconditional on the item.
+fn spec_dce_struct_has_f128_field(sd: &StructDef) -> bool with Mut, Panic, Div {
+    var cur = (*sd).fields
+    var going = true
+    var found = false
+    while going {
+        match cur {
+            Some(list) => {
+                if spec_dce_type_expr_is_f128(&(*list).head.ty) { found = true }
+                cur = (*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    found
+}
+
 fn spec_dce_scan_fn_def(fd: &FnDef, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     if spec_dce_fn_sig_uses_f128(fd) {
         spec_dce_mark_f128_desugar_targets(marks, count)
@@ -1791,6 +1812,15 @@ fn spec_dce_scan_item_if_marked(
                 Some(fd) => spec_dce_scan_fn_def(&(*fd), marks, count)
                 None => {}
             }
+        }
+    } else if it.kind == ItemKind::ItemStruct {
+        match it.struct_def {
+            Some(sd) => {
+                if spec_dce_struct_has_f128_field(&(*sd)) {
+                    spec_dce_mark_f128_desugar_targets(marks, count)
+                }
+            }
+            None => {}
         }
     } else if it.kind == ItemKind::ItemImpl {
         // Method bodies are scanned UNCONDITIONALLY, not only when the bare
