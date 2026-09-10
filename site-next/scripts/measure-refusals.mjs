@@ -17,7 +17,11 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '../..');
-const REF = process.env.CORPUS_REF ?? 'origin/main';
+// HEAD, não origin/main: o site descreve a árvore de que foi construído, e
+// qualquer pessoa pode fazer checkout desse commit e repetir a medição. Medir
+// um ramo que se move faria os números descreverem uma árvore que não é a
+// publicada, e reprovaria a guarda de deriva a cada commit alheio.
+const REF = process.env.CORPUS_REF ?? 'HEAD';
 const OUT = join(REPO, 'artifacts/site/refusals.v1.json');
 const DIR = 'tests/compile-fail';
 
