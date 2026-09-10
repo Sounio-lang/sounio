@@ -425,9 +425,13 @@ compilação, sem cast que escape. Em TypeScript a marca é convenção.
   Mas não há toolchain Swift aqui e o Docker sobe sem conseguir extrair camadas
   (falta privilégio de mount), então **nada disso passou pelo compilador**.
   `swift build` é o primeiro passo antes de confiar no gerador híbrido.
-- `npm run measure` precisa rodar quando o repositório muda: reescreve os três
-  artefatos do site (`corpus`, `refusals`, `dose_scene`). Ainda não está no CI —
-  e agora importa mais, porque a abertura da home depende de `dose_scene`.
+- ~~`npm run measure` ainda não está no CI.~~ **Resolvido**, e de um modo
+  diferente do previsto. Os scripts mediam `origin/main`, que se move: os
+  artefatos descreviam uma árvore diferente da publicada e ninguém conseguiria
+  repetir a medição sem adivinhar o momento. Passaram a medir `HEAD`. A CI
+  remede e **compara** — não regenera: os números do site passam por revisão
+  como qualquer outra mudança, em vez de a CI os reescrever sem que nenhum
+  commit explique por que a manchete mudou.
 - **Mais cenas, além da dose e do hidrogénio.** Restam `particle_physics`, `ode`,
   `climate_ensemble`, `sensor_fusion`. É aqui que entra investimento de design,
   não em efeito.
