@@ -521,7 +521,12 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
       with_lock state (fun () ->
           if not (Sys.file_exists path) then (
             let target = selector_runtime runtimes "current" in
-            let source_digest = sha256 raw_event in
+            (* O pin e validado contra identity_digest (validate_pin, exact
+               "presence_sha256"), entao e com ele que precisa nascer. Carimbar
+               sha256 raw_event — o hash do evento, nao da identidade — fazia
+               toda sessao pos-cutover falhar em pin-identity-drift no primeiro
+               prompt. O caminho de cutover em massa ja usa identity_digest. *)
+            let source_digest = identity_digest identity in
             let pin = pin_text identity source_digest "post-cutover-birth" target in
             let transaction = sha256 (source_digest ^ sha256 pin ^ target.manifest_sha256) in
             authority_decide state authority ~command:"hook-generation-pin-birth" 5 33021951 (identity_digest identity)
