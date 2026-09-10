@@ -119,3 +119,23 @@ execution of the new workflow steps remains a separate CI gate after publication
 This workflow edit does not change the frozen runtime or the waiting driver's
 orchestration hashes. It is queued behind the exact-source run 34415603204 rather
 than replacing that validation with a new head.
+
+### Source CI interruption and bounded recovery
+
+CI run 34415603204 attempt 1 ended in failure on 2026-09-10 at 00:44 UTC.
+The Madaros fixed-point step logged a runner shutdown signal and exit 143,
+after Merged IR: 13269 functions. This is not a successful self-compile;
+the shutdown's underlying cause is not established. The original driver
+stopped at STOP_SOURCE_CI without allocating a hardware attempt.
+
+source-ci-attempt-1/manifest.json pins the raw failed-job log, run/job
+metadata and original terminal driver log. Only failed CI jobs were explicitly
+rerun on the same source revision. ci-recovery.py watches run attempt 2
+in remote tmux and invokes the unchanged original driver only after that
+attempt succeeds. It refuses a changed run identity or an existing hardware
+attempt. The original driver still performs its full source, hash and pair
+preflight checks. A CI rerun is not a hardware retry; the experimental limit
+remains one attempt, zero retries. No CPU/container or loaded-model
+qualification follows from this recovery setup.
+
+Recovery controls: six isolated subprocess controls passed, including existing-attempt, changed-source, changed-run-attempt, failed-CI and changed-driver refusals. Archived failure hashes also passed. These controls do not execute hardware. Replay with python3 tools/pireus/continuity/validation/external-container-cpu-v3-20260909/ci-recovery-controls.py.
