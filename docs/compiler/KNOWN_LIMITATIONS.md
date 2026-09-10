@@ -757,7 +757,8 @@ whoever picks option 1, 2, or the remainder of option 3.
 - **Madaros V0-E.5:** general IEEE binary128 add/sub in `stdlib/math/softfloat_f128.sio`
   (`--stage v0e5`), seed-run and Madaros-run of `F128Bits` (not language `f128` ops).
 - **Madaros V0-E.5.1:** language `f128` `+`/`−` Madaros-run desugars to that softfloat
-  (`--stage v0e51`) on 2-limb locals (exact dyadic literals or `f128_from_limbs`).
+  (`--stage v0e51`) on 2-limb locals (exact dyadic literals or `f128_from_limbs`;
+  since V0-E.5.9 any exactly representable decimal or hex-float literal).
 - **Madaros V0-E.5.2:** language `f128` `*`, unary `-`, and `< <= > >= == !=`
   Madaros-run desugar to the same softfloat (`--stage v0e52`; IEEE RNE product,
   +0 == -0, NaN unordered).
@@ -806,6 +807,27 @@ whoever picks option 1, 2, or the remainder of option 3.
   print/println argument with unresolved scalar kind`; check admits it, no ELF).
   `print_f128` on f256/f64 is a checker error (E009). f256 printing, width /
   precision options, and parsing from text are not provided.
+- **Madaros V0-E.5.9:** exact `f128` literals (`--stage v0e59`). The parser reads
+  each float literal's source bytes once (`self-hosted/parser/f128_literal.sio`)
+  and stamps the node with its binary128 limbs (`Expr.f128_lit_lo / _hi /
+  _exact`): decimal `d.ddd e±N` and C99 hex-float `0xh.hhh p±N` are exact iff
+  the value is a dyadic rational whose odd part fits 113 bits and whose exponent
+  is in the finite range (subnormals only when no bit is lost). The lowerer
+  emits those limbs in every f128 position (let, struct literal, array slot,
+  operand, argument) and fails closed otherwise (`f128 literal is not exactly
+  representable in binary128 (V0-E.5.9; no f64 widen)`): `0.1`, `2.5e-3`,
+  `3.3`, a 26-digit non-dyadic decimal, a 29-hex-digit mantissa, `0x1p+16384`,
+  `0x1p-16495` are refused; `4.0`, `0.125`, `1e3`, `1e23`, `1152921504606846977.0`
+  (2^60+1), `1e38`, `0x1.8p+1`, `0x1.0000000000000000000000000001p+0` (1+2^-112),
+  `0x1.ffffffffffffffffffffffffffffp+16383`, `0x0.0000000000000000000000000001p-16382`
+  are exact. No f64 is read on this path. This replaced the V0-E.5.1 8-entry
+  table (0, ±1, 2, 3, 0.5, 1.5, 0.25) keyed on the literal's f64 value, and
+  closed a latent greenwash: a C99 hex-float reached that table as the parser's
+  placeholder magnitude, so `let x: f128 = 0x1.8p+0` lowered as 1.0/0.0 and
+  emitted an ELF. Still open (not this rung): the **f64** path of a hex-float
+  literal (`let x: f64 = 0x1.8p+0`) still lowers the parser placeholder
+  magnitude; checker E008/E001 still reject a bare literal in a `-> f128` tail
+  position and as a `[f128; N]` element.
 - Full stdlib GUM surface for `f128` is still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
   control); not a claim path. Repro: `examples/numerics/f128_is_f64_probe.sio`.
