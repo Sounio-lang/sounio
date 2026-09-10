@@ -7,3 +7,30 @@ The declared command compiles gen2 only, preserving Madaros build argv through s
 Before launch, record fresh node/queue state and worker pod identity. Capture monotonic wall time, child process CPU usage, peak RSS, minor/major faults, host memory/swap/PSI and process identity. Preserve partial artifacts on timeout as unqualified evidence; never execute a partial output. A successful compile may subsequently undergo a bounded banner check, recorded separately. The runner must refuse an existing attempt marker.
 
 Job 11991 entered the verified worker at 2026-09-10T11:33:42 UTC. The packet passed hash verification on both ends of transport; fresh queue and host preflight passed. Execution runs under tmux pireus-gen2-cpu-v1. Twenty samples and compiler diagnostics confirmed execution in progress; no terminal result or completed compilation is asserted. See execution-state.json for the bounded observation.
+
+## Terminal packet audit
+
+After result.json exists, run the read-only verifier from the owned worktree
+against the complete collected packet (including tree/), or copy the verifier
+outside the frozen worker packet and run it there:
+
+```sh
+python3 tools/pireus/continuity/ops/gen2_cpu_receipt.py /path/to/complete-packet
+```
+
+The verifier is explicitly pinned to job 11991, the recorded boot identity,
+protocol bytes, and runner bytes. It rehashes compiler/archive/artifact inputs,
+compares every source file against the pinned archive, rejects extra source
+files, checks allocation and result identity, and preserves failed/timeout
+compilations as incomplete. The returned hashes describe the observed terminal
+packet. They are not an independently authenticated execution transcript.
+
+Scheduler accounting and live worker identity still require separate collection.
+A successful packet audit does not execute the output or assert banner, CI,
+Inkling, fixed-point, or causal qualification. Do not run this verifier while
+the compiler is writing: a missing terminal result is a refusal, not permission
+to restart.
+
+Validation: 11 unittest controls passed for success scope, missing terminal,
+modified/added sources, modified artifact/runner/protocol, job/boot/allocation
+mismatch, failed/timeout results, empty successful output, and claim promotion.
