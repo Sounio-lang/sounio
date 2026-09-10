@@ -179,3 +179,11 @@ completed the initial lowering gates successfully, including the imported-
 capacity gate, and reached the self-compile step. This does not supply a full
 CI verdict or CPU/container qualification. No timeout change is justified by
 these observations alone. See capacity-diagnostic-followup.json.
+
+## Source revision 7617d6ff: CPU job 11982
+
+The separately frozen source revision completed one exclusive Spark pair CPU/container attempt. Slurm accounting is COMPLETED / 0:0; both ranks passed the unchanged 64 MiB allocation oracle, deadline cadence, observer resource readability, runtime and process custody, and guardian completion. The collection is complete and pinned in attempt-11982/qualification.json; archive-manifest.json pins the raw records and exact driver.
+
+Each rank produced 36 samples. Maximum sample gaps including boundaries were 200718035 ns and 200911656 ns against the frozen 500000000 ns ceiling. Observer peak RSS was 15683584 and 16084992 bytes; cumulative CPU deltas were 153230992 and 150292000 ns. These are CPU-control measurements, not an accepted overhead budget for a loaded model. The target task reported unlimited memory.max, memory.high and memory.swap.max; no ancestor limit is inferred from those fields.
+
+The prior source CI refusals and loaded-model negative job 11977 remain unchanged. No Inkling inference or loaded-model screening ran in job 11982. A separate prospective loaded-model qualification remains required.
