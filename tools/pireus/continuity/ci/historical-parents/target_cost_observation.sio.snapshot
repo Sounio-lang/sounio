@@ -1,0 +1,1332 @@
+//! Typed, target-local cost observation ontology for Pireus.
+//!
+//! This first child emits measurement requests only. It owns no material cost
+//! values and cannot compare targets.
+
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+}
+use hardware::pireus::target_profile::{
+    PIREUS_TARGET_DARWIN_XEON, PIREUS_TARGET_APPLE_SILICON,
+    PIREUS_TARGET_DGX_SPARK, PIREUS_MACHINE_T560,
+}
+use hardware::pireus::execution_engine::{
+    pireus_execution_engine_store,
+    pireus_query_observed_engines_by, pireus_query_target_blueprints,
+    pireus_query_observed_engines_for_target,
+    PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_KIND_GPU,
+    PIREUS_ENGINE_CPU_T560, PIREUS_BLUEPRINT_APPLE_CPU,
+    PIREUS_BLUEPRINT_DGX_GPU, PIREUS_INTERFACE_CUDA, PIREUS_INTERFACE_METAL,
+}
+use hardware::pireus::xor_convolution_operation::{
+    pireus_xor_operation_evaluate,
+    pireus_xor_operation_matches_frozen_semantics,
+}
+use hardware::pireus::xor_selector_material_admission::{
+    PireusXorMaterialFilePaths,
+    PireusXorSelectorAdmissionResult,
+    PIREUS_XOR_ADMISSION_NODE_ADMITTED,
+    pireus_xor_selector_material_admission_evaluate,
+    pireus_xor_selector_material_admission_matches_frozen_semantics,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_store_count, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    sparql_result_count, triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_COST_REQUEST_COUNT: i64 = 7
+pub const PIREUS_COST_PARENT_FILE_COUNT: i64 = 11
+
+pub const PIREUS_CLASS_COST_RECORD: i64 = 706000
+pub const PIREUS_CLASS_MEASUREMENT_REQUEST: i64 = 706001
+pub const PIREUS_CLASS_MATERIAL_OBSERVATION: i64 = 706002
+pub const PIREUS_CLASS_DERIVED_SUMMARY: i64 = 706003
+pub const PIREUS_CLASS_COMPARISON_RECEIPT: i64 = 706004
+pub const PIREUS_CLASS_COST_QUANTITY: i64 = 706005
+pub const PIREUS_CLASS_COST_UNIT: i64 = 706006
+pub const PIREUS_CLASS_COST_SCOPE: i64 = 706007
+pub const PIREUS_CLASS_COST_STATISTIC: i64 = 706008
+pub const PIREUS_CLASS_COST_SUBJECT: i64 = 706009
+
+pub const PIREUS_COST_HAS_TARGET: i64 = 706100
+pub const PIREUS_COST_HAS_MACHINE: i64 = 706101
+pub const PIREUS_COST_HAS_ENGINE: i64 = 706102
+pub const PIREUS_COST_HAS_SUBJECT: i64 = 706103
+pub const PIREUS_COST_HAS_QUANTITY: i64 = 706104
+pub const PIREUS_COST_HAS_UNIT: i64 = 706105
+pub const PIREUS_COST_HAS_SCOPE: i64 = 706106
+pub const PIREUS_COST_HAS_STATISTIC: i64 = 706107
+pub const PIREUS_COST_HAS_EVIDENCE_ROLE: i64 = 706108
+
+pub const PIREUS_COST_STATIC_SITE_COUNT: i64 = 706200
+pub const PIREUS_COST_EXECUTED_INSTRUCTION_COUNT: i64 = 706201
+pub const PIREUS_COST_EXECUTED_MICRO_OP_COUNT: i64 = 706202
+pub const PIREUS_COST_DEPENDENCY_LATENCY: i64 = 706203
+pub const PIREUS_COST_RECIPROCAL_THROUGHPUT: i64 = 706204
+pub const PIREUS_COST_ELAPSED_DURATION: i64 = 706205
+pub const PIREUS_COST_TRANSFER_BYTES: i64 = 706206
+pub const PIREUS_COST_ENERGY: i64 = 706207
+pub const PIREUS_COST_FREQUENCY: i64 = 706208
+pub const PIREUS_COST_OCCUPANCY: i64 = 706209
+
+pub const PIREUS_COST_UNIT_COUNT: i64 = 706220
+pub const PIREUS_COST_UNIT_CYCLE: i64 = 706221
+pub const PIREUS_COST_UNIT_NANOSECOND: i64 = 706222
+pub const PIREUS_COST_UNIT_BYTE: i64 = 706223
+pub const PIREUS_COST_UNIT_JOULE: i64 = 706224
+pub const PIREUS_COST_UNIT_HERTZ: i64 = 706225
+pub const PIREUS_COST_UNIT_OPERATION_PER_SECOND: i64 = 706226
+pub const PIREUS_COST_UNIT_RATIO: i64 = 706227
+
+pub const PIREUS_COST_SCOPE_STATIC_BINARY: i64 = 706240
+pub const PIREUS_COST_SCOPE_DEPENDENCY_CHAIN: i64 = 706241
+pub const PIREUS_COST_SCOPE_INDEPENDENT_STREAM: i64 = 706242
+pub const PIREUS_COST_SCOPE_SINGLE_NODE: i64 = 706243
+pub const PIREUS_COST_SCOPE_COMPLETE_OPERATION: i64 = 706244
+pub const PIREUS_COST_SCOPE_HOST_TO_DEVICE: i64 = 706245
+pub const PIREUS_COST_SCOPE_DEVICE_TO_HOST: i64 = 706246
+pub const PIREUS_COST_SCOPE_DEVICE_LOCAL: i64 = 706247
+
+pub const PIREUS_COST_STAT_RAW_SAMPLE: i64 = 706260
+pub const PIREUS_COST_STAT_MINIMUM: i64 = 706261
+pub const PIREUS_COST_STAT_MEDIAN: i64 = 706262
+pub const PIREUS_COST_STAT_MEAN: i64 = 706263
+pub const PIREUS_COST_STAT_QUANTILE: i64 = 706264
+
+pub const PIREUS_COST_SUBJECT_INSTRUCTION_FORM: i64 = 706280
+pub const PIREUS_COST_SUBJECT_LOWERING_NODE: i64 = 706281
+pub const PIREUS_COST_SUBJECT_COMPLETE_OPERATION: i64 = 706282
+pub const PIREUS_COST_SUBJECT_DATA_MOVEMENT_EDGE: i64 = 706283
+pub const PIREUS_COST_SUBJECT_SYNCHRONIZATION_BARRIER: i64 = 706284
+
+pub const PIREUS_COST_EVIDENCE_REQUEST: i64 = 706300
+pub const PIREUS_COST_EVIDENCE_MATERIAL_OBSERVATION: i64 = 706301
+pub const PIREUS_COST_EVIDENCE_DERIVED_SUMMARY: i64 = 706302
+pub const PIREUS_COST_EVIDENCE_COMPARISON_RECEIPT: i64 = 706303
+
+pub const PIREUS_COST_LANGUAGE_SOUNIO: i64 = 1
+pub const PIREUS_COST_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_COST_LANGUAGE_EXTERNAL_LLM: i64 = 6
+pub const PIREUS_COST_LANGUAGE_PYTHON: i64 = 7
+pub const PIREUS_COST_LANGUAGE_RUST: i64 = 8
+pub const PIREUS_COST_ROLE_SEMANTIC_AUTHORITY: i64 = 1
+pub const PIREUS_COST_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_COST_ROLE_REVIEW_ONLY: i64 = 6
+
+pub const PIREUS_COST_ENV_HARDWARE: i64 = 1
+pub const PIREUS_COST_ENV_TOOLCHAIN: i64 = 2
+pub const PIREUS_COST_ENV_BINARY: i64 = 4
+pub const PIREUS_COST_ENV_COMMAND: i64 = 8
+pub const PIREUS_COST_ENV_WORKLOAD: i64 = 16
+pub const PIREUS_COST_ENV_OS_DRIVER: i64 = 32
+pub const PIREUS_COST_ENV_THREADS: i64 = 64
+pub const PIREUS_COST_ENV_AFFINITY: i64 = 128
+pub const PIREUS_COST_ENV_FREQUENCY: i64 = 256
+pub const PIREUS_COST_ENV_POWER: i64 = 512
+pub const PIREUS_COST_ENV_TIMER_COUNTER: i64 = 1024
+pub const PIREUS_COST_ENV_COMPLETE: i64 = 2047
+
+pub const PIREUS_COST_OK: i64 = 0
+pub const PIREUS_COST_ERR_PARENT: i64 = 1
+pub const PIREUS_COST_ERR_ENGINE: i64 = 2
+pub const PIREUS_COST_ERR_REQUEST: i64 = 3
+pub const PIREUS_COST_ERR_ONTOLOGY: i64 = 4
+pub const PIREUS_COST_ERR_AUTHORITY: i64 = 5
+
+pub struct PireusCostDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusCostParentPaths {
+    pub garden: string,
+    pub admission_source: string,
+    pub admission_semantics: string,
+    pub admission_receipt: string,
+    pub admission_evidence: string,
+    pub engine_source: string,
+    pub engine_semantics: string,
+    pub engine_receipt: string,
+    pub operation_source: string,
+    pub operation_semantics: string,
+    pub operation_receipt: string,
+}
+
+pub struct PireusCostRequest {
+    pub request_id: i64,
+    pub target_id: i64,
+    pub machine_id: i64,
+    pub engine_id: i64,
+    pub engine_is_blueprint: bool,
+    pub engine_observed: bool,
+    pub subject_kind: i64,
+    pub subject_node: i64,
+    pub quantity: i64,
+    pub unit: i64,
+    pub scope: i64,
+    pub statistic: i64,
+    pub requested_sample_count: i64,
+    pub requested_warmup_count: i64,
+    pub required_environment_mask: i64,
+    pub bound_environment_mask: i64,
+    pub evidence_role: i64,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub value_present: bool,
+    pub estimate_numerator: i64,
+    pub estimate_denominator: i64,
+    pub lower_numerator: i64,
+    pub lower_denominator: i64,
+    pub upper_numerator: i64,
+    pub upper_denominator: i64,
+    pub subject_covered: bool,
+    pub admitted: bool,
+}
+
+pub struct PireusCostLedger {
+    pub request_ids: [i64; 7],
+    pub target_ids: [i64; 7],
+    pub machine_ids: [i64; 7],
+    pub engine_ids: [i64; 7],
+    pub engine_is_blueprint: [bool; 7],
+    pub engine_observed: [bool; 7],
+    pub subject_kinds: [i64; 7],
+    pub subject_nodes: [i64; 7],
+    pub quantities: [i64; 7],
+    pub units: [i64; 7],
+    pub scopes: [i64; 7],
+    pub statistics: [i64; 7],
+    pub requested_sample_counts: [i64; 7],
+    pub requested_warmup_counts: [i64; 7],
+    pub required_environment_masks: [i64; 7],
+    pub bound_environment_masks: [i64; 7],
+    pub evidence_roles: [i64; 7],
+    pub producer_languages: [i64; 7],
+    pub producer_roles: [i64; 7],
+    pub value_present: [bool; 7],
+    pub subject_covered: [bool; 7],
+    pub admitted: [bool; 7],
+    pub request_count: i64,
+    pub selector_request_count: i64,
+    pub whole_operation_request_count: i64,
+}
+
+pub struct PireusCostNegatives {
+    pub missing_garden_binding: bool,
+    pub missing_or_mismatched_parent: bool,
+    pub static_site_to_latency: bool,
+    pub static_site_to_dynamic_instruction: bool,
+    pub instruction_to_micro_op: bool,
+    pub selector_to_complete_operation: bool,
+    pub unnamed_dgx_to_named_node: bool,
+    pub blueprint_to_observed_engine: bool,
+    pub interface_to_isa: bool,
+    pub gpu_cost_to_host_xeon: bool,
+    pub quantity_unit_mismatch: bool,
+    pub latency_to_independent_throughput: bool,
+    pub zero_sample_count: bool,
+    pub zero_denominator: bool,
+    pub lower_above_estimate: bool,
+    pub estimate_above_upper: bool,
+    pub missing_core_environment: bool,
+    pub missing_affinity_or_frequency: bool,
+    pub request_with_value: bool,
+    pub cpp_semantic_authority: bool,
+    pub summary_without_observation: bool,
+    pub comparison_without_receipt: bool,
+    pub same_unit_comparability: bool,
+    pub review_to_authority: bool,
+    pub premature_stage: bool,
+    pub forbidden_producer_prelaunch: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusTargetCostObservationResult {
+    pub valid: bool,
+    pub error: i64,
+    pub parent_file_match_mask: i64,
+    pub parent_file_match_count: i64,
+    pub parent_files_valid: bool,
+    pub admission_parent_live: bool,
+    pub operation_parent_live: bool,
+    pub engine_parent_live: bool,
+    pub observed_cpu_count: i64,
+    pub observed_gpu_count: i64,
+    pub darwin_observed_engine_count: i64,
+    pub apple_observed_engine_count: i64,
+    pub dgx_observed_engine_count: i64,
+    pub darwin_blueprint_count: i64,
+    pub apple_blueprint_count: i64,
+    pub dgx_blueprint_count: i64,
+    pub ledger: PireusCostLedger,
+    pub static_site_fact_count: i64,
+    pub secondary_site_fact_count: i64,
+    pub ontology_triple_count: i64,
+    pub ontology_request_count: i64,
+    pub ontology_observation_count: i64,
+    pub ontology_summary_count: i64,
+    pub ontology_comparison_count: i64,
+    pub material_observation_count: i64,
+    pub derived_summary_count: i64,
+    pub comparison_receipt_count: i64,
+    pub speedup_count: i64,
+    pub ranking_count: i64,
+    pub cross_target_comparable: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub result_digest: PireusCostDigest,
+    pub negatives: PireusCostNegatives,
+    pub failures: i64,
+}
+
+fn ptc_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ptc_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        bytes[i as usize] = ((value >> ((7 - i) * 8)) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn ptc_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    ptc_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn ptc_digest_finish(state: SHA256State) -> PireusCostDigest
+with Mut, Panic, Div {
+    let finalized = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        var word: i64 = 0
+        var j: i64 = 0
+        while j < 4 {
+            word = word * 256 + sha256_digest_byte(finalized, i * 4 + j)
+            j = j + 1
+        }
+        words[i as usize] = word
+        i = i + 1
+    }
+    PireusCostDigest { words: words }
+}
+
+fn ptc_file_hash(path: string) -> PireusCostDigest
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size <= 0 || size >= 1048576 {
+        return PireusCostDigest { words: [0; 8] }
+    }
+    let raw = read_file(path)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var byte = raw[(pos + i) as usize] as i64
+            if byte < 0 { byte = byte + 256 }
+            window[i as usize] = byte as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    ptc_digest_finish(state)
+}
+
+fn ptc_expected_parent_hash(index: i64) -> [i64; 8] {
+    if index == 0 { return [0xecef7f1f, 0xf683f115, 0x7e89bb5e, 0x552e121f, 0x51c4191e, 0x9662b17a, 0x0a5f4a71, 0x909223a8] }
+    if index == 1 { return [0xb9249fe2, 0x4f5d08fb, 0x01263134, 0x6164d826, 0xb8ee9751, 0x30b0f298, 0xa809ad48, 0xf4843a66] }
+    if index == 2 { return [0x17196cbc, 0x2c3fa286, 0xc9c2c6e4, 0x8f042cd3, 0xb180d731, 0xee41e0e4, 0x92077b35, 0x5ca34ea9] }
+    if index == 3 { return [0x26154484, 0x49a16faf, 0x1d826a6d, 0x42e0b021, 0x2036f485, 0xa3a3e815, 0xfc064c29, 0x8070f979] }
+    if index == 4 { return [0xa59d9753, 0x37fb4e0d, 0x825038e2, 0x5ba4bf4b, 0x11105e28, 0x863fdf83, 0x7d1cba60, 0x919ffc7e] }
+    if index == 5 { return [0x8b5063f0, 0xe9a39650, 0xfb0b60e8, 0xb70b315f, 0x33972369, 0x0e06050c, 0x2bebacec, 0xe888e37e] }
+    if index == 6 { return [0xc47668a0, 0x8ad25f39, 0xbebe9d8b, 0xef90b66e, 0xb2ad7119, 0x063c19ab, 0x8319fa4f, 0xab265233] }
+    if index == 7 { return [0x9da8ca53, 0xc3cb0e66, 0x31c92e55, 0xa8e82387, 0xaed2bd53, 0x863ffa9d, 0x64671980, 0x6eec4ffd] }
+    if index == 8 { return [0xbc039d5d, 0xb9f195b9, 0x4fbeb08f, 0x22f9c961, 0x64a174c2, 0xcea67573, 0x9e901a07, 0xfdf54db8] }
+    if index == 9 { return [0x40fe6982, 0x9b1feb58, 0x43ea8b47, 0x20b70516, 0x303e8eda, 0x37c14498, 0x9909b52d, 0x1b466fb1] }
+    if index == 10 { return [0x9e1e416d, 0xefa4a1cf, 0xc477f063, 0x0623321e, 0x12209a40, 0xc9f5f878, 0xb85cce40, 0xbe83d330] }
+    [0; 8]
+}
+
+fn ptc_parent_path(paths: &PireusCostParentPaths, index: i64) -> string {
+    if index == 0 { return paths.garden }
+    if index == 1 { return paths.admission_source }
+    if index == 2 { return paths.admission_semantics }
+    if index == 3 { return paths.admission_receipt }
+    if index == 4 { return paths.admission_evidence }
+    if index == 5 { return paths.engine_source }
+    if index == 6 { return paths.engine_semantics }
+    if index == 7 { return paths.engine_receipt }
+    if index == 8 { return paths.operation_source }
+    if index == 9 { return paths.operation_semantics }
+    paths.operation_receipt
+}
+
+fn ptc_parent_match_mask(paths: &PireusCostParentPaths) -> i64
+with IO, Mut, Panic, Div, Alloc {
+    var mask: i64 = 0
+    var i: i64 = 0
+    while i < PIREUS_COST_PARENT_FILE_COUNT {
+        let actual = ptc_file_hash(ptc_parent_path(paths, i))
+        let expected = ptc_expected_parent_hash(i)
+        if ptc_hash_equal(&actual.words, &expected) {
+            mask = mask | (1 << i)
+        }
+        i = i + 1
+    }
+    mask
+}
+
+pub fn pireus_cost_parent_file_matches(mask: i64, index: i64) -> bool {
+    index >= 0 && index < PIREUS_COST_PARENT_FILE_COUNT &&
+        (mask & (1 << index)) != 0
+}
+
+pub fn pireus_cost_quantity_unit_valid(quantity: i64, unit: i64) -> bool {
+    if quantity == PIREUS_COST_STATIC_SITE_COUNT ||
+        quantity == PIREUS_COST_EXECUTED_INSTRUCTION_COUNT ||
+        quantity == PIREUS_COST_EXECUTED_MICRO_OP_COUNT {
+        return unit == PIREUS_COST_UNIT_COUNT
+    }
+    if quantity == PIREUS_COST_DEPENDENCY_LATENCY {
+        return unit == PIREUS_COST_UNIT_CYCLE ||
+            unit == PIREUS_COST_UNIT_NANOSECOND
+    }
+    if quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT {
+        return unit == PIREUS_COST_UNIT_CYCLE
+    }
+    if quantity == PIREUS_COST_ELAPSED_DURATION {
+        return unit == PIREUS_COST_UNIT_NANOSECOND
+    }
+    if quantity == PIREUS_COST_TRANSFER_BYTES { return unit == PIREUS_COST_UNIT_BYTE }
+    if quantity == PIREUS_COST_ENERGY { return unit == PIREUS_COST_UNIT_JOULE }
+    if quantity == PIREUS_COST_FREQUENCY { return unit == PIREUS_COST_UNIT_HERTZ }
+    if quantity == PIREUS_COST_OCCUPANCY { return unit == PIREUS_COST_UNIT_RATIO }
+    false
+}
+
+fn ptc_quantity_can_satisfy(observed: i64, requested: i64) -> bool {
+    observed == requested && observed != PIREUS_COST_STATIC_SITE_COUNT
+}
+
+pub fn pireus_cost_subject_scope_valid(subject: i64, scope: i64) -> bool {
+    if subject == PIREUS_COST_SUBJECT_LOWERING_NODE {
+        return scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN ||
+            scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM ||
+            scope == PIREUS_COST_SCOPE_SINGLE_NODE
+    }
+    if subject == PIREUS_COST_SUBJECT_COMPLETE_OPERATION {
+        return scope == PIREUS_COST_SCOPE_COMPLETE_OPERATION
+    }
+    if subject == PIREUS_COST_SUBJECT_INSTRUCTION_FORM {
+        return scope == PIREUS_COST_SCOPE_STATIC_BINARY ||
+            scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN ||
+            scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM
+    }
+    if subject == PIREUS_COST_SUBJECT_DATA_MOVEMENT_EDGE {
+        return scope == PIREUS_COST_SCOPE_HOST_TO_DEVICE ||
+            scope == PIREUS_COST_SCOPE_DEVICE_TO_HOST ||
+            scope == PIREUS_COST_SCOPE_DEVICE_LOCAL
+    }
+    subject == PIREUS_COST_SUBJECT_SYNCHRONIZATION_BARRIER &&
+        scope == PIREUS_COST_SCOPE_DEVICE_LOCAL
+}
+
+fn ptc_quantity_scope_valid(quantity: i64, scope: i64) -> bool {
+    if quantity == PIREUS_COST_DEPENDENCY_LATENCY {
+        return scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN
+    }
+    if quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT {
+        return scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM
+    }
+    if quantity == PIREUS_COST_ELAPSED_DURATION {
+        return scope == PIREUS_COST_SCOPE_COMPLETE_OPERATION
+    }
+    true
+}
+
+fn ptc_target_engine_valid(request: &PireusCostRequest) -> bool {
+    if request.target_id == PIREUS_TARGET_DARWIN_XEON {
+        return request.machine_id == PIREUS_MACHINE_T560 &&
+            request.engine_id == PIREUS_ENGINE_CPU_T560 &&
+            !request.engine_is_blueprint && request.engine_observed
+    }
+    if request.target_id == PIREUS_TARGET_APPLE_SILICON {
+        return request.machine_id == 0 &&
+            request.engine_id == PIREUS_BLUEPRINT_APPLE_CPU &&
+            request.engine_is_blueprint && !request.engine_observed
+    }
+    if request.target_id == PIREUS_TARGET_DGX_SPARK {
+        return request.machine_id == 0 &&
+            request.engine_id == PIREUS_BLUEPRINT_DGX_GPU &&
+            request.engine_is_blueprint && !request.engine_observed
+    }
+    false
+}
+
+pub fn pireus_cost_request_valid(request: &PireusCostRequest) -> bool {
+    request.request_id > 0 && request.subject_covered && request.admitted &&
+        ptc_target_engine_valid(request) &&
+        pireus_cost_quantity_unit_valid(request.quantity, request.unit) &&
+        pireus_cost_subject_scope_valid(request.subject_kind, request.scope) &&
+        ptc_quantity_scope_valid(request.quantity, request.scope) &&
+        request.statistic == PIREUS_COST_STAT_MEDIAN &&
+        request.requested_sample_count > 0 &&
+        request.requested_warmup_count >= 0 &&
+        request.required_environment_mask == PIREUS_COST_ENV_COMPLETE &&
+        request.bound_environment_mask == 0 &&
+        request.evidence_role == PIREUS_COST_EVIDENCE_REQUEST &&
+        request.producer_language == PIREUS_COST_LANGUAGE_SOUNIO &&
+        request.producer_role == PIREUS_COST_ROLE_SEMANTIC_AUTHORITY &&
+        !request.value_present && request.estimate_numerator == 0 &&
+        request.estimate_denominator == 0 && request.lower_numerator == 0 &&
+        request.lower_denominator == 0 && request.upper_numerator == 0 &&
+        request.upper_denominator == 0
+}
+
+fn ptc_ratio_component_valid(value: i64) -> bool {
+    value >= 0 && value <= 1000000000
+}
+
+fn ptc_producer_launch_allowed(language: i64) -> bool {
+    language != PIREUS_COST_LANGUAGE_PYTHON &&
+        language != PIREUS_COST_LANGUAGE_RUST
+}
+
+fn ptc_summary_valid(
+    admitted_observation_count: i64, evidence_role: i64,
+) -> bool {
+    admitted_observation_count > 0 &&
+        evidence_role == PIREUS_COST_EVIDENCE_DERIVED_SUMMARY
+}
+
+fn ptc_comparison_valid(
+    admitted_observation_count: i64,
+    comparison_receipt_count: i64,
+    evidence_role: i64,
+) -> bool {
+    admitted_observation_count >= 2 && comparison_receipt_count > 0 &&
+        evidence_role == PIREUS_COST_EVIDENCE_COMPARISON_RECEIPT
+}
+
+pub fn pireus_cost_requests_comparable(
+    left: &PireusCostRequest, right: &PireusCostRequest,
+) -> bool {
+    left.target_id == right.target_id &&
+        left.engine_id == right.engine_id &&
+        left.subject_kind == right.subject_kind &&
+        left.subject_node == right.subject_node &&
+        left.quantity == right.quantity && left.unit == right.unit &&
+        left.scope == right.scope && left.statistic == right.statistic &&
+        left.requested_sample_count == right.requested_sample_count &&
+        left.requested_warmup_count == right.requested_warmup_count &&
+        left.required_environment_mask == right.required_environment_mask
+}
+
+fn ptc_child_boundary_valid(
+    material_observations: i64,
+    derived_summaries: i64,
+    comparisons: i64,
+    speedups: i64,
+    rankings: i64,
+    cross_target_comparable: bool,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    material_observations == 0 && derived_summaries == 0 &&
+        comparisons == 0 && speedups == 0 && rankings == 0 &&
+        !cross_target_comparable && !parity_open && !claim_ready
+}
+
+fn ptc_request(
+    id: i64, target: i64, machine: i64, engine: i64,
+    blueprint: bool, observed: bool, subject: i64, node: i64,
+    quantity: i64, unit: i64, scope: i64, covered: bool,
+) -> PireusCostRequest {
+    PireusCostRequest {
+        request_id: id, target_id: target, machine_id: machine,
+        engine_id: engine, engine_is_blueprint: blueprint,
+        engine_observed: observed, subject_kind: subject, subject_node: node,
+        quantity: quantity, unit: unit, scope: scope,
+        statistic: PIREUS_COST_STAT_MEDIAN,
+        requested_sample_count: 1001, requested_warmup_count: 128,
+        required_environment_mask: PIREUS_COST_ENV_COMPLETE,
+        bound_environment_mask: 0,
+        evidence_role: PIREUS_COST_EVIDENCE_REQUEST,
+        producer_language: PIREUS_COST_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_COST_ROLE_SEMANTIC_AUTHORITY,
+        value_present: false, estimate_numerator: 0, estimate_denominator: 0,
+        lower_numerator: 0, lower_denominator: 0,
+        upper_numerator: 0, upper_denominator: 0,
+        subject_covered: covered, admitted: covered,
+    }
+}
+
+fn ptc_build_ledger(
+    admission: &PireusXorSelectorAdmissionResult,
+) -> PireusCostLedger with Mut, Panic {
+    let darwin_selector = admission.darwin.node_status[0] ==
+        PIREUS_XOR_ADMISSION_NODE_ADMITTED
+    let apple_selector = admission.apple.node_status[0] ==
+        PIREUS_XOR_ADMISSION_NODE_ADMITTED
+    let dgx_selector = admission.dgx.node_status[0] ==
+        PIREUS_XOR_ADMISSION_NODE_ADMITTED
+    let darwin_whole = admission.darwin.whole_operation_covered
+    let covered: [bool; 7] = [
+        darwin_selector, darwin_selector, darwin_whole,
+        apple_selector, apple_selector, dgx_selector, dgx_selector,
+    ]
+    let count = (if covered[0] { 1 } else { 0 }) +
+        (if covered[1] { 1 } else { 0 }) +
+        (if covered[2] { 1 } else { 0 }) +
+        (if covered[3] { 1 } else { 0 }) +
+        (if covered[4] { 1 } else { 0 }) +
+        (if covered[5] { 1 } else { 0 }) +
+        (if covered[6] { 1 } else { 0 })
+    let selector_count = count - (if darwin_whole { 1 } else { 0 })
+    let whole_count = if darwin_whole { 1 } else { 0 }
+    PireusCostLedger {
+        request_ids: [1, 2, 3, 4, 5, 6, 7],
+        target_ids: [
+            PIREUS_TARGET_DARWIN_XEON, PIREUS_TARGET_DARWIN_XEON,
+            PIREUS_TARGET_DARWIN_XEON, PIREUS_TARGET_APPLE_SILICON,
+            PIREUS_TARGET_APPLE_SILICON, PIREUS_TARGET_DGX_SPARK,
+            PIREUS_TARGET_DGX_SPARK,
+        ],
+        machine_ids: [
+            PIREUS_MACHINE_T560, PIREUS_MACHINE_T560, PIREUS_MACHINE_T560,
+            0, 0, 0, 0,
+        ],
+        engine_ids: [
+            PIREUS_ENGINE_CPU_T560, PIREUS_ENGINE_CPU_T560,
+            PIREUS_ENGINE_CPU_T560, PIREUS_BLUEPRINT_APPLE_CPU,
+            PIREUS_BLUEPRINT_APPLE_CPU, PIREUS_BLUEPRINT_DGX_GPU,
+            PIREUS_BLUEPRINT_DGX_GPU,
+        ],
+        engine_is_blueprint: [false, false, false, true, true, true, true],
+        engine_observed: [true, true, true, false, false, false, false],
+        subject_kinds: [
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SUBJECT_COMPLETE_OPERATION,
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+        ],
+        subject_nodes: [0, 0, 0, 0, 0, 0, 0],
+        quantities: [
+            PIREUS_COST_DEPENDENCY_LATENCY,
+            PIREUS_COST_RECIPROCAL_THROUGHPUT,
+            PIREUS_COST_ELAPSED_DURATION,
+            PIREUS_COST_DEPENDENCY_LATENCY,
+            PIREUS_COST_RECIPROCAL_THROUGHPUT,
+            PIREUS_COST_DEPENDENCY_LATENCY,
+            PIREUS_COST_RECIPROCAL_THROUGHPUT,
+        ],
+        units: [
+            PIREUS_COST_UNIT_CYCLE, PIREUS_COST_UNIT_CYCLE,
+            PIREUS_COST_UNIT_NANOSECOND, PIREUS_COST_UNIT_CYCLE,
+            PIREUS_COST_UNIT_CYCLE, PIREUS_COST_UNIT_CYCLE,
+            PIREUS_COST_UNIT_CYCLE,
+        ],
+        scopes: [
+            PIREUS_COST_SCOPE_DEPENDENCY_CHAIN,
+            PIREUS_COST_SCOPE_INDEPENDENT_STREAM,
+            PIREUS_COST_SCOPE_COMPLETE_OPERATION,
+            PIREUS_COST_SCOPE_DEPENDENCY_CHAIN,
+            PIREUS_COST_SCOPE_INDEPENDENT_STREAM,
+            PIREUS_COST_SCOPE_DEPENDENCY_CHAIN,
+            PIREUS_COST_SCOPE_INDEPENDENT_STREAM,
+        ],
+        statistics: [PIREUS_COST_STAT_MEDIAN; 7],
+        requested_sample_counts: [1001; 7],
+        requested_warmup_counts: [128; 7],
+        required_environment_masks: [PIREUS_COST_ENV_COMPLETE; 7],
+        bound_environment_masks: [0; 7],
+        evidence_roles: [PIREUS_COST_EVIDENCE_REQUEST; 7],
+        producer_languages: [PIREUS_COST_LANGUAGE_SOUNIO; 7],
+        producer_roles: [PIREUS_COST_ROLE_SEMANTIC_AUTHORITY; 7],
+        value_present: [false; 7],
+        subject_covered: covered,
+        admitted: covered,
+        request_count: count,
+        selector_request_count: selector_count,
+        whole_operation_request_count: whole_count,
+    }
+}
+
+pub fn pireus_cost_ledger_request(
+    ledger: &PireusCostLedger, index: i64,
+) -> PireusCostRequest with Panic {
+    PireusCostRequest {
+        request_id: ledger.request_ids[index as usize],
+        target_id: ledger.target_ids[index as usize],
+        machine_id: ledger.machine_ids[index as usize],
+        engine_id: ledger.engine_ids[index as usize],
+        engine_is_blueprint: ledger.engine_is_blueprint[index as usize],
+        engine_observed: ledger.engine_observed[index as usize],
+        subject_kind: ledger.subject_kinds[index as usize],
+        subject_node: ledger.subject_nodes[index as usize],
+        quantity: ledger.quantities[index as usize],
+        unit: ledger.units[index as usize],
+        scope: ledger.scopes[index as usize],
+        statistic: ledger.statistics[index as usize],
+        requested_sample_count: ledger.requested_sample_counts[index as usize],
+        requested_warmup_count: ledger.requested_warmup_counts[index as usize],
+        required_environment_mask:
+            ledger.required_environment_masks[index as usize],
+        bound_environment_mask: ledger.bound_environment_masks[index as usize],
+        evidence_role: ledger.evidence_roles[index as usize],
+        producer_language: ledger.producer_languages[index as usize],
+        producer_role: ledger.producer_roles[index as usize],
+        value_present: ledger.value_present[index as usize],
+        estimate_numerator: 0, estimate_denominator: 0,
+        lower_numerator: 0, lower_denominator: 0,
+        upper_numerator: 0, upper_denominator: 0,
+        subject_covered: ledger.subject_covered[index as usize],
+        admitted: ledger.admitted[index as usize],
+    }
+}
+
+pub fn pireus_cost_ledger_request_valid(
+    ledger: &PireusCostLedger, index: i64,
+) -> bool with Panic {
+    if index < 0 || index >= PIREUS_COST_REQUEST_COUNT { return false }
+    let request = pireus_cost_ledger_request(ledger, index)
+    pireus_cost_request_valid(&request)
+}
+
+fn ptc_add_class(store: &TripleStore, id: i64) {
+    triple_store_add(store, triple_iri(id, PIREUS_RDF_TYPE,
+        PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn ptc_add_terms(store: &TripleStore, class_id: i64, first: i64, count: i64) {
+    var i: i64 = 0
+    while i < count {
+        triple_store_add(store, triple_iri(first + i, PIREUS_RDF_TYPE, class_id))
+        i = i + 1
+    }
+}
+
+fn ptc_add_request(store: &TripleStore, request: &PireusCostRequest) {
+    if !request.admitted { return }
+    let id = 706700 + request.request_id
+    triple_store_add(store, triple_iri(id, PIREUS_RDF_TYPE,
+        PIREUS_CLASS_COST_RECORD))
+    triple_store_add(store, triple_iri(id, PIREUS_RDF_TYPE,
+        PIREUS_CLASS_MEASUREMENT_REQUEST))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_TARGET,
+        request.target_id))
+    if request.machine_id != 0 {
+        triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_MACHINE,
+            request.machine_id))
+    }
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_ENGINE,
+        request.engine_id))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_SUBJECT,
+        request.subject_kind))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_QUANTITY,
+        request.quantity))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_UNIT,
+        request.unit))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_SCOPE,
+        request.scope))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_STATISTIC,
+        request.statistic))
+    triple_store_add(store, triple_iri(id, PIREUS_COST_HAS_EVIDENCE_ROLE,
+        request.evidence_role))
+}
+
+fn ptc_store(ledger: &PireusCostLedger) -> TripleStore with Mut, Panic {
+    var store = pireus_execution_engine_store()
+    ptc_add_class(&store, PIREUS_CLASS_COST_RECORD)
+    ptc_add_class(&store, PIREUS_CLASS_MEASUREMENT_REQUEST)
+    ptc_add_class(&store, PIREUS_CLASS_MATERIAL_OBSERVATION)
+    ptc_add_class(&store, PIREUS_CLASS_DERIVED_SUMMARY)
+    ptc_add_class(&store, PIREUS_CLASS_COMPARISON_RECEIPT)
+    ptc_add_class(&store, PIREUS_CLASS_COST_QUANTITY)
+    ptc_add_class(&store, PIREUS_CLASS_COST_UNIT)
+    ptc_add_class(&store, PIREUS_CLASS_COST_SCOPE)
+    ptc_add_class(&store, PIREUS_CLASS_COST_STATISTIC)
+    ptc_add_class(&store, PIREUS_CLASS_COST_SUBJECT)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_QUANTITY,
+        PIREUS_COST_STATIC_SITE_COUNT, 10)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_UNIT, PIREUS_COST_UNIT_COUNT, 8)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_SCOPE,
+        PIREUS_COST_SCOPE_STATIC_BINARY, 8)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_STATISTIC,
+        PIREUS_COST_STAT_RAW_SAMPLE, 5)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_SUBJECT,
+        PIREUS_COST_SUBJECT_INSTRUCTION_FORM, 5)
+    ptc_add_terms(&store, PIREUS_CLASS_COST_RECORD,
+        PIREUS_COST_EVIDENCE_REQUEST, 4)
+    var i: i64 = 0
+    while i < 7 {
+        let request = pireus_cost_ledger_request(ledger, i)
+        ptc_add_request(&store, &request)
+        i = i + 1
+    }
+    store
+}
+
+fn ptc_query_class(store: &TripleStore, class_id: i64) -> SparqlResult
+with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(class_id)))
+    sparql_execute(store, &query)
+}
+
+fn ptc_material_observation_valid(record: &PireusCostRequest) -> bool {
+    record.evidence_role == PIREUS_COST_EVIDENCE_MATERIAL_OBSERVATION &&
+        record.producer_language == PIREUS_COST_LANGUAGE_CPP &&
+        record.producer_role == PIREUS_COST_ROLE_MATERIAL_PARITY &&
+        record.engine_observed && !record.engine_is_blueprint &&
+        record.value_present && record.requested_sample_count > 0 &&
+        ptc_ratio_component_valid(record.estimate_numerator) &&
+        ptc_ratio_component_valid(record.estimate_denominator) &&
+        ptc_ratio_component_valid(record.lower_numerator) &&
+        ptc_ratio_component_valid(record.lower_denominator) &&
+        ptc_ratio_component_valid(record.upper_numerator) &&
+        ptc_ratio_component_valid(record.upper_denominator) &&
+        record.estimate_denominator > 0 && record.lower_denominator > 0 &&
+        record.upper_denominator > 0 &&
+        record.lower_numerator * record.estimate_denominator <=
+            record.estimate_numerator * record.lower_denominator &&
+        record.estimate_numerator * record.upper_denominator <=
+            record.upper_numerator * record.estimate_denominator &&
+        (record.bound_environment_mask & record.required_environment_mask) ==
+            record.required_environment_mask
+}
+
+fn ptc_valid_material_seed() -> PireusCostRequest {
+    var record = ptc_request(90, PIREUS_TARGET_DARWIN_XEON,
+        PIREUS_MACHINE_T560, PIREUS_ENGINE_CPU_T560, false, true,
+        PIREUS_COST_SUBJECT_LOWERING_NODE, 0,
+        PIREUS_COST_DEPENDENCY_LATENCY, PIREUS_COST_UNIT_CYCLE,
+        PIREUS_COST_SCOPE_DEPENDENCY_CHAIN, true)
+    record.evidence_role = PIREUS_COST_EVIDENCE_MATERIAL_OBSERVATION
+    record.producer_language = PIREUS_COST_LANGUAGE_CPP
+    record.producer_role = PIREUS_COST_ROLE_MATERIAL_PARITY
+    record.bound_environment_mask = PIREUS_COST_ENV_COMPLETE
+    record.value_present = true
+    record.estimate_numerator = 10
+    record.estimate_denominator = 1
+    record.lower_numerator = 9
+    record.lower_denominator = 1
+    record.upper_numerator = 11
+    record.upper_denominator = 1
+    record
+}
+
+fn ptc_exercise_negatives(
+    parent_mask: i64,
+    admission: &PireusXorSelectorAdmissionResult,
+) -> PireusCostNegatives with Mut, Panic {
+    let request = ptc_request(91, PIREUS_TARGET_DARWIN_XEON,
+        PIREUS_MACHINE_T560, PIREUS_ENGINE_CPU_T560, false, true,
+        PIREUS_COST_SUBJECT_LOWERING_NODE, 0,
+        PIREUS_COST_DEPENDENCY_LATENCY, PIREUS_COST_UNIT_CYCLE,
+        PIREUS_COST_SCOPE_DEPENDENCY_CHAIN, true)
+    var blueprint = request
+    blueprint.target_id = PIREUS_TARGET_APPLE_SILICON
+    blueprint.machine_id = 0
+    blueprint.engine_id = PIREUS_BLUEPRINT_APPLE_CPU
+    blueprint.engine_is_blueprint = true
+    blueprint.engine_observed = true
+    var gpu_on_cpu = request
+    gpu_on_cpu.engine_id = PIREUS_BLUEPRINT_DGX_GPU
+    var zero_sample = ptc_valid_material_seed()
+    zero_sample.requested_sample_count = 0
+    var zero_denominator = ptc_valid_material_seed()
+    zero_denominator.estimate_denominator = 0
+    var lower_above = ptc_valid_material_seed()
+    lower_above.lower_numerator = 12
+    var estimate_above = ptc_valid_material_seed()
+    estimate_above.upper_numerator = 8
+    var missing_core = ptc_valid_material_seed()
+    missing_core.bound_environment_mask = PIREUS_COST_ENV_COMPLETE &
+        (0 - 1 - PIREUS_COST_ENV_TOOLCHAIN)
+    var missing_state = ptc_valid_material_seed()
+    missing_state.bound_environment_mask = PIREUS_COST_ENV_COMPLETE &
+        (0 - 1 - PIREUS_COST_ENV_AFFINITY - PIREUS_COST_ENV_FREQUENCY)
+    var valued_request = request
+    valued_request.value_present = true
+    valued_request.estimate_numerator = 1
+    valued_request.estimate_denominator = 1
+    var cpp_authority = ptc_valid_material_seed()
+    cpp_authority.producer_role = PIREUS_COST_ROLE_SEMANTIC_AUTHORITY
+    var latency_request = request
+    var throughput_request = request
+    throughput_request.request_id = 92
+    throughput_request.quantity = PIREUS_COST_RECIPROCAL_THROUGHPUT
+    throughput_request.scope = PIREUS_COST_SCOPE_INDEPENDENT_STREAM
+
+    let values: [bool; 26] = [
+        !pireus_cost_parent_file_matches(parent_mask & (0 - 2), 0),
+        !pireus_cost_parent_file_matches(parent_mask & (0 - 5), 2),
+        !pireus_cost_quantity_unit_valid(
+            PIREUS_COST_STATIC_SITE_COUNT, PIREUS_COST_UNIT_CYCLE),
+        !ptc_quantity_can_satisfy(
+            PIREUS_COST_STATIC_SITE_COUNT,
+            PIREUS_COST_EXECUTED_INSTRUCTION_COUNT),
+        !ptc_quantity_can_satisfy(
+            PIREUS_COST_EXECUTED_INSTRUCTION_COUNT,
+            PIREUS_COST_EXECUTED_MICRO_OP_COUNT),
+        !pireus_cost_subject_scope_valid(
+            PIREUS_COST_SUBJECT_LOWERING_NODE,
+            PIREUS_COST_SCOPE_COMPLETE_OPERATION),
+        admission.dgx.unnamed_resolved_node_count > 0 &&
+            admission.dgx.node_status[1] != PIREUS_XOR_ADMISSION_NODE_ADMITTED,
+        !ptc_target_engine_valid(&blueprint),
+        PIREUS_INTERFACE_CUDA != PIREUS_BLUEPRINT_DGX_GPU &&
+            PIREUS_INTERFACE_METAL != PIREUS_BLUEPRINT_APPLE_CPU,
+        !ptc_target_engine_valid(&gpu_on_cpu),
+        !pireus_cost_quantity_unit_valid(
+            PIREUS_COST_DEPENDENCY_LATENCY, PIREUS_COST_UNIT_BYTE),
+        !ptc_quantity_scope_valid(
+            PIREUS_COST_DEPENDENCY_LATENCY,
+            PIREUS_COST_SCOPE_INDEPENDENT_STREAM),
+        !ptc_material_observation_valid(&zero_sample),
+        !ptc_material_observation_valid(&zero_denominator),
+        !ptc_material_observation_valid(&lower_above),
+        !ptc_material_observation_valid(&estimate_above),
+        !ptc_material_observation_valid(&missing_core),
+        !ptc_material_observation_valid(&missing_state),
+        !pireus_cost_request_valid(&valued_request),
+        !ptc_material_observation_valid(&cpp_authority),
+        !ptc_summary_valid(0, PIREUS_COST_EVIDENCE_DERIVED_SUMMARY),
+        !ptc_comparison_valid(
+            2, 0, PIREUS_COST_EVIDENCE_COMPARISON_RECEIPT),
+        latency_request.unit == throughput_request.unit &&
+            !pireus_cost_requests_comparable(
+                &latency_request, &throughput_request),
+        PIREUS_COST_LANGUAGE_EXTERNAL_LLM != PIREUS_COST_LANGUAGE_SOUNIO &&
+            PIREUS_COST_ROLE_REVIEW_ONLY !=
+                PIREUS_COST_ROLE_SEMANTIC_AUTHORITY,
+        !ptc_child_boundary_valid(0, 0, 0, 0, 0, false, true, true),
+        !ptc_producer_launch_allowed(PIREUS_COST_LANGUAGE_PYTHON) &&
+            !ptc_producer_launch_allowed(PIREUS_COST_LANGUAGE_RUST),
+    ]
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < 26 {
+        if values[i as usize] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusCostNegatives {
+        missing_garden_binding: values[0],
+        missing_or_mismatched_parent: values[1],
+        static_site_to_latency: values[2],
+        static_site_to_dynamic_instruction: values[3],
+        instruction_to_micro_op: values[4],
+        selector_to_complete_operation: values[5],
+        unnamed_dgx_to_named_node: values[6],
+        blueprint_to_observed_engine: values[7],
+        interface_to_isa: values[8],
+        gpu_cost_to_host_xeon: values[9],
+        quantity_unit_mismatch: values[10],
+        latency_to_independent_throughput: values[11],
+        zero_sample_count: values[12],
+        zero_denominator: values[13],
+        lower_above_estimate: values[14],
+        estimate_above_upper: values[15],
+        missing_core_environment: values[16],
+        missing_affinity_or_frequency: values[17],
+        request_with_value: values[18],
+        cpp_semantic_authority: values[19],
+        summary_without_observation: values[20],
+        comparison_without_receipt: values[21],
+        same_unit_comparability: values[22],
+        review_to_authority: values[23],
+        premature_stage: values[24],
+        forbidden_producer_prelaunch: values[25],
+        passed: passed, total: 26,
+    }
+}
+
+fn ptc_digest_result(
+    parent_mask: i64, ledger: &PireusCostLedger,
+    counts: &[i64; 18], boundaries: &[bool; 8],
+    negatives: &PireusCostNegatives,
+) -> PireusCostDigest with Mut, Panic, Div {
+    var state = ptc_digest_add_i64(sha256_init(), 0x5054434f53543031)
+    state = ptc_digest_add_i64(state, parent_mask)
+    var i: i64 = 0
+    while i < 7 {
+        let request = pireus_cost_ledger_request(ledger, i)
+        let r = &request
+        state = ptc_digest_add_i64(state, r.request_id)
+        state = ptc_digest_add_i64(state, r.target_id)
+        state = ptc_digest_add_i64(state, r.machine_id)
+        state = ptc_digest_add_i64(state, r.engine_id)
+        state = ptc_digest_add_bool(state, r.engine_is_blueprint)
+        state = ptc_digest_add_bool(state, r.engine_observed)
+        state = ptc_digest_add_i64(state, r.subject_kind)
+        state = ptc_digest_add_i64(state, r.subject_node)
+        state = ptc_digest_add_i64(state, r.quantity)
+        state = ptc_digest_add_i64(state, r.unit)
+        state = ptc_digest_add_i64(state, r.scope)
+        state = ptc_digest_add_i64(state, r.statistic)
+        state = ptc_digest_add_i64(state, r.requested_sample_count)
+        state = ptc_digest_add_i64(state, r.requested_warmup_count)
+        state = ptc_digest_add_i64(state, r.required_environment_mask)
+        state = ptc_digest_add_bool(state, r.value_present)
+        state = ptc_digest_add_bool(state, r.subject_covered)
+        state = ptc_digest_add_bool(state, r.admitted)
+        i = i + 1
+    }
+    i = 0
+    while i < 18 {
+        state = ptc_digest_add_i64(state, counts[i as usize])
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        state = ptc_digest_add_bool(state, boundaries[i as usize])
+        i = i + 1
+    }
+    state = ptc_digest_add_i64(state, negatives.passed)
+    state = ptc_digest_add_i64(state, negatives.total)
+    ptc_digest_finish(state)
+}
+
+pub fn pireus_target_cost_observation_evaluate(
+    pdf_path: string,
+    xed_path: string,
+    material_paths: &PireusXorMaterialFilePaths,
+    parent_paths: &PireusCostParentPaths,
+) -> PireusTargetCostObservationResult
+with IO, Mut, Panic, Div, Alloc, Epistemic {
+    let parent_mask = ptc_parent_match_mask(parent_paths)
+    var parent_count: i64 = 0
+    var i: i64 = 0
+    while i < PIREUS_COST_PARENT_FILE_COUNT {
+        if pireus_cost_parent_file_matches(parent_mask, i) {
+            parent_count = parent_count + 1
+        }
+        i = i + 1
+    }
+    let parent_files_valid = parent_count == PIREUS_COST_PARENT_FILE_COUNT
+
+    let admission = pireus_xor_selector_material_admission_evaluate(
+        pdf_path, xed_path, material_paths)
+    let admission_live =
+        pireus_xor_selector_material_admission_matches_frozen_semantics(
+            &admission)
+    let operation = pireus_xor_operation_evaluate()
+    let operation_live = pireus_xor_operation_matches_frozen_semantics(&operation)
+
+    var engine_store = pireus_execution_engine_store()
+    let cpu = pireus_query_observed_engines_by(
+        &engine_store, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU)
+    let gpu = pireus_query_observed_engines_by(
+        &engine_store, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_GPU)
+    let darwin_observed = pireus_query_observed_engines_for_target(
+        &engine_store, PIREUS_TARGET_DARWIN_XEON)
+    let apple_observed = pireus_query_observed_engines_for_target(
+        &engine_store, PIREUS_TARGET_APPLE_SILICON)
+    let dgx_observed = pireus_query_observed_engines_for_target(
+        &engine_store, PIREUS_TARGET_DGX_SPARK)
+    let darwin_blueprints = pireus_query_target_blueprints(
+        &engine_store, PIREUS_TARGET_DARWIN_XEON)
+    let apple_blueprints = pireus_query_target_blueprints(
+        &engine_store, PIREUS_TARGET_APPLE_SILICON)
+    let dgx_blueprints = pireus_query_target_blueprints(
+        &engine_store, PIREUS_TARGET_DGX_SPARK)
+    let cpu_count = sparql_result_count(&cpu)
+    let gpu_count = sparql_result_count(&gpu)
+    let darwin_observed_count = sparql_result_count(&darwin_observed)
+    let apple_observed_count = sparql_result_count(&apple_observed)
+    let dgx_observed_count = sparql_result_count(&dgx_observed)
+    let darwin_blueprint_count = sparql_result_count(&darwin_blueprints)
+    let apple_blueprint_count = sparql_result_count(&apple_blueprints)
+    let dgx_blueprint_count = sparql_result_count(&dgx_blueprints)
+    let engine_live = cpu_count == 5 && gpu_count == 4 &&
+        darwin_observed_count == 9 && apple_observed_count == 0 &&
+        dgx_observed_count == 0 && darwin_blueprint_count == 2 &&
+        apple_blueprint_count == 2 && dgx_blueprint_count == 2
+
+    let ledger = ptc_build_ledger(&admission)
+    var request_failures: i64 = 0
+    i = 0
+    while i < 7 {
+        if ledger.admitted[i as usize] &&
+            !pireus_cost_ledger_request_valid(&ledger, i) {
+            request_failures = request_failures + 1
+        }
+        i = i + 1
+    }
+    var store = ptc_store(&ledger)
+    let request_query = ptc_query_class(&store,
+        PIREUS_CLASS_MEASUREMENT_REQUEST)
+    let observation_query = ptc_query_class(&store,
+        PIREUS_CLASS_MATERIAL_OBSERVATION)
+    let summary_query = ptc_query_class(&store, PIREUS_CLASS_DERIVED_SUMMARY)
+    let comparison_query = ptc_query_class(&store,
+        PIREUS_CLASS_COMPARISON_RECEIPT)
+    let ontology_triples = triple_store_count(&store)
+    let ontology_requests = sparql_result_count(&request_query)
+    let ontology_observations = sparql_result_count(&observation_query)
+    let ontology_summaries = sparql_result_count(&summary_query)
+    let ontology_comparisons = sparql_result_count(&comparison_query)
+
+    let static_sites = admission.darwin.static_selector_sites +
+        admission.apple.static_selector_sites + admission.dgx.static_selector_sites
+    let secondary_sites = admission.darwin.secondary_selector_sites +
+        admission.apple.secondary_selector_sites +
+        admission.dgx.secondary_selector_sites
+    let negatives = ptc_exercise_negatives(parent_mask, &admission)
+    let material_observations: i64 = 0
+    let derived_summaries: i64 = 0
+    let comparisons: i64 = 0
+    let speedups: i64 = 0
+    let rankings: i64 = 0
+    let cross_target_comparable = false
+    let parity_open = false
+    let claim_ready = false
+    let counts: [i64; 18] = [
+        parent_count, cpu_count, gpu_count, darwin_observed_count,
+        apple_observed_count, dgx_observed_count, darwin_blueprint_count,
+        apple_blueprint_count, dgx_blueprint_count, ledger.request_count,
+        ledger.selector_request_count, ledger.whole_operation_request_count,
+        static_sites, secondary_sites, ontology_triples, ontology_requests,
+        request_failures, negatives.passed,
+    ]
+    let boundaries: [bool; 8] = [
+        parent_files_valid, admission_live, operation_live, engine_live,
+        cross_target_comparable, parity_open, claim_ready,
+        material_observations == 0 && derived_summaries == 0 &&
+            comparisons == 0 && speedups == 0 && rankings == 0,
+    ]
+    let digest = ptc_digest_result(
+        parent_mask, &ledger, &counts, &boundaries, &negatives)
+
+    var error = PIREUS_COST_OK
+    if !parent_files_valid || !admission_live || !operation_live {
+        error = PIREUS_COST_ERR_PARENT
+    } else if !engine_live {
+        error = PIREUS_COST_ERR_ENGINE
+    } else if request_failures != 0 || ledger.request_count <= 0 ||
+        ledger.request_count != ledger.selector_request_count +
+            ledger.whole_operation_request_count {
+        error = PIREUS_COST_ERR_REQUEST
+    } else if ontology_requests != ledger.request_count ||
+        ontology_observations != 0 || ontology_summaries != 0 ||
+        ontology_comparisons != 0 {
+        error = PIREUS_COST_ERR_ONTOLOGY
+    } else if negatives.passed != negatives.total ||
+        !ptc_child_boundary_valid(
+            material_observations, derived_summaries, comparisons,
+            speedups, rankings, cross_target_comparable,
+            parity_open, claim_ready) {
+        error = PIREUS_COST_ERR_AUTHORITY
+    }
+    var failures: i64 = request_failures
+    if error != PIREUS_COST_OK { failures = failures + 1 }
+
+    PireusTargetCostObservationResult {
+        valid: error == PIREUS_COST_OK && failures == 0,
+        error: error,
+        parent_file_match_mask: parent_mask,
+        parent_file_match_count: parent_count,
+        parent_files_valid: parent_files_valid,
+        admission_parent_live: admission_live,
+        operation_parent_live: operation_live,
+        engine_parent_live: engine_live,
+        observed_cpu_count: cpu_count,
+        observed_gpu_count: gpu_count,
+        darwin_observed_engine_count: darwin_observed_count,
+        apple_observed_engine_count: apple_observed_count,
+        dgx_observed_engine_count: dgx_observed_count,
+        darwin_blueprint_count: darwin_blueprint_count,
+        apple_blueprint_count: apple_blueprint_count,
+        dgx_blueprint_count: dgx_blueprint_count,
+        ledger: ledger,
+        static_site_fact_count: static_sites,
+        secondary_site_fact_count: secondary_sites,
+        ontology_triple_count: ontology_triples,
+        ontology_request_count: ontology_requests,
+        ontology_observation_count: ontology_observations,
+        ontology_summary_count: ontology_summaries,
+        ontology_comparison_count: ontology_comparisons,
+        material_observation_count: material_observations,
+        derived_summary_count: derived_summaries,
+        comparison_receipt_count: comparisons,
+        speedup_count: speedups,
+        ranking_count: rankings,
+        cross_target_comparable: cross_target_comparable,
+        parity_open: parity_open,
+        claim_ready: claim_ready,
+        result_digest: digest,
+        negatives: negatives,
+        failures: failures,
+    }
+}
+
+fn ptc_frozen_request_matches(
+    request: &PireusCostRequest, index: i64,
+) -> bool {
+    if !pireus_cost_request_valid(request) ||
+        request.request_id != index + 1 {
+        return false
+    }
+    if index == 0 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN
+    }
+    if index == 1 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM
+    }
+    if index == 2 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_COMPLETE_OPERATION &&
+            request.quantity == PIREUS_COST_ELAPSED_DURATION &&
+            request.unit == PIREUS_COST_UNIT_NANOSECOND &&
+            request.scope == PIREUS_COST_SCOPE_COMPLETE_OPERATION
+    }
+    if index == 3 || index == 4 {
+        return request.target_id == PIREUS_TARGET_APPLE_SILICON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            ((index == 3 &&
+                request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+                request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN) ||
+             (index == 4 &&
+                request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+                request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM))
+    }
+    if index == 5 || index == 6 {
+        return request.target_id == PIREUS_TARGET_DGX_SPARK &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            ((index == 5 &&
+                request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+                request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN) ||
+             (index == 6 &&
+                request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+                request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM))
+    }
+    false
+}
+
+/// Exact predicate written only after the first post-Garden Sounio stream.
+pub fn pireus_target_cost_observation_matches_frozen_semantics(
+    result: &PireusTargetCostObservationResult,
+) -> bool with Mut, Panic {
+    if !result.valid || result.error != PIREUS_COST_OK ||
+        result.failures != 0 || !result.parent_files_valid ||
+        result.parent_file_match_count != 11 ||
+        !result.admission_parent_live || !result.operation_parent_live ||
+        !result.engine_parent_live {
+        return false
+    }
+    var i: i64 = 0
+    while i < PIREUS_COST_PARENT_FILE_COUNT {
+        if !pireus_cost_parent_file_matches(
+            result.parent_file_match_mask, i) {
+            return false
+        }
+        i = i + 1
+    }
+    if result.observed_cpu_count != 5 || result.observed_gpu_count != 4 ||
+        result.darwin_observed_engine_count != 9 ||
+        result.apple_observed_engine_count != 0 ||
+        result.dgx_observed_engine_count != 0 ||
+        result.darwin_blueprint_count != 2 ||
+        result.apple_blueprint_count != 2 ||
+        result.dgx_blueprint_count != 2 ||
+        result.ledger.request_count != 7 ||
+        result.ledger.selector_request_count != 6 ||
+        result.ledger.whole_operation_request_count != 1 {
+        return false
+    }
+    i = 0
+    while i < PIREUS_COST_REQUEST_COUNT {
+        let request = pireus_cost_ledger_request(&result.ledger, i)
+        if !ptc_frozen_request_matches(&request, i) { return false }
+        i = i + 1
+    }
+    if result.static_site_fact_count != 36 ||
+        result.secondary_site_fact_count != 32 ||
+        result.ontology_triple_count != 413 ||
+        result.ontology_request_count != 7 ||
+        result.ontology_observation_count != 0 ||
+        result.ontology_summary_count != 0 ||
+        result.ontology_comparison_count != 0 ||
+        result.material_observation_count != 0 ||
+        result.derived_summary_count != 0 ||
+        result.comparison_receipt_count != 0 ||
+        result.speedup_count != 0 || result.ranking_count != 0 ||
+        result.cross_target_comparable || result.parity_open ||
+        result.claim_ready || result.negatives.passed != 26 ||
+        result.negatives.total != 26 {
+        return false
+    }
+    if !result.negatives.missing_garden_binding ||
+        !result.negatives.missing_or_mismatched_parent ||
+        !result.negatives.static_site_to_latency ||
+        !result.negatives.static_site_to_dynamic_instruction ||
+        !result.negatives.instruction_to_micro_op ||
+        !result.negatives.selector_to_complete_operation ||
+        !result.negatives.unnamed_dgx_to_named_node ||
+        !result.negatives.blueprint_to_observed_engine ||
+        !result.negatives.interface_to_isa ||
+        !result.negatives.gpu_cost_to_host_xeon ||
+        !result.negatives.quantity_unit_mismatch ||
+        !result.negatives.latency_to_independent_throughput ||
+        !result.negatives.zero_sample_count ||
+        !result.negatives.zero_denominator ||
+        !result.negatives.lower_above_estimate ||
+        !result.negatives.estimate_above_upper ||
+        !result.negatives.missing_core_environment ||
+        !result.negatives.missing_affinity_or_frequency ||
+        !result.negatives.request_with_value ||
+        !result.negatives.cpp_semantic_authority ||
+        !result.negatives.summary_without_observation ||
+        !result.negatives.comparison_without_receipt ||
+        !result.negatives.same_unit_comparability ||
+        !result.negatives.review_to_authority ||
+        !result.negatives.premature_stage ||
+        !result.negatives.forbidden_producer_prelaunch {
+        return false
+    }
+    let expected: [i64; 8] = [
+        166882395, 243190428, 1767805310, 4234095682,
+        63968340, 1374547816, 344010038, 3839699970,
+    ]
+    ptc_hash_equal(&result.result_digest.words, &expected)
+}

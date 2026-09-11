@@ -1,0 +1,311 @@
+Review this new Sounio external proposal admission boundary adversarially. Return CLEAR or BLOCKER with concrete bugs. Scope: bounded flat JSON parser, snapshot binding, semantic reconstruction of labeled Cayley-Dickson tensor, numeric plan identity, preservation of ascending-j/no-FMA contract, explicit lack of FP/hardware/formal closure. Context is a trusted immutable orchestrator input; LLM controls only proposal bytes. Python tests are observational and exercise a rebuilt current-source native executable. This stage does not yet emit new kernels. Do not claim test execution. Check representation, range, overflow, parser ambiguity, and whether receipt overclaims. Existing cd_sigma is canonical repo convention, not a new theorem.
+
+
+FILE tools/pireus/continuity/admission.sio
+// External proposals are data. This executable owns admission and reconstruction.
+// Protocol v1 is a bounded JSON object: ASCII keys, nonnegative integer values,
+// and one lowercase SHA256 context string. Unknown/duplicate keys are refused.
+use algebra::cayley_dickson::cd_sigma
+use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
+
+struct Document {
+    values: [i64; 18],
+    seen: i64,
+    context: [i64; 64],
+    valid: bool,
+}
+fn key_name(i: i64) -> string {
+    if i == 0 { return "schema" }
+    if i == 1 { return "target" }
+    if i == 2 { return "dimension" }
+    if i == 3 { return "precision" }
+    if i == 4 { return "order" }
+    if i == 5 { return "fma" }
+    if i == 6 { return "capabilities" }
+    if i == 7 { return "lane_width" }
+    if i == 8 { return "facts_state" }
+    if i == 9 { return "kind" }
+    if i == 10 { return "lane_stride" }
+    if i == 11 { return "lane_offset" }
+    if i == 12 { return "load" }
+    if i == 13 { return "layout" }
+    if i == 14 { return "unroll" }
+    if i == 15 { return "context" }
+    "UNKNOWN"
+}
+fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
+fn skip(s: string, p: i64, n: i64) -> i64 with Mut {
+    var x = p
+    while x < n && whitespace(str_char_at(s, x)) { x = x + 1 }
+    x
+}
+fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
+    var d = Document { values: [0; 18], seen: 0, context: [0; 64], valid: false }
+    if n <= 0 || n > 4096 || str_len(s) != n { return d }
+    var p = skip(s, 0, n)
+    if p >= n || str_char_at(s, p) != 123 { return d }
+    p = p + 1
+    var count: i64 = 0
+    while count < 16 {
+        p = skip(s, p, n)
+        if p >= n || str_char_at(s, p) != 34 { return d }
+        p = p + 1
+        let start = p
+        while p < n && str_char_at(s, p) != 34 {
+            let c = str_char_at(s, p)
+            if !((c >= 97 && c <= 122) || c == 95) { return d }
+            p = p + 1
+        }
+        if p >= n { return d }
+        var key: i64 = -1
+        var k: i64 = 0
+        while k < 16 {
+            let name = key_name(k)
+            if str_len(name) == p - start {
+                var same = true
+                var j: i64 = 0
+                while j < p - start {
+                    if str_char_at(name, j) != str_char_at(s, start + j) { same = false }
+                    j = j + 1
+                }
+                if same { key = k }
+            }
+            k = k + 1
+        }
+        if key < 0 { return d }
+        if (d.seen & (1 << key)) != 0 { return d }
+        d.seen = d.seen | (1 << key)
+        p = skip(s, p + 1, n)
+        if p >= n || str_char_at(s, p) != 58 { return d }
+        p = skip(s, p + 1, n)
+        if p >= n { return d }
+        if key == 15 {
+            if str_char_at(s, p) != 34 { return d }
+            p = p + 1
+            var j: i64 = 0
+            while j < 64 {
+                if p >= n { return d }
+                let c = str_char_at(s, p)
+                if !((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { return d }
+                d.context[j as usize] = c
+                p = p + 1
+                j = j + 1
+            }
+            if p >= n || str_char_at(s, p) != 34 { return d }
+            p = p + 1
+        } else {
+            let first = p
+            var value: i64 = 0
+            while p < n && str_char_at(s, p) >= 48 && str_char_at(s, p) <= 57 {
+                if p - first >= 9 { return d }
+                value = value * 10 + str_char_at(s, p) - 48
+                p = p + 1
+            }
+            if first == p { return d }
+            if p - first > 1 && str_char_at(s, first) == 48 { return d }
+            d.values[key as usize] = value
+        }
+        count = count + 1
+        p = skip(s, p, n)
+        if p >= n { return d }
+        if str_char_at(s, p) == 125 {
+            if skip(s, p + 1, n) != n { return d }
+            d.valid = true
+            return d
+        }
+        if str_char_at(s, p) != 44 { return d }
+        p = p + 1
+    }
+    d
+}
+fn hash_text(s: string, n: i64) -> SHA256Digest with Mut, Panic, Div {
+    var state = sha256_init()
+    var p: i64 = 0
+    while p < n {
+        var chunk: [u8; 256] = [0; 256]
+        var count: i64 = 0
+        while p < n && count < 256 {
+            chunk[count as usize] = str_char_at(s, p) as u8
+            count = count + 1
+            p = p + 1
+        }
+        state = sha256_update(state, chunk, count as i32)
+    }
+    sha256_finalize(state)
+}
+fn hex_char(n: i64) -> i64 { if n < 10 { 48 + n } else { 87 + n } }
+fn hash_matches(d: SHA256Digest, proposal: &Document) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        let b = d.bytes[i as usize] as i64
+        if proposal.context[(i * 2) as usize] != hex_char(b / 16) { return false }
+        if proposal.context[(i * 2 + 1) as usize] != hex_char(b % 16) { return false }
+        i = i + 1
+    }
+    true
+}
+fn print_digest(d: SHA256Digest) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        let b = d.bytes[i as usize] as i64
+        print_char(hex_char(b / 16) as i32)
+        print_char(hex_char(b % 16) as i32)
+        i = i + 1
+    }
+}
+fn refuse(reason: string) -> i32 with IO {
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"REFUSE\",\"reason\":\"")
+    print(reason); print("\"}\n")
+    1
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 2 { return refuse("ARGUMENTS") }
+    let cp = get_arg(0)
+    let pp = get_arg(1)
+    let cn = file_size(cp)
+    let pn = file_size(pp)
+    if cn <= 0 || cn > 4096 || pn <= 0 || pn > 4096 { return refuse("SIZE") }
+    let cs = read_file(cp)
+    let ps = read_file(pp)
+    let c = parse(cs, cn)
+    let p = parse(ps, pn)
+    if !c.valid || c.seen != 511 { return refuse("CONTEXT_FORMAT") }
+    // Proposal fields 0..5 and 9..15; context-only fields cannot be overridden.
+    if !p.valid || p.seen != 65087 { return refuse("PROPOSAL_FORMAT") }
+    if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
+    if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
+    if c.values[1] != 701202 || p.values[1] != c.values[1] { return refuse("TARGET") }
+    if c.values[2] != 16 || p.values[2] != 16 { return refuse("DIMENSION") }
+    if c.values[3] != 64 || p.values[3] != 64 { return refuse("PRECISION") }
+    // order=1 means output k, ascending right operand j, left i=k XOR j.
+    if c.values[4] != 1 || p.values[4] != 1 { return refuse("ORDER") }
+    if c.values[5] != 0 || p.values[5] != 0 { return refuse("FMA") }
+    if c.values[8] != 1 { return refuse("UNKNOWN_OR_CONTRADICTORY_FACTS") }
+    if c.values[6] < 0 || c.values[6] > 63 || c.values[7] != 32 { return refuse("CAPABILITY") }
+    if p.values[9] != 1 { return refuse("KIND") }
+    let stride = p.values[10]
+    let offset = p.values[11]
+    let load = p.values[12]
+    let layout = p.values[13]
+    let unroll = p.values[14]
+    if stride < 1 || stride > 15 || stride % 2 != 1 || offset > 15 { return refuse("LANE_MAP") }
+    if load > 1 || layout > 1 { return refuse("GRAMMAR") }
+    if unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16 { return refuse("UNROLL") }
+    var required: i64 = 39
+    if load == 1 { required = required | 16 }
+    if (c.values[6] & required) != required { return refuse("CAPABILITY") }
+    var lanes: [i64; 16] = [0; 16]
+    var lane: i64 = 0
+    while lane < 16 {
+        let k = (lane * stride + offset) % 16
+        lanes[k as usize] = lanes[k as usize] + 1
+        lane = lane + 1
+    }
+    var i: i64 = 0
+    while i < 16 {
+        if lanes[i as usize] != 1 { return refuse("LANE_COVERAGE") }
+        i = i + 1
+    }
+    // Reconstruct every coefficient in labeled basis order (a,b,k).
+    // Algebraic tensor parity alone does not establish floating-point parity.
+    var state = sha256_init()
+    var a: i64 = 0
+    var failures: i64 = 0
+    while a < 16 {
+        var block: [u8; 256] = [0; 256]
+        var b: i64 = 0
+        while b < 16 {
+            var k: i64 = 0
+            while k < 16 {
+                var reconstructed: i64 = 0
+                lane = 0
+                while lane < 16 {
+                    let output = (lane * stride + offset) % 16
+                    if output == k && (output ^ b) == a {
+                        reconstructed = reconstructed + cd_sigma(a as i32, b as i32, 4) as i64
+                    }
+                    lane = lane + 1
+                }
+                var expected: i64 = 0
+                if (a ^ b) == k { expected = cd_sigma(a as i32, b as i32, 4) as i64 }
+                if reconstructed != expected { failures = failures + 1 }
+                block[(b * 16 + k) as usize] = (reconstructed + 1) as u8
+                k = k + 1
+            }
+            b = b + 1
+        }
+        state = sha256_update(state, block, 256)
+        a = a + 1
+    }
+    if failures != 0 { return refuse("TENSOR") }
+    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
+    print_int(plan_id)
+    print(",\"tensor_components\":4096,\"tensor_sha256\":\"")
+    print_digest(sha256_finalize(state))
+    print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
+    print("\",\"proposal_sha256\":\""); print_digest(hash_text(ps, pn))
+    print("\",\"fp_parity\":\"UNMEASURED\",\"claim_ready\":false,\"formal_v13_v14\":\"OPEN\"}\n")
+    0
+}
+
+FILE tools/pireus/continuity/test_admission.py
+#!/usr/bin/env python3
+"""Exercise actual Sounio admission executable with raw adversarial JSON bytes."""
+import argparse, hashlib, json, pathlib, subprocess, tempfile
+def raw(value): return (json.dumps(value,separators=(",",":"))+"\n").encode()
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("engine");args=ap.parse_args()
+ context=dict(schema=1,target=701202,dimension=16,precision=64,order=1,fma=0,capabilities=55,lane_width=32,facts_state=1)
+ proposal=dict(schema=1,target=701202,dimension=16,precision=64,order=1,fma=0,kind=1,lane_stride=1,lane_offset=0,load=1,layout=0,unroll=1)
+ with tempfile.TemporaryDirectory() as directory:
+  root=pathlib.Path(directory)
+  def check(label,reason=None,changes=None,context_changes=None,transform=None):
+   c=context| (context_changes or {});cb=raw(c)
+   p=proposal|{"context":hashlib.sha256(cb).hexdigest()}| (changes or {})
+   pb=raw(p)
+   if transform:pb=transform(pb)
+   (root/"context.json").write_bytes(cb);(root/"proposal.json").write_bytes(pb)
+   run=subprocess.run([args.engine,str(root/"context.json"),str(root/"proposal.json")],capture_output=True,text=True,timeout=30)
+   try: receipt=json.loads(run.stdout)
+   except Exception:raise AssertionError((label,run.returncode,run.stdout,run.stderr))
+   if reason:
+    assert run.returncode==1 and receipt["decision"]=="REFUSE" and receipt["reason"]==reason,(label,receipt)
+   else:
+    assert run.returncode==0 and receipt["decision"]=="ADMIT",(label,receipt)
+    assert receipt["proposal_sha256"]==hashlib.sha256(pb).hexdigest(),receipt
+    assert receipt["context_sha256"]==hashlib.sha256(cb).hexdigest(),receipt
+    assert receipt["tensor_components"]==4096 and not receipt["claim_ready"]
+   print(label,json.dumps(receipt),flush=True)
+   return receipt
+  first=check("positive")
+  second=check("permuted-layout-schedule",changes=dict(lane_stride=15,lane_offset=13,load=0,layout=1,unroll=16))
+  assert first["plan_id"]!=second["plan_id"] and first["tensor_sha256"]==second["tensor_sha256"]
+  for label,reason,changes in [
+   ("bad-snapshot","SNAPSHOT",dict(context="0"*64)),
+   ("bad-target","TARGET",dict(target=999)),
+   ("precision","PRECISION",dict(precision=32)),
+   ("order","ORDER",dict(order=2)),
+   ("fma","FMA",dict(fma=1)),
+   ("lane-alias","LANE_MAP",dict(lane_stride=2)),
+   ("lane-range","LANE_MAP",dict(lane_offset=16)),
+   ("unroll","UNROLL",dict(unroll=3)),
+   ("unknown-kind","KIND",dict(kind=2)),
+   ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
+   ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
+    check(label,reason,changes)
+  check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
+  check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
+  check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))
+  for label,transform in [
+   ("duplicate",lambda b:b.replace(b'"schema":1',b'"schema":1,"schema":1')),
+   ("trailing",lambda b:b+b"{}"),
+   ("fraction",lambda b:b.replace(b'"unroll":1',b'"unroll":1.0')),
+   ("boolean",lambda b:b.replace(b'"unroll":1',b'"unroll":true')),
+   ("leading-zero",lambda b:b.replace(b'"unroll":1',b'"unroll":01')),
+   ("trailing-comma",lambda b:b.rstrip()[:-1]+b",}"),
+   ("nul",lambda b:b+b"\0"),
+   ("negative",lambda b:b.replace(b'"unroll":1',b'"unroll":-1'))]:
+    check(label,"PROPOSAL_FORMAT",transform=transform)
+ print("PIREUS_EXTERNAL_ADMISSION_GATE_PASS",flush=True)
+if __name__=="__main__":main()
