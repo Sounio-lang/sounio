@@ -6303,32 +6303,24 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
 
     // NaN/inf fast paths (#2389). Skipped under ieee-f64-special sabotage.
     if NC_IEEE_F64_SABOTAGE != 1 {
-    // NaN: ucomisd xmm0,xmm0; CF=1 iff unordered (#2389)
-    c.code = emit_ucomisd_xmm0_xmm1(c.code)
-    c.code = emit_setb_al(c.code)
-    c.code = emit_test_al_al(c.code)
-    let jnz_not_nan = c.code.len
-    c.code = emit_jnz_rel32(c.code)
-    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 110, 97, 110, 0) // "nan"
-    let after_nan = c.code.len
-    c.code = patch_u32_le(c.code, jnz_not_nan + 2, after_nan - (jnz_not_nan + 6))
-
-    // ±inf: exponent 0x7FF and zero mantissa (rdi still holds the input bits)
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    // Classify NaN / ±inf from IEEE bits (#2389). Integer-only: ucomisd self-tests
+    // mis-fire on some non-NaN values when xmm state is entangled with prior ops.
     c.code = emit_mov_reg_imm(c.code, 1, 52)          // mov rcx, 52 → cl for shr
-    c.code = emit_shr_rax_cl(c.code)
+    c.code = emit_shr_rax_cl(c.code)                  // rax = biased exponent
     c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)
-    c.code = emit_and_rax_rbx(c.code)                 // rax = biased exponent
-    c.code = emit_mov_reg_reg(c.code, 1, 3)           // mov rcx, rbx (0x7FF)
+    c.code = emit_and_rax_rbx(c.code)
     c.code = emit_cmp_rbx_rax(c.code)                 // cmp 0x7FF, exp
-    let jnz_not_inf = c.code.len
+    let jnz_not_special = c.code.len
     c.code = emit_jnz_rel32(c.code)
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
     c.code = emit_and_rax_rbx(c.code)
     c.code = emit_test_rax_rax(c.code)
-    let jnz_not_inf2 = c.code.len
-    c.code = emit_jnz_rel32(c.code)
+    let jz_is_inf = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 110, 97, 110, 0) // "nan"
+    let inf_block = c.code.len
+    c.code = patch_u32_le(c.code, jz_is_inf + 2, inf_block - (jz_is_inf + 6))
     c.code = emit_test_rdi_rdi(c.code)
     let jns_pos_inf = c.code.len
     c.code = emit_jns_rel8(c.code, 0)
@@ -6339,8 +6331,7 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     }
     c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 105, 110, 102, 0) // "inf"
     let after_inf = c.code.len
-    c.code = patch_u32_le(c.code, jnz_not_inf + 2, after_inf - (jnz_not_inf + 6))
-    c.code = patch_u32_le(c.code, jnz_not_inf2 + 2, after_inf - (jnz_not_inf2 + 6))
+    c.code = patch_u32_le(c.code, jnz_not_special + 2, after_inf - (jnz_not_special + 6))
     }
 
     // Sign check: test rdi, rdi; jns skip_neg
