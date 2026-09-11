@@ -81,7 +81,15 @@ fn pk_concentration(t: f64, dose: f64, ka: f64, vd: f64, cl: f64) -> f64 {
     let ke = cl / vd
     let exp_ke = exp_f64(0.0 - ke * t)
     let exp_ka = exp_f64(0.0 - ka * t)
-    return (ka * dose / vd) * (exp_ke - exp_ka) / (ka - ke)
+    // Divisor hoisted into its own binding. A compiler built from COMMITTED
+    // sources still mis-folds a parenthesised `(ka - ke)` divisor to constant
+    // zero and reports E056 on it, even though ka=3.8 and ke=27/77 make the
+    // divisor ~3.449. The repair for that fold exists only as uncommitted work
+    // in another lane, which is why the tracked bin/madaros-linux-x86_64 does
+    // not need this hoist but `make build-madaros` does. Drop the hoist once
+    // that fold fix is committed, not before.
+    let ka_minus_ke = ka - ke
+    return (ka * dose / vd) * (exp_ke - exp_ka) / ka_minus_ke
 }
 
 fn pk_find_tmax_scan(dose: f64, ka: f64, vd: f64, cl: f64) -> f64 {
@@ -146,7 +154,8 @@ fn main() -> i32 with IO, Panic {
 
     // Analytic t_max = ln(ka/ke)/(ka-ke), with numeric fallback if unstable.
     let ka_ke_ratio = ka_v / ke_v
-    let t_max_raw = ln_f64(ka_ke_ratio) / (ka_v - ke_v)
+    let ka_minus_ke_v = ka_v - ke_v
+    let t_max_raw = ln_f64(ka_ke_ratio) / ka_minus_ke_v
     let t_max = if t_max_raw <= 0.0 || t_max_raw > 24.0 {
         pk_find_tmax_scan(dose, ka_v, vd_v, cl_v)
     } else {
