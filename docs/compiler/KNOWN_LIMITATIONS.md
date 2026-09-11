@@ -35,7 +35,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
 | KL-11 | #1792 first-order / variance across calls | madaros |
 | KL-12 | thin-link `rc=12` probes | madaros |
@@ -47,20 +46,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 ## Ledger
 
 
-### KL-8 — `f128` surface residuals (after V0-E.5.10)
-
-- Engine: `madaros`. Closed on this rung (KL-8): nested `if`/`else` literal
-  tail in an `-> f128` fn, `%` and `+=` on language `f128`, and builtin
-  `print`/`println` routing to `print_f128`/`println_f128` with implicit
-  import of `math/softfloat_f128_fmt.sio`. Pin:
-  `scripts/ci/madaros_kl8_f128_residuals_gate.sh`;
-  `tests/run-pass/f128_kl8_residuals.sio`.
-- Still open: the legacy `native_compile_driver.sio` lexer
-  (`driver_lex_source_to_globals`, `:8872-8945`) does not take `_`
-  separators; reachable only via the `scripts/ci/native_v2_*_gate.sh` family
-  (see KL-10).
-- Ladder record: `docs/architecture/F128_F256_LADDER.md`; closed stages pinned
-  by `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`.
 
 ### KL-9 — seed: `f128` greenwash and #1494
 
