@@ -10,7 +10,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.boots
 # Bootstrap seed (`lean_single.sio`)
 
 Moved out of `docs/compiler/KNOWN_LIMITATIONS.md` on 2026-09-11 (KL-0). The
-seed's open defects are ledger rows KL-9, KL-10 and KL-16 in that file; this
+seed's open defects are ledger rows KL-9 and KL-16 in that file; this
 document is the standing policy and the #1494 record.
 
 **Status:** bootstrap seed and escape hatch. Not a bug; a maturity-stage reality that contributors must know about before editing compiler logic.
@@ -53,12 +53,16 @@ Because the modular compiler and legacy seed are no longer the same source file,
 
 ### Parity status and planned resolution
 
-1. **Parity harness exists but is not workflow-reachable.**
+1. **Parity harness is workflow-reachable since KL-10 (2026-09-11).**
    `scripts/ci/engine_parity_gate.sh` compares compile/run outcomes and stdout
-   for both engines against `tests/engine_parity_baseline.txt`. The committed
-   baseline contains 1007 classified rows. Running the gate prevents new drift
-   only where it is actually invoked; the workflow currently runs the narrower
-   epsilon parity gate, not the full harness.
+   for both engines against `tests/engine_parity_baseline.txt` (1007
+   classified rows). `.github/workflows/engine-parity-nightly.yml` runs it
+   nightly and on dispatch against a Madaros built from the checked-out
+   source (the gate refuses a compiler older than any `self-hosted/` file, so
+   a committed prebuilt can never certify parity in a fresh checkout), and
+   runs `scripts/ci/lean_single_fixed_point_gate.sh` on every pull request
+   that touches the seed, the baseline or the two gates. `ci.yml` still runs
+   the narrower `epsilon_engine_parity_gate.sh` on every PR.
 2. **Bootstrap retirement remains long term.** Retire `lean_single.sio` as an
    escape hatch only after the modular compiler has sufficient fixed-point and
    parity evidence.
