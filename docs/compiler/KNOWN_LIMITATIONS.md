@@ -44,7 +44,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-7 | `i256`/`i512` wide-local `print_int` | madaros |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
-| KL-10 | infra: parity/fixed-point gates unreachable, legacy driver gates | n/a |
 | KL-11 | #1792 first-order / variance across calls | madaros |
 | KL-12 | thin-link `rc=12` probes | madaros |
 | KL-13 | derived units, unit loss at call boundary (#2388) | both |
@@ -196,8 +195,8 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `println_f128` needs an explicit `use math::softfloat_f128_fmt` because
   the implicit import (V0-E.5.10) covers `math/softfloat_f128.sio` only.
 - The legacy `native_compile_driver.sio` lexer (`driver_lex_source_to_globals`,
-  `:8872-8945`) does not take `_` separators; reachable only via the
-  `scripts/ci/native_v2_*_gate.sh` family (see KL-10).
+  `:8872-8945`) does not take `_` separators; no longer reachable from any gate (the `native_v2_*` leaf gates were
+  deprecated in KL-10, `scripts/ci/deprecated/`).
 - Pin: the v0e510 gate pins the closed half; the residuals above have no
   negative fixture yet.
 
@@ -218,18 +217,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Any seed change re-runs the 2-stage bootstrap, `canonical_compiler_gate.sh`,
   `verify_lean_seed.sh` + `SeedReceipt.json`, `engine_parity_gate.sh`, and
   rebuilds Madaros from the new seed.
-
-### KL-10 — infrastructure
-
-- `scripts/ci/engine_parity_gate.sh` (`tests/engine_parity_baseline.txt`,
-  1007 rows) and `scripts/ci/lean_single_fixed_point_gate.sh` are not
-  reachable from any workflow; ci.yml runs only
-  `epsilon_engine_parity_gate.sh`. A gate that is not reachable is not a gate
-  (#1978).
-- The nine `scripts/ci/native_v2_*_gate.sh` gates are the only callers of
-  the legacy `native_compile_driver.sio` lexer and none is in a workflow.
-- Pin: `scripts/ci/gate_workflow_reference_ratchet.sh` (frozen count 487)
-  records which gates are workflow-referenced.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
