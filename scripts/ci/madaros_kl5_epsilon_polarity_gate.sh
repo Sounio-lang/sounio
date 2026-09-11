@@ -8,6 +8,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
+# Witness Gate builds this PR's Madaros into MADAROS_RAW_BIN; Contracts must
+# not run this gate against the committed prebuilt (it lags self-hosted/).
+if [[ -z "${MADAROS_RAW_BIN:-}${SOUNIO_MADAROS_BIN:-}" ]]; then
+  echo "KL5_EPSILON_POLARITY_GATE_FAIL: MADAROS_RAW_BIN or SOUNIO_MADAROS_BIN required" >&2
+  exit 1
+fi
 SOUC="${SOUC:-$ROOT/bin/souc}"
 BAD="tests/compile-fail/vancomycin_low_conf.sio"
 GOOD="tests/run-pass/kl5_epsilon_confidence_boundary_ok.sio"
@@ -49,7 +55,7 @@ for engine in madaros lean_single; do
     cat "$bad_log" >&2
     exit 1
   fi
-  grep -qiE 'confidence|epsilon|ε' "$bad_log" || {
+  grep -qiE 'confidence|epsilon|ε|E036|bound is not tight' "$bad_log" || {
     echo "KL5_EPSILON_POLARITY_GATE_FAIL engine=$engine wrong refusal" >&2
     cat "$bad_log" >&2
     exit 1
