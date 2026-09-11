@@ -194,6 +194,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `pending_variance_reg :988`. Audit:
   `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
+- **`pow` has no FO transfer entry on Madaros.** Measured at KL-6 close:
+  `hessian_of(pow(x, 3.0), 0, 0)` prints `0.000000` (true `6x = 3.0`;
+  `lean_single` prints `3.000000`). The call is opaque to
+  `fo_apply_call_transfer` (`ir/lower.sio`, `fo_xfer_seed_transcendentals`),
+  so sensitivity and Hessian are both cleared — a structural zero, not a
+  diagnostic. Every unary builtin (`sin cos exp atan asin acos tan tanh log
+  sqrt`) has a first- and second-derivative entry; `pow` is the only math
+  builtin left out.
 
 ### KL-12 — thin-link `rc=12`
 
