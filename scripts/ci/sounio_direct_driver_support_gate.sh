@@ -123,7 +123,7 @@ pass_count = int(sys.argv[4])
 fail_count = int(sys.argv[5])
 
 registry_path = root / "docs/serious-language/public-claim-registry.v1.tsv"
-known_limitations_path = root / "docs/compiler/KNOWN_LIMITATIONS.md"
+known_limitations_path = root / "docs/compiler/MATURITY.md"
 readiness_ledger_path = root / "docs/serious-language/readiness-ledger.md"
 
 gate_ref = "scripts/ci/sounio_direct_driver_support_gate.sh"
