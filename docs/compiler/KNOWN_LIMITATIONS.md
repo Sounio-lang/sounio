@@ -37,7 +37,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-1 | small parity items: `~`, `Epistemic(-N)`, `*const`/`*mut` at call sites, `println` of computed local | madaros |
 | KL-2 | IEEE 754 special values (#2389) | both |
-| KL-3 | specializer caps, method turbofish | madaros |
 | KL-4 | private field reads unchecked | both |
 | KL-5 | ε polarity fork | madaros |
 | KL-6 | Hessian quotient / composite chain on Madaros | madaros |
@@ -99,24 +98,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Working rule until fixed: bound every loop that exits on a float
   comparison and range-check after it (`ulp()` in
   `examples/chemistry/rep_stagnation.sio`).
-
-### KL-3 — specializer caps and method turbofish
-
-- **Silent caps.** Engine: `madaros`. At most 4 type parameters per generic
-  function (`tp_h0..tp_h3`), 256 generic functions, 256 generic structs and
-  64 emitted hashes per unit (`check/specializer.sio:74-143`, `:455`, `:486`,
-  `:1045`). Exceeding a cap degrades silently. Pin: none.
-- **Method-call turbofish is inert.** Engine: `madaros`. `x.m::<T>()` parses
-  and stores `e.type_args` (`parser/exprs.sio:1536-1579`) but
-  `checker_check_method_call_with_base_ty_inplace` (`check.sio:8122`) never
-  reads it and the specializer only walks `ExprCall`
-  (`specializer.sio:1202`). The annotation is discarded, not rejected. Pin:
-  none.
-- Context (closed, kept for orientation): one-instantiation-per-template
-  monomorphiser; non-scalar multi-instantiation is refused
-  (`scripts/ci/madaros_specializer_nested_targ_gate.sh`); recursive name
-  rendering with `_Lb_`/`_Cm_`/`_Rb_`;
-  `docs/handoff/BLK-20260903-specializer-nested-targ-collision.md`.
 
 ### KL-4 — private field reads are not checked
 
