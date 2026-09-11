@@ -4743,6 +4743,11 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
                 }
+                let obi = lower_option_box_inner_type_name(&(*list).head.ty)
+                if obi.len > 0 {
+                    let obl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), obi)
+                    lowerer_bind_local_box_inner_mut(lo, (*list).head.name, obl)
+                }
                 if lower_type_expr_is_box(&(*list).head.ty) {
                     let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_inner_type_name(&(*list).head.ty))
                     lowerer_bind_local_box_inner_mut(lo, (*list).head.name, bl)
@@ -6136,6 +6141,31 @@ fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {
 fn lower_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     match (*ty).type_args {
         Some(list) => ir_path_first_name((*list).head.path),
+        None => ir_empty_name(),
+    }
+}
+
+// T of `Option<Box<T>>`, empty for anything else. The payload of a `Some(x)`
+// pattern is a Box<T> handle, and without T the binding can only be tagged
+// "Box" -- which sends every later `(*x).field` down the by-name scan that
+// resolves `tail` against whichever list struct declares it first.
+fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return ir_empty_name()
+    }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Option")) {
+        return ir_empty_name()
+    }
+    match (*ty).type_args {
+        Some(list) => {
+            if !ir_name_eq(ir_path_first_name((*list).head.path), make_name("Box")) {
+                return ir_empty_name()
+            }
+            match (*list).head.type_args {
+                Some(binner) => ir_path_first_name((*binner).head.path),
+                None => ir_empty_name(),
+            }
+        }
         None => ir_empty_name(),
     }
 }
@@ -17637,13 +17667,13 @@ impl Lowerer {
     }
 
     // Lower match arms as a linear if/else chain
-    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_match_arms_ref(self, scrut: i64, res: i64, l_end: i64, pay_layout: i64, arms: &Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = arms
         while true {
             match *current {
                 Some(list) => {
-                    lo = lo.lower_match_arm_ref(scrut, res, l_end, &(*list).head)
+                    lo = lo.lower_match_arm_ref(scrut, res, l_end, pay_layout, &(*list).head)
                     current = &(*list).tail
                 }
                 _ => break
@@ -17652,8 +17682,8 @@ impl Lowerer {
         lo
     }
 
-    fn lower_match_arms(self, scrut: i64, res: i64, l_end: i64, arms: Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arms_ref(scrut, res, l_end, &arms)
+    fn lower_match_arms(self, scrut: i64, res: i64, l_end: i64, pay_layout: i64, arms: Option<Box<MatchArmList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        self.lower_match_arms_ref(scrut, res, l_end, pay_layout, &arms)
     }
 
     // Lower a single match arm: test pattern, conditionally execute body
@@ -17670,7 +17700,7 @@ impl Lowerer {
         }
     }
 
-    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn lower_match_arm_ref(self, scrut: i64, res: i64, l_end: i64, pay_layout: i64, arm: &MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let pat = &arm.pattern
         if pat.kind == PatternKind::PatWildcard {
             // Wildcard matches the pattern unconditionally; an `if` guard can still reject it,
@@ -17713,7 +17743,7 @@ impl Lowerer {
                 // Branch if scrutinee == 0 (skip this arm)
                 lo = lo.emit(ir_branch_false(scrut, l_skip))
                 // Bind the inner pattern (first sub_pattern) to scrutinee value
-                lo = lo.bind_match_sub_pattern(scrut, pat.sub_patterns)
+                lo = lo.bind_match_sub_pattern(scrut, pay_layout, pat.sub_patterns)
                 lo = lo.lower_arm_guard(&arm.guard, l_skip)
                 let pair_b = lo.lower_expr_ref(&arm.body)
                 lo = pair_b.0
@@ -17820,8 +17850,8 @@ impl Lowerer {
         }
     }
 
-    fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        self.lower_match_arm_ref(scrut, res, l_end, &arm)
+    fn lower_match_arm(self, scrut: i64, res: i64, l_end: i64, pay_layout: i64, arm: MatchArm) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        self.lower_match_arm_ref(scrut, res, l_end, pay_layout, &arm)
     }
 
     // Lower Some(x) — just evaluate the first argument (identity)
@@ -18824,7 +18854,7 @@ impl Lowerer {
     }
 
     // Bind the first sub-pattern of a Some(x) match to the scrutinee value
-    fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn bind_match_sub_pattern(self, scrut: i64, pay_layout: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match pats {
             Some(list) => {
                 let inner = (*list).head
@@ -18837,6 +18867,15 @@ impl Lowerer {
                     // changes how `*nx` lowers, and deref/field-access of a non-Box payload
                     // (e.g. Option<i64>) is not valid code anyway.
                     lo = lo.bind_local_struct_type(inner.name, make_name("Box"))
+                    // ... and record T's layout, when the scrutinee gave us one.
+                    // The "Box" tag alone leaves the payload type unknown, and the
+                    // field-access site then resolves `(*x).f` by NAME across every
+                    // registered layout, first match wins. ast.sio declares `tail` in
+                    // 30 list structs, so an ItemList node read ExprList's slot. With
+                    // the layout recorded the access takes the type-directed branch.
+                    if pay_layout >= 0 {
+                        lo = lo.bind_local_box_inner_layout(inner.name, pay_layout)
+                    }
                     lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
@@ -20933,7 +20972,20 @@ impl Lowerer {
         let pair_end = lo.fresh_label()
         lo = pair_end.0
         let l_end = pair_end.1
-        lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms)
+        // The scrutinee of `match o { Some(x) => ... }` is an Option<Box<T>>; when
+        // it is a local whose T layout we already recorded, hand it to the arm so
+        // the Some-binding is not left type-erased.
+        let pay_layout = match e.left {
+            Some(se) => {
+                if (*se).kind == ExprKind::ExprIdent {
+                    lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, (*se).name)
+                } else {
+                    0 - 1
+                }
+            }
+            _ => 0 - 1,
+        }
+        lo = lo.lower_match_arms_ref(scrut, res, l_end, pay_layout, &e.arms)
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         (lo, res)
