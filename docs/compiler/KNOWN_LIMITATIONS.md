@@ -60,7 +60,11 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   separators; reachable only via the `scripts/ci/native_v2_*_gate.sh` family
   (see KL-10).
 - Ladder record: `docs/architecture/F128_F256_LADDER.md`; closed stages pinned
-  by `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`. `f128` as f64.** Engine: `lean_single`. Repro:
+  by `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`.
+
+### KL-9 — seed: `f128` greenwash and #1494
+
+- **`lean_single` lowers `f128` as f64.** Engine: `lean_single`. Repro:
   `examples/numerics/f128_is_f64_probe.sio` (53 halvings). Pin:
   `scripts/ci/language_gap_ratchet_gate.sh` line for `f128 halvings`.
   Locus: lowercase-unknown-type rule `lean_single.sio:24359-24361`,
