@@ -83,6 +83,39 @@ pub fn int_widths_compatible(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div
     fa == int_width_family(b.kind)
 }
 
+// Keep call/return compatibility aligned with lean_single's Knowledge ty_eq.
+// The required annotation chooses confidence-floor, exact, or error-bound
+// ordering; the provided mode only blocks confidence values from silently
+// flowing into an error-bound requirement.
+fn compat_epsilon_subsumes(a: TypeEntry, b: TypeEntry) -> bool {
+    if a.knowledge_epsilon > 1.0 || b.knowledge_epsilon > 1.0 {
+        return false
+    }
+    if b.knowledge_epsilon_mode == 3 {
+        if a.knowledge_epsilon_mode == 3 { return true }
+        return a.knowledge_epsilon_mode == 0 && a.knowledge_epsilon < 0.0
+    }
+    if b.knowledge_epsilon_mode == 2 {
+        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return false
+        }
+        return a.knowledge_epsilon >= b.knowledge_epsilon
+    }
+    if b.knowledge_epsilon_mode == 1 {
+        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return false
+        }
+        return a.knowledge_epsilon == b.knowledge_epsilon
+    }
+    if b.knowledge_epsilon < 0.0 {
+        return true
+    }
+    if a.knowledge_epsilon_mode == 2 || a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 {
+        return false
+    }
+    a.knowledge_epsilon <= b.knowledge_epsilon
+}
+
 pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     // Wildcard types: compatible with anything (check BOTH sides)
     if a.kind == TypeKind::TyError || b.kind == TypeKind::TyError {
@@ -246,21 +279,13 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return a.fn_sig_id == b.fn_sig_id
     }
 
-    // Knowledge types: inner type must be compatible + epsilon subsumption
-    // Knowledge<T, ε1> is compatible with Knowledge<T, ε2> if ε1 <= ε2
-    // (tighter bound satisfies looser requirement)
-    // Negative epsilon (-1.0) means unspecified — always compatible
+    // Knowledge types: inner type must be compatible + operator-aware epsilon
+    // subsumption. An unspecified requirement accepts any well-formed wrapper.
     if a.kind == TypeKind::TyKnowledge && b.kind == TypeKind::TyKnowledge {
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        // If either epsilon is unspecified, accept
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        // a is the provided value, b is the expected type
-        // a.epsilon must be <= b.epsilon (tighter bound ok)
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyModel && b.kind == TypeKind::TyModel {
@@ -451,20 +476,14 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyCounterfactual && b.kind == TypeKind::TyCounterfactual {
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyValidated && b.kind == TypeKind::TyValidated {
@@ -474,10 +493,7 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 && a.epistemic_meta_id != b.epistemic_meta_id {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyAdmissible && b.kind == TypeKind::TyAdmissible {
