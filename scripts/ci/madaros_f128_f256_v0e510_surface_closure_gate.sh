@@ -76,9 +76,11 @@ DRIVER=self-hosted/compiler/module_frontend.sio
 SPEC=self-hosted/check/specializer.sio
 
 # 1. hex-float f64 reader present and wired at both parser entry points.
-if grep -Fq 'pub fn f64_hex_literal_from_source(start: i64, end: i64) -> f64' "$LITMOD" \
-  && grep -Fq 'fn f64lit_scale_pow2(' "$LITMOD" \
-  && grep -Fq 'e.float_val = f64_hex_literal_from_source(start.start, hex_end)' self-hosted/parser/exprs.sio \
+PARSER=self-hosted/parser/parser.sio
+if grep -Fq 'pub fn f64_hex_literal_from_source(start: i64, end: i64) -> f64' "$PARSER" \
+  && grep -Fq 'fn f64lit_scale_pow2(' "$PARSER" \
+  && ! grep -v '^[[:space:]]*//' "$LITMOD" | grep -Eq '(^|[^a-z_])f64([^a-z_0-9]|$)' \
+  && grep -Fq 'e.float_val = f64_hex_literal_from_source(start.start, parser_prev_token_end(p))' self-hosted/parser/exprs.sio \
   && grep -Fq 'return f64_hex_literal_from_source(start, end)' self-hosted/parser/parser.sio \
   && grep -Fq 'if sfx_span.start == parser_prev_token_end(p)' self-hosted/parser/exprs.sio \
   && ! grep -Fq 'e.float_val = 1.0' self-hosted/parser/exprs.sio; then
