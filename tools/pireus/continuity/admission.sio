@@ -28,6 +28,8 @@ fn key_name(i: i64) -> string {
     if i == 13 { return "layout" }
     if i == 14 { return "unroll" }
     if i == 15 { return "context" }
+    // kind=2 only. The bilinear phase code naming the proposed operator.
+    if i == 16 { return "phase" }
     "UNKNOWN"
 }
 fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
@@ -43,7 +45,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
     if p >= n || str_char_at(s, p) != 123 { return d }
     p = p + 1
     var count: i64 = 0
-    while count < 16 {
+    while count < 17 {
         p = skip(s, p, n)
         if p >= n || str_char_at(s, p) != 34 { return d }
         p = p + 1
@@ -56,7 +58,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
         if p >= n { return d }
         var key: i64 = -1
         var k: i64 = 0
-        while k < 16 {
+        while k < 17 {
             let name = key_name(k)
             if str_len(name) == p - start {
                 var same = true
@@ -150,6 +152,30 @@ fn print_digest(d: SHA256Digest) with IO, Mut, Panic, Div {
         i = i + 1
     }
 }
+// The bilinear phase i^T B j over F2^4, B given by the 16-bit phase code.
+// Bit (i*4 + j) of the code is the coefficient B[i][j].
+fn bilinear(code: i64, x: i64, y: i64) -> i64 with Mut {
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        if ((x >> i) & 1) == 1 {
+            var j: i64 = 0
+            while j < 4 {
+                if ((y >> j) & 1) == 1 { s = s ^ ((code >> (i * 4 + j)) & 1) }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    s
+}
+// Structure coefficient of the operator the proposal names.
+// Phase code 0 returns cd_sigma unchanged, so kind=1 is unaffected.
+fn sigma_phase(code: i64, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    let base = cd_sigma(a as i32, b as i32, 4) as i64
+    if bilinear(code, a, b) == 1 { return 0 - base }
+    base
+}
 fn refuse(reason: string) -> i32 with IO {
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"REFUSE\",\"reason\":\"")
     print(reason); print("\"}\n")
@@ -174,7 +200,10 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let p = parse(ps, pn)
     if !c.valid || c.seen != 511 { return refuse("CONTEXT_FORMAT") }
     // Proposal fields 0..5 and 9..15; context-only fields cannot be overridden.
-    if !p.valid || p.seen != 65087 { return refuse("PROPOSAL_FORMAT") }
+    // 65087 = fields 0..5 and 9..15 (kind=1). 130623 adds field 16 (kind=2).
+    // Fields 6,7,8 stay context-only under both masks.
+    if !p.valid { return refuse("PROPOSAL_FORMAT") }
+    if p.seen != 65087 && p.seen != 130623 { return refuse("PROPOSAL_FORMAT") }
     if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
     if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
     if c.values[1] != 701202 || p.values[1] != c.values[1] { return refuse("TARGET") }
@@ -185,7 +214,13 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if c.values[5] != 0 || p.values[5] != 0 { return refuse("FMA") }
     if c.values[8] != 1 { return refuse("UNKNOWN_OR_CONTRADICTORY_FACTS") }
     if c.values[6] < 0 || c.values[6] > 63 || c.values[7] != 32 { return refuse("CAPABILITY") }
-    if p.values[9] != 1 { return refuse("KIND") }
+    let kind = p.values[9]
+    if kind != 1 && kind != 2 { return refuse("KIND") }
+    // The phase key is present exactly when kind is 2, and never otherwise.
+    if kind == 1 && p.seen != 65087 { return refuse("KIND_MASK") }
+    if kind == 2 && p.seen != 130623 { return refuse("KIND_MASK") }
+    let phase = p.values[16]
+    if kind == 2 && (phase < 0 || phase > 65535) { return refuse("PHASE_RANGE") }
     let stride = p.values[10]
     let offset = p.values[11]
     let load = p.values[12]
@@ -214,6 +249,9 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // Canonical tensor encoding cd16-abk-offset1-v1: a,b,k ascending, one
     // byte per coefficient; -1 maps to 0, 0 to 1, +1 to 2. This is injective
     // on the admitted coefficient set. No tensor/hash is accepted from the LLM.
+    // kind=1 keeps the Cayley-Dickson constant; kind=2 twists it by the phase.
+    var twist: i64 = 0
+    if kind == 2 { twist = phase }
     var state = sha256_init()
     var a: i64 = 0
     var failures: i64 = 0
@@ -228,12 +266,12 @@ fn main() -> i32 with IO, Mut, Panic, Div {
                 while lane < 16 {
                     let output = (lane * stride + offset) % 16
                     if output == k && (output ^ b) == a {
-                        reconstructed = reconstructed + cd_sigma(a as i32, b as i32, 4) as i64
+                        reconstructed = reconstructed + sigma_phase(twist, a, b)
                     }
                     lane = lane + 1
                 }
                 var expected: i64 = 0
-                if (a ^ b) == k { expected = cd_sigma(a as i32, b as i32, 4) as i64 }
+                if (a ^ b) == k { expected = sigma_phase(twist, a, b) }
                 if reconstructed != expected { failures = failures + 1 }
                 block[(b * 16 + k) as usize] = (reconstructed + 1) as u8
                 k = k + 1
@@ -245,10 +283,30 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     }
     if failures != 0 { return refuse("TENSOR") }
     if materialize {
+        // emit_lowering_ptx encodes the Cayley-Dickson signs and takes no
+        // phase. For kind=2 it would emit the wrong operator silently, so
+        // materialisation is refused rather than approximated.
+        if kind != 1 { return refuse("MATERIALIZE_KIND") }
         emit_lowering_ptx(stride, offset, load, layout, unroll)
         return 0
     }
     let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll
+    if kind == 2 {
+        print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
+        print_int(phase)
+        print(",\"plan_id\":")
+        print_int(plan_id)
+        print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
+        print_digest(sha256_finalize(state))
+        print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
+        print("\",\"proposal_sha256\":\""); print_digest(hash_text(ps, pn))
+        // This engine establishes well-definedness only. Novelty needs the
+        // GL(4,2) atlas and is decided by eisa_h.pireus_operator_atlas.v1.
+        print("\",\"novelty\":\"NOT_CLASSIFIED\"")
+        print(",\"classifier\":\"eisa_h.pireus_operator_atlas.v1\"")
+        print(",\"fp_parity\":\"UNMEASURED\",\"claim_ready\":false,\"formal_v13_v14\":\"OPEN\"}\n")
+        return 0
+    }
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
     print_int(plan_id)
     print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
