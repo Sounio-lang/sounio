@@ -148,6 +148,19 @@ fn sf_u128_shl_n(a: SfU128, n: i64) -> SfU128 with Mut {
     out
 }
 
+fn sf_u128_shr_n_trunc(a: SfU128, n: i64) -> SfU128 with Mut {
+    var out = a
+    var i: i64 = 0
+    var cap = n
+    if cap > 128 { cap = 128 }
+    while i < cap {
+        let sh = sf_u128_shr1(out)
+        out = sh.val
+        i = i + 1
+    }
+    out
+}
+
 fn sf_u128_shr_n_sticky(a: SfU128, n: i64) -> SfU128 with Mut {
     var out = a
     var sticky: i64 = 0
@@ -573,6 +586,81 @@ fn sf_u128_div_wide(sig_a: SfU128, sig_b: SfU128) -> SfU128 with Mut {
         q = SfU128 { w0: q.w0 | 1, w1: q.w1, w2: q.w2, w3: q.w3 }
     }
     q
+}
+
+/// Truncate a finite binary128 toward zero (KL-8 helper for `%`).
+fn f128_bits_soft_trunc(x: F128Bits) -> F128Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(x.hi)
+    let ea = sf_unpack_exp(x.hi)
+    let fa = sf_unpack_frac(x.lo, x.hi)
+    let exp_ones: i64 = 32767
+    if sf_is_nan(ea, fa) {
+        var f = fa
+        if sf_u128_is_zero(f) { f = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f)
+    }
+    if sf_is_inf(ea, fa) {
+        return sf_pack(0, exp_ones, sf_qnan_frac())
+    }
+    if sf_is_zero(ea, fa) {
+        return sf_pack(sa, 0, sf_u128_zero())
+    }
+    let pair = sf_sig_from(ea, fa)
+    let exp_u = pair.0
+    let sig = pair.1
+    if exp_u < 0 {
+        return sf_pack(sa, 0, sf_u128_zero())
+    }
+    if exp_u >= 112 {
+        return x
+    }
+    let shift = 112 - exp_u
+    let truncated = sf_u128_shr_n_trunc(sig, shift)
+    sf_pack_wide(sa, exp_u, truncated)
+}
+
+/// IEEE binary128 remainder: a - trunc(a/b)*b (trunc toward zero, fmod family).
+pub fn f128_bits_soft_rem(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.hi)
+    let ea = sf_unpack_exp(a.hi)
+    let fa = sf_unpack_frac(a.lo, a.hi)
+    let sb = sf_unpack_sign(b.hi)
+    let eb = sf_unpack_exp(b.hi)
+    let fb = sf_unpack_frac(b.lo, b.hi)
+    let exp_ones: i64 = 32767
+    if sf_is_nan(ea, fa) {
+        var f = fa
+        if sf_u128_is_zero(f) { f = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f)
+    }
+    if sf_is_nan(eb, fb) {
+        var f2 = fb
+        if sf_u128_is_zero(f2) { f2 = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f2)
+    }
+    let inf_a = sf_is_inf(ea, fa)
+    let inf_b = sf_is_inf(eb, fb)
+    let zero_a = sf_is_zero(ea, fa)
+    let zero_b = sf_is_zero(eb, fb)
+    if zero_b {
+        if zero_a || inf_a {
+            return sf_pack(0, exp_ones, sf_qnan_frac())
+        }
+        return sf_pack(sa, exp_ones, sf_u128_zero())
+    }
+    if zero_a || inf_a {
+        if inf_a && !inf_b {
+            return sf_pack(0, exp_ones, sf_qnan_frac())
+        }
+        return sf_pack(sa, 0, sf_u128_zero())
+    }
+    if inf_b {
+        return a
+    }
+    let q = f128_bits_soft_div(a, b)
+    let t = f128_bits_soft_trunc(q)
+    let prod = f128_bits_soft_mul(t, b)
+    f128_bits_soft_sub(a, prod)
 }
 
 /// IEEE binary128 division, round-to-nearest-even. x/0 → ±inf, 0/0 and

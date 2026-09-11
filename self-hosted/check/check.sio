@@ -6366,7 +6366,8 @@ fn checker_check_binary_op_types_inplace(c: *mut Checker, span: Span, op: Binary
             }
         }
         BinaryOp::OpRem => {
-            if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
+            if is_wide_float_type(left_ty) && is_wide_float_type(right_ty) && types_compatible(left_ty, right_ty) {
+            } else if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
                 checker_report_error_at_inplace(c, span, 50, 0, 0, 0)
             }
         }
@@ -6939,6 +6940,11 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // the RESULT-value join above's counterpart for BINDINGS -- two
             // different fail-open holes, both closed at this same merge point.
             checker_merge_ns_reassigned_inplace(c)
+            // KL-8: `fn f() -> f128 { if c { 1.0 } else { 2.0 } }` — both arms are
+            // float-literal tails; mark so checker_fn_body_return_compatible accepts.
+            if checker_if_arms_are_float_literal_tails(e) {
+                (*c).last_literal_kind = 2
+            }
             joined
         }
         None => {
@@ -18564,6 +18570,54 @@ fn checker_expr_is_float_literal_like(e: Expr) -> bool {
     }
 }
 
+// KL-8: `{ 1.0 }` as the then-arm of an `if` used as an `-> f128` fn tail.
+fn checker_block_tail_is_float_literal_like(opt: Option<Box<Block>>) -> bool with Mut {
+    match opt {
+        Some(blk) => {
+            var sl = (*blk).stmts
+            var tail_stmt: Option<Box<Stmt>> = None
+            while true {
+                match sl {
+                    Some(list) => {
+                        match (*list).tail {
+                            Some(rest) => { sl = Some(rest) }
+                            _ => {
+                                tail_stmt = Some(Box::new((*list).head))
+                                break
+                            }
+                        }
+                    }
+                    _ => break
+                }
+            }
+            match tail_stmt {
+                Some(s) => {
+                    if (*s).kind == StmtKind::StmtExpr {
+                        match (*s).expr {
+                            Some(expr_box) => return checker_expr_is_float_literal_like(*expr_box)
+                            None => return false
+                        }
+                    }
+                    false
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn checker_if_arms_are_float_literal_tails(e: Expr) -> bool with Mut {
+    let else_ok = match e.else_expr {
+        Some(ee) => checker_expr_is_float_literal_like(*ee),
+        None => false,
+    }
+    if !else_ok {
+        return false
+    }
+    checker_block_tail_is_float_literal_like(e.block)
+}
+
 fn checker_float_literal_magnitude(e: Expr) -> f64 {
     var v: f64 = 0.0
     if e.kind == ExprKind::ExprFloatLit {
@@ -23531,6 +23585,9 @@ impl Checker {
                 self
             }
             BinaryOp::OpRem => {
+                if is_wide_float_type(left_ty) && is_wide_float_type(right_ty) && types_compatible(left_ty, right_ty) {
+                    return self
+                }
                 if !is_integer_type(left_ty) || !is_integer_type(right_ty) {
                     return self.report_error_at(span, 50, 0, 0, 0)
                 }

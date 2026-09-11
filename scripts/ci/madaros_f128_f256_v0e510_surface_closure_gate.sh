@@ -268,7 +268,7 @@ else
   note_fail "souc_missing"
 fi
 
-echo "NOTE v0e510_deferred nested_block_literal_tail=pending driver_lexer_separators=pending f256=pending compound_assign=pending gum=pending"
+echo "NOTE v0e510_deferred driver_lexer_separators=pending f256=pending gum=pending kl8_residuals=closed_elsewhere"
 echo "NOTE adr009 python_softfloat=not_claim_clock rust=not_claim_clock lean_single_language=greenwash"
 
 echo "---"

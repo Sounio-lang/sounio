@@ -49,28 +49,18 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-8 — `f128` surface residuals (after V0-E.5.10)
 
-- Engine: `madaros`. Ladder record:
-  `docs/architecture/F128_F256_LADDER.md`; every closed stage is pinned by
-  `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`.
-- A float literal as the tail of a **nested** block used as the fn tail
-  (`fn f() -> f128 { if c { 1.0 } else { 2.0 } }`) is E008 — only the body
-  block and `return` are routed (`LOWER_F128_FN_BODY_PENDING`,
-  `ir/lower.sio`).
-- `%` and `+=` on `f128` are refused (no `soft_rem` desugar; compound
-  assignment not routed).
-- Builtin `print`/`println` of an `f128` is refused at lowering (`cannot
-  safely lower print/println argument with unresolved scalar kind`);
-  `println_f128` needs an explicit `use math::softfloat_f128_fmt` because
-  the implicit import (V0-E.5.10) covers `math/softfloat_f128.sio` only.
-- The legacy `native_compile_driver.sio` lexer (`driver_lex_source_to_globals`,
-  `:8872-8945`) does not take `_` separators; no longer reachable from any gate (the `native_v2_*` leaf gates were
-  deprecated in KL-10, `scripts/ci/deprecated/`).
-- Pin: the v0e510 gate pins the closed half; the residuals above have no
-  negative fixture yet.
-
-### KL-9 — seed: `f128` greenwash and #1494
-
-- **`lean_single` lowers `f128` as f64.** Engine: `lean_single`. Repro:
+- Engine: `madaros`. Closed on this rung (KL-8): nested `if`/`else` literal
+  tail in an `-> f128` fn, `%` and `+=` on language `f128`, and builtin
+  `print`/`println` routing to `print_f128`/`println_f128` with implicit
+  import of `math/softfloat_f128_fmt.sio`. Pin:
+  `scripts/ci/madaros_kl8_f128_residuals_gate.sh`;
+  `tests/run-pass/f128_kl8_residuals.sio`.
+- Still open: the legacy `native_compile_driver.sio` lexer
+  (`driver_lex_source_to_globals`, `:8872-8945`) does not take `_`
+  separators; reachable only via the `scripts/ci/native_v2_*_gate.sh` family
+  (see KL-10).
+- Ladder record: `docs/architecture/F128_F256_LADDER.md`; closed stages pinned
+  by `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`. `f128` as f64.** Engine: `lean_single`. Repro:
   `examples/numerics/f128_is_f64_probe.sio` (53 halvings). Pin:
   `scripts/ci/language_gap_ratchet_gate.sh` line for `f128 halvings`.
   Locus: lowercase-unknown-type rule `lean_single.sio:24359-24361`,
