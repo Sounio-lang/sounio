@@ -12,7 +12,23 @@ cd "$ROOT_DIR"
 unset SOUC_BIN SOUNIO_SOUC_BIN || true
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-SOUC="${MADAROS_RAW_BIN:-${SOUC:-$ROOT_DIR/bin/souc}}"
+# Raw Madaros needs >=512 MiB stack (see bin/madaros / MADAROS_STACK_KB).
+# Workflow ulimit in the build step does not persist into later steps; gates that
+# invoke MADAROS_RAW_BIN directly must reserve stack here or the host SEGVs
+# (rc=139) on default ~8 MiB runner stacks.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
+
+if [[ -x "$ROOT_DIR/bin/madaros" ]]; then
+  # Launcher applies MADAROS_STACK_KB and resolves MADAROS_RAW_BIN.
+  SOUC="$ROOT_DIR/bin/madaros"
+else
+  SOUC="${MADAROS_RAW_BIN:-${SOUC:-$ROOT_DIR/bin/souc}}"
+fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kl8-f128-residuals.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
