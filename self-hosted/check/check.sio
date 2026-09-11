@@ -4713,7 +4713,25 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
     match e.left {
         Some(val_expr) => {
-            if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
+            // `return <expr>` requires a DECLARED return type. A function with no
+            // return annotation lowers its return type to TyUnknown (the None arms
+            // of the two ret_ty matches), and types_compatible treats TyUnknown as a
+            // wildcard compatible with everything -- so every value return in an
+            // unannotated function was accepted, whatever it returned.
+            //
+            // lean_single rejects `fn f() { return 0 }` and this accepted it, which
+            // is how examples/hello.sio shipped ill-typed and red in
+            // real_language_runner_gate step 6/7 from 114c542b91 until b3e3d1c71b:
+            // `souc check` (Madaros) said OK and the raw compile path said
+            // "typecheck: failed", on the same file in the same gate.
+            //
+            // TyUnknown is deliberate in the SIGNATURE and stays: it is what lets
+            // `fn f() { 42 }` be called as `let x: i64 = f()`, which lean_single
+            // also accepts. Only the explicit value return is closed here, so
+            // trailing-expression returns and call-site inference are untouched.
+            if (*c).current_return_type.kind == TypeKind::TyUnknown {
+                checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+            } else if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
             // Raw-reference escape: `return &local` / `return r` where r is rooted
@@ -6113,6 +6131,23 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).current_effects = [0; 8]
     (*c).current_effect_count = 0
 
+    // A closure body's `return` was checked against the ENCLOSING function's
+    // return type, because nothing here ever set current_return_type -- so
+    // `|x: f64| -> f64 { return x * x }` inside `fn main()` was checked against
+    // main's type, not f64. Harmless while an unannotated enclosing type was a
+    // TyUnknown wildcard; not harmless once the return check above rejects value
+    // returns under TyUnknown, which would fail exactly the declared-return
+    // closures this tree already contains.
+    //
+    // Only a DECLARED closure return is installed. An undeclared one is inferred
+    // from the body below (inferred_ret_ty), so there is no type to check against
+    // and the enclosing context is left exactly as it was -- this narrows
+    // behaviour where a type exists and changes nothing where it does not.
+    let saved_return_type = (*c).current_return_type
+    if ret_ty.kind != TypeKind::TyUnknown {
+        (*c).current_return_type = ret_ty
+    }
+
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
@@ -6121,6 +6156,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+    (*c).current_return_type = saved_return_type
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -22925,7 +22961,13 @@ impl Checker {
         let val_ty = pair.1
         match e.left {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type) {
+                // Mirrors checker_check_return_expr_inplace: an unannotated return
+                // type is TyUnknown, a types_compatible wildcard, so `return <expr>`
+                // in an unannotated function must be rejected explicitly. See the
+                // comment at that site for why the signature keeps TyUnknown.
+                if c.current_return_type.kind == TypeKind::TyUnknown {
+                    c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
+                } else if !checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type) {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
