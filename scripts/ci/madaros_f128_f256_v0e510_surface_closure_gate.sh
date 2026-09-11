@@ -102,7 +102,7 @@ fi
 # 2. lowerer: body-block tail and `return` literal routed to f128 limbs.
 if grep -Fq 'var LOWER_F128_FN_BODY_PENDING: bool = false' "$LOWER" \
   && grep -Fq 'LOWER_F128_FN_BODY_PENDING = (*lo).current_func_loaded && lower_fn_returns_f128(&(*(*lo).current_func))' "$LOWER" \
-  && grep -Fq 'if f128_body_tail && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box))' "$LOWER" \
+  && grep -Fq 'f128_lit_tail_ctx && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box))' "$LOWER" \
   && grep -Fq 'Some(ret_box2) => self.lower_f128_value_ref(&(*ret_box2))' "$LOWER"; then
   note_pass "lower_routes_f128_fn_literal_tail_and_return"
 else
