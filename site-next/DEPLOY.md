@@ -19,38 +19,58 @@ cd ..             && node scripts/build-vercel-output.mjs
 
 Ou, do `site-next/web`, o ciclo curto: `npm run build:hybrid`.
 
-## Configuração, uma vez só
+## Configuração
 
-O workflow existe e falha com mensagem clara enquanto estes três passos não
-forem feitos. Nenhum deles foi executado por mim — criar projeto e apontar
-domínio são ações na conta de vocês.
+**Estado: dois dos três passos feitos.**
 
-### 1. Criar o projeto na Vercel
+| Passo | Estado |
+|---|---|
+| 1. Criar o projeto | ✅ `sounio-next` = `prj_8hvPYrL97qWYsCfeZp1wkxR5Gp5E` |
+| 2. Registrar o ID | ✅ variável `VERCEL_PROJECT_ID_SITE_V2` definida |
+| 3. Apontar o domínio | ⬜ pendente — ação no DNS de vocês |
 
-Separado do `sounio` em produção (`prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s`), que
-continua servindo o site atual.
+Restam duas coisas, ambas fora do que dá para fazer por API sem um token de
+escopo amplo:
 
-```bash
-vercel project add sounio-next --scope team_rWORp5HA3dSzo95gt1RZd3sh
+- **desligar o deploy por git** no `sounio-next` (ver abaixo);
+- apontar `next.souniolang.org`.
+
+O projeto foi criado **sem framework e sem deploy** (`latestDeployment: null`),
+como especificado. Antes e depois da criação, o `sounio` em produção foi
+fotografado e comparado: `updatedAt`, último deploy, domínios e framework
+idênticos — **não foi tocado**.
+
+### 1. Criar o projeto na Vercel — feito
+
+`sounio-next` = `prj_8hvPYrL97qWYsCfeZp1wkxR5Gp5E`, separado do `sounio` em
+produção (`prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s`), que continua servindo o site
+atual. Criado sem framework e sem deploy.
+
+**Pendente e importante:** ele ficou com **deploy por git ligado**. Como está
+ligado a `Sounio-lang/sounio`, todo push na `main` vai disparar um build na
+Vercel — que **vai falhar**, porque o contêiner dela não tem Swift e o projeto
+não tem framework. Não é perigoso (o deploy real é `--prebuilt`, por
+`workflow_dispatch` ou tag, e não passa por esse caminho), mas é ruído a cada
+push.
+
+Desligar no painel: **Project → Settings → Git → Ignored Build Step**, ou
+desconectar o repositório. Evite resolver com um `vercel.json` na raiz: o
+`sounio` de produção está ligado ao **mesmo** repositório, e uma configuração
+de raiz pode alcançá-lo.
+
+### 2. Registrar o ID do projeto — feito
+
+```
+VERCEL_PROJECT_ID_SITE_V2 = prj_8hvPYrL97qWYsCfeZp1wkxR5Gp5E
 ```
 
-Sem framework e sem build command: tudo chega pronto. Deixe
-`deploymentEnabled: false` para o git, como no projeto atual — o deploy é por
-`workflow_dispatch` ou por tag `site-v2-*`.
+Variável de repositório, não secret — não é sigiloso, e assim aparece nos logs
+para conferência. O `VERCEL_TOKEN` já existia como secret desde o PR #2397.
 
-### 2. Registrar o ID do projeto
+A guarda do workflow aprova este ID: ela aborta só se o projeto resolvido for
+`prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s`.
 
-Pegue o `prj_…` do projeto criado e defina como **variável de repositório**
-(não secret — não é sigiloso, e assim aparece nos logs para conferência):
-
-```
-Settings → Secrets and variables → Actions → Variables
-  VERCEL_PROJECT_ID_SITE_V2 = prj_…
-```
-
-O `VERCEL_TOKEN` já existe como secret desde o PR #2397.
-
-### 3. Apontar o domínio
+### 3. Apontar o domínio — pendente
 
 ```bash
 vercel domains add next.souniolang.org --scope team_rWORp5HA3dSzo95gt1RZd3sh
