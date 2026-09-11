@@ -25,7 +25,7 @@ Ou, do `site-next/web`, o ciclo curto: `npm run build:hybrid`.
 
 | Passo | Estado |
 |---|---|
-| 1. Criar o projeto | ✅ `sounio-next` = `prj_8hvPYrL97qWYsCfeZp1wkxR5Gp5E` |
+| 1. Criar o projeto | ⚠️ criado e **PAUSADO** — `prj_8hvPYrL97qWYsCfeZp1wkxR5Gp5E` |
 | 2. Registrar o ID | ✅ variável `VERCEL_PROJECT_ID_SITE_V2` definida |
 | 3. Apontar o domínio | ⬜ pendente — ação no DNS de vocês |
 
@@ -46,17 +46,30 @@ idênticos — **não foi tocado**.
 produção (`prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s`), que continua servindo o site
 atual. Criado sem framework e sem deploy.
 
-**Pendente e importante:** ele ficou com **deploy por git ligado**. Como está
-ligado a `Sounio-lang/sounio`, todo push na `main` vai disparar um build na
-Vercel — que **vai falhar**, porque o contêiner dela não tem Swift e o projeto
-não tem framework. Não é perigoso (o deploy real é `--prebuilt`, por
-`workflow_dispatch` ou tag, e não passa por esse caminho), mas é ruído a cada
-push.
+### O projeto está PAUSADO, e por quê
 
-Desligar no painel: **Project → Settings → Git → Ignored Build Step**, ou
-desconectar o repositório. Evite resolver com um `vercel.json` na raiz: o
-`sounio` de produção está ligado ao **mesmo** repositório, e uma configuração
-de raiz pode alcançá-lo.
+Ele nasceu com **deploy por git ligado**, e a consequência foi maior do que eu
+previ. Em segundos a Vercel varreu o repositório e criou **quatro deploys**:
+dois da `main` e de `fix/gum-2cov` marcados `target: production`, e dois
+previews. O bot da Vercel comentou no **PR #2477, de outra pessoa**, que não
+tem nenhuma relação com este trabalho.
+
+Eu previ "builds que falham, ruído"; na verdade eles **tiveram sucesso** e
+espalharam comentários em PRs alheios. Pausei o projeto para estancar
+(`pause_project`), o que impede novos deploys por git.
+
+Nada disso alcançou produção: o `sounio` foi comparado antes e depois —
+`updatedAt`, último deploy, domínios e framework idênticos.
+
+**Antes de despausar**, desligue o deploy por git no painel:
+**Project → Settings → Git** — desconecte o repositório, ou use *Ignored Build
+Step* com `exit 0`. Só então `unpause`, porque o deploy real é `--prebuilt` por
+`workflow_dispatch` ou tag e não precisa da ligação com o git.
+
+Não resolva com um `vercel.json` na raiz: o `sounio` de produção está ligado ao
+**mesmo** repositório, e uma configuração de raiz pode alcançá-lo. Além disso
+não adiantaria — um arquivo no meu branch não muda o comportamento da `main`
+nem dos PRs alheios.
 
 ### 2. Registrar o ID do projeto — feito
 
