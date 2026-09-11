@@ -791,8 +791,9 @@ whoever picks option 1, 2, or the remainder of option 3.
   never the literal shape. The same column records 256 for `[f256; N]`, so an
   f256 element now reaches the V0-E.4.1 refusal (on `main` before this rung
   `xs[0] * xs[1]` on a `[f256; 2]` lowered as an integer multiply and emitted an
-  ELF — a latent greenwash, fixed here). Checker limit: a bare float literal as a `[f128; N]`
-  element is still inferred `[f64; N]` and rejected (E001) — use f128 idents.
+  ELF — a latent greenwash, fixed here). Checker limit (closed in V0-E.5.10): a
+  bare float literal as a `[f128; N]` element was inferred `[f64; N]` and
+  rejected (E001) — f128 idents only until then.
   Fns returning `[f128; N]`, `Seq<f128>`, `for x in xs` over f128 arrays, nested
   arrays, `%`, `+=` on f128, f256 fields/params/arrays, methods returning `f128`
   (`v.norm2()`), and GUM/`Knowledge`/`MeasuredF256` remain deferred.
@@ -824,18 +825,31 @@ whoever picks option 1, 2, or the remainder of option 3.
   table (0, ±1, 2, 3, 0.5, 1.5, 0.25) keyed on the literal's f64 value, and
   closed a latent greenwash: a C99 hex-float reached that table as the parser's
   placeholder magnitude, so `let x: f128 = 0x1.8p+0` lowered as 1.0/0.0 and
-  emitted an ELF. Still open (not this rung): the **f64** path of a hex-float
-  literal (`let x: f64 = 0x1.8p+0`) still lowers the parser placeholder
-  magnitude; checker E008/E001 still reject a bare literal in a `-> f128` tail
-  position and as a `[f128; N]` element.
-- **Madaros, language `f128` without `use math::softfloat_f128`:** the softfloat
-  desugar targets (`f128_bits_soft_add` …) are stdlib fns; a program that uses
-  language `f128` arithmetic but imports nothing from `math::softfloat_f128`
-  compiles to an ELF whose desugared calls hit body-less stubs and trap (SIGILL,
-  exit 132) instead of being refused at compile time. Every ladder witness
-  imports the module. Making the lowerer refuse when a desugar target is not in
-  the module graph is a pending rung (found by the V0-E.4.1 gate rewrite in
-  V0-E.5.9).
+  emitted an ELF.
+- **Madaros V0-E.5.10:** surface closure (`--stage v0e510`). The four gaps
+  V0-E.5.9 left are closed: the **f64** path of a hex-float literal (`let x: f64
+  = 0x1.8p+0`) is the correctly rounded binary64 value of its text
+  (`f64_hex_literal_from_source`, single nearest-even rounding with a sticky
+  bit; subnormals and max finite exact) instead of the parser placeholder; a
+  bare float literal is accepted as the tail of an `-> f128` fn/method and
+  `return 1.5` in such a fn lowers to exact limbs (before, check passed it and
+  the slot received binary64 bits); `let a: [f128; N] = [1.0, 2.0]` / `[0.5; N]`
+  and struct-field array initialisers with literal elements are accepted
+  (inexact elements still fail closed); the live flat lexer accepts `_` before
+  a digit in every part of a numeric literal (`1_024.0`, `1_000`, `0x1_0`,
+  `1_0.5e0_1`). Language `f128` without `use math::softfloat_f128` now works:
+  the driver adds the stdlib module to the module graph itself when any loaded
+  module mentions `f128` (`imported_compile: implicit_import
+  math/softfloat_f128.sio reason=f128_in_ast` — the compiler's first implicit
+  import), and if a desugar target still has no body (stdlib unreachable) the
+  compile refuses (`an f128 desugar target has no body (V0-E.5.10 …)`, no ELF)
+  instead of emitting a binary that traps with SIGILL 132. Still open: a float
+  literal as the tail of a **nested** block used as the fn tail (`fn f() -> f128
+  { if c { 1.0 } else { 2.0 } }`) is still E008 — only the fn body block and
+  `return` are routed; the legacy `native_compile_driver.sio` lexer
+  (`driver_lex_source_to_globals`) does not take `_` separators; the implicit
+  import covers `math/softfloat_f128.sio` only (not `softfloat_f128_fmt`, so
+  `println_f128` still needs its `use`).
 - Full stdlib GUM surface for `f128` is still out of scope.
 - **lean_single** language `f128` still greenwashes to f64 (V0-E.4 negative
   control); not a claim path. Repro: `examples/numerics/f128_is_f64_probe.sio`.
