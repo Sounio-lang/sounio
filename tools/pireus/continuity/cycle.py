@@ -86,7 +86,7 @@ def prepare(args):
         data = path.read_bytes()
         atomic(root / name, data)
         dependencies[name] = digest(data)
-    manifest = dict(schema=1, condition=args.condition, budget=args.budget,
+    manifest = dict(schema=1, condition=args.condition, kind=getattr(args, "kind", 1), budget=args.budget,
                     round=args.round, model=MODEL, revision=REVISION,
                     transport=getattr(args, "transport", "openai-chat"),
                     dependencies=dependencies,
@@ -102,23 +102,65 @@ def prepare(args):
     event(root, "prepare", root / "manifest.json")
     return manifest
 
-def proposal_template(context_hash):
-    return dict(schema=1, target=701202, dimension=16, precision=64, order=1,
-                fma=0, kind=1, lane_stride=1, lane_offset=0, load=1,
+def proposal_template(context_hash, kind=1):
+    # kind=1 is a lowering of the fixed Cayley-Dickson product. kind=2 names a
+    # new operator through a 16-bit bilinear phase code and still carries a
+    # lane plan, because a proposed operator still has to be lowered. The only
+    # added key is `phase`; every other field keeps its kind=1 meaning.
+    base = dict(schema=1, target=701202, dimension=16, precision=64, order=1,
+                fma=0, kind=kind, lane_stride=1, lane_offset=0, load=1,
                 layout=0, unroll=1, context=context_hash)
+    if kind == 2:
+        base["phase"] = 0
+    return base
+
+# These are plain constants concatenated onto the format string below, so they
+# are NOT consumed by the % operator: a literal percent stays a single percent
+# here, unlike the inline string this replaced.
+LOWERING_PROMPT = (
+    "Propose one untrusted lowering plan as a JSON object only. "
+    "Do not add expected results, authority, claims, or new fields. "
+    "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
+    "You may vary lane_stride in odd integers 1..15; lane_offset 0..15; "
+    "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); "
+    "unroll in [1,2,4,8,16]. Output k accumulates ascending right operand j "
+    "with left i=k XOR j, separate f64 multiply/add, no reassociation. "
+    "Lane mapping k=(lane*lane_stride+lane_offset)%16. ")
+
+# The kind=2 prompt asks for an OPERATOR, not a lowering of one. It states the
+# whole admissible space and the single number that selects a point in it,
+# because the engine accepts nothing else from the proposer: no tensor, no
+# digest, no claim. Everything a proposal asserts about its operator is
+# recomputed by Sounio and by eisa_h.pireus_operator_admission.v1, and a
+# proposal that misdescribes its own algebra is refused even when the algebra
+# is sound.
+OPERATOR_PROMPT = (
+    "Propose one untrusted OPERATOR as a JSON object only. "
+    "Do not add expected results, authority, claims, tensors, hashes, or new fields. "
+    "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
+    "The operator is a product on 16 basis elements graded by XOR: "
+    "e_i * e_j = sigma(i,j) e_(i XOR j). "
+    "sigma(i,j) = cd_sigma(i,j) * (-1)^(i^T B j), where cd_sigma is the "
+    "Cayley-Dickson sedenion sign and B is a 4x4 matrix over F2 that you choose. "
+    "You choose B by giving `phase`, an integer 0..65535 whose bit (4*i + j) is B[i][j]. "
+    "phase 0 reproduces the sedenions exactly and will be refused as not novel. "
+    "Two phase codes that differ by a diagonal sign rescaling of the basis give "
+    "the same operator, so only the symmetrised form matters: there are 1024 "
+    "distinct classes, falling into 32 classes under the admitted change-of-basis "
+    "actions, and the lowering grammar used so far has only ever reached 4 of them. "
+    "Aim outside those 4. "
+    "You may also vary lane_stride in odd integers 1..15; lane_offset 0..15; "
+    "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); unroll in [1,2,4,8,16], "
+    "with the same evaluation order as a lowering proposal: output k accumulates "
+    "ascending right operand j with left i=k XOR j, separate f64 multiply/add, "
+    "no reassociation, lane mapping k=(lane*lane_stride+lane_offset)%16. ")
 
 def request_body(manifest, context, index, served_model=MODEL):
-    base = proposal_template(digest(context))
+    kind = manifest.get("kind", 1)
+    base = proposal_template(digest(context), kind)
     facts = context.decode() if manifest["condition"] == "inkling-ontology" else "withheld"
     prompt = (
-        "Propose one untrusted lowering plan as a JSON object only. "
-        "Do not add expected results, authority, claims, or new fields. "
-        "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
-        "You may vary lane_stride in odd integers 1..15; lane_offset 0..15; "
-        "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); "
-        "unroll in [1,2,4,8,16]. Output k accumulates ascending right operand j "
-        "with left i=k XOR j, separate f64 multiply/add, no reassociation. "
-        "Lane mapping k=(lane*lane_stride+lane_offset)%%16. "
+        (OPERATOR_PROMPT if kind == 2 else LOWERING_PROMPT) +
         "This is proposal %d in round %d. Frozen research context (declared ontology, not observed hardware facts): %s. Template: %s"
         % (index, manifest["round"], facts, json.dumps(base)))
     body = dict(model=served_model, messages=[dict(role="user", content=prompt)],
@@ -130,7 +172,7 @@ def generate(args, manifest):
         raise ValueError("Use tokenized_cycle.py for the frozen token-ID transport")
     root = args.run
     context = (root / "context.json").read_bytes()
-    base = proposal_template(digest(context))
+    base = proposal_template(digest(context), manifest.get("kind", 1))
     for index in range(manifest["budget"]):
         prefix = root / ("%03d" % index)
         proposal = prefix.with_suffix(".proposal.json")
@@ -144,6 +186,12 @@ def generate(args, manifest):
                             lane_offset=(index // 8 + manifest["round"]) % 16,
                             load=(index // 2) % 2, layout=index % 2,
                             unroll=(1, 2, 4, 8, 16)[index % 5])
+            if manifest.get("kind", 1) == 2:
+                # Fixed phase codes, not a search: enough to exercise transport
+                # and admission without a Spark pair. 1128 is the operator the
+                # upstream genesis run selected; the others are distinct codes
+                # so one run reaches more than a single class.
+                p["phase"] = (1128, 2, 8, 74, 198, 1129, 4, 16)[index % 8]
             atomic(proposal, encoded(p))
         else:
             if not args.endpoint:
@@ -222,7 +270,7 @@ def report(root, manifest):
     receipts = [json.loads(p.read_text()) for p in sorted(root.glob("*.receipt.json"))]
     admitted = [x for x in receipts if x["decision"] == "ADMIT"]
     benchmark=json.loads((root/"benchmark-report.json").read_text()) if (root/"benchmark-report.json").exists() else None
-    return dict(schema=1, condition=manifest["condition"], budget=manifest["budget"],
+    return dict(schema=1, condition=manifest["condition"], kind=manifest.get("kind", 1), budget=manifest["budget"],
                 generated=len(list(root.glob("*.proposal.json"))), validated=len(receipts),
                 admitted=len(admitted), unique_plans=len({x["plan_id"] for x in admitted}),
                 refused=len(receipts)-len(admitted), materialized=len(list(root.glob("*.ptx"))), hardware_benchmarked=len(benchmark["decisions"]) if benchmark else 0,
@@ -238,6 +286,9 @@ def main():
     ap.add_argument("--evidence", type=Path, nargs="*", default=[])
     ap.add_argument("--condition", choices=["deterministic", "inkling-no-ontology", "inkling-ontology"],
                     default="deterministic")
+    ap.add_argument("--kind", type=int, choices=[1, 2], default=1,
+                    help="1 = lowering of the fixed product (default, unchanged behaviour); "
+                         "2 = operator genesis, adds the 16-bit `phase` key")
     ap.add_argument("--budget", type=int, choices=[8,32], default=8)
     ap.add_argument("--deduplicate-material", action="store_true")
     ap.add_argument("--round", type=int, choices=[0,1,2], default=0)
