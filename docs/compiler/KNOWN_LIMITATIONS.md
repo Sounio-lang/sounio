@@ -38,7 +38,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-1 | small parity items: `~`, `Epistemic(-N)`, `*const`/`*mut` at call sites, `println` of computed local | madaros |
 | KL-2 | IEEE 754 special values (#2389) | both |
 | KL-4 | private field reads unchecked | both |
-| KL-5 | ε polarity fork | madaros |
+| KL-6 | Hessian quotient / composite chain on Madaros | madaros |
 | KL-7 | `i256`/`i512` wide-local `print_int` | madaros |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
@@ -110,21 +110,22 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   struct-literal half only). Blast radius over `stdlib/` is measured before
   enforcement; a warning-first ratchet is acceptable for one rung.
 
-### KL-5 — ε has opposite polarities in the two engines
+### KL-6 — Hessian on Madaros: quotient and composite chain rule
 
-- Engine: `madaros` accepts `tests/compile-fail/vancomycin_low_conf.sio`
-  (`check: OK`, rc=0); `lean_single` refuses it with P0003. Madaros reads ε as
-  an error bound (`epsilon_subsumes` is `a <= b`,
-  `check/epistemic.sio:607`; `epsilon_subsumes_call_boundary` `:613` ignores
-  `EpsilonBound.op`), the corpus reads it as confidence (`ε >= 0.82`: 15
-  uses, `ε =`: 10, `ε <`: 0). Seed: `ty_eq` `lean_single.sio:4276-4295`
-  honours the operator.
-- Pin: the three covering gates (`clinical_vanco_tdm_e2e`,
-  `epistemic_prescription_chain_e2e`, `ousadia_epistemic_method_rx`) pin
-  `SOUNIO_SOUC_ENGINE=lean_single` and are not workflow-reachable;
-  `scripts/ci/epsilon_engine_parity_gate.sh` (ci.yml) covers a narrower set.
-- Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`. Do not state the
-  vancomycin ε guarantee without naming the engine.
+- Engine: `madaros`. `tests/run-pass/madaros_hessian_quotient.sio` prints
+  `h_aa=h_ab=h_bb=h_rec=0.000000` and `MADAROS_HESSIAN_QUOTIENT_FAIL` on the
+  committed ELF and on source. Composite inner expressions (`exp(x*x)`,
+  `exp(sin(x))`, `sin(sin(x))`) are deliberately refused by clearing the
+  Hessian and returning `0.0` (`ir/lower.sio:11338-11347`, `:11423`); the
+  `f'(g)·H(g)` term is not implemented.
+- Locus: `lower_expr_variance_ref` guard `lower.sio:12277`
+  (`fo_expr_or_snap_has_sens(sL)` only — a Hessian carried by the right
+  operand alone is dropped), `so_combine_hess_div` `:9782`,
+  `so_combine_hess_mul` `:9871`.
+- Pin: the transcendental witness
+  `tests/run-pass/madaros_hessian_transcendental.sio` is green and must stay
+  so; the quotient witness is the failing repro. Do not generalise the
+  transcendental result to Hessian AD as a whole.
 
 ### KL-7 — `i256`/`i512` wide-local `print_int`
 
