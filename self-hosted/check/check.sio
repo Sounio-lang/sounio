@@ -5687,6 +5687,30 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
                                 let pred = checker_refinement_pred_from_info(ri)
                                 let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
                                 (*c).refinements = refinement_table_add((*c).refinements, name, rt)
+                                // BIND THE ALIAS NAME, which this arm never did.
+                                // Registering the refinement in the table made it
+                                // findable by name but left the NAME itself
+                                // unbound, so `type Positive = { x: i64 | x > 0 }`
+                                // followed by `let p: Positive = 42` resolved
+                                // Positive to an opaque ty_named and reported
+                                // `expected Positive, found i64`. Measured: that
+                                // is tests/run-pass/refinement_satisfied and
+                                // refinement_float_bound failing on the committed
+                                // baseline too, and it is what kept
+                                // ontology_axiom_conjunction at E009 -- the
+                                // argument was a tagged f64 and the parameter a
+                                // named type, so the refinement boundary that
+                                // would have discharged the obligation was never
+                                // reached.
+                                //
+                                // A refinement type IS its base type carrying a
+                                // predicate, exactly as an ontology class with an
+                                // f64 property IS that f64 carrying a species.
+                                // Both were opaque for the same reason.
+                                let rid = refinement_table_find((*c).refinements, name)
+                                if rid >= 0 {
+                                    (*c).env = (*c).env.bind(name, ty_with_refinement(base_ty, rid), false)
+                                }
                             }
                             None => {}
                         }
@@ -9579,8 +9603,18 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         // primitive, and a reference is never TyF64, so there is no inner to
         // unwrap on this path.
         if primitive_exact
+        // refinement_id joins unit_id and ontology_id here, and the reason it
+        // was not here from the start is recorded in e0b5b70722: it had the same
+        // shape and was left out for want of its own measurement. The
+        // measurement arrived. Binding a refinement alias to its base type made
+        // `type NeedsHalf = { v: f64 | v > 0.5 }` resolve to TyF64, so
+        // assert_potent(0.1) became TyF64-against-TyF64, took this fast path, and
+        // skipped the refinement boundary that rejects it -- a call the committed
+        // baseline REFUSES with E009 and this build accepted. Three fixtures
+        // turned green vacuously in the process.
         && (arg_ty.unit_id >= 0 || param_info.ty.unit_id >= 0
-         || arg_ty.ontology_id >= 0 || param_info.ty.ontology_id >= 0) {
+         || arg_ty.ontology_id >= 0 || param_info.ty.ontology_id >= 0
+         || arg_ty.refinement_id >= 0 || param_info.ty.refinement_id >= 0) {
             primitive_exact = false
         }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
