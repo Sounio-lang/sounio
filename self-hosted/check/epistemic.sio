@@ -57,6 +57,7 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
 
     // Validate epsilon bound if present
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -66,6 +67,7 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
@@ -77,6 +79,7 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     // types_equal never reads this field; the call-boundary check is the
     // only consumer. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
     var ty = ty_knowledge(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     let prov = meta.provenance
     ty.knowledge_provenance_kind = prov.kind
     (c, ty)
@@ -88,6 +91,7 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -97,12 +101,14 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_intervention(inner_ty, eps_val)
+    var ty = ty_intervention(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -112,6 +118,7 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -121,12 +128,14 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_counterfactual(inner_ty, eps_val)
+    var ty = ty_counterfactual(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -136,6 +145,7 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -145,12 +155,14 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_validated(inner_ty, eps_val)
+    var ty = ty_validated(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -596,45 +608,65 @@ pub fn knowledge_meta_is_valid(meta: KnowledgeMeta) -> bool {
 // Confidence subsumption lattice (lines 301-380)
 // ============================================================
 
-// Confidence subsumption: lower epsilon = higher confidence
-// epsilon_subsumes(eps_a, eps_b) returns true if a is at least as
-// confident as b (eps_a <= eps_b)
-//
-// This defines a partial order where:
-//   0.0 (certain) > 0.1 > 0.5 > 1.0 (unknown)
-//
-// Returns true if eps_a <= eps_b
-pub fn epsilon_subsumes(eps_a: f64, eps_b: f64) -> bool {
-    eps_a <= eps_b
+// TypeEntry stores the parser operator as the same compact mode used by the
+// bootstrap seed: 0=error bound/unspecified, 1=exact, 2=confidence floor.
+pub fn epsilon_mode_from_compare_op(op: CompareOp) -> i64 {
+    if op == CompareOp::CmpEq { return 1 }
+    if op == CompareOp::CmpGe || op == CompareOp::CmpGt { return 2 }
+    0
 }
 
-// Function-call boundaries fail closed on unknown/invalid provided epsilon.
-// Required epsilon < 0.0 means "unspecified requirement".
-pub fn epsilon_subsumes_call_boundary(provided_eps: f64, required_eps: f64) -> bool {
-    if !epsilon_is_valid(provided_eps) {
+// Directional epsilon subsumption. This deliberately mirrors lean_single
+// ty_eq: the required annotation chooses the direction, while a confidence
+// value cannot flow into an error-bound requirement.
+pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
+    if provided_eps > 1.0 || required_eps > 1.0 {
         return false
+    }
+    if required_mode == 3 {
+        if provided_mode == 3 { return true }
+        return provided_mode == 0 && provided_eps < 0.0
+    }
+    if required_mode == 2 {
+        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+            return false
+        }
+        return provided_eps >= required_eps
+    }
+    if required_mode == 1 {
+        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+            return false
+        }
+        return provided_eps == required_eps
     }
     if required_eps < 0.0 {
         return true
     }
-    if !epsilon_is_valid(required_eps) {
+    if provided_mode == 2 || provided_mode == 3 {
         return false
     }
-    epsilon_subsumes(provided_eps, required_eps)
+    if !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+        return false
+    }
+    provided_eps <= required_eps
 }
 
-// Get the more confident (lower) epsilon
-pub fn epsilon_meet(eps_a: f64, eps_b: f64) -> f64 {
-    if eps_a < eps_b {
+pub fn epsilon_subsumes_call_boundary(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
+    epsilon_subsumes(provided_eps, provided_mode, required_eps, required_mode)
+}
+
+// Meet/join follow the annotation polarity: confidence floors order upward,
+// while error bounds (and propagated, mode-0 values) order downward.
+pub fn epsilon_meet(eps_a: f64, eps_b: f64, mode: i64) -> f64 {
+    if (mode == 2 && eps_a > eps_b) || (mode != 2 && eps_a < eps_b) {
         eps_a
     } else {
         eps_b
     }
 }
 
-// Get the less confident (higher) epsilon
-pub fn epsilon_join(eps_a: f64, eps_b: f64) -> f64 {
-    if eps_a > eps_b {
+pub fn epsilon_join(eps_a: f64, eps_b: f64, mode: i64) -> f64 {
+    if (mode == 2 && eps_a < eps_b) || (mode != 2 && eps_a > eps_b) {
         eps_a
     } else {
         eps_b
@@ -657,7 +689,12 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
         false
     } else {
         // Check epsilon subsumption
-        epsilon_subsumes(ty_a.knowledge_epsilon, ty_b.knowledge_epsilon)
+        epsilon_subsumes(
+            ty_a.knowledge_epsilon,
+            ty_a.knowledge_epsilon_mode,
+            ty_b.knowledge_epsilon,
+            ty_b.knowledge_epsilon_mode
+        )
     }
 }
 
@@ -677,7 +714,7 @@ pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
 // Check if knowledge type meets epsilon requirement
 pub fn knowledge_meets_epsilon(ty: TypeEntry, required_epsilon: f64) -> bool {
     if is_knowledge_type(ty) {
-        epsilon_subsumes(ty.knowledge_epsilon, required_epsilon)
+        epsilon_subsumes(ty.knowledge_epsilon, ty.knowledge_epsilon_mode, required_epsilon, 0)
     } else {
         false
     }
@@ -970,7 +1007,12 @@ pub fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEnt
     }
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
-    if !epsilon_subsumes_call_boundary(knowledge_meta_epsilon(pmeta), knowledge_meta_epsilon(rmeta)) {
+    if !epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    ) {
         return false
     }
     if !validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta)) {
