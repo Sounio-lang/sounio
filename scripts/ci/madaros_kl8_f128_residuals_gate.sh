@@ -58,8 +58,8 @@ fi
 
 SMOKE=tests/run-pass/f128_kl8_residuals.sio
 if grep -Fq 'fn pick(cond: bool) -> f128' "$SMOKE" \
-  && grep -Fq '8.0 % 3.0' "$SMOKE" \
-  && grep -Fq 'acc += 2.0' "$SMOKE" \
+  && grep -Fq 'eight % three' "$SMOKE" \
+  && grep -Fq 'acc += two' "$SMOKE" \
   && grep -Fq 'println(v)' "$SMOKE" \
   && ! grep -Fq 'softfloat_f128_fmt' "$SMOKE"; then
   note_pass "smoke_covers_kl8_residuals"
