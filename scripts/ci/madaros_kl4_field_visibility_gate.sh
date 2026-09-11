@@ -30,7 +30,7 @@ impl Capsule {
         Capsule { visible: value, hidden: value + 1 }
     }
 
-    pub fn reveal(&self) -> i64 {
+    pub fn reveal(self: &Capsule) -> i64 {
         self.hidden
     }
 }
