@@ -36,7 +36,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-1 | small parity items: `~`, `Epistemic(-N)`, `*const`/`*mut` at call sites, `println` of computed local | madaros |
-| KL-2 | IEEE 754 special values (#2389) | both |
 | KL-4 | private field reads unchecked | both |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
@@ -76,25 +75,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `lower_let_stmt_ref` unannotated path `lower.sio:16922-16991` only marks
   int for `ExprCall`/`ExprMethodCall`/`Binary`/`Unary`. Pin: none.
 
-### KL-2 — IEEE 754 special values (#2389)
-
-- Engine: `both`. `nan == nan` is `1`, `nan != nan` is `0`, `nan < 1.0` is
-  `1` (IEEE: `0 / 1 / 0`); `x != x` cannot detect NaN. `lean_single`:
-  `println(inf)` never returns, `println(nan)` prints non-numeric bytes.
-  `madaros`: `println(inf)` prints `9223372036854775808.000000`,
-  `println(nan)` prints `-9223372036854775808.000000`.
-- Repro: `tests/known-gaps/numerics/{nan_compare_is_not_ieee,print_inf_never_returns,print_nan_is_garbage}.sio`.
-- Pin: `scripts/ci/language_gap_ratchet_gate.sh` (workflow
-  `language-gap-ratchet.yml`) pins the wrong values; the fix flips those
-  lines deliberately.
-- Locus: `native/codegen_x86_linux.sio:8150-8199` (`sete/setne/setb/…` after
-  `ucomisd`, no PF handling), `native/lower_ir.sio:689-727`, seed
-  `lean_single.sio:21203-21214`; `print_f64` at `codegen_x86_linux.sio:6185`
-  (`cvttsd2si` without inf/nan guard) and seed `__native_print_f64_n`
-  (`lean_single.sio:41729`).
-- Working rule until fixed: bound every loop that exits on a float
-  comparison and range-check after it (`ulp()` in
-  `examples/chemistry/rep_stagnation.sio`).
 
 ### KL-4 — private field reads are not checked
 
