@@ -99,6 +99,44 @@ pub enum CompileStrategy {
     StrategyProbabilistic,      // with Prob — trace-compatible for MCMC/VI
 }
 
+// Algebraic lowering contract. Backends may accelerate the XOR selector only
+// when they preserve this twist and leave the reduction order explicit.
+// Cayley-Dickson signs at bits >= 3 are not a group 2-cocycle: octonion and
+// sedenion multiplication are non-associative.
+pub enum HlirXorTwist {
+    HlirTwistCayleyDicksonSign,
+}
+
+pub enum HlirXorCandidate {
+    HlirXorCandidateAuto,
+    HlirXorCandidateWarpShuffle,
+    HlirXorCandidateGlobalLoad,
+    HlirXorCandidateTwoZmmIndexedPermute,
+}
+
+pub struct HlirXorConvolution {
+    pub bits: i64,
+    pub dimension: i64,
+    pub twist: HlirXorTwist,
+}
+
+pub fn hlir_cayley_dickson_xor_convolution(bits: i64) -> HlirXorConvolution {
+    HlirXorConvolution {
+        bits: bits,
+        dimension: 1 << bits,
+        twist: HlirXorTwist::HlirTwistCayleyDicksonSign,
+    }
+}
+
+pub let HLIR_OPERATOR_NONE: i64 = 0
+pub let HLIR_OPERATOR_XOR_CONVOLUTION: i64 = 1
+pub let HLIR_XOR_TWIST_NONE: i64 = 0
+pub let HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
+pub let HLIR_XOR_CANDIDATE_AUTO: i64 = 0
+pub let HLIR_XOR_CANDIDATE_WARP_SHUFFLE: i64 = 1
+pub let HLIR_XOR_CANDIDATE_GLOBAL_LOAD: i64 = 2
+pub let HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 3
+
 // ============================================================================
 // HLIR Type System
 // ============================================================================
@@ -896,6 +934,10 @@ pub struct HlirInstr {
     pub call_name: HlirName,      // function name (for CallDirect)
     pub call_args: [i64; 64],     // ValueId array
     pub call_arg_count: i64,
+    pub operator_kind: i64,
+    pub xor_bits: i64,
+    pub xor_twist: i64,
+    pub xor_candidate: i64,
 
     // For GetFieldPtr, ExtractValue, InsertValue
     pub base: i64,                // ValueId
@@ -981,6 +1023,10 @@ pub fn hlir_instr_new(op: i64) -> HlirInstr {
         call_name: hlir_empty_name(),
         call_args: [HLIR_INVALID_VALUE; 64],
         call_arg_count: 0,
+        operator_kind: HLIR_OPERATOR_NONE,
+        xor_bits: 0,
+        xor_twist: HLIR_XOR_TWIST_NONE,
+        xor_candidate: HLIR_XOR_CANDIDATE_AUTO,
         base: HLIR_INVALID_VALUE,
         field_index: -1,
         index: HLIR_INVALID_VALUE,
@@ -1369,6 +1415,8 @@ pub struct HlirModule {
     pub global_count: i64,
     pub typedefs: [HlirTypeDef; 512],
     pub typedef_count: i64,
+    // Preserve lowering failures across module finalization.
+    pub lowering_error_count: i64,
 }
 
 pub fn hlir_module_new(name: HlirName) -> HlirModule {
@@ -1380,6 +1428,7 @@ pub fn hlir_module_new(name: HlirName) -> HlirModule {
         global_count: 0,
         typedefs: [hlir_typedef_struct(hlir_empty_name()); 512],
         typedef_count: 0,
+        lowering_error_count: 0,
     }
 }
 
@@ -1501,6 +1550,15 @@ pub fn hlir_instr_call_direct(result: i64, name: HlirName, args: [i64; 64], arg_
     instr.call_args = args
     instr.call_arg_count = arg_count
     instr.ty = ty
+    instr
+}
+
+pub fn hlir_instr_xor_convolution_call_direct(result: i64, name: HlirName, args: [i64; 64], arg_count: i64, ty: HlirType, contract: HlirXorConvolution, candidate: i64) -> HlirInstr {
+    var instr = hlir_instr_call_direct(result, name, args, arg_count, ty)
+    instr.operator_kind = HLIR_OPERATOR_XOR_CONVOLUTION
+    instr.xor_bits = contract.bits
+    instr.xor_twist = HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN
+    instr.xor_candidate = candidate
     instr
 }
 
