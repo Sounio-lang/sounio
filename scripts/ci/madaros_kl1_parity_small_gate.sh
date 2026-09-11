@@ -63,6 +63,7 @@ run_case tests/run-pass/kl1_raw_ptr_mut_to_const.sio KL1_RAW_PTR_OK
 run_case tests/run-pass/kl1_println_computed_local.sio KL1_PRINTLN_COMPUTED_OK
 
 refuse_case tests/compile-fail/kl1_unary_type_errors.sio E005
+refuse_case tests/compile-fail/kl1_logical_not_integer.sio E005
 refuse_case tests/compile-fail/kl1_epistemic_negative_payload.sio "effect payload must be a non-negative integer literal"
 refuse_case tests/compile-fail/kl1_raw_ptr_const_to_mut.sio E009
 

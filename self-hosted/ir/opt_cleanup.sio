@@ -2040,6 +2040,10 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var is_bnot:  [bool; 256] = [false; 256]
     var bnot_src: [i64;  256] = [-1;    256]
     var bnot_op:  [UnaryOp; 256] = [UnaryOp::OpNeg; 256]
+    // Logical NOT is tracked separately: its truth-table semantics must never
+    // enter the integer complement rewrites that consume is_bnot/bnot_src.
+    var is_lnot:  [bool; 256] = [false; 256]
+    var lnot_src: [i64;  256] = [-1;    256]
     // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
     // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
     var mul_valid:   [bool; 256] = [false; 256]
@@ -2127,6 +2131,7 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             is_neg[d] = false
             is_bnot[d] = false
             bnot_op[d] = UnaryOp::OpNeg
+            is_lnot[d] = false
             mul_valid[d] = false
             as_valid[d] = false
             sh_valid[d] = false
@@ -6605,8 +6610,15 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
             // Double NOT cancellation is valid only for two identical operators.
             // SOTA: LLVM InstCombineAndOrXor; Boolean double negation law; Hacker's Delight §2-2.
-            if us_ok && is_bnot[us as usize] && bnot_op[us as usize] == instr.un_op {
-                let bj_inner = bnot_src[us as usize]
+            if us_ok
+                && ((instr.un_op == UnaryOp::OpBitNot && is_bnot[us as usize]
+                        && bnot_op[us as usize] == UnaryOp::OpBitNot)
+                    || (instr.un_op == UnaryOp::OpNot && is_lnot[us as usize])) {
+                let bj_inner = if instr.un_op == UnaryOp::OpNot {
+                    lnot_src[us as usize]
+                } else {
+                    bnot_src[us as usize]
+                }
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, bj_inner))
                 if instr.dst >= 0 && instr.dst < 256 {
                     if bj_inner >= 0 && bj_inner < 256 && is_const[bj_inner as usize] {
@@ -6616,12 +6628,16 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
         }
-        if instr.op == IrOpcode::IrUnaryOp
-            && (instr.un_op == UnaryOp::OpNot || instr.un_op == UnaryOp::OpBitNot) {
+        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpBitNot {
             if instr.dst >= 0 && instr.dst < 256 {
                 is_bnot[instr.dst as usize]  = true
                 bnot_src[instr.dst as usize] = instr.src1
-                bnot_op[instr.dst as usize] = instr.un_op
+                bnot_op[instr.dst as usize] = UnaryOp::OpBitNot
+            }
+        } else if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNot {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_lnot[instr.dst as usize] = true
+                lnot_src[instr.dst as usize] = instr.src1
             }
         }
 
