@@ -91,14 +91,13 @@ else
   # and run to rc=0. (Before V0-E.5.9 it was refused only because `4.0` was not
   # in the literal table — a refusal this gate misread as the wide-float
   # fail-closed path.)
-  # The softfloat desugar targets live in stdlib math::softfloat_f128; a
-  # program must import that module for the targets to be in its module graph
-  # (without the import the ELF traps on the body-less stub — documented gap,
-  # see KNOWN_LIMITATIONS). The run probe adds the import; nothing else changes.
-  LANG128="$TMP_DIR/arith_check_f128_imported.sio"
-  { echo 'use math::softfloat_f128::{f128_from_limbs}'; cat "$LANG"; } >"$LANG128"
+  # The softfloat desugar targets live in stdlib math::softfloat_f128. Since
+  # V0-E.5.10 the driver adds that module to the graph itself when the AST
+  # mentions f128 (imported_compile: implicit_import ...), so the program is
+  # run AS WRITTEN — no prepended `use`. Before V0-E.5.10 this probe had to
+  # add the import or the ELF trapped on a body-less stub (SIGILL, 132).
   set +e
-  "$SOUC" run "$LANG128" >"$TMP_DIR/run_f128.log" 2>&1
+  "$SOUC" run "$LANG" >"$TMP_DIR/run_f128.log" 2>&1
   r_rc=$?
   set -e
   if [[ "$r_rc" -eq 0 ]]; then
@@ -135,13 +134,13 @@ else
   fi
 fi
 
-echo "NOTE v0e41_deferred f256_payload=pending print_builtin=pending gum=pending (language f128 arith is Madaros-run since V0-E.5.1–V0-E.5.9)"
+echo "NOTE v0e41_deferred f256_payload=pending print_builtin=pending gum=pending (language f128 arith is Madaros-run since V0-E.5.1–V0-E.5.9; run as written since V0-E.5.10)"
 
 echo "---"
 echo "PASS_COUNT=$PASS"
 echo "FAIL_COUNT=$FAIL"
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS f128_f256_v0e41_fail_closed_lower check=ok f256_compile=refuse_no_f64_greenwash f128_run=madaros v0e4=green"
+  echo "PASS f128_f256_v0e41_fail_closed_lower check=ok f256_compile=refuse_no_f64_greenwash f128_run=madaros_as_written_implicit_import v0e4=green"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0e41"
   exit 0
 fi

@@ -1785,6 +1785,136 @@ fn spec_dce_mark_f128_desugar_targets(marks: &! [i64; 16384], count: &! i64) wit
     var _k = spec_dce_hash_insert(marks, count, ast_name_hash(make_name("f128_bits_soft_div")))
 }
 
+// ── V0-E.5.10: "does this program mention language f128 anywhere?" ─────────
+//
+// Boolean twin of the marking scanners above, with no mark set. The driver
+// (module_frontend_compile_imported_to_file) asks this for every loaded module
+// and, if any says yes, adds stdlib math/softfloat_f128.sio to the module
+// graph itself — the desugar targets (f128_bits_soft_*) live there, and before
+// this rung a program that forgot `use math::softfloat_f128::...` linked to a
+// body-less stub and died with SIGILL (exit 132). Same AST-visible triggers as
+// the DCE marks: an f128 (or [f128; N], &f128 ...) let/var type, param, return,
+// or struct field, anywhere in a fn body including nested blocks, closures,
+// match arms and handler blocks. Item-level fns, structs and impl methods are
+// walked; nothing else carries a type annotation the lowerer classifies wide.
+fn spec_mentions_f128_opt_expr(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_mentions_f128_expr(*b),
+        None => false,
+    }
+}
+
+fn spec_mentions_f128_opt_block(opt: Option<Box<Block>>) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_mentions_f128_block(*b),
+        None => false,
+    }
+}
+
+fn spec_mentions_f128_expr(e: Expr) -> bool with Mut, Panic, Div {
+    if spec_mentions_f128_opt_expr(e.left) { return true }
+    if spec_mentions_f128_opt_expr(e.right) { return true }
+    if spec_mentions_f128_opt_expr(e.else_expr) { return true }
+    if spec_mentions_f128_opt_expr(e.closure_body) { return true }
+    if spec_mentions_f128_opt_block(e.block) { return true }
+    if spec_mentions_f128_opt_block(e.handler_block) { return true }
+    var acur = e.args
+    var agoing = true
+    while agoing {
+        match acur {
+            Some(list) => {
+                if spec_mentions_f128_expr((*list).head) { return true }
+                acur = (*list).tail
+            }
+            None => { agoing = false }
+        }
+    }
+    var mcur = e.arms
+    var mgoing = true
+    while mgoing {
+        match mcur {
+            Some(list) => {
+                if spec_mentions_f128_opt_expr((*list).head.guard) { return true }
+                if spec_mentions_f128_expr((*list).head.body) { return true }
+                mcur = (*list).tail
+            }
+            None => { mgoing = false }
+        }
+    }
+    false
+}
+
+fn spec_mentions_f128_block(b: Block) -> bool with Mut, Panic, Div {
+    var cur = b.stmts
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                    if spec_dce_opt_type_is_f128((*list).head.ty) { return true }
+                }
+                if spec_mentions_f128_opt_expr((*list).head.expr) { return true }
+                if spec_mentions_f128_opt_expr((*list).head.target) { return true }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_mentions_f128_item(it: Item) -> bool with Mut, Panic, Div {
+    if it.kind == ItemKind::ItemFn {
+        match it.fn_def {
+            Some(fd) => {
+                if spec_dce_fn_sig_uses_f128(&(*fd)) { return true }
+                return spec_mentions_f128_block((*fd).body)
+            }
+            None => { return false }
+        }
+    }
+    if it.kind == ItemKind::ItemStruct {
+        match it.struct_def {
+            Some(sd) => { return spec_dce_struct_has_f128_field(&(*sd)) }
+            None => { return false }
+        }
+    }
+    if it.kind == ItemKind::ItemImpl {
+        match it.impl_def {
+            Some(id) => {
+                var mcur = (*id).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        Some(ml) => {
+                            if spec_mentions_f128_item((*ml).head) { return true }
+                            mcur = (*ml).tail
+                        }
+                        None => { mgoing = false }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+pub fn spec_program_mentions_f128(prog: &Program) -> bool with Mut, Panic, Div {
+    var cur = (*prog).items
+    var going = true
+    while going {
+        match cur {
+            Some(list) => {
+                if spec_mentions_f128_item((*list).head) { return true }
+                cur = (*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    false
+}
+
 fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     var cur = b.stmts
     var going = true

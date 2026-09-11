@@ -1094,6 +1094,17 @@ var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 // lean_single); matching that bug was rejected in favour of matching CUDA.
 var LOWER_KERNEL_CONT_LABEL: i64 = 0 - 1
 
+// V0-E.5.10: set to true immediately before the BODY block of a `fn ... -> f128`
+// is lowered, and consumed (read + cleared) by lower_block_ref on entry. The
+// block that consumes it is the function body, and ONLY that block treats a
+// bare float-literal tail (`1.5`, `-0.25`) as a literal in f128 position
+// (lower_f128_value_ref: exact limbs or fail-closed). Nested blocks never see
+// the flag — `let y: f64 = if c { 1.0 } else { 2.0 }` inside an f128 fn stays
+// f64. Before this rung such a tail passed check (V0-E.5.10 checker change) or
+// `return 1.5` passed check already, and either emitted binary64 bits into an
+// F128Bits return slot.
+var LOWER_F128_FN_BODY_PENDING: bool = false
+
 pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
     LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE = enabled
 }
@@ -5220,7 +5231,10 @@ fn lowerer_lower_fn_item_mut(
 lower_rss_mark("before_block")
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
+        // V0-E.5.10: the body block of an `-> f128` fn owns its literal tail.
+        LOWER_F128_FN_BODY_PENDING = (*lo).current_func_loaded && lower_fn_returns_f128(&(*(*lo).current_func))
         let bpair = (*lo).lower_block_ref(&fd.body)
+        LOWER_F128_FN_BODY_PENDING = false
         (*lo) = bpair.0
         result_reg = bpair.1
     }
@@ -5650,6 +5664,21 @@ fn lower_f128_param_mask_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Pa
 
 fn lower_fn_returns_f128(func: &IrFunction) -> bool with Mut, Panic, Div {
     ir_name_eq((*func).return_struct_name, make_name("f128"))
+}
+
+// V0-E.5.10: `1.5` or `-1.5` — the two spellings the checker's float-literal
+// contextual coercion accepts (checker_expr_is_float_literal_like).
+fn lower_expr_is_float_literal_like_ref(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprFloatLit {
+        return true
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return (*inner).kind == ExprKind::ExprFloatLit }
+            _ => { return false }
+        }
+    }
+    false
 }
 
 // V0-E.5.6: `-> f256` has no Madaros payload yet. Its result must still be
@@ -16240,6 +16269,10 @@ impl Lowerer {
     fn lower_block_ref(self, blk: &Block) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
+        // V0-E.5.10: consume the "this is the body of an -> f128 fn" flag so
+        // nested blocks lowered below see it cleared.
+        let f128_body_tail = LOWER_F128_FN_BODY_PENDING
+        LOWER_F128_FN_BODY_PENDING = false
         lo.scope_depth = lo.scope_depth + 1
         let saved_local_count = (*lo.locals).count
         var current = &blk.stmts
@@ -16249,6 +16282,11 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    var is_tail_stmt = false
+                    match (*list).tail {
+                        Some(rest) => { is_tail_stmt = false }
+                        _ => { is_tail_stmt = true }
+                    }
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         lo.lower_let_stmt_ref(stmt_ref, false)
                     } else if stmt_ref.kind == StmtKind::StmtVar {
@@ -16257,7 +16295,11 @@ impl Lowerer {
                         let expr_opt_ref = &stmt_ref.expr
                         match *expr_opt_ref {
                             Some(expr_box) => {
-                                lo.lower_expr_ref(&(*expr_box))
+                                if f128_body_tail && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box)) {
+                                    lo.lower_f128_value_ref(&(*expr_box))
+                                } else {
+                                    lo.lower_expr_ref(&(*expr_box))
+                                }
                             }
                             _ => {
                                 lo.emit_unit()
@@ -22537,7 +22579,24 @@ impl Lowerer {
     }
 
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_opt_expr_ref(&e.left)
+        // V0-E.5.10: `return 1.5` in an `-> f128` fn is a literal in f128
+        // position — exact limbs or fail-closed, never binary64 bits in an
+        // F128Bits slot (check accepted this spelling since V0-B).
+        var ret_f128_lit = false
+        if self.current_func_loaded && lower_fn_returns_f128(&(*self.current_func)) {
+            match e.left {
+                Some(ret_box) => { ret_f128_lit = lower_expr_is_float_literal_like_ref(&(*ret_box)) }
+                _ => { ret_f128_lit = false }
+            }
+        }
+        let pair = if ret_f128_lit {
+            match e.left {
+                Some(ret_box2) => self.lower_f128_value_ref(&(*ret_box2))
+                _ => self.lower_opt_expr_ref(&e.left)
+            }
+        } else {
+            self.lower_opt_expr_ref(&e.left)
+        }
         let lo = pair.0
         let reg = pair.1
         // Inside a kernel lane loop, `return` ends the lane, not the launch.

@@ -1,0 +1,196 @@
+// Sounio semantic authority for the first Pireus-generated operator question:
+// can a Cayley-Dickson sign twist be gauged into pure XOR convolution?
+
+pub struct GaugeSolveResult {
+    pub bits: i64,
+    pub dimension: i64,
+    pub variables: i64,
+    pub equations: i64,
+    pub rank: i64,
+    pub contradictions: i64,
+    pub first_contradiction_equation: i64,
+    pub witness_i: i64,
+    pub witness_j: i64,
+    pub witness_delta: i64,
+    pub witness_product: i64,
+    pub gauge_control_violations: i64,
+}
+
+fn cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sign(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sign(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sign(a_lo, 0, bits - 1) }
+        return 0 - cd_sign(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sign(0, a_lo, bits - 1) }
+    cd_sign(b_lo, a_lo, bits - 1)
+}
+
+fn lowest_set_bit(row: i64, variables: i64) -> i64 {
+    var bit: i64 = 0
+    while bit < variables {
+        if ((row >> bit) & 1) == 1 { return bit }
+        bit = bit + 1
+    }
+    0 - 1
+}
+
+fn bit_parity(value: i64, bits: i64) -> i64 {
+    var parity: i64 = 0
+    var bit: i64 = 0
+    while bit < bits {
+        parity = parity ^ ((value >> bit) & 1)
+        bit = bit + 1
+    }
+    parity
+}
+
+fn generated_gauge_sign(i: i64, j: i64, bits: i64) -> i64 {
+    let a = bit_parity(i, bits)
+    let b = bit_parity(j >> 1, bits)
+    let c = bit_parity((i ^ j) & 3, bits)
+    if (a ^ b ^ c) == 1 { 0 - 1 } else { 1 }
+}
+
+pub fn solve_twist_gauge(bits: i64) -> GaugeSolveResult with Mut {
+    let dimension = 1 << bits
+    let variables = 3 * dimension
+    var basis_rows: [i64; 48] = [0; 48]
+    var basis_rhs: [i64; 48] = [0; 48]
+    var rank: i64 = 0
+    var contradictions: i64 = 0
+    var first_contradiction: i64 = 0 - 1
+    var witness_i: i64 = 0 - 1
+    var witness_j: i64 = 0 - 1
+    var witness_delta: i64 = 0 - 1
+    var witness_product: i64 = 1
+    var gauge_control_violations: i64 = 0
+    var equation: i64 = 0
+    var i: i64 = 0
+    while i < dimension {
+        var j: i64 = 0
+        while j < dimension {
+            let d = i ^ j
+            var row = (1 << i) | (1 << (dimension + j)) | (1 << (2 * dimension + d))
+            var rhs = if cd_sign(i, j, bits) < 0 { 1 } else { 0 }
+            var resolved = false
+            while !resolved {
+                let pivot = lowest_set_bit(row, variables)
+                if pivot < 0 {
+                    if rhs == 1 {
+                        contradictions = contradictions + 1
+                        if first_contradiction < 0 { first_contradiction = equation }
+                    }
+                    resolved = true
+                } else if basis_rows[pivot as usize] == 0 {
+                    basis_rows[pivot as usize] = row
+                    basis_rhs[pivot as usize] = rhs
+                    rank = rank + 1
+                    resolved = true
+                } else {
+                    row = row ^ basis_rows[pivot as usize]
+                    rhs = rhs ^ basis_rhs[pivot as usize]
+                }
+            }
+            equation = equation + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var wi: i64 = 0
+    while wi < dimension && witness_i < 0 {
+        var wj: i64 = 0
+        while wj < dimension && witness_i < 0 {
+            var delta: i64 = 1
+            while delta < dimension && witness_i < 0 {
+                let shifted_i = wi ^ delta
+                let shifted_j = wj ^ delta
+                let rectangle = cd_sign(wi, wj, bits)
+                    * cd_sign(shifted_i, shifted_j, bits)
+                    * cd_sign(wi, shifted_j, bits)
+                    * cd_sign(shifted_i, wj, bits)
+                if rectangle < 0 {
+                    witness_i = wi
+                    witness_j = wj
+                    witness_delta = delta
+                    witness_product = rectangle
+                }
+                let control_rectangle = generated_gauge_sign(wi, wj, bits)
+                    * generated_gauge_sign(shifted_i, shifted_j, bits)
+                    * generated_gauge_sign(wi, shifted_j, bits)
+                    * generated_gauge_sign(shifted_i, wj, bits)
+                if control_rectangle != 1 {
+                    gauge_control_violations = gauge_control_violations + 1
+                }
+                delta = delta + 1
+            }
+            wj = wj + 1
+        }
+        wi = wi + 1
+    }
+    GaugeSolveResult {
+        bits: bits,
+        dimension: dimension,
+        variables: variables,
+        equations: dimension * dimension,
+        rank: rank,
+        contradictions: contradictions,
+        first_contradiction_equation: first_contradiction,
+        witness_i: witness_i,
+        witness_j: witness_j,
+        witness_delta: witness_delta,
+        witness_product: witness_product,
+        gauge_control_violations: gauge_control_violations,
+    }
+}
+
+fn emit_result(result: GaugeSolveResult) with IO {
+    print("bits="); print_int(result.bits)
+    print(" dimension="); print_int(result.dimension)
+    print(" variables="); print_int(result.variables)
+    print(" equations="); print_int(result.equations)
+    print(" rank="); print_int(result.rank)
+    print(" contradictions="); print_int(result.contradictions)
+    print(" first_contradiction_equation="); print_int(result.first_contradiction_equation)
+    print(" witness_i="); print_int(result.witness_i)
+    print(" witness_j="); print_int(result.witness_j)
+    print(" witness_delta="); print_int(result.witness_delta)
+    print(" witness_product="); print_int(result.witness_product)
+    print(" gauge_control_violations="); print_int(result.gauge_control_violations)
+    if result.contradictions == 0 && result.witness_i < 0 {
+        print(" gauge_wht_candidate=GENERATED\n")
+    } else {
+        print(" gauge_wht_candidate=REFUSED\n")
+    }
+}
+
+fn main() -> i32 with IO, Mut {
+    print("schema=pireus-twist-gauge-factorization-v1\n")
+    print("producer_language=Sounio\n")
+    print("producer_role=SEMANTIC_AUTHORITY\n")
+    print("factorization=sigma(i,j)=alpha(i)*beta(j)*gamma(i_xor_j)\n")
+    print("solver=incremental-gaussian-elimination-over-GF2\n")
+    print("certificate=xor-rectangle-four-sign-parity\n")
+    var bits: i64 = 1
+    while bits <= 4 {
+        let result = solve_twist_gauge(bits)
+        if result.contradictions == 0 || result.witness_product != 0 - 1
+            || result.gauge_control_violations != 0 {
+            print("PIREUS_TWIST_GAUGE_FACTORIZATION_FAIL\n")
+            return 1
+        }
+        emit_result(result)
+        bits = bits + 1
+    }
+    print("claim_boundary=no-general-complexity-lower-bound\n")
+    print("PIREUS_TWIST_GAUGE_FACTORIZATION_PASS\n")
+    0
+}
