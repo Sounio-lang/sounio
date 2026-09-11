@@ -12,6 +12,9 @@
 #      (nearest-even with a sticky bit: 0x1.00000000000008p+0 ties to 1.0,
 #      0x1.00000000000008000000000001p+0 rounds up to 1+2^-52); subnormals
 #      and the binary64 max are exact. Oracle: Python float.fromhex bits.
+#      Also: the optional `f128`/`f256` suffix after a hex-float is taken
+#      only when glued to the exponent digits — an identifier on the next
+#      line used to be swallowed as the suffix (E017 on the following `(`).
 #   2. `fn q() -> f128 { 0.25 }`, `return 1.5`, `-0.5` tail: check accepts
 #      the float-literal tail against a wide return (last_literal_kind == 2),
 #      and the lowerer routes the body-block tail / `return` literal through
@@ -77,6 +80,7 @@ if grep -Fq 'pub fn f64_hex_literal_from_source(start: i64, end: i64) -> f64' "$
   && grep -Fq 'fn f64lit_scale_pow2(' "$LITMOD" \
   && grep -Fq 'e.float_val = f64_hex_literal_from_source(start.start, hex_end)' self-hosted/parser/exprs.sio \
   && grep -Fq 'return f64_hex_literal_from_source(start, end)' self-hosted/parser/parser.sio \
+  && grep -Fq 'if sfx_span.start == parser_prev_token_end(p)' self-hosted/parser/exprs.sio \
   && ! grep -Fq 'e.float_val = 1.0' self-hosted/parser/exprs.sio; then
   note_pass "parser_hex_float_f64_exact_reader_wired"
 else
