@@ -835,7 +835,7 @@ fn monomorphize_fields(
             let args_for_head = type_entry_list_clone(args)
             let args_for_rest = type_entry_list_clone(args)
             let new_ty = substitute_type_param(head.ty, tp_buf, args_for_head)
-            let new_head = FieldInfo { name: head.name, ty: new_ty }
+            let new_head = FieldInfo { name: head.name, ty: new_ty, is_pub: head.is_pub }
             let rest = monomorphize_fields((*fl).tail, tp_buf, &args_for_rest)
             return (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
         }
@@ -4611,7 +4611,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
 // Mirror the enum path: box the node into a local, return a small {Option<Box>, i64}.
 fn checker_collect_field_def_list_mut(c: *mut Checker, fdl: FieldDefList) -> MutFieldsResult with Mut, Panic, Div, Alloc, IO {
     let head_ty = checker_lower_type_expr_mut(c, fdl.head.ty)
-    let head_info = FieldInfo { name: fdl.head.name, ty: head_ty }
+    let head_info = FieldInfo { name: fdl.head.name, ty: head_ty, is_pub: fdl.head.is_pub }
     match fdl.tail {
         None => {
             var flist = FieldInfoList { head: head_info, tail: None }
@@ -7310,9 +7310,12 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
             let si = struct_table_get((*c).structs, struct_idx)
-                    let field_ty = field_info_list_find(si.fields, e.name)
-            if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+            let field_ty = field_info_list_find(si.fields, e.name)
+            let field_exists = field_info_list_has(si.fields, e.name)
+            if field_ty.kind == TypeKind::TyError && !field_exists {
                 checker_report_no_field_inplace(c, e.span, e.name, base_ty)
+            } else if field_exists && (*c).enforce_visibility && !checker_field_visible_inplace(c, struct_idx, e.name) {
+                checker_report_error_at_inplace(c, e.span, 259, 0, 0, 0)
             }
             field_ty
         } else {
@@ -7631,7 +7634,8 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     let struct_idx = struct_table_find((*c).structs, struct_name)
     if struct_idx >= 0 {
         let si = struct_table_get((*c).structs, struct_idx)
-        if (*c).enforce_visibility && !checker_struct_visible_inplace(c, struct_idx) {
+        let struct_is_visible = !(*c).enforce_visibility || checker_struct_visible_inplace(c, struct_idx)
+        if !struct_is_visible {
             checker_report_error_at_inplace(c, e.span, 176, 0, 0, 0)
         }
         if si.is_generic_template {
@@ -7721,6 +7725,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                         if !field_info_list_has(mono_si.fields, (*list).head.name) {
                                             checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
                                         } else {
+                                            if struct_is_visible && (*c).enforce_visibility && !checker_field_visible_inplace(c, struct_idx, (*list).head.name) {
+                                                checker_report_error_at_inplace(c, (*list).head.value.span, 259, 0, 0, 0)
+                                            }
                                             let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
                                             let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
                                             if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
@@ -7757,6 +7764,9 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         if !field_info_list_has(si.fields, (*list).head.name) {
                             checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
                         } else {
+                            if struct_is_visible && (*c).enforce_visibility && !checker_field_visible_inplace(c, struct_idx, (*list).head.name) {
+                                checker_report_error_at_inplace(c, (*list).head.value.span, 259, 0, 0, 0)
+                            }
                             let field_ty = field_info_list_find(si.fields, (*list).head.name)
                             let init_ty = checker_check_expr_inplace(c, (*list).head.value)
                             if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
@@ -9221,6 +9231,26 @@ fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with
     visibility_allows_access(
         (*(*c).structs).entries[struct_idx as usize].visibility,
         (*(*c).structs).entries[struct_idx as usize].defining_module,
+        (*c).current_module,
+        (*c).crate_root,
+    )
+}
+
+fn checker_field_visible_inplace(c: *mut Checker, struct_idx: i64, field_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    let si = struct_table_get((*c).structs, struct_idx)
+    if field_info_list_is_pub(si.fields, field_name) {
+        return true
+    }
+    if si.defining_module_id == (*c).current_module_id {
+        return true
+    }
+    let impl_ty = (*c).current_impl_type
+    if impl_ty.kind == TypeKind::TyNamed && name_eq(impl_ty.name, si.name) {
+        return true
+    }
+    visibility_allows_access(
+        visibility_private(),
+        si.defining_module,
         (*c).current_module,
         (*c).crate_root,
     )
@@ -15419,6 +15449,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    else if code == 259 { print("struct field is private in its defining module") }
     // NS capacity enforcement (178-179) -- W4. Both are LOUD replacements for a
     // silent saturation to the unknown noise-set handle.
     else if code == 178 { print("noise-source capacity exceeded: this checker run has issued more independent measurement sources than the noise-symbol domain can represent, so correlation between them can no longer be tracked") }
@@ -21529,7 +21560,7 @@ impl Checker {
         let pair = self.lower_type_expr(fdl.head.ty)
         var c = pair.0
         let field_ty = pair.1
-        let head_info = FieldInfo { name: fdl.head.name, ty: field_ty }
+        let head_info = FieldInfo { name: fdl.head.name, ty: field_ty, is_pub: fdl.head.is_pub }
         let head_list = FieldInfoList { head: head_info, tail: None }
         match fdl.tail {
             None => CollectFieldDefListResult { checker: c, list: head_list, count: 1 }
@@ -23761,8 +23792,17 @@ impl Checker {
             if struct_idx >= 0 {
                 let si = struct_table_get(c.structs, struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
-                if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                let field_exists = field_info_list_has(si.fields, e.name)
+                if field_ty.kind == TypeKind::TyError && !field_exists {
                     c = c.report_no_field(e.span, e.name, base_ty)
+                } else if field_exists && c.enforce_visibility && !field_info_list_is_pub(si.fields, e.name) {
+                    let same_module = si.defining_module_id == c.current_module_id
+                        || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                    let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
+                        && name_eq(c.current_impl_type.name, si.name)
+                    if !same_module && !own_impl {
+                        c = c.report_error_at(e.span, 259, 0, 0, 0)
+                    }
                 }
                 (c, field_ty)
             } else {
@@ -27405,6 +27445,15 @@ impl Checker {
         match opt {
             Some(list) => {
                 var c = self
+                if c.enforce_visibility && !field_info_list_is_pub(si.fields, (*list).head.name) {
+                    let same_module = si.defining_module_id == c.current_module_id
+                        || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                    let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
+                        && name_eq(c.current_impl_type.name, si.name)
+                    if !same_module && !own_impl {
+                        c = c.report_error_at((*list).head.value.span, 259, 0, 0, 0)
+                    }
+                }
                 let field_ty = field_info_list_find(si.fields, (*list).head.name)
                 let pair = c.check_expr((*list).head.value)
                 c = pair.0
