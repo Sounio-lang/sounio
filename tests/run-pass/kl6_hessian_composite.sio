@@ -1,0 +1,89 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: KL6_HESSIAN_COMPOSITE_PASS
+//@ sabotage: hessian-chain
+
+// KL-6: hessian_of through a transcendental whose ARGUMENT carries its own
+// Hessian, plus a quotient whose numerator does.
+//
+//   H(f(g)) = f''(g) * grad g * grad g^T + f'(g) * H(g)
+//
+// The second term is what a leaf or linear inner never exercises: for g = x
+// or g = 2x, H(g) = 0 and the product f''(g) s_g^2 is the whole answer. A
+// compound inner used to be REFUSED -- the Hessian cleared and 0.0 returned --
+// on the kind-8 path (atan/asin/acos/tan/tanh, and now log/sqrt), while the
+// kind-6 path (sin/cos/exp) already carried it. This witness pins both paths
+// and the quotient rule fed by a composite numerator.
+//
+// Every expected value is closed-form at x = 0.5, a = 2.0:
+//   exp(x*x)          (2 + 4x^2) e^{x^2}                     = 3.852076250063224
+//   sin(sin(x))       -sin(sin x) cos^2 x - cos(sin x) sin x = -0.7806224073194925
+//   exp(sin(x))       e^{sin x} (cos^2 x - sin x)            = 0.46956439926573407
+//   log(x*x + 1)      2/(1+x^2) - 4x^2/(1+x^2)^2             = 0.96
+//   sqrt(x*x + 1)     -x^2/(u sqrt u) + 1/sqrt u, u = 1+x^2  = 0.7155417527999327
+//   exp(x*x) / a      H_xx = (2+4x^2) e^{x^2} / a            = 1.926038125031612
+//                     H_xa = -2x e^{x^2} / a^2               = -0.32100635417193535
+//                     H_aa = 2 e^{x^2} / a^3                 = 0.32100635417193535
+//
+// Tolerance is 1e-9 absolute on values of order 1; it is not loosened for any
+// row. Each row prints its value and its own verdict, and the summary sentinel
+// is printed only when every row passed.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn row(name: string, got: f64, want: f64) -> i64 with IO {
+    print(name); print("="); print_f64(got)
+    if abs_f(got - want) < 1.0e-9 {
+        print(" PASS\n")
+        return 1
+    }
+    print(" FAIL want="); print_f64(want); print("\n")
+    0
+}
+
+fn main() -> i64 with Mut, Panic, Div, Alloc, Epistemic, IO {
+    let k: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let ka: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let x = k.value      // channel 0
+    let a = ka.value     // channel 1
+
+    // kind 6 (sin/cos/exp) with a compound inner
+    let h_exx  = hessian_of(exp(x * x), 0, 0)
+    let h_ssin = hessian_of(sin(sin(x)), 0, 0)
+    let h_esin = hessian_of(exp(sin(x)), 0, 0)
+
+    // kind 8 (emitted derivative) with a compound inner
+    let h_log  = hessian_of(log(x * x + 1.0), 0, 0)
+    let h_sqrt = hessian_of(sqrt(x * x + 1.0), 0, 0)
+
+    // quotient rule with a composite numerator
+    let q_xx = hessian_of(exp(x * x) / a, 0, 0)
+    let q_xa = hessian_of(exp(x * x) / a, 0, 1)
+    let q_aa = hessian_of(exp(x * x) / a, 1, 1)
+
+    // controls that must not move
+    let c_poly = hessian_of(x * x, 0, 0)     // 2
+    let c_sin  = hessian_of(sin(x), 0, 0)    // -sin(0.5)
+
+    var n: i64 = 0
+    n = n + row("h_exx",  h_exx,  3.852076250063224)
+    n = n + row("h_ssin", h_ssin, 0.0 - 0.7806224073194925)
+    n = n + row("h_esin", h_esin, 0.46956439926573407)
+    n = n + row("h_log",  h_log,  0.96)
+    n = n + row("h_sqrt", h_sqrt, 0.7155417527999327)
+    n = n + row("q_xx",   q_xx,   1.926038125031612)
+    n = n + row("q_xa",   q_xa,   0.0 - 0.32100635417193535)
+    n = n + row("q_aa",   q_aa,   0.32100635417193535)
+    n = n + row("c_poly", c_poly, 2.0)
+    n = n + row("c_sin",  c_sin,  0.0 - 0.479425538604203)
+
+    print("rows_ok="); print_int(n); print("/10\n")
+    if n == 10 {
+        print("KL6_HESSIAN_COMPOSITE_PASS\n")
+        return 0
+    }
+    print("KL6_HESSIAN_COMPOSITE_FAIL\n")
+    1
+}

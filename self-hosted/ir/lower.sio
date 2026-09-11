@@ -810,15 +810,17 @@ pub fn fo_xfer_global_reset() with Mut {
 // result's variance — leaving the partial at the seed value 1.0 and computing
 // var(sin(x)) as 0 (#1549).
 //
-// log is deliberately absent: its derivative is 1/x, not a call, so it needs a
-// reciprocal kind rather than this one. Leaving it out keeps it honestly
-// unsupported instead of silently wrong.
+// log and sqrt were absent from the kind-6 table because their derivatives
+// (1/x, 1/(2*sqrt x)) are not calls. Kind 8 EMITS the derivative, so they live
+// there (KL-6): f' and f'' from x plus the sqrt builtin only.
 fn kind_lit_to_analytic_id(lit: f64) -> i64 with Mut, Panic, Div {
     if lit >= 0.5 && lit < 1.5 { return 1 }
     if lit >= 1.5 && lit < 2.5 { return 2 }
     if lit >= 2.5 && lit < 3.5 { return 3 }
     if lit >= 3.5 && lit < 4.5 { return 4 }
     if lit >= 4.5 && lit < 5.5 { return 5 }
+    if lit >= 5.5 && lit < 6.5 { return 6 }
+    if lit >= 6.5 && lit < 7.5 { return 7 }
     0
 }
 
@@ -832,6 +834,10 @@ fn fo_xfer_seed_transcendentals() with Mut, Panic, Div, IO {
     fo_xfer_global_set(make_name("acos"), 8, 3.0, ir_empty_name())
     fo_xfer_global_set(make_name("tan"), 8, 4.0, ir_empty_name())
     fo_xfer_global_set(make_name("tanh"), 8, 5.0, ir_empty_name())
+    // KL-6: natural log and square root. Both are backend builtins (ids 17,
+    // 14); their derivatives are emitted from x and sqrt, so no E221 hole.
+    fo_xfer_global_set(make_name("log"), 8, 6.0, ir_empty_name())
+    fo_xfer_global_set(make_name("sqrt"), 8, 7.0, ir_empty_name())
 }
 
 // Derivative function for a kind-6 entry, resolved from FO_XFER_FWD_HASH. The
@@ -11152,6 +11158,49 @@ impl Lowerer {
             lo = d2p.0
             return (lo, d2p.1)
         }
+        if which == 6 {
+            // log: f' = 1/x ; f'' = -1/x^2  (KL-6)
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, argv)
+                lo = d1p.0
+                return (lo, d1p.1)
+            }
+            let xxp = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xxp.0
+            let xx = xxp.1
+            let rp = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, xx)
+            lo = rp.0
+            let r = rp.1
+            let d2p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, r)
+            lo = d2p.0
+            return (lo, d2p.1)
+        }
+        if which == 7 {
+            // sqrt: s = sqrt x ; f' = 1/(2s) ; f'' = -1/(4*x*s)  (KL-6)
+            let sp = lo.fo_emit_math_call(make_name("sqrt"), argv)
+            lo = sp.0
+            let sroot = sp.1
+            let tsp = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, sroot)
+            lo = tsp.0
+            let twos = tsp.1
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, twos)
+                lo = d1p.0
+                return (lo, d1p.1)
+            }
+            let fxp = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
+            lo = fxp.0
+            let twox = fxp.1
+            let dnp = lo.fo_emit_f64_binop(twox, BinaryOp::OpMul, twos)
+            lo = dnp.0
+            let den = dnp.1
+            let rp = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, den)
+            lo = rp.0
+            let r = rp.1
+            let d2p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, r)
+            lo = d2p.0
+            return (lo, d2p.1)
+        }
         (lo, 0 - 1)
     }
 
@@ -11331,41 +11380,65 @@ impl Lowerer {
                 return (lo.fo_clear_expr_sens(), -1)
             }
             // Second order, in kind 6's order: written BEFORE the sens combine,
-            // which overwrites fo_expr_sens. Restricted the same way kind 6
-            // documents -- only when the argument carries no Hessian of its own,
-            // because with a compound inner the chain rule reads s_g^2 where H_g
-            // belongs, and a confident wrong number is harder to catch than a zero.
+            // which overwrites fo_expr_sens.
+            //
+            //   H_jk(f(g)) = f''(g)*s_j*s_k + f'(g)*H_jk(g)
+            //
+            // KL-6: the second term used to be refused -- a compound inner
+            // (`atan(x*x)`, `log(x*x + 1.0)`) cleared the Hessian and returned a
+            // confident 0.0. Same discipline as kind 6 (3fe37565e): H_g is read
+            // from the Lowerer field, the muls are emitted in place, and every
+            // tuple's .1 is bound on the next line. A slot with neither term
+            // stays -1 (structural zero).
             if lo.so_enabled && !sab_hessian_chain() && d2r >= 0 {
-                let hNow8 = lo.so_snapshot_expr_hess()
-                var arg_has_hess8 = false
-                var hq8: i64 = 0
-                while hq8 < 36 {
-                    if hNow8[hq8 as usize] >= 0 { arg_has_hess8 = true }
-                    hq8 = hq8 + 1
-                }
-                if arg_has_hess8 {
-                    lo = lo.so_clear_expr_hess()
-                } else {
-                    var hj8: i64 = 0
-                    while hj8 < 8 {
-                        var hk8: i64 = hj8
-                        while hk8 < 8 {
-                            let sj8 = s0[hj8 as usize]
-                            let sk8 = s0[hk8 as usize]
-                            if sj8 >= 0 && sk8 >= 0 {
-                                let pjp = lo.fo_emit_f64_binop(sj8, BinaryOp::OpMul, sk8)
-                                lo = pjp.0
-                                let pj = pjp.1
-                                let pvp = lo.fo_emit_f64_binop(d2r, BinaryOp::OpMul, pj)
-                                lo = pvp.0
-                                let hid8 = lo.so_hess_idx(hj8, hk8)
-                                lo.so_expr_hess[hid8 as usize] = pvp.1
-                            }
-                            hk8 = hk8 + 1
+                var hj8: i64 = 0
+                while hj8 < 8 {
+                    var hk8: i64 = hj8
+                    while hk8 < 8 {
+                        let sj8 = s0[hj8 as usize]
+                        let sk8 = s0[hk8 as usize]
+                        let hid8 = lo.so_hess_idx(hj8, hk8)
+                        let hg8 = lo.so_expr_hess[hid8 as usize]
+                        var acc8: i64 = 0 - 1
+                        if hg8 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let dr = d.1
+                            lo = lo.emit(ir_binop_typed(dr, d1r, BinaryOp::OpMul, hg8, true, true))
+                            lo = lo.emit(ir_mark_float_reg(dr))
+                            acc8 = dr
                         }
-                        hj8 = hj8 + 1
+                        if sj8 >= 0 && sk8 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let pj = d.1
+                            lo = lo.emit(ir_binop_typed(pj, sj8, BinaryOp::OpMul, sk8, true, true))
+                            lo = lo.emit(ir_mark_float_reg(pj))
+                            let d2 = lo.fresh_reg()
+                            lo = d2.0
+                            let t2 = d2.1
+                            lo = lo.emit(ir_binop_typed(t2, d2r, BinaryOp::OpMul, pj, true, true))
+                            lo = lo.emit(ir_mark_float_reg(t2))
+                            if acc8 < 0 {
+                                acc8 = t2
+                            } else {
+                                let d3 = lo.fresh_reg()
+                                lo = d3.0
+                                let sum = d3.1
+                                lo = lo.emit(ir_binop_typed(sum, acc8, BinaryOp::OpAdd, t2, true, true))
+                                lo = lo.emit(ir_mark_float_reg(sum))
+                                acc8 = sum
+                            }
+                        }
+                        lo.so_expr_hess[hid8 as usize] = acc8
+                        hk8 = hk8 + 1
                     }
+                    hj8 = hj8 + 1
                 }
+            } else if lo.so_enabled {
+                // No chain rule (sabotage, or no f''): the slots still hold
+                // H(g). Clear rather than let the inner's Hessian wear f's name.
+                lo = lo.so_clear_expr_hess()
             }
             var sL8: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sL8, s0, d1r, argv8)
@@ -11509,7 +11582,14 @@ impl Lowerer {
                         }
                         hj = hj + 1
                     }
+                } else {
+                    // KL-6 fail-closed: no f'' entry means no chain rule, and
+                    // the slots still hold H(g). Clear them rather than let the
+                    // inner's Hessian wear f's name.
+                    lo = lo.so_clear_expr_hess()
                 }
+            } else if lo.so_enabled {
+                lo = lo.so_clear_expr_hess()
             }
             var sZ: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
@@ -12274,7 +12354,11 @@ impl Lowerer {
             let hR = lo.so_snapshot_expr_hess()
 
             // Multi-channel FO path when either side carries seed sensitivities.
-            if lo.fo_expr_or_snap_has_sens(sL) {
+            // Both snapshots are named (KL-6): the live fo_expr_sens is sR at
+            // this point, so the old single-snapshot call already covered the
+            // right operand, but `1.0 / b` -- sensitivity and Hessian on the
+            // right only -- must visibly take this path, not the legacy one.
+            if lo.fo_expr_or_snap_has_sens(sL) || lo.fo_expr_or_snap_has_sens(sR) {
                 if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                     let is_sub = (*e).bin_op == BinaryOp::OpSub
                     if lo.so_enabled {
