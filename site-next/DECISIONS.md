@@ -415,16 +415,24 @@ compilação, sem cast que escape. Em TypeScript a marca é convenção.
 
 ## 7. Em aberto
 
-- **O gerador Swift continua sem compilar nesta máquina.** Portados agora:
-  `Corpus.swift`, `Dose.swift` (cena, rig e recusas) e as três páginas em
-  `Pages.swift`. O contrato de marcação foi conferido classe a classe contra o
-  CSS, o React e a ilha — e o verificador achou duas divergências reais que
-  foram corrigidas: o React não emitia `.rig-var`, que é o nó que a ilha
-  atualiza, e `Part.code` emitia `<b>` em vez de `<code>`, o que fazia o
-  literal citado divergir do React e escapar da regra de código do portão.
-  Mas não há toolchain Swift aqui e o Docker sobe sem conseguir extrair camadas
-  (falta privilégio de mount), então **nada disso passou pelo compilador**.
-  `swift build` é o primeiro passo antes de confiar no gerador híbrido.
+- ~~O gerador Swift nunca compilou.~~ **Resolvido.** Toolchain 6.0.3 baixado e
+  extraído localmente (sem Docker, que não tem privilégio de mount aqui).
+  `swift build` completa em **5,25 s, zero erros e zero avisos** — os seis
+  arquivos escritos sem compilador passaram de primeira. `swift run sitegen`
+  gera as três páginas em **647 ms**.
+
+  Verificado além de compilar: as **39 afirmações** do HTML gerado batem
+  exatamente com os artefatos; as três ilhas atacam (o rig da dose vira
+  `REFUSED` em σ=5.6 com a banda vermelha, a varredura do H2 vai de 1.000 a
+  0.500 ao refinar o passo, o filtro do `/proof` monta os três botões); zero
+  erros de console; sem rolagem horizontal; e a página fica completa sem
+  JavaScript, com o estado estático correto escrito no HTML.
+
+  O peso, medido: o SPA React custa **97,5 KB** comprimidos em qualquer página,
+  porque o bundle é o mesmo. O `/proof` gerado em Swift, com os 527 artefatos
+  desenhados, custa **23,4 KB** — **4,2× menos** — e as ilhas inteiras são
+  1,7 KB. As outras duas páginas ficam em 14 e 13 KB.
+
 - ~~`npm run measure` ainda não está no CI.~~ **Resolvido**, e de um modo
   diferente do previsto. Os scripts mediam `origin/main`, que se move: os
   artefatos descreviam uma árvore diferente da publicada e ninguém conseguiria
