@@ -843,6 +843,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # The gen2 self-compile ("Madaros compiles Madaros" below) is memory-bound,
+      # not CPU-bound: sampled every 5 s on a 64-core box on 2026-09-10/11, its
+      # peak RSS was 18.34 GB for `main` (c769d38f) and 18.45 GB for PR #2463 —
+      # same wall time (58 vs 57 min), same 124/125 `arena_reset_skipped`
+      # modules, so the footprint is the compiler's own, not any one PR's. A
+      # 4-vCPU GH-hosted runner has 16 GB RAM + a 4 GB /mnt/swapfile: the rung
+      # sits at ~92% of everything the VM has, and the job dies from outside
+      # with exit 143 (SIGTERM to the whole step, nothing after "[rung gen2]",
+      # runner hung for 44 min afterwards in one case). PR #2463 hit that 5
+      # attempts in a row; `main` and other PRs hit it ~2 in 5. More swap on
+      # the runner's ~70 GB /mnt temp disk moves the rung off the cliff; it is
+      # a headroom measure, not a correctness claim. Printed before/after so a
+      # future reader can see the actual numbers in the log.
+      - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+        run: |
+          echo "--- before"; free -m; swapon --show; df -h /mnt
+          sudo fallocate -l 16G /mnt/swapfile-gen2
+          sudo chmod 600 /mnt/swapfile-gen2
+          sudo mkswap /mnt/swapfile-gen2
+          sudo swapon /mnt/swapfile-gen2
+          echo "--- after"; free -m; swapon --show
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
