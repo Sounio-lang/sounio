@@ -1,0 +1,1047 @@
+//! Pireus target-shaped selector plan for the frozen bits=4 XOR permutation.
+//!
+//! This module realizes only the abstract XOR_PERMUTE node. It does not assign
+//! an ISA instruction, establish selector behavior, lower the remaining
+//! operation graph, record a hardware observation, or estimate a cost.
+
+use hardware::pireus::xor_convolution_operation::{
+    PIREUS_XOR_TARGET_DARWIN_XEON,
+    PIREUS_XOR_TARGET_APPLE_SILICON,
+    PIREUS_XOR_TARGET_DGX,
+    pireus_xor_operation_evaluate,
+    pireus_xor_operation_matches_frozen_semantics,
+}
+use hardware::pireus::xed_import::{
+    pireus_xed_load, pireus_xed_parse, pireus_xed_digest_matches,
+    pireus_xed_inventory_store, pireus_xed_query_forms_by,
+    PIREUS_XED_HAS_CORPUS, PIREUS_XED_HAS_ICLASS,
+    PIREUS_XED_CORPUS_AVX512F_2026_08_23,
+    PIREUS_XED_ICLASS_VPERMI2PD, PIREUS_XED_ICLASS_VPERMPD,
+    PIREUS_XED_ICLASS_VPERMT2PD,
+}
+use ontology::query::sparql_result_count
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_XOR_MATERIAL_BITS: i64 = 4
+pub const PIREUS_XOR_MATERIAL_DIMENSION: i64 = 16
+pub const PIREUS_XOR_MATERIAL_ELEMENT_BITS: i64 = 64
+pub const PIREUS_XOR_MATERIAL_CHUNK_LANES: i64 = 8
+pub const PIREUS_XOR_MATERIAL_CHUNK_COUNT: i64 = 2
+pub const PIREUS_XOR_MATERIAL_CELL_COUNT: i64 = 256
+pub const PIREUS_XOR_MATERIAL_GROUP_COUNT: i64 = 32
+
+pub const PIREUS_XOR_PLAN_UNRESOLVED: i64 = 0
+pub const PIREUS_XOR_PLAN_TWO_F64X8_CHUNKS: i64 = 1
+
+pub const PIREUS_XOR_MATERIAL_OK: i64 = 0
+pub const PIREUS_XOR_MATERIAL_ERR_PARENT: i64 = 1
+pub const PIREUS_XOR_MATERIAL_ERR_SHAPE: i64 = 2
+pub const PIREUS_XOR_MATERIAL_ERR_SELECTOR: i64 = 3
+pub const PIREUS_XOR_MATERIAL_ERR_XED_EVIDENCE: i64 = 4
+pub const PIREUS_XOR_MATERIAL_ERR_TARGET: i64 = 5
+pub const PIREUS_XOR_MATERIAL_ERR_AUTHORITY: i64 = 6
+
+pub struct PireusXorMaterialDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusXorSelectorTable {
+    pub count: i64,
+    pub displacements: [i64; 256],
+    pub output_chunks: [i64; 256],
+    pub output_lanes: [i64; 256],
+    pub global_indices: [i64; 256],
+    pub partner_indices: [i64; 256],
+    pub source_chunks: [i64; 256],
+    pub source_lanes: [i64; 256],
+    pub reconstructed: [bool; 256],
+}
+
+pub struct PireusXorXedEvidence {
+    pub frozen_content_sha256: [i64; 8],
+    pub current_envelope_sha256: [i64; 8],
+    pub current_receipt_sha256: [i64; 8],
+    pub total_forms: i64,
+    pub vpermpd_forms: i64,
+    pub vpermi2pd_forms: i64,
+    pub vpermt2pd_forms: i64,
+    pub frozen_receipt_reference_present: bool,
+    pub vendor_corpus_digest_match: bool,
+    pub counts_from_digest_matched_vendor_bytes: bool,
+    pub counts_match_receipt_record: bool,
+    pub candidate_family_present: bool,
+    pub selector_behavior_derived_from_form_presence: bool,
+    pub selector_semantics_receipt_present: bool,
+    pub instruction_match_authorized: bool,
+    pub immediate_sufficiency_authorized: bool,
+    pub two_source_necessity_authorized: bool,
+    pub valid: bool,
+}
+
+pub struct PireusXorMaterialTargets {
+    pub count: i64,
+    pub target_ids: [i64; 3],
+    pub canonical: [bool; 3],
+    pub observed: [bool; 3],
+    pub candidate_plans: [i64; 3],
+    pub unresolved: [bool; 3],
+    pub material_receipts: [bool; 3],
+}
+
+pub struct PireusXorMaterialNegatives {
+    pub missing_operation_parent_hash: bool,
+    pub mismatched_operation_parent_hash: bool,
+    pub missing_operation_receipt: bool,
+    pub mismatched_operation_receipt: bool,
+    pub wrong_logical_bit_width: bool,
+    pub wrong_dimension: bool,
+    pub wrong_element_width: bool,
+    pub wrong_chunk_width: bool,
+    pub displacement_out_of_range: bool,
+    pub output_chunk_out_of_range: bool,
+    pub output_lane_out_of_range: bool,
+    pub corrupted_source_chunk: bool,
+    pub corrupted_source_lane: bool,
+    pub layout_to_two_source_necessity: bool,
+    pub imm8_without_vendor_semantics: bool,
+    pub form_presence_to_behavior: bool,
+    pub capability_to_emitted_use: bool,
+    pub target_observation_without_receipt: bool,
+    pub cost_without_material_receipt: bool,
+    pub parity_or_claim_before_transition: bool,
+    pub prohibited_oracle_language: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusXorMaterialResult {
+    pub valid: bool,
+    pub error: i64,
+    pub bits: i64,
+    pub dimension: i64,
+    pub element_bits: i64,
+    pub chunk_lanes: i64,
+    pub chunk_count: i64,
+    pub operation_parent_live_match: bool,
+    pub operation_result_digest: [i64; 8],
+    pub operation_result_digest_match: bool,
+    pub operation_semantics_sha256: [i64; 8],
+    pub operation_receipt_sha256: [i64; 8],
+    pub operation_parent_binding_valid: bool,
+    pub selector: PireusXorSelectorTable,
+    pub reconstructed_cells: i64,
+    pub one_source_groups: i64,
+    pub layout_one_source_per_group: bool,
+    pub xed: PireusXorXedEvidence,
+    pub targets: PireusXorMaterialTargets,
+    pub material_observation_count: i64,
+    pub instruction_match_count: i64,
+    pub lowering_count: i64,
+    pub cost_record_count: i64,
+    pub loom_guardian_external_required: bool,
+    pub selector_digest: PireusXorMaterialDigest,
+    pub evidence_digest: PireusXorMaterialDigest,
+    pub target_digest: PireusXorMaterialDigest,
+    pub witness_digest: PireusXorMaterialDigest,
+    pub negatives: PireusXorMaterialNegatives,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub failures: i64,
+}
+
+pub fn pireus_xor_material_operation_semantics_hash() -> [i64; 8] {
+    [
+        0x40fe6982, 0x9b1feb58, 0x43ea8b47, 0x20b70516,
+        0x303e8eda, 0x37c14498, 0x9909b52d, 0x1b466fb1,
+    ]
+}
+
+pub fn pireus_xor_material_operation_receipt_hash() -> [i64; 8] {
+    [
+        0x9e1e416d, 0xefa4a1cf, 0xc477f063, 0x0623321e,
+        0x12209a40, 0xc9f5f878, 0xb85cce40, 0xbe83d330,
+    ]
+}
+
+pub fn pireus_xor_material_operation_result_digest() -> [i64; 8] {
+    [
+        0x84edf6ba, 0xe148754e, 0xbd0e8722, 0x368e2eb0,
+        0x6095cd92, 0x9779c36d, 0xef4f3bb5, 0x000013a3,
+    ]
+}
+
+pub fn pireus_xor_material_xed_frozen_content_hash() -> [i64; 8] {
+    [
+        0x5d9a56cd, 0x05eb141b, 0x24dfa80b, 0xbab74f41,
+        0x306bb19a, 0x01902c25, 0xfb0feeda, 0x63265612,
+    ]
+}
+
+pub fn pireus_xor_material_xed_current_envelope_hash() -> [i64; 8] {
+    [
+        0xd96d6d57, 0xba1e2969, 0x30caec5f, 0x4f0aff8e,
+        0x2898b3b1, 0xd5df6bfa, 0xacb96a19, 0x333266f7,
+    ]
+}
+
+pub fn pireus_xor_material_xed_current_receipt_hash() -> [i64; 8] {
+    [
+        0x2dfc2433, 0x81acb8d3, 0x65112b3b, 0x4075ccab,
+        0xf944de6f, 0xf081b462, 0x6f9a4f69, 0x3f136af6,
+    ]
+}
+
+fn pxm_zero_hash() -> [i64; 8] { [0; 8] }
+
+fn pxm_hash_nonzero(hash: &[i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if hash[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pxm_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxm_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+    with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn pxm_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+    with Mut, Panic, Div {
+    pxm_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn pxm_digest_add_hash(state: SHA256State, hash: &[i64; 8]) -> SHA256State
+    with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = pxm_digest_add_i64(next, hash[i])
+        i = i + 1
+    }
+    next
+}
+
+fn pxm_digest_finish(state: SHA256State) -> PireusXorMaterialDigest
+    with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(&digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusXorMaterialDigest { words: words }
+}
+
+pub fn pireus_xor_material_digest_nonzero(
+    digest: &PireusXorMaterialDigest,
+) -> bool {
+    pxm_hash_nonzero(&digest.words)
+}
+
+fn pxm_shape_valid(bits: i64, dimension: i64, element_bits: i64,
+    chunk_lanes: i64, chunk_count: i64) -> bool {
+    bits == PIREUS_XOR_MATERIAL_BITS &&
+        dimension == PIREUS_XOR_MATERIAL_DIMENSION &&
+        dimension == (1 << bits) &&
+        element_bits == PIREUS_XOR_MATERIAL_ELEMENT_BITS &&
+        chunk_lanes == PIREUS_XOR_MATERIAL_CHUNK_LANES &&
+        chunk_count == PIREUS_XOR_MATERIAL_CHUNK_COUNT &&
+        chunk_lanes * chunk_count == dimension
+}
+
+fn pxm_selector_input_valid(d: i64, chunk: i64, lane: i64) -> bool {
+    d >= 0 && d < PIREUS_XOR_MATERIAL_DIMENSION &&
+        chunk >= 0 && chunk < PIREUS_XOR_MATERIAL_CHUNK_COUNT &&
+        lane >= 0 && lane < PIREUS_XOR_MATERIAL_CHUNK_LANES
+}
+
+fn pxm_selector_cell_valid(d: i64, chunk: i64, lane: i64,
+    global_i: i64, partner_j: i64, source_chunk: i64,
+    source_lane: i64) -> bool {
+    if !pxm_selector_input_valid(d, chunk, lane) { return false }
+    let expected_i = PIREUS_XOR_MATERIAL_CHUNK_LANES * chunk + lane
+    let expected_j = expected_i ^ d
+    let expected_source_chunk = chunk ^ (d >> 3)
+    let expected_source_lane = lane ^ (d & 7)
+    global_i == expected_i && partner_j == expected_j &&
+        source_chunk == expected_source_chunk &&
+        source_lane == expected_source_lane &&
+        partner_j == PIREUS_XOR_MATERIAL_CHUNK_LANES * source_chunk +
+            source_lane
+}
+
+fn pxm_build_selector() -> PireusXorSelectorTable with Mut {
+    var displacements: [i64; 256] = [0; 256]
+    var output_chunks: [i64; 256] = [0; 256]
+    var output_lanes: [i64; 256] = [0; 256]
+    var global_indices: [i64; 256] = [0; 256]
+    var partner_indices: [i64; 256] = [0; 256]
+    var source_chunks: [i64; 256] = [0; 256]
+    var source_lanes: [i64; 256] = [0; 256]
+    var reconstructed: [bool; 256] = [false; 256]
+    var index: i64 = 0
+    var d: i64 = 0
+    while d < PIREUS_XOR_MATERIAL_DIMENSION {
+        var chunk: i64 = 0
+        while chunk < PIREUS_XOR_MATERIAL_CHUNK_COUNT {
+            var lane: i64 = 0
+            while lane < PIREUS_XOR_MATERIAL_CHUNK_LANES {
+                let global_i = PIREUS_XOR_MATERIAL_CHUNK_LANES * chunk + lane
+                let partner_j = global_i ^ d
+                let source_chunk = chunk ^ (d >> 3)
+                let source_lane = lane ^ (d & 7)
+                displacements[index] = d
+                output_chunks[index] = chunk
+                output_lanes[index] = lane
+                global_indices[index] = global_i
+                partner_indices[index] = partner_j
+                source_chunks[index] = source_chunk
+                source_lanes[index] = source_lane
+                reconstructed[index] = pxm_selector_cell_valid(
+                    d, chunk, lane, global_i, partner_j,
+                    source_chunk, source_lane,
+                )
+                index = index + 1
+                lane = lane + 1
+            }
+            chunk = chunk + 1
+        }
+        d = d + 1
+    }
+    PireusXorSelectorTable {
+        count: index,
+        displacements: displacements,
+        output_chunks: output_chunks,
+        output_lanes: output_lanes,
+        global_indices: global_indices,
+        partner_indices: partner_indices,
+        source_chunks: source_chunks,
+        source_lanes: source_lanes,
+        reconstructed: reconstructed,
+    }
+}
+
+fn pxm_count_reconstructed(selector: &PireusXorSelectorTable) -> i64 {
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < selector.count {
+        if selector.reconstructed[i] { passed = passed + 1 }
+        i = i + 1
+    }
+    passed
+}
+
+fn pxm_count_one_source_groups(selector: &PireusXorSelectorTable) -> i64 {
+    var passed: i64 = 0
+    var d: i64 = 0
+    while d < PIREUS_XOR_MATERIAL_DIMENSION {
+        var chunk: i64 = 0
+        while chunk < PIREUS_XOR_MATERIAL_CHUNK_COUNT {
+            let base = d * PIREUS_XOR_MATERIAL_DIMENSION +
+                chunk * PIREUS_XOR_MATERIAL_CHUNK_LANES
+            let expected = selector.source_chunks[base]
+            var group_valid = expected == (chunk ^ (d >> 3))
+            var lane: i64 = 0
+            while lane < PIREUS_XOR_MATERIAL_CHUNK_LANES {
+                let index = base + lane
+                if selector.source_chunks[index] != expected {
+                    group_valid = false
+                }
+                lane = lane + 1
+            }
+            if group_valid { passed = passed + 1 }
+            chunk = chunk + 1
+        }
+        d = d + 1
+    }
+    passed
+}
+
+fn pxm_xed_evidence(path: string) -> PireusXorXedEvidence
+    with IO, Mut, Panic, Div, Alloc {
+    let frozen = pireus_xor_material_xed_frozen_content_hash()
+    let envelope = pireus_xor_material_xed_current_envelope_hash()
+    let receipt = pireus_xor_material_xed_current_receipt_hash()
+    var corpus = pireus_xed_load(path)
+    let vendor_corpus_digest_match = pireus_xed_digest_matches(&corpus)
+    let inventory = pireus_xed_parse(&corpus, true)
+    var store = pireus_xed_inventory_store(&inventory)
+    let all_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_CORPUS,
+        PIREUS_XED_CORPUS_AVX512F_2026_08_23)
+    let i2_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMI2PD)
+    let perm_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMPD)
+    let t2_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMT2PD)
+    let total_forms = sparql_result_count(&all_forms)
+    let vpermi2pd_forms = sparql_result_count(&i2_forms)
+    let vpermpd_forms = sparql_result_count(&perm_forms)
+    let vpermt2pd_forms = sparql_result_count(&t2_forms)
+    let counts_match_receipt_record = total_forms == 8 &&
+        vpermpd_forms == 4 && vpermi2pd_forms == 2 &&
+        vpermt2pd_forms == 2
+    let candidate_family_present = vpermpd_forms > 0
+    let valid = pxm_hash_nonzero(&frozen) &&
+        pxm_hash_nonzero(&envelope) && pxm_hash_nonzero(&receipt) &&
+        vendor_corpus_digest_match && counts_match_receipt_record &&
+        total_forms == vpermpd_forms + vpermi2pd_forms + vpermt2pd_forms &&
+        candidate_family_present
+    PireusXorXedEvidence {
+        frozen_content_sha256: frozen,
+        current_envelope_sha256: envelope,
+        current_receipt_sha256: receipt,
+        total_forms: total_forms,
+        vpermpd_forms: vpermpd_forms,
+        vpermi2pd_forms: vpermi2pd_forms,
+        vpermt2pd_forms: vpermt2pd_forms,
+        frozen_receipt_reference_present: true,
+        vendor_corpus_digest_match: vendor_corpus_digest_match,
+        counts_from_digest_matched_vendor_bytes:
+            vendor_corpus_digest_match,
+        counts_match_receipt_record: counts_match_receipt_record,
+        candidate_family_present: candidate_family_present,
+        selector_behavior_derived_from_form_presence: false,
+        selector_semantics_receipt_present: false,
+        instruction_match_authorized: false,
+        immediate_sufficiency_authorized: false,
+        two_source_necessity_authorized: false,
+        valid: valid,
+    }
+}
+
+fn pxm_targets() -> PireusXorMaterialTargets {
+    PireusXorMaterialTargets {
+        count: 3,
+        target_ids: [
+            PIREUS_XOR_TARGET_DARWIN_XEON,
+            PIREUS_XOR_TARGET_APPLE_SILICON,
+            PIREUS_XOR_TARGET_DGX,
+        ],
+        canonical: [true, true, true],
+        observed: [false, false, false],
+        candidate_plans: [
+            PIREUS_XOR_PLAN_TWO_F64X8_CHUNKS,
+            PIREUS_XOR_PLAN_UNRESOLVED,
+            PIREUS_XOR_PLAN_UNRESOLVED,
+        ],
+        unresolved: [false, true, true],
+        material_receipts: [false, false, false],
+    }
+}
+
+fn pxm_targets_valid(targets: &PireusXorMaterialTargets) -> bool {
+    if targets.count != 3 { return false }
+    let expected: [i64; 3] = [
+        PIREUS_XOR_TARGET_DARWIN_XEON,
+        PIREUS_XOR_TARGET_APPLE_SILICON,
+        PIREUS_XOR_TARGET_DGX,
+    ]
+    var i: i64 = 0
+    while i < 3 {
+        if targets.target_ids[i] != expected[i] || !targets.canonical[i] ||
+            targets.observed[i] || targets.material_receipts[i] {
+            return false
+        }
+        i = i + 1
+    }
+    targets.candidate_plans[0] == PIREUS_XOR_PLAN_TWO_F64X8_CHUNKS &&
+        !targets.unresolved[0] &&
+        targets.candidate_plans[1] == PIREUS_XOR_PLAN_UNRESOLVED &&
+        targets.unresolved[1] &&
+        targets.candidate_plans[2] == PIREUS_XOR_PLAN_UNRESOLVED &&
+        targets.unresolved[2]
+}
+
+fn pxm_claim_boundary_values_valid(
+    selector_semantics_receipt: bool,
+    instruction_match_claimed: bool,
+    immediate_sufficiency_claimed: bool,
+    two_source_necessity_claimed: bool,
+    target_observed: bool,
+    target_material_receipt: bool,
+    emitted_use_claimed: bool,
+    emitted_code_receipt: bool,
+    cost_record_count: i64,
+    cost_receipt: bool,
+    parity_open: bool,
+    semantics_frozen: bool,
+    loom_parity_receipt: bool,
+    claim_ready: bool,
+) -> bool {
+    if instruction_match_claimed && !selector_semantics_receipt {
+        return false
+    }
+    if immediate_sufficiency_claimed && !selector_semantics_receipt {
+        return false
+    }
+    if two_source_necessity_claimed &&
+        !(selector_semantics_receipt && target_material_receipt) {
+        return false
+    }
+    if target_observed && !target_material_receipt { return false }
+    if emitted_use_claimed && !(target_observed && emitted_code_receipt) {
+        return false
+    }
+    if cost_record_count > 0 && !cost_receipt { return false }
+    if parity_open && !(semantics_frozen && loom_parity_receipt) {
+        return false
+    }
+    if claim_ready && !(parity_open && target_material_receipt) {
+        return false
+    }
+    true
+}
+
+fn pxm_semantic_producer_role_valid(language: i64) -> bool {
+    language == 1
+}
+
+fn pxm_exercise_negatives() -> PireusXorMaterialNegatives {
+    let operation_hash = pireus_xor_material_operation_semantics_hash()
+    let operation_receipt = pireus_xor_material_operation_receipt_hash()
+    let absent = pxm_zero_hash()
+    var bad_operation = operation_hash
+    bad_operation[0] = bad_operation[0] ^ 1
+    var bad_receipt = operation_receipt
+    bad_receipt[7] = bad_receipt[7] ^ 1
+
+    let missing_operation_parent_hash = !pxm_hash_nonzero(&absent)
+    let mismatched_operation_parent_hash =
+        !pxm_hash_equal(&bad_operation, &operation_hash)
+    let missing_operation_receipt = !pxm_hash_nonzero(&absent)
+    let mismatched_operation_receipt =
+        !pxm_hash_equal(&bad_receipt, &operation_receipt)
+    let wrong_logical_bit_width = !pxm_shape_valid(
+        5, 16, 64, 8, 2)
+    let wrong_dimension = !pxm_shape_valid(4, 32, 64, 8, 2)
+    let wrong_element_width = !pxm_shape_valid(4, 16, 32, 8, 2)
+    let wrong_chunk_width = !pxm_shape_valid(4, 16, 64, 4, 2)
+    let displacement_out_of_range =
+        !pxm_selector_input_valid(16, 0, 0)
+    let output_chunk_out_of_range =
+        !pxm_selector_input_valid(0, 2, 0)
+    let output_lane_out_of_range =
+        !pxm_selector_input_valid(0, 0, 8)
+    let corrupted_source_chunk =
+        !pxm_selector_cell_valid(9, 0, 3, 3, 10, 0, 2)
+    let corrupted_source_lane =
+        !pxm_selector_cell_valid(6, 1, 5, 13, 11, 1, 2)
+    let boundary_baseline = pxm_claim_boundary_values_valid(
+        false, false, false, false,
+        false, false, false, false,
+        0, false, false, false, false, false,
+    )
+    let layout_to_two_source_necessity = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, true,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let imm8_without_vendor_semantics = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, true, false,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let form_presence_to_behavior = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, true, false, false,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let capability_to_emitted_use = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, true, false,
+            0, false, false, false, false, false,
+        )
+    let target_observation_without_receipt = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            true, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let cost_without_material_receipt = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            1, false, false, false, false, false,
+        )
+    let parity_or_claim_before_transition = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            0, false, true, false, false, false,
+        ) &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            0, false, false, true, false, true,
+        )
+    let prohibited_oracle_language =
+        pxm_semantic_producer_role_valid(1) &&
+        !pxm_semantic_producer_role_valid(7) &&
+        !pxm_semantic_producer_role_valid(8)
+
+    var passed: i64 = 0
+    if missing_operation_parent_hash { passed = passed + 1 }
+    if mismatched_operation_parent_hash { passed = passed + 1 }
+    if missing_operation_receipt { passed = passed + 1 }
+    if mismatched_operation_receipt { passed = passed + 1 }
+    if wrong_logical_bit_width { passed = passed + 1 }
+    if wrong_dimension { passed = passed + 1 }
+    if wrong_element_width { passed = passed + 1 }
+    if wrong_chunk_width { passed = passed + 1 }
+    if displacement_out_of_range { passed = passed + 1 }
+    if output_chunk_out_of_range { passed = passed + 1 }
+    if output_lane_out_of_range { passed = passed + 1 }
+    if corrupted_source_chunk { passed = passed + 1 }
+    if corrupted_source_lane { passed = passed + 1 }
+    if layout_to_two_source_necessity { passed = passed + 1 }
+    if imm8_without_vendor_semantics { passed = passed + 1 }
+    if form_presence_to_behavior { passed = passed + 1 }
+    if capability_to_emitted_use { passed = passed + 1 }
+    if target_observation_without_receipt { passed = passed + 1 }
+    if cost_without_material_receipt { passed = passed + 1 }
+    if parity_or_claim_before_transition { passed = passed + 1 }
+    if prohibited_oracle_language { passed = passed + 1 }
+
+    PireusXorMaterialNegatives {
+        missing_operation_parent_hash: missing_operation_parent_hash,
+        mismatched_operation_parent_hash: mismatched_operation_parent_hash,
+        missing_operation_receipt: missing_operation_receipt,
+        mismatched_operation_receipt: mismatched_operation_receipt,
+        wrong_logical_bit_width: wrong_logical_bit_width,
+        wrong_dimension: wrong_dimension,
+        wrong_element_width: wrong_element_width,
+        wrong_chunk_width: wrong_chunk_width,
+        displacement_out_of_range: displacement_out_of_range,
+        output_chunk_out_of_range: output_chunk_out_of_range,
+        output_lane_out_of_range: output_lane_out_of_range,
+        corrupted_source_chunk: corrupted_source_chunk,
+        corrupted_source_lane: corrupted_source_lane,
+        layout_to_two_source_necessity: layout_to_two_source_necessity,
+        imm8_without_vendor_semantics: imm8_without_vendor_semantics,
+        form_presence_to_behavior: form_presence_to_behavior,
+        capability_to_emitted_use: capability_to_emitted_use,
+        target_observation_without_receipt:
+            target_observation_without_receipt,
+        cost_without_material_receipt: cost_without_material_receipt,
+        parity_or_claim_before_transition:
+            parity_or_claim_before_transition,
+        prohibited_oracle_language: prohibited_oracle_language,
+        passed: passed,
+        total: 21,
+    }
+}
+
+fn pxm_digest_selector(selector: &PireusXorSelectorTable)
+    -> PireusXorMaterialDigest with Mut, Panic, Div {
+    var state = pxm_digest_add_i64(sha256_init(), 0x50584d53454c4543)
+    state = pxm_digest_add_i64(state, selector.count)
+    var i: i64 = 0
+    while i < selector.count {
+        state = pxm_digest_add_i64(state, selector.displacements[i])
+        state = pxm_digest_add_i64(state, selector.output_chunks[i])
+        state = pxm_digest_add_i64(state, selector.output_lanes[i])
+        state = pxm_digest_add_i64(state, selector.global_indices[i])
+        state = pxm_digest_add_i64(state, selector.partner_indices[i])
+        state = pxm_digest_add_i64(state, selector.source_chunks[i])
+        state = pxm_digest_add_i64(state, selector.source_lanes[i])
+        state = pxm_digest_add_bool(state, selector.reconstructed[i])
+        i = i + 1
+    }
+    pxm_digest_finish(state)
+}
+
+fn pxm_digest_evidence(xed: &PireusXorXedEvidence,
+    operation_hash: &[i64; 8], operation_receipt: &[i64; 8])
+    -> PireusXorMaterialDigest with Mut, Panic, Div {
+    var state = pxm_digest_add_i64(sha256_init(), 0x50584d4556494445)
+    state = pxm_digest_add_hash(state, operation_hash)
+    state = pxm_digest_add_hash(state, operation_receipt)
+    state = pxm_digest_add_hash(state, &xed.frozen_content_sha256)
+    state = pxm_digest_add_hash(state, &xed.current_envelope_sha256)
+    state = pxm_digest_add_hash(state, &xed.current_receipt_sha256)
+    state = pxm_digest_add_i64(state, xed.total_forms)
+    state = pxm_digest_add_i64(state, xed.vpermpd_forms)
+    state = pxm_digest_add_i64(state, xed.vpermi2pd_forms)
+    state = pxm_digest_add_i64(state, xed.vpermt2pd_forms)
+    state = pxm_digest_add_bool(state, xed.frozen_receipt_reference_present)
+    state = pxm_digest_add_bool(state, xed.vendor_corpus_digest_match)
+    state = pxm_digest_add_bool(
+        state, xed.counts_from_digest_matched_vendor_bytes)
+    state = pxm_digest_add_bool(state, xed.counts_match_receipt_record)
+    state = pxm_digest_add_bool(state, xed.candidate_family_present)
+    state = pxm_digest_add_bool(
+        state, xed.selector_behavior_derived_from_form_presence)
+    state = pxm_digest_add_bool(
+        state, xed.selector_semantics_receipt_present)
+    state = pxm_digest_add_bool(state, xed.instruction_match_authorized)
+    state = pxm_digest_add_bool(
+        state, xed.immediate_sufficiency_authorized)
+    state = pxm_digest_add_bool(
+        state, xed.two_source_necessity_authorized)
+    pxm_digest_finish(state)
+}
+
+fn pxm_digest_targets(targets: &PireusXorMaterialTargets)
+    -> PireusXorMaterialDigest with Mut, Panic, Div {
+    var state = pxm_digest_add_i64(sha256_init(), 0x50584d5441524745)
+    state = pxm_digest_add_i64(state, targets.count)
+    var i: i64 = 0
+    while i < targets.count {
+        state = pxm_digest_add_i64(state, targets.target_ids[i])
+        state = pxm_digest_add_bool(state, targets.canonical[i])
+        state = pxm_digest_add_bool(state, targets.observed[i])
+        state = pxm_digest_add_i64(state, targets.candidate_plans[i])
+        state = pxm_digest_add_bool(state, targets.unresolved[i])
+        state = pxm_digest_add_bool(state, targets.material_receipts[i])
+        i = i + 1
+    }
+    pxm_digest_finish(state)
+}
+
+fn pxm_digest_negatives(neg: &PireusXorMaterialNegatives)
+    -> PireusXorMaterialDigest with Mut, Panic, Div {
+    var state = pxm_digest_add_i64(sha256_init(), 0x50584d5749544e45)
+    state = pxm_digest_add_bool(state, neg.missing_operation_parent_hash)
+    state = pxm_digest_add_bool(state, neg.mismatched_operation_parent_hash)
+    state = pxm_digest_add_bool(state, neg.missing_operation_receipt)
+    state = pxm_digest_add_bool(state, neg.mismatched_operation_receipt)
+    state = pxm_digest_add_bool(state, neg.wrong_logical_bit_width)
+    state = pxm_digest_add_bool(state, neg.wrong_dimension)
+    state = pxm_digest_add_bool(state, neg.wrong_element_width)
+    state = pxm_digest_add_bool(state, neg.wrong_chunk_width)
+    state = pxm_digest_add_bool(state, neg.displacement_out_of_range)
+    state = pxm_digest_add_bool(state, neg.output_chunk_out_of_range)
+    state = pxm_digest_add_bool(state, neg.output_lane_out_of_range)
+    state = pxm_digest_add_bool(state, neg.corrupted_source_chunk)
+    state = pxm_digest_add_bool(state, neg.corrupted_source_lane)
+    state = pxm_digest_add_bool(state, neg.layout_to_two_source_necessity)
+    state = pxm_digest_add_bool(state, neg.imm8_without_vendor_semantics)
+    state = pxm_digest_add_bool(state, neg.form_presence_to_behavior)
+    state = pxm_digest_add_bool(state, neg.capability_to_emitted_use)
+    state = pxm_digest_add_bool(
+        state, neg.target_observation_without_receipt)
+    state = pxm_digest_add_bool(state, neg.cost_without_material_receipt)
+    state = pxm_digest_add_bool(
+        state, neg.parity_or_claim_before_transition)
+    state = pxm_digest_add_bool(state, neg.prohibited_oracle_language)
+    state = pxm_digest_add_i64(state, neg.passed)
+    state = pxm_digest_add_i64(state, neg.total)
+    pxm_digest_finish(state)
+}
+
+pub fn pireus_xor_material_evaluate(xed_path: string)
+    -> PireusXorMaterialResult with IO, Mut, Panic, Div, Alloc {
+    let operation = pireus_xor_operation_evaluate()
+    let operation_live_match =
+        pireus_xor_operation_matches_frozen_semantics(&operation)
+    let expected_operation_result =
+        pireus_xor_material_operation_result_digest()
+    let operation_result_digest_match = pxm_hash_equal(
+        &operation.result_digest.words, &expected_operation_result)
+    let operation_hash = pireus_xor_material_operation_semantics_hash()
+    let operation_receipt = pireus_xor_material_operation_receipt_hash()
+    let parent_binding_valid = operation_live_match &&
+        operation_result_digest_match &&
+        pxm_hash_nonzero(&operation_hash) &&
+        pxm_hash_nonzero(&operation_receipt)
+    let selector = pxm_build_selector()
+    let reconstructed_cells = pxm_count_reconstructed(&selector)
+    let one_source_groups = pxm_count_one_source_groups(&selector)
+    let one_source = one_source_groups == PIREUS_XOR_MATERIAL_GROUP_COUNT
+    let xed = pxm_xed_evidence(xed_path)
+    let targets = pxm_targets()
+    let negatives = pxm_exercise_negatives()
+    let shape_valid = pxm_shape_valid(
+        PIREUS_XOR_MATERIAL_BITS,
+        PIREUS_XOR_MATERIAL_DIMENSION,
+        PIREUS_XOR_MATERIAL_ELEMENT_BITS,
+        PIREUS_XOR_MATERIAL_CHUNK_LANES,
+        PIREUS_XOR_MATERIAL_CHUNK_COUNT,
+    )
+    var any_target_observed = false
+    var any_material_receipt = false
+    var target_index: i64 = 0
+    while target_index < targets.count {
+        if targets.observed[target_index] { any_target_observed = true }
+        if targets.material_receipts[target_index] {
+            any_material_receipt = true
+        }
+        target_index = target_index + 1
+    }
+    let claim_boundary_valid = pxm_claim_boundary_values_valid(
+        xed.selector_semantics_receipt_present,
+        xed.instruction_match_authorized,
+        xed.immediate_sufficiency_authorized,
+        xed.two_source_necessity_authorized,
+        any_target_observed,
+        any_material_receipt,
+        false,
+        false,
+        0,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+
+    var error = PIREUS_XOR_MATERIAL_OK
+    if !parent_binding_valid { error = PIREUS_XOR_MATERIAL_ERR_PARENT }
+    else if !shape_valid { error = PIREUS_XOR_MATERIAL_ERR_SHAPE }
+    else if selector.count != PIREUS_XOR_MATERIAL_CELL_COUNT ||
+        reconstructed_cells != selector.count || !one_source {
+        error = PIREUS_XOR_MATERIAL_ERR_SELECTOR
+    } else if !xed.valid || !xed.frozen_receipt_reference_present ||
+        !xed.vendor_corpus_digest_match ||
+        !xed.counts_from_digest_matched_vendor_bytes ||
+        !xed.counts_match_receipt_record ||
+        xed.selector_behavior_derived_from_form_presence ||
+        !claim_boundary_valid {
+        error = PIREUS_XOR_MATERIAL_ERR_XED_EVIDENCE
+    } else if !pxm_targets_valid(&targets) {
+        error = PIREUS_XOR_MATERIAL_ERR_TARGET
+    } else if negatives.passed != negatives.total {
+        error = PIREUS_XOR_MATERIAL_ERR_AUTHORITY
+    }
+
+    let selector_digest = pxm_digest_selector(&selector)
+    let evidence_digest = pxm_digest_evidence(
+        &xed, &operation_hash, &operation_receipt)
+    let target_digest = pxm_digest_targets(&targets)
+    let witness_digest = pxm_digest_negatives(&negatives)
+    var failures: i64 = 0
+    if error != PIREUS_XOR_MATERIAL_OK { failures = failures + 1 }
+    if !pireus_xor_material_digest_nonzero(&selector_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_material_digest_nonzero(&evidence_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_material_digest_nonzero(&target_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_material_digest_nonzero(&witness_digest) {
+        failures = failures + 1
+    }
+
+    PireusXorMaterialResult {
+        valid: error == PIREUS_XOR_MATERIAL_OK && failures == 0,
+        error: error,
+        bits: PIREUS_XOR_MATERIAL_BITS,
+        dimension: PIREUS_XOR_MATERIAL_DIMENSION,
+        element_bits: PIREUS_XOR_MATERIAL_ELEMENT_BITS,
+        chunk_lanes: PIREUS_XOR_MATERIAL_CHUNK_LANES,
+        chunk_count: PIREUS_XOR_MATERIAL_CHUNK_COUNT,
+        operation_parent_live_match: operation_live_match,
+        operation_result_digest: operation.result_digest.words,
+        operation_result_digest_match: operation_result_digest_match,
+        operation_semantics_sha256: operation_hash,
+        operation_receipt_sha256: operation_receipt,
+        operation_parent_binding_valid: parent_binding_valid,
+        selector: selector,
+        reconstructed_cells: reconstructed_cells,
+        one_source_groups: one_source_groups,
+        layout_one_source_per_group: one_source,
+        xed: xed,
+        targets: targets,
+        material_observation_count: 0,
+        instruction_match_count: 0,
+        lowering_count: 0,
+        cost_record_count: 0,
+        loom_guardian_external_required: true,
+        selector_digest: selector_digest,
+        evidence_digest: evidence_digest,
+        target_digest: target_digest,
+        witness_digest: witness_digest,
+        negatives: negatives,
+        parity_open: false,
+        claim_ready: false,
+        failures: failures,
+    }
+}
+
+fn pxm_material_digest_matches(digest: &PireusXorMaterialDigest,
+    expected: [i64; 8]) -> bool {
+    pxm_hash_equal(&digest.words, &expected)
+}
+
+/// Exact predicate admitted only after the first Sounio authority stream.
+pub fn pireus_xor_material_matches_frozen_semantics(
+    result: &PireusXorMaterialResult,
+) -> bool with Div {
+    if !result.valid || result.error != PIREUS_XOR_MATERIAL_OK ||
+        result.bits != 4 || result.dimension != 16 ||
+        result.element_bits != 64 || result.chunk_lanes != 8 ||
+        result.chunk_count != 2 || !result.operation_parent_live_match ||
+        !result.operation_result_digest_match ||
+        !result.operation_parent_binding_valid {
+        return false
+    }
+
+    let expected_operation =
+        pireus_xor_material_operation_semantics_hash()
+    let expected_receipt = pireus_xor_material_operation_receipt_hash()
+    let expected_result = pireus_xor_material_operation_result_digest()
+    if !pxm_hash_equal(
+        &result.operation_semantics_sha256, &expected_operation) ||
+        !pxm_hash_equal(&result.operation_receipt_sha256, &expected_receipt) ||
+        !pxm_hash_equal(&result.operation_result_digest, &expected_result) {
+        return false
+    }
+
+    if result.selector.count != 256 || result.reconstructed_cells != 256 ||
+        result.one_source_groups != 32 ||
+        !result.layout_one_source_per_group {
+        return false
+    }
+    var index: i64 = 0
+    while index < 256 {
+        let d = index / 16
+        let within_d = index - d * 16
+        let chunk = within_d / 8
+        let lane = within_d - chunk * 8
+        let global_i = chunk * 8 + lane
+        let partner_j = global_i ^ d
+        let source_chunk = chunk ^ (d >> 3)
+        let source_lane = lane ^ (d & 7)
+        if result.selector.displacements[index] != d ||
+            result.selector.output_chunks[index] != chunk ||
+            result.selector.output_lanes[index] != lane ||
+            result.selector.global_indices[index] != global_i ||
+            result.selector.partner_indices[index] != partner_j ||
+            result.selector.source_chunks[index] != source_chunk ||
+            result.selector.source_lanes[index] != source_lane ||
+            !result.selector.reconstructed[index] {
+            return false
+        }
+        index = index + 1
+    }
+
+    let expected_xed_content =
+        pireus_xor_material_xed_frozen_content_hash()
+    let expected_xed_envelope =
+        pireus_xor_material_xed_current_envelope_hash()
+    let expected_xed_receipt =
+        pireus_xor_material_xed_current_receipt_hash()
+    let xed = &result.xed
+    if !xed.valid ||
+        !pxm_hash_equal(&xed.frozen_content_sha256, &expected_xed_content) ||
+        !pxm_hash_equal(
+            &xed.current_envelope_sha256, &expected_xed_envelope) ||
+        !pxm_hash_equal(&xed.current_receipt_sha256, &expected_xed_receipt) ||
+        xed.total_forms != 8 || xed.vpermpd_forms != 4 ||
+        xed.vpermi2pd_forms != 2 || xed.vpermt2pd_forms != 2 ||
+        !xed.frozen_receipt_reference_present ||
+        !xed.vendor_corpus_digest_match ||
+        !xed.counts_from_digest_matched_vendor_bytes ||
+        !xed.counts_match_receipt_record ||
+        !xed.candidate_family_present ||
+        xed.selector_behavior_derived_from_form_presence ||
+        xed.selector_semantics_receipt_present ||
+        xed.instruction_match_authorized ||
+        xed.immediate_sufficiency_authorized ||
+        xed.two_source_necessity_authorized {
+        return false
+    }
+
+    if result.targets.count != 3 ||
+        result.targets.target_ids[0] != PIREUS_XOR_TARGET_DARWIN_XEON ||
+        result.targets.target_ids[1] != PIREUS_XOR_TARGET_APPLE_SILICON ||
+        result.targets.target_ids[2] != PIREUS_XOR_TARGET_DGX ||
+        !result.targets.canonical[0] || !result.targets.canonical[1] ||
+        !result.targets.canonical[2] || result.targets.observed[0] ||
+        result.targets.observed[1] || result.targets.observed[2] ||
+        result.targets.candidate_plans[0] !=
+            PIREUS_XOR_PLAN_TWO_F64X8_CHUNKS ||
+        result.targets.candidate_plans[1] != PIREUS_XOR_PLAN_UNRESOLVED ||
+        result.targets.candidate_plans[2] != PIREUS_XOR_PLAN_UNRESOLVED ||
+        result.targets.unresolved[0] || !result.targets.unresolved[1] ||
+        !result.targets.unresolved[2] ||
+        result.targets.material_receipts[0] ||
+        result.targets.material_receipts[1] ||
+        result.targets.material_receipts[2] {
+        return false
+    }
+
+    let neg = &result.negatives
+    if !neg.missing_operation_parent_hash ||
+        !neg.mismatched_operation_parent_hash ||
+        !neg.missing_operation_receipt ||
+        !neg.mismatched_operation_receipt ||
+        !neg.wrong_logical_bit_width || !neg.wrong_dimension ||
+        !neg.wrong_element_width || !neg.wrong_chunk_width ||
+        !neg.displacement_out_of_range ||
+        !neg.output_chunk_out_of_range ||
+        !neg.output_lane_out_of_range || !neg.corrupted_source_chunk ||
+        !neg.corrupted_source_lane ||
+        !neg.layout_to_two_source_necessity ||
+        !neg.imm8_without_vendor_semantics ||
+        !neg.form_presence_to_behavior ||
+        !neg.capability_to_emitted_use ||
+        !neg.target_observation_without_receipt ||
+        !neg.cost_without_material_receipt ||
+        !neg.parity_or_claim_before_transition ||
+        !neg.prohibited_oracle_language || neg.passed != 21 ||
+        neg.total != 21 {
+        return false
+    }
+
+    if result.material_observation_count != 0 ||
+        result.instruction_match_count != 0 || result.lowering_count != 0 ||
+        result.cost_record_count != 0 ||
+        !result.loom_guardian_external_required || result.parity_open ||
+        result.claim_ready || result.failures != 0 {
+        return false
+    }
+
+    pxm_material_digest_matches(&result.selector_digest,
+        [0xfd515df6, 0xbe12f316, 0xcc771cf0, 0x43aa0220,
+         0xbae75563, 0x62074a12, 0xeefe7f5a, 0x8f718928]) &&
+    pxm_material_digest_matches(&result.evidence_digest,
+        [0x824e0d32, 0x4a62a817, 0xf2d116f5, 0x1e6b9095,
+         0x34add1a3, 0xbae46a09, 0x3dc09139, 0xd1230774]) &&
+    pxm_material_digest_matches(&result.target_digest,
+        [0x3e2e2f88, 0x1cc866c4, 0xa99b6b95, 0xea933153,
+         0xdf35e047, 0x2b42f51f, 0x9a0c5a2f, 0x0cb975b5]) &&
+    pxm_material_digest_matches(&result.witness_digest,
+        [0x95f189ec, 0x40d69f9b, 0x2dcc3263, 0x557e6076,
+         0xe9232420, 0x0e5cc7cc, 0xb7c525fc, 0xa19e82bb])
+}
