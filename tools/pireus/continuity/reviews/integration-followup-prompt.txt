@@ -1,0 +1,1812 @@
+Follow-up review after a BLOCKER verdict. Do not rubber-stamp. Review only; no generated expected tables.
+Changes: GPU opcode appended to keep old tags; explicit DGX flag alone selects SM121; missing checker metadata refuses aggregate multiplication; butterfly clamp now explicit byte_offset with full-warp default31; Metal validates one terminal operation with direct positional parameter mapping and refuses duplicate/mixed/branch shapes; CLI refuses #error result; compiler prechecks typed GPU contracts before material lowering. New source negative controls added.
+Context for prior findings:
+- native_bridge.sio exists as an imported untracked file; source build from this full integration succeeded twice, with identical ELF hash8dac4cf3195bad26304f757471dae76fd976313d0875e21dea9f0f6b990f4b0a, hello execution passed. Corrected compiler build is pending.
+- Native scope is intentionally ptr3 shape; native v2 explicitly returns false for generic virtual shape. We do NOT claim expression-level native support or whole-language closure. If the fallback can emit successful bad code flag this risk rather than assuming supported.
+- HLIR candidate3 and IR candidate1 are different domains: native_bridge validates HLIR and constructs an IR opcode (no integer copy); GPU accepts only its supported subset. Updated precheck makes target-incompatible typed contracts a refusal.
+- Missing scalar Hyper argument is rejected by checker, not a valid default-f64 type.
+- The claimed octonion reduction reorder is not per-output reorder: old (i,j) updates each fixed d once per ascending i at j=i xor d; new (d,i) has the same ascending i subsequence for each d. Floating-point general reassociation is NOT inferred.
+- GPU effect id5 is canonical in current effects.sio.
+Assess remaining concrete defects; distinguish confirmed scope constraints and unsupported inputs from accidental silent lowering. Report CLEAR or enumerated defects.
+
+CONTEXT
+self-hosted/check/check.sio
+    // Hyper<Algebra, T> — first-class hypercomplex type (Octonion/Sedenion/…). The non-inplace
+    // resolver lower_named_type_with_args handles this at :14322; the inplace resolver (the one
+    // that actually runs during checking) was missing it, so `Hyper<Octonion, f64>` degraded to
+    // TyNamed("Hyper") and `a * h` never reached check_hyper_binary. Mirror the branch here.
+    if name_matches_str5(name, 72, 121, 112, 101, 114) {
+        match type_args {
+            Some(args) => {
+                let alg_expr = (*args).head
+                var elem_expr = alg_expr
+                match (*args).tail {
+                    Some(rest) => { elem_expr = (*rest).head }
+                    None => { checker_note_type_error_mut(c) return ty_error() }
+                }
+                if alg_expr.kind != TypeExprKind::TypeNamed {
+                    checker_note_type_error_mut(c)
+                    return ty_error()
+                }
+                let alg_name = checker_copy_string_list_to_name(alg_expr.path.segments)
+                let algebra_tag = resolve_algebra_name(alg_name)
+                if algebra_tag < 0 {
+                    checker_note_type_error_mut(c)
+                    return ty_error()
+                }
+                let elem_ty = checker_lower_type_expr_mut(c, elem_expr)
+                return ty_hyper(algebra_tag, elem_ty)
+            }
+            None => { checker_note_type_error_mut(c) return ty_error() }
+        }
+    }
+    // Feature B: Invariant<T, G> — second type-arg G is one of the four named
+self-hosted/check/effects.sio
+// Effect processing for type checker
+//
+// Converts parsed EffectList from AST to effect ID arrays in FnSig.
+// Effect IDs are EffectKind discriminants in declaration order (ID order,
+// not the historical source-arm order).
+//
+// Production ids 0-22 (phase 2a, unchanged):
+//   0=IO 1=Mut 2=Alloc 3=Panic 4=Div 5=GPU 6=Async 7=Prob
+//   8=Epistemic 9=Causal 10=Network 11=Sensor 12=Render 13=Observe
+//   14=NonAssoc 15=Audit 16=Hypothesis 17=MultiTest 18=ZD 19=Witness
+//   20=Temporal 21=Learn 22=Chaotic
+//
+self-hosted/hlir/native_bridge.sio
+        broadcast_ctrl_zmm: 18, sign_table_gpr: 0,
+    }
+}
+
+// Refusal reasons: 1=not operator, 2=bits, 3=twist, 4=candidate, 5=arity.
+// The callee name is intentionally not inspected: semantic selection comes
+// only from the typed operator metadata frozen in HLIR.
+pub fn hlir_xor_convolution_to_native_ir(h: HlirInstr, layout: HlirXorNativeLayout) -> HlirNativeBridgeResult {
+    var out = HlirNativeBridgeResult {
+        accepted: false, reason: 1, instr: ir_instr_new(IrOpcode::IrNop),
+    }
+    if h.operator_kind != HLIR_OPERATOR_XOR_CONVOLUTION { return out }
+    if h.xor_bits != 4 { out.reason = 2; return out }
+    if h.xor_twist != HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN { out.reason = 3; return out }
+    if h.xor_candidate != HLIR_XOR_CANDIDATE_AUTO
+        && h.xor_candidate != HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE {
+        out.reason = 4
+        return out
+    }
+    if h.call_arg_count != 3 { out.reason = 5; return out }
+    out.accepted = true
+    out.reason = 0
+    out.instr = ir_xor_convolution_s(layout.dst_zmm, layout.lhs_zmm, layout.rhs_zmm,
+        layout.xor_ctrl_zmm, layout.broadcast_ctrl_zmm, layout.sign_table_gpr)
+    out
+}
+self-hosted/native/codegen_x86_linux.sio
+        } else if instr_op == IrOpcode::IrXorConvolutionS {
+            let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
+            let twist = flags & 255
+            let candidate = (flags >> 8) & 255
+            if IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize] != 4
+                || twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
+                || candidate != IR_XOR_CANDIDATE_AUTO
+                || IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] != 1 {
+                return false
+            }
+            pireus_native_emit_xor_convolution_s_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
+        } else if instr_op == IrOpcode::IrStorePtr {
+            // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
+            nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_emit_mov_rbx_rax(nc)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_emit_store_rbx_to_mem_rax(nc)
+        } else if instr_op == IrOpcode::IrAlloc {
+self-hosted/hlir/native_bridge.sio
+// Typed HLIR to native IR bridge for Pireus algebraic operators.
+module hlir::native_bridge
+
+use hlir::ir::*
+use ir::ir::*
+
+pub struct HlirXorNativeLayout {
+    pub dst_zmm: i64,
+    pub lhs_zmm: i64,
+    pub rhs_zmm: i64,
+    pub xor_ctrl_zmm: i64,
+    pub broadcast_ctrl_zmm: i64,
+    pub sign_table_gpr: i64,
+}
+
+pub struct HlirNativeBridgeResult {
+    pub accepted: bool,
+    pub reason: i64,
+    pub instr: IrInstr,
+}
+
+pub fn hlir_xor_native_layout_xeon() -> HlirXorNativeLayout {
+    HlirXorNativeLayout {
+        dst_zmm: 0, lhs_zmm: 6, rhs_zmm: 8, xor_ctrl_zmm: 10,
+        broadcast_ctrl_zmm: 18, sign_table_gpr: 0,
+CURRENT INTEGRATION DIFF
+diff --git a/self-hosted/check/check.sio b/self-hosted/check/check.sio
+index 542519b369..257932a969 100644
+--- a/self-hosted/check/check.sio
++++ b/self-hosted/check/check.sio
+@@ -10958,7 +10958,13 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
+     // it already emits E035 with the missing-effect list.
+     match s.target {
+         Some(effect_target) => {
+-            if checker_place_excl_ref_root(c, *effect_target, 0) {
++            // GPU is the effect that authorizes mutation of device memory. A
++            // kernel signature cannot carry Mut (E070), so requiring host Mut
++            // for an exclusive device-reference store makes every `&!T`
++            // kernel output uninhabitable. Keep the host rule intact: only a
++            // body whose checked signature carries GPU absorbs this store.
++            let gpu_store = has_effect_id((*c).current_effects, (*c).current_effect_count, 5)
++            if checker_place_excl_ref_root(c, *effect_target, 0) && !gpu_store {
+                 var store_effects: [i64; 8] = [0; 8]
+                 // 1 = Mut (effect_name_to_id, self-hosted/check/effects.sio:26)
+                 store_effects[0] = 1
+diff --git a/self-hosted/compiler/main.sio b/self-hosted/compiler/main.sio
+index 78c588040b..23eedfb7c4 100644
+--- a/self-hosted/compiler/main.sio
++++ b/self-hosted/compiler/main.sio
+@@ -28361,6 +28361,39 @@ fn compiler_mark_hlir_kernels_from_items(module: HlirModule, items: Option<Box<I
+     }
+ }
+
++fn compiler_trace_pireus_hlir(module: &HlirModule) with IO, Mut, Panic, Div, Alloc {
++    if !str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") { return }
++    var fi: i64 = 0
++    while fi < module.fn_count {
++        var bi: i64 = 0
++        while bi < module.functions[fi as usize].block_count {
++            let block = &module.functions[fi as usize].blocks[bi as usize]
++            var ii: i64 = 0
++            while ii < block.instr_count {
++                let instr = &block.instrs[ii as usize]
++                if instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION {
++                    print("PIREUS_HLIR_TYPED operator_kind=")
++                    print_int(instr.operator_kind)
++                    print(" bits=")
++                    print_int(instr.xor_bits)
++                    print(" twist=")
++                    print_int(instr.xor_twist)
++                    print(" candidate=")
++                    print_int(instr.xor_candidate)
++                    print(" argc=")
++                    print_int(instr.call_arg_count)
++                    print(" callee_len=")
++                    print_int(instr.call_name.len)
++                    print("\n")
++                }
++                ii = ii + 1
++            }
++            bi = bi + 1
++        }
++        fi = fi + 1
++    }
++}
++
+
+ // ============================================================================
+ // GPU COMPILE PIPELINE
+@@ -28408,13 +28441,28 @@ fn run_gpu_compile_pipeline(
+         return 1
+     }
+
++    // Preserve checker-owned hypercomplex operator identity across the AST
++    // reload below. HLIR may use syntax for physical layout, but it must not
++    // invent a Sedenion operator from a spelling or function name.
++    var hyper_epistemic = ir_empty_epistemic_section()
++    let hyper_prog = load_module_file(input_path)
++    if !check_program_epistemic_into(hyper_prog, &!hyper_epistemic) {
++        print("GPU: typed metadata export failed\n")
++        return 1
++    }
++
+     // module_frontend_check_items_with_source_context consumes the item list on
+     // the self-hosted value path. Reload before HLIR lowering so kernel fn
+     // declarations remain visible to the GPU extraction pass.
+     let lower_prog = load_module_file(input_path)
+-    var hlir_module = hlir_lower_module(lower_prog)
++    var hlir_module = hlir_lower_module_with_epistemic(lower_prog, &hyper_epistemic)
+     let kernel_mark_prog = load_module_file(input_path)
+     hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
++    compiler_trace_pireus_hlir(&hlir_module)
++    if !hlir_module_xor_contracts_valid(&hlir_module) {
++        print("GPU: PIREUS_TYPED_CONTRACT_REFUSED\n")
++        return 1
++    }
+
+     // Count GPU-annotated kernels
+     let kcount = hlir_extract_kernel_count(hlir_module)
+@@ -28440,6 +28488,10 @@ fn run_gpu_compile_pipeline(
+
+         // Metal MSL — print to stdout (no file write available for MetalBuf)
+         let metal_all = hlir_kernels_to_metal(hlir_module)
++        if metal_buf_contains(metal_all, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED") {
++            print("GPU: PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
++            return 1
++        }
+         metal_buf_print(metal_all)
+
+         // SPIR-V binary
+@@ -28468,8 +28520,26 @@ fn run_gpu_compile_pipeline(
+                                  && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
+                                  && str_char_at(gpu_target, 4) == str_char_at("metal", 4) {
+         let metal = hlir_kernels_to_metal(hlir_module)
+-        metal_buf_print(metal)
+-        print("GPU: Metal MSL emitted\n")
++        if metal_buf_contains(metal, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED") {
++            print("GPU: PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
++            return 1
++        }
++        if str_len(output_path) > 0 {
++            let metal_ok = io_write_bytes_to_file(output_path, metal.data, metal.len)
++            if metal_ok {
++                print("GPU: Metal MSL written to ")
++                print(output_path)
++                print("\n")
++            } else {
++                print("GPU: failed to write Metal MSL to ")
++                print(output_path)
++                print("\n")
++                return 1
++            }
++        } else {
++            metal_buf_print(metal)
++            print("GPU: Metal MSL emitted\n")
++        }
+         return 0
+     }
+
+@@ -28625,6 +28695,21 @@ fn run_gpu_compile_pipeline(
+         return 0
+     }
+
++    // Explicit DGX Spark GB10 / Blackwell profile.
++    if str_eq(gpu_target, "dgx-sm121") {
++        let dgx_ptx = hlir_kernels_to_dgx_sm121_ptx(hlir_module)
++        if str_len(output_path) > 0 {
++            if !io_write_bytes_to_file(output_path, dgx_ptx.data, dgx_ptx.len) {
++                print("GPU: failed to write DGX sm_121 PTX\n")
++                return 1
++            }
++            print("GPU: DGX sm_121 PTX written\n")
++        } else {
++            ptx_buf_print(dgx_ptx)
++        }
++        return 0
++    }
++
+     // PTX (CUDA / ROCm) — default path
+     // Select variant based on binary_format or epistemic annotation
+     let use_epistemic = str_eq(gpu_binary_format, "epistemic")
+diff --git a/self-hosted/compiler/module_frontend.sio b/self-hosted/compiler/module_frontend.sio
+index 09388e6b99..61c86695ee 100644
+--- a/self-hosted/compiler/module_frontend.sio
++++ b/self-hosted/compiler/module_frontend.sio
+@@ -5513,6 +5513,15 @@ fn module_frontend_lower_single_program_array_direct_box(
+     }
+     let epistemic = ir_empty_epistemic_section_boxed()
+     let seed_program = mf_program_from_items(&seed_items)
++    // The direct single-module path already ran the checker, but historically
++    // discarded its semantic sidecar here and lowered against an empty
++    // section. That made typed Hyper multiplication metadata unavailable to
++    // AST-to-IR lowering. Re-export from the DCE-filtered program so source
++    // spans and the lowered item set remain identical.
++    if !check_program_epistemic_into(seed_program, &! (*epistemic)) {
++        trace.last_stage = "epistemic_export_error"
++        return module_frontend_lower_direct_box_error("epistemic_export_failed")
++    }
+     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&seed_program, programs, 1, 0, &(*epistemic))
+     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+     if summary_result.had_error {
+diff --git a/self-hosted/gpu/hlir_to_gpu.sio b/self-hosted/gpu/hlir_to_gpu.sio
+index eae9dd7ab5..ef8c5b561e 100644
+--- a/self-hosted/gpu/hlir_to_gpu.sio
++++ b/self-hosted/gpu/hlir_to_gpu.sio
+@@ -1587,6 +1587,38 @@ fn gpu_widen_intrinsic_to_i64(kernel: GpuKernelIr, reg: i64, res_kind: HlirTypeK
+ }
+
+ // Lower a single HLIR instruction to GPU ops and append to kernel.
++pub fn hlir_gpu_xor_contract_valid(instr: HlirInstr) -> bool {
++    instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION
++        && instr.xor_bits == 4
++        && instr.xor_twist == HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN
++        && instr.call_arg_count == 3
++        && instr.xor_candidate >= HLIR_XOR_CANDIDATE_AUTO
++        && instr.xor_candidate <= HLIR_XOR_CANDIDATE_GLOBAL_LOAD
++}
++
++// Validate typed contracts before material lowering. A target-incompatible
++// operator is a compilation refusal, never an omitted instruction.
++pub fn hlir_module_xor_contracts_valid(module: &HlirModule) -> bool with Mut, Panic {
++    var f: i64 = 0
++    while f < (*module).fn_count {
++        let func = (*module).functions[f as usize]
++        var b: i64 = 0
++        while b < func.block_count {
++            let block = func.blocks[b as usize]
++            var i: i64 = 0
++            while i < block.instr_count {
++                let instr = block.instrs[i as usize]
++                if instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION
++                    && !hlir_gpu_xor_contract_valid(instr) { return false }
++                i = i + 1
++            }
++            b = b + 1
++        }
++        f = f + 1
++    }
++    true
++}
++
+ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr with Mut, Panic {
+     var k = kernel
+     let op_kind = instr.op_kind
+@@ -1876,6 +1908,22 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
+             bf.rhs_reg = instr.call_args[1]
+             bf.addr_reg = instr.call_args[2]
+             k = gpu_kernel_append_op(k, bf)
++        } else if hlir_gpu_xor_contract_valid(instr) {
++            // Explicit distributed ABI. One sedenion component lives in each of 16 active lanes.
++            // call_args = [pa, pb, pout]. The DGX PTX backend preserves the serial j accumulation.
++            // Malformed or target-incompatible contracts deliberately fall
++            // through without a material opcode; they cannot be reinterpreted
++            // as a nearby XOR implementation.
++            var xc = gpu_op_new()
++            xc.opcode = GpuOpcode::GpuXorConvolutionF64
++            xc.lhs_reg = instr.call_args[0]
++            xc.rhs_reg = instr.call_args[1]
++            xc.addr_reg = instr.call_args[2]
++            xc.rhs_imm = 1 << instr.xor_bits
++            // byte_offset is the foundry strategy: 0=warp shuffle, 1=direct global load.
++            xc.byte_offset = if instr.xor_candidate == HLIR_XOR_CANDIDATE_GLOBAL_LOAD { 1 } else { 0 }
++            k.max_threads = 1 << instr.xor_bits
++            k = gpu_kernel_append_op(k, xc)
+         } else if hlir_name_is_ossm_oct_step_f64(cn) || hlir_name_is_ossm_sed_step_f64(cn) {
+             // Full-f64 O-SSM step. call_args = [pA, pB, px, pH, pout]. Exact f64 → one GpuOctStepF64.
+             var sf = gpu_op_new()
+@@ -2600,6 +2648,22 @@ pub(crate) fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with IO, Mut, Pa
+     combined
+ }
+
++pub(crate) fn hlir_kernels_to_dgx_sm121_ptx(module: HlirModule) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
++    var combined = ptx_buf_new()
++    let kcount = hlir_extract_kernel_count(module)
++    var ki: i64 = 0
++    while ki < kcount {
++        let fidx = hlir_get_kernel_index(module, ki)
++        if fidx >= 0 {
++            let gpu_kernel = hlir_function_to_gpu_kernel(module.functions[fidx as usize])
++            let ptx = gpu_lower_to_ptx_for_target(gpu_kernel, true)
++            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
++        }
++        ki = ki + 1
++    }
++    combined
++}
++
+ // Extract all kernel functions, apply auto-tuning, then lower to PTX.
+ // Auto-tuning detects workload patterns and sets optimal CTA dimensions.
+ pub(crate) fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+diff --git a/self-hosted/gpu/kernel_ir.sio b/self-hosted/gpu/kernel_ir.sio
+index 97dec3ca75..4f80a8954a 100644
+--- a/self-hosted/gpu/kernel_ir.sio
++++ b/self-hosted/gpu/kernel_ir.sio
+@@ -225,6 +225,10 @@ pub enum GpuOpcode {
+     GpuCgTiledPartition,     // Cooperative group tiled_partition
+     GpuCgSync,               // Cooperative group sync
+     GpuCgReduce,             // Cooperative group reduce
++
++    // Append new opcodes to preserve existing discriminants.
++    GpuXorConvolutionF64, // Pireus distributed sedenion product: lane d computes
++    //   r[d] = Σ_j σ(d⊕j,j)·a[d⊕j]·b[j]. pa,pb,pout in lhs/rhs/addr; exactly 16 active lanes.
+ }
+
+ // GPU memory space (for load/store address space qualification)
+diff --git a/self-hosted/gpu/lower_to_ptx.sio b/self-hosted/gpu/lower_to_ptx.sio
+index f609aca1ad..e1e0390e18 100644
+--- a/self-hosted/gpu/lower_to_ptx.sio
++++ b/self-hosted/gpu/lower_to_ptx.sio
+@@ -8,11 +8,17 @@ use gpu::ptx::*
+
+ // Lower a complete GPU kernel IR to PTX
+ pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
++    gpu_lower_to_ptx_for_target(kernel, false)
++}
++
++pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+     var buf = ptx_buf_new()
+
+     // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
+     // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
+-    if gpu_has_wmma_tile(kernel) {
++    if dgx_sm121 {
++        buf = ptx_emit_dgx_sm121_header(buf)
++    } else if gpu_has_wmma_tile(kernel) {
+         buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+     } else {
+         buf = ptx_emit_header(buf)
+@@ -60,6 +66,9 @@ pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div,
+         let fbits = if fdim == 16 { 4 } else { 3 }
+         buf = ptx_push_str(buf, gpu_emit_cell_sign_table(fdim, fbits))
+     }
++    if gpu_has_xor_convolution_f64(kernel) {
++        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(16, 4))
++    }
+     // f64 tensor-core tile: ossm_Lsgn σ(k⊕j,j) for the f64 L(a) build.
+     if gpu_has_oct_batch_f64(kernel) {
+         let tdim = gpu_batch_f64_dim(kernel)
+@@ -191,9 +200,10 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
+     let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_assoc_bwd_dh(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
+     let readout = gpu_has_oct_readout(kernel)
+     let stepf64 = gpu_has_oct_step_f64(kernel)
++    let xorconv64 = gpu_has_xor_convolution_f64(kernel)
+     let tc64 = gpu_has_oct_batch_f64(kernel)
+     let matvec = gpu_has_oct_matvec(kernel)
+-    let stage_or_pa = stage || postadd || cell || readout || stepf64 || tc64 || matvec
++    let stage_or_pa = stage || postadd || cell || readout || stepf64 || xorconv64 || tc64 || matvec
+
+     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
+     var pred_count = kernel.max_reg_pred
+@@ -210,6 +220,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
+     if cell && b32_count < 12 { b32_count = 12 }
+     if readout && b32_count < 6 { b32_count = 6 }
+     if stepf64 && b32_count < 12 { b32_count = 12 }
++    if xorconv64 && b32_count < 12 { b32_count = 12 }
+     if tc64 && b32_count < 12 { b32_count = 12 }
+     if matvec && b32_count < 12 { b32_count = 12 }
+     if b32_count > 0 {
+@@ -222,7 +233,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
+     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
+     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
+     // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
+-    if (cell || postadd || readout || stepf64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
++    if (cell || postadd || readout || stepf64 || xorconv64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
+     if b64_count > 0 {
+         out = ptx_push_str(out, "    .reg .b64 %rd<")
+         out = gpu_push_i64(out, b64_count)
+@@ -237,6 +248,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
+     var f32_count = kernel.max_reg_f32
+     if postadd && f32_count < 4 { f32_count = 4 }
+     if stepf64 && f32_count < 1 { f32_count = 1 }
++    if xorconv64 && f32_count < 1 { f32_count = 1 }
+     if tc64 && f32_count < 1 { f32_count = 1 }
+     if matvec && f32_count < 2 { f32_count = 2 }
+     if cell && f32_count < 8 { f32_count = 8 }
+@@ -249,7 +261,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
+     // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
+     var f64_count = kernel.max_reg_f64
+     if stage && f64_count < 2 { f64_count = 2 }
+-    if (postadd || cell || readout || stepf64) && f64_count < 3 { f64_count = 3 }
++    if (postadd || cell || readout || stepf64 || xorconv64) && f64_count < 3 { f64_count = 3 }
+     if tc64 && f64_count < 14 { f64_count = 14 }
+     if matvec && f64_count < 3 { f64_count = 3 }
+     if f64_count > 0 {
+@@ -1247,6 +1259,58 @@ fn gpu_step_f64_dim(kernel: GpuKernelIr) -> i64 {
+     8
+ }
+
++fn gpu_has_xor_convolution_f64(kernel: GpuKernelIr) -> bool {
++    var i: i64 = 0
++    while i < kernel.op_count {
++        if kernel.ops[i as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { return true }
++        i = i + 1
++    }
++    false
++}
++
++// One sedenion component per lane. Lane d computes the serially ordered sum
++// r[d] = Σ_j σ(d⊕j,j)·a[d⊕j]·b[j]. b[j] arrives from lane j via bfly(d⊕j).
++fn gpu_emit_xor_convolution_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
++    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCDONE;\n"
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), pbR)
++    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mov.b64 {%r2, %r3}, %fd2;\n")
++    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCJ:\n")
++    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
++    t = str_concat(t, "    shfl.sync.bfly.b32 %r4, %r2, %r9, 15, 65535;\n")
++    t = str_concat(t, "    shfl.sync.bfly.b32 %r5, %r3, %r9, 15, 65535;\n")
++    t = str_concat(t, "    mov.b64 %fd2, {%r4, %r5};\n")
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
++    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
++    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
++    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
++    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
++    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
++    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCJ;\n")
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
++    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCDONE:\n")
++    t
++}
++
++// Foundry candidate 1: preserve the same lane/output and serial accumulation order,
++// but obtain b[j] through a direct global load rather than a two-half warp shuffle.
++fn gpu_emit_xor_convolution_global_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
++    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCGDONE;\n"
++    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCGJ:\n")
++    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), pbR)
++    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n")
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
++    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
++    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
++    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
++    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
++    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
++    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCGJ;\n")
++    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
++    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCGDONE:\n")
++    t
++}
++
+ // FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
+ // (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
+ // read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
+@@ -2020,6 +2084,14 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO,
+             ptx_push_str(buf, gpu_emit_oct_step_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), fdim))
+         }
+
++        GpuOpcode::GpuXorConvolutionF64 => {
++            if op.byte_offset == 1 {
++                ptx_push_str(buf, gpu_emit_xor_convolution_global_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
++            } else {
++                ptx_push_str(buf, gpu_emit_xor_convolution_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
++            }
++        }
++
+         GpuOpcode::GpuOctBatchF64 => {
+             // Batched hypercomplex multiply on f64 tensor cores (m8n8k4.f64). pa=lhs, pH=rhs, pout=addr.
+             // byte_offset==1 → transpose (L(a)ᵀ·B, the BPTT backward L(A)ᵀ·dS).
+@@ -2835,7 +2907,23 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO,
+         GpuOpcode::GpuRsqrt => gpu_refuse_unlowered(buf, "GpuRsqrt"),
+         GpuOpcode::GpuSetpGt => gpu_refuse_unlowered(buf, "GpuSetpGt"),
+         GpuOpcode::GpuSetpNe => gpu_refuse_unlowered(buf, "GpuSetpNe"),
+-        GpuOpcode::GpuShflBfly => gpu_refuse_unlowered(buf, "GpuShflBfly"),
++        GpuOpcode::GpuShflBfly => {
++            var out = buf
++            out = ptx_push_str(out, "    shfl.sync.bfly.b32 ")
++            out = ptx_push_str(out, gpu_reg_u32(op.dst_reg))
++            out = ptx_push_str(out, ", ")
++            out = ptx_push_str(out, gpu_reg_u32(op.src_reg))
++            out = ptx_push_str(out, ", ")
++            out = ptx_push_str(out, i64_to_string(op.rhs_imm))
++            out = ptx_push_str(out, ", ")
++            // byte_offset carries the explicit butterfly clamp; zero keeps a full warp.
++            let clamp = if op.byte_offset > 0 { op.byte_offset } else { 31 }
++            out = ptx_push_str(out, i64_to_string(clamp))
++            out = ptx_push_str(out, ", ")
++            out = ptx_push_str(out, i64_to_string(op.mask))
++            out = ptx_push_str(out, ";\n")
++            out
++        },
+         GpuOpcode::GpuShflIdx => gpu_refuse_unlowered(buf, "GpuShflIdx"),
+         GpuOpcode::GpuShflUp => gpu_refuse_unlowered(buf, "GpuShflUp"),
+         GpuOpcode::GpuShl => gpu_refuse_unlowered(buf, "GpuShl"),
+diff --git a/self-hosted/gpu/metal.sio b/self-hosted/gpu/metal.sio
+index 9c181b23e8..491b6911cf 100644
+--- a/self-hosted/gpu/metal.sio
++++ b/self-hosted/gpu/metal.sio
+@@ -76,7 +76,7 @@ fn metal_push_str(buf: MetalBuf, s: string) -> MetalBuf with Mut, Panic, Div {
+     out
+ }
+
+-fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Div {
++pub fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Div {
+     let nlen = str_len(needle)
+     if nlen == 0 { return true }
+     if buf.len < nlen { return false }
+@@ -269,6 +269,52 @@ fn metal_emit_header(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
+     out
+ }
+
++fn metal_kernel_has_xor_convolution(kernel: GpuKernelIr) -> bool {
++    var i: i64 = 0
++    while i < kernel.op_count {
++        if kernel.ops[i as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { return true }
++        i = i + 1
++    }
++    false
++}
++
++fn metal_cd_sign(a: i64, b: i64, bits: i64) -> i64 {
++    if a == 0 || b == 0 { return 1 }
++    if bits <= 1 { return 0 - 1 }
++    let half = 1 << (bits - 1)
++    let ah = if a >= half { 1 } else { 0 }
++    let bh = if b >= half { 1 } else { 0 }
++    let al = a & (half - 1)
++    let bl = b & (half - 1)
++    if ah == 0 && bh == 0 { return metal_cd_sign(al, bl, bits - 1) }
++    if ah == 0 && bh == 1 { return metal_cd_sign(bl, al, bits - 1) }
++    if ah == 1 && bh == 0 {
++        if bl == 0 { return metal_cd_sign(al, 0, bits - 1) }
++        return 0 - metal_cd_sign(al, bl, bits - 1)
++    }
++    if bl == 0 { return 0 - metal_cd_sign(0, al, bits - 1) }
++    metal_cd_sign(bl, al, bits - 1)
++}
++
++fn metal_emit_xor_sign_table(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
++    var out = metal_push_str(buf, "constant char pireus_xor_sign[256] = {")
++    var d: i64 = 0
++    while d < 16 {
++        var j: i64 = 0
++        while j < 16 {
++            if d != 0 || j != 0 { out = metal_push_str(out, ",") }
++            if metal_cd_sign(d ^ j, j, 4) < 0 {
++                out = metal_push_str(out, "-1")
++            } else {
++                out = metal_push_str(out, "1")
++            }
++            j = j + 1
++        }
++        d = d + 1
++    }
++    metal_push_str(out, "};\n\n")
++}
++
+ // ============================================================================
+ // Kernel signature emission
+ // ============================================================================
+@@ -509,9 +555,66 @@ fn metal_emit_atomic_binop(buf: MetalBuf, op: GpuOp, fn_name: string) -> MetalBu
+ // Lower operations → MSL statements
+ // ============================================================================
+
++// The compound Metal recipe has a distinct float2 ABI and may replace only
++// one straight-line aggregate store. Reject extra effects and pointer remaps.
++pub fn metal_xor_kernel_shape_valid(kernel: GpuKernelIr) -> bool with Mut, Panic {
++    if !metal_kernel_has_xor_convolution(kernel) { return true }
++    if kernel.param_count != 3 { return false }
++    var params: [i64; 3] = [0 - 1; 3]
++    var count: i64 = 0
++    var labels: i64 = 0
++    var seen: bool = false
++    var i: i64 = 0
++    while i < kernel.op_count {
++        let op = kernel.ops[i as usize]
++        if op.opcode == GpuOpcode::GpuLoadParam {
++            if seen || op.param_idx < 0 || op.param_idx >= 3 { return false }
++            params[op.param_idx as usize] = op.dst_reg
++        } else if op.opcode == GpuOpcode::GpuXorConvolutionF64 {
++            count = count + 1
++            if count != 1 || params[0] < 0 || params[1] < 0 || params[2] < 0 { return false }
++            if op.lhs_reg != params[0] || op.rhs_reg != params[1] || op.addr_reg != params[2] { return false }
++            seen = true
++        } else if op.opcode == GpuOpcode::GpuRet {
++            if !seen || i != kernel.op_count - 1 { return false }
++        } else if op.opcode == GpuOpcode::GpuBra {
++            labels = labels + 1
++            if seen || op.src_reg != 1 || labels > 1 { return false }
++        } else {
++            if seen { return false }
++            // Dead aggregate-load scaffolding before the terminal store.
++            let pure = op.opcode == GpuOpcode::GpuLoadGlobal
++                || op.opcode == GpuOpcode::GpuAddImm
++                || op.opcode == GpuOpcode::GpuMulImm
++                || (op.opcode == GpuOpcode::GpuAdd && op.ty == GpuType::GpuU64)
++            if !pure { return false }
++        }
++        i = i + 1
++    }
++    count == 1
++}
++
+ fn metal_lower_ops(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+     var out = buf
+     var i: i64 = 0
++    let is_xor_convolution = metal_kernel_has_xor_convolution(kernel)
++
++    // GpuXorConvolutionF64 is a terminal compound operator with its own
++    // three-pointer ABI. The scalar loads/GEPs that precede it in generic HLIR
++    // are provenance scaffolding, not executable parts of the selected Metal
++    // recipe. Emitting both produced undeclared synthetic registers and an
++    // early `return` before the materializer. Once selected, emit exactly the
++    // compound operator and nothing from the generic prelude.
++    if is_xor_convolution {
++        while i < kernel.op_count {
++            let selected = kernel.ops[i as usize]
++            if selected.opcode == GpuOpcode::GpuXorConvolutionF64 {
++                return metal_lower_single_op(out, selected, kernel)
++            }
++            i = i + 1
++        }
++        return out
++    }
+
+     while i < kernel.op_count {
+         let op = kernel.ops[i as usize]
+@@ -651,6 +754,12 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
+     // ---- LoadParam ----
+     if opc == GpuOpcode::GpuLoadParam {
+         let param = kernel.params[op.param_idx as usize]
++        if metal_kernel_has_xor_convolution(kernel) && op.ty == GpuType::GpuPtr {
++            out = metal_push_str(out, "    // ptr parameter consumed by Pireus float2 materializer: ")
++            out = metal_push_name(out, param.name)
++            out = metal_push_str(out, "\n")
++            return out
++        }
+         out = metal_push_str(out, "    ")
+         out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+         out = metal_push_str(out, " = (")
+@@ -1337,6 +1446,36 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
+         return out
+     }
+
++    if opc == GpuOpcode::GpuXorConvolutionF64 {
++        out = metal_push_str(out, "    // pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce\n")
++        out = metal_push_str(out, "    // pireus.equivalence=APPROXIMATE pireus.storage=float2-hi-lo\n")
++        out = metal_push_str(out, "    // pireus.source_semantics=f64x16 pireus.material_abi=float2x16\n")
++        out = metal_push_str(out, "    // pireus.requires_pack=f64-to-twofold-float2\n")
++        out = metal_push_str(out, "    if (tid < 16u) {\n")
++        out = metal_push_str(out, "        device const float2* __a = (device const float2*)")
++        out = metal_push_name(out, kernel.params[0].name)
++        out = metal_push_str(out, ";\n        device const float2* __b = (device const float2*)")
++        out = metal_push_name(out, kernel.params[1].name)
++        out = metal_push_str(out, ";\n        device float2* __out = (device float2*)")
++        out = metal_push_name(out, kernel.params[2].name)
++        out = metal_push_str(out, ";\n        float2 __acc = float2(0.0f);\n")
++        out = metal_push_str(out, "        for (uint __j = 0u; __j < 16u; ++__j) {\n")
++        out = metal_push_str(out, "            uint __ai = tid ^ __j;\n")
++        out = metal_push_str(out, "            float2 __av = __a[__ai];\n")
++        out = metal_push_str(out, "            float2 __bv = __b[__j];\n")
++        out = metal_push_str(out, "            float __p = __av.x * __bv.x;\n")
++        out = metal_push_str(out, "            float __e = fma(__av.x, __bv.x, -__p) + __av.x * __bv.y + __av.y * __bv.x;\n")
++        out = metal_push_str(out, "            float __sgn = (float)pireus_xor_sign[tid * 16u + __j];\n")
++        out = metal_push_str(out, "            __p *= __sgn;\n            __e *= __sgn;\n")
++        out = metal_push_str(out, "            float __s = __acc.x + __p;\n            float __bb = __s - __acc.x;\n")
++        out = metal_push_str(out, "            float __err = (__acc.x - (__s - __bb)) + (__p - __bb) + __acc.y + __e;\n")
++        out = metal_push_str(out, "            float __hi = __s + __err;\n")
++        out = metal_push_str(out, "            float __lo = __err - (__hi - __s);\n")
++        out = metal_push_str(out, "            __acc = float2(__hi, __lo);\n")
++        out = metal_push_str(out, "        }\n        __out[tid] = __acc;\n    }\n")
++        return out
++    }
++
+     // Phase 6: Cooperative groups
+     if opc == GpuOpcode::GpuCgTiledPartition {
+         out = metal_push_str(out, "    // cg::tiled_partition: use simd_group in MSL\n")
+@@ -1362,7 +1501,11 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
+
+ pub fn gpu_lower_to_metal(kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+     var buf = metal_buf_new()
++    if !metal_xor_kernel_shape_valid(kernel) {
++        return metal_push_str(buf, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
++    }
+     buf = metal_emit_header(buf)
++    if metal_kernel_has_xor_convolution(kernel) { buf = metal_emit_xor_sign_table(buf) }
+     buf = metal_emit_kernel_signature(buf, kernel)
+     buf = metal_emit_var_decls(buf, kernel)
+     buf = metal_lower_ops(buf, kernel)
+diff --git a/self-hosted/gpu/ptx.sio b/self-hosted/gpu/ptx.sio
+index 2e1c70094a..604e78e8b4 100644
+--- a/self-hosted/gpu/ptx.sio
++++ b/self-hosted/gpu/ptx.sio
+@@ -853,6 +853,15 @@ pub fn ptx_emit_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+     out
+ }
+
++pub fn ptx_emit_dgx_sm121_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
++    var out = buf
++    out = ptx_push_str(out, ".version 9.0\n")
++    out = ptx_push_str(out, ".target sm_121\n")
++    out = ptx_push_str(out, ptx_header_address_size())
++    out = ptx_push_str(out, "\n\n")
++    out
++}
++
+ pub fn ptx_emit_vec_add_signature(
+     buf: PtxBuf,
+     kernel_name: string,
+diff --git a/self-hosted/hlir/builder.sio b/self-hosted/hlir/builder.sio
+index bf6f5731a3..b9b2fe466c 100644
+--- a/self-hosted/hlir/builder.sio
++++ b/self-hosted/hlir/builder.sio
+@@ -243,6 +243,15 @@ pub fn hlir_builder_emit_call_direct(builder: HlirFunctionBuilder, name: HlirNam
+     (b, result)
+ }
+
++pub fn hlir_builder_emit_xor_convolution(builder: HlirFunctionBuilder, name: HlirName, args: [i64; 64], arg_count: i64, ret_ty: HlirType, contract: HlirXorConvolution, candidate: i64) -> (HlirFunctionBuilder, i64) with Mut, Panic {
++    let pair = hlir_builder_fresh_value(builder)
++    var b = pair.0
++    let result = pair.1
++    b.func = hlir_function_register_local(b.func, result, ret_ty)
++    b = hlir_builder_emit(b, hlir_instr_xor_convolution_call_direct(result, name, args, arg_count, ret_ty, contract, candidate))
++    (b, result)
++}
++
+ pub fn hlir_builder_emit_cast(builder: HlirFunctionBuilder, value: i64, source: HlirType, target: HlirType) -> (HlirFunctionBuilder, i64) with Mut, Panic {
+     let pair = hlir_builder_fresh_value(builder)
+     var b = pair.0
+diff --git a/self-hosted/hlir/ir.sio b/self-hosted/hlir/ir.sio
+index eadb036ec8..697ccb6608 100644
+--- a/self-hosted/hlir/ir.sio
++++ b/self-hosted/hlir/ir.sio
+@@ -99,6 +99,44 @@ pub enum CompileStrategy {
+     StrategyProbabilistic,      // with Prob — trace-compatible for MCMC/VI
+ }
+
++// Algebraic lowering contract. Backends may accelerate the XOR selector only
++// when they preserve this twist and leave the reduction order explicit.
++// Cayley-Dickson signs at bits >= 3 are not a group 2-cocycle: octonion and
++// sedenion multiplication are non-associative.
++pub enum HlirXorTwist {
++    HlirTwistCayleyDicksonSign,
++}
++
++pub enum HlirXorCandidate {
++    HlirXorCandidateAuto,
++    HlirXorCandidateWarpShuffle,
++    HlirXorCandidateGlobalLoad,
++    HlirXorCandidateTwoZmmIndexedPermute,
++}
++
++pub struct HlirXorConvolution {
++    pub bits: i64,
++    pub dimension: i64,
++    pub twist: HlirXorTwist,
++}
++
++pub fn hlir_cayley_dickson_xor_convolution(bits: i64) -> HlirXorConvolution {
++    HlirXorConvolution {
++        bits: bits,
++        dimension: 1 << bits,
++        twist: HlirXorTwist::HlirTwistCayleyDicksonSign,
++    }
++}
++
++pub let HLIR_OPERATOR_NONE: i64 = 0
++pub let HLIR_OPERATOR_XOR_CONVOLUTION: i64 = 1
++pub let HLIR_XOR_TWIST_NONE: i64 = 0
++pub let HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
++pub let HLIR_XOR_CANDIDATE_AUTO: i64 = 0
++pub let HLIR_XOR_CANDIDATE_WARP_SHUFFLE: i64 = 1
++pub let HLIR_XOR_CANDIDATE_GLOBAL_LOAD: i64 = 2
++pub let HLIR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 3
++
+ // ============================================================================
+ // HLIR Type System
+ // ============================================================================
+@@ -896,6 +934,10 @@ pub struct HlirInstr {
+     pub call_name: HlirName,      // function name (for CallDirect)
+     pub call_args: [i64; 64],     // ValueId array
+     pub call_arg_count: i64,
++    pub operator_kind: i64,
++    pub xor_bits: i64,
++    pub xor_twist: i64,
++    pub xor_candidate: i64,
+
+     // For GetFieldPtr, ExtractValue, InsertValue
+     pub base: i64,                // ValueId
+@@ -981,6 +1023,10 @@ pub fn hlir_instr_new(op: i64) -> HlirInstr {
+         call_name: hlir_empty_name(),
+         call_args: [HLIR_INVALID_VALUE; 64],
+         call_arg_count: 0,
++        operator_kind: HLIR_OPERATOR_NONE,
++        xor_bits: 0,
++        xor_twist: HLIR_XOR_TWIST_NONE,
++        xor_candidate: HLIR_XOR_CANDIDATE_AUTO,
+         base: HLIR_INVALID_VALUE,
+         field_index: -1,
+         index: HLIR_INVALID_VALUE,
+@@ -1504,6 +1550,15 @@ pub fn hlir_instr_call_direct(result: i64, name: HlirName, args: [i64; 64], arg_
+     instr
+ }
+
++pub fn hlir_instr_xor_convolution_call_direct(result: i64, name: HlirName, args: [i64; 64], arg_count: i64, ty: HlirType, contract: HlirXorConvolution, candidate: i64) -> HlirInstr {
++    var instr = hlir_instr_call_direct(result, name, args, arg_count, ty)
++    instr.operator_kind = HLIR_OPERATOR_XOR_CONVOLUTION
++    instr.xor_bits = contract.bits
++    instr.xor_twist = HLIR_XOR_TWIST_CAYLEY_DICKSON_SIGN
++    instr.xor_candidate = candidate
++    instr
++}
++
+ pub fn hlir_instr_cast(result: i64, value: i64, source: HlirType, target: HlirType) -> HlirInstr {
+     var instr = hlir_instr_new(HLIR_OP_CAST)
+     instr.result = result
+diff --git a/self-hosted/hlir/lower.sio b/self-hosted/hlir/lower.sio
+index 1cf1d60192..1704b8c152 100644
+--- a/self-hosted/hlir/lower.sio
++++ b/self-hosted/hlir/lower.sio
+@@ -109,7 +109,22 @@ pub struct HlirLowerState {
+     oct_keys: [i64; 128],
+     oct_comps: [i64; 2048],
+     oct_dims: [i64; 128],
++    // Pointer provenance and deferred algebraic operator operands. A loaded
++    // Hyper value keeps its source pointer; a Sedenion product keeps the two
++    // source pointers until the destination store makes the three-pointer ABI
++    // explicit. This prevents the frontend from erasing the operator into 256
++    // scalar products before target selection.
++    oct_ptrs: [i64; 128],
++    oct_xor_lhs_ptrs: [i64; 128],
++    oct_xor_rhs_ptrs: [i64; 128],
+     oct_count: i64,
++    // Checker-owned semantic identity, reduced to the fields HLIR needs. The
++    // source span is stable across the post-check AST reload in the GPU path.
++    hyper_span_starts: [i64; 128],
++    hyper_span_ends: [i64; 128],
++    hyper_algebra_tags: [i64; 128],
++    hyper_op_kinds: [i64; 128],
++    hyper_expr_count: i64,
+ }
+
+ struct HlirExprListResult {
+@@ -140,10 +155,48 @@ pub fn hlir_lower_state_new() -> HlirLowerState with Div, Mut, Panic {
+         oct_keys: [0 - 1; 128],
+         oct_comps: [0; 2048],
+         oct_dims: [0; 128],
++        oct_ptrs: [HLIR_INVALID_VALUE; 128],
++        oct_xor_lhs_ptrs: [HLIR_INVALID_VALUE; 128],
++        oct_xor_rhs_ptrs: [HLIR_INVALID_VALUE; 128],
+         oct_count: 0,
++        hyper_span_starts: [0; 128],
++        hyper_span_ends: [0; 128],
++        hyper_algebra_tags: [0 - 1; 128],
++        hyper_op_kinds: [0; 128],
++        hyper_expr_count: 0,
+     }
+ }
+
++fn hlir_install_hyper_metadata(state: HlirLowerState, epistemic: &IrEpistemicSection) -> HlirLowerState with Mut, Panic {
++    var s = state
++    var count = epistemic.hyper_expr_count
++    if count > 128 { count = 128 }
++    var i: i64 = 0
++    while i < count {
++        let info = epistemic.hyper_exprs[i as usize]
++        s.hyper_span_starts[i as usize] = info.span_start
++        s.hyper_span_ends[i as usize] = info.span_end
++        s.hyper_algebra_tags[i as usize] = info.algebra_tag
++        s.hyper_op_kinds[i as usize] = info.op_kind
++        i = i + 1
++    }
++    s.hyper_expr_count = count
++    s
++}
++
++fn hlir_checked_hyper_mul_algebra(state: HlirLowerState, span: Span) -> i64 {
++    var i: i64 = 0
++    while i < state.hyper_expr_count {
++        if state.hyper_span_starts[i as usize] == span.start
++            && state.hyper_span_ends[i as usize] == span.end
++            && state.hyper_op_kinds[i as usize] == 1 {
++            return state.hyper_algebra_tags[i as usize]
++        }
++        i = i + 1
++    }
++    0 - 1
++}
++
+ // --- Octonion value model helpers (GPU first-class `a * h`) ---
+
+ // cd_sigma sign for octonion basis product e_i·e_j = σ(i,j)·e_{i⊕j} (bits=3, Convention X).
+@@ -186,6 +239,39 @@ fn hlir_oct_record(state: HlirLowerState, comps: [i64; 16], dim: i64) -> (HlirLo
+     (s, repr)
+ }
+
++fn hlir_oct_find(state: HlirLowerState, repr: i64) -> i64 {
++    var k: i64 = 0
++    while k < state.oct_count {
++        if state.oct_keys[k as usize] == repr { return k }
++        k = k + 1
++    }
++    0 - 1
++}
++
++fn hlir_oct_record_pointer(state: HlirLowerState, repr: i64, ptr: i64) -> HlirLowerState {
++    var s = state
++    let k = hlir_oct_find(s, repr)
++    if k >= 0 { s.oct_ptrs[k as usize] = ptr }
++    s
++}
++
++fn hlir_oct_pointer(state: HlirLowerState, repr: i64) -> i64 {
++    let k = hlir_oct_find(state, repr)
++    if k < 0 { return HLIR_INVALID_VALUE }
++    state.oct_ptrs[k as usize]
++}
++
++fn hlir_oct_record_deferred_xor(state: HlirLowerState, lhs_ptr: i64, rhs_ptr: i64) -> (HlirLowerState, i64) with Mut, Panic {
++    let recorded = hlir_oct_record(state, [HLIR_INVALID_VALUE; 16], 16)
++    var s = recorded.0
++    let k = hlir_oct_find(s, recorded.1)
++    if k >= 0 {
++        s.oct_xor_lhs_ptrs[k as usize] = lhs_ptr
++        s.oct_xor_rhs_ptrs[k as usize] = rhs_ptr
++    }
++    (s, recorded.1)
++}
++
+ // Is value_id a recorded hypercomplex repr?
+ fn hlir_oct_is(state: HlirLowerState, value_id: i64) -> bool {
+     var k: i64 = 0
+@@ -239,28 +325,38 @@ fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerSta
+         comps[c as usize] = load_pair.1
+         c = c + 1
+     }
+-    hlir_oct_record(s, comps, dim)
++    let recorded = hlir_oct_record(s, comps, dim)
++    (hlir_oct_record_pointer(recorded.0, recorded.1, ptr_val), recorded.1)
+ }
+
+-// Cayley-Dickson multiply: r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over `dim` components
+-// (dim=8/bits=3 octonion, dim=16/bits=4 sedenion). Returns a fresh repr.
+-fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
++// Twisted XOR convolution for the Cayley-Dickson sign function:
++// r[d] = sum_i sigma(i, i^d, bits) * a[i] * b[i^d].
++// Fixing d makes every selected pair land in one result lane. The explicit
++// reduction order remains authoritative; target selectors may accelerate only
++// b[i^d] until a reduction proof is available.
++fn hlir_xor_convolution(state: HlirLowerState, a_repr: i64, b_repr: i64, contract: HlirXorConvolution) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+     var s = state
++    let dim = contract.dimension
++    let bits = contract.bits
++    if bits == 4 && dim == 16 {
++        let lhs_ptr = hlir_oct_pointer(s, a_repr)
++        let rhs_ptr = hlir_oct_pointer(s, b_repr)
++        if lhs_ptr == HLIR_INVALID_VALUE || rhs_ptr == HLIR_INVALID_VALUE {
++            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
++        }
++        return hlir_oct_record_deferred_xor(s, lhs_ptr, rhs_ptr)
++    }
+     let a = hlir_oct_lookup(s, a_repr)
+     let b = hlir_oct_lookup(s, b_repr)
+     var r: [i64; 16] = [0 - 1; 16]
+-    var z: i64 = 0
+-    while z < dim {
++    var d: i64 = 0
++    while d < dim {
+         let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
+         s = zp.0
+-        r[z as usize] = zp.1
+-        z = z + 1
+-    }
+-    var i: i64 = 0
+-    while i < dim {
+-        var j: i64 = 0
+-        while j < dim {
+-            let m = i ^ j
++        var sum = zp.1
++        var i: i64 = 0
++        while i < dim {
++            let j = i ^ d
+             let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
+             s = mulp.0
+             var t = mulp.1
+@@ -271,12 +367,13 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits:
+                 s = negp.0
+                 t = negp.1
+             }
+-            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, r[m as usize], t, hlir_type_f64())
++            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, sum, t, hlir_type_f64())
+             s = addp.0
+-            r[m as usize] = addp.1
+-            j = j + 1
++            sum = addp.1
++            i = i + 1
+         }
+-        i = i + 1
++        r[d as usize] = sum
++        d = d + 1
+     }
+     hlir_oct_record(s, r, dim)
+ }
+@@ -284,6 +381,17 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits:
+ // Store a repr's `dim` components through a hypercomplex pointer value.
+ fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+     var s = state
++    let repr_idx = hlir_oct_find(s, repr)
++    if repr_idx >= 0 && s.oct_xor_lhs_ptrs[repr_idx as usize] != HLIR_INVALID_VALUE {
++        var args: [i64; 64] = [HLIR_INVALID_VALUE; 64]
++        args[0] = s.oct_xor_lhs_ptrs[repr_idx as usize]
++        args[1] = s.oct_xor_rhs_ptrs[repr_idx as usize]
++        args[2] = ptr_val
++        let lowered = hlir_lower_xor_convolution_call(
++            s, hlir_empty_name(), args, 3, hlir_type_void(),
++            hlir_cayley_dickson_xor_convolution(4), HLIR_XOR_CANDIDATE_AUTO)
++        return lowered.0
++    }
+     let comps = hlir_oct_lookup(s, repr)
+     let dim = hlir_oct_dim(s, repr)
+     var c: i64 = 0
+@@ -562,6 +670,13 @@ pub fn hlir_lower_call_named(state: HlirLowerState, callee: HlirName, arg_vals:
+     (s, result)
+ }
+
++pub fn hlir_lower_xor_convolution_call(state: HlirLowerState, callee: HlirName, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType, contract: HlirXorConvolution, candidate: i64) -> (HlirLowerState, i64) with Mut, Panic {
++    var s = state
++    let pair = hlir_builder_emit_xor_convolution(s.builder, callee, arg_vals, arg_count, ret_ty, contract, candidate)
++    s.builder = pair.0
++    (s, pair.1)
++}
++
+ // ============================================================================
+ // Expression lowering — Cast
+ // ============================================================================
+@@ -2024,8 +2139,19 @@ pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc
+             match ty.type_args {
+                 Some(args) => {
+                     let alg_name = hlir_ast_path_head_to_string((*args).head.path)
+-                    if alg_name == "Octonion" { return hlir_type_octonion() }
+-                    if alg_name == "Sedenion" { return hlir_type_sedenion() }
++                    // The only material contract currently defined is f64.
++                    // Keep every other scalar type out of these f64-only HLIR
++                    // kinds until it has its own opcode and backend ABI.
++                    match (*args).tail {
++                        Some(scalar_args) => {
++                            let scalar_name = hlir_ast_path_head_to_string((*scalar_args).head.path)
++                            if scalar_name == "f64" {
++                                if alg_name == "Octonion" { return hlir_type_octonion() }
++                                if alg_name == "Sedenion" { return hlir_type_sedenion() }
++                            }
++                        }
++                        None => {}
++                    }
+                 }
+                 None => {}
+             }
+@@ -2460,10 +2586,26 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
+         // First-class hypercomplex multiply: both operands are recorded reprs → expand
+         // r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over the components (Convention X / cd_sigma).
+         // dim/bits come from the operands: octonion (8,3) or sedenion (16,4).
+-        if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
+-            let dim = hlir_oct_dim(s, lhs_val)
+-            let bits = if dim == 16 { 4 } else { 3 }
+-            return hlir_oct_mul(s, lhs_val, rhs_val, dim, bits)
++        let checked_algebra = hlir_checked_hyper_mul_algebra(s, expr.span)
++        // An unbound aggregate multiply must never become a scalar multiply.
++        if expr.bin_op == BinaryOp::OpMul && checked_algebra < 0
++            && (hlir_oct_is(s, lhs_val) || hlir_oct_is(s, rhs_val)) {
++            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
++        }
++        if expr.bin_op == BinaryOp::OpMul
++            && checked_algebra >= 0
++            && hlir_oct_is(s, lhs_val)
++            && hlir_oct_is(s, rhs_val) {
++            let lhs_dim = hlir_oct_dim(s, lhs_val)
++            let rhs_dim = hlir_oct_dim(s, rhs_val)
++            let bits = if checked_algebra == 4 && lhs_dim == 16 && rhs_dim == 16 { 4 }
++                else if checked_algebra == 3 && lhs_dim == 8 && rhs_dim == 8 { 3 }
++                else { 0 }
++            if bits == 0 {
++                return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
++            }
++            let contract = hlir_cayley_dickson_xor_convolution(bits)
++            return hlir_xor_convolution(s, lhs_val, rhs_val, contract)
+         }
+         let lhs_ty = hlir_lower_value_type(s, lhs_val)
+         let rhs_ty = hlir_lower_value_type(s, rhs_val)
+@@ -2804,6 +2946,18 @@ pub fn hlir_lower_module(ast_module: Program) -> HlirModule with Mut, Panic, Div
+     hlir_lower_finish_module(s)
+ }
+
++pub fn hlir_lower_module_with_epistemic(ast_module: Program, epistemic: &IrEpistemicSection) -> HlirModule with Mut, Panic, Div, Alloc {
++    var s = hlir_install_hyper_metadata(hlir_lower_state_new(), epistemic)
++    let mod_name = hlir_ast_path_head_to_string(ast_module.module_path)
++    if str_len(mod_name) > 0 {
++        s = hlir_lower_set_module_name(s, mod_name)
++    } else {
++        s = hlir_lower_set_module_name(s, "module")
++    }
++    s = hlir_lower_items(s, ast_module.items)
++    hlir_lower_finish_module(s)
++}
++
+ // ============================================================================
+ // End of hlir/lower.sio
+ // ============================================================================
+diff --git a/self-hosted/hlir/mod.sio b/self-hosted/hlir/mod.sio
+index 7eb10bbf15..cad62be1f1 100644
+--- a/self-hosted/hlir/mod.sio
++++ b/self-hosted/hlir/mod.sio
+@@ -30,3 +30,4 @@ pub use ir::*
+ pub use builder::*
+ pub use lower::*
+ pub use opt_strategy::*
++pub use native_bridge::*
+diff --git a/self-hosted/ir/ir.sio b/self-hosted/ir/ir.sio
+index 13ebe767e0..1226be82d4 100644
+--- a/self-hosted/ir/ir.sio
++++ b/self-hosted/ir/ir.sio
+@@ -81,6 +81,9 @@ let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
+ let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
+ let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
+ pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
++pub let IR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
++pub let IR_XOR_CANDIDATE_AUTO: i64 = 0
++pub let IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 1
+
+ pub enum IrOpcode {
+     IrLoadImm,
+@@ -671,6 +674,9 @@ pub enum IrOpcode {
+     IrStoreGlobal,
+     // Store through a raw pointer: [src1] = src2  (used for `*p = val` on a true reference).
+     IrStorePtr,
++    // Typed bits=4 Cayley-Dickson sign-twisted XOR convolution.
++    // Appended to preserve every existing opcode discriminant.
++    IrXorConvolutionS,
+ }
+
+ pub struct IrRegList {
+@@ -4845,6 +4851,81 @@ fn ir_hyper_mul_s(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
+     }
+ }
+
++// XorConvolution(bits=4, twist=CayleyDicksonSign), Xeon two-ZMM candidate.
++// label_id packs xor_ctrl_base in bits 0..4 and broadcast_ctrl_base in 5..9.
++// field_idx is the GPR holding the address of the frozen 16x2 sign-vector table.
++pub fn ir_xor_convolution_s(dst: i64, lhs: i64, rhs: i64, xor_ctrl_base: i64, broadcast_ctrl_base: i64, sign_table_gpr: i64) -> IrInstr {
++    let base = ir_instr_new(IrOpcode::IrXorConvolutionS)
++    IrInstr {
++        op: base.op,
++        dst: dst,
++        src1: lhs,
++        src2: rhs,
++        imm_i64: 4,
++        imm_f64: base.imm_f64,
++        label_id: (xor_ctrl_base & 31) | ((broadcast_ctrl_base & 31) << 5),
++        fn_id: base.fn_id,
++        field_idx: sign_table_gpr,
++        imm_flags: IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
++            | (IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE << 8),
++        bin_op: base.bin_op,
++        un_op: base.un_op,
++        name_id: base.name_id,
++        call_args: base.call_args,
++        arg_count: base.arg_count,
++    }
++}
++
++// Semantic form produced by AST lowering. Its operands are ordinary IR vregs,
++// not physical ZMM/GPR numbers. Native target selection must materialize this
++// form before emission; candidate=AUTO is deliberately rejected by the raw
++// physical encoder so an absent materialization cannot silently miscompile.
++pub fn ir_xor_convolution_s_virtual(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
++    let base = ir_instr_new(IrOpcode::IrXorConvolutionS)
++    IrInstr {
++        op: base.op,
++        dst: dst,
++        src1: lhs,
++        src2: rhs,
++        imm_i64: 4,
++        imm_f64: base.imm_f64,
++        label_id: 0,
++        fn_id: base.fn_id,
++        field_idx: base.field_idx,
++        imm_flags: IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
++            | (IR_XOR_CANDIDATE_AUTO << 8),
++        bin_op: base.bin_op,
++        un_op: base.un_op,
++        name_id: base.name_id,
++        call_args: base.call_args,
++        arg_count: base.arg_count,
++    }
++}
++
++// Materialized native-v2 form whose three operands are vregs containing
++// dst/lhs/rhs pointers. label_id=1 is an explicit ABI discriminator: the
++// generic virtual form above must never be interpreted as raw pointers.
++pub fn ir_xor_convolution_s_virtual_ptr3(dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) -> IrInstr {
++    let out = ir_xor_convolution_s_virtual(dst_ptr, lhs_ptr, rhs_ptr)
++    IrInstr {
++        op: out.op,
++        dst: out.dst,
++        src1: out.src1,
++        src2: out.src2,
++        imm_i64: out.imm_i64,
++        imm_f64: out.imm_f64,
++        label_id: 1,
++        fn_id: out.fn_id,
++        field_idx: out.field_idx,
++        imm_flags: out.imm_flags,
++        bin_op: out.bin_op,
++        un_op: out.un_op,
++        name_id: out.name_id,
++        call_args: out.call_args,
++        arg_count: out.arg_count,
++    }
++}
++
+ pub fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
+     let base = ir_instr_new(IrOpcode::IrUnaryOp)
+     IrInstr {
+diff --git a/self-hosted/ir/lower.sio b/self-hosted/ir/lower.sio
+index 04ae33c9a1..3bcaa25f85 100644
+--- a/self-hosted/ir/lower.sio
++++ b/self-hosted/ir/lower.sio
+@@ -16920,6 +16920,61 @@ impl Lowerer {
+     }
+
+     fn lower_assign_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
++        // Preserve a typed wide product as one pointer-level semantic operation.
++        // Lowering either dereference first would retain only the first 64-bit
++        // component in Core IR and make native materialization impossible.
++        if s.assign_op == AssignOp::AssignEq {
++            match s.target {
++                Some(target_expr_xor) => match s.expr {
++                    Some(rhs_expr_xor) => {
++                        if (*target_expr_xor).kind == ExprKind::ExprUnary
++                            && (*target_expr_xor).un_op == UnaryOp::OpDeref
++                            && (*rhs_expr_xor).kind == ExprKind::ExprBinary
++                            && (*rhs_expr_xor).bin_op == BinaryOp::OpMul {
++                            let hyper_expr_id = lowerer_find_hyper_expr_id_for_span_ref(&self, (*rhs_expr_xor).span)
++                            if hyper_expr_id >= 0 && hyper_expr_id < (*self.module).epistemic.hyper_expr_count {
++                                let info = (*self.module).epistemic.hyper_exprs[hyper_expr_id as usize]
++                                match (*target_expr_xor).left {
++                                    Some(dst_ptr_expr) => match (*rhs_expr_xor).left {
++                                        Some(lhs_deref_expr) => match (*rhs_expr_xor).right {
++                                            Some(rhs_deref_expr) => {
++                                                if info.op_kind == 1 && info.algebra_tag == 4
++                                                    && (*lhs_deref_expr).kind == ExprKind::ExprUnary
++                                                    && (*lhs_deref_expr).un_op == UnaryOp::OpDeref
++                                                    && (*rhs_deref_expr).kind == ExprKind::ExprUnary
++                                                    && (*rhs_deref_expr).un_op == UnaryOp::OpDeref {
++                                                    match (*lhs_deref_expr).left {
++                                                        Some(lhs_ptr_expr) => match (*rhs_deref_expr).left {
++                                                            Some(rhs_ptr_expr) => {
++                                                                let dst_pair = self.lower_expr_ref(&(*dst_ptr_expr))
++                                                                let lhs_pair = dst_pair.0.lower_expr_ref(&(*lhs_ptr_expr))
++                                                                let rhs_pair = lhs_pair.0.lower_expr_ref(&(*rhs_ptr_expr))
++                                                                let lo_xor = rhs_pair.0.emit(ir_xor_convolution_s_virtual_ptr3(dst_pair.1, lhs_pair.1, rhs_pair.1))
++                                                                if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
++                                                                    print("PIREUS_IR_EMIT opcode=IrXorConvolutionS bits=4 twist=CayleyDicksonSign candidate=auto abi=ptr3\n")
++                                                                }
++                                                                return (lo_xor, dst_pair.1)
++                                                            }
++                                                            _ => {}
++                                                        }
++                                                        _ => {}
++                                                    }
++                                                }
++                                            }
++                                            _ => {}
++                                        }
++                                        _ => {}
++                                    }
++                                    _ => {}
++                                }
++                            }
++                        }
++                    }
++                    _ => {}
++                }
++                _ => {}
++            }
++        }
+         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
+         var lo = pair_rhs.0
+         var rhs = pair_rhs.1
+@@ -19790,6 +19845,13 @@ impl Lowerer {
+                     let lo4_h = lo3.emit(ir_hyper_mul_o(dst, lhs, rhs))
+                     return (lo4_h, dst)
+                 }
++                if info.op_kind == 1 && info.algebra_tag == 4 {
++                    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
++                        print("PIREUS_IR_EMIT opcode=IrXorConvolutionS bits=4 twist=CayleyDicksonSign candidate=auto\n")
++                    }
++                    let lo4_h = lo3.emit(ir_xor_convolution_s_virtual(dst, lhs, rhs))
++                    return (lo4_h, dst)
++                }
+             }
+         }
+         if wide_bits > 64 {
+diff --git a/self-hosted/native/codegen_x86_linux.sio b/self-hosted/native/codegen_x86_linux.sio
+index 7f9f68bbb4..ef5b3f1637 100644
+--- a/self-hosted/native/codegen_x86_linux.sio
++++ b/self-hosted/native/codegen_x86_linux.sio
+@@ -7,14 +7,14 @@
+ module native::codegen_x86_linux
+
+ use parser::ast::{Name}
+-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
++use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+ use native::encode::*
+ use native::elf::*
+ use native::aarch64::*
+ use native::macho::*
+ use native::reloc::*
+ use native::frame::*
+-use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code}
++use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s}
+ use native::machine_ir::*
+ use native::peephole::{ph_run_on_func}
+ use native::regalloc::*
+@@ -8851,6 +8851,120 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
+     }
+ }
+
++fn pireus_native_cd_sign(a: i64, b: i64, bits: i64) -> i64 {
++    if a == 0 || b == 0 { return 1 }
++    if bits <= 1 { return 0 - 1 }
++    let half = 1 << (bits - 1)
++    let ah = if a >= half { 1 } else { 0 }
++    let bh = if b >= half { 1 } else { 0 }
++    let al = a & (half - 1)
++    let bl = b & (half - 1)
++    if ah == 0 && bh == 0 { return pireus_native_cd_sign(al, bl, bits - 1) }
++    if ah == 0 && bh == 1 { return pireus_native_cd_sign(bl, al, bits - 1) }
++    if ah == 1 && bh == 0 {
++        if bl == 0 { return pireus_native_cd_sign(al, 0, bits - 1) }
++        return 0 - pireus_native_cd_sign(al, bl, bits - 1)
++    }
++    if bl == 0 { return 0 - pireus_native_cd_sign(0, al, bits - 1) }
++    pireus_native_cd_sign(bl, al, bits - 1)
++}
++
++fn pireus_native_rodata_align64(nc: &! NativeCompiler) with Mut, Panic, Div {
++    while ((*nc).flat_rodata_len & 63) != 0 {
++        native_v2_rodata_append_byte_into(nc, 0)
++    }
++}
++
++fn pireus_native_rodata_append_i64(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
++    var byte: i64 = 0
++    while byte < 8 {
++        native_v2_rodata_append_byte_into(nc, (value >> (byte * 8)) & 255)
++        byte = byte + 1
++    }
++}
++
++// Materialize semantic ptr3 XorConvolution<4,CayleyDicksonSign> at the final
++// x86 boundary. The ZMM layout is the frozen Pireus Xeon candidate validated by
++// emit_xor_convolution_s; virtual Core-IR registers never masquerade as ZMM ids.
++fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
++    pireus_native_rodata_align64(nc)
++    let xor_offset = (*nc).flat_rodata_len
++    var lane: i64 = 0
++    while lane < 8 {
++        var d: i64 = 0
++        while d < 8 {
++            pireus_native_rodata_append_i64(nc, lane ^ d)
++            d = d + 1
++        }
++        lane = lane + 1
++    }
++    let broadcast_offset = (*nc).flat_rodata_len
++    lane = 0
++    while lane < 8 {
++        var q: i64 = 0
++        while q < 8 {
++            pireus_native_rodata_append_i64(nc, lane)
++            q = q + 1
++        }
++        lane = lane + 1
++    }
++    let sign_offset = (*nc).flat_rodata_len
++    var i: i64 = 0
++    while i < 16 {
++        var out: i64 = 0
++        while out < 16 {
++            let sign_bits = if pireus_native_cd_sign(i, i ^ out, 4) < 0 {
++                0 - 9223372036854775807 - 1
++            } else {
++                0
++            }
++            pireus_native_rodata_append_i64(nc, sign_bits)
++            out = out + 1
++        }
++        i = i + 1
++    }
++
++    // SysV pointer registers stay live through the EVEX-only kernel.
++    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
++    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
++    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 6, 0, 7, 0, 2)
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 7, 0, 7, 64, 2)
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 8, 0, 6, 0, 2)
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 9, 0, 6, 64, 2)
++
++    let xor_lea = (*nc).code.len
++    nc_emit_lea_rax_rip_disp32(nc, 0)
++    nc_add_rodata_reloc(nc, xor_lea + 3, xor_offset)
++    lane = 0
++    while lane < 8 {
++        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 10 + lane, 0, 0, lane * 64, 2)
++        lane = lane + 1
++    }
++    let broadcast_lea = (*nc).code.len
++    nc_emit_lea_rax_rip_disp32(nc, 0)
++    nc_add_rodata_reloc(nc, broadcast_lea + 3, broadcast_offset)
++    lane = 0
++    while lane < 8 {
++        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 18 + lane, 0, 0, lane * 64, 2)
++        lane = lane + 1
++    }
++    let sign_lea = (*nc).code.len
++    nc_emit_lea_rax_rip_disp32(nc, 0)
++    nc_add_rodata_reloc(nc, sign_lea + 3, sign_offset)
++
++    let physical = ir_xor_convolution_s(0, 6, 8, 10, 18, 0)
++    (*nc).code = emit_xor_convolution_s((*nc).code, physical)
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 0, 0, 2, 0, 2)
++    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 1, 0, 2, 64, 2)
++    nc_emit_byte(nc, 0xc5)
++    nc_emit_byte(nc, 0xf8)
++    nc_emit_byte(nc, 0x77)
++    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
++        print("PIREUS_NATIVE_EMIT opcode=IrXorConvolutionS candidate=two_zmm_indexed_permute kernel_bytes=1004 abi=ptr3\n")
++    }
++}
++
+ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+     nc_refresh_wide_mul_sabotage()
+     nc_v2_reset_label_state()
+@@ -9231,6 +9345,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
+             } else {
+                 return false
+             }
++        } else if instr_op == IrOpcode::IrXorConvolutionS {
++            let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
++            let twist = flags & 255
++            let candidate = (flags >> 8) & 255
++            if IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize] != 4
++                || twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
++                || candidate != IR_XOR_CANDIDATE_AUTO
++                || IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] != 1 {
++                return false
++            }
++            pireus_native_emit_xor_convolution_s_ptr3(
++                nc,
++                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
++                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
++                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
++            )
+         } else if instr_op == IrOpcode::IrStorePtr {
+             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
+             nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
+diff --git a/self-hosted/native/encode.sio b/self-hosted/native/encode.sio
+index 7e993b336f..fdb43510ae 100644
+--- a/self-hosted/native/encode.sio
++++ b/self-hosted/native/encode.sio
+@@ -73,6 +73,14 @@ pub fn code_buffer_new() -> CodeBuffer {
+     out
+ }
+
++// Read materialized Linux native-v2 code without exposing the vestigial
++// CodeBuffer.bytes stub to byte-level backend gates.
++pub fn code_buffer_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
++    if idx < 0 || idx >= buf.len || idx >= nc_code_capacity_bytes() { return -1 }
++    let x = NC_BIG_CODE[idx as usize] as i64
++    if x < 0 { x + 256 } else { x }
++}
++
+ pub fn low8(x: i64) -> i64 with Mut, Panic, Div {
+     var n = x % 256
+     if n < 0 { n = n + 256 }
+diff --git a/self-hosted/native/lower_ir.sio b/self-hosted/native/lower_ir.sio
+index f4d309d864..1e646f7feb 100644
+--- a/self-hosted/native/lower_ir.sio
++++ b/self-hosted/native/lower_ir.sio
+@@ -3,7 +3,8 @@
+ module native::lower_ir
+
+ use parser::ast::{BinaryOp, UnaryOp}
+-use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX}
++use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX,
++    IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE}
+ use ir::algebra::*
+ use native::regalloc::*
+ use native::encode::*
+@@ -233,6 +234,8 @@ pub fn lower_instr(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div,
+         lower_hyper_norm_sq_o(nc, instr)
+     } else if instr.op == IrOpcode::IrHyperMulS {
+         lower_hyper_mul_s(nc, instr)
++    } else if instr.op == IrOpcode::IrXorConvolutionS {
++        lower_xor_convolution_s(nc, instr)
+     } else if instr.op == IrOpcode::IrAssociator {
+         lower_associator(nc, instr)
+     } else if instr.op == IrOpcode::IrAssociatorVariance {
+@@ -1235,6 +1238,23 @@ pub fn emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, sr
+     b
+ }
+
++// EVEX packed-f64 load with an explicit disp32. The sign table uses ordinary
++// GPR base addressing; RSP/R12 require a SIB byte. Keeping disp32 fixed makes
++// the material byte count independent of EVEX compressed-displacement rules.
++pub fn emit_evex_pd_rm_disp32(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, vvvv: i64, base_gpr: i64, disp: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
++    var b = buf
++    b = emit_byte(b, 0x62)
++    b = emit_byte(b, evex_p1(dst, base_gpr, map))
++    b = emit_byte(b, evex_p2_pd(vvvv))
++    b = emit_byte(b, evex_p3_vl(vvvv, vl_code))
++    b = emit_byte(b, opcode)
++    let base_lo = evex_lo3(base_gpr)
++    b = emit_byte(b, 0x80 | (evex_lo3(dst) << 3) | base_lo)
++    if base_lo == 4 { b = emit_byte(b, 0x24) }
++    b = emit_u32_le(b, disp)
++    b
++}
++
+ // VBROADCASTSD ZMM,XMM — EVEX.512.66.0F38.W1 19 /r
+ // Broadcasts the low f64 of src (ZMM lane 0) to all lanes of dst.
+ // vvvv = 1111 (unused): src1=0 in evex_p2_pd gives vvvv_inv=0xF → vvvv=1111.
+@@ -1838,6 +1858,96 @@ pub fn lower_hyper_mul_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic,
+     (*nc) = c
+ }
+
++fn pireus_zmm_ranges_overlap(a: i64, a_count: i64, b: i64, b_count: i64) -> bool {
++    a < b + b_count && b < a + a_count
++}
++
++pub fn pireus_xor_zmm_plan_error(instr: IrInstr) -> i64 {
++    let xor_ctrl_base = instr.label_id & 31
++    let bcast_base = (instr.label_id >> 5) & 31
++    let twist = instr.imm_flags & 255
++    let candidate = (instr.imm_flags >> 8) & 255
++    if instr.imm_i64 != 4 { return 1 }
++    if twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN { return 2 }
++    if candidate != IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE { return 3 }
++    if instr.dst < 0 || instr.dst + 5 > 31 { return 4 }
++    if instr.src1 < 0 || instr.src1 + 1 > 31 { return 5 }
++    if instr.src2 < 0 || instr.src2 + 1 > 31 { return 6 }
++    if xor_ctrl_base < 0 || xor_ctrl_base + 7 > 31 { return 7 }
++    if bcast_base < 0 || bcast_base + 7 > 31 { return 8 }
++    if instr.field_idx < 0 || instr.field_idx > 15 { return 9 }
++    if pireus_zmm_ranges_overlap(instr.dst, 6, instr.src1, 2) { return 10 }
++    if pireus_zmm_ranges_overlap(instr.dst, 6, instr.src2, 2) { return 11 }
++    if pireus_zmm_ranges_overlap(instr.src1, 2, instr.src2, 2) { return 12 }
++    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, bcast_base, 8) { return 13 }
++    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.dst, 6) { return 14 }
++    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.src1, 2) { return 15 }
++    if pireus_zmm_ranges_overlap(xor_ctrl_base, 8, instr.src2, 2) { return 16 }
++    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.dst, 6) { return 17 }
++    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.src1, 2) { return 18 }
++    if pireus_zmm_ranges_overlap(bcast_base, 8, instr.src2, 2) { return 19 }
++    0
++}
++
++fn pireus_xor_zmm_plan_valid(instr: IrInstr) -> bool {
++    pireus_xor_zmm_plan_error(instr) == 0
++}
++
++// IrXorConvolutionS: compute all sixteen destination displacements in parallel.
++//
++// Constants:
++//   xor_ctrl_base+[0..7]   = [i xor 0, ..., i xor 7] for each i low bits
++//   bcast_base+[0..7]      = [i, i, ..., i]
++//   [sign_table_gpr+i*128] = two ZMM sign-bit vectors frozen by
++//                            xeon_avx512_xor_plan.sio
++//
++// Per i: 3 VPERMPD + 2 VMOVUPD + 2 VXORPD + 2 VFMADD231PD = 9 instructions.
++// Two initial VXORPD instructions zero the result: 146 instructions total.
++pub fn emit_xor_convolution_s(buf: CodeBuffer, instr: IrInstr) -> CodeBuffer with Mut, Panic, Div {
++    var code = buf
++    if !pireus_xor_zmm_plan_valid(instr) {
++        return emit_ud2(code)
++    }
++    let vl = 2
++    let dst_lo = instr.dst
++    let dst_hi = instr.dst + 1
++    let a_bcast = instr.dst + 2
++    let b_lo = instr.dst + 3
++    let b_hi = instr.dst + 4
++    let sign = instr.dst + 5
++    let xor_ctrl_base = instr.label_id & 31
++    let bcast_base = (instr.label_id >> 5) & 31
++    let sign_table_gpr = instr.field_idx
++
++    code = emit_evex_pd_rr_full(code, 1, 0x57, dst_lo, dst_lo, dst_lo, vl, 0, 0)
++    code = emit_evex_pd_rr_full(code, 1, 0x57, dst_hi, dst_hi, dst_hi, vl, 0, 0)
++    var i: i64 = 0
++    while i < 16 {
++        let lane = i & 7
++        let half = (i >> 3) & 1
++        let a_src = instr.src1 + half
++        let b_lo_src = instr.src2 + half
++        let b_hi_src = instr.src2 + (1 ^ half)
++        code = emit_evex_pd_rr_full(code, 2, 0x16, a_bcast, bcast_base + lane, a_src, vl, 0, 0)
++        code = emit_evex_pd_rr_full(code, 2, 0x16, b_lo, xor_ctrl_base + lane, b_lo_src, vl, 0, 0)
++        code = emit_evex_pd_rr_full(code, 2, 0x16, b_hi, xor_ctrl_base + lane, b_hi_src, vl, 0, 0)
++        code = emit_evex_pd_rm_disp32(code, 1, 0x10, sign, 0, sign_table_gpr, i * 128, vl)
++        code = emit_evex_pd_rr_full(code, 1, 0x57, b_lo, b_lo, sign, vl, 0, 0)
++        code = emit_evex_pd_rm_disp32(code, 1, 0x10, sign, 0, sign_table_gpr, i * 128 + 64, vl)
++        code = emit_evex_pd_rr_full(code, 1, 0x57, b_hi, b_hi, sign, vl, 0, 0)
++        code = emit_evex_pd_rr_full(code, 2, 0xB8, dst_lo, a_bcast, b_lo, vl, 0, 0)
++        code = emit_evex_pd_rr_full(code, 2, 0xB8, dst_hi, a_bcast, b_hi, vl, 0, 0)
++        i = i + 1
++    }
++    code
++}
++
++pub fn lower_xor_convolution_s(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
++    var c = (*nc)
++    c.code = emit_xor_convolution_s(c.code, instr)
++    (*nc) = c
++}
++
+ // IrAssociator → octonion associator [a,b,c] = (ab)c − a(bc)
+ //
+ // First compiler IR node representing the associator as a computable value.
+diff --git a/self-hosted/native/machine_ir.sio b/self-hosted/native/machine_ir.sio
+index 4730903995..73ca612a78 100644
+--- a/self-hosted/native/machine_ir.sio
++++ b/self-hosted/native/machine_ir.sio
+@@ -420,6 +420,7 @@ pub fn native_v2_ir_opcode_name(op: IrOpcode) -> string with Mut, Panic, Div {
+     if op == IrOpcode::IrHyperConjugateO { return "hyper_conjugate_o" }
+     if op == IrOpcode::IrHyperMulO { return "hyper_mul_o" }
+     if op == IrOpcode::IrHyperNormSqO { return "hyper_norm_sq_o" }
++    if op == IrOpcode::IrXorConvolutionS { return "xor_convolution_s" }
+     if op == IrOpcode::IrG2ProjectImO { return "g2_project_im_o" }
+     if op == IrOpcode::IrG2ApplyGenO { return "g2_apply_gen_o" }
+     if op == IrOpcode::IrG2DenseO { return "g2_dense_o" }
+
+NEGATIVE CONTROL GATE
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SOUC="${SOUC:-./bin/souc}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+fail() { printf 'PIREUS_TYPED_XOR_GPU_GATE_FAIL: %s\n' "$*" >&2; exit 1; }
+
+grep -q 'callee == "pireus_sed_xor_convolution' self-hosted/hlir/lower.sio && \
+  fail 'nominal selector remains in HLIR lowering'
+
+for src in tests/gpu/sedenion_mul_source_level.sio tests/gpu/sedenion_mul_source_level_renamed.sio; do
+  tag="$(basename "$src" .sio)"
+  for target in dgx-sm121 metal; do
+    suffix=ptx
+    [[ "$target" == metal ]] && suffix=metal
+    out="$work/$tag.$suffix"
+    log="$work/$tag-$target.log"
+    SOUNIO_PIREUS_OPERATOR_TRACE=1 "$SOUC" compile "$src" -o "$out" --gpu-target "$target" >"$log" 2>&1 || \
+      fail "$tag did not compile for $target"
+    [[ -s "$out" ]] || fail "$tag produced no $target artifact"
+    grep -q '^PIREUS_HLIR_TYPED operator_kind=1 bits=4 twist=1 candidate=0 argc=3 callee_len=0$' "$log" || \
+      fail "$tag lacks checker-owned empty-callee HLIR identity"
+    if [[ "$target" == metal ]]; then
+      grep -q 'pireus.recipe=xor-shuffle+sign-xor+twofold-mul+compensated-reduce' "$out" || \
+        fail "$tag lacks Metal Pireus recipe"
+      grep -q 'fma(' "$out" || fail "$tag lacks Metal twofold multiply"
+    else
+      grep -q 'shfl.sync.bfly.b32' "$out" || fail "$tag lacks DGX XOR shuffle"
+      grep -q 'st.global.f64' "$out" || fail "$tag lacks DGX f64 store"
+    fi
+    printf 'PIREUS_TYPED_XOR_ARTIFACT source=%s target=%s sha256=%s\n' \
+      "$tag" "$target" "$(sha256sum "$out" | cut -d' ' -f1)"
+  done
+done
+
+host_log="$work/host-mut.log"
+if "$SOUC" check tests/compile-fail/gpu_exclusive_ref_write_requires_mut_host.sio >"$host_log" 2>&1; then
+  fail 'host exclusive-reference store escaped Mut'
+fi
+grep -q 'missing: Mut' "$host_log" || fail 'host rejection did not identify Mut'
+
+for negative in pireus_magic_name_poison sedenion_f32_no_f64_lowering octonion_mul_source_level; do
+  log="$work/$negative.log"
+  out="$work/$negative.ptx"
+  rc=0
+  SOUNIO_PIREUS_OPERATOR_TRACE=1 "$SOUC" compile "tests/gpu/$negative.sio" \
+    -o "$out" --gpu-target dgx-sm121 >"$log" 2>&1 || rc=$?
+  grep -q '^PIREUS_HLIR_TYPED ' "$log" && fail "$negative selected the f64x16 typed operator"
+  if [[ "$rc" -eq 0 && -s "$out" ]]; then
+    grep -q 'shfl.sync.bfly.b32' "$out" && fail "$negative materialized the XOR shuffle"
+  fi
+  printf 'PIREUS_TYPED_XOR_NEGATIVE source=%s rc=%s\n' "$negative" "$rc"
+done
+
+echo 'PIREUS_TYPED_XOR_GPU_GATE_PASS positives=4 negatives=4 authority=checker-metadata'
+
+# The terminal float2 recipe cannot silently discard additional stores or
+# reinterpret a different pointer mapping as its positional three-buffer ABI.
+for negative in pireus_metal_duplicate_operator pireus_metal_reordered_operands pireus_metal_extra_store; do
+  log="$work/$negative.log"
+  out="$work/$negative.metal"
+  if "$SOUC" compile "tests/gpu/$negative.sio" -o "$out" --gpu-target metal >"$log" 2>&1; then
+    fail "$negative silently materialized an unsupported Metal shape"
+  fi
+  grep -q 'PIREUS_METAL_COMPOUND_SHAPE_REFUSED' "$log" || fail "$negative failed for an unrelated reason"
+done
+printf 'PIREUS_METAL_COMPOUND_REFUSAL_GATE_PASS\n'
