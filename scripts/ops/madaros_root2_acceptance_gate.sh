@@ -20,8 +20,10 @@ Runs the current Madaros Root2/SRET acceptance probes with SOUC/Madaros routing
 environment variables unset:
 
   1. scripts/ci/madaros_operational_contract_gate.sh
-  2. scripts/ci/native_v2_enum_match_gate.sh
-  3. scripts/run_sio_test_suite.sh sret_forwarding --verbose
+  2. scripts/run_sio_test_suite.sh sret_forwarding --verbose
+
+  (native_v2_enum_match_gate.sh removed KL-10 — deprecated; Madaros `run`
+  native_compile_driver.sio fails with `error: no main` on main.)
 
 By default the script exits non-zero if any probe fails. Use --allow-fail for
 read-only diagnostic snapshots while the blocker is still open. Use --root to
@@ -98,9 +100,6 @@ run_probe() {
 
 run_probe madaros_operational_contract \
   bash scripts/ci/madaros_operational_contract_gate.sh
-
-run_probe native_v2_enum_match \
-  bash scripts/ci/native_v2_enum_match_gate.sh
 
 run_probe sret_forwarding \
   bash scripts/run_sio_test_suite.sh sret_forwarding --verbose

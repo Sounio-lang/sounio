@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED (KL-10, 2026-09): Madaros `souc run native_compile_driver.sio -- <example>` fails with `error: no main` on main (measured 2026-09-11 sounio-workspace).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

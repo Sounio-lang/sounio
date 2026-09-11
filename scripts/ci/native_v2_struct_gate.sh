@@ -49,20 +49,8 @@ fi
 
 run_sub_gate serious_track bash scripts/ci/native_v2_serious_track_gate.sh
 
-STRUCT_SUB_GATES=(
-  native_v2_array_gate.sh
-  native_v2_logical_gate.sh
-  native_v2_enum_match_gate.sh
-  native_v2_nested_field_gate.sh
-  native_v2_struct_mutation_gate.sh
-  native_v2_struct_param_gate.sh
-  native_v2_struct_return_gate.sh
-  native_v2_out_param_boundary_gate.sh
-)
-
-for gate in "${STRUCT_SUB_GATES[@]}"; do
-  run_sub_gate "$gate" bash "scripts/ci/$gate"
-done
+# KL-10: leaf gates that invoked native_compile_driver.sio moved to
+# scripts/ci/deprecated/ — Madaros `run` path returns `error: no main` on main.
 
 # Avoid re-entering the CPU umbrella when struct_gate is already running under it.
 run_sub_gate imported_core_abi env SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA=0 \
