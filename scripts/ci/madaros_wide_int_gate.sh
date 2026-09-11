@@ -251,12 +251,12 @@ source_42 "source_i128_sub_eq_zero" 'fn main() -> i64 { let a: i128 = 4294967296
 
 # ---------------------------------------------------------------------------
 # 18. KL-7 fail-closed print contract.  A wide value must never reach the i64
-#     print builtin and produce a plausible low-limb lie.  Both check and build
-#     refuse, and build must leave no ELF behind.
+#     print builtin and produce a plausible low-limb lie.  Typecheck stays OK;
+#     lowering refuses during build and must leave no ELF behind.
 # ---------------------------------------------------------------------------
 WIDE_PRINT_FIXTURE="$ROOT_DIR/tests/compile-fail/kl7_wide_int_print.sio"
-expect_exit 1 "$MADAROS" check "$WIDE_PRINT_FIXTURE" >"$WORK/kl7_print_check.log" 2>&1
-expect_log_contains "wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs" "$WORK/kl7_print_check.log"
+"$MADAROS" check "$WIDE_PRINT_FIXTURE" >"$WORK/kl7_print_check.log" 2>&1
+expect_log_contains "check: OK" "$WORK/kl7_print_check.log"
 rm -f "$WORK/kl7_print.elf"
 expect_exit 1 "$MADAROS" build "$WIDE_PRINT_FIXTURE" -o "$WORK/kl7_print.elf" >"$WORK/kl7_print_build.log" 2>&1
 expect_log_contains "wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs" "$WORK/kl7_print_build.log"
