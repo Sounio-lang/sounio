@@ -588,38 +588,9 @@ fn sf_u128_div_wide(sig_a: SfU128, sig_b: SfU128) -> SfU128 with Mut {
     q
 }
 
-/// Truncate a finite binary128 toward zero (KL-8 helper for `%`).
-fn f128_bits_soft_trunc(x: F128Bits) -> F128Bits with Mut, Panic, Div {
-    let sa = sf_unpack_sign(x.hi)
-    let ea = sf_unpack_exp(x.hi)
-    let fa = sf_unpack_frac(x.lo, x.hi)
-    let exp_ones: i64 = 32767
-    if sf_is_nan(ea, fa) {
-        var f = fa
-        if sf_u128_is_zero(f) { f = sf_qnan_frac() }
-        return sf_pack(0, exp_ones, f)
-    }
-    if sf_is_inf(ea, fa) {
-        return sf_pack(0, exp_ones, sf_qnan_frac())
-    }
-    if sf_is_zero(ea, fa) {
-        return sf_pack(sa, 0, sf_u128_zero())
-    }
-    let pair = sf_sig_from(ea, fa)
-    let exp_u = pair.0
-    let sig = pair.1
-    if exp_u < 0 {
-        return sf_pack(sa, 0, sf_u128_zero())
-    }
-    if exp_u >= 112 {
-        return x
-    }
-    let shift = 112 - exp_u
-    let truncated = sf_u128_shr_n_trunc(sig, shift)
-    sf_pack_wide(sa, exp_u, truncated)
-}
-
 /// IEEE binary128 remainder: a - trunc(a/b)*b (trunc toward zero, fmod family).
+/// Builds trunc(a/b) by peeling unit magnitudes from |q| — bounded by the
+/// exponent gap, no host float on the payload path.
 pub fn f128_bits_soft_rem(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {
     let sa = sf_unpack_sign(a.hi)
     let ea = sf_unpack_exp(a.hi)
@@ -658,8 +629,25 @@ pub fn f128_bits_soft_rem(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic,
         return a
     }
     let q = f128_bits_soft_div(a, b)
-    let t = f128_bits_soft_trunc(q)
-    let prod = f128_bits_soft_mul(t, b)
+    let one = sf_pack(0, 16383, sf_u128_shl_n(sf_u128_zero(), 112))
+    let neg_one = sf_pack(1, 16383, sf_u128_shl_n(sf_u128_zero(), 112))
+    var n_acc = sf_pack(0, 0, sf_u128_zero())
+    var qb = q
+    var guard: i64 = 0
+    if sa == sb {
+        while guard < 17000 && f128_bits_soft_cmp(qb, one) >= 0 {
+            qb = f128_bits_soft_sub(qb, one)
+            n_acc = f128_bits_soft_add(n_acc, one)
+            guard = guard + 1
+        }
+    } else {
+        while guard < 17000 && f128_bits_soft_cmp(qb, neg_one) <= 0 {
+            qb = f128_bits_soft_add(qb, one)
+            n_acc = f128_bits_soft_sub(n_acc, one)
+            guard = guard + 1
+        }
+    }
+    let prod = f128_bits_soft_mul(n_acc, b)
     f128_bits_soft_sub(a, prod)
 }
 
