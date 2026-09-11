@@ -50,7 +50,6 @@ fi
 run_sub_gate serious_track bash scripts/ci/native_v2_serious_track_gate.sh
 
 STRUCT_SUB_GATES=(
-  native_v2_algebra_law_gate.sh
   native_v2_array_gate.sh
   native_v2_logical_gate.sh
   native_v2_enum_match_gate.sh

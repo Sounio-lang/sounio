@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# DEPRECATED (KL-10, 2026-09): T1201 self-test absent from lean.sio on main (305s, FAIL 2026-09-11);
+# gate targets lean.sio, not native_compile_driver.sio — superseded by Madaros IR algebra-law coverage.
 # Gate: algebra law enforcement -- reassoc_strategy decisions for the Cayley-Dickson tower.
 # Runs the lean modular compiler algebra-law self-test and asserts T1201 passes.
 # T1201 verifies that ir_algebra_info_for_tag returns the correct reassoc_strategy for each level:
