@@ -327,6 +327,16 @@ pub struct Checker {
     // the conventional second generic name and the SI symbol for kelvin, and
     // `struct Map<K, V>` broke the moment units were wired up.
     current_type_params: TypeParamBuf,
+    // Spans already warned with W046, so one declaration produces one notice.
+    // Without this the warning fires once per LOWERING of the type, and a
+    // refined parameter is lowered while collecting the signature and again
+    // while checking the body -- measured at three identical W046 for a single
+    // declaration. A diagnostic that repeats trains its reader to skip it.
+    // Overflow past 64 distinct spans means later ones may repeat; that is a
+    // capacity limit, stated, not a silent cap.
+    w046_files: [i64; 64],
+    w046_starts: [i64; 64],
+    w046_count: i64,
     current_effects: [i64; 8],
     current_effect_count: i64,
     // Which function is being checked. current_module was already tracked (it is
@@ -1362,6 +1372,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         enforce_visibility: true,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
+        w046_files: [0 - 1; 64],
+        w046_starts: [0 - 1; 64],
+        w046_count: 0,
         current_type_params: empty_type_param_buf(),
         current_effects: [0; 8],
         current_effect_count: 0,
@@ -2513,7 +2526,7 @@ fn checker_refinement_pred_from_info(ri: RefinementInfo) -> RefinementPred with 
     }
 }
 
-fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<RefinementInfo> >, decl_span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info) => {
             let ri = *info
@@ -2521,13 +2534,82 @@ fn checker_lower_refinement_type_mut(c: *mut Checker, opt: Option<Box<Refinement
                 Some(bte) => {
                     let base_ty = checker_lower_type_expr_mut(c, *bte)
                     if ri.pred_op > 0 {
+                        // The author is told at the DECLARATION whenever any
+                        // part of the predicate is unrepresentable, not only when
+                        // ALL of it is. A conjunction whose first operator parses
+                        // and whose second does not -- `n > 0 && n * 2 < 200` --
+                        // registers here and used to reach the author only as a
+                        // W040 at each CALL SITE, which is the wrong audience: a
+                        // caller cannot rewrite someone else's predicate.
+                        //
+                        // Measured before this: f(0) violating n > 0 and f(500)
+                        // violating n * 2 < 200 both produced W040 and neither
+                        // produced E042, so the conjunction is declined WHOLE and
+                        // is not silently enforcing only its representable half.
+                        // Conservative, and worth saying out loud at the source.
                         let pred = checker_refinement_pred_from_info(ri)
                         let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
                         let synth_name = make_refinement_synth_name((*c).refinements.count)
                         (*c).refinements = refinement_table_add((*c).refinements, synth_name, rt)
                         let ref_idx = (*c).refinements.count - 1
+                        if !pred_is_evaluable(pred) {
+                            var seen2 = false
+                            var wj: i64 = 0
+                            while wj < (*c).w046_count && wj < 64 {
+                                if (*c).w046_files[wj as usize] == decl_span.file_id
+                                && (*c).w046_starts[wj as usize] == decl_span.start {
+                                    seen2 = true
+                                }
+                                wj = wj + 1
+                            }
+                            if !seen2 {
+                                if (*c).w046_count < 64 {
+                                    (*c).w046_files[(*c).w046_count as usize] = decl_span.file_id
+                                    (*c).w046_starts[(*c).w046_count as usize] = decl_span.start
+                                    (*c).w046_count = (*c).w046_count + 1
+                                }
+                                checker_report_warning_at_mut(c, decl_span, 46, 0, 0, 0)
+                            }
+                        }
                         ty_with_refinement(base_ty, ref_idx)
                     } else {
+                        // THE PREDICATE WAS NOT UNDERSTOOD, AND SAYING SO IS
+                        // WHY THIS BRANCH EXISTS.
+                        //
+                        // pred_op = 0 means the parser met an operator it does
+                        // not represent -- `{ n: i32 | n * 2 < 200 }`, where the
+                        // coefficient on n has no place in RefinementPred. Until
+                        // the parser default was corrected this arrived as
+                        // pred_op = 5, an invented `n == 0` that rejected every
+                        // argument but zero. Correcting it removed the false
+                        // rejection and left SILENCE: the type came back with no
+                        // refinement, nothing was checked, and nobody was told.
+                        // A check that does nothing quietly is the failure mode
+                        // this branch spent its length chasing, so it does not
+                        // get to be the resting state of a fix for it.
+                        //
+                        // The notice belongs at the DECLARATION. The author
+                        // wrote the predicate; a caller cannot do anything about
+                        // it. RefinementInfo carries no span of its own, so the
+                        // enclosing TypeExpr passes one in.
+                        // One notice per declaration, not one per lowering.
+                        var seen = false
+                        var wi: i64 = 0
+                        while wi < (*c).w046_count && wi < 64 {
+                            if (*c).w046_files[wi as usize] == decl_span.file_id
+                            && (*c).w046_starts[wi as usize] == decl_span.start {
+                                seen = true
+                            }
+                            wi = wi + 1
+                        }
+                        if !seen {
+                            if (*c).w046_count < 64 {
+                                (*c).w046_files[(*c).w046_count as usize] = decl_span.file_id
+                                (*c).w046_starts[(*c).w046_count as usize] = decl_span.start
+                                (*c).w046_count = (*c).w046_count + 1
+                            }
+                            checker_report_warning_at_mut(c, decl_span, 46, 0, 0, 0)
+                        }
                         base_ty
                     }
                 }
@@ -2878,7 +2960,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
         TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
         TypeExprKind::TypeRawPtr => checker_lower_raw_ptr_type_mut(c, te.inner, te.array_size)
-        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info)
+        TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info, te.span)
         _ => {
             checker_note_type_error_mut(c)
             ty_error()
@@ -17265,6 +17347,12 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 43 {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
+    }
+    else if code == 46 {
+        print("refinement predicate could not be represented and is NOT being checked\n")
+        print("   = note: this checker represents `<var> <cmp> <literal>` and conjunctions of those\n")
+        print("   = note: arithmetic on the bound variable, such as `n * 2 < 200`, has no representation\n")
+        print("   = help: the declared base type still applies; no obligation from this predicate is enforced\n")
     }
     else if code == 45 {
         print("public function performs an effect its signature does not declare\n")
