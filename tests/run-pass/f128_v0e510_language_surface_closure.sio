@@ -1,0 +1,147 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.10 — surface closure: C99 hex-float is exact on the f64 path (single rounding), a bare float literal is accepted as the tail/return of an `-> f128` fn and as `[f128; N]` elements (exact limbs), `_` digit separators lex in int/float/hex literals, and language f128 no longer needs an explicit `use math::softfloat_f128`
+//@ ladder-stage: V0-E.5.10
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: the no-import probe lives in the gate (scripts/ci/madaros_f128_f256_v0e510_surface_closure_gate.sh); this file imports f128_to_lo/hi for the limb checks
+//@ expect-stdout-contains: hex_f64_1_5_bits=4609434218613702656
+//@ expect-stdout-contains: hex_f64_tie_even_bits=4607182418800017408
+//@ expect-stdout-contains: hex_f64_sticky_up_bits=4607182418800017409
+//@ expect-stdout-contains: tail_quarter=2.50000000000000000000000000000000000e-0001
+//@ expect-stdout-contains: PASS f128_v0e510_language_surface_closure
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e510
+//
+// Four gaps V0-E.5.9 left open, closed here:
+//   1. f64 path of a hex-float: `let h: f64 = 0x1.8p+0` was the parser's
+//      placeholder (1.0 or 0.0). Now f64_hex_literal_from_source reads the
+//      bytes and rounds ONCE (nearest-even, sticky bit for dropped digits).
+//   2. `fn q() -> f128 { 0.25 }` and `return 1.5` in an `-> f128` fn: check
+//      said E008 for the tail; `return` passed check and emitted binary64 bits
+//      into the F128Bits slot. Both now go through lower_f128_value_ref.
+//   3. `let a: [f128; 2] = [1.0, 2.0]` / `[0.5; 3]`: check typed the literal
+//      `[f64; N]` and refused (E001/E008/E016). Now a literal array whose
+//      elements are float literals is accepted against a wide-float array.
+//   4. `1_024.0`, `1_000`, `0x1_0`: the live flat lexer split at `_` (E137).
+//
+// Distinct non-zero exits:
+// 11=hex_f64_1_5 12=hex_f64_tie_even 13=hex_f64_sticky_up 14=hex_f64_min_sub
+// 15=hex_f64_half_min_sub_is_zero 16=hex_f64_1_5_min_sub_rounds_to_2 17=hex_f64_max
+// 18=hex_f64_min_normal 19=hex_f64_uppercase 20=tail_quarter 21=return_1_5
+// 22=tail_neg_half 23=arr_list 24=arr_repeat 25=sep_float 26=sep_int 27=sep_hex
+// 28=sep_exp 29=sep_f128 30=arr_in_struct 31=tail_via_method 32=hex_f64_arith
+// 33=tail_via_nested
+
+use math::softfloat_f128::{
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::softfloat_f128_fmt::{println_f128}
+
+fn limbs_are(x: f128, lo: i64, hi: i64) -> bool {
+    f128_to_lo(x) == lo && f128_to_hi(x) == hi
+}
+
+// (2) a bare literal as the tail of an `-> f128` fn.
+fn quarter() -> f128 { 0.25 }
+
+// (2) explicit `return` of a literal — passed check before, lowered as f64 bits.
+fn one_and_half() -> f128 { return 1.5 }
+
+// (2) negated literal tail.
+fn neg_half() -> f128 { -0.5 }
+
+// (2) the flag is consumed by the body block only: a nested f64 block inside an
+// f128 fn stays f64, and the f128 tail here is an ident, not a literal.
+fn nested_stays_f64(c: bool) -> f128 {
+    let y: f64 = if c { 1.0 } else { 2.0 }
+    let r: f128 = 3.0
+    if y != 1.0 { return r }
+    r
+}
+
+struct Q { arr: [f128; 2] }
+
+impl Q {
+    // (2) impl-method call site of the E008 tail check.
+    fn unit_of(self) -> f128 { 1.0 }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    println("v0e510_main_entered")
+
+    // ---- (1) hex-float on the f64 path: bits against float.fromhex ----
+    let h15: f64 = 0x1.8p+0
+    print("hex_f64_1_5_bits=")
+    print_int(f64_to_bits(h15))
+    println("")
+    if f64_to_bits(h15) != 4609434218613702656 { println("FAIL hex_f64_1_5"); return 11 }
+    // 1 + 2^-53: exactly halfway between 1 and 1+2^-52 -> ties-to-even -> 1.0
+    let tie: f64 = 0x1.00000000000008p+0
+    print("hex_f64_tie_even_bits=")
+    print_int(f64_to_bits(tie))
+    println("")
+    if f64_to_bits(tie) != 4607182418800017408 { println("FAIL hex_f64_tie_even"); return 12 }
+    // halfway plus a digit far below: the sticky bit must turn the tie into round-up
+    let up: f64 = 0x1.00000000000008000000000001p+0
+    print("hex_f64_sticky_up_bits=")
+    print_int(f64_to_bits(up))
+    println("")
+    if f64_to_bits(up) != 4607182418800017409 { println("FAIL hex_f64_sticky_up"); return 13 }
+    let minsub: f64 = 0x1p-1074
+    if f64_to_bits(minsub) != 1 { println("FAIL hex_f64_min_sub"); return 14 }
+    let halfmin: f64 = 0x1p-1075
+    if f64_to_bits(halfmin) != 0 { println("FAIL hex_f64_half_min_sub_is_zero"); return 15 }
+    let sub15: f64 = 0x1.8p-1074
+    if f64_to_bits(sub15) != 2 { println("FAIL hex_f64_1_5_min_sub_rounds_to_2"); return 16 }
+    let hmax: f64 = 0x1.fffffffffffffp+1023
+    if f64_to_bits(hmax) != 9218868437227405311 { println("FAIL hex_f64_max"); return 17 }
+    let minnorm: f64 = 0x1.0000000000001p-1022
+    if f64_to_bits(minnorm) != 4503599627370497 { println("FAIL hex_f64_min_normal"); return 18 }
+    let hup: f64 = 0X1.8P+1
+    if hup != 3.0 { println("FAIL hex_f64_uppercase"); return 19 }
+    let hsum = h15 + hup
+    if hsum != 4.5 { println("FAIL hex_f64_arith"); return 32 }
+
+    // ---- (2) literal tail / return in an -> f128 fn ----
+    let q = quarter()
+    if !limbs_are(q, 0, 4610841593497255936) { println("FAIL tail_quarter"); return 20 }
+    print("tail_quarter=")
+    println_f128(q)
+    let oh = one_and_half()
+    if !limbs_are(oh, 0, 4611545280939032576) { println("FAIL return_1_5"); return 21 }
+    let nh = neg_half()
+    if !limbs_are(nh, 0, 0 - 4612248968380809216) { println("FAIL tail_neg_half"); return 22 }
+    let three = nested_stays_f64(true)
+    if !limbs_are(three, 0, 4611826755915743232) { println("FAIL tail_via_nested"); return 33 }
+
+    // ---- (3) float literals as [f128; N] elements ----
+    let arr: [f128; 2] = [1.0, 2.0]
+    let d = arr[1] - arr[0]
+    if !limbs_are(d, 0, 4611404543450677248) { println("FAIL arr_list"); return 23 }
+    let rep: [f128; 3] = [0.5; 3]
+    let s = rep[0] + rep[2]
+    if !limbs_are(s, 0, 4611404543450677248) { println("FAIL arr_repeat"); return 24 }
+    let qs = Q { arr: [0.25, 1.5] }
+    let qsum = qs.arr[0] + qs.arr[1]
+    if !limbs_are(qsum, 0, 4611615649683210240) { println("FAIL arr_in_struct"); return 30 }
+    let u = qs.unit_of()
+    if !limbs_are(u, 0, 4611404543450677248) { println("FAIL tail_via_method"); return 31 }
+
+    // ---- (4) digit separators ----
+    let sf: f64 = 1_024.0
+    if f64_to_bits(sf) != 4652218415073722368 { println("FAIL sep_float"); return 25 }
+    let si: i64 = 1_000
+    if si != 1000 { println("FAIL sep_int"); return 26 }
+    let sh: i64 = 0x1_0
+    if sh != 16 { println("FAIL sep_hex"); return 27 }
+    let se: f64 = 1_0.5e0_1
+    if f64_to_bits(se) != 4637089135075524608 { println("FAIL sep_exp"); return 28 }
+    let sw: f128 = 1_024.0
+    if !limbs_are(sw, 0, 4614219293217783808) { println("FAIL sep_f128"); return 29 }
+
+    println("PASS f128_v0e510_language_surface_closure hex_f64=single_rounding tail_return=f128_limbs array_literal=accepted separators=lexed implicit_import=gate_probe")
+    0
+}
