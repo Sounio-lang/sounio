@@ -127,21 +127,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   so; the quotient witness is the failing repro. Do not generalise the
   transcendental result to Hessian AD as a whole.
 
-### KL-7 — `i256`/`i512` wide-local `print_int`
-
-- Engine: `madaros`. Wide values are consecutive virtual registers plus an
-  immediate pool (`ir/lower.sio:48-49`, `fresh_wide_reg :12788`,
-  `ir/numeric_payload.sio:165`); `print_int` of a wide local
-  (`lower.sio:19661-19679`) prints the low limb. Negative wide literals rely
-  on low-limb sign extension that is not asserted.
-- Repro: `tests/run-pass/r1_i256_lorenz_peak.sio` (green — proves multiply
-  and shift, not printing). Pin: `scripts/ci/madaros_wide_int_gate.sh`
-  (emitter only, no `print`). Receipt:
-  `docs/audit/R1_I256_I512_LIMBS_2026-08-20.md`.
-- Out of scope for this ledger and for any rung: the Lorenz certificate
-  conclusions in `stdlib/systems/` remain unaudited; do not state that any
-  certificate conclusion is proved or wrong from these receipts (spec
-  `docs/spec/S12_NUMERIC_TOWER.md` §12.2.6, §12.4-6).
 
 ### KL-8 — `f128` surface residuals (after V0-E.5.10)
 
