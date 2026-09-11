@@ -235,6 +235,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.known-failure-needs-an-engine-2026-08-19 | repo_only | docs/audit/KNOWN_FAILURE_NEEDS_AN_ENGINE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.known-failure-xpas-gate-dispatch-2026-08-18 | repo_only | docs/audit/KNOWN_FAILURE_XPAS_GATE_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.known-failure-xpas-signal-2026-08-18 | repo_only | docs/audit/KNOWN_FAILURE_XPAS_SIGNAL_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.known-limitations-history-2026-09 | repo_only | docs/audit/KNOWN_LIMITATIONS_HISTORY_2026-09.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.layer-crossings-map-2026-08-19 | repo_only | docs/audit/LAYER_CROSSINGS_MAP_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-knowledge-arithmetic-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_KNOWLEDGE_ARITHMETIC_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-struct-field-aggregate-copy-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_STRUCT_FIELD_AGGREGATE_COPY_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -490,6 +491,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.brand.sounio-brand-pack-v4-complete.00-readme.readme | repo_only | docs/brand/Sounio_Brand_Pack_v4_COMPLETE/00_README/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.competitive-position-2026 | repo_only | docs/COMPETITIVE_POSITION_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.async-design | repo_only | docs/compiler/ASYNC_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.bootstrap-seed | repo_only | docs/compiler/BOOTSTRAP_SEED.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.closure-type-theory | repo_only | docs/compiler/CLOSURE_TYPE_THEORY.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.compiler-plan-consolidated | repo_only | docs/compiler/COMPILER_PLAN_CONSOLIDATED.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.confidence-effect-design | repo_only | docs/compiler/CONFIDENCE_EFFECT_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -501,6 +503,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.compiler.incremental-query-opt-p0 | historical | docs/compiler/INCREMENTAL_QUERY_OPT_P0.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.integration-guide | repo_only | docs/compiler/INTEGRATION_GUIDE.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.known-limitations | repo_only | docs/compiler/KNOWN_LIMITATIONS.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.maturity | repo_only | docs/compiler/MATURITY.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.metal-first-algebraic-gpu | repo_only | docs/compiler/METAL_FIRST_ALGEBRAIC_GPU.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.native-v2-serious-track | repo_only | docs/compiler/NATIVE_V2_SERIOUS_TRACK.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.numerical-determinism | repo_only | docs/compiler/numerical_determinism.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_unsound_poison}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -1862,6 +1862,67 @@ fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_na
         }
     }
     old_id
+}
+
+// V0-E.5.10 fail-closed net under the implicit softfloat import above. After
+// call targets are resolved, any IrCall whose callee is an f128 desugar target
+// (`f128_bits_soft_*`, emitted by ir/lower.sio by bare name) that still binds
+// to a body-less slot (instr_count == 0, and no lowered body under that name
+// anywhere in the module) means math::softfloat_f128 is not in the module
+// graph — the implicit import could not resolve the stdlib, or the program was
+// compiled through a path that does not run it. Before this rung the backend
+// emitted `ud2` there (NATIVE_REFUSAL kind=empty_stub_ud2 is a log line, not a
+// refusal) and the ELF died with SIGILL at run time. Returns true if such a
+// call exists; the caller refuses to write the binary.
+fn module_frontend_name_has_f128_soft_prefix(n: Name) -> bool with Mut, Panic {
+    // "f128_bits_soft_" is 15 bytes.
+    if n.len < 15 { return false }
+    let p0 = (n.buf[0] as i64) == 102 && (n.buf[1] as i64) == 49 && (n.buf[2] as i64) == 50 && (n.buf[3] as i64) == 56
+    let p1 = (n.buf[4] as i64) == 95 && (n.buf[5] as i64) == 98 && (n.buf[6] as i64) == 105 && (n.buf[7] as i64) == 116 && (n.buf[8] as i64) == 115
+    let p2 = (n.buf[9] as i64) == 95 && (n.buf[10] as i64) == 115 && (n.buf[11] as i64) == 111 && (n.buf[12] as i64) == 102 && (n.buf[13] as i64) == 116 && (n.buf[14] as i64) == 95
+    p0 && p1 && p2
+}
+
+fn module_frontend_bodyless_f128_targets(module: &IrModule) -> bool with IO, Mut, Div, Panic {
+    var found = false
+    var fi: i64 = 0
+    while fi < (*module).fn_count && !found {
+        let f = ir_fn_get(module, fi as usize)
+        var ii: i64 = 0
+        while ii < f.instr_count && !found {
+            let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                let callee_id = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
+                var callee_nm = ir_arena_name(ir_region_slot_r(f.region, (ii)))
+                if callee_nm.len == 0 && callee_id >= 0 && callee_id < (*module).fn_count {
+                    callee_nm = ir_function_name_at(module, callee_id)
+                }
+                if module_frontend_name_has_f128_soft_prefix(callee_nm) {
+                    var has_body = false
+                    if callee_id >= 0 && callee_id < (*module).fn_count && ir_fn_instr_count(module, callee_id) > 0 {
+                        has_body = true
+                    }
+                    if !has_body {
+                        let by_name = ir_merge_find_function_name_index(module, callee_nm)
+                        if by_name >= 0 && ir_fn_instr_count(module, by_name) > 0 {
+                            has_body = true
+                        }
+                    }
+                    if !has_body {
+                        print("error: f128 program needs math::softfloat_f128 in its module graph (V0-E.5.10): desugar target `")
+                        print(str_from_bytes(callee_nm.buf, callee_nm.len))
+                        print("` has no body, called from `")
+                        print(str_from_bytes(f.name.buf, f.name.len))
+                        print("` -- the implicit import did not resolve stdlib/math/softfloat_f128.sio (check SOUNIO_STDLIB_PATH) and no `use math::softfloat_f128::...` supplied it\n")
+                        found = true
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    found
 }
 
 // After multimodule merge, rebind every direct IrCall/IrCallSret to the merged
@@ -5513,6 +5574,15 @@ fn module_frontend_lower_single_program_array_direct_box(
     }
     let epistemic = ir_empty_epistemic_section_boxed()
     let seed_program = mf_program_from_items(&seed_items)
+    // The direct single-module path already ran the checker, but historically
+    // discarded its semantic sidecar here and lowered against an empty
+    // section. That made typed Hyper multiplication metadata unavailable to
+    // AST-to-IR lowering. Re-export from the DCE-filtered program so source
+    // spans and the lowered item set remain identical.
+    if !check_program_epistemic_into(seed_program, &! (*epistemic)) {
+        trace.last_stage = "epistemic_export_error"
+        return module_frontend_lower_direct_box_error("epistemic_export_failed")
+    }
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&seed_program, programs, 1, 0, &(*epistemic))
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
     if summary_result.had_error {
@@ -6494,43 +6564,95 @@ pub fn module_frontend_compile_imported_to_file(
     trace.last_stage = "load_main"
     trace.last_module_index = 0
 
-    while work_front < loaded && loaded < 256 {
-        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
-        if module_frontend_lower_trace_enabled() {
-            print("imported_compile: scan_front=")
-            print_int(work_front)
-            print(" loaded=")
-            print_int(loaded)
-            print(" count=")
-            print_int(work_imports.count)
-            print("\n")
-        }
-        work_front = work_front + 1
-        dep_i = 0
-        while dep_i < work_imports.count && loaded < 256 {
-            let file_path: string = work_imports.paths[dep_i]
+    // V0-E.5.10: the BFS runs to a fixpoint; then, once, the loaded programs
+    // are asked whether they mention language f128 (spec_program_mentions_f128:
+    // f128 let/var/param/return/field, nested blocks included). If so and
+    // stdlib math/softfloat_f128.sio is not already in the graph, it is added
+    // as an IMPLICIT import and the BFS runs again for its own deps
+    // (math::wide_float). The f128 desugar (ir/lower.sio lower_f128_*) emits
+    // calls to f128_bits_soft_* by bare name; without this module in the graph
+    // those calls bound to body-less stubs and the ELF trapped (SIGILL, 132).
+    // This is the compiler's first implicit import; it is announced on stdout
+    // so a gate can see it, and the merge step below refuses (hard error) if a
+    // desugar target still has no body — e.g. when the stdlib cannot be found.
+    var implicit_f128_checked = false
+    var bfs_again = true
+    while bfs_again {
+        bfs_again = false
+        while work_front < loaded && loaded < 256 {
+            let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
             if module_frontend_lower_trace_enabled() {
-                print("imported_compile: dep front=")
-                print_int(work_front - 1)
-                print(" dep=")
-                print_int(dep_i)
-                print(" path=")
-                print(file_path)
+                print("imported_compile: scan_front=")
+                print_int(work_front)
+                print(" loaded=")
+                print_int(loaded)
+                print(" count=")
+                print_int(work_imports.count)
                 print("\n")
             }
-            if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
-                visited_count = visited_count + 1
-                if file_exists(file_path) {
-                    programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
-                    loaded = loaded + 1
-                    trace.loaded_modules = loaded
-                    trace.last_stage = "load_deps"
-                    trace.last_module_index = loaded - 1
+            work_front = work_front + 1
+            dep_i = 0
+            while dep_i < work_imports.count && loaded < 256 {
+                let file_path: string = work_imports.paths[dep_i]
+                if module_frontend_lower_trace_enabled() {
+                    print("imported_compile: dep front=")
+                    print_int(work_front - 1)
+                    print(" dep=")
+                    print_int(dep_i)
+                    print(" path=")
+                    print(file_path)
+                    print("\n")
+                }
+                if !visited_contains(visited_paths, visited_count, file_path) {
+                    visited_paths[visited_count] = file_path
+                    visited_count = visited_count + 1
+                    if file_exists(file_path) {
+                        programs[loaded] = load_module_file(file_path)
+                        file_paths[loaded] = file_path
+                        loaded = loaded + 1
+                        trace.loaded_modules = loaded
+                        trace.last_stage = "load_deps"
+                        trace.last_module_index = loaded - 1
+                    }
+                }
+                dep_i = dep_i + 1
+            }
+        }
+        if !implicit_f128_checked {
+            implicit_f128_checked = true
+            var mentions_f128 = false
+            var mi: i64 = 0
+            while mi < loaded && mi < 256 {
+                // Whole-Program by-value copy then &prog: the A14-safe pattern
+                // (nested &programs[i].field reads as None under lean_single).
+                var mprog = programs[mi as usize]
+                if spec_program_mentions_f128(&mprog) {
+                    mentions_f128 = true
+                }
+                mi = mi + 1
+            }
+            if mentions_f128 && loaded < 256 {
+                let soft_rel: string = "math/softfloat_f128.sio"
+                let soft_path = module_frontend_resolve_import_relpath(soft_rel, module_frontend_path_directory_slice(main_path))
+                if !visited_contains(visited_paths, visited_count, soft_path) {
+                    visited_paths[visited_count] = soft_path
+                    visited_count = visited_count + 1
+                    if file_exists(soft_path) {
+                        programs[loaded] = load_module_file(soft_path)
+                        file_paths[loaded] = soft_path
+                        loaded = loaded + 1
+                        trace.loaded_modules = loaded
+                        trace.last_stage = "load_implicit_f128"
+                        trace.last_module_index = loaded - 1
+                        print("imported_compile: implicit_import math/softfloat_f128.sio reason=f128_in_ast path=")
+                        print(soft_path)
+                        print("\n")
+                        bfs_again = true
+                    } else {
+                        print("imported_compile: implicit_import math/softfloat_f128.sio reason=f128_in_ast unresolved (SOUNIO_STDLIB_PATH?)\n")
+                    }
                 }
             }
-            dep_i = dep_i + 1
         }
     }
 
@@ -6668,6 +6790,11 @@ pub fn module_frontend_compile_imported_to_file(
             module_frontend_global_init_compile_end()
             return 1
         }
+        if module_frontend_bodyless_f128_targets(&(*module_box)) {
+            print("Error: refusing to write a binary -- an f128 desugar target has no body (V0-E.5.10; the ELF would trap with SIGILL)\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
         module_frontend_print_float_bits_probe("single", &(*module_box))
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
@@ -6764,6 +6891,11 @@ pub fn module_frontend_compile_imported_to_file(
     if lower_hard_error_pending() {
         lower_hard_error_report()
         print("Error: refusing to write a binary -- lowering hit a hard error (see the error above)\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
+    if module_frontend_bodyless_f128_targets(&(*module_box)) {
+        print("Error: refusing to write a binary -- an f128 desugar target has no body (V0-E.5.10; the ELF would trap with SIGILL)\n")
         module_frontend_global_init_compile_end()
         return 1
     }
@@ -7612,7 +7744,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Type checking module 0\n")
         main_prog.items = specialize_generics(main_prog.items)
         let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
-        if single_verdict_no_use != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict_no_use != 0 {
             print("Type check failed for module 0\n")
             return multimodule_frontend_error("type_check_failed")
         }
@@ -7627,7 +7759,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
         print("Type checking module 0\n")
         main_prog.items = specialize_generics(main_prog.items)
         let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
-        if single_verdict != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict != 0 {
             print("Type check failed for module 0\n")
             return multimodule_frontend_error("type_check_failed")
         }
@@ -7676,7 +7808,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         main_prog.items = specialize_generics(main_prog.items)
         let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
-        if single_verdict_no_use != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict_no_use != 0 {
             print("Type check failed during IR lowering for module 0\n")
             module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
@@ -7715,7 +7847,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         main_prog.items = specialize_generics(main_prog.items)
         let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
-        if single_verdict != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict != 0 {
             print("Type check failed during IR lowering for module 0\n")
             module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
@@ -7891,7 +8023,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
         let single_verdict_no_use = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
-        if single_verdict_no_use != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict_no_use != 0 {
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_counts_error("type_check_failed")
         }
@@ -7936,7 +8068,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_begin\n") }
         let single_verdict = module_frontend_check_items_with_source_context(main_prog.items, main_path)
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
-        if single_verdict != 0 || spec_report_unsound_poison() {
+        if spec_report_any_specializer_failure() || single_verdict != 0 {
             print("Type check failed during IR lowering for module 0\n")
             return multimodule_ir_counts_error("type_check_failed")
         }
