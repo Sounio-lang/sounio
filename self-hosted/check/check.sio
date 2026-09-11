@@ -18551,6 +18551,68 @@ fn checker_array_int_literal_compatible(e: Expr, actual_ty: TypeEntry, expected_
     }
 }
 
+// V0-E.5.10: the float mirror of the int-literal array path above. An array
+// literal whose elements are all float literals is typed `[f64; N]` by the
+// element check; against an expected `[f128; N]` / `[f256; N]` (or `[f32; N]`
+// within magnitude) each element is a literal in that position and the lowerer
+// already carries its exact identity (`lower_f128_array_literal_ref` →
+// `lower_f128_value_ref`, fail-closed on an inexact literal). Both the list
+// form `[1.0, 2.0]` (e.args) and the repeat form `[0.5; N]` (e.left) qualify.
+fn checker_array_float_literal_compatible(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprArrayLit {
+        return false
+    }
+    if actual_ty.kind != TypeKind::TyArray || expected_ty.kind != TypeKind::TyArray {
+        return false
+    }
+    if !checker_array_sizes_compatible(actual_ty, expected_ty) {
+        return false
+    }
+    match actual_ty.inner {
+        Some(actual_inner) => match expected_ty.inner {
+            Some(expected_inner) => {
+                if (*actual_inner).kind != TypeKind::TyF64 {
+                    return false
+                }
+                if !is_wide_float_type(*expected_inner) && !is_float_type(*expected_inner) {
+                    return false
+                }
+                match e.left {
+                    Some(elem_box) => {
+                        checker_expr_is_float_literal_like(*elem_box)
+                            && checker_expected_accepts_float_literal(*elem_box, *actual_inner, *expected_inner)
+                    }
+                    None => checker_expr_list_all_float_literals_accepted(e.args, *actual_inner, *expected_inner)
+                }
+            }
+            None => false
+        }
+        None => false
+    }
+}
+
+fn checker_expr_list_all_float_literals_accepted(opt: Option<Box<ExprList> >, actual_inner: TypeEntry, expected_inner: TypeEntry) -> bool with Mut {
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                if !checker_expr_is_float_literal_like((*list).head) {
+                    return false
+                }
+                if !checker_expected_accepts_float_literal((*list).head, actual_inner, expected_inner) {
+                    return false
+                }
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    true
+}
+
 fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(actual_ty, expected_ty) {
         return true
@@ -18561,7 +18623,10 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
     if checker_expr_is_float_literal_like(expr) && checker_expected_accepts_float_literal(expr, actual_ty, expected_ty) {
         return true
     }
-    checker_array_int_literal_compatible(expr, actual_ty, expected_ty)
+    if checker_array_int_literal_compatible(expr, actual_ty, expected_ty) {
+        return true
+    }
+    checker_array_float_literal_compatible(expr, actual_ty, expected_ty)
 }
 
 // Function-body return compatibility: like contextual expr compatibility, but the body
@@ -18574,10 +18639,18 @@ fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry
     let int_lit_narrow = (*c).last_literal_kind == 1
         && body_ty.kind == TypeKind::TyI64
         && is_integer_type(return_ty)
+    // V0-E.5.10: `fn f() -> f128 { 1.5 }` — a bare float literal tail is born
+    // f64 (kind 2). In an f128/f256 return position it is a literal in that
+    // position, same as `let x: f128 = 1.5`; the lowerer routes the tail through
+    // lower_f128_value_ref (exact limbs or fail-closed). `return 1.5` already
+    // went through checker_contextual_expr_compatible with the Expr in hand.
+    let float_lit_wide = (*c).last_literal_kind == 2
+        && body_ty.kind == TypeKind::TyF64
+        && is_wide_float_type(return_ty)
     let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, body_ty.name) >= 0
     let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, return_ty.name) >= 0
     let enum_int_ok = (body_enum && is_numeric_type(return_ty)) || (is_numeric_type(body_ty) && ret_enum)
-    int_lit_narrow || enum_int_ok
+    int_lit_narrow || float_lit_wide || enum_int_ok
 }
 
 fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {

@@ -421,3 +421,132 @@ pub fn f128_literal_from_source(start: i64, end: i64) -> F128Lit with Mut, Panic
     }
     f128lit_from_decimal(start, end)
 }
+
+// ── V0-E.5.10: exact binary64 value of a C99 hex-float in an f64 position ──
+//
+// Until this rung the f64 path carried a placeholder (1.0 from the lexer, 0.0
+// from parser_parse_float_token) for `0x1.8p+0`. This reads the same bytes
+// f128lit_from_hex reads and produces the correctly rounded binary64 value with
+// ONE rounding step, in i64 arithmetic:
+//   * hex digits accumulate into `sig` while it stays below 2^56 (so sig*16+15
+//     < 2^60); further digits only set `sticky` (and, before the point, scale
+//     the exponent). A dropped digit implies sig >= 2^56 > 2^53, so `sticky`
+//     always lands below the rounding position.
+//   * the kept mantissa is rounded to nearest-even at 53 bits (fewer for a
+//     subnormal result: nothing below 2^-1074 survives).
+//   * the result is materialised as `(mant as f64) * 2^k` with 2^k applied by
+//     exact doublings/halvings — every intermediate is `mant * 2^j`, which is
+//     representable, so no second rounding. `bits_to_f64` is not used: the
+//     seed tier has no such builtin.
+// A literal past the binary64 range clamps to +-max (mirrors parser.sio's
+// decimal path); zero mantissa is 0.0.
+fn f64lit_scale_pow2(value: f64, k_in: i64) -> f64 with Mut, Panic, Div {
+    var f = value
+    var k = k_in
+    while k >= 32 {
+        f = f * 4294967296.0
+        k = k - 32
+    }
+    while k > 0 {
+        f = f * 2.0
+        k = k - 1
+    }
+    while k <= 0 - 32 {
+        f = f / 4294967296.0
+        k = k + 32
+    }
+    while k < 0 {
+        f = f / 2.0
+        k = k + 1
+    }
+    f
+}
+
+pub fn f64_hex_literal_from_source(start: i64, end: i64) -> f64 with Mut, Panic, Div {
+    if end <= start + 2 {
+        return 0.0
+    }
+    var i = start + 2
+    var sig: i64 = 0
+    var sticky = false
+    var bexp: i64 = 0
+    var seen_dot = false
+    while i < end {
+        let ch = cursor_source_byte(i)
+        if ch == (95 as i8) {
+            i = i + 1
+            continue
+        }
+        if ch == (46 as i8) && !seen_dot {
+            seen_dot = true
+            i = i + 1
+            continue
+        }
+        let hv = f128lit_hex_digit_value(ch)
+        if hv < 0 { break }
+        if sig < 72057594037927936 {
+            sig = sig * 16 + hv
+            if seen_dot { bexp = bexp - 4 }
+        } else {
+            if hv != 0 { sticky = true }
+            if !seen_dot { bexp = bexp + 4 }
+        }
+        i = i + 1
+    }
+    if i < end && (cursor_source_byte(i) == (112 as i8) || cursor_source_byte(i) == (80 as i8)) {
+        i = i + 1
+        var neg = false
+        if i < end && cursor_source_byte(i) == (45 as i8) {
+            neg = true
+            i = i + 1
+        } else if i < end && cursor_source_byte(i) == (43 as i8) {
+            i = i + 1
+        }
+        var ev: i64 = 0
+        while i < end {
+            let ch2 = cursor_source_byte(i)
+            if ch2 == (95 as i8) {
+                i = i + 1
+                continue
+            }
+            if !f128lit_is_digit(ch2) { break }
+            if ev < 100000 {
+                ev = ev * 10 + ((ch2 - (48 as i8)) as i64)
+            }
+            i = i + 1
+        }
+        if neg { bexp = bexp - ev } else { bexp = bexp + ev }
+    }
+    if sig == 0 {
+        return 0.0
+    }
+    let len = f128lit_word_bit_length(sig)
+    // Unbiased exponent of the leading bit.
+    let e = bexp + len - 1
+    if e > 1023 {
+        // (2^53 - 1) * 2^971 = binary64 max, built exactly.
+        return f64lit_scale_pow2(9007199254740991 as f64, 971)
+    }
+    var shift = len - 53
+    let sub_shift = (0 - 1074) - bexp
+    if sub_shift > shift { shift = sub_shift }
+    var mant = sig
+    if shift > 0 {
+        if shift >= 62 {
+            // Everything is below half of the smallest subnormal.
+            return 0.0
+        }
+        let dropped = sig & ((1 << shift) - 1)
+        let half = 1 << (shift - 1)
+        mant = sig >> shift
+        var round_up = false
+        if dropped > half {
+            round_up = true
+        } else if dropped == half {
+            if sticky || (mant & 1) == 1 { round_up = true }
+        }
+        if round_up { mant = mant + 1 }
+        bexp = bexp + shift
+    }
+    f64lit_scale_pow2(mant as f64, bexp)
+}

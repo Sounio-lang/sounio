@@ -238,7 +238,15 @@ IO        Mut       Alloc     Panic     Async     GPU       Prob      Div
 3.14            // Basic
 1e10            // Scientific
 2.5e-3          // Scientific with sign
+1_024.0         // With separators (integer part, fraction and exponent)
+0x1.8p+1        // C99 hex-float (exact binary value: 3.0)
 ```
+
+A `_` is a digit separator only when a digit follows it; `500_mg` is a
+unit-annotated literal (2.6.3), not a separator. A hex-float in an `f64`
+position is the correctly rounded binary64 value of its text (single
+rounding); in an `f128` position it must be exactly representable in
+binary128 or the compiler refuses it.
 
 #### 2.6.3 Unit-Annotated Literals
 
