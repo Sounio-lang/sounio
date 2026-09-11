@@ -5654,34 +5654,19 @@ fn lower_fn_returns_f256(func: &IrFunction) -> bool with Mut, Panic, Div {
     ir_name_eq((*func).return_struct_name, make_name("f256"))
 }
 
-// V0-E.5.1: only dyadic values that are exact in both f64 and f128. Anything
-// else (including 1e-20) must use f128_from_limbs — never f64 widen.
-//
-// Scalar helpers, not a `(i64, i64, i64)` tuple: this was the only 3-tuple
-// return in the compiler, and the seed-built Madaros read `.2` as a stack
-// address (Linux x86_64: f128_to_hi(1.0) = 00007fff1ff54180). Every table
-// value has lo = 0; hi is the IEEE binary128 MSW.
-fn lower_f128_literal_is_exact(v: f64) -> bool {
-    if v == 0.0 { return true }
-    if v == 1.0 { return true }
-    if v == 2.0 { return true }
-    if v == 0.5 { return true }
-    if v == 1.5 { return true }
-    if v == 3.0 { return true }
-    if v == 0.25 { return true }
-    if v == 0.0 - 1.0 { return true }
-    false
-}
-
-fn lower_f128_literal_hi(v: f64) -> i64 {
-    if v == 1.0 { return 4611404543450677248 }
-    if v == 2.0 { return 4611686018427387904 }
-    if v == 0.5 { return 4611123068473966592 }
-    if v == 1.5 { return 4611545280939032576 }
-    if v == 3.0 { return 4611826755915743232 }
-    if v == 0.25 { return 4610841593497255936 }
-    if v == 0.0 - 1.0 { return 0 - 4611967493404098560 }
-    0
+// V0-E.5.9: a float literal in an f128 position carries its own exact
+// binary128 identity — `Expr.f128_lit_lo / f128_lit_hi / f128_lit_exact`,
+// computed by the parser from the literal's SOURCE BYTES
+// (self-hosted/parser/f128_literal.sio: decimal d.ddd e±N and C99 hex-float
+// 0xh.hhh p±N; dyadic rationals with an odd part of at most 113 bits, in the
+// finite binary128 range). The lowerer reads the node and emits the limbs, or
+// fails closed on `f128_lit_exact == false`. This replaced the V0-E.5.1 8-entry
+// table keyed on the literal's f64 value (0, ±1, 2, 3, 0.5, 1.5, 0.25), which
+// refused `4.0` and — because a hex-float reached it as the parser's
+// placeholder magnitude — silently lowered `0x1.8p+0` as that placeholder.
+// No f64 is read on this path.
+fn lower_f128_literal_fail_msg() -> string {
+    "f128 literal is not exactly representable in binary128 (V0-E.5.9; no f64 widen): write a dyadic decimal, a C99 hex-float 0x1.<hex>p<+-N>, or f128_from_limbs(lo, hi)"
 }
 
 fn lower_f128_fail(lo: Lowerer, msg: string) -> (Lowerer, i64) with Mut, Panic, Div, IO {
@@ -20186,10 +20171,10 @@ impl Lowerer {
 
     fn lower_f128_value_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFloatLit {
-            if !lower_f128_literal_is_exact((*e).float_val) {
-                return lower_f128_fail(self, "f128 literal is not an exact table value; use f128_from_limbs(lo, hi) (V0-E.5.1; no f64 widen)")
+            if !(*e).f128_lit_exact {
+                return lower_f128_fail(self, lower_f128_literal_fail_msg())
             }
-            return self.lower_f128_emit_limbs(0, lower_f128_literal_hi((*e).float_val))
+            return self.lower_f128_emit_limbs((*e).f128_lit_lo, (*e).f128_lit_hi)
         }
         if (*e).kind == ExprKind::ExprIdent {
             if self.lookup_local_scalar_kind((*e).name) == 5 && self.lookup_local_wide_bits((*e).name) == 128 {

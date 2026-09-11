@@ -6,14 +6,20 @@
 # Claim clock: ADR-008 / ADR-009 — structural fail-closed (no numeric judge)
 #
 # V0-E.4.1 green (this gate):
-#   - Madaros compile of language f128 arith FAILS with the fail-closed sentinel
-#     (does not emit a silent f64-greenwash ELF)
-#   - Madaros check of the same program still OK (V0-E.2)
+#   - Madaros compile of language WIDE-FLOAT arith with no payload (the f256
+#     form of tests/run-pass/f128_v0e2_arith_check.sio) FAILS with the
+#     fail-closed sentinel and emits no ELF (no silent f64 greenwash)
+#   - Madaros check of the f128 program still OK (V0-E.2)
+#   - The f128 form of the same program now COMPILES AND RUNS (rc=0): every op
+#     in it is Madaros-run since V0-E.5.1–V0-E.5.6, and every literal in it is
+#     exact since V0-E.5.9. Until V0-E.5.9 this gate saw the f128 program
+#     refused only because `4.0` was outside the 8-entry literal table — the
+#     refusal it measured was the table, not the wide-float fail-closed path.
 #   - Structural: lower.sio marks wide-float scalar_kind=5 + refuse path present
 #   - V0-E.4 anti-f64 seed softfloat still green
 #
 # Explicitly NOT claimed:
-#   - Successful Madaros-run of language f128 ops (softfloat desugar)
+#   - f256 arithmetic (no payload; that is what the sentinel guards now)
 #   - print_f128 builtin / GUM / MeasuredF256
 #
 set -euo pipefail
@@ -81,13 +87,37 @@ else
     tail -20 "$TMP_DIR/check.log" >&2 || true
   fi
 
-  # Compile must fail-closed (no greenwash ELF success)
+  # The f128 program is Madaros-run since V0-E.5.1–V0-E.5.9: it must compile
+  # and run to rc=0. (Before V0-E.5.9 it was refused only because `4.0` was not
+  # in the literal table — a refusal this gate misread as the wide-float
+  # fail-closed path.)
+  # The softfloat desugar targets live in stdlib math::softfloat_f128; a
+  # program must import that module for the targets to be in its module graph
+  # (without the import the ELF traps on the body-less stub — documented gap,
+  # see KNOWN_LIMITATIONS). The run probe adds the import; nothing else changes.
+  LANG128="$TMP_DIR/arith_check_f128_imported.sio"
+  { echo 'use math::softfloat_f128::{f128_from_limbs}'; cat "$LANG"; } >"$LANG128"
+  set +e
+  "$SOUC" run "$LANG128" >"$TMP_DIR/run_f128.log" 2>&1
+  r_rc=$?
+  set -e
+  if [[ "$r_rc" -eq 0 ]]; then
+    note_pass "madaros_run_language_f128_arith_v0e5x"
+  else
+    note_fail "madaros_run_language_f128_arith_v0e5x rc=$r_rc"
+    tail -30 "$TMP_DIR/run_f128.log" >&2 || true
+  fi
+
+  # The WIDE-FLOAT fail-closed path proper: the same program over f256, for
+  # which no payload exists. Compile must refuse with the sentinel, no ELF.
+  LANG256="$TMP_DIR/arith_check_f256.sio"
+  sed 's/f128/f256/g' "$LANG" >"$LANG256"
   OUT="$TMP_DIR/lang.elf"
   set +e
-  "$SOUC" compile "$LANG" -o "$OUT" >"$TMP_DIR/compile.log" 2>&1
+  "$SOUC" compile "$LANG256" -o "$OUT" >"$TMP_DIR/compile.log" 2>&1
   c_rc=$?
   set -e
-  if grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/compile.log"; then
+  if grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/compile.log" && [[ ! -s "$OUT" ]]; then
     note_pass "madaros_compile_fail_closed_sentinel"
   elif [[ "$c_rc" -ne 0 ]] && grep -Eiq 'f128|f256|wide.float|softfloat|E\.4\.1' "$TMP_DIR/compile.log"; then
     note_pass "madaros_compile_fail_closed_related"
@@ -105,13 +135,13 @@ else
   fi
 fi
 
-echo "NOTE v0e41_deferred madaros_run_language_softfloat_desugar=pending print_builtin=pending gum=pending"
+echo "NOTE v0e41_deferred f256_payload=pending print_builtin=pending gum=pending (language f128 arith is Madaros-run since V0-E.5.1–V0-E.5.9)"
 
 echo "---"
 echo "PASS_COUNT=$PASS"
 echo "FAIL_COUNT=$FAIL"
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS f128_f256_v0e41_fail_closed_lower check=ok compile=refuse_no_f64_greenwash v0e4=green desugar=deferred"
+  echo "PASS f128_f256_v0e41_fail_closed_lower check=ok f256_compile=refuse_no_f64_greenwash f128_run=madaros v0e4=green"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0e41"
   exit 0
 fi
