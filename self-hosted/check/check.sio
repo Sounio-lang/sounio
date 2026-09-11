@@ -7472,8 +7472,11 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         if struct_idx >= 0 && struct_idx < (*(*c).structs).count {
             let si = struct_table_get((*c).structs, struct_idx)
             let field_ty = field_info_list_find(si.fields, e.name)
-            if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+            let field_exists = field_info_list_has(si.fields, e.name)
+            if field_ty.kind == TypeKind::TyError && !field_exists {
                 checker_report_no_field_inplace(c, e.span, e.name, base_ty)
+            } else if field_exists && (*c).enforce_visibility && !checker_field_visible_inplace(c, struct_idx, e.name) {
+                checker_report_error_at_inplace(c, e.span, 259, 0, 0, 0)
             }
             field_ty
         } else {
@@ -23924,8 +23927,17 @@ impl Checker {
                 if struct_idx >= 0 {
                     let si = struct_table_get(c.structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
-                    if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
+                    let field_exists = field_info_list_has(si.fields, e.name)
+                    if field_ty.kind == TypeKind::TyError && !field_exists {
                         c = c.report_no_field(e.span, e.name, base_ty)
+                    } else if field_exists && c.enforce_visibility && !field_info_list_is_pub(si.fields, e.name) {
+                        let same_module = si.defining_module_id == c.current_module_id
+                            || visibility_allows_access(visibility_private(), si.defining_module, c.current_module, c.crate_root)
+                        let own_impl = c.current_impl_type.kind == TypeKind::TyNamed
+                            && name_eq(c.current_impl_type.name, si.name)
+                        if !same_module && !own_impl {
+                            c = c.report_error_at(e.span, 259, 0, 0, 0)
+                        }
                     }
                     (c, field_ty)
                 } else {
