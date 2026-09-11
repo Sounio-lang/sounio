@@ -263,17 +263,23 @@ expect_log_contains "wide integer print is not implemented; use shifts and casts
 [[ ! -e "$WORK/kl7_print.elf" ]] || fail "wide println refusal still produced an ELF"
 pass "KL-7 wide println fails closed before ELF emission"
 
-# Sabotage/control: narrow the exact fixture to i64.  It must become an ordinary
-# runnable println(-1), proving the negative assertion is keyed to wide shape
-# rather than a vacuous fixture or a generally broken print path.
-sed 's/i256/i64/g' "$WIDE_PRINT_FIXTURE" >"$WORK/kl7_print_narrow_control.sio"
+# Sabotage/control: the same print shape with an i64 must remain an ordinary
+# runnable println(-1), proving the refusal is keyed to wide shape rather than
+# a vacuous fixture or a generally broken print path.
+cat >"$WORK/kl7_print_narrow_control.sio" <<'EOF'
+fn main() -> i64 with IO {
+    let x: i64 = 0 - 1
+    println(x)
+    0
+}
+EOF
 "$MADAROS" check "$WORK/kl7_print_narrow_control.sio" >"$WORK/kl7_print_narrow_check.log" 2>&1
 expect_log_contains "check: OK" "$WORK/kl7_print_narrow_check.log"
 "$MADAROS" build "$WORK/kl7_print_narrow_control.sio" -o "$WORK/kl7_print_narrow.elf" >"$WORK/kl7_print_narrow_build.log" 2>&1
 chmod +x "$WORK/kl7_print_narrow.elf"
 "$WORK/kl7_print_narrow.elf" >"$WORK/kl7_print_narrow.stdout"
 [[ "$(cat "$WORK/kl7_print_narrow.stdout")" == "-1" ]] || fail "narrow sabotage control did not print -1"
-pass "KL-7 print refusal sabotage control (i256->i64) runs and prints -1"
+pass "KL-7 print refusal narrow control runs and prints -1"
 
 # ---------------------------------------------------------------------------
 # 19. Signed widening and wide unary negation.  The witness inspects high limbs
@@ -286,7 +292,7 @@ expect_log_contains "check: OK" "$WORK/kl7_sign_check.log"
 chmod +x "$WORK/kl7_sign.elf"
 "$WORK/kl7_sign.elf" >"$WORK/kl7_sign.stdout"
 [[ "$(cat "$WORK/kl7_sign.stdout")" == "KL7_WIDE_SIGN_EXTENSION_OK" ]] || fail "signed-wide witness output/exit mismatch"
-pass "KL-7 i256/i512 sign extension and -(2^70)"
+pass "KL-7 i256/i512 sign extension, signed comparison and -(2^200)"
 
 set +e
 SOUNIO_WIDE_MUL_SABOTAGE=1 "$MADAROS" build "$SIGN_FIXTURE" -o "$WORK/kl7_sign_sabotaged.elf" >"$WORK/kl7_sign_sabotaged_build.log" 2>&1
