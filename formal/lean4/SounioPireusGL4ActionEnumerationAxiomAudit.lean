@@ -1,0 +1,17 @@
+import SounioPireusGL4ActionEnumeration
+
+open SounioPireusGL4ActionEnumeration
+
+#print axioms scan_membership_facts
+#print axioms matrixWitnessOfScanEntry
+#print axioms matrix_witness_of_scan_entry_code
+#print axioms typed_gl4_witness_originates_in_frozen_scan
+#print axioms every_admitted_matrix_code_has_typed_entry
+#print axioms viewWitness
+#print axioms concreteLinearSwapActionAt
+#print axioms unswappedViewOf
+#print axioms swappedViewOf
+#print axioms each_scan_entry_has_both_concrete_actions
+#print axioms the_two_views_have_the_same_matrix_witness
+#print axioms gl4ActionEnumerationBoundary
+#print axioms gl4_action_enumeration_does_not_close_v13_target03

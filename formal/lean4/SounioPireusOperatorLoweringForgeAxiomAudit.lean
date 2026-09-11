@@ -1,0 +1,14 @@
+import SounioPireusOperatorLoweringForge
+
+/-
+  This audit is an executable trust-boundary check, not a semantic authority.
+  Every v6 formal-parity theorem must have an empty axiom closure.
+-/
+
+#print axioms SounioPireusOperatorLoweringForge.formal_parity_summary_matches_frozen_sounio
+#print axioms SounioPireusOperatorLoweringForge.candidate_index_roundtrip_and_grammar_cardinality
+#print axioms SounioPireusOperatorLoweringForge.program_serialization_quotient_exact
+#print axioms SounioPireusOperatorLoweringForge.machine_envelope_partition_exact
+#print axioms SounioPireusOperatorLoweringForge.parent_representative_lineage_bound
+#print axioms SounioPireusOperatorLoweringForge.residual_seed_partition_exact
+#print axioms SounioPireusOperatorLoweringForge.obligation_ledger_and_no_admission
