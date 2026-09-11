@@ -39,7 +39,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-2 | IEEE 754 special values (#2389) | both |
 | KL-4 | private field reads unchecked | both |
 | KL-5 | ε polarity fork | madaros |
-| KL-6 | Hessian quotient / composite chain on Madaros | madaros |
 | KL-7 | `i256`/`i512` wide-local `print_int` | madaros |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
@@ -126,23 +125,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `scripts/ci/epsilon_engine_parity_gate.sh` (ci.yml) covers a narrower set.
 - Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`. Do not state the
   vancomycin ε guarantee without naming the engine.
-
-### KL-6 — Hessian on Madaros: quotient and composite chain rule
-
-- Engine: `madaros`. `tests/run-pass/madaros_hessian_quotient.sio` prints
-  `h_aa=h_ab=h_bb=h_rec=0.000000` and `MADAROS_HESSIAN_QUOTIENT_FAIL` on the
-  committed ELF and on source. Composite inner expressions (`exp(x*x)`,
-  `exp(sin(x))`, `sin(sin(x))`) are deliberately refused by clearing the
-  Hessian and returning `0.0` (`ir/lower.sio:11338-11347`, `:11423`); the
-  `f'(g)·H(g)` term is not implemented.
-- Locus: `lower_expr_variance_ref` guard `lower.sio:12277`
-  (`fo_expr_or_snap_has_sens(sL)` only — a Hessian carried by the right
-  operand alone is dropped), `so_combine_hess_div` `:9782`,
-  `so_combine_hess_mul` `:9871`.
-- Pin: the transcendental witness
-  `tests/run-pass/madaros_hessian_transcendental.sio` is green and must stay
-  so; the quotient witness is the failing repro. Do not generalise the
-  transcendental result to Hessian AD as a whole.
 
 ### KL-7 — `i256`/`i512` wide-local `print_int`
 
