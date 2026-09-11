@@ -519,3 +519,4 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E256 | type-checker/causal | error | `d_separated` needs a declared causal graph and exactly two variable names, with an optional conditioning set | — |
 | E257 | type-checker/causal | error | `indep_dsep`'s argument must be a `d_separated(...)` call the compiler itself discharged, not a hand-written value | — |
 | E258 | parser | error | string literal(s) exceed Name capacity (384 bytes incl. quotes); refuses rather than silently truncating | [E258.md](explanations/E258.md) |
+| E259 | type-checker/visibility | error | direct access to a private struct field from outside its defining module | — |
