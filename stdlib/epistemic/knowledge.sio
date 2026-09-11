@@ -224,39 +224,53 @@ pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
 //   ep_add_cov(x, x, Var) -> 4Var       (2X has twice the standard deviation)
 //   ep_sub_cov(x, x, Var) -> 0          (X - X is certain)
 //   ep_mul_cov(x, x, Var) -> 4X²Var     (agrees with ep_square)
-// A negative variance cannot be produced by a valid covariance -- for a positive
-// semi-definite 2x2 covariance matrix the propagated variance is g'Sg >= 0, so
-// the clamp never fires on a consistent input. A caller can still pass an
-// inconsistent Cov, and ALL FOUR forms clamp at zero rather than return a
-// negative variance: add and mul can go negative too, not just sub and div.
+// A negative variance cannot be produced by a VALID covariance -- for a positive
+// semi-definite 2x2 covariance matrix S = [[Var X, Cov],[Cov, Var Y]] the
+// propagated variance is g'Sg >= 0 for every Jacobian g. So rather than clamp a
+// negative result to zero (which would report inconsistent evidence as apparent
+// maximum certainty), all four forms REFUSE a non-PSD input up front, at
+// construction, the way indep_measured refuses an out-of-range rho. The PSD test
+// for the 2x2 is Cov^2 <= Var(X)*Var(Y); the (1 + 1e-10) slack admits the exact
+// self-correlated boundary (Cov = Var, e.g. ep_sub_cov(x, x, Var) -> 0) against
+// floating-point rounding. With the input proven PSD the propagated variance is
+// >= 0 and no clamp is needed.
 
 // Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)
-pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
+        panic("ep_add_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
+    }
     let v = a.variance + b.variance + 2.0 * cov
     Epistemic {
         val: a.val + b.val,
-        variance: if v < 0.0 { 0.0 } else { v },
+        variance: v,
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
 
 // Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y)
-pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
+        panic("ep_sub_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
+    }
     let v = a.variance + b.variance - 2.0 * cov
     Epistemic {
         val: a.val - b.val,
-        variance: if v < 0.0 { 0.0 } else { v },
+        variance: v,
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
 
 // GUM delta method: Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y)
-pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
+        panic("ep_mul_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
+    }
     let v = b.val * b.val * a.variance + a.val * a.val * b.variance
         + 2.0 * a.val * b.val * cov
     Epistemic {
         val: a.val * b.val,
-        variance: if v < 0.0 { 0.0 } else { v },
+        variance: v,
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }
@@ -264,6 +278,9 @@ pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
 // GUM delta method: Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³
 // The partials are 1/Y and -X/Y², so the cross term enters NEGATIVE.
 pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div, Panic {
+    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
+        panic("ep_div_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
+    }
     let y2 = b.val * b.val
     let y3 = y2 * b.val
     let y4 = y2 * y2
@@ -271,7 +288,7 @@ pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div,
         - 2.0 * a.val * cov / y3
     Epistemic {
         val: a.val / b.val,
-        variance: if v < 0.0 { 0.0 } else { v },
+        variance: v,
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }

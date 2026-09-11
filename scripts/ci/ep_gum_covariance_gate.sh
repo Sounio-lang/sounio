@@ -60,4 +60,43 @@ for marker in 'UNCORRELATED case only' 'ep_add_cov' 'ep_mul_cov'; do
   }
 done
 
+# Refusal probe: a non-PSD covariance (Cov^2 > Var(X)*Var(Y)) must be REFUSED at
+# construction, not clamped to a false zero variance. There is no run-fail test
+# harness, so drive it here: compile a program that feeds cov = 99.0 (with
+# Var 0.25, 0.09 -> 99^2 = 9801 >> 0.0225) and require the run to ABORT (non-zero
+# exit) WITHOUT printing the sentinel. A clean exit or the sentinel means the
+# clamp came back and inconsistent evidence is again read as certainty.
+PROBE_SRC="$OUT/ep_gum_cov_refuse.sio"
+PROBE_ELF="$OUT/ep_gum_cov_refuse.elf"
+cat > "$PROBE_SRC" <<'PROBE'
+//@ run-pass
+use epistemic::knowledge::{Epistemic, ep_sub_cov}
+fn main() -> i32 with IO, Div, Panic {
+    let x = Epistemic { val: 3.0, variance: 0.25, confidence: 900 }
+    let y = Epistemic { val: 2.0, variance: 0.09, confidence: 900 }
+    // Non-PSD: must panic here, never reach the print below.
+    let r = ep_sub_cov(&x, &y, 99.0)
+    print("EP_GUM_COV_REFUSE_ESCAPED ")
+    print_int(r.variance as i64)
+    print("\n")
+    return 0
+}
+PROBE
+if ! "$SOUC" compile "$PROBE_SRC" -o "$PROBE_ELF" >"$OUT/probe_compile.log" 2>&1; then
+  echo "FAIL: refusal probe did not compile"
+  tail -40 "$OUT/probe_compile.log" || true
+  exit 1
+fi
+chmod +x "$PROBE_ELF"
+set +e
+"$PROBE_ELF" >"$OUT/probe_run.log" 2>&1
+PROBE_RC=$?
+set -e
+if [ "$PROBE_RC" -eq 0 ] || grep -q 'EP_GUM_COV_REFUSE_ESCAPED' "$OUT/probe_run.log"; then
+  echo "FAIL: non-PSD covariance was NOT refused (clamp regression)"
+  cat "$OUT/probe_run.log" || true
+  exit 1
+fi
+echo "  refusal probe ok: non-PSD covariance rejected (rc $PROBE_RC)"
+
 echo "MADAROS_EP_GUM_COVARIANCE_GATE_OK"
