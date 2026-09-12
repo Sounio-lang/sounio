@@ -35,7 +35,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-1 | small parity items: `~`, `Epistemic(-N)`, `*const`/`*mut` at call sites, `println` of computed local | madaros |
 | KL-4 | private field reads unchecked | both |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
@@ -47,33 +46,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
 ## Ledger
-
-### KL-1 — small parity items
-
-- **Unary `~` refused by Madaros.** Engine: `madaros` (E005; `lean_single`
-  accepts). Repro: `tests/run-pass/bitwise_not_bootstrap_regression.sio`. Pin:
-  `tests/engine_parity_baseline.txt` row `LEAN-ONLY` for that file. Locus:
-  `self-hosted/parser/exprs.sio:211` maps `Tilde` to `UnaryOp::OpNot`;
-  `check/compat.sio:1233` makes `OpNot` bool-only; `native/encode.sio:1576`
-  `emit_not_rax` exists and is unused.
-- **`Epistemic(-N)` collides with "no payload".** Engine: `both` accept the
-  syntax; Madaros erases `-1` to the no-payload sentinel
-  (`parser/ast.sio:140` `EffectRef.payload`, `parser/types.sio:940`).
-  Positive floors are enforced (E215). Receipt:
-  `docs/audit/MADAROS_EPISTEMIC_PAYLOAD_GATE_2026-08-20.md`. Pin: none.
-- **`*const T` vs `*mut T` at a call site.** Engine: `madaros`. Passing
-  `expr as *const u8` where the callee takes `*mut u8` (or the reverse) can
-  produce arity/type diagnostics; stdlib wrappers prefer `*mut u8`. Locus:
-  `check.sio:17310` `checker_call_arg_types_compatible_table`,
-  `check/compat.sio:226`. Pin: none (the fixture the old text cited,
-  `tests/stdlib/compress/test_zstd_e2e.sio`, is now a constants-only stub and
-  does not exercise this).
-- **`println(<computed local>)` routes to the `char*` printer.** Engine:
-  `madaros`. A local bound from a bare index/field-access initializer without
-  an int scalar-kind marker (`let v = r.c[0]; println(v)`) reaches
-  `println_dispatch_name` (`ir/lower.sio:12514`) with kind 0. Locus:
-  `lower_let_stmt_ref` unannotated path `lower.sio:16922-16991` only marks
-  int for `ExprCall`/`ExprMethodCall`/`Binary`/`Unary`. Pin: none.
 
 
 ### KL-4 — private field reads are not checked

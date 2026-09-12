@@ -53,7 +53,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | GPU PTX backend | Validated research | Registry: `gpu.ptx = validated_research`. Named gate covers L4 fixtures; out-of-fixture behavior is research. |
 | 168 / Cayley-Dickson algebra | Validated research | Registry: `algebra.168 = validated_research`. Algebraic/formal artifacts only — no biological or EEG advantage claims. |
 | Ontology subsystem | Validated research | Registry: `ontology = validated_research`. Rebuilt ontology validation surfaces only. |
-| Epistemic Types — `Knowledge<T>` / GUM | Validated research | Single-file emit and named GUM gates are validated surfaces. Engine-specific epsilon semantics and payload bounds remain open (`KNOWN_LIMITATIONS.md` rows KL-5 and KL-1); clinical use must cite the exact engine and gate. |
+| Epistemic Types — `Knowledge<T>` / GUM | Validated research | Single-file emit and named GUM gates are validated surfaces. Engine-specific epsilon semantics remain open (`KNOWN_LIMITATIONS.md` row KL-5); clinical use must cite the exact engine and gate. |
 
 Editor-tooling details:
 
