@@ -14,7 +14,7 @@ use native::aarch64::*
 use native::macho::*
 use native::reloc::*
 use native::frame::*
-use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s}
+use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s, lower_ir_set_ieee_f64_sabotage}
 use native::machine_ir::*
 use native::peephole::{ph_run_on_func}
 use native::regalloc::*
@@ -65,6 +65,8 @@ var NC_V2_CURRENT_FN_INDEX: i64 = -1
 // IO compile entry so nc_wide_mul_into does not take IO — its emit-loop
 // helper must stay Mut/Panic/Div or the effect walks the core_ir graph.
 var NC_WIDE_MUL_SABOTAGE: i64 = 0
+// Cached SOUNIO_SABOTAGE_IEEE_F64_SPECIAL (#2389 / KL-2 witness hook).
+var NC_IEEE_F64_SABOTAGE: i64 = 0
 
 fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
     (*nc).label_overflow = true
@@ -2349,6 +2351,22 @@ fn nc_emit_setbe_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x96); nc_emit_byte(nc, 0xc0)
 }
 
+fn nc_emit_setpo_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9b); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_setpe_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9a); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_and_al_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x22); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_or_al_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0a); nc_emit_byte(nc, 0xc1)
+}
+
 // MOVZX RAX, AL
 fn nc_emit_movzx_rax_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -2714,6 +2732,16 @@ fn nc_refresh_wide_mul_sabotage() with IO, Mut, Panic, Div {
         NC_WIDE_MUL_SABOTAGE = 1
     } else {
         NC_WIDE_MUL_SABOTAGE = 0
+    }
+}
+
+fn nc_refresh_ieee_f64_sabotage() with IO, Mut, Panic, Div {
+    if str_eq(read_env("SOUNIO_SABOTAGE_IEEE_F64_SPECIAL"), "1") {
+        NC_IEEE_F64_SABOTAGE = 1
+        lower_ir_set_ieee_f64_sabotage(1)
+    } else {
+        NC_IEEE_F64_SABOTAGE = 0
+        lower_ir_set_ieee_f64_sabotage(0)
     }
 }
 
@@ -6197,6 +6225,66 @@ pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
+// Epilogue shared by print_f64 special-value exits (#2389).
+fn emit_print_f64_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_mov_rsp_rbp(b)
+    b = emit_pop_rbp(b)
+    b = emit_ret(b)
+    b
+}
+
+// Write count bytes at [rbp+disp8] to stdout and return from print_f64.
+fn emit_print_f64_write_stack_and_return(c: NativeCompiler, disp8: i8, count: i64,
+        b0: i8, b1: i8, b2: i8, b3: i8) -> NativeCompiler with Mut, Panic, Div {
+    var code = c.code
+    if count >= 1 {
+        var s0 = code
+        s0 = emit_byte(s0, 0xC6)
+        s0 = emit_byte(s0, 0x45)
+        s0 = emit_byte(s0, disp8)
+        s0 = emit_byte(s0, b0)
+        code = s0
+    }
+    if count >= 2 {
+        var s1 = code
+        s1 = emit_byte(s1, 0xC6)
+        s1 = emit_byte(s1, 0x45)
+        s1 = emit_byte(s1, disp8 + 1)
+        s1 = emit_byte(s1, b1)
+        code = s1
+    }
+    if count >= 3 {
+        var s2 = code
+        s2 = emit_byte(s2, 0xC6)
+        s2 = emit_byte(s2, 0x45)
+        s2 = emit_byte(s2, disp8 + 2)
+        s2 = emit_byte(s2, b2)
+        code = s2
+    }
+    if count >= 4 {
+        var s3 = code
+        s3 = emit_byte(s3, 0xC6)
+        s3 = emit_byte(s3, 0x45)
+        s3 = emit_byte(s3, disp8 + 3)
+        s3 = emit_byte(s3, b3)
+        code = s3
+    }
+    var lea = code
+    lea = emit_byte(lea, 0x48)
+    lea = emit_byte(lea, 0x8D)
+    lea = emit_byte(lea, 0x75)
+    lea = emit_byte(lea, disp8)
+    code = lea
+    code = emit_mov_reg_imm(code, 2, count)
+    var nc = c
+    nc.code = code
+    nc = emit_load_runtime_context_field_rdi(nc, runtime_context_field_stdout_fd())
+    nc = emit_write_syscall_for_target(nc, nc.target_os_id)
+    nc.code = emit_print_f64_epilogue(nc.code)
+    nc
+}
+
 // Sprint 118: print_f64 builtin — f64 → stdout, fraction rounded (#1573)
 pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -6212,6 +6300,39 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     // rdi = f64 bit pattern
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+
+    // NaN/inf fast paths (#2389). Skipped under ieee-f64-special sabotage.
+    if NC_IEEE_F64_SABOTAGE != 1 {
+    // Classify NaN / ±inf from IEEE bits (#2389). Integer-only: ucomisd self-tests
+    // mis-fire on some non-NaN values when xmm state is entangled with prior ops.
+    c.code = emit_mov_reg_imm(c.code, 1, 52)          // mov rcx, 52 → cl for shr
+    c.code = emit_shr_rax_cl(c.code)                  // rax = biased exponent
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_cmp_rbx_rax(c.code)                 // cmp 0x7FF, exp
+    let jnz_not_special = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let jz_is_inf = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 110, 97, 110, 0) // "nan"
+    let inf_block = c.code.len
+    c.code = patch_u32_le(c.code, jz_is_inf + 2, inf_block - (jz_is_inf + 6))
+    c.code = emit_test_rdi_rdi(c.code)
+    let jns_pos_inf = c.code.len
+    c.code = emit_jns_rel8(c.code, 0)
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 4, 45, 105, 110, 102) // "-inf"
+    let pos_inf = c.code.len
+    if jns_pos_inf + 1 < nc_code_capacity_bytes() {
+        NC_BIG_CODE[(jns_pos_inf + 1) as usize] = low8(pos_inf - (jns_pos_inf + 2)) as i8
+    }
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 105, 110, 102, 0) // "inf"
+    let after_inf = c.code.len
+    c.code = patch_u32_le(c.code, jnz_not_special + 2, after_inf - (jnz_not_special + 6))
+    }
 
     // Sign check: test rdi, rdi; jns skip_neg
     c.code = emit_test_rdi_rdi(c.code)
@@ -8182,22 +8303,46 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
         return true
     } else if op == BinaryOp::OpEq {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_sete_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_sete_al(nc)
+        } else {
+            nc_emit_sete_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpNe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setne_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setne_al(nc)
+        } else {
+            nc_emit_setne_al(nc)
+            nc_emit_setpe_cl(nc)
+            nc_emit_or_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpLt {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setb_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setb_al(nc)
+        } else {
+            nc_emit_setb_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpLe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setbe_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setbe_al(nc)
+        } else {
+            nc_emit_setbe_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpGt {
@@ -8207,7 +8352,13 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
         return true
     } else if op == BinaryOp::OpGe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setae_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setae_al(nc)
+        } else {
+            nc_emit_setae_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     }
@@ -8983,6 +9134,7 @@ fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64
 
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_refresh_wide_mul_sabotage()
+    nc_refresh_ieee_f64_sabotage()
     nc_v2_reset_label_state()
     NC_V2_CURRENT_FN_INDEX = fn_index
     reset_function_state_mut(nc)

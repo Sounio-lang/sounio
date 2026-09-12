@@ -191,7 +191,8 @@ echo "parity=$n_parity divergence=$(count_of DIVERGENCE) rule_drift=$n_drift out
 # 2026-09-06). The corpus grows, so these are floors rather than equalities and
 # are overridable for a filtered run. A collapse in the in-scope population is
 # the signature of the wrong-cwd or wrong-stdlib false green described above.
-CORPUS_MIN="${CORPUS_MIN:-392}"
+# Floor dropped: KL-2: turbofish_concrete_type_mismatch moved to requires:madaros
+CORPUS_MIN="${CORPUS_MIN:-391}"
 IN_SCOPE_MIN="${IN_SCOPE_MIN:-300}"
 if [[ "$n_total" -lt "$CORPUS_MIN" ]]; then
     echo "A64_COMPILE_FAIL_PARITY_GATE=FAIL (corpus shrank: $n_total < $CORPUS_MIN)"
