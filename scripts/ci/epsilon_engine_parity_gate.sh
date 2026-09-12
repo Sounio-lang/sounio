@@ -8,21 +8,14 @@
 # GATE_ENGINE: both (Madaros default + SOUNIO_SOUC_ENGINE=lean_single)
 # GATE_RESULT_ON_SKIP: fail
 #
-# WHY THIS EXISTS, and why it does not take a side.
+# WHY THIS EXISTS.
 #
-# epsilon has two polarities in this tree. Madaros reads it as an error bound
-# (self-hosted/check/epistemic.sio:595, `epsilon_subsumes` is `a <= b`), while
-# lean_single and the clinical surface read it as confidence. Neither engine is
-# wrong against a decision, because no decision exists yet -- see
-# docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md.
+# KL-5 resolved the polarity fork by following lean_single: the parser operator
+# selects the ordering. `>=` is a confidence floor, `<`/`<=` are error bounds,
+# and `=` is exact. The frozen divergence is therefore zero.
 #
-# What IS wrong under either decision is that the disagreement is SILENT. A
-# patient-safety compile-fail test answering `check: OK` on the engine bin/souc
-# routes to is a failure whichever way epsilon is finally defined. This gate does
-# not choose the polarity. It refuses to let the divergence grow, and it prints
-# every current instance by name on every run so nobody has to rediscover them.
-#
-# The frozen count may only SHRINK. Deciding the polarity should drive it to 0.
+# A compile-fail test answering `check: OK` on either engine is a silent hole.
+# This gate refuses any recurrence and prints every divergent instance by name.
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -86,7 +79,7 @@ if (( divergent > frozen )); then
   status=fail; rc=1
   echo "REFUSE: engine-divergent epsilon refusals rose ${frozen} -> ${divergent}." >&2
   echo "  A compile-fail test that one engine refuses and the other accepts is a" >&2
-  echo "  silent hole whichever polarity epsilon is finally given." >&2
+  echo "  regression from the operator-aware epsilon semantics fixed by KL-5." >&2
 elif (( divergent < frozen )); then
   echo "OK: engine-divergent epsilon refusals fell ${frozen} -> ${divergent}. Lower the frozen count:"
   echo "  printf '%s\\n' ${divergent} > ${FROZEN_FILE}"

@@ -49,15 +49,9 @@ expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean 
 # #2388 (3) -- still open: K still enters an f64 parameter unchecked.
 expect "unit lost at call boundary (lean_single accepts)" "0" "$(rc lean check $UNITS/unit_lost_at_call_boundary.sio)"
 
-# IEEE special values -- NaN compares as ordered on both engines
-for e in lean mad; do
-  got=$($e run $NUM/nan_compare_is_not_ieee.sio 2>/dev/null | grep -E '^[01]$' | tr '\n' ' ' | sed 's/ $//')
-  expect "nan ==,!=,< on $e (IEEE would be '0 1 0')" "1 0 1" "$got"
-done
-# println(inf): lean_single never returns (timeout 20s -> 124); Madaros prints 2^63
-expect "println(inf) hangs on lean_single" "124" "$(timeout 20 env SOUNIO_SOUC_ENGINE=lean_single "$SOUC" run $NUM/print_inf_never_returns.sio >/dev/null 2>&1; echo $?)"
-expect "println(inf) on Madaros" "9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_inf_never_returns.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
-expect "println(nan) on Madaros" "-9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_nan_is_garbage.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
+# #2389 / KL-2 — CLOSED 2026-09-11. IEEE f64 compares are PF-aware on both
+# engines; print_f64 / println emit "inf" and "nan". Witnesses moved to
+# tests/run-pass/ieee_f64_*.sio; pinned by madaros_ieee_f64_special_values_gate.sh.
 
 
 echo "[ratchet] $((N-FAILS))/$N witnesses hold the measured gap"
