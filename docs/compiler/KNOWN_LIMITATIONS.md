@@ -35,7 +35,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-4 | private field reads unchecked | both |
 | KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
 | KL-11 | #1792 first-order / variance across calls | madaros |
@@ -46,19 +45,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
 ## Ledger
-
-
-### KL-4 — private field reads are not checked
-
-- Engine: `both` for direct reads; on Madaros the parser drops the field's
-  `pub` (`parser/items.sio:1861-1863`, also `:1966`, `:2072`), so
-  `FieldDef`/`FieldInfo` carry no visibility (`parser/ast.sio:1159`,
-  `check/defs.sio:16`). Struct-literal construction of a private struct is
-  refused (E176 via `checker_struct_visible_inplace`); field access
-  (`check.sio:7301`) is not.
-- Repro/pin: none (the zero-event constructor-privacy fixtures cover the
-  struct-literal half only). Blast radius over `stdlib/` is measured before
-  enforcement; a warning-first ratchet is acceptable for one rung.
 
 
 ### KL-8 — `f128` surface residuals (after V0-E.5.10)
