@@ -35,7 +35,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
 | KL-11 | #1792 first-order / variance across calls | madaros |
 | KL-12 | thin-link `rc=12` probes | madaros |
@@ -47,26 +46,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 ## Ledger
 
 
-### KL-8 — `f128` surface residuals (after V0-E.5.10)
-
-- Engine: `madaros`. Ladder record:
-  `docs/architecture/F128_F256_LADDER.md`; every closed stage is pinned by
-  `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`.
-- A float literal as the tail of a **nested** block used as the fn tail
-  (`fn f() -> f128 { if c { 1.0 } else { 2.0 } }`) is E008 — only the body
-  block and `return` are routed (`LOWER_F128_FN_BODY_PENDING`,
-  `ir/lower.sio`).
-- `%` and `+=` on `f128` are refused (no `soft_rem` desugar; compound
-  assignment not routed).
-- Builtin `print`/`println` of an `f128` is refused at lowering (`cannot
-  safely lower print/println argument with unresolved scalar kind`);
-  `println_f128` needs an explicit `use math::softfloat_f128_fmt` because
-  the implicit import (V0-E.5.10) covers `math/softfloat_f128.sio` only.
-- The legacy `native_compile_driver.sio` lexer (`driver_lex_source_to_globals`,
-  `:8872-8945`) does not take `_` separators; no longer reachable from any gate (the `native_v2_*` leaf gates were
-  deprecated in KL-10, `scripts/ci/deprecated/`).
-- Pin: the v0e510 gate pins the closed half; the residuals above have no
-  negative fixture yet.
 
 ### KL-9 — seed: `f128` greenwash and #1494
 
