@@ -1,0 +1,174 @@
+name: Deploy site-v2 to Vercel
+
+# O gerador é escrito em Swift, e o contêiner de build da Vercel não tem
+# toolchain Swift. Por isso o build acontece aqui, dentro da imagem oficial do
+# Swift, e a Vercel recebe a saída pronta via `deploy --prebuilt` — que não roda
+# build nenhum do lado dela.
+#
+# Alvo: next.souniolang.org (projeto separado do `sounio` em produção).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+  push:
+    tags:
+      - 'site-v2-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-site-v2-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Imagem oficial: Swift já instalado, sem action de terceiros no caminho.
+    container: swift:6.0.3-noble
+    env:
+      VERCEL_ORG_ID: team_rWORp5HA3dSzo95gt1RZd3sh
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID_SITE_V2 }}
+      VERCEL_EXPECTED_PROJECT_NAME: sounio-next
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Os scripts de medição leem `origin/main`. Um checkout raso não o
+          # tem, e eles falhariam — o que é o modo de falha certo, mas custa
+          # um ciclo de CI para descobrir.
+          fetch-depth: 0
+
+      - name: Verify required credentials
+        run: |
+          set -eu
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "::error::Missing VERCEL_TOKEN secret."
+            exit 1
+          fi
+          if [ -z "${VERCEL_PROJECT_ID:-}" ]; then
+            echo "::error::Missing repository variable VERCEL_PROJECT_ID_SITE_V2."
+            echo "::error::Create the Vercel project first — see site-next/DEPLOY.md."
+            exit 1
+          fi
+          echo "Org:     $VERCEL_ORG_ID"
+          echo "Project: $VERCEL_PROJECT_ID"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Install web dependencies
+        working-directory: site-next/web
+        run: npm ci
+
+      # Guarda de deriva: os artefatos de medição são COMMITADOS, para que os
+      # números do site passem por revisão como qualquer outra mudança. Aqui
+      # eles são remedidos e comparados. Se o repositório andou e ninguém
+      # remediu, o build para — em vez de o site publicar em silêncio números
+      # de um commit que já não existe, ou de a CI reescrevê-los sem que
+      # nenhum commit explique a mudança.
+      #
+      # `generated_at` é um carimbo de hora e muda a cada execução: é
+      # descartado da comparação, que é sobre as medições.
+      - name: Measurement artifacts are current
+        working-directory: site-next
+        run: |
+          set -eu
+          before=$(mktemp -d)
+          cp -r ../artifacts/site "$before/"
+          npm --prefix web run measure
+          if ! node -e '
+            const fs = require("node:fs"), path = require("node:path");
+            const strip = f => { const d = JSON.parse(fs.readFileSync(f, "utf8"));
+                                 delete d.generated_at; return JSON.stringify(d); };
+            const dir = process.argv[1], now = "../artifacts/site";
+            let drift = [];
+            for (const f of fs.readdirSync(now)) {
+              if (strip(path.join(dir, f)) !== strip(path.join(now, f))) drift.push(f);
+            }
+            if (drift.length) {
+              console.error("Artefatos de medição desatualizados: " + drift.join(", "));
+              console.error("Rode `npm --prefix site-next/web run measure` e commite o resultado.");
+              process.exit(1);
+            }
+          ' "$before/site"; then
+            echo "::error::Os artefatos de medição não correspondem ao repositório."
+            exit 1
+          fi
+
+      # A evidência é regenerada aqui: o índice é derivado de artifacts/,
+      # nunca commitado. Se um artefato sumiu, o portão reprova o build.
+      - name: Build islands and run the claim gate
+        working-directory: site-next/web
+        run: |
+          npm run evidence
+          npm run gate
+          npm run build:islands
+
+      - name: Generate static site
+        working-directory: site-next/swift
+        run: swift run -c release sitegen
+
+      - name: Assemble Vercel build output
+        run: node site-next/scripts/build-vercel-output.mjs
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Verify Vercel project target
+        working-directory: site-next
+        run: |
+          set -eu
+          if [ "${{ inputs.target }}" = "production" ] || [ "${{ github.event_name }}" = "push" ]; then
+            vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          else
+            vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+          fi
+          test -f .vercel/project.json
+          node -e '
+            const p = require("./.vercel/project.json");
+            if (p.projectId !== process.env.VERCEL_PROJECT_ID) {
+              console.error(`Expected ${process.env.VERCEL_PROJECT_ID}, resolved ${p.projectId}.`);
+              process.exit(1);
+            }
+            if (p.projectId === "prj_0FStNQ8BOUUiQHLP7D6AWah4mY8s") {
+              console.error("Refusing: that is the live sounio project, not site-v2.");
+              process.exit(1);
+            }
+            console.log(`Verified project ${p.projectId} in org ${p.orgId}`);
+          '
+
+      # `vercel pull` reescreve .vercel/output em alguns casos: remontamos
+      # depois dele, para garantir que o que sobe é o que o Swift gerou.
+      - name: Re-assemble output after pull
+        run: node site-next/scripts/build-vercel-output.mjs
+
+      - name: Deploy preview
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'preview'
+        working-directory: site-next
+        run: |
+          url="$(vercel deploy --prebuilt --token="$VERCEL_TOKEN")"
+          echo "Preview: $url"
+          echo "- Preview: $url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy production
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')
+        working-directory: site-next
+        run: |
+          url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          echo "Production: $url"
+          echo "- Production: $url" >> "$GITHUB_STEP_SUMMARY"
