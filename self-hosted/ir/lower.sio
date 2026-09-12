@@ -12891,6 +12891,9 @@ impl Lowerer {
             if bits > 64 { return bits }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
+        if (*expr).kind == ExprKind::ExprUnary {
+            return self.expr_wide_bits_opt_ref(&(*expr).left)
+        }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_bits((*expr).name)
         }
@@ -12919,6 +12922,9 @@ impl Lowerer {
         }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_signed((*expr).name)
+        }
+        if (*expr).kind == ExprKind::ExprUnary {
+            return self.expr_wide_signed_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprBinary {
             return self.expr_wide_signed_opt_ref(&(*expr).left)
@@ -16619,7 +16625,36 @@ impl Lowerer {
         let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
-        let reg = pair.1
+        var reg = pair.1
+        // KL-7: an annotated signed-wide binding whose RHS was lowered as one
+        // machine word must materialise every high limb.  Leaving only `reg`
+        // live made `let x: i256 = 0 - 1` look wide in metadata while its high
+        // vregs belonged to unrelated temporaries.  Arithmetic shift supplies
+        // the runtime sign word for literals, unary negatives and computed i64s.
+        let annotated_wide_bits = lower_opt_type_wide_bits(&s.ty)
+        if annotated_wide_bits > 64 && lo.expr_wide_bits_opt_ref(&s.expr) <= 64 {
+            let limbs = lower_wide_limb_count(annotated_wide_bits)
+            let wide_pair = lo.fresh_wide_reg(limbs)
+            lo = wide_pair.0
+            let wide_reg = wide_pair.1
+            lo = lo.emit(ir_copy(wide_reg, reg))
+            let sign_pair = lo.fresh_reg()
+            lo = sign_pair.0
+            let sign_reg = sign_pair.1
+            if lower_opt_type_wide_signed(&s.ty) == 1 {
+                let shift_pair = lo.emit_i64_const(63)
+                lo = shift_pair.0
+                lo = lo.emit(ir_binop(sign_reg, reg, BinaryOp::OpShr, shift_pair.1))
+            } else {
+                lo = lo.emit(ir_load_imm(sign_reg, 0))
+            }
+            var wi: i64 = 1
+            while wi < limbs {
+                lo = lo.emit(ir_copy(wide_reg + wi, sign_reg))
+                wi = wi + 1
+            }
+            reg = wide_reg
+        }
         lo.lower_let_stmt_after_expr_ref(s, is_mut, reg)
     }
 
@@ -19743,6 +19778,16 @@ impl Lowerer {
             return (lo_call_k, dst_k)
         }
         if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+            let print_wide_bits = match e.args {
+                Some(print_args) => self.expr_wide_bits_ref(&(*print_args).head),
+                None => 0,
+            }
+            if print_wide_bits > 64 {
+                print("error: wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs\n")
+                var lo_refuse = self
+                lowerer_mark_hard_error(&! lo_refuse)
+                return lo_refuse.emit_unit()
+            }
             // Redirect bare print(<int literal>) to the print_int builtin: print
             // (=print_str) treats its argument as a char* and would deref the integer
             // value as a pointer. Explicit print_int / print_char are left untouched.
@@ -19763,6 +19808,16 @@ impl Lowerer {
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
+            let println_wide_bits = match e.args {
+                Some(println_args) => self.expr_wide_bits_ref(&(*println_args).head),
+                None => 0,
+            }
+            if println_wide_bits > 64 {
+                print("error: wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs\n")
+                var lo_refuse = self
+                lowerer_mark_hard_error(&! lo_refuse)
+                return lo_refuse.emit_unit()
+            }
             // Lower println(x) -> print_kind(x); print_char('\n'). Dispatch rules:
             //   int literal / i64 var  → print_int   (itoa+write)
             //   float literal / f64 var → print_f64   (dtoa+write)
@@ -20878,7 +20933,13 @@ impl Lowerer {
         // The result's variance must be DERIVED from both operands, never inherited
         // from one of them.
         lo2.pending_variance_reg = -1
-        let cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
+        var cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
+        // Ordered wide comparisons need signed treatment at the most-significant
+        // limb. Encode signed Lt/Le/Gt/Ge as 8/9/10/11; Eq/Ne are bitwise and
+        // retain 0/1. The native emitter compares lower limbs as unsigned.
+        if cmp_op >= 2 && self.expr_wide_signed_ref(e) == 1 {
+            cmp_op = cmp_op + 6
+        }
         let limbs = lower_wide_limb_count(wide_bits)
         var alloc_limbs = limbs
         if wide_bits > 64 && cmp_op < 0 {
@@ -21604,9 +21665,19 @@ impl Lowerer {
             var lo2 = p.0
             let dst = p.1
             lo2 = lo2.emit(ir_copy(dst, src_reg))
+            let sign_pair = lo2.fresh_reg()
+            lo2 = sign_pair.0
+            let sign_reg = sign_pair.1
+            if lower_opt_type_wide_signed(&e.cast_type) == 1 {
+                let shift_pair = lo2.emit_i64_const(63)
+                lo2 = shift_pair.0
+                lo2 = lo2.emit(ir_binop(sign_reg, src_reg, BinaryOp::OpShr, shift_pair.1))
+            } else {
+                lo2 = lo2.emit(ir_load_imm(sign_reg, 0))
+            }
             var wi: i64 = 1
             while wi < limbs {
-                lo2 = lo2.emit(ir_load_imm(dst + wi, 0))
+                lo2 = lo2.emit(ir_copy(dst + wi, sign_reg))
                 wi = wi + 1
             }
             match e.left {
@@ -21647,6 +21718,28 @@ impl Lowerer {
             var lo_refuse = self
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
+        }
+        // KL-7: wide negation is two's-complement subtraction from an all-zero
+        // wide value.  Applying the scalar IrUnaryOp to the base vreg negated
+        // only limb 0 and left the upper limbs unchanged.
+        let unary_wide_bits = self.expr_wide_bits_opt_ref(&e.left)
+        if e.un_op == UnaryOp::OpNeg && unary_wide_bits > 64 {
+            let operand_pair = self.lower_opt_expr_ref(&e.left)
+            var lo_wide = operand_pair.0
+            let limbs = lower_wide_limb_count(unary_wide_bits)
+            let zero_pair = lo_wide.fresh_wide_reg(limbs)
+            lo_wide = zero_pair.0
+            let zero_reg = zero_pair.1
+            var zi: i64 = 0
+            while zi < limbs {
+                lo_wide = lo_wide.emit(ir_load_imm(zero_reg + zi, 0))
+                zi = zi + 1
+            }
+            let dst_pair = lo_wide.fresh_wide_reg(limbs)
+            lo_wide = dst_pair.0
+            let dst_reg = dst_pair.1
+            lo_wide = lo_wide.emit(ir_wide_sub(dst_reg, zero_reg, operand_pair.1, limbs))
+            return (lo_wide, dst_reg)
         }
         // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
         // ref_array_* then does load[slot] → resolve_handle → +object_header.
