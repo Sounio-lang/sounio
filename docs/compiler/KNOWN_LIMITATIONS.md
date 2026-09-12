@@ -47,23 +47,24 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 
 
-### KL-9 — seed: `f128` greenwash and #1494
+### KL-9 — seed: #1494 imported-module typecheck errors
 
-- **`lean_single` lowers `f128` as f64.** Engine: `lean_single`. Repro:
-  `examples/numerics/f128_is_f64_probe.sio` (53 halvings). Pin:
-  `scripts/ci/language_gap_ratchet_gate.sh` line for `f128 halvings`.
-  Locus: lowercase-unknown-type rule `lean_single.sio:24359-24361`,
-  `:17204-17206`, `type_name_kind :4191`. Target: refuse `f128`/`f256`
-  spellings in the seed (fail closed), never widen.
+- **`f128` greenwash on lean_single — CLOSED (KL-9 partial, 2026-09-12).**
+  The seed refuses `f128`/`f256` spellings fail-closed (`tc_wide_float_refused`)
+  instead of lowering them as f64 via the lowercase-unknown-type rule.
+  Pin: `scripts/ci/language_gap_ratchet_gate.sh` (`f128 refused by lean_single`);
+  witness: `tests/compile-fail/f128_refused_on_lean_single.sio`.
 - **Imported-module typecheck errors are non-fatal (#1494).** Engine:
-  `lean_single`. `CONVERGENCE FIX` block `lean_single.sio:31416-31443` stubs
-  an imported fn only above 10 errors; below that the partial codegen ships.
-  The current build tolerates three such errors (`lower.sio`, `imports.sio`,
-  `opt_cleanup.sio`). Record and options: `docs/compiler/BOOTSTRAP_SEED.md`.
-  Pin: none (the build log carries the errors inline).
-- Any seed change re-runs the 2-stage bootstrap, `canonical_compiler_gate.sh`,
-  `verify_lean_seed.sh` + `SeedReceipt.json`, `engine_parity_gate.sh`, and
-  rebuilds Madaros from the new seed.
+  `lean_single`. `CONVERGENCE FIX` block stubs an imported fn only above 10
+  errors; below that the partial codegen ships. The current build tolerates
+  three such errors (`lower.sio`, `imports.sio`, `opt_cleanup.sio`). Record and
+  options: `docs/compiler/BOOTSTRAP_SEED.md`. Pin: none (the build log carries
+  the errors inline). Closing this needs an explicit policy choice among the
+  three options in that doc — not a silent threshold tweak.
+- Any further seed change re-runs the 2-stage bootstrap,
+  `canonical_compiler_gate.sh`, `verify_lean_seed.sh` + `SeedReceipt.json`,
+  `engine_parity_gate.sh`, and rebuilds Madaros from the new seed.
+
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
