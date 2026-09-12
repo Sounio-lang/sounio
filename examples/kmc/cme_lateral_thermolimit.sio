@@ -1,0 +1,185 @@
+// examples/kmc/cme_lateral_thermolimit.sio
+//
+// M3e: DOES THE MEAN-FIELD ERROR FOR LATERAL REPULSION VANISH AS N -> INFINITY?
+//
+// The exact finite-ring table (cme_lateral_crt.sio) does not answer this on
+// its own: the over/under-estimate alternates in sign up to N=10 (+21.3%,
+// -16.6%, +0.4%, -14.6%, -3.9%, -14.3%, -6.4%), unlike the non-interacting
+// case, which converged cleanly to zero by N=9. Reading a trend off seven
+// points that still disagree in sign would be a guess wearing a table's
+// clothes.
+//
+// The stationary distribution is confirmed, by two independent exact routes
+// at every N from 4 to 10, to be the equilibrium Gibbs measure of a 1D
+// lattice gas: pi(s) proportional to K^(occ(s)/2) * w^(n_pairs(s)), K=1/3,
+// w=1/2. That is exactly the weight a nearest-neighbour 1D transfer matrix
+// factorises, so the N -> infinity limit is standard 1D statistical
+// mechanics rather than a numerical extrapolation: ln(Z_N)/N -> ln(lambda_max),
+// the log of the transfer matrix's dominant eigenvalue, and per-site coverage
+// follows from differentiating that with respect to K.
+//
+// DERIVATION. Write T(a,b) = K^(a/2) * w^(a*b) for a,b in {0,1}. Each site's
+// occupation sigma_i appears as the FIRST argument of exactly one bond term
+// T(sigma_i, sigma_{i+1}), so prod_i T(sigma_i, sigma_{i+1}) over the cyclic
+// ring equals K^(occ(s)/2) * w^(n_pairs(s)) exactly -- the same weight
+// verified against the exact linear solve at every N so far. For a ring,
+// Z_N = Tr(T^N) is the standard closed-boundary transfer-matrix identity.
+// Differentiating Z = sum_s K^(occ/2) w^pairs with respect to K gives
+// dZ/dK = (Z/2K) * <occ>, so <occ> = 2K * d(ln Z)/dK; in the thermodynamic
+// limit ln(Z_N)/N -> ln(lambda_max(K)), so
+//
+//     theta_infinity = 2K * d(lambda_max)/dK / lambda_max
+//
+// TWO ROUTES SHARING NO CODE, because a formula typed once is exactly what
+// this file series exists to catch:
+//
+//   1. CLOSED FORM. T = [[1,1],[sqrt(K), sqrt(K)*w]]; lambda_max is the
+//      larger root of lambda^2 - Tr(T)*lambda + det(T) = 0; the derivative
+//      is a central difference on that closed-form eigenvalue.
+//
+//   2. DIRECT LARGE-N TRACE. Z_N(K) = Tr(T(K)^N) via N=300 explicit 2x2
+//      matrix multiplications, no eigenvalue formula anywhere, and
+//      theta_infinity approximated the way finite-size thermodynamics
+//      always is: (K/(N*h)) * (Z_N(K+h) - Z_N(K-h)) / Z_N(K).
+//
+// AND A THIRD CHECK TYING THIS FILE TO THE EXACT ONE: the same trace-based
+// method run at the SMALL N already solved exactly (9 and 10) should
+// reproduce those decimals to floating precision. If it does not, the
+// transfer-matrix construction itself is wrong, independent of any
+// large-N or thermodynamic-limit question.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 80 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+fn lambda_max_of(k: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k)
+    let tr = 1.0 + u * w
+    let det = u * (w - 1.0)
+    let disc = tr * tr - 4.0 * det
+    (tr + sqrt_newton(disc)) / 2.0
+}
+
+// Z_N(K) via N explicit 2x2 multiplications -- shares no code with the
+// eigenvalue route above.
+fn trace_power(k: f64, w: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k)
+    let a = 1.0
+    let b = 1.0
+    let c = u
+    let d = u * w
+    var ra = 1.0
+    var rb = 0.0
+    var rc = 0.0
+    var rd = 1.0
+    var i: i64 = 0
+    while i < n {
+        let na = ra * a + rb * c
+        let nb = ra * b + rb * d
+        let nc = rc * a + rd * c
+        let nd = rc * b + rd * d
+        ra = na
+        rb = nb
+        rc = nc
+        rd = nd
+        i = i + 1
+    }
+    ra + rd
+}
+
+fn theta_from_trace(k0: f64, w: f64, n: i64, h: f64) -> f64 with Mut, Div, Panic {
+    let zp = trace_power(k0 + h, w, n)
+    let zm = trace_power(k0 - h, w, n)
+    let z0 = trace_power(k0, w, n)
+    (k0 / ((n as f64) * h)) * (zp - zm) / z0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("THERMODYNAMIC LIMIT: DOES THE MEAN-FIELD ERROR VANISH AS N -> INFINITY?")
+    println("K = k_ads/k_des = 1/3, w = nn-repulsion factor = 1/2")
+    println("")
+
+    let k0: f64 = 0.3333333333333333
+    let w: f64 = 0.5
+    let h: f64 = 0.000001
+
+    println("-- cross-check: does the transfer matrix reproduce the exact")
+    println("   finite-N results already solved by linear algebra? --")
+    // n_sites, not class size: the ring has 9 (or 10) SITES, whatever the
+    // reachable-class size (256, 252) happened to be in the exact solve.
+    // Those two numbers look similar enough in this file's own comments that
+    // they got swapped on the first attempt -- caught only because the
+    // anti-vacuity threshold below refused to call 0.024 close enough.
+    let th9 = theta_from_trace(k0, w, 9, h)
+    let th10 = theta_from_trace(k0, w, 10, h)
+    print("  N=9  transfer-matrix theta = ") print_f64(th9)
+    print("   exact (cme_lateral_crt.sio) = 0.287876")
+    print("   diff = ") print_f64(abs_f(th9 - 0.287876)) println("")
+    print("  N=10 transfer-matrix theta = ") print_f64(th10)
+    print("   exact (cme_lateral_crt.sio) = 0.263568")
+    print("   diff = ") print_f64(abs_f(th10 - 0.263568)) println("")
+    println("")
+    println("(N above is the TRANSFER-MATRIX RING LENGTH, not the class size --")
+    println("this is deliberately the same finite-difference machinery used for")
+    println("the N->infinity estimate below, just evaluated at a length already")
+    println("solved exactly, as the check that the construction itself is right.)")
+    println("")
+
+    let lp = lambda_max_of(k0 + h, w)
+    let lm = lambda_max_of(k0 - h, w)
+    let l0 = lambda_max_of(k0, w)
+    let dlam = (lp - lm) / (2.0 * h)
+    let theta_eigen = 2.0 * k0 * dlam / l0
+
+    let nring: i64 = 300
+    let theta_trace = theta_from_trace(k0, w, nring, h)
+
+    println("-- the thermodynamic limit itself --")
+    print("route 1 (closed-form eigenvalue):  theta_infinity = ") print_f64(theta_eigen) println("")
+    print("route 2 (N=300 explicit trace):    theta_infinity = ") print_f64(theta_trace) println("")
+    print("agreement to 1e-6: ")
+    let agree = abs_f(theta_eigen - theta_trace) < 0.000001
+    if agree { println("yes") } else { println("NO -- the two routes disagree") }
+    println("")
+
+    // Mean field, same Bragg-Williams equation and bisection as the
+    // finite-size study, so the comparison point is not retyped by hand.
+    var lo: f64 = 0.0
+    var hi: f64 = 1.0
+    var bi: i64 = 0
+    while bi < 200 {
+        let mid = 0.5 * (lo + hi)
+        let lhs = (1.0 - mid) * (1.0 - mid)
+        let rhs = 6.0 * mid * mid * (1.0 + mid) * (1.0 + mid)
+        if lhs > rhs { lo = mid } else { hi = mid }
+        bi = bi + 1
+    }
+    let mf = 0.5 * (lo + hi)
+
+    print("mean-field theta (all N):          ") print_f64(mf) println("")
+    print("mean-field error at N -> infinity:  ")
+    print_f64((mf - theta_eigen) / theta_eigen * 100.0)
+    println("%")
+    println("")
+    println("for reference, the exact finite-ring table:")
+    println("  N= 5  0.295720   -16.581%")
+    println("  N= 7  0.288808   -14.585%")
+    println("  N= 9  0.287876   -14.308%   odd branch, already close to the limit")
+    println("  N= 8  0.256793    -3.936%")
+    println("  N=10  0.263568    -6.405%   even branch, still climbing toward it")
+    println("")
+
+    if abs_f(th9 - 0.287876) < 0.001 && abs_f(th10 - 0.263568) < 0.001 && agree {
+        println("M3E_THERMODYNAMIC_LIMIT_OK")
+    } else {
+        println("M3E_THERMODYNAMIC_LIMIT_FAILED")
+    }
+    0
+}

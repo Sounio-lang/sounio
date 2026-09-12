@@ -1,0 +1,349 @@
+// examples/kmc/cme_exact_langmuir.sio
+//
+// M1: THE EXACT CHEMICAL MASTER EQUATION, SOLVED IN RATIONALS.
+//
+// WHY THIS EXISTS, and it is not to compute a coverage.
+//
+// Every accelerated KMC scheme in the literature carries a documented error
+// that nobody can bound, and the reason is structural rather than
+// mathematical: there is no ground truth to measure against. The 2022 review
+// of KMC for heterogeneous catalysis names "acceleration with pre-specified
+// error tolerances" as not yet existing; tau-leaping violates its own leap
+// condition on microscopic lattices, accelerated-superbasin error grows
+// linearly in the downscaling factor, and channel throttling over-scales
+// quasi-equilibrated steps that feed two low-coverage reactants. Each failure
+// mode is known. None of them has a number attached, because measuring one
+// requires an answer known exactly.
+//
+// A lattice small enough to enumerate has such an answer. The stationary
+// distribution of the master equation is the solution of pi Q = 0 with
+// sum(pi) = 1, and over the rationals that solution is EXACT -- not converged,
+// not sampled, not to within a tolerance. This file computes it.
+//
+// WHAT IS BEING VALIDATED HERE, and it is the machinery rather than the
+// chemistry. Non-dissociative Langmuir adsorption on independent sites has a
+// closed-form stationary distribution: sites do not interact, so the
+// distribution factorises into a product of independent Bernoulli(p) with
+// p = k_ads / (k_ads + k_des). Every one of the 16 states therefore has a
+// known exact probability, and agreement is checked as RATIONAL EQUALITY
+// rather than as a float comparison within tolerance. If the enumeration, the
+// generator assembly or the exact solve is wrong anywhere, a product of
+// independent Bernoullis will not come out of it.
+//
+// The interesting case -- dissociative adsorption, which needs an adjacent
+// pair of empty sites and therefore does NOT factorise -- is the next file.
+// This one has to be right first, and it has to be right for a reason that
+// does not depend on the thing being measured.
+//
+// WHAT THIS IS NOT. Four sites is not a surface. The state count is 2^N and
+// nothing here changes that; this is a reference instrument for calibrating
+// samplers and acceleration schemes on systems small enough to know exactly,
+// not a simulation method. Saying otherwise would be the same category error
+// as calling a ruler a microscope.
+//
+// ENGINE. Checks under Madaros. The numeric run is done with gen3.elf.
+// Wide integers were probed first and are NOT usable on the execution path --
+// `var f: i128 = 1` is rejected there as "expected f64, got i64" -- so every
+// rational here is over i64 and the point at which that overflows is itself a
+// measurement, taken in the next milestone rather than assumed now.
+
+use math::rational::*
+
+// ---------------------------------------------------------------------------
+// Lattice: a periodic ring of 4 sites. A ring rather than a 2x2 square mesh
+// because on a 2x2 periodic mesh each site's two neighbours are the same site
+// reached twice, which silently doubles every pair rate. On a ring of 4 the
+// two neighbours are distinct.
+// ---------------------------------------------------------------------------
+
+fn n_sites() -> i64 { 4 }
+fn n_states() -> i64 { 16 }
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i {
+        b = b * 2
+        k = k + 1
+    }
+    b
+}
+
+fn is_occupied(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+
+fn set_occupied(s: i64, i: i64) -> i64 with Mut, Div, Panic {
+    if is_occupied(s, i) { s } else { s + site_bit(i) }
+}
+
+fn clear_occupied(s: i64, i: i64) -> i64 with Mut, Div, Panic {
+    if is_occupied(s, i) { s - site_bit(i) } else { s }
+}
+
+fn popcount_state(s: i64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < n_sites() {
+        if is_occupied(s, i) { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
+// Generator. Q[from * n_states + to] is the rate of from -> to for from != to,
+// and the diagonal is minus the row sum, so every row sums to exactly zero --
+// which is checked below rather than asserted.
+// ---------------------------------------------------------------------------
+
+fn build_generator(k_ads: Rational, k_des: Rational, q: &![Rational; 256]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 256 {
+        q[i as usize] = rat_zero()
+        i = i + 1
+    }
+
+    var s: i64 = 0
+    while s < n_states() {
+        var site: i64 = 0
+        while site < n_sites() {
+            if is_occupied(s, site) {
+                // desorption: this site empties
+                let t = clear_occupied(s, site)
+                let idx = s * n_states() + t
+                q[idx as usize] = rat_add(q[idx as usize], k_des)
+            } else {
+                // adsorption: this site fills
+                let t = set_occupied(s, site)
+                let idx = s * n_states() + t
+                q[idx as usize] = rat_add(q[idx as usize], k_ads)
+            }
+            site = site + 1
+        }
+        s = s + 1
+    }
+
+    // Diagonal last, so it sees the finished off-diagonal row.
+    var r: i64 = 0
+    while r < n_states() {
+        var row_sum = rat_zero()
+        var c: i64 = 0
+        while c < n_states() {
+            if c != r {
+                row_sum = rat_add(row_sum, q[(r * n_states() + c) as usize])
+            }
+            c = c + 1
+        }
+        q[(r * n_states() + r) as usize] = rat_neg(row_sum)
+        r = r + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exact solve of pi Q = 0 with sum(pi) = 1.
+//
+// pi Q = 0 is Q^T pi^T = 0. That system is singular by construction -- a
+// generator always has a zero eigenvalue, which is exactly why a stationary
+// distribution exists -- so one equation is replaced by the normalisation
+// sum(pi) = 1. Gaussian elimination with full rational arithmetic follows; no
+// pivot tolerance appears anywhere because a rational pivot is either zero or
+// it is not.
+// ---------------------------------------------------------------------------
+
+fn solve_stationary(q: &[Rational; 256], pi: &![Rational; 16]) -> bool with Mut, Div, Panic {
+    // Augmented matrix, 16 rows x 17 columns: Q^T with the last row replaced
+    // by the normalisation, and the right-hand side in column 16.
+    var a: [Rational; 272] = [rat_zero(); 272]
+    let n = n_states()
+
+    var r: i64 = 0
+    while r < n {
+        var c: i64 = 0
+        while c < n {
+            // row r of Q^T is column r of Q
+            a[(r * 17 + c) as usize] = q[(c * n + r) as usize]
+            c = c + 1
+        }
+        a[(r * 17 + 16) as usize] = rat_zero()
+        r = r + 1
+    }
+
+    // Replace the final equation with sum(pi) = 1.
+    var c2: i64 = 0
+    while c2 < n {
+        a[((n - 1) * 17 + c2) as usize] = rat_one()
+        c2 = c2 + 1
+    }
+    a[((n - 1) * 17 + 16) as usize] = rat_one()
+
+    // Forward elimination with partial pivoting on "is it nonzero", which is
+    // the only pivot criterion exact arithmetic needs.
+    var col: i64 = 0
+    while col < n {
+        var piv: i64 = 0 - 1
+        var rr = col
+        while rr < n {
+            if !rat_is_zero(a[(rr * 17 + col) as usize]) {
+                if piv < 0 { piv = rr }
+            }
+            rr = rr + 1
+        }
+        if piv < 0 {
+            return false
+        }
+        if piv != col {
+            var cc: i64 = 0
+            while cc < 17 {
+                let tmp = a[(col * 17 + cc) as usize]
+                a[(col * 17 + cc) as usize] = a[(piv * 17 + cc) as usize]
+                a[(piv * 17 + cc) as usize] = tmp
+                cc = cc + 1
+            }
+        }
+        let pivot = a[(col * 17 + col) as usize]
+        var rr2 = col + 1
+        while rr2 < n {
+            let head = a[(rr2 * 17 + col) as usize]
+            if !rat_is_zero(head) {
+                let factor = rat_div(head, pivot)
+                var cc2 = col
+                while cc2 < 17 {
+                    let sub = rat_mul(factor, a[(col * 17 + cc2) as usize])
+                    a[(rr2 * 17 + cc2) as usize] = rat_sub(a[(rr2 * 17 + cc2) as usize], sub)
+                    cc2 = cc2 + 1
+                }
+            }
+            rr2 = rr2 + 1
+        }
+        col = col + 1
+    }
+
+    // Back substitution.
+    var k = n - 1
+    while k >= 0 {
+        var acc = a[(k * 17 + 16) as usize]
+        var j = k + 1
+        while j < n {
+            acc = rat_sub(acc, rat_mul(a[(k * 17 + j) as usize], pi[j as usize]))
+            j = j + 1
+        }
+        let d = a[(k * 17 + k) as usize]
+        if rat_is_zero(d) {
+            return false
+        }
+        pi[k as usize] = rat_div(acc, d)
+        k = k - 1
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+fn print_rat(x: Rational) with IO, Mut, Div, Panic {
+    print(x.num) print("/") print(x.den)
+}
+
+fn rat_pow(base: Rational, e: i64) -> Rational with Mut, Div, Panic {
+    var acc = rat_one()
+    var i: i64 = 0
+    while i < e {
+        acc = rat_mul(acc, base)
+        i = i + 1
+    }
+    acc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("EXACT CHEMICAL MASTER EQUATION, RING OF 4 SITES, RATIONAL ARITHMETIC")
+    println("non-dissociative Langmuir: sites are independent, so the exact")
+    println("stationary distribution is a product of Bernoulli(p) and every one")
+    println("of the 16 states has a known closed form to check against.")
+    println("")
+
+    // k_ads = 1, k_des = 3  ->  p = 1/4 exactly.
+    let k_ads = rat_from_int(1)
+    let k_des = rat_from_int(3)
+
+    var q: [Rational; 256] = [rat_zero(); 256]
+    build_generator(k_ads, k_des, &! q)
+
+    // Every generator row must sum to exactly zero. Checked, not assumed.
+    var rows_ok = true
+    var r: i64 = 0
+    while r < n_states() {
+        var s = rat_zero()
+        var c: i64 = 0
+        while c < n_states() {
+            s = rat_add(s, q[(r * n_states() + c) as usize])
+            c = c + 1
+        }
+        if !rat_is_zero(s) { rows_ok = false }
+        r = r + 1
+    }
+    print("generator rows sum to exactly zero: ")
+    if rows_ok { println("yes") } else { println("NO -- assembly is wrong") }
+
+    var pi: [Rational; 16] = [rat_zero(); 16]
+    let solved = solve_stationary(&q, &! pi)
+    print("exact solve succeeded: ")
+    if solved { println("yes") } else { println("NO -- singular after normalisation") }
+    println("")
+
+    // Closed form: p = k_ads / (k_ads + k_des) = 1/4, q = 3/4.
+    let p = rat_div(k_ads, rat_add(k_ads, k_des))
+    let qq = rat_sub(rat_one(), p)
+
+    println("state  occupied  computed        closed form     equal?")
+    var all_equal = true
+    var s2: i64 = 0
+    while s2 < n_states() {
+        let k = popcount_state(s2)
+        let expect = rat_mul(rat_pow(p, k), rat_pow(qq, n_sites() - k))
+        let got = pi[s2 as usize]
+        let same = rat_eq(got, expect)
+        if !same { all_equal = false }
+        print("  ") print(s2)
+        if s2 < 10 { print(" ") }
+        print("       ") print(k)
+        print("       ") print_rat(got)
+        print("        ") print_rat(expect)
+        print("       ")
+        if same { println("yes") } else { println("NO") }
+        s2 = s2 + 1
+    }
+    println("")
+
+    // Sum of the exact distribution must be exactly one.
+    var total = rat_zero()
+    var s3: i64 = 0
+    while s3 < n_states() {
+        total = rat_add(total, pi[s3 as usize])
+        s3 = s3 + 1
+    }
+    print("sum of pi, exactly: ") print_rat(total) println("")
+
+    // Mean coverage, exactly and as a decimal for reading.
+    var cov = rat_zero()
+    var s4: i64 = 0
+    while s4 < n_states() {
+        let w = rat_from_int(popcount_state(s4))
+        cov = rat_add(cov, rat_mul(pi[s4 as usize], w))
+        s4 = s4 + 1
+    }
+    cov = rat_div(cov, rat_from_int(n_sites()))
+    print("mean coverage, exactly: ") print_rat(cov)
+    print("   expected p = ") print_rat(p)
+    if rat_eq(cov, p) { println("   equal") } else { println("   NOT EQUAL") }
+    println("")
+
+    if rows_ok && solved && all_equal && rat_eq(total, rat_one()) && rat_eq(cov, p) {
+        println("M1_EXACT_CME_OK")
+    } else {
+        println("M1_EXACT_CME_FAILED")
+    }
+    0
+}

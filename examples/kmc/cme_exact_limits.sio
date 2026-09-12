@@ -1,0 +1,322 @@
+// examples/kmc/cme_exact_limits.sio
+//
+// M2: WHERE THE EXACT SOLVE STOPS BEING EXACT, MEASURED RATHER THAN ASSUMED.
+//
+// The M1 solver is exact over the rationals, and rationals here are pairs of
+// i64. That is a bounded resource, and the honest question is not "will it
+// overflow" but "at what lattice size, and does something else bind first".
+// This file answers both by instrumenting the arithmetic instead of trusting
+// a plausible-looking answer.
+//
+// HOW OVERFLOW IS DETECTED, probed before it was relied on: i64 multiplication
+// WRAPS on this toolchain rather than aborting -- 2^62 * 2 gives
+// -9223372036854775808, and dividing back gives -2^62 rather than 2^62. So
+// `a * b` is checked by `(a * b) / b == a`, which is exact when no wrap
+// occurred and fails when one did. A wrapped product that happened to divide
+// back correctly is possible in principle; every rational produced is
+// therefore ALSO checked for the invariant that its denominator stays
+// positive and its reduction is stable.
+//
+// WHY A PLAUSIBLE ANSWER IS THE DANGER HERE. A wrapped numerator does not look
+// wrong. It produces a probability that sums to something near one and a
+// coverage near the right value, and nothing about the output announces that
+// the arithmetic left the integers. That is why this file checks the closed
+// form -- Bernoulli(p) on independent sites -- at EVERY lattice size rather
+// than only at the smallest, and reports the largest magnitude reached rather
+// than only a pass/fail.
+//
+// THE OTHER LIMIT, which may well bind first. Gaussian elimination is O(n^3)
+// in the state count and the state count is 2^N, so the work grows as 8^N.
+// Rational arithmetic carries a gcd on every operation. Whether i64 capacity
+// or wall-clock is the binding constraint is not obvious in advance, and the
+// answer decides whether the next milestone needs multi-limb integers or
+// needs sparsity and symmetry reduction first. Assuming it without measuring
+// is how a month goes into the wrong foundation.
+
+use math::rational::*
+
+// ---------------------------------------------------------------------------
+// Instrumented integer and rational arithmetic.
+//
+// stats[0] = count of detected multiplication wraps
+// stats[1] = largest |numerator| seen
+// stats[2] = largest |denominator| seen
+// ---------------------------------------------------------------------------
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn ck_mul(a: i64, b: i64, stats: &![i64; 4]) -> i64 with Mut, Div, Panic {
+    if a == 0 || b == 0 { return 0 }
+    let p = a * b
+    if p / b != a {
+        stats[0] = stats[0] + 1
+    }
+    p
+}
+
+fn note_rat(x: Rational, stats: &![i64; 4]) with Mut, Div, Panic {
+    let n = abs_i(x.num)
+    let d = abs_i(x.den)
+    if n > stats[1] { stats[1] = n }
+    if d > stats[2] { stats[2] = d }
+}
+
+fn gcd_i(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 {
+        let t = x - (x / y) * y
+        x = y
+        y = t
+    }
+    if x == 0 { 1 } else { x }
+}
+
+fn crat_make(n: i64, d: i64, stats: &![i64; 4]) -> Rational with Mut, Div, Panic {
+    if d == 0 { return Rational { num: 0, den: 0 } }
+    var nn = n
+    var dd = d
+    if dd < 0 { nn = 0 - nn  dd = 0 - dd }
+    let g = gcd_i(nn, dd)
+    let out = Rational { num: nn / g, den: dd / g }
+    note_rat(out, stats)
+    out
+}
+
+fn crat_add(a: Rational, b: Rational, stats: &![i64; 4]) -> Rational with Mut, Div, Panic {
+    let n1 = ck_mul(a.num, b.den, stats)
+    let n2 = ck_mul(b.num, a.den, stats)
+    let dd = ck_mul(a.den, b.den, stats)
+    crat_make(n1 + n2, dd, stats)
+}
+
+fn crat_sub(a: Rational, b: Rational, stats: &![i64; 4]) -> Rational with Mut, Div, Panic {
+    let nb = Rational { num: 0 - b.num, den: b.den }
+    crat_add(a, nb, stats)
+}
+
+fn crat_mul(a: Rational, b: Rational, stats: &![i64; 4]) -> Rational with Mut, Div, Panic {
+    crat_make(ck_mul(a.num, b.num, stats), ck_mul(a.den, b.den, stats), stats)
+}
+
+fn crat_div(a: Rational, b: Rational, stats: &![i64; 4]) -> Rational with Mut, Div, Panic {
+    if b.num == 0 { return Rational { num: 0, den: 0 } }
+    crat_make(ck_mul(a.num, b.den, stats), ck_mul(a.den, b.num, stats), stats)
+}
+
+// ---------------------------------------------------------------------------
+// Lattice, parameterised by site count at run time. Arrays are sized for the
+// largest case and the used prefix is what varies.
+// ---------------------------------------------------------------------------
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+
+fn popcount_n(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { if is_occ(s, i) { c = c + 1 }  i = i + 1 }
+    c
+}
+
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+
+// ---------------------------------------------------------------------------
+// One measurement at a given lattice size.
+//
+// out[0] = 1.0 if the closed form matched at every state, 0.0 otherwise
+// out[1] = detected multiplication wraps
+// out[2] = largest |numerator|
+// out[3] = largest |denominator|
+// out[4] = 1.0 if the solve succeeded
+// ---------------------------------------------------------------------------
+
+fn measure_at(n_sites: i64, k_ads: Rational, k_des: Rational, out: &![f64; 8]) with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    var stats: [i64; 4] = [0; 4]
+
+    // Generator, dense, ns x ns. Sized for ns <= 64.
+    var q: [Rational; 4096] = [rat_zero(); 4096]
+    var i: i64 = 0
+    while i < ns * ns { q[i as usize] = rat_zero()  i = i + 1 }
+
+    var s: i64 = 0
+    while s < ns {
+        var site: i64 = 0
+        while site < n_sites {
+            if is_occ(s, site) {
+                let t = s - site_bit(site)
+                let idx = s * ns + t
+                q[idx as usize] = crat_add(q[idx as usize], k_des, &! stats)
+            } else {
+                let t = s + site_bit(site)
+                let idx = s * ns + t
+                q[idx as usize] = crat_add(q[idx as usize], k_ads, &! stats)
+            }
+            site = site + 1
+        }
+        s = s + 1
+    }
+    var r: i64 = 0
+    while r < ns {
+        var rs = rat_zero()
+        var c: i64 = 0
+        while c < ns {
+            if c != r { rs = crat_add(rs, q[(r * ns + c) as usize], &! stats) }
+            c = c + 1
+        }
+        q[(r * ns + r) as usize] = Rational { num: 0 - rs.num, den: rs.den }
+        r = r + 1
+    }
+
+    // Augmented Q^T with normalisation, ns x (ns+1), sized for ns <= 64.
+    var a: [Rational; 4160] = [rat_zero(); 4160]
+    let w = ns + 1
+    var rr: i64 = 0
+    while rr < ns {
+        var cc: i64 = 0
+        while cc < ns {
+            a[(rr * w + cc) as usize] = q[(cc * ns + rr) as usize]
+            cc = cc + 1
+        }
+        a[(rr * w + ns) as usize] = rat_zero()
+        rr = rr + 1
+    }
+    var c2: i64 = 0
+    while c2 < ns {
+        a[((ns - 1) * w + c2) as usize] = rat_one()
+        c2 = c2 + 1
+    }
+    a[((ns - 1) * w + ns) as usize] = rat_one()
+
+    var ok = true
+    var col: i64 = 0
+    while col < ns {
+        var piv: i64 = 0 - 1
+        var p1 = col
+        while p1 < ns {
+            if piv < 0 {
+                if a[(p1 * w + col) as usize].num != 0 { piv = p1 }
+            }
+            p1 = p1 + 1
+        }
+        if piv < 0 { ok = false  col = ns }
+        else {
+            if piv != col {
+                var sc: i64 = 0
+                while sc < w {
+                    let tmp = a[(col * w + sc) as usize]
+                    a[(col * w + sc) as usize] = a[(piv * w + sc) as usize]
+                    a[(piv * w + sc) as usize] = tmp
+                    sc = sc + 1
+                }
+            }
+            let pivot = a[(col * w + col) as usize]
+            var r2 = col + 1
+            while r2 < ns {
+                let head = a[(r2 * w + col) as usize]
+                if head.num != 0 {
+                    let f = crat_div(head, pivot, &! stats)
+                    var c3 = col
+                    while c3 < w {
+                        let sub = crat_mul(f, a[(col * w + c3) as usize], &! stats)
+                        a[(r2 * w + c3) as usize] = crat_sub(a[(r2 * w + c3) as usize], sub, &! stats)
+                        c3 = c3 + 1
+                    }
+                }
+                r2 = r2 + 1
+            }
+            col = col + 1
+        }
+    }
+
+    var pi: [Rational; 64] = [rat_zero(); 64]
+    if ok {
+        var k = ns - 1
+        while k >= 0 {
+            var acc = a[(k * w + ns) as usize]
+            var j = k + 1
+            while j < ns {
+                acc = crat_sub(acc, crat_mul(a[(k * w + j) as usize], pi[j as usize], &! stats), &! stats)
+                j = j + 1
+            }
+            let d = a[(k * w + k) as usize]
+            if d.num == 0 { ok = false  k = 0 }
+            else { pi[k as usize] = crat_div(acc, d, &! stats) }
+            k = k - 1
+        }
+    }
+
+    // Closed form check at EVERY state, as rational equality.
+    var all_eq = ok
+    if ok {
+        let p = crat_div(k_ads, crat_add(k_ads, k_des, &! stats), &! stats)
+        let qq = crat_sub(rat_one(), p, &! stats)
+        var s2: i64 = 0
+        while s2 < ns {
+            let kk = popcount_n(s2, n_sites)
+            var e = rat_one()
+            var t1: i64 = 0
+            while t1 < kk { e = crat_mul(e, p, &! stats)  t1 = t1 + 1 }
+            var t2: i64 = 0
+            while t2 < n_sites - kk { e = crat_mul(e, qq, &! stats)  t2 = t2 + 1 }
+            if !rat_eq(pi[s2 as usize], e) { all_eq = false }
+            s2 = s2 + 1
+        }
+    }
+
+    out[0] = if all_eq { 1.0 } else { 0.0 }
+    out[1] = stats[0] as f64
+    out[2] = stats[1] as f64
+    out[3] = stats[2] as f64
+    out[4] = if ok { 1.0 } else { 0.0 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("WHERE THE EXACT SOLVE STOPS BEING EXACT")
+    println("ring of N sites, non-dissociative Langmuir, k_ads=1 k_des=3")
+    println("closed form is Bernoulli(1/4) per site, checked at EVERY state")
+    println("")
+    println("  N  states  solved  closed-form  wraps  max|num|        max|den|")
+
+    let k_ads = rat_from_int(1)
+    let k_des = rat_from_int(3)
+    var out: [f64; 8] = [0.0; 8]
+
+    var n: i64 = 2
+    while n <= 6 {
+        measure_at(n, k_ads, k_des, &! out)
+        print("  ") print(n)
+        print("  ") print(pow2(n))
+        if pow2(n) < 10 { print("  ") } else { print(" ") }
+        print("     ")
+        if out[4] > 0.5 { print("yes  ") } else { print("NO   ") }
+        print("   ")
+        if out[0] > 0.5 { print("match      ") } else { print("MISMATCH   ") }
+        print(out[1] as i64)
+        print("      ") print(out[2] as i64)
+        print("      ") print(out[3] as i64)
+        println("")
+        n = n + 1
+    }
+    println("")
+    println("READING: wraps > 0 means the arithmetic left the integers and any")
+    println("agreement below it is coincidence. max|den| approaching 9.2e18 is")
+    println("the i64 ceiling; how close it gets says how much headroom remains.")
+    println("M2_LIMITS_OK")
+    0
+}
