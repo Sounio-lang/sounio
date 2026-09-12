@@ -810,15 +810,17 @@ pub fn fo_xfer_global_reset() with Mut {
 // result's variance — leaving the partial at the seed value 1.0 and computing
 // var(sin(x)) as 0 (#1549).
 //
-// log is deliberately absent: its derivative is 1/x, not a call, so it needs a
-// reciprocal kind rather than this one. Leaving it out keeps it honestly
-// unsupported instead of silently wrong.
+// log and sqrt were absent from the kind-6 table because their derivatives
+// (1/x, 1/(2*sqrt x)) are not calls. Kind 8 EMITS the derivative, so they live
+// there (KL-6): f' and f'' from x plus the sqrt builtin only.
 fn kind_lit_to_analytic_id(lit: f64) -> i64 with Mut, Panic, Div {
     if lit >= 0.5 && lit < 1.5 { return 1 }
     if lit >= 1.5 && lit < 2.5 { return 2 }
     if lit >= 2.5 && lit < 3.5 { return 3 }
     if lit >= 3.5 && lit < 4.5 { return 4 }
     if lit >= 4.5 && lit < 5.5 { return 5 }
+    if lit >= 5.5 && lit < 6.5 { return 6 }
+    if lit >= 6.5 && lit < 7.5 { return 7 }
     0
 }
 
@@ -832,6 +834,10 @@ fn fo_xfer_seed_transcendentals() with Mut, Panic, Div, IO {
     fo_xfer_global_set(make_name("acos"), 8, 3.0, ir_empty_name())
     fo_xfer_global_set(make_name("tan"), 8, 4.0, ir_empty_name())
     fo_xfer_global_set(make_name("tanh"), 8, 5.0, ir_empty_name())
+    // KL-6: natural log and square root. Both are backend builtins (ids 17,
+    // 14); their derivatives are emitted from x and sqrt, so no E221 hole.
+    fo_xfer_global_set(make_name("log"), 8, 6.0, ir_empty_name())
+    fo_xfer_global_set(make_name("sqrt"), 8, 7.0, ir_empty_name())
 }
 
 // Derivative function for a kind-6 entry, resolved from FO_XFER_FWD_HASH. The
@@ -905,7 +911,7 @@ fn fo_xfer_global_set(name: Name, kind: i64, lit: f64, fwd: Name) with Mut, Pani
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
     // source array lengths are literal-only in the bootstrap grammar.
-    elem_kinds: [i64; 16384],
+    pub elem_kinds: [i64; 16384],
 }
 
 fn empty_lower_global_type_table() -> LowerGlobalTypeTable {
@@ -1018,43 +1024,43 @@ struct IrPreparedCallArgs {
 }
 
 pub struct IrProgramSummary {
-    module: Box<IrModule>,
-    enum_variants: Box<EnumVariantTable>,
-    struct_layouts: Box<StructLayoutTable>,
-    global_types: Box<LowerGlobalTypeTable>,
-    probe_mode: bool,
+    pub module: Box<IrModule>,
+    pub enum_variants: Box<EnumVariantTable>,
+    pub struct_layouts: Box<StructLayoutTable>,
+    pub global_types: Box<LowerGlobalTypeTable>,
+    pub probe_mode: bool,
 }
 
 pub struct IrProgramSummaryResult {
-    summary: IrProgramSummary,
-    error_count: i64,
-    had_error: bool,
+    pub summary: IrProgramSummary,
+    pub error_count: i64,
+    pub had_error: bool,
 }
 
 pub struct IrProgramSummaryBoxResult {
-    summary: Box<IrProgramSummary>,
-    error_count: i64,
-    had_error: bool,
+    pub summary: Box<IrProgramSummary>,
+    pub error_count: i64,
+    pub had_error: bool,
 }
 
 pub struct IrProgramSummaryFlat {
-    module: IrModule,
-    enum_variants: EnumVariantTable,
-    struct_layouts: StructLayoutTable,
-    global_types: LowerGlobalTypeTable,
-    probe_mode: bool,
+    pub module: IrModule,
+    pub enum_variants: EnumVariantTable,
+    pub struct_layouts: StructLayoutTable,
+    pub global_types: LowerGlobalTypeTable,
+    pub probe_mode: bool,
 }
 
 pub struct IrProgramSummaryFlatResult {
-    summary: IrProgramSummaryFlat,
-    error_count: i64,
-    had_error: bool,
+    pub summary: IrProgramSummaryFlat,
+    pub error_count: i64,
+    pub had_error: bool,
 }
 
 pub struct LowerExprArgsResult {
-    lowerer: Lowerer,
-    regs: IrRegList,
-    count: i64,
+    pub lowerer: Lowerer,
+    pub regs: IrRegList,
+    pub count: i64,
 }
 
 struct IrFastSummaryOwnedSeed {
@@ -1065,17 +1071,17 @@ struct IrFastSummaryOwnedSeed {
 }
 
 pub struct IrFunctionBodyResult {
-    func: IrFunction,
-    error_count: i64,
-    had_error: bool,
-    patch_stats: IrValidatedPatchStats,
+    pub func: IrFunction,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub patch_stats: IrValidatedPatchStats,
 }
 
 pub struct IrLowerBoxResult {
-    module: Box<IrModule>,
-    error_count: i64,
-    had_error: bool,
-    patch_stats: IrValidatedPatchStats,
+    pub module: Box<IrModule>,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub patch_stats: IrValidatedPatchStats,
 }
 
 var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
@@ -1094,16 +1100,14 @@ var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 // lean_single); matching that bug was rejected in favour of matching CUDA.
 var LOWER_KERNEL_CONT_LABEL: i64 = 0 - 1
 
-// V0-E.5.10: set to true immediately before the BODY block of a `fn ... -> f128`
-// is lowered, and consumed (read + cleared) by lower_block_ref on entry. The
-// block that consumes it is the function body, and ONLY that block treats a
-// bare float-literal tail (`1.5`, `-0.25`) as a literal in f128 position
-// (lower_f128_value_ref: exact limbs or fail-closed). Nested blocks never see
-// the flag — `let y: f64 = if c { 1.0 } else { 2.0 }` inside an f128 fn stays
-// f64. Before this rung such a tail passed check (V0-E.5.10 checker change) or
-// `return 1.5` passed check already, and either emitted binary64 bits into an
-// F128Bits return slot.
+// V0-E.5.10 / KL-8: set to true immediately before the BODY block of a
+// `fn ... -> f128` is lowered. The function body block consumes it; nested
+// blocks reached while LOWER_F128_TAIL_EXPR is set (if/else fn tail) also route
+// bare float-literal tails through lower_f128_value_ref. A nested if used in an
+// f64 position (`let y: f64 = if c { 1.0 } else { 2.0 }`) never sets the tail
+// flag, so it stays f64.
 var LOWER_F128_FN_BODY_PENDING: bool = false
+var LOWER_F128_TAIL_EXPR: bool = false
 
 pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
     LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE = enabled
@@ -11152,6 +11156,49 @@ impl Lowerer {
             lo = d2p.0
             return (lo, d2p.1)
         }
+        if which == 6 {
+            // log: f' = 1/x ; f'' = -1/x^2  (KL-6)
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, argv)
+                lo = d1p.0
+                return (lo, d1p.1)
+            }
+            let xxp = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xxp.0
+            let xx = xxp.1
+            let rp = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, xx)
+            lo = rp.0
+            let r = rp.1
+            let d2p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, r)
+            lo = d2p.0
+            return (lo, d2p.1)
+        }
+        if which == 7 {
+            // sqrt: s = sqrt x ; f' = 1/(2s) ; f'' = -1/(4*x*s)  (KL-6)
+            let sp = lo.fo_emit_math_call(make_name("sqrt"), argv)
+            lo = sp.0
+            let sroot = sp.1
+            let tsp = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, sroot)
+            lo = tsp.0
+            let twos = tsp.1
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, twos)
+                lo = d1p.0
+                return (lo, d1p.1)
+            }
+            let fxp = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
+            lo = fxp.0
+            let twox = fxp.1
+            let dnp = lo.fo_emit_f64_binop(twox, BinaryOp::OpMul, twos)
+            lo = dnp.0
+            let den = dnp.1
+            let rp = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, den)
+            lo = rp.0
+            let r = rp.1
+            let d2p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, r)
+            lo = d2p.0
+            return (lo, d2p.1)
+        }
         (lo, 0 - 1)
     }
 
@@ -11331,41 +11378,65 @@ impl Lowerer {
                 return (lo.fo_clear_expr_sens(), -1)
             }
             // Second order, in kind 6's order: written BEFORE the sens combine,
-            // which overwrites fo_expr_sens. Restricted the same way kind 6
-            // documents -- only when the argument carries no Hessian of its own,
-            // because with a compound inner the chain rule reads s_g^2 where H_g
-            // belongs, and a confident wrong number is harder to catch than a zero.
+            // which overwrites fo_expr_sens.
+            //
+            //   H_jk(f(g)) = f''(g)*s_j*s_k + f'(g)*H_jk(g)
+            //
+            // KL-6: the second term used to be refused -- a compound inner
+            // (`atan(x*x)`, `log(x*x + 1.0)`) cleared the Hessian and returned a
+            // confident 0.0. Same discipline as kind 6 (3fe37565e): H_g is read
+            // from the Lowerer field, the muls are emitted in place, and every
+            // tuple's .1 is bound on the next line. A slot with neither term
+            // stays -1 (structural zero).
             if lo.so_enabled && !sab_hessian_chain() && d2r >= 0 {
-                let hNow8 = lo.so_snapshot_expr_hess()
-                var arg_has_hess8 = false
-                var hq8: i64 = 0
-                while hq8 < 36 {
-                    if hNow8[hq8 as usize] >= 0 { arg_has_hess8 = true }
-                    hq8 = hq8 + 1
-                }
-                if arg_has_hess8 {
-                    lo = lo.so_clear_expr_hess()
-                } else {
-                    var hj8: i64 = 0
-                    while hj8 < 8 {
-                        var hk8: i64 = hj8
-                        while hk8 < 8 {
-                            let sj8 = s0[hj8 as usize]
-                            let sk8 = s0[hk8 as usize]
-                            if sj8 >= 0 && sk8 >= 0 {
-                                let pjp = lo.fo_emit_f64_binop(sj8, BinaryOp::OpMul, sk8)
-                                lo = pjp.0
-                                let pj = pjp.1
-                                let pvp = lo.fo_emit_f64_binop(d2r, BinaryOp::OpMul, pj)
-                                lo = pvp.0
-                                let hid8 = lo.so_hess_idx(hj8, hk8)
-                                lo.so_expr_hess[hid8 as usize] = pvp.1
-                            }
-                            hk8 = hk8 + 1
+                var hj8: i64 = 0
+                while hj8 < 8 {
+                    var hk8: i64 = hj8
+                    while hk8 < 8 {
+                        let sj8 = s0[hj8 as usize]
+                        let sk8 = s0[hk8 as usize]
+                        let hid8 = lo.so_hess_idx(hj8, hk8)
+                        let hg8 = lo.so_expr_hess[hid8 as usize]
+                        var acc8: i64 = 0 - 1
+                        if hg8 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let dr = d.1
+                            lo = lo.emit(ir_binop_typed(dr, d1r, BinaryOp::OpMul, hg8, true, true))
+                            lo = lo.emit(ir_mark_float_reg(dr))
+                            acc8 = dr
                         }
-                        hj8 = hj8 + 1
+                        if sj8 >= 0 && sk8 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let pj = d.1
+                            lo = lo.emit(ir_binop_typed(pj, sj8, BinaryOp::OpMul, sk8, true, true))
+                            lo = lo.emit(ir_mark_float_reg(pj))
+                            let d2 = lo.fresh_reg()
+                            lo = d2.0
+                            let t2 = d2.1
+                            lo = lo.emit(ir_binop_typed(t2, d2r, BinaryOp::OpMul, pj, true, true))
+                            lo = lo.emit(ir_mark_float_reg(t2))
+                            if acc8 < 0 {
+                                acc8 = t2
+                            } else {
+                                let d3 = lo.fresh_reg()
+                                lo = d3.0
+                                let sum = d3.1
+                                lo = lo.emit(ir_binop_typed(sum, acc8, BinaryOp::OpAdd, t2, true, true))
+                                lo = lo.emit(ir_mark_float_reg(sum))
+                                acc8 = sum
+                            }
+                        }
+                        lo.so_expr_hess[hid8 as usize] = acc8
+                        hk8 = hk8 + 1
                     }
+                    hj8 = hj8 + 1
                 }
+            } else if lo.so_enabled {
+                // No chain rule (sabotage, or no f''): the slots still hold
+                // H(g). Clear rather than let the inner's Hessian wear f's name.
+                lo = lo.so_clear_expr_hess()
             }
             var sL8: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sL8, s0, d1r, argv8)
@@ -11509,7 +11580,14 @@ impl Lowerer {
                         }
                         hj = hj + 1
                     }
+                } else {
+                    // KL-6 fail-closed: no f'' entry means no chain rule, and
+                    // the slots still hold H(g). Clear them rather than let the
+                    // inner's Hessian wear f's name.
+                    lo = lo.so_clear_expr_hess()
                 }
+            } else if lo.so_enabled {
+                lo = lo.so_clear_expr_hess()
             }
             var sZ: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
@@ -12274,7 +12352,11 @@ impl Lowerer {
             let hR = lo.so_snapshot_expr_hess()
 
             // Multi-channel FO path when either side carries seed sensitivities.
-            if lo.fo_expr_or_snap_has_sens(sL) {
+            // Both snapshots are named (KL-6): the live fo_expr_sens is sR at
+            // this point, so the old single-snapshot call already covered the
+            // right operand, but `1.0 / b` -- sensitivity and Hessian on the
+            // right only -- must visibly take this path, not the legacy one.
+            if lo.fo_expr_or_snap_has_sens(sL) || lo.fo_expr_or_snap_has_sens(sR) {
                 if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                     let is_sub = (*e).bin_op == BinaryOp::OpSub
                     if lo.so_enabled {
@@ -12520,6 +12602,8 @@ impl Lowerer {
                     make_name("print_int")
                 } else if sk == 2 {
                     make_name("print_f64")
+                } else if sk == 5 {
+                    make_name("println_f128")
                 } else if self.expr_result_is_string_ref(&(*list).head) {
                     make_name("print")
                 } else {
@@ -12807,6 +12891,9 @@ impl Lowerer {
             if bits > 64 { return bits }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
+        if (*expr).kind == ExprKind::ExprUnary {
+            return self.expr_wide_bits_opt_ref(&(*expr).left)
+        }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_bits((*expr).name)
         }
@@ -12835,6 +12922,9 @@ impl Lowerer {
         }
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_signed((*expr).name)
+        }
+        if (*expr).kind == ExprKind::ExprUnary {
+            return self.expr_wide_signed_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprBinary {
             return self.expr_wide_signed_opt_ref(&(*expr).left)
@@ -13306,11 +13396,9 @@ impl Lowerer {
     fn field_is_int_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_int_for_struct(type_name, field_name) {
-                        return true
-                    }
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len > 0 && self.field_is_int_for_struct(type_name, field_name) {
+                    return true
                 }
                 false
             }
@@ -13768,7 +13856,39 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprUnary {
             return self.opt_expr_result_is_wide_float_ref(&(*e).left)
         }
+        if (*e).kind == ExprKind::ExprIf {
+            return self.block_tail_is_wide_float_ref(&(*e).block)
+                || self.opt_expr_result_is_wide_float_ref(&(*e).else_expr)
+        }
         false
+    }
+
+    fn stmt_list_tail_is_wide_float_ref(self, opt: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                match (*list).tail {
+                    Some(rest) => self.stmt_list_tail_is_wide_float_ref(&Some(rest)),
+                    _ => {
+                        if (*list).head.kind == StmtKind::StmtExpr {
+                            match (*list).head.expr {
+                                Some(expr_box) => self.expr_result_is_wide_float_ref(&(*expr_box)),
+                                None => false,
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            None => false,
+        }
+    }
+
+    fn block_tail_is_wide_float_ref(self, opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(blk) => self.stmt_list_tail_is_wide_float_ref(&(*blk).stmts),
+            None => false,
+        }
     }
 
     // String-ness of an expression result, for routing `+`/`++` on strings to the
@@ -14612,6 +14732,9 @@ impl Lowerer {
         }
         if ((*e).kind == ExprKind::ExprBinary || (*e).kind == ExprKind::ExprUnary)
             && self.expr_result_is_wide_float_ref(e) {
+            return 5
+        }
+        if (*e).kind == ExprKind::ExprIf && self.expr_result_is_wide_float_ref(e) {
             return 5
         }
         if (*e).kind == ExprKind::ExprFloatLit {
@@ -16269,10 +16392,11 @@ impl Lowerer {
     fn lower_block_ref(self, blk: &Block) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
-        // V0-E.5.10: consume the "this is the body of an -> f128 fn" flag so
-        // nested blocks lowered below see it cleared.
+        // V0-E.5.10 / KL-8: the fn body block owns the pending flag; nested blocks
+        // inherit LOWER_F128_TAIL_EXPR when lowering an if/else fn tail.
         let f128_body_tail = LOWER_F128_FN_BODY_PENDING
         LOWER_F128_FN_BODY_PENDING = false
+        let f128_lit_tail_ctx = f128_body_tail || LOWER_F128_TAIL_EXPR
         lo.scope_depth = lo.scope_depth + 1
         let saved_local_count = (*lo.locals).count
         var current = &blk.stmts
@@ -16295,11 +16419,18 @@ impl Lowerer {
                         let expr_opt_ref = &stmt_ref.expr
                         match *expr_opt_ref {
                             Some(expr_box) => {
-                                if f128_body_tail && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box)) {
+                                if f128_body_tail && is_tail_stmt {
+                                    LOWER_F128_TAIL_EXPR = true
+                                }
+                                let pair_tail = if f128_lit_tail_ctx && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box)) {
                                     lo.lower_f128_value_ref(&(*expr_box))
                                 } else {
                                     lo.lower_expr_ref(&(*expr_box))
                                 }
+                                if f128_body_tail && is_tail_stmt {
+                                    LOWER_F128_TAIL_EXPR = false
+                                }
+                                pair_tail
                             }
                             _ => {
                                 lo.emit_unit()
@@ -16535,7 +16666,36 @@ impl Lowerer {
         let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
-        let reg = pair.1
+        var reg = pair.1
+        // KL-7: an annotated signed-wide binding whose RHS was lowered as one
+        // machine word must materialise every high limb.  Leaving only `reg`
+        // live made `let x: i256 = 0 - 1` look wide in metadata while its high
+        // vregs belonged to unrelated temporaries.  Arithmetic shift supplies
+        // the runtime sign word for literals, unary negatives and computed i64s.
+        let annotated_wide_bits = lower_opt_type_wide_bits(&s.ty)
+        if annotated_wide_bits > 64 && lo.expr_wide_bits_opt_ref(&s.expr) <= 64 {
+            let limbs = lower_wide_limb_count(annotated_wide_bits)
+            let wide_pair = lo.fresh_wide_reg(limbs)
+            lo = wide_pair.0
+            let wide_reg = wide_pair.1
+            lo = lo.emit(ir_copy(wide_reg, reg))
+            let sign_pair = lo.fresh_reg()
+            lo = sign_pair.0
+            let sign_reg = sign_pair.1
+            if lower_opt_type_wide_signed(&s.ty) == 1 {
+                let shift_pair = lo.emit_i64_const(63)
+                lo = shift_pair.0
+                lo = lo.emit(ir_binop(sign_reg, reg, BinaryOp::OpShr, shift_pair.1))
+            } else {
+                lo = lo.emit(ir_load_imm(sign_reg, 0))
+            }
+            var wi: i64 = 1
+            while wi < limbs {
+                lo = lo.emit(ir_copy(wide_reg + wi, sign_reg))
+                wi = wi + 1
+            }
+            reg = wide_reg
+        }
         lo.lower_let_stmt_after_expr_ref(s, is_mut, reg)
     }
 
@@ -16971,6 +17131,12 @@ impl Lowerer {
                         // SIGSEGV (e.g. `let r = use2::<i64>(2,3); println(r)`).
                         // Restricted to Call/MethodCall so an indexed struct element
                         // cannot be misclassified as int.
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if ((*expr_box_sk).kind == ExprKind::ExprFieldAccess
+                            || (*expr_box_sk).kind == ExprKind::ExprIndex)
+                        && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 1 {
+                        // Positively classified computed scalar locals retain their
+                        // integer kind for a later println(local).
                         lo = lo.bind_local_scalar_kind(s.name, 1)
                     } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
                         // `let y = x + 1` / `let y = 0 - x` without an integer annotation:
@@ -17484,13 +17650,55 @@ impl Lowerer {
         // struct field) takes an F128Bits handle. `x = 1.0` lowered through the
         // generic path would store f64 bits into the handle slot; `x = y` copies
         // the limbs like `let`, so a later store into `y` cannot alias `x`.
-        // Compound assignment on f128 stays V0-E.4.1 fail-closed.
         let target_is_f128 = match s.target {
             Some(t) => self.lower_expr_is_f128_slot_ref(&(*t)),
             None => false,
         }
+        // KL-8: `+=`/`-=` on f128 desugar to softfloat add/sub (store back below).
         if target_is_f128 && s.assign_op != AssignOp::AssignEq {
-            return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
+            if s.assign_op != AssignOp::AssignAdd && s.assign_op != AssignOp::AssignSub {
+                return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
+            }
+            match s.target {
+                Some(target_f128) => {
+                    let old_pair = self.lower_f128_value_ref(&(*target_f128))
+                    let rhs_pair = match s.expr {
+                        Some(rhs_box) => old_pair.0.lower_f128_value_ref(&(*rhs_box)),
+                        None => return lower_f128_fail(old_pair.0, "missing f128 compound-assign RHS"),
+                    }
+                    let result_pair = if s.assign_op == AssignOp::AssignAdd {
+                        rhs_pair.0.lower_f128_call_soft_limbs(true, old_pair.1, rhs_pair.1)
+                    } else {
+                        rhs_pair.0.lower_f128_call_soft_limbs(false, old_pair.1, rhs_pair.1)
+                    }
+                    var lo_cmp = result_pair.0
+                    let rhs_cmp = result_pair.1
+                    if (*target_f128).kind == ExprKind::ExprIdent {
+                        let dst = lo_cmp.lookup_local((*target_f128).name)
+                        if dst < 0 {
+                            return lower_f128_fail(lo_cmp, "f128 compound assign target is not a local")
+                        }
+                        lo_cmp = lo_cmp.emit(ir_copy(dst, rhs_cmp))
+                        return (lo_cmp, rhs_cmp)
+                    }
+                    if (*target_f128).kind == ExprKind::ExprFieldAccess {
+                        let base_opt: Option<Box<Expr>> = (*target_f128).left
+                        match base_opt {
+                            Some(base_expr) => {
+                                let fidx = lo_cmp.field_idx_for_base_ref(&(*target_f128).left, (*target_f128).name)
+                                let pair_base = lo_cmp.lower_expr_ref(&(*base_expr))
+                                var lo_f = pair_base.0
+                                let base_reg = pair_base.1
+                                lo_f = lo_f.emit(ir_field_set(base_reg, fidx, rhs_cmp, (*target_f128).name))
+                                return (lo_f, rhs_cmp)
+                            }
+                            None => {}
+                        }
+                    }
+                    return lower_f128_fail(lo_cmp, "f128 compound assign target shape unsupported")
+                }
+                None => return lower_f128_fail(self, "missing f128 compound-assign target"),
+            }
         }
         let pair_rhs = if target_is_f128 {
             match s.expr {
@@ -19659,12 +19867,33 @@ impl Lowerer {
             return (lo_call_k, dst_k)
         }
         if name_eq(callee_name, make_name("print")) || name_eq(callee_name, make_name("print_int")) || name_eq(callee_name, make_name("print_char")) {
+            let print_wide_bits = match e.args {
+                Some(print_args) => self.expr_wide_bits_ref(&(*print_args).head),
+                None => 0,
+            }
+            // KL-7: refuse wide *integer* print. Language f128 reuses wide_bits=128
+            // for softfloat limbs and routes to println_f128 / print_f128 (sk==5).
+            if print_wide_bits > 64 {
+                let print_sk = match e.args {
+                    Some(print_args) => self.expr_result_scalar_kind_ref(&(*print_args).head),
+                    None => 0,
+                }
+                if !(print_sk == 5 && print_wide_bits == 128) {
+                    print("error: wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs\n")
+                    var lo_refuse = self
+                    lowerer_mark_hard_error(&! lo_refuse)
+                    return lo_refuse.emit_unit()
+                }
+            }
             // Redirect bare print(<int literal>) to the print_int builtin: print
             // (=print_str) treats its argument as a char* and would deref the integer
             // value as a pointer. Explicit print_int / print_char are left untouched.
             var print_builtin_name = callee_name
             if name_eq(callee_name, make_name("print")) {
                 print_builtin_name = self.println_dispatch_name(&e.args)
+                if ir_name_eq(print_builtin_name, make_name("println_f128")) {
+                    print_builtin_name = make_name("print_f128")
+                }
             }
             var lo_builtin = self
             let fn_id_builtin = lowerer_find_or_add_fn_id_mut(&! lo_builtin, print_builtin_name)
@@ -19679,6 +19908,24 @@ impl Lowerer {
             return (lo_call_builtin, dst_builtin)
         }
         if name_eq(callee_name, make_name("println")) {
+            let println_wide_bits = match e.args {
+                Some(println_args) => self.expr_wide_bits_ref(&(*println_args).head),
+                None => 0,
+            }
+            // KL-7: refuse wide *integer* print. Language f128 reuses wide_bits=128
+            // for softfloat limbs and routes to println_f128 (sk==5).
+            if println_wide_bits > 64 {
+                let println_sk = match e.args {
+                    Some(println_args) => self.expr_result_scalar_kind_ref(&(*println_args).head),
+                    None => 0,
+                }
+                if !(println_sk == 5 && println_wide_bits == 128) {
+                    print("error: wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs\n")
+                    var lo_refuse = self
+                    lowerer_mark_hard_error(&! lo_refuse)
+                    return lo_refuse.emit_unit()
+                }
+            }
             // Lower println(x) -> print_kind(x); print_char('\n'). Dispatch rules:
             //   int literal / i64 var  → print_int   (itoa+write)
             //   float literal / f64 var → print_f64   (dtoa+write)
@@ -20245,7 +20492,7 @@ impl Lowerer {
         // itself call f128_bits_soft_add before the first `+`.
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, fname)
         if fn_id < 0 {
-            return lower_f128_fail(lo, "language f128 ops require `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub, f128_bits_soft_mul, f128_bits_soft_div, f128_bits_soft_neg, f128_bits_soft_lt, ...}` (V0-E.5.1 .. V0-E.5.3)")
+            return lower_f128_fail(lo, "language f128 ops require `use math::softfloat_f128::{f128_bits_soft_add, f128_bits_soft_sub, f128_bits_soft_mul, f128_bits_soft_div, f128_bits_soft_rem, f128_bits_soft_neg, f128_bits_soft_lt, ...}` (V0-E.5.1 .. V0-E.5.3 / KL-8)")
         }
         var args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a)))
         if argc != 1 {
@@ -20515,6 +20762,7 @@ impl Lowerer {
         if op == BinaryOp::OpSub { return make_name("f128_bits_soft_sub") }
         if op == BinaryOp::OpMul { return make_name("f128_bits_soft_mul") }
         if op == BinaryOp::OpDiv { return make_name("f128_bits_soft_div") }
+        if op == BinaryOp::OpRem { return make_name("f128_bits_soft_rem") }
         if op == BinaryOp::OpLt { return make_name("f128_bits_soft_lt") }
         if op == BinaryOp::OpLe { return make_name("f128_bits_soft_le") }
         if op == BinaryOp::OpGt { return make_name("f128_bits_soft_gt") }
@@ -20530,7 +20778,7 @@ impl Lowerer {
 
     fn lower_f128_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // V0-E.5.1: + −. V0-E.5.2: * and the six comparisons (bool result).
-        // V0-E.5.3: / (restoring long division in stdlib). `%` stays fail-closed.
+        // V0-E.5.3: `/`. KL-8: `%` via f128_bits_soft_rem.
         let fname = self.lower_f128_binary_target(e.bin_op)
         if ir_name_eq(fname, ir_empty_name()) {
             return lower_f128_fail(self, "f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)")
@@ -20759,7 +21007,7 @@ impl Lowerer {
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
         // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
-        // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. `%` still refuses.
+        // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. KL-8: `%`.
         if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
             if self.lower_f128_binary_op_supported(e.bin_op)
                 && self.lower_f128_expr_ready_ref(&e.left)
@@ -20794,7 +21042,13 @@ impl Lowerer {
         // The result's variance must be DERIVED from both operands, never inherited
         // from one of them.
         lo2.pending_variance_reg = -1
-        let cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
+        var cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
+        // Ordered wide comparisons need signed treatment at the most-significant
+        // limb. Encode signed Lt/Le/Gt/Ge as 8/9/10/11; Eq/Ne are bitwise and
+        // retain 0/1. The native emitter compares lower limbs as unsigned.
+        if cmp_op >= 2 && self.expr_wide_signed_ref(e) == 1 {
+            cmp_op = cmp_op + 6
+        }
         let limbs = lower_wide_limb_count(wide_bits)
         var alloc_limbs = limbs
         if wide_bits > 64 && cmp_op < 0 {
@@ -21520,9 +21774,19 @@ impl Lowerer {
             var lo2 = p.0
             let dst = p.1
             lo2 = lo2.emit(ir_copy(dst, src_reg))
+            let sign_pair = lo2.fresh_reg()
+            lo2 = sign_pair.0
+            let sign_reg = sign_pair.1
+            if lower_opt_type_wide_signed(&e.cast_type) == 1 {
+                let shift_pair = lo2.emit_i64_const(63)
+                lo2 = shift_pair.0
+                lo2 = lo2.emit(ir_binop(sign_reg, src_reg, BinaryOp::OpShr, shift_pair.1))
+            } else {
+                lo2 = lo2.emit(ir_load_imm(sign_reg, 0))
+            }
             var wi: i64 = 1
             while wi < limbs {
-                lo2 = lo2.emit(ir_load_imm(dst + wi, 0))
+                lo2 = lo2.emit(ir_copy(dst + wi, sign_reg))
                 wi = wi + 1
             }
             match e.left {
@@ -21563,6 +21827,28 @@ impl Lowerer {
             var lo_refuse = self
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
+        }
+        // KL-7: wide negation is two's-complement subtraction from an all-zero
+        // wide value.  Applying the scalar IrUnaryOp to the base vreg negated
+        // only limb 0 and left the upper limbs unchanged.
+        let unary_wide_bits = self.expr_wide_bits_opt_ref(&e.left)
+        if e.un_op == UnaryOp::OpNeg && unary_wide_bits > 64 {
+            let operand_pair = self.lower_opt_expr_ref(&e.left)
+            var lo_wide = operand_pair.0
+            let limbs = lower_wide_limb_count(unary_wide_bits)
+            let zero_pair = lo_wide.fresh_wide_reg(limbs)
+            lo_wide = zero_pair.0
+            let zero_reg = zero_pair.1
+            var zi: i64 = 0
+            while zi < limbs {
+                lo_wide = lo_wide.emit(ir_load_imm(zero_reg + zi, 0))
+                zi = zi + 1
+            }
+            let dst_pair = lo_wide.fresh_wide_reg(limbs)
+            lo_wide = dst_pair.0
+            let dst_reg = dst_pair.1
+            lo_wide = lo_wide.emit(ir_wide_sub(dst_reg, zero_reg, operand_pair.1, limbs))
+            return (lo_wide, dst_reg)
         }
         // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
         // ref_array_* then does load[slot] → resolve_handle → +object_header.
@@ -22303,7 +22589,13 @@ impl Lowerer {
 
         let else_expr_opt: Option<Box<Expr>> = e.else_expr
         let pair_else = match else_expr_opt {
-            Some(ee) => lo.lower_expr_ref(&(*ee)),
+            Some(ee) => {
+                if LOWER_F128_TAIL_EXPR && lower_expr_is_float_literal_like_ref(&(*ee)) {
+                    lo.lower_f128_value_ref(&(*ee))
+                } else {
+                    lo.lower_expr_ref(&(*ee))
+                }
+            }
             None => lo.emit_unit(),
         }
         lo = pair_else.0

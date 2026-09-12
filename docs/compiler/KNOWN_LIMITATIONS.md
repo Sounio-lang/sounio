@@ -35,13 +35,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-1 | small parity items: `~`, `Epistemic(-N)`, `*const`/`*mut` at call sites, `println` of computed local | madaros |
-| KL-2 | IEEE 754 special values (#2389) | both |
-| KL-4 | private field reads unchecked | both |
-| KL-5 | ε polarity fork | madaros |
-| KL-6 | Hessian quotient / composite chain on Madaros | madaros |
-| KL-7 | `i256`/`i512` wide-local `print_int` | madaros |
-| KL-8 | `f128` surface residuals | madaros |
 | KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
 | KL-11 | #1792 first-order / variance across calls | madaros |
 | KL-12 | thin-link `rc=12` probes | madaros |
@@ -52,134 +45,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ## Ledger
 
-### KL-1 — small parity items
 
-- **Unary `~` refused by Madaros.** Engine: `madaros` (E005; `lean_single`
-  accepts). Repro: `tests/run-pass/bitwise_not_bootstrap_regression.sio`. Pin:
-  `tests/engine_parity_baseline.txt` row `LEAN-ONLY` for that file. Locus:
-  `self-hosted/parser/exprs.sio:211` maps `Tilde` to `UnaryOp::OpNot`;
-  `check/compat.sio:1233` makes `OpNot` bool-only; `native/encode.sio:1576`
-  `emit_not_rax` exists and is unused.
-- **`Epistemic(-N)` collides with "no payload".** Engine: `both` accept the
-  syntax; Madaros erases `-1` to the no-payload sentinel
-  (`parser/ast.sio:140` `EffectRef.payload`, `parser/types.sio:940`).
-  Positive floors are enforced (E215). Receipt:
-  `docs/audit/MADAROS_EPISTEMIC_PAYLOAD_GATE_2026-08-20.md`. Pin: none.
-- **`*const T` vs `*mut T` at a call site.** Engine: `madaros`. Passing
-  `expr as *const u8` where the callee takes `*mut u8` (or the reverse) can
-  produce arity/type diagnostics; stdlib wrappers prefer `*mut u8`. Locus:
-  `check.sio:17310` `checker_call_arg_types_compatible_table`,
-  `check/compat.sio:226`. Pin: none (the fixture the old text cited,
-  `tests/stdlib/compress/test_zstd_e2e.sio`, is now a constants-only stub and
-  does not exercise this).
-- **`println(<computed local>)` routes to the `char*` printer.** Engine:
-  `madaros`. A local bound from a bare index/field-access initializer without
-  an int scalar-kind marker (`let v = r.c[0]; println(v)`) reaches
-  `println_dispatch_name` (`ir/lower.sio:12514`) with kind 0. Locus:
-  `lower_let_stmt_ref` unannotated path `lower.sio:16922-16991` only marks
-  int for `ExprCall`/`ExprMethodCall`/`Binary`/`Unary`. Pin: none.
-
-### KL-2 — IEEE 754 special values (#2389)
-
-- Engine: `both`. `nan == nan` is `1`, `nan != nan` is `0`, `nan < 1.0` is
-  `1` (IEEE: `0 / 1 / 0`); `x != x` cannot detect NaN. `lean_single`:
-  `println(inf)` never returns, `println(nan)` prints non-numeric bytes.
-  `madaros`: `println(inf)` prints `9223372036854775808.000000`,
-  `println(nan)` prints `-9223372036854775808.000000`.
-- Repro: `tests/known-gaps/numerics/{nan_compare_is_not_ieee,print_inf_never_returns,print_nan_is_garbage}.sio`.
-- Pin: `scripts/ci/language_gap_ratchet_gate.sh` (workflow
-  `language-gap-ratchet.yml`) pins the wrong values; the fix flips those
-  lines deliberately.
-- Locus: `native/codegen_x86_linux.sio:8150-8199` (`sete/setne/setb/…` after
-  `ucomisd`, no PF handling), `native/lower_ir.sio:689-727`, seed
-  `lean_single.sio:21203-21214`; `print_f64` at `codegen_x86_linux.sio:6185`
-  (`cvttsd2si` without inf/nan guard) and seed `__native_print_f64_n`
-  (`lean_single.sio:41729`).
-- Working rule until fixed: bound every loop that exits on a float
-  comparison and range-check after it (`ulp()` in
-  `examples/chemistry/rep_stagnation.sio`).
-
-### KL-4 — private field reads are not checked
-
-- Engine: `both` for direct reads; on Madaros the parser drops the field's
-  `pub` (`parser/items.sio:1861-1863`, also `:1966`, `:2072`), so
-  `FieldDef`/`FieldInfo` carry no visibility (`parser/ast.sio:1159`,
-  `check/defs.sio:16`). Struct-literal construction of a private struct is
-  refused (E176 via `checker_struct_visible_inplace`); field access
-  (`check.sio:7301`) is not.
-- Repro/pin: none (the zero-event constructor-privacy fixtures cover the
-  struct-literal half only). Blast radius over `stdlib/` is measured before
-  enforcement; a warning-first ratchet is acceptable for one rung.
-
-### KL-5 — ε has opposite polarities in the two engines
-
-- Engine: `madaros` accepts `tests/compile-fail/vancomycin_low_conf.sio`
-  (`check: OK`, rc=0); `lean_single` refuses it with P0003. Madaros reads ε as
-  an error bound (`epsilon_subsumes` is `a <= b`,
-  `check/epistemic.sio:607`; `epsilon_subsumes_call_boundary` `:613` ignores
-  `EpsilonBound.op`), the corpus reads it as confidence (`ε >= 0.82`: 15
-  uses, `ε =`: 10, `ε <`: 0). Seed: `ty_eq` `lean_single.sio:4276-4295`
-  honours the operator.
-- Pin: the three covering gates (`clinical_vanco_tdm_e2e`,
-  `epistemic_prescription_chain_e2e`, `ousadia_epistemic_method_rx`) pin
-  `SOUNIO_SOUC_ENGINE=lean_single` and are not workflow-reachable;
-  `scripts/ci/epsilon_engine_parity_gate.sh` (ci.yml) covers a narrower set.
-- Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`. Do not state the
-  vancomycin ε guarantee without naming the engine.
-
-### KL-6 — Hessian on Madaros: quotient and composite chain rule
-
-- Engine: `madaros`. `tests/run-pass/madaros_hessian_quotient.sio` prints
-  `h_aa=h_ab=h_bb=h_rec=0.000000` and `MADAROS_HESSIAN_QUOTIENT_FAIL` on the
-  committed ELF and on source. Composite inner expressions (`exp(x*x)`,
-  `exp(sin(x))`, `sin(sin(x))`) are deliberately refused by clearing the
-  Hessian and returning `0.0` (`ir/lower.sio:11338-11347`, `:11423`); the
-  `f'(g)·H(g)` term is not implemented.
-- Locus: `lower_expr_variance_ref` guard `lower.sio:12277`
-  (`fo_expr_or_snap_has_sens(sL)` only — a Hessian carried by the right
-  operand alone is dropped), `so_combine_hess_div` `:9782`,
-  `so_combine_hess_mul` `:9871`.
-- Pin: the transcendental witness
-  `tests/run-pass/madaros_hessian_transcendental.sio` is green and must stay
-  so; the quotient witness is the failing repro. Do not generalise the
-  transcendental result to Hessian AD as a whole.
-
-### KL-7 — `i256`/`i512` wide-local `print_int`
-
-- Engine: `madaros`. Wide values are consecutive virtual registers plus an
-  immediate pool (`ir/lower.sio:48-49`, `fresh_wide_reg :12788`,
-  `ir/numeric_payload.sio:165`); `print_int` of a wide local
-  (`lower.sio:19661-19679`) prints the low limb. Negative wide literals rely
-  on low-limb sign extension that is not asserted.
-- Repro: `tests/run-pass/r1_i256_lorenz_peak.sio` (green — proves multiply
-  and shift, not printing). Pin: `scripts/ci/madaros_wide_int_gate.sh`
-  (emitter only, no `print`). Receipt:
-  `docs/audit/R1_I256_I512_LIMBS_2026-08-20.md`.
-- Out of scope for this ledger and for any rung: the Lorenz certificate
-  conclusions in `stdlib/systems/` remain unaudited; do not state that any
-  certificate conclusion is proved or wrong from these receipts (spec
-  `docs/spec/S12_NUMERIC_TOWER.md` §12.2.6, §12.4-6).
-
-### KL-8 — `f128` surface residuals (after V0-E.5.10)
-
-- Engine: `madaros`. Ladder record:
-  `docs/architecture/F128_F256_LADDER.md`; every closed stage is pinned by
-  `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b … v0e510`.
-- A float literal as the tail of a **nested** block used as the fn tail
-  (`fn f() -> f128 { if c { 1.0 } else { 2.0 } }`) is E008 — only the body
-  block and `return` are routed (`LOWER_F128_FN_BODY_PENDING`,
-  `ir/lower.sio`).
-- `%` and `+=` on `f128` are refused (no `soft_rem` desugar; compound
-  assignment not routed).
-- Builtin `print`/`println` of an `f128` is refused at lowering (`cannot
-  safely lower print/println argument with unresolved scalar kind`);
-  `println_f128` needs an explicit `use math::softfloat_f128_fmt` because
-  the implicit import (V0-E.5.10) covers `math/softfloat_f128.sio` only.
-- The legacy `native_compile_driver.sio` lexer (`driver_lex_source_to_globals`,
-  `:8872-8945`) does not take `_` separators; no longer reachable from any gate (the `native_v2_*` leaf gates were
-  deprecated in KL-10, `scripts/ci/deprecated/`).
-- Pin: the v0e510 gate pins the closed half; the residuals above have no
-  negative fixture yet.
 
 ### KL-9 — seed: `f128` greenwash and #1494
 
@@ -212,6 +78,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `pending_variance_reg :988`. Audit:
   `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
+- **`pow` has no FO transfer entry on Madaros.** Measured at KL-6 close:
+  `hessian_of(pow(x, 3.0), 0, 0)` prints `0.000000` (true `6x = 3.0`;
+  `lean_single` prints `3.000000`). The call is opaque to
+  `fo_apply_call_transfer` (`ir/lower.sio`, `fo_xfer_seed_transcendentals`),
+  so sensitivity and Hessian are both cleared — a structural zero, not a
+  diagnostic. Every unary builtin (`sin cos exp atan asin acos tan tanh log
+  sqrt`) has a first- and second-derivative entry; `pow` is the only math
+  builtin left out.
 
 ### KL-12 — thin-link `rc=12`
 
