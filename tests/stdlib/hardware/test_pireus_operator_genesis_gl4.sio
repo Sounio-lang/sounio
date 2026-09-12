@@ -1,0 +1,230 @@
+//@ run-pass
+use hardware::pireus::operator_genesis_gl4::{
+    PIREUS_GL4_OK,
+    PIREUS_GL4_CANDIDATE_COUNT,
+    PIREUS_GL4_CORPUS_COUNT,
+    PIREUS_GL4_MATRIX_ENCODINGS,
+    PIREUS_GL4_MATRIX_COUNT,
+    PIREUS_GL4_LINEAR_SWAP_ACTIONS,
+    PIREUS_GL4_GAUGE_COUNT,
+    PIREUS_GL4_GAUGE_KERNEL_COUNT,
+    PIREUS_GL4_GAUGE_ACTION_COUNT,
+    pireus_operator_genesis_gl4_request,
+    pireus_operator_genesis_gl4_evaluate,
+    pireus_operator_genesis_gl4_matches_frozen_semantics,
+    pireus_gl4_genesis_digest_nonzero,
+}
+
+fn test_highest_basis_bit(value: i64) -> i64 with Mut {
+    var selected: i64 = 0
+    var bit: i64 = 0
+    while bit < 4 {
+        let basis = 1 << bit
+        if (value & basis) != 0 { selected = basis }
+        bit = bit + 1
+    }
+    selected
+}
+
+fn is_basis(value: i64) -> bool {
+    value == 1 || value == 2 || value == 4 || value == 8
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    let request = pireus_operator_genesis_gl4_request()
+    let result = pireus_operator_genesis_gl4_evaluate(&request)
+    if !result.valid || result.error != PIREUS_GL4_OK ||
+        result.failures != 0 ||
+        !pireus_operator_genesis_gl4_matches_frozen_semantics(&result) {
+        return 1
+    }
+
+    if result.group.encodings_scanned != PIREUS_GL4_MATRIX_ENCODINGS ||
+        result.group.matrix_count != PIREUS_GL4_MATRIX_COUNT ||
+        result.group.bfs_count != PIREUS_GL4_MATRIX_COUNT ||
+        result.group.set_mismatches != 0 ||
+        result.group.bfs_noninvertible != 0 || result.group.bfs_overflow ||
+        !result.group.identity_present || !result.group.sorted_unique ||
+        result.group.operand_orders != 2 ||
+        result.group.linear_swap_actions != PIREUS_GL4_LINEAR_SWAP_ACTIONS ||
+        !result.group.complete { return 2 }
+
+    if result.gauge.gauge_functions != PIREUS_GL4_GAUGE_COUNT ||
+        result.gauge.kernel_count != PIREUS_GL4_GAUGE_KERNEL_COUNT ||
+        result.gauge.distinct_actions != PIREUS_GL4_GAUGE_ACTION_COUNT ||
+        result.gauge.tree_edges != 11 || !result.gauge.quotient_exact ||
+        result.gauge_invariance_checks != PIREUS_GL4_GAUGE_COUNT ||
+        result.gauge_invariance_failures != 0 ||
+        result.generator_invariance_checks != 5 ||
+        result.generator_invariance_failures != 0 { return 3 }
+
+    if result.search.candidates_evaluated != PIREUS_GL4_CANDIDATE_COUNT ||
+        result.search.corpus_canonicalized != PIREUS_GL4_CORPUS_COUNT ||
+        result.search.matrices_per_table != PIREUS_GL4_MATRIX_COUNT ||
+        result.search.linear_swap_actions_per_table !=
+            PIREUS_GL4_LINEAR_SWAP_ACTIONS { return 4 }
+
+    var seen: i64 = 0
+    var cd_equivalent: bool = false
+    var digest_words_nonzero: i64 = 0
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GL4_CANDIDATE_COUNT {
+        let mask = result.search.candidate_masks[ordinal]
+        if mask < 0 || mask >= 16 || (seen & (1 << mask)) != 0 { return 5 }
+        seen = seen | (1 << mask)
+        if result.search.candidate_distances[ordinal] < 0 ||
+            result.search.candidate_distances[ordinal] > 256 ||
+            result.search.candidate_matrices[ordinal] < 0 ||
+            result.search.candidate_matrices[ordinal] >= 65536 ||
+            result.search.candidate_nearest_corpus[ordinal] < 1 ||
+            result.search.candidate_nearest_corpus[ordinal] > 3 { return 6 }
+        if mask == 0 {
+            cd_equivalent = result.search.candidate_equivalent[ordinal] &&
+                result.search.candidate_distances[ordinal] == 0
+        }
+        if result.search.candidate_equivalence_classes[ordinal] < 0 ||
+            result.search.candidate_equivalence_classes[ordinal] >= 16 {
+            return 7
+        }
+        var word: i64 = 0
+        while word < 8 {
+            if result.search.candidate_canonical_digest_words[
+                ordinal * 8 + word] != 0 {
+                digest_words_nonzero = digest_words_nonzero + 1
+            }
+            word = word + 1
+        }
+        ordinal = ordinal + 1
+    }
+    if seen != 65535 || !cd_equivalent || digest_words_nonzero == 0 ||
+        result.search.candidate_equivalence_class_count <= 0 ||
+        result.search.candidate_equivalence_class_count > 16 { return 7 }
+    var corpus_digest_nonzero: i64 = 0
+    var corpus_word: i64 = 0
+    while corpus_word < 24 {
+        if result.search.corpus_canonical_digest_words[corpus_word] != 0 {
+            corpus_digest_nonzero = corpus_digest_nonzero + 1
+        }
+        corpus_word = corpus_word + 1
+    }
+    if corpus_digest_nonzero == 0 { return 7 }
+    var left: i64 = 0
+    while left < PIREUS_GL4_CANDIDATE_COUNT {
+        var right: i64 = left + 1
+        while right < PIREUS_GL4_CANDIDATE_COUNT {
+            var digest_equal: bool = true
+            var word: i64 = 0
+            while word < 8 && digest_equal {
+                if result.search.candidate_canonical_digest_words[
+                        left * 8 + word] !=
+                    result.search.candidate_canonical_digest_words[
+                        right * 8 + word] {
+                    digest_equal = false
+                }
+                word = word + 1
+            }
+            let class_equal =
+                result.search.candidate_equivalence_classes[left] ==
+                result.search.candidate_equivalence_classes[right]
+            if digest_equal != class_equal { return 7 }
+            right = right + 1
+        }
+        left = left + 1
+    }
+
+    let selected = &result.search.selected
+    if selected.generation_ordinal < 0 || selected.generation_ordinal >= 16 ||
+        selected.phase_mask < 0 || selected.phase_mask >= 16 ||
+        selected.canonical_matrix < 0 || selected.canonical_matrix >= 65536 ||
+        selected.canonical_quotient_distance <= 0 ||
+        selected.nearest_corpus_id < 1 || selected.nearest_corpus_id > 3 ||
+        selected.equivalent_to_corpus ||
+        !selected.declared_gl4_gauge_inequivalence ||
+        !result.selected_key.valid ||
+        result.selected_key.actions_considered !=
+            PIREUS_GL4_LINEAR_SWAP_ACTIONS ||
+        result.selected_key.diagonal_finalists <= 0 ||
+        result.selected_key.commutator_finalists <= 0 ||
+        result.selected_key.normalized_actions <= 0 { return 8 }
+
+    var x: i64 = 1
+    while x < 16 {
+        if !is_basis(x) {
+            let edge = test_highest_basis_bit(x)
+            let parent = x ^ edge
+            if result.selected_key.table[parent * 16 + edge] != 0 { return 9 }
+        }
+        x = x + 1
+    }
+
+    if !result.witness.present ||
+        result.witness.corpus_id != selected.nearest_corpus_id ||
+        result.witness.i < 0 || result.witness.i >= 16 ||
+        result.witness.j < 0 || result.witness.j >= 16 ||
+        result.witness.candidate_sign == result.witness.corpus_sign ||
+        result.witness.canonical_quotient_distance !=
+            selected.canonical_quotient_distance { return 10 }
+
+    if result.fingerprint.positive_count + result.fingerprint.negative_count !=
+            256 || result.fingerprint.commutator_defects < 0 ||
+        result.fingerprint.commutator_defects > 256 ||
+        result.fingerprint.associator_defects < 0 ||
+        result.fingerprint.associator_defects > 4096 { return 11 }
+    var negative_sum: i64 = 0
+    var displacement: i64 = 0
+    while displacement < 16 {
+        let count = result.fingerprint.displacement_negative_counts[displacement]
+        if count < 0 || count > 16 { return 12 }
+        negative_sum = negative_sum + count
+        displacement = displacement + 1
+    }
+    if negative_sum != result.fingerprint.negative_count { return 13 }
+
+    if !result.receipt.grammar_hash_bound ||
+        !result.receipt.matrix_hash_bound || !result.receipt.gauge_hash_bound ||
+        !result.receipt.corpus_hash_bound ||
+        !result.receipt.declared_corpus_only ||
+        !result.receipt.declared_grammar_exhaustive ||
+        result.receipt.all_sign_tables_exhausted ||
+        !result.receipt.base_twist_assumed ||
+        !result.receipt.exhaustive_search ||
+        !result.receipt.relative_semantic_novelty ||
+        !result.receipt.declared_gl4_gauge_inequivalence ||
+        !result.receipt.relative_monomial_gauge_novelty ||
+        result.receipt.relative_algebraic_novelty ||
+        result.receipt.algebra_isomorphism_complete ||
+        !result.receipt.quotient_distance_not_orbit_hamming ||
+        result.receipt.algorithmic_novelty || result.receipt.material_novelty ||
+        result.receipt.scientific_novelty || result.receipt.global_novelty ||
+        result.receipt.historical_novelty || result.receipt.priority_claim ||
+        result.receipt.external_prior_art_complete ||
+        result.receipt.source_hash_bound || result.receipt.semantics_hash_bound ||
+        result.receipt.receipt_frozen || result.receipt.receipt_admitted ||
+        result.receipt.formal_parity_open || result.receipt.effect_parity_open ||
+        result.receipt.material_parity_count != 0 ||
+        result.receipt.parity_open || result.receipt.claim_ready { return 14 }
+
+    if result.negatives.passed != 30 || result.negatives.total != 30 ||
+        !result.negatives.python_oracle || !result.negatives.rust_oracle ||
+        !result.negatives.cpp_authority || !result.negatives.llm_authority ||
+        !result.negatives.parity_prefreeze ||
+        !result.negatives.orbit_hamming_promotion ||
+        !result.negatives.algebraic_promotion ||
+        !result.negatives.global_promotion ||
+        !result.negatives.scientific_promotion ||
+        !result.negatives.invalid_waiver ||
+        !result.negatives.zero_distance_promotion { return 15 }
+
+    if !pireus_gl4_genesis_digest_nonzero(&result.grammar_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.matrix_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.gauge_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.corpus_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.search_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.candidate_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.canonical_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.witness_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&result.receipt_digest) { return 16 }
+
+    print("PIREUS_OPERATOR_GENESIS_GL4_EXECUTABLE_OK\n")
+    0
+}

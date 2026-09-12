@@ -169,6 +169,55 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T9b: DGX Spark Blackwell PTX selection and shuffle lowering
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'str_eq(gpu_target, "dgx-sm121")' self-hosted/compiler/main.sio && \
+       grep -q 'hlir_kernels_to_dgx_sm121_ptx' self-hosted/gpu/hlir_to_gpu.sio && \
+       grep -q '\.target sm_121' self-hosted/gpu/ptx.sio && \
+       grep -q 'shfl\.sync\.bfly\.b32' self-hosted/gpu/lower_to_ptx.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T9b_dgx_sm121_ptx_wired"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T9b_dgx_sm121_ptx_wired"
+    fi
+}
+
+# T9c: execute the Sounio-native DGX header + butterfly emitter witness
+{
+    result="$(run_souc_tail self-hosted/gpu/pireus_dgx_sm121_codegen.sio)"
+    if [ "$result" = "PIREUS_DGX_SM121_CODEGEN_PASS" ]; then
+        pass "T9c_dgx_sm121_codegen_witness"
+    else
+        fail "T9c_dgx_sm121_codegen_witness" "$result"
+    fi
+}
+
+# T9d/T9e: explicit Pireus sedenion XOR-convolution ABI and 16-lane f64 lowering
+check_souc \
+    "T9d_pireus_xor_convolution_source" \
+    "tests/gpu/pireus_sed_xor_convolution_f64.sio"
+
+check_souc \
+    "T9d2_pireus_xor_convolution_global_source" \
+    "tests/gpu/pireus_sed_xor_convolution_global_f64.sio"
+
+# The public language path is ordinary typed multiplication. This must remain
+# green independently of the legacy foundry ABI fixtures above.
+check_souc \
+    "T9d3_pireus_typed_sedenion_multiply" \
+    "tests/gpu/sedenion_mul_source_level.sio"
+
+{
+    result="$(run_souc_tail self-hosted/gpu/pireus_xor_convolution_f64_codegen.sio)"
+    if [ "$result" = "PIREUS_XOR_CONV_F64_CODEGEN_PASS" ]; then
+        pass "T9e_pireus_xor_convolution_codegen"
+    else
+        fail "T9e_pireus_xor_convolution_codegen" "$result"
+    fi
+}
+
 # T10: Epistemic SPIR-V wired — structural check
 {
     TOTAL=$((TOTAL + 1))

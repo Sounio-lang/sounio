@@ -1,0 +1,208 @@
+//@ run-pass
+//! Structural test for the first, still-unfrozen Operator Genome executable.
+
+use hardware::pireus::operator_genome::{
+    PIREUS_GENOME_OK,
+    PIREUS_GENOME_BITS,
+    PIREUS_GENOME_DIMENSION,
+    PIREUS_GENOME_CELL_COUNT,
+    PIREUS_GENOME_GROUP_COUNT,
+    PIREUS_GENOME_GROUP_LANES,
+    PIREUS_GENOME_TARGET_COUNT,
+    PIREUS_GENOME_OBLIGATION_COUNT,
+    PIREUS_GENOME_SELECTED_CLASS,
+    PIREUS_GENOME_SELECTED_QUADRATIC_CODE,
+    PIREUS_GENOME_SELECTED_MATRIX,
+    PIREUS_GENOME_TARGET_DARWIN_XEON,
+    PIREUS_GENOME_TARGET_APPLE_SILICON,
+    PIREUS_GENOME_TARGET_DGX_SPARK,
+    PIREUS_GENOME_TARGET_AMD_ALVEO_U250,
+    pireus_operator_genome_request,
+    pireus_operator_genome_evaluate,
+    pireus_operator_genome_digest_nonzero,
+    pireus_operator_genome_matches_frozen_semantics,
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    let request = pireus_operator_genome_request()
+    let result = pireus_operator_genome_evaluate(&request)
+    if !result.valid || result.error != PIREUS_GENOME_OK ||
+        result.failures != 0 ||
+        !pireus_operator_genome_matches_frozen_semantics(&result) { return 1 }
+    if !result.lineage.complete || !result.lineage.parent_live_match ||
+        !result.lineage.parent_selected_match ||
+        !result.lineage.parent_receipt_scope_match { return 2 }
+    if !result.genotype.complete || result.genotype.bits != PIREUS_GENOME_BITS ||
+        result.genotype.dimension != PIREUS_GENOME_DIMENSION ||
+        result.genotype.class_id != PIREUS_GENOME_SELECTED_CLASS ||
+        result.genotype.quadratic_code !=
+            PIREUS_GENOME_SELECTED_QUADRATIC_CODE ||
+        result.genotype.packed_matrix != PIREUS_GENOME_SELECTED_MATRIX ||
+        result.genotype.base_range_checks != PIREUS_GENOME_CELL_COUNT ||
+        result.genotype.base_range_failures != 0 ||
+        result.genotype.negative_count < 0 ||
+        result.genotype.negative_count > PIREUS_GENOME_CELL_COUNT ||
+        result.genotype.negative_recount != result.genotype.negative_count ||
+        result.genotype.negative_recount_failures != 0 {
+        return 3
+    }
+    if result.genotype.matrix_rows[0] !=
+            (PIREUS_GENOME_SELECTED_MATRIX & 15) ||
+        result.genotype.matrix_rows[1] !=
+            ((PIREUS_GENOME_SELECTED_MATRIX >> 4) & 15) ||
+        result.genotype.matrix_rows[2] !=
+            ((PIREUS_GENOME_SELECTED_MATRIX >> 8) & 15) ||
+        result.genotype.matrix_rows[3] !=
+            ((PIREUS_GENOME_SELECTED_MATRIX >> 12) & 15) { return 4 }
+    if !result.microprogram.complete ||
+        result.microprogram.cell_count != PIREUS_GENOME_CELL_COUNT ||
+        result.microprogram.group_count != PIREUS_GENOME_GROUP_COUNT ||
+        result.microprogram.partner_permutation_checks !=
+            PIREUS_GENOME_CELL_COUNT ||
+        result.microprogram.partner_permutation_failures != 0 ||
+        result.microprogram.coverage_checks != PIREUS_GENOME_CELL_COUNT ||
+        result.microprogram.coverage_failures != 0 ||
+        result.microprogram.same_chunk_groups != 16 ||
+        result.microprogram.cross_chunk_groups != 16 ||
+        result.microprogram.same_chunk_groups +
+            result.microprogram.cross_chunk_groups !=
+                PIREUS_GENOME_GROUP_COUNT { return 5 }
+
+    var d: i64 = 0
+    while d < PIREUS_GENOME_DIMENSION {
+        var seen: [i64; 16] = [0; 16]
+        var i: i64 = 0
+        while i < PIREUS_GENOME_DIMENSION {
+            let cell = d * PIREUS_GENOME_DIMENSION + i
+            let partner = i ^ d
+            if result.microprogram.destinations[cell] != d ||
+                result.microprogram.lhs_indices[cell] != i ||
+                result.microprogram.rhs_indices[cell] != partner ||
+                result.microprogram.ordinals[cell] != i ||
+                result.microprogram.sign_bits[cell] !=
+                    result.genotype.sign_bits[i * 16 + partner] {
+                return 6
+            }
+            seen[partner] = seen[partner] + 1
+            i = i + 1
+        }
+        i = 0
+        while i < 16 {
+            if seen[i] != 1 { return 7 }
+            i = i + 1
+        }
+        var chunk: i64 = 0
+        while chunk < 2 {
+            let group = d * 2 + chunk
+            if result.microprogram.group_displacements[group] != d ||
+                result.microprogram.group_source_chunks[group] != chunk ||
+                result.microprogram.group_first_ordinals[group] !=
+                    chunk * PIREUS_GENOME_GROUP_LANES ||
+                result.microprogram.group_last_ordinals[group] !=
+                    chunk * PIREUS_GENOME_GROUP_LANES + 7 ||
+                result.microprogram.group_cross_chunk[group] != (d >= 8) {
+                return 8
+            }
+            var expected_mask: i64 = 0
+            var lane: i64 = 0
+            while lane < PIREUS_GENOME_GROUP_LANES {
+                let source = chunk * PIREUS_GENOME_GROUP_LANES + lane
+                let cell = d * 16 + source
+                if result.microprogram.sign_bits[cell] != 0 {
+                    expected_mask = expected_mask | (1 << lane)
+                }
+                lane = lane + 1
+            }
+            if result.microprogram.group_negative_masks[group] !=
+                expected_mask { return 9 }
+            chunk = chunk + 1
+        }
+        d = d + 1
+    }
+
+    if !result.evaluation.fixture_bit_exact ||
+        result.evaluation.output_checks != PIREUS_GENOME_DIMENSION ||
+        result.evaluation.output_failures != 0 { return 10 }
+    var lane: i64 = 0
+    while lane < PIREUS_GENOME_DIMENSION {
+        if result.evaluation.direct_output_bits[lane] !=
+            result.evaluation.microprogram_output_bits[lane] { return 11 }
+        lane = lane + 1
+    }
+
+    if !result.targets.complete ||
+        result.targets.target_count != PIREUS_GENOME_TARGET_COUNT ||
+        result.targets.target_ids[0] != PIREUS_GENOME_TARGET_DARWIN_XEON ||
+        result.targets.target_ids[1] !=
+            PIREUS_GENOME_TARGET_APPLE_SILICON ||
+        result.targets.target_ids[2] != PIREUS_GENOME_TARGET_DGX_SPARK ||
+        result.targets.target_ids[3] !=
+            PIREUS_GENOME_TARGET_AMD_ALVEO_U250 ||
+        result.targets.u250_required_cards != 2 ||
+        result.targets.u250_declared_engine_slots != 2 ||
+        result.targets.unresolved_obligations !=
+            PIREUS_GENOME_TARGET_COUNT * PIREUS_GENOME_OBLIGATION_COUNT {
+        return 12
+    }
+    var target: i64 = 0
+    while target < PIREUS_GENOME_TARGET_COUNT {
+        if !result.targets.canonical[target] ||
+            result.targets.observed[target] ||
+            result.targets.obligation_counts[target] !=
+                PIREUS_GENOME_OBLIGATION_COUNT ||
+            result.targets.discharged_counts[target] != 0 ||
+            result.targets.material_receipt_counts[target] != 0 ||
+            result.targets.lowering_counts[target] != 0 ||
+            result.targets.cost_record_counts[target] != 0 ||
+            !result.targets.strict_order_required[target] { return 13 }
+        target = target + 1
+    }
+
+    if !result.receipt.parent_lineage_bound ||
+        !result.receipt.genotype_derived ||
+        !result.receipt.canonical_cells_complete ||
+        !result.receipt.comparison_groups_complete ||
+        !result.receipt.fixture_evaluators_agree ||
+        !result.receipt.target_envelopes_emitted ||
+        !result.receipt.hardware_semantics_mutation_absent ||
+        !result.receipt.parent_receipt_relative_semantic_novelty ||
+        !result.receipt.executable_genome_derivation ||
+        result.receipt.semantics_frozen || result.receipt.formal_parity_open ||
+        result.receipt.effect_parity_open ||
+        result.receipt.material_parity_open ||
+        result.receipt.target_lowering_admitted ||
+        result.receipt.target_cost_admitted ||
+        result.receipt.target_performance_admitted ||
+        result.receipt.algorithmic_novelty ||
+        result.receipt.material_novelty ||
+        result.receipt.scientific_novelty ||
+        result.receipt.global_novelty ||
+        result.receipt.historical_novelty || result.receipt.priority_claim ||
+        result.receipt.claim_ready { return 14 }
+    if result.negatives.passed != result.negatives.total ||
+        result.negatives.total != 25 || !result.negatives.python_oracle ||
+        !result.negatives.rust_oracle || !result.negatives.cpp_authority ||
+        !result.negatives.llm_authority || !result.negatives.missing_parent ||
+        !result.negatives.matrix_override ||
+        !result.negatives.parity_prefreeze ||
+        !result.negatives.changed_partner || !result.negatives.changed_sign ||
+        !result.negatives.dropped_cell ||
+        !result.negatives.duplicated_cell ||
+        !result.negatives.reassociated_reduction ||
+        !result.negatives.wrong_u250_card_count ||
+        !result.negatives.claim_ready_promotion ||
+        !result.negatives.invalid_waiver { return 15 }
+    if !pireus_operator_genome_digest_nonzero(&result.lineage_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.genotype_digest) ||
+        !pireus_operator_genome_digest_nonzero(
+            &result.microprogram_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.group_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.evaluation_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.target_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.receipt_digest) ||
+        !pireus_operator_genome_digest_nonzero(&result.genome_digest) {
+        return 16
+    }
+    print("PIREUS_OPERATOR_GENOME_EXECUTABLE_OK\n")
+    0
+}
