@@ -10995,8 +10995,8 @@ impl Lowerer {
         (lo, dreg)
     }
 
-    // Two-argument math builtin call (pow). Same float-marker discipline as the
-    // unary helper; args are (a, b) in call order.
+    // Two-argument math builtin call. Prefer `ffi_pow` (native id 49); a bare
+    // `pow` name invents an empty_stub_ud2. Args are (a, b) in call order.
     fn fo_emit_math_call2(self, nm: Name, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let fid = lowerer_find_or_add_fn_id_mut(&! lo, nm)
@@ -11648,9 +11648,10 @@ impl Lowerer {
             lo = lo.fo_combine_sens_div(s0, s1, dnum, dval1.1)
             return lo.fo_emit_var_from_sens()
         }
-        // kind 9: pow(x, y). ∂f/∂x = y·x^(y-1), ∂²f/∂x² = y·(y-1)·x^(y-2),
-        // ∂f/∂y = f·log(x). Hessian chain on the base matches kind 8; exponent
-        // FO is first-order only (mixed Hessian left open under KL-11 remainder).
+        // kind 9: pow(x, y). Emit via ffi_pow (id 49) — a bare `pow` ir_call is
+        // an empty_stub_ud2. Derivatives from one evaluation:
+        //   f = pow(x,y);  ∂f/∂x = y·f/x;  ∂²f/∂x² = y·(y-1)·f/(x·x);
+        //   ∂f/∂y = f·log(x).
         if kind == 9 {
             let avalx = lo.fo_lower_nth_arg_value(args, 0)
             lo = avalx.0
@@ -11666,28 +11667,30 @@ impl Lowerer {
             let onep = lo.emit_f64_const(1.0)
             lo = onep.0
             let one = onep.1
-            let twop = lo.emit_f64_const(2.0)
-            lo = twop.0
-            let two = twop.1
+            let fc = lo.fo_emit_math_call2(make_name("ffi_pow"), xv, yv)
+            lo = fc.0
+            let fv = fc.1
+            // d1x = y * f / x
+            let yfp = lo.fo_emit_f64_binop(yv, BinaryOp::OpMul, fv)
+            lo = yfp.0
+            let yf = yfp.1
+            let d1xp = lo.fo_emit_f64_binop(yf, BinaryOp::OpDiv, xv)
+            lo = d1xp.0
+            let d1x = d1xp.1
+            // d2x = y * (y-1) * f / (x*x)
             let ym1p = lo.fo_emit_f64_binop(yv, BinaryOp::OpSub, one)
             lo = ym1p.0
             let ym1 = ym1p.1
-            let ym2p = lo.fo_emit_f64_binop(yv, BinaryOp::OpSub, two)
-            lo = ym2p.0
-            let ym2 = ym2p.1
-            let p1c = lo.fo_emit_math_call2(make_name("pow"), xv, ym1)
-            lo = p1c.0
-            let p1 = p1c.1
-            let d1xp = lo.fo_emit_f64_binop(yv, BinaryOp::OpMul, p1)
-            lo = d1xp.0
-            let d1x = d1xp.1
-            let p2c = lo.fo_emit_math_call2(make_name("pow"), xv, ym2)
-            lo = p2c.0
-            let p2 = p2c.1
             let typ = lo.fo_emit_f64_binop(yv, BinaryOp::OpMul, ym1)
             lo = typ.0
             let ty = typ.1
-            let d2xp = lo.fo_emit_f64_binop(ty, BinaryOp::OpMul, p2)
+            let tyfp = lo.fo_emit_f64_binop(ty, BinaryOp::OpMul, fv)
+            lo = tyfp.0
+            let tyf = tyfp.1
+            let xxp = lo.fo_emit_f64_binop(xv, BinaryOp::OpMul, xv)
+            lo = xxp.0
+            let xx = xxp.1
+            let d2xp = lo.fo_emit_f64_binop(tyf, BinaryOp::OpDiv, xx)
             lo = d2xp.0
             let d2x = d2xp.1
             if lo.so_enabled && !sab_hessian_chain() {
@@ -11748,9 +11751,6 @@ impl Lowerer {
             }
             if s1_live == 1 {
                 let s_base = lo.fo_snapshot_expr_sens()
-                let fc = lo.fo_emit_math_call2(make_name("pow"), xv, yv)
-                lo = fc.0
-                let fv = fc.1
                 let lc = lo.fo_emit_math_call(make_name("log"), xv)
                 lo = lc.0
                 let lv = lc.1
