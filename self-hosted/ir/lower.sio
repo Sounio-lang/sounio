@@ -6145,11 +6145,8 @@ fn lower_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     }
 }
 
-// T of `Option<Box<T>>`, empty for anything else. The payload of a `Some(x)`
-// pattern is a Box<T> handle, and without T the binding can only be tagged
-// "Box" -- which sends every later `(*x).field` down the by-name scan that
-// resolves `tail` against whichever list struct declares it first.
-fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+// T of a by-value `Option<Box<T>>`, empty for anything else. See the wrapper below.
+fn lower_option_box_payload_named(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*ty).kind != TypeExprKind::TypeNamed {
         return ir_empty_name()
     }
@@ -6168,6 +6165,26 @@ fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div 
         }
         None => ir_empty_name(),
     }
+}
+
+// T of `Option<Box<T>>`, through one level of reference. The payload of a
+// `Some(x)` pattern is a Box<T> handle, and without T the binding can only be
+// tagged "Box" -- which sends every later `(*x).field` down the by-name scan
+// that resolves `tail` against whichever list struct declares it first.
+//
+// The reference unwrap is not cosmetic: every list walk in the parser is
+// written `fn f(current: &Option<Box<T>>) { match *current { ... } }`, so the
+// by-value form alone covered almost none of them.
+fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeReference
+        || (*ty).kind == TypeExprKind::TypeRefMut
+        || (*ty).kind == TypeExprKind::TypeRawPtr {
+        match (*ty).inner {
+            Some(it) => return lower_option_box_payload_named(&(*it)),
+            None => return ir_empty_name(),
+        }
+    }
+    lower_option_box_payload_named(ty)
 }
 
 fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div {
@@ -16463,6 +16480,40 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // `var cur = *params` / `let x = y`: carry the source local's Box inner
+        // layout onto the new binding. Without it a list walk written
+        //     var cur = *params
+        //     while true { match cur { Some(node) => { ... cur = (*node).tail } ... } }
+        // leaves `cur` untyped, the Some-binding type-erased, and `(*node).tail`
+        // resolved by NAME -- which picks ExprList's `tail` (field 2) for a
+        // ParamList (field 1). Measured in pure_fn_reg_record: the parameter
+        // `params` recorded layout 6, `match cur` then saw pay_layout=-1.
+        // Reassignment `cur = (*node).tail` needs nothing: the layout is keyed by
+        // the local's name and stays valid, since the type does not change.
+        match s.expr {
+            Some(expr_box_bl) => {
+                var bl_src = ir_empty_name()
+                if (*expr_box_bl).kind == ExprKind::ExprIdent {
+                    bl_src = (*expr_box_bl).name
+                } else if (*expr_box_bl).kind == ExprKind::ExprUnary && (*expr_box_bl).un_op == UnaryOp::OpDeref {
+                    match (*expr_box_bl).left {
+                        Some(bl_inner) => {
+                            if (*bl_inner).kind == ExprKind::ExprIdent {
+                                bl_src = (*bl_inner).name
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if bl_src.len > 0 {
+                    let bl_layout = lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, bl_src)
+                    if bl_layout >= 0 {
+                        lo = lo.bind_local_box_inner_layout(s.name, bl_layout)
+                    }
+                }
+            }
+            _ => {}
+        }
         match s.expr {
             Some(expr_box_var) => {
                 if lo.lookup_local_variance_reg(s.name) >= 0 {
@@ -20998,6 +21049,20 @@ impl Lowerer {
             Some(se) => {
                 if (*se).kind == ExprKind::ExprIdent {
                     lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, (*se).name)
+                } else if (*se).kind == ExprKind::ExprUnary && (*se).un_op == UnaryOp::OpDeref {
+                    // `match *current { Some(list) => ... }` -- the list-walk idiom
+                    // used throughout the parser. The payload type is recorded on
+                    // `current`, one level in.
+                    match (*se).left {
+                        Some(inner) => {
+                            if (*inner).kind == ExprKind::ExprIdent {
+                                lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, (*inner).name)
+                            } else {
+                                0 - 1
+                            }
+                        }
+                        _ => 0 - 1,
+                    }
                 } else {
                     0 - 1
                 }
