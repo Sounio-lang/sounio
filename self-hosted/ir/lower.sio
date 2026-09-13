@@ -3362,6 +3362,13 @@ fn lower_type_expr_elem_or_box_inner_name(te: &TypeExpr) -> Name with Mut, Panic
     if lower_type_expr_is_box(te) {
         return lower_box_inner_type_name(te)
     }
+    // `f: Option<Box<T>>` -- the third disjoint shape. Its named type is
+    // "Option", so neither Box reader below answers for it; the dedicated reader
+    // field_option_box_inner_type_for_struct does, and the array reader refuses it.
+    let opt_box_inner = lower_option_box_payload_named(te)
+    if opt_box_inner.len > 0 {
+        return opt_box_inner
+    }
     lower_type_expr_array_elem_name(te)
 }
 
@@ -13232,6 +13239,29 @@ impl Lowerer {
         }
     }
 
+    // Inner T of an `Option<Box<T>>` FIELD, or empty. Gated on the named type
+    // "Option" so it cannot answer for a Box field or an array field.
+    fn field_option_box_inner_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id), make_name("Option")) {
+                            return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
+                        }
+                        return ir_empty_name()
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
     // Box-specific variant: pointer class (is_float == 4) AND the declared type
     // name is the literal "Box". named_type_name_id holds "Box" for `f: Box<T>`
     // (a TypeNamed whose path starts with Box) and stays 0-empty for &T / &!T /
@@ -13397,6 +13427,11 @@ impl Lowerer {
                         // to be empty. Keep it empty: this reader's behaviour is
                         // unchanged by the widening, deliberately.
                         if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                            return ir_empty_name()
+                        }
+                        // Same for `Option<Box<T>>`: the slot now carries T, which is
+                        // not an array element.
+                        if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id), make_name("Option")) {
                             return ir_empty_name()
                         }
                         return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
@@ -21268,6 +21303,16 @@ impl Lowerer {
                                 0 - 1
                             }
                         }
+                        _ => 0 - 1,
+                    }
+                } else if (*se).kind == ExprKind::ExprFieldAccess {
+                    // `match item.type_alias_ty { Some(expr) => ... *expr }` and
+                    // `match ty.inner { Some(inner) => ... }`: the payload type is the
+                    // DECLARED type of the field, resolved against its owner's type.
+                    match (*se).left {
+                        Some(owner) => lower_struct_layout_index_of(
+                            &(*lo.struct_layouts),
+                            lo.field_option_box_inner_type_for_struct(lo.expr_receiver_struct_type_ref(&(*owner)), (*se).name)),
                         _ => 0 - 1,
                     }
                 } else {
