@@ -35,8 +35,8 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 | Rung | Scope | Engine |
 |---|---|---|
-| KL-9 | seed: `f128` greenwash, #1494 tolerated errors | lean_single |
-| KL-11 | #1792 first-order / variance across calls | madaros |
+| KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
+| KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-12 | thin-link `rc=12` probes | madaros |
 | KL-13 | derived units, unit loss at call boundary (#2388) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
@@ -74,19 +74,17 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   bit-pattern fabrication. `tests/run-pass/gum_fo_across_call.sio` documents
   that FO/variance channels stop at `ir_call`.
 - Pin: `scripts/ci/epistemic_fabrication_detect_gate.sh` (detect-only).
-- Locus: `ir/lower.sio:1120-1185` Knowledge layout,
-  `variance_base_regs/variance_value_regs [1024]` `:975-977`,
-  `pending_variance_reg :988`. Audit:
-  `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
+- Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
+  Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
-- **`pow` has no FO transfer entry on Madaros.** Measured at KL-6 close:
-  `hessian_of(pow(x, 3.0), 0, 0)` prints `0.000000` (true `6x = 3.0`;
-  `lean_single` prints `3.000000`). The call is opaque to
-  `fo_apply_call_transfer` (`ir/lower.sio`, `fo_xfer_seed_transcendentals`),
-  so sensitivity and Hessian are both cleared — a structural zero, not a
-  diagnostic. Every unary builtin (`sin cos exp atan asin acos tan tanh log
-  sqrt`) has a first- and second-derivative entry; `pow` is the only math
-  builtin left out.
+- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12).**
+  `fo_xfer_seed_transcendentals` registers `pow` as kind 9; `fo_apply_transfer_kind`
+  emits `∂/∂x`, `∂²/∂x²`, and first-order `∂/∂y` when the exponent carries
+  sensitivity. Witness: `tests/run-pass/kl11_pow_fo_hessian.sio`
+  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`). Pin:
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
+  FO across arbitrary user `fn` bodies, remain open.
+
 
 ### KL-12 — thin-link `rc=12`
 
