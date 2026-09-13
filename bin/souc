@@ -16,7 +16,8 @@
 #
 # Engine selection (in order):
 #   SOUNIO_SOUC_BIN=<elf>          -> exec that ELF directly (raw, lean_single CLI:
-#                                     `souc SRC OUT [flags]`); souc verbs are refused
+#                                     `souc SRC OUT [flags]`); souc verbs are refused,
+#                                     and so is a flag-looking OUT unless the ELF is Madaros
 #   SOUNIO_SOUC_ENGINE=lean_single -> force the legacy lean_single ELF
 #   (default)                      -> Madaros; if its raw ELF is not built, fall
 #                                     back to lean_single with a visible notice so
@@ -274,13 +275,32 @@ if _is_elf "${SOUNIO_SOUC_BIN:-}"; then
   # this block execs first -- and argv reaches the ELF unchanged, so OUT=`-o`.
   # Measured 2026-09-13, SOUNIO_SOUC_BIN=<lean_single ELF> souc t.sio -o x.elf:
   # rc=0, a 36447-byte file literally named `-o` in the cwd, x.elf never written.
-  # Same check, same rc. Flags after OUT (`souc f.sio out --show-ast`) are the
-  # raw ABI and still pass.
-  if [[ $# -ge 2 && "${1:-}" == *.sio && "${2:-}" == -* ]]; then
-    echo "souc: refused: bare form 'souc $1 $2 …' would treat '$2' as the output filename and exit 0" >&2
-    echo "  SOUNIO_SOUC_BIN=$SOUNIO_SOUC_BIN" >&2
-    echo "souc: the raw ABI puts the output second: souc $1 <out> [flags]" >&2
-    exit 2
+  # Same rc. Flags after OUT (`souc f.sio out --show-ast`) are the raw ABI and
+  # still pass.
+  #
+  # Two differences from the non-override check, both measured 2026-09-13:
+  # - Any source path, not only *.sio: lean_single reads whatever path it is
+  #   given, and `souc ./run_src -o x.elf` wrote `-o` and exited 0 as well.
+  # - Madaros is exempt: `SRC -o OUT` is its own raw build form, and under this
+  #   override it compiled a runnable x.elf. The engine is identified only on this
+  #   argv shape, the way scripts/lib/souc_invoke.sh's souc_banner does it; an ELF
+  #   not positively identified as Madaros is refused.
+  if [[ $# -ge 2 && "${1:-}" != -* && "${2:-}" == -* ]]; then
+    _ov_banner="$("$SOUNIO_SOUC_BIN" --version 2>&1 | head -3 || true)"
+    if grep -qi 'madaros' <<<"$_ov_banner"; then
+      _ov_kind="madaros"
+    elif grep -qE 'Usage: mini_native <source\.sio> <output>' <<<"$_ov_banner"; then
+      _ov_kind="lean_single"
+    else
+      _ov_kind="unknown"
+    fi
+    if [[ "$_ov_kind" != "madaros" ]]; then
+      echo "souc: refused: bare form 'souc $1 $2 …' would treat '$2' as the output filename and exit 0" >&2
+      echo "  SOUNIO_SOUC_BIN=$SOUNIO_SOUC_BIN (identified as: $_ov_kind)" >&2
+      echo "souc: the raw ABI puts the output second: souc $1 <out> [flags]" >&2
+      exit 2
+    fi
+    unset _ov_banner _ov_kind
   fi
   exec "$SOUNIO_SOUC_BIN" "$@"
 fi

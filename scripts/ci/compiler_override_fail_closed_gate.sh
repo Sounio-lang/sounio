@@ -23,8 +23,10 @@
 # The same raw exec also skipped the bare-form refusal: `souc t.sio -o x.elf`
 # reached lean_single with OUT=`-o`, wrote a file named `-o`, and exited 0
 # (measured 2026-09-13). The non-override path already refused that with rc=2;
-# the override now does too. A flag AFTER OUT is the raw ABI and must still work.
-# Both of those cases run in $W, so a regression writes `-o` there, not in the repo.
+# the override now does too, for any source path (`souc ./run_src -o x.elf` wrote
+# `-o` too), except for a Madaros ELF, whose raw build form IS `SRC -o OUT` and
+# must still build. A flag AFTER OUT is the raw ABI and must still work.
+# These cases run in $W, so a regression writes `-o` there, not in the repo.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -46,12 +48,15 @@ cp "$LEAN_REAL" "$W/lean.elf"; chmod 700 "$W/lean.elf"
 
 fails=0
 check() {  # check <name> <expect-rc0|expect-reject> <needle> <cmd...>
+  # An exit 0 on an expect-reject case is explained as a silent fallback, which is
+  # what most refusals here guard against. A case whose rc=0 means something else
+  # says so with a prefix assignment: why_rc0="..." check ...
   local name="$1" expect="$2" needle="$3"; shift 3
   local out rc
   out="$(env -u SOUC_BIN SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$@" 2>&1)"; rc=$?
   if [[ "$expect" == "expect-reject" ]]; then
     if [[ $rc -eq 0 ]]; then
-      echo "  FAIL $name — exited 0. It fell back to another compiler in silence." >&2
+      echo "  FAIL $name — exited 0. ${why_rc0:-It fell back to another compiler in silence.}" >&2
       echo "$out" | tail -3 | sed 's/^/       /' >&2; fails=$((fails+1)); return
     fi
     if [[ -n "$needle" ]] && ! grep -qF -- "$needle" <<<"$out"; then
@@ -89,8 +94,15 @@ done
 unset _verb
 check "souc: 'check' verb under raw SOUNIO_SOUC_BIN (Madaros)" expect-reject "set MADAROS_RAW_BIN instead" \
   env SOUNIO_SOUC_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
-check "souc: bare 'SRC -o OUT' under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "would treat '-o' as the output filename" \
+why_rc0="Nothing fell back: bin/souc passed '-o' to the named ELF as the output path instead of refusing (lean_single writes a file named '-o')." \
+  check "souc: bare 'SRC -o OUT' under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "would treat '-o' as the output filename" \
   env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && exec "$2/bin/souc" t.sio -o dash.elf' _ "$W" "$ROOT_DIR"
+why_rc0="Nothing fell back: a source path not named *.sio skipped the check, and lean_single wrote a file named '-o'." \
+  check "souc: bare 'SRC -o OUT' with a source not named *.sio (lean_single)" expect-reject "would treat '-o' as the output filename" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && cp t.sio run_src && exec "$2/bin/souc" ./run_src -o dash.elf' _ "$W" "$ROOT_DIR"
+why_rc0="Nothing fell back: bin/souc passed '--output' to the named ELF as the output path instead of refusing." \
+  check "souc: bare 'SRC --output OUT' under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "would treat '--output' as the output filename" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && exec "$2/bin/souc" t.sio --output dash.elf' _ "$W" "$ROOT_DIR"
 
 # The same defect lives in two sourced libraries, and they are the wider door:
 # scripts/lib/resolve_souc.sh is sourced by 126 scripts. They are checked here
@@ -135,6 +147,8 @@ check "raw SRC OUT --show-ast under SOUNIO_SOUC_BIN: a flag after OUT is not ref
   env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && "$2/bin/souc" t.sio flagged.elf --show-ast && chmod +x flagged.elf && ./flagged.elf | grep -qx x' _ "$W" "$ROOT_DIR"
 check "a source named like a verb passes as ./run" expect-rc0 "" \
   env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cp "$1" "$2/run" && cd "$2" && "$3/bin/souc" ./run verbfile.elf && chmod +x verbfile.elf && ./verbfile.elf | grep -qx x' _ "$W/t.sio" "$W" "$ROOT_DIR"
+check "Madaros raw 'SRC -o OUT' under SOUNIO_SOUC_BIN still builds" expect-rc0 "" \
+  env SOUNIO_SOUC_BIN="$W/ok.elf" bash -c 'ulimit -S -s 524288; mkdir -p "$1/mdash" && cd "$1/mdash" && "$2/bin/souc" "$1/t.sio" -o m.elf && chmod +x m.elf && ./m.elf | grep -qx x && [[ ! -e ./-o ]]' _ "$W" "$ROOT_DIR"
 check "strict mode honours the committed ELF by content" expect-rc0 "" \
   env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc --version
 # provenance must TELL THE TRUTH about a local build (measured 2026-08-31, #2318)
@@ -158,4 +172,4 @@ if [[ $fails -gt 0 ]]; then
   echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
   exit 1
 fi
-echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 27 cases, 15 of them refusals, each behaved as stated"
+echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 30 cases, 17 of them refusals, each behaved as stated"
