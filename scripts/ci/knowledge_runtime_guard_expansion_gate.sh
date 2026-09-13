@@ -581,8 +581,25 @@ else
   exit 1
 fi
 
+# The current-source lean_single has the raw CLI `souc SRC OUT` and no verbs.
+# bin/souc's SOUNIO_SOUC_BIN override execs that ELF with its arguments
+# unchanged, so `SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run f.sio` compiled a
+# source literally named `run` and failed with error[E221]: no main, never
+# compiling f.sio. The reject step below then PASSED on that E221. Measured
+# 2026-09-13: both internal-label steps exited 1 with E221 through the wrapper.
+# Call the raw ABI, and keep compile and execution separate so the reject step
+# can only pass on the runtime guard trap (a failed lean_single assert exits 1
+# with no output), not on a compile error.
+lean_compile() {  # lean_compile <src> <out>
+  rm -f "$2"
+  "$CURRENT_SOUC" "$1" "$2" || return $?
+  chmod +x "$2"
+}
+
 INTERNAL_LABEL_POSITIVE_LOG="$TMP_DIR/internal-label-positive.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$INTERNAL_LABEL_POSITIVE_EXPANDED" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1; then
+INTERNAL_LABEL_POSITIVE_BIN="$TMP_DIR/internal-label-positive.lean"
+if lean_compile "$INTERNAL_LABEL_POSITIVE_EXPANDED" "$INTERNAL_LABEL_POSITIVE_BIN" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1 &&
+   "$INTERNAL_LABEL_POSITIVE_BIN" >>"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1; then
   printf 'PASS  %s accepted dynamic internal-label unit value satisfying generated runtime guard\n' "$INTERNAL_LABEL_POSITIVE"
 else
   printf 'FAIL  %s should pass the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_POSITIVE" >&2
@@ -591,12 +608,22 @@ else
 fi
 
 INTERNAL_LABEL_NEGATIVE_LOG="$TMP_DIR/internal-label-negative.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$INTERNAL_LABEL_NEGATIVE_EXPANDED" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1; then
-  printf 'FAIL  %s should fail the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE" >&2
+INTERNAL_LABEL_NEGATIVE_BIN="$TMP_DIR/internal-label-negative.lean"
+if ! lean_compile "$INTERNAL_LABEL_NEGATIVE_EXPANDED" "$INTERNAL_LABEL_NEGATIVE_BIN" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1; then
+  printf 'FAIL  %s did not compile, so it never reached the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE" >&2
   cat "$INTERNAL_LABEL_NEGATIVE_LOG" >&2
   exit 1
-else
+fi
+set +e
+"$INTERNAL_LABEL_NEGATIVE_BIN" >>"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1
+INTERNAL_LABEL_NEGATIVE_RC=$?
+set -e
+if [[ "$INTERNAL_LABEL_NEGATIVE_RC" -eq 1 ]]; then
   printf 'PASS  %s failed the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE"
+else
+  printf 'FAIL  %s should fail the generated internal-label unit Knowledge<T> runtime guard with exit code 1, got %s\n' "$INTERNAL_LABEL_NEGATIVE" "$INTERNAL_LABEL_NEGATIVE_RC" >&2
+  cat "$INTERNAL_LABEL_NEGATIVE_LOG" >&2
+  exit 1
 fi
 assert_native_guard_pair "internal-label-unit" "$INTERNAL_LABEL_POSITIVE" "$INTERNAL_LABEL_POSITIVE_EXPANDED" "$INTERNAL_LABEL_NEGATIVE" "$INTERNAL_LABEL_NEGATIVE_EXPANDED"
 
