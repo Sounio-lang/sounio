@@ -20,6 +20,11 @@
 # compiled a source named `run` and failed with error[E221]: no main. Measured
 # 2026-09-13: a gate's reject step passed on that E221. bin/souc now refuses a
 # souc verb under that override; the raw `SRC OUT` form must still work.
+# The same raw exec also skipped the bare-form refusal: `souc t.sio -o x.elf`
+# reached lean_single with OUT=`-o`, wrote a file named `-o`, and exited 0
+# (measured 2026-09-13). The non-override path already refused that with rc=2;
+# the override now does too. A flag AFTER OUT is the raw ABI and must still work.
+# Both of those cases run in $W, so a regression writes `-o` there, not in the repo.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -84,6 +89,8 @@ done
 unset _verb
 check "souc: 'check' verb under raw SOUNIO_SOUC_BIN (Madaros)" expect-reject "set MADAROS_RAW_BIN instead" \
   env SOUNIO_SOUC_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
+check "souc: bare 'SRC -o OUT' under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "would treat '-o' as the output filename" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && exec "$2/bin/souc" t.sio -o dash.elf' _ "$W" "$ROOT_DIR"
 
 # The same defect lives in two sourced libraries, and they are the wider door:
 # scripts/lib/resolve_souc.sh is sourced by 126 scripts. They are checked here
@@ -124,6 +131,8 @@ check "empty override is not an override" expect-rc0 "" env MADAROS_RAW_BIN= ./b
 check "--version unaffected"            expect-rc0 "" ./bin/souc --version
 check "raw SRC OUT under SOUNIO_SOUC_BIN compiles and runs" expect-rc0 "" \
   env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c './bin/souc "$1" "$2" && chmod +x "$2" && "$2" | grep -qx x' _ "$W/t.sio" "$W/raw.elf"
+check "raw SRC OUT --show-ast under SOUNIO_SOUC_BIN: a flag after OUT is not refused" expect-rc0 "" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cd "$1" && "$2/bin/souc" t.sio flagged.elf --show-ast && chmod +x flagged.elf && ./flagged.elf | grep -qx x' _ "$W" "$ROOT_DIR"
 check "a source named like a verb passes as ./run" expect-rc0 "" \
   env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cp "$1" "$2/run" && cd "$2" && "$3/bin/souc" ./run verbfile.elf && chmod +x verbfile.elf && ./verbfile.elf | grep -qx x' _ "$W/t.sio" "$W" "$ROOT_DIR"
 check "strict mode honours the committed ELF by content" expect-rc0 "" \
@@ -149,4 +158,4 @@ if [[ $fails -gt 0 ]]; then
   echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
   exit 1
 fi
-echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 25 cases, 14 of them refusals, each behaved as stated"
+echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 27 cases, 15 of them refusals, each behaved as stated"
