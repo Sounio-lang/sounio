@@ -13296,7 +13296,13 @@ impl Lowerer {
                     let type_name = self.lookup_local_struct_type((*base_expr).name)
                     return self.field_is_box_for_struct(type_name, field_name)
                 }
-                false
+                // `*(*info).inner_type`, `*a.b.inner`: the base is not an ident, so the
+                // ident lookup above cannot see it and this answered false -- a Box
+                // field reached through a deref or a field chain was then dereferenced
+                // with a raw pointer load. Resolve the owner by type instead; for an
+                // ident base expr_receiver_struct_type_ref is the same lookup.
+                let owner_type = self.expr_receiver_struct_type_ref(&(*base_expr))
+                self.field_is_box_for_struct(owner_type, field_name)
             }
             _ => false,
         }
@@ -17109,6 +17115,16 @@ impl Lowerer {
                                 }
                             }
                         }
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprUnary && (*expr_box).un_op == UnaryOp::OpDeref {
+                    // `let inner_ty = *(*info).inner_type`: this chain had no arm for a
+                    // deref, so the local stayed untyped and every field read on it
+                    // resolved by NAME. Measured in knowledge_context_validate_type:
+                    // `inner_ty.kind` took idx 1 and `inner_ty.path` idx 5 (TypeExpr has
+                    // them at 0 and 2), and path_first_name faulted on the wrong slot.
+                    let deref_ty = lo.expr_receiver_struct_type_ref(&(*expr_box))
+                    if deref_ty.len > 0 && !ir_name_is_box(deref_ty) {
+                        lo = lo.bind_local_struct_type(s.name, deref_ty)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
