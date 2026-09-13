@@ -76,6 +76,14 @@ printf '[cross-engine] lean=wrapper(SOUNIO_SOUC_ENGINE=lean_single)\n[cross-engi
 
 # Positive control: the instrument must be able to REPORT a disagreement, or a clean sweep means
 # nothing. These three are verified by hand -- both accept, Madaros-only rejects, both reject.
+# Each control must be TRACKED on this branch: a missing file makes both engines fail with "could
+# not read input file", which reads as AGREE_REJECT and fails the control for the wrong reason.
+# Measured 2026-09-13 at 59e82e3d50 with lean_single and Madaros both built from that source:
+#   tests/run-pass/_diag_sobol.sio                        lean rc=0  Madaros rc=0
+#   tests/compile-fail/f256_v0b_arithmetic_rejected.sio   lean rc=0  Madaros rc=1 error[E249]
+#   stdlib/verify/interval.sio                            lean rc=1  Madaros rc=1 error[E003]
+# The first two are also the controls of scripts/research/cross_engine_runpass_census.sh; the f256
+# file documents the divergence as intentional (Madaros reserves f256 arithmetic, lean_single does not).
 pc_fail=0
 pc() {
   local f="$1" want="$2"
@@ -88,8 +96,8 @@ pc() {
   if [[ "$got" == "$want" ]]; then printf '[cross-engine] positive-control OK %s -> %s\n' "$(basename "$f")" "$got"
   else printf '[cross-engine] positive-control FAIL %s: want %s got %s\n' "$(basename "$f")" "$want" "$got" >&2; pc_fail=1; fi
 }
-pc tests/run-pass/struct_name_8byte_collision_ref.sio AGREE_ACCEPT
-pc tests/run-pass/interval_outward_rounding_containment.sio MADAROS_ONLY
+pc tests/run-pass/_diag_sobol.sio AGREE_ACCEPT
+pc tests/compile-fail/f256_v0b_arithmetic_rejected.sio MADAROS_ONLY
 pc stdlib/verify/interval.sio AGREE_REJECT
 if [[ $pc_fail -ne 0 ]]; then
   echo "[cross-engine] ABORT: the instrument cannot reproduce a known disagreement; a sweep would be meaningless." >&2
