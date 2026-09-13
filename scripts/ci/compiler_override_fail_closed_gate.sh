@@ -14,6 +14,12 @@
 # Opposite verdicts about the language, decided by a permission bit. This gate
 # drives BOTH directions: the refusal must fire, and the working paths must
 # still work — a guard that rejects everything would pass a one-sided test.
+#
+# A USABLE override can still be handed the wrong argv. SOUNIO_SOUC_BIN is a raw
+# exec, and lean_single has no verbs, so `SOUNIO_SOUC_BIN=$elf souc run f.sio`
+# compiled a source named `run` and failed with error[E221]: no main. Measured
+# 2026-09-13: a gate's reject step passed on that E221. bin/souc now refuses a
+# souc verb under that override; the raw `SRC OUT` form must still work.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -29,6 +35,9 @@ cp "$REAL" "$W/noexec.elf"; chmod 600 "$W/noexec.elf"
 cp "$REAL" "$W/ok.elf";     chmod 700 "$W/ok.elf"
 printf '#!/bin/sh\necho nope\n' > "$W/script.elf"; chmod 755 "$W/script.elf"
 cp "$REAL" "$W/local.elf"; printf '\0' >> "$W/local.elf"; chmod 700 "$W/local.elf"   # byte-different, still runs: a "local build"
+LEAN_REAL="$ROOT_DIR/bin/souc-linux-x86_64"
+[[ -f "$LEAN_REAL" ]] || { echo "GATE SKIP: no committed lean_single ELF to derive fixtures from"; exit 0; }
+cp "$LEAN_REAL" "$W/lean.elf"; chmod 700 "$W/lean.elf"
 
 fails=0
 check() {  # check <name> <expect-rc0|expect-reject> <needle> <cmd...>
@@ -68,6 +77,13 @@ check "souc: strict mode refuses a non-committed ELF"    expect-reject "not the 
   env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/local.elf" ./bin/souc --version
 check "madaros: strict mode refuses a non-committed ELF" expect-reject "not the committed" \
   env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/local.elf" ./bin/madaros --version
+for _verb in run check compile build; do
+  check "souc: '$_verb' verb under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "SOUNIO_SOUC_BIN is a raw exec" \
+    env SOUNIO_SOUC_BIN="$W/lean.elf" ./bin/souc "$_verb" "$W/t.sio" -o "$W/verb.elf"
+done
+unset _verb
+check "souc: 'check' verb under raw SOUNIO_SOUC_BIN (Madaros)" expect-reject "set MADAROS_RAW_BIN instead" \
+  env SOUNIO_SOUC_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
 
 # The same defect lives in two sourced libraries, and they are the wider door:
 # scripts/lib/resolve_souc.sh is sourced by 126 scripts. They are checked here
@@ -106,6 +122,10 @@ check "no override resolves normally"   expect-rc0 "" ./bin/souc check "$W/t.sio
 check "valid override is honoured"      expect-rc0 "" env MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
 check "empty override is not an override" expect-rc0 "" env MADAROS_RAW_BIN= ./bin/souc check "$W/t.sio"
 check "--version unaffected"            expect-rc0 "" ./bin/souc --version
+check "raw SRC OUT under SOUNIO_SOUC_BIN compiles and runs" expect-rc0 "" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c './bin/souc "$1" "$2" && chmod +x "$2" && "$2" | grep -qx x' _ "$W/t.sio" "$W/raw.elf"
+check "a source named like a verb passes as ./run" expect-rc0 "" \
+  env SOUNIO_SOUC_BIN="$W/lean.elf" bash -c 'cp "$1" "$2/run" && cd "$2" && "$3/bin/souc" ./run verbfile.elf && chmod +x verbfile.elf && ./verbfile.elf | grep -qx x' _ "$W/t.sio" "$W" "$ROOT_DIR"
 check "strict mode honours the committed ELF by content" expect-rc0 "" \
   env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc --version
 # provenance must TELL THE TRUTH about a local build (measured 2026-08-31, #2318)
@@ -129,4 +149,4 @@ if [[ $fails -gt 0 ]]; then
   echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
   exit 1
 fi
-echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 18 cases, 9 of them refusals, each behaved as stated"
+echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 25 cases, 14 of them refusals, each behaved as stated"
