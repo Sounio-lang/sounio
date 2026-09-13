@@ -125,7 +125,15 @@ pub fn ep_is_credible(e: &Epistemic, min_conf: i64) -> bool {
     e.confidence >= min_conf
 }
 
-// GUM: Var(X+Y) = Var(X) + Var(Y); conf = min scaled
+// Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y). This drops the 2Cov term, so it is
+// the UNCORRELATED case only (Cov = 0) -- a precondition on the caller, not an
+// identity. First-order propagation needs only a vanishing covariance, not the
+// stronger independence: no higher moment enters the formula.
+// If the operands share a source it UNDERSTATES: ep_add(&x, &x) reports
+// Var(X)+Var(X) where 2X has 4Var(X), i.e. half the true variance.
+// Use ep_add_cov when the covariance is known, or the tracked CorrelatedValue
+// in epistemic::correlation when it is not.
+// conf = min scaled
 pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val + b.val,
@@ -134,7 +142,11 @@ pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM: Var(X-Y) = Var(X) + Var(Y)
+// Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y). This drops the 2Cov term, so it is
+// the UNCORRELATED case only (Cov = 0). For positively correlated operands it
+// OVERSTATES,
+// which is the safe direction but still wrong: ep_sub(&x, &x) reports
+// 2Var(X) where X-X is certain. Use ep_sub_cov when the covariance is known.
 pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val - b.val,
@@ -143,7 +155,13 @@ pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+// GUM delta method, UNCORRELATED case only (Cov = 0):
+//   Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y), and the 2XY·Cov is dropped.
+// Consequence worth stating out loud: ep_mul(&x, &x) gives 2X²·Var(X) while
+// ep_square(&x), three functions below, gives the correct 4X²·Var(X) for the
+// same quantity. The multiply UNDERSTATES by a factor of two when both operands
+// are the same variable. Use ep_square for X², or ep_mul_cov with the known
+// covariance.
 pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
     let new_var = b.val * b.val * a.variance + a.val * a.val * b.variance
     Epistemic {
@@ -153,7 +171,9 @@ pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
+// GUM delta method, UNCORRELATED case only (Cov = 0):
+//   Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³, and the last term is
+// dropped. Use ep_div_cov when the covariance is known.
 pub fn ep_div(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
     let y2 = b.val * b.val
     let y4 = y2 * y2
@@ -183,7 +203,82 @@ pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
     }
 }
 
-// Var(X²) ≈ 4X²·Var(X)
+// ============================================================================
+// Covariance-aware forms
+// ============================================================================
+//
+// The four rules above drop the covariance term and are therefore valid only
+// when the operands are uncorrelated. Uncorrelated, not independent: these are
+// first-order expressions, so only Cov(X,Y) enters and no higher moment does. These take Cov(X,Y) explicitly and carry
+// the full first-order GUM expression, so a caller who knows the covariance is
+// no longer forced to choose between a wrong answer and writing the algebra by
+// hand.
+//
+// Where Cov comes from: epistemic::correlation tracks it through a source id
+// (`CorrelatedValue`, `covariance(a, b)`), and epistemic::covariance carries a
+// full matrix with Jacobian propagation. Neither is replaced here; these are
+// the one-line forms for when the number is already in hand.
+//
+// The sign conventions are the ones that make the self-correlated cases come
+// out right, which is the cheapest way to check them (Cov(X,X) = Var(X)):
+//   ep_add_cov(x, x, Var) -> 4Var       (2X has twice the standard deviation)
+//   ep_sub_cov(x, x, Var) -> 0          (X - X is certain)
+//   ep_mul_cov(x, x, Var) -> 4X²Var     (agrees with ep_square)
+// A negative variance cannot be produced by a valid covariance -- for a positive
+// semi-definite 2x2 covariance matrix the propagated variance is g'Sg >= 0, so
+// the clamp never fires on a consistent input. A caller can still pass an
+// inconsistent Cov, and ALL FOUR forms clamp at zero rather than return a
+// negative variance: add and mul can go negative too, not just sub and div.
+
+// Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)
+pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+    let v = a.variance + b.variance + 2.0 * cov
+    Epistemic {
+        val: a.val + b.val,
+        variance: if v < 0.0 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y)
+pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+    let v = a.variance + b.variance - 2.0 * cov
+    Epistemic {
+        val: a.val - b.val,
+        variance: if v < 0.0 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// GUM delta method: Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y)
+pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic {
+    let v = b.val * b.val * a.variance + a.val * a.val * b.variance
+        + 2.0 * a.val * b.val * cov
+    Epistemic {
+        val: a.val * b.val,
+        variance: if v < 0.0 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// GUM delta method: Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³
+// The partials are 1/Y and -X/Y², so the cross term enters NEGATIVE.
+pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div, Panic {
+    let y2 = b.val * b.val
+    let y3 = y2 * b.val
+    let y4 = y2 * y2
+    let v = a.variance / y2 + a.val * a.val * b.variance / y4
+        - 2.0 * a.val * cov / y3
+    Epistemic {
+        val: a.val / b.val,
+        variance: if v < 0.0 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// Var(X²) ~ 4X²·Var(X). This is the delta method for f(X)=X², f'(X)=2X, and it
+// is the CORRELATED truth for a single variable -- equivalently ep_mul_cov(x, x,
+// Var(X)), since Cov(X,X) = Var(X). It is NOT what ep_mul(&x, &x) returns.
 pub fn ep_square(a: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val * a.val,

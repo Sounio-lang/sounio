@@ -170,21 +170,8 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 }
 EOF
 
-# Builtin println of a language f128: still not supported. Pin today's
-# behaviour: check admits it, lowering refuses (no ELF, no wrong digits).
-cat >"$TMP_DIR/builtin_println_f128.sio" <<'EOF'
-use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
-
-fn main() -> i32 with IO, Mut, Panic, Div {
-    let x: f128 = 3.0
-    println(x)
-    return 0
-}
-EOF
-
 REFUSE_SENTINEL='f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)'
 CHECK_MISMATCH='argument type does not match parameter'
-PRINT_REFUSE='cannot safely lower print/println argument with unresolved scalar kind'
 
 if [[ -x "$SOUC" ]]; then
   for neg in print_f128_of_f256:print_f128_on_f256_fail_closed \
@@ -202,18 +189,6 @@ if [[ -x "$SOUC" ]]; then
       tail -30 "$TMP_DIR/$name.compile.log" >&2 || true
     fi
   done
-
-  set +e
-  "$SOUC" compile "$TMP_DIR/builtin_println_f128.sio" -o "$TMP_DIR/builtin_println_f128.elf" >"$TMP_DIR/builtin_println_f128.compile.log" 2>&1
-  p_rc=$?
-  set -e
-  if [[ "$p_rc" -ne 0 && ! -f "$TMP_DIR/builtin_println_f128.elf" ]] \
-     && { grep -Fq "$PRINT_REFUSE" "$TMP_DIR/builtin_println_f128.compile.log" || grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/builtin_println_f128.compile.log"; }; then
-    note_pass "builtin_println_f128_still_fail_closed"
-  else
-    note_fail "builtin_println_f128_fail_closed_regression rc=$p_rc"
-    tail -30 "$TMP_DIR/builtin_println_f128.compile.log" >&2 || true
-  fi
 
   set +e
   "$SOUC" run "$SMOKE" >"$TMP_DIR/madaros.run.log" 2>&1
@@ -245,7 +220,7 @@ else
 fi
 
 echo "NOTE v0e58_format decimal='[-]d.<35 digits>e[+-]dddd' zero='0.0e+0000' hex='[-]0x1.<28 hex>p<exp>' subnormal='0x0.<28 hex>p-16382'"
-echo "NOTE v0e58_deferred builtin_print_f128=fail_closed f256_print=pending f128_methods=pending f128_arrays=pending compound_assign=pending gum=pending"
+echo "NOTE v0e58_deferred f256_print=pending f128_methods=pending f128_arrays=pending gum=pending kl8_builtin_println=closed_elsewhere"
 echo "NOTE adr009 python_softfloat=not_claim_clock rust=not_claim_clock lean_single_language=greenwash"
 
 echo "---"

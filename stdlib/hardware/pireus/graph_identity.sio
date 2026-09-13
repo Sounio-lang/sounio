@@ -1,0 +1,1633 @@
+//! Pireus graph identity and composition projection.
+//!
+//! Frozen importer stores keep their local integer IRIs. This module admits
+//! their producers and namespace owners first, verifies transitive parent
+//! closures, and then lifts every source occurrence into a composed graph.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+use ontology::query::{Triple, TripleStore}
+
+pub const PIREUS_GRAPH_MODEL: i64 = 0
+pub const PIREUS_GRAPH_TARGET_PROFILE: i64 = 1
+pub const PIREUS_GRAPH_EXECUTION_ENGINE: i64 = 2
+pub const PIREUS_GRAPH_XED: i64 = 3
+pub const PIREUS_GRAPH_AARCHMRS: i64 = 4
+pub const PIREUS_GRAPH_PTX: i64 = 5
+pub const PIREUS_GRAPH_APPLE_METAL: i64 = 6
+
+pub const PIREUS_GRAPH_COUNT: i64 = 7
+pub const PIREUS_NAMESPACE_COUNT: i64 = 8
+
+pub const PIREUS_OWNER_LANGUAGE: i64 = 1
+pub const PIREUS_OWNER_CORE: i64 = 2
+pub const PIREUS_OWNER_TARGET_PROFILE: i64 = 3
+pub const PIREUS_OWNER_EXECUTION_ENGINE: i64 = 4
+pub const PIREUS_OWNER_XED: i64 = 5
+pub const PIREUS_OWNER_AARCHMRS: i64 = 6
+pub const PIREUS_OWNER_PTX: i64 = 7
+pub const PIREUS_OWNER_APPLE_METAL: i64 = 8
+
+pub const PIREUS_TERM_IRI: i64 = 1
+pub const PIREUS_TERM_LITERAL: i64 = 2
+
+pub const PIREUS_REF_SHARED: i64 = 1
+pub const PIREUS_REF_OWNED: i64 = 2
+pub const PIREUS_REF_FOREIGN_PARENT: i64 = 3
+
+const PIREUS_ROLE_SUBJECT: i64 = 1
+const PIREUS_ROLE_PREDICATE: i64 = 2
+const PIREUS_ROLE_OBJECT: i64 = 4
+
+const PIREUS_LOCAL_BOUND: i64 = 1000000
+const PIREUS_NAMESPACE_WIDTH: i64 = 2000000
+const PIREUS_LITERAL_OFFSET: i64 = 1000000
+const PIREUS_MAX_TERM_REFS: i64 = 4096
+const PIREUS_MAX_CANONICAL_TRIPLES: i64 = 4096
+const PIREUS_MAX_OCCURRENCES: i64 = 4096
+
+const PIREUS_OK: i64 = 0
+const PIREUS_ERR_ADMISSION: i64 = 1
+const PIREUS_ERR_ARRIVAL: i64 = 2
+const PIREUS_ERR_CLOSURE: i64 = 3
+const PIREUS_ERR_TERM: i64 = 4
+const PIREUS_ERR_CAPACITY: i64 = 5
+
+pub struct PireusDigest {
+    pub words: [i64; 8],
+}
+
+struct PireusNamespace {
+    owner_id: i64,
+    allocation_start: i64,
+    allocation_end: i64,
+}
+
+struct PireusProducer {
+    graph_id: i64,
+    producer_concept: i64,
+    namespace_owner: i64,
+    literal_owner: i64,
+    parent_graph: i64,
+    topological_rank: i64,
+    source_hash: [i64; 8],
+    parent_hash: [i64; 8],
+}
+
+struct PireusRegistry {
+    namespaces: Seq<PireusNamespace>,
+    producers: Seq<PireusProducer>,
+}
+
+pub struct PireusGraphIdentityAdmission {
+    registry: PireusRegistry,
+    pub valid: bool,
+    pub producer_count: i64,
+    pub namespace_count: i64,
+    pub producer_registry_digest: PireusDigest,
+    pub dependency_digest: PireusDigest,
+}
+
+struct PireusTermReference {
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+    owner_id: i64,
+    lifted_id: i64,
+    reference_kind: i64,
+}
+
+struct PireusCanonicalTriple {
+    subject: i64,
+    predicate: i64,
+    object: i64,
+    object_sort: i64,
+    literal_value_bits: i64,
+}
+
+struct PireusOccurrence {
+    graph_id: i64,
+    parent_graph: i64,
+    producer_concept: i64,
+    source_index: i64,
+    inherited: bool,
+    local_subject: i64,
+    local_predicate: i64,
+    local_object: i64,
+    object_sort: i64,
+    literal_value_bits: i64,
+    lifted_subject: i64,
+    lifted_predicate: i64,
+    lifted_object: i64,
+    source_hash: [i64; 8],
+    canonical_index: i64,
+}
+
+struct PireusComposition {
+    term_refs: Seq<PireusTermReference>,
+    term_role_masks: Seq<i64>,
+    canonical_triples: Seq<PireusCanonicalTriple>,
+    canonical_occurrence_counts: Seq<i64>,
+    occurrences: Seq<PireusOccurrence>,
+    graph_arrived: [bool; 7],
+    graph_composed: [bool; 7],
+    closure_verified: [bool; 7],
+    error: i64,
+}
+
+pub struct PireusGraphIdentityNegatives {
+    pub missing_producer: bool,
+    pub missing_hash: bool,
+    pub duplicate_producer: bool,
+    pub duplicate_namespace: bool,
+    pub overlapping_namespace: bool,
+    pub missing_parent: bool,
+    pub cyclic_parent: bool,
+    pub reordered_parent: bool,
+    pub parent_hash_mismatch: bool,
+    pub changed_parent_closure: bool,
+    pub unregistered_iri: bool,
+    pub owned_claimed_shared: bool,
+    pub foreign_rebound: bool,
+    pub incompatible_lifted_meaning: bool,
+    pub double_local_mapping: bool,
+    pub iri_literal_sort_swap: bool,
+    pub query_binding_sort_swap: bool,
+    pub missing_literal_owner: bool,
+    pub literal_value_bits_loss: bool,
+    pub lift_overflow: bool,
+    pub capacity_exhaustion: bool,
+    pub inherited_query_inflation: bool,
+    pub occurrence_loss: bool,
+    pub declaration_only_census: bool,
+    pub provenance_loss: bool,
+    pub local_query_promotion: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusCollisionCensus {
+    pub pair_count: i64,
+    pub local_ids: [i64; 64],
+    pub term_sorts: [i64; 64],
+    pub owner_a: [i64; 64],
+    pub owner_b: [i64; 64],
+    pub lifted_a: [i64; 64],
+    pub lifted_b: [i64; 64],
+}
+
+pub struct PireusGraphIdentityResult {
+    pub error: i64,
+    pub producer_count: i64,
+    pub namespace_count: i64,
+    pub term_reference_count: i64,
+    pub canonical_triple_count: i64,
+    pub occurrence_count: i64,
+    pub inherited_occurrence_count: i64,
+    pub duplicate_canonical_count: i64,
+    pub collision_key_count: i64,
+    pub collision_pair_count: i64,
+    pub derived_collision_key_count: i64,
+    pub canonical_target_count: i64,
+    pub profile_join_count: i64,
+    pub apple_blueprint_link_count: i64,
+    pub target_occurrence_count: i64,
+    pub all_parent_closures_verified: bool,
+    pub collisions: PireusCollisionCensus,
+    pub registry_digest: PireusDigest,
+    pub dependency_digest: PireusDigest,
+    pub lifted_graph_digest: PireusDigest,
+    pub occurrence_digest: PireusDigest,
+    pub collision_digest: PireusDigest,
+    pub provenance_digest: PireusDigest,
+    pub negatives: PireusGraphIdentityNegatives,
+}
+
+struct PireusBinding {
+    variable_id: i64,
+    term_sort: i64,
+    identity: i64,
+    literal_value_bits: i64,
+}
+
+fn zero_hash() -> [i64; 8] { [0; 8] }
+
+fn source_hash_for(graph_id: i64) -> [i64; 8] {
+    if graph_id == PIREUS_GRAPH_MODEL {
+        return [0xee4589ab, 0x4dad2a47, 0xa136629d, 0xcab6e93a,
+                0xa2f215cf, 0x114a8e2f, 0x7b3f24a8, 0x9d39ed9d]
+    }
+    if graph_id == PIREUS_GRAPH_TARGET_PROFILE {
+        return [0xd41726a8, 0xa7eba621, 0x32e3763c, 0xf6a71938,
+                0xde746ec9, 0xd58ce8a2, 0x0caa4070, 0x9546d6a4]
+    }
+    if graph_id == PIREUS_GRAPH_EXECUTION_ENGINE {
+        return [0x8b5063f0, 0xe9a39650, 0xfb0b60e8, 0xb70b315f,
+                0x33972369, 0x0e06050c, 0x2bebacec, 0xe888e37e]
+    }
+    if graph_id == PIREUS_GRAPH_XED {
+        return [0xc65d63a4, 0x90038d87, 0x4f9d1ae3, 0x4458ff44,
+                0x793049eb, 0x7ec01bee, 0x01981df7, 0x974cbeb9]
+    }
+    if graph_id == PIREUS_GRAPH_AARCHMRS {
+        return [0xce0693e5, 0x1f5204f8, 0x9c67b791, 0x7fd129dc,
+                0x1976f069, 0x675323ec, 0x73d4e2c4, 0x2913078b]
+    }
+    if graph_id == PIREUS_GRAPH_PTX {
+        return [0xca2760d5, 0x39c4602c, 0x85841ac8, 0x475a9ffd,
+                0x8a2f7603, 0x13a8169f, 0xaf99a329, 0x56063bba]
+    }
+    if graph_id == PIREUS_GRAPH_APPLE_METAL {
+        return [0xb43f48c7, 0x23283d65, 0xc3e1df18, 0x24f62843,
+                0x03a71967, 0xe20deab2, 0xc9fe8c7b, 0x72f97587]
+    }
+    zero_hash()
+}
+
+fn graph_parent(graph_id: i64) -> i64 {
+    if graph_id == PIREUS_GRAPH_MODEL { return 0 - 1 }
+    if graph_id == PIREUS_GRAPH_TARGET_PROFILE { return PIREUS_GRAPH_MODEL }
+    if graph_id == PIREUS_GRAPH_EXECUTION_ENGINE {
+        return PIREUS_GRAPH_TARGET_PROFILE
+    }
+    if graph_id == PIREUS_GRAPH_APPLE_METAL {
+        return PIREUS_GRAPH_EXECUTION_ENGINE
+    }
+    PIREUS_GRAPH_TARGET_PROFILE
+}
+
+fn graph_owner(graph_id: i64) -> i64 {
+    if graph_id == PIREUS_GRAPH_MODEL { return PIREUS_OWNER_CORE }
+    if graph_id == PIREUS_GRAPH_TARGET_PROFILE {
+        return PIREUS_OWNER_TARGET_PROFILE
+    }
+    if graph_id == PIREUS_GRAPH_EXECUTION_ENGINE {
+        return PIREUS_OWNER_EXECUTION_ENGINE
+    }
+    if graph_id == PIREUS_GRAPH_XED { return PIREUS_OWNER_XED }
+    if graph_id == PIREUS_GRAPH_AARCHMRS { return PIREUS_OWNER_AARCHMRS }
+    if graph_id == PIREUS_GRAPH_PTX { return PIREUS_OWNER_PTX }
+    PIREUS_OWNER_APPLE_METAL
+}
+
+fn hash_nonzero(hash: [i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if hash[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn hash_equal(a: [i64; 8], b: [i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if a[i] != b[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+    with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+    with Mut, Panic, Div {
+    digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn digest_add_hash(state: SHA256State, hash: [i64; 8]) -> SHA256State
+    with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = digest_add_i64(next, hash[i])
+        i = i + 1
+    }
+    next
+}
+
+fn digest_finish(state: SHA256State) -> PireusDigest
+    with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusDigest { words: words }
+}
+
+pub fn pireus_digest_equal(a: &PireusDigest, b: &PireusDigest) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if a.words[i] != b.words[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn namespace_pair_disjoint(a: &PireusNamespace, b: &PireusNamespace) -> bool {
+    a.allocation_end < b.allocation_start ||
+        b.allocation_end < a.allocation_start
+}
+
+fn add_namespace(registry: &PireusRegistry, owner_id: i64) {
+    let start = owner_id * PIREUS_NAMESPACE_WIDTH
+    registry.namespaces.push(PireusNamespace {
+        owner_id: owner_id,
+        allocation_start: start,
+        allocation_end: start + PIREUS_NAMESPACE_WIDTH - 1,
+    })
+}
+
+fn add_producer(registry: &PireusRegistry, graph_id: i64) {
+    let parent = graph_parent(graph_id)
+    registry.producers.push(PireusProducer {
+        graph_id: graph_id,
+        producer_concept: 710000 + graph_id,
+        namespace_owner: graph_owner(graph_id),
+        literal_owner: graph_owner(graph_id),
+        parent_graph: parent,
+        topological_rank: graph_id,
+        source_hash: source_hash_for(graph_id),
+        parent_hash: if parent < 0 { zero_hash() }
+            else { source_hash_for(parent) },
+    })
+}
+
+fn registry_new() -> PireusRegistry {
+    var registry = PireusRegistry {
+        namespaces: seq_new(),
+        producers: seq_new(),
+    }
+    var owner: i64 = PIREUS_OWNER_LANGUAGE
+    while owner <= PIREUS_OWNER_APPLE_METAL {
+        add_namespace(&registry, owner)
+        owner = owner + 1
+    }
+    var graph: i64 = 0
+    while graph < PIREUS_GRAPH_COUNT {
+        add_producer(&registry, graph)
+        graph = graph + 1
+    }
+    registry
+}
+
+fn registry_valid(registry: &PireusRegistry) -> bool with Epistemic {
+    let nc = registry.namespaces.len().unwrap("namespace count")
+    let pc = registry.producers.len().unwrap("producer count")
+    if nc != PIREUS_NAMESPACE_COUNT || pc != PIREUS_GRAPH_COUNT {
+        return false
+    }
+    var i: i64 = 0
+    while i < nc {
+        let a = registry.namespaces[i]
+        if a.owner_id <= 0 || a.allocation_start < PIREUS_NAMESPACE_WIDTH ||
+            a.allocation_end - a.allocation_start + 1 != PIREUS_NAMESPACE_WIDTH {
+            return false
+        }
+        var j = i + 1
+        while j < nc {
+            let b = registry.namespaces[j]
+            if a.owner_id == b.owner_id || !namespace_pair_disjoint(&a, &b) {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < pc {
+        let producer = registry.producers[i]
+        if producer.graph_id != i || producer.topological_rank != i ||
+            !hash_nonzero(producer.source_hash) {
+            return false
+        }
+        if producer.parent_graph < 0 {
+            if producer.graph_id != PIREUS_GRAPH_MODEL ||
+                hash_nonzero(producer.parent_hash) {
+                return false
+            }
+        } else {
+            if producer.parent_graph >= producer.graph_id { return false }
+            let parent = registry.producers[producer.parent_graph]
+            if !hash_equal(producer.parent_hash, parent.source_hash) {
+                return false
+            }
+        }
+        var j = i + 1
+        while j < pc {
+            let other = registry.producers[j]
+            if producer.graph_id == other.graph_id ||
+                producer.producer_concept == other.producer_concept ||
+                producer.namespace_owner == other.namespace_owner {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn digest_producer_registry(registry: &PireusRegistry) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555534752)
+    let nc = registry.namespaces.len().unwrap("namespace count")
+    var i: i64 = 0
+    while i < nc {
+        let ns = registry.namespaces[i]
+        state = digest_add_i64(state, ns.owner_id)
+        state = digest_add_i64(state, ns.allocation_start)
+        state = digest_add_i64(state, ns.allocation_end)
+        i = i + 1
+    }
+    let pc = registry.producers.len().unwrap("producer count")
+    i = 0
+    while i < pc {
+        let p = registry.producers[i]
+        state = digest_add_i64(state, p.graph_id)
+        state = digest_add_i64(state, p.producer_concept)
+        state = digest_add_i64(state, p.namespace_owner)
+        state = digest_add_i64(state, p.literal_owner)
+        state = digest_add_hash(state, p.source_hash)
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_dependencies(registry: &PireusRegistry) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555534445)
+    let pc = registry.producers.len().unwrap("producer count")
+    var i: i64 = 0
+    while i < pc {
+        let p = registry.producers[i]
+        state = digest_add_i64(state, p.graph_id)
+        state = digest_add_i64(state, p.parent_graph)
+        state = digest_add_i64(state, p.topological_rank)
+        state = digest_add_hash(state, p.parent_hash)
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+pub fn pireus_graph_identity_admit() -> PireusGraphIdentityAdmission
+    with Mut, Panic, Div, Epistemic {
+    let registry = registry_new()
+    let valid = registry_valid(&registry)
+    let producer_digest = digest_producer_registry(&registry)
+    let dependency_digest = digest_dependencies(&registry)
+    PireusGraphIdentityAdmission {
+        registry: registry,
+        valid: valid,
+        producer_count: PIREUS_GRAPH_COUNT,
+        namespace_count: PIREUS_NAMESPACE_COUNT,
+        producer_registry_digest: producer_digest,
+        dependency_digest: dependency_digest,
+    }
+}
+
+fn namespace_for(registry: &PireusRegistry, owner_id: i64) -> i64
+    with Epistemic {
+    let count = registry.namespaces.len().unwrap("namespace count")
+    var i: i64 = 0
+    while i < count {
+        if registry.namespaces[i].owner_id == owner_id { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn lift_identity(
+    registry: &PireusRegistry,
+    owner_id: i64,
+    local_id: i64,
+    term_sort: i64,
+) -> i64 with Epistemic {
+    if local_id < 0 || local_id >= PIREUS_LOCAL_BOUND { return 0 - 1 }
+    if term_sort != PIREUS_TERM_IRI && term_sort != PIREUS_TERM_LITERAL {
+        return 0 - 1
+    }
+    let nsi = namespace_for(registry, owner_id)
+    if nsi < 0 { return 0 - 1 }
+    let ns = registry.namespaces[nsi]
+    let offset = if term_sort == PIREUS_TERM_LITERAL {
+        PIREUS_LITERAL_OFFSET
+    } else { 0 }
+    let lifted = ns.allocation_start + offset + local_id
+    if lifted < ns.allocation_start || lifted > ns.allocation_end {
+        return 0 - 1
+    }
+    lifted
+}
+
+fn composition_new() -> PireusComposition {
+    PireusComposition {
+        term_refs: seq_new(),
+        term_role_masks: seq_new(),
+        canonical_triples: seq_new(),
+        canonical_occurrence_counts: seq_new(),
+        occurrences: seq_new(),
+        graph_arrived: [false; 7],
+        graph_composed: [false; 7],
+        closure_verified: [false; 7],
+        error: PIREUS_OK,
+    }
+}
+
+fn is_ancestor(registry: &PireusRegistry, ancestor: i64, graph: i64) -> bool
+    with Epistemic {
+    if ancestor < 0 || graph < 0 || ancestor >= PIREUS_GRAPH_COUNT ||
+        graph >= PIREUS_GRAPH_COUNT {
+        return false
+    }
+    var current = registry.producers[graph].parent_graph
+    var steps: i64 = 0
+    while current >= 0 && steps < PIREUS_GRAPH_COUNT {
+        if current == ancestor { return true }
+        current = registry.producers[current].parent_graph
+        steps = steps + 1
+    }
+    false
+}
+
+fn find_term_ref(
+    composition: &PireusComposition,
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+) -> i64 with Epistemic {
+    let count = composition.term_refs.len().unwrap("term ref count")
+    var i: i64 = 0
+    while i < count {
+        let entry = composition.term_refs[i]
+        if entry.graph_id == graph_id && entry.local_id == local_id &&
+            entry.term_sort == term_sort {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn find_ancestor_owner(
+    composition: &PireusComposition,
+    registry: &PireusRegistry,
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+) -> i64 with Epistemic {
+    let count = composition.term_refs.len().unwrap("term ref count")
+    var owner: i64 = 0 - 1
+    var i: i64 = 0
+    while i < count {
+        let entry = composition.term_refs[i]
+        if entry.local_id == local_id && entry.term_sort == term_sort &&
+            is_ancestor(registry, entry.graph_id, graph_id) {
+            if owner < 0 { owner = entry.owner_id }
+            else if owner != entry.owner_id { return 0 - 2 }
+        }
+        i = i + 1
+    }
+    owner
+}
+
+fn ensure_term_ref(
+    composition: &PireusComposition,
+    registry: &PireusRegistry,
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+    role: i64,
+) -> i64 with Mut, Epistemic {
+    let existing = find_term_ref(composition, graph_id, local_id, term_sort)
+    if existing >= 0 {
+        let prior_role = seq_get(composition.term_role_masks, existing)
+        seq_set(composition.term_role_masks, existing, prior_role | role)
+        return existing
+    }
+    if composition.term_refs.len().unwrap("term ref count") >=
+        PIREUS_MAX_TERM_REFS {
+        composition.error = PIREUS_ERR_CAPACITY
+        return 0 - 1
+    }
+    var owner: i64 = 0 - 1
+    var reference_kind = PIREUS_REF_OWNED
+    if term_sort == PIREUS_TERM_IRI && local_id == 1 {
+        owner = PIREUS_OWNER_LANGUAGE
+        reference_kind = PIREUS_REF_SHARED
+    } else {
+        let ancestor_owner = find_ancestor_owner(
+            composition, registry, graph_id, local_id, term_sort)
+        if ancestor_owner == 0 - 2 {
+            composition.error = PIREUS_ERR_TERM
+            return 0 - 1
+        }
+        if ancestor_owner >= 0 {
+            owner = ancestor_owner
+            reference_kind = PIREUS_REF_FOREIGN_PARENT
+        } else {
+            let producer = registry.producers[graph_id]
+            owner = if term_sort == PIREUS_TERM_LITERAL {
+                producer.literal_owner
+            } else { producer.namespace_owner }
+        }
+    }
+    let lifted = lift_identity(registry, owner, local_id, term_sort)
+    if lifted < 0 {
+        composition.error = PIREUS_ERR_TERM
+        return 0 - 1
+    }
+    composition.term_refs.push(PireusTermReference {
+        graph_id: graph_id,
+        local_id: local_id,
+        term_sort: term_sort,
+        owner_id: owner,
+        lifted_id: lifted,
+        reference_kind: reference_kind,
+    })
+    composition.term_role_masks.push(role)
+    composition.term_refs.len().unwrap("term ref count") - 1
+}
+
+fn triple_equal(a: &Triple, b: &Triple) -> bool {
+    a.subject == b.subject && a.predicate == b.predicate &&
+        a.object_iri == b.object_iri &&
+        a.object_literal == b.object_literal &&
+        a.is_object_literal == b.is_object_literal &&
+        f64_to_bits(a.object_value) == f64_to_bits(b.object_value)
+}
+
+fn verify_parent_prefix(child: &TripleStore, parent: &TripleStore) -> bool
+    with Epistemic {
+    let child_count = child.triples.len().unwrap("child count")
+    let parent_count = parent.triples.len().unwrap("parent count")
+    if child_count < parent_count { return false }
+    var i: i64 = 0
+    while i < parent_count {
+        let ct = child.triples[i]
+        let pt = parent.triples[i]
+        if !triple_equal(&ct, &pt) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn canonical_equal(
+    canonical: &PireusCanonicalTriple,
+    subject: i64,
+    predicate: i64,
+    object: i64,
+    object_sort: i64,
+    literal_value_bits: i64,
+) -> bool {
+    canonical.subject == subject && canonical.predicate == predicate &&
+        canonical.object == object && canonical.object_sort == object_sort &&
+        canonical.literal_value_bits == literal_value_bits
+}
+
+fn ensure_canonical(
+    composition: &PireusComposition,
+    subject: i64,
+    predicate: i64,
+    object: i64,
+    object_sort: i64,
+    literal_value_bits: i64,
+) -> i64 with Mut, Epistemic {
+    let count = composition.canonical_triples.len().unwrap("canonical count")
+    var i: i64 = 0
+    while i < count {
+        if canonical_equal(&composition.canonical_triples[i], subject,
+            predicate, object, object_sort, literal_value_bits) {
+            let prior_count = seq_get(composition.canonical_occurrence_counts, i)
+            seq_set(composition.canonical_occurrence_counts, i, prior_count + 1)
+            return i
+        }
+        i = i + 1
+    }
+    if count >= PIREUS_MAX_CANONICAL_TRIPLES {
+        composition.error = PIREUS_ERR_CAPACITY
+        return 0 - 1
+    }
+    composition.canonical_triples.push(PireusCanonicalTriple {
+        subject: subject,
+        predicate: predicate,
+        object: object,
+        object_sort: object_sort,
+        literal_value_bits: literal_value_bits,
+    })
+    composition.canonical_occurrence_counts.push(1)
+    count
+}
+
+fn ingest_graph(
+    composition: &PireusComposition,
+    admission: &PireusGraphIdentityAdmission,
+    graph_id: i64,
+    store: &TripleStore,
+    parent: &TripleStore,
+) with Mut, Epistemic {
+    if composition.error != PIREUS_OK { return }
+    if !composition.graph_arrived[graph_id] {
+        composition.error = PIREUS_ERR_ARRIVAL
+        return
+    }
+    let producer = admission.registry.producers[graph_id]
+    var parent_count: i64 = 0
+    if producer.parent_graph >= 0 {
+        if !composition.graph_composed[producer.parent_graph] ||
+            !verify_parent_prefix(store, parent) {
+            composition.error = PIREUS_ERR_CLOSURE
+            return
+        }
+        parent_count = parent.triples.len().unwrap("parent count")
+    }
+    composition.closure_verified[graph_id] = true
+    let count = store.triples.len().unwrap("store count")
+    var source_index: i64 = 0
+    while source_index < count {
+        if composition.occurrences.len().unwrap("occurrence count") >=
+            PIREUS_MAX_OCCURRENCES {
+            composition.error = PIREUS_ERR_CAPACITY
+            return
+        }
+        let triple = store.triples[source_index]
+        let si = ensure_term_ref(composition, &admission.registry,
+            graph_id, triple.subject, PIREUS_TERM_IRI, PIREUS_ROLE_SUBJECT)
+        let pi = ensure_term_ref(composition, &admission.registry,
+            graph_id, triple.predicate, PIREUS_TERM_IRI, PIREUS_ROLE_PREDICATE)
+        let object_local = if triple.is_object_literal {
+            triple.object_literal
+        } else { triple.object_iri }
+        let object_sort = if triple.is_object_literal {
+            PIREUS_TERM_LITERAL
+        } else { PIREUS_TERM_IRI }
+        let oi = ensure_term_ref(composition, &admission.registry,
+            graph_id, object_local, object_sort, PIREUS_ROLE_OBJECT)
+        if si < 0 || pi < 0 || oi < 0 { return }
+        let subject = composition.term_refs[si].lifted_id
+        let predicate = composition.term_refs[pi].lifted_id
+        let object = composition.term_refs[oi].lifted_id
+        let value_bits = if triple.is_object_literal {
+            f64_to_bits(triple.object_value)
+        } else { 0 }
+        let canonical_index = ensure_canonical(composition, subject,
+            predicate, object, object_sort, value_bits)
+        if canonical_index < 0 { return }
+        composition.occurrences.push(PireusOccurrence {
+            graph_id: graph_id,
+            parent_graph: producer.parent_graph,
+            producer_concept: producer.producer_concept,
+            source_index: source_index,
+            inherited: source_index < parent_count,
+            local_subject: triple.subject,
+            local_predicate: triple.predicate,
+            local_object: object_local,
+            object_sort: object_sort,
+            literal_value_bits: value_bits,
+            lifted_subject: subject,
+            lifted_predicate: predicate,
+            lifted_object: object,
+            source_hash: producer.source_hash,
+            canonical_index: canonical_index,
+        })
+        source_index = source_index + 1
+    }
+    composition.graph_composed[graph_id] = true
+}
+
+fn stage_arrivals(composition: &PireusComposition, reverse: bool) with Mut {
+    var arrival: i64 = 0
+    while arrival < PIREUS_GRAPH_COUNT {
+        let graph_id = if reverse {
+            PIREUS_GRAPH_COUNT - 1 - arrival
+        } else { arrival }
+        if composition.graph_arrived[graph_id] {
+            composition.error = PIREUS_ERR_ARRIVAL
+            return
+        }
+        composition.graph_arrived[graph_id] = true
+        arrival = arrival + 1
+    }
+}
+
+fn compose_staged(
+    composition: &PireusComposition,
+    admission: &PireusGraphIdentityAdmission,
+    model: &TripleStore,
+    target: &TripleStore,
+    execution: &TripleStore,
+    xed: &TripleStore,
+    aarchmrs: &TripleStore,
+    ptx: &TripleStore,
+    apple: &TripleStore,
+) with Mut, Epistemic {
+    ingest_graph(composition, admission, PIREUS_GRAPH_MODEL, model, model)
+    ingest_graph(composition, admission, PIREUS_GRAPH_TARGET_PROFILE,
+        target, model)
+    ingest_graph(composition, admission, PIREUS_GRAPH_EXECUTION_ENGINE,
+        execution, target)
+    ingest_graph(composition, admission, PIREUS_GRAPH_XED, xed, target)
+    ingest_graph(composition, admission, PIREUS_GRAPH_AARCHMRS,
+        aarchmrs, target)
+    ingest_graph(composition, admission, PIREUS_GRAPH_PTX, ptx, target)
+    ingest_graph(composition, admission, PIREUS_GRAPH_APPLE_METAL,
+        apple, execution)
+}
+
+fn is_first_owner_term(composition: &PireusComposition, index: i64) -> bool
+    with Epistemic {
+    let current = composition.term_refs[index]
+    var i: i64 = 0
+    while i < index {
+        let prior = composition.term_refs[i]
+        if prior.owner_id == current.owner_id &&
+            prior.local_id == current.local_id &&
+            prior.term_sort == current.term_sort {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn collision_counts(composition: &PireusComposition) -> [i64; 3]
+    with Epistemic {
+    let count = composition.term_refs.len().unwrap("term ref count")
+    var keys: i64 = 0
+    var pairs: i64 = 0
+    var derived: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        if is_first_owner_term(composition, i) {
+            let a = composition.term_refs[i]
+            var has_collision = false
+            var j = i + 1
+            while j < count {
+                if is_first_owner_term(composition, j) {
+                    let b = composition.term_refs[j]
+                    if a.local_id == b.local_id &&
+                        a.term_sort == b.term_sort &&
+                        a.owner_id != b.owner_id {
+                        pairs = pairs + 1
+                        has_collision = true
+                    }
+                }
+                j = j + 1
+            }
+            if has_collision {
+                var first_key = true
+                var k: i64 = 0
+                while k < i {
+                    if is_first_owner_term(composition, k) {
+                        let prior = composition.term_refs[k]
+                        if prior.local_id == a.local_id &&
+                            prior.term_sort == a.term_sort {
+                            first_key = false
+                        }
+                    }
+                    k = k + 1
+                }
+                if first_key {
+                    keys = keys + 1
+                    if a.local_id >= 703300 && a.local_id < 704000 {
+                        derived = derived + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    [keys, pairs, derived]
+}
+
+fn collision_census(composition: &PireusComposition) -> PireusCollisionCensus
+    with Mut, Epistemic {
+    var census = PireusCollisionCensus {
+        pair_count: 0,
+        local_ids: [0; 64],
+        term_sorts: [0; 64],
+        owner_a: [0; 64],
+        owner_b: [0; 64],
+        lifted_a: [0; 64],
+        lifted_b: [0; 64],
+    }
+    let count = composition.term_refs.len().unwrap("term ref count")
+    var i: i64 = 0
+    while i < count {
+        if is_first_owner_term(composition, i) {
+            let a = composition.term_refs[i]
+            var j = i + 1
+            while j < count {
+                if is_first_owner_term(composition, j) {
+                    let b = composition.term_refs[j]
+                    if a.local_id == b.local_id &&
+                        a.term_sort == b.term_sort &&
+                        a.owner_id != b.owner_id {
+                        if census.pair_count < 64 {
+                            let at = census.pair_count
+                            census.local_ids[at] = a.local_id
+                            census.term_sorts[at] = a.term_sort
+                            census.owner_a[at] = a.owner_id
+                            census.owner_b[at] = b.owner_id
+                            census.lifted_a[at] = a.lifted_id
+                            census.lifted_b[at] = b.lifted_id
+                        }
+                        census.pair_count = census.pair_count + 1
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    census
+}
+
+fn digest_final_registry(
+    admission: &PireusGraphIdentityAdmission,
+    composition: &PireusComposition,
+) -> PireusDigest with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555535452)
+    var i: i64 = 0
+    while i < 8 {
+        state = digest_add_i64(state,
+            admission.producer_registry_digest.words[i])
+        i = i + 1
+    }
+    let count = composition.term_refs.len().unwrap("term ref count")
+    i = 0
+    while i < count {
+        let t = composition.term_refs[i]
+        state = digest_add_i64(state, t.graph_id)
+        state = digest_add_i64(state, t.local_id)
+        state = digest_add_i64(state, t.term_sort)
+        state = digest_add_i64(state, t.owner_id)
+        state = digest_add_i64(state, t.lifted_id)
+        state = digest_add_i64(state, t.reference_kind)
+        state = digest_add_i64(state,
+            seq_get(composition.term_role_masks, i))
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_lifted_graph(composition: &PireusComposition) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555534c47)
+    let count = composition.canonical_triples.len().unwrap("canonical count")
+    var i: i64 = 0
+    while i < count {
+        let t = composition.canonical_triples[i]
+        state = digest_add_i64(state, t.subject)
+        state = digest_add_i64(state, t.predicate)
+        state = digest_add_i64(state, t.object)
+        state = digest_add_i64(state, t.object_sort)
+        state = digest_add_i64(state, t.literal_value_bits)
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_occurrences(composition: &PireusComposition) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555534f43)
+    let count = composition.occurrences.len().unwrap("occurrence count")
+    var i: i64 = 0
+    while i < count {
+        let o = composition.occurrences[i]
+        state = digest_add_i64(state, o.graph_id)
+        state = digest_add_i64(state, o.source_index)
+        state = digest_add_bool(state, o.inherited)
+        state = digest_add_i64(state, o.lifted_subject)
+        state = digest_add_i64(state, o.lifted_predicate)
+        state = digest_add_i64(state, o.lifted_object)
+        state = digest_add_i64(state, o.object_sort)
+        state = digest_add_i64(state, o.literal_value_bits)
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_collision_census(composition: &PireusComposition) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x504952455553434f)
+    let count = composition.term_refs.len().unwrap("term ref count")
+    var i: i64 = 0
+    while i < count {
+        if is_first_owner_term(composition, i) {
+            let a = composition.term_refs[i]
+            var j = i + 1
+            while j < count {
+                if is_first_owner_term(composition, j) {
+                    let b = composition.term_refs[j]
+                    if a.local_id == b.local_id &&
+                        a.term_sort == b.term_sort &&
+                        a.owner_id != b.owner_id {
+                        state = digest_add_i64(state, a.local_id)
+                        state = digest_add_i64(state, a.term_sort)
+                        state = digest_add_i64(state, a.owner_id)
+                        state = digest_add_i64(state, b.owner_id)
+                        state = digest_add_i64(state, a.lifted_id)
+                        state = digest_add_i64(state, b.lifted_id)
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_provenance(composition: &PireusComposition) -> PireusDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = digest_add_i64(sha256_init(), 0x5049524555535052)
+    let count = composition.occurrences.len().unwrap("occurrence count")
+    var i: i64 = 0
+    while i < count {
+        let o = composition.occurrences[i]
+        state = digest_add_i64(state, o.graph_id)
+        state = digest_add_i64(state, o.parent_graph)
+        state = digest_add_i64(state, o.producer_concept)
+        state = digest_add_i64(state, o.source_index)
+        state = digest_add_hash(state, o.source_hash)
+        state = digest_add_i64(state, o.local_subject)
+        state = digest_add_i64(state, o.local_predicate)
+        state = digest_add_i64(state, o.local_object)
+        state = digest_add_i64(state, o.object_sort)
+        state = digest_add_i64(state, o.literal_value_bits)
+        state = digest_add_i64(state, o.lifted_subject)
+        state = digest_add_i64(state, o.lifted_predicate)
+        state = digest_add_i64(state, o.lifted_object)
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn lifted_for(
+    composition: &PireusComposition,
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+) -> i64 with Epistemic {
+    let index = find_term_ref(composition, graph_id, local_id, term_sort)
+    if index < 0 { return 0 - 1 }
+    composition.term_refs[index].lifted_id
+}
+
+fn count_type_objects(
+    composition: &PireusComposition,
+    rdf_type: i64,
+    class_id: i64,
+) -> i64 with Epistemic {
+    let count = composition.canonical_triples.len().unwrap("canonical count")
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let t = composition.canonical_triples[i]
+        if t.predicate == rdf_type && t.object_sort == PIREUS_TERM_IRI &&
+            t.object == class_id {
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+    matches
+}
+
+fn binding_matches_position(
+    binding: &PireusBinding,
+    expected_sort: i64,
+    identity: i64,
+    literal_value_bits: i64,
+) -> bool {
+    if binding.term_sort != expected_sort || binding.identity != identity {
+        return false
+    }
+    if expected_sort == PIREUS_TERM_LITERAL {
+        return binding.literal_value_bits == literal_value_bits
+    }
+    true
+}
+
+fn count_profile_join(
+    composition: &PireusComposition,
+    has_profile: i64,
+    rdf_type: i64,
+    profile_class: i64,
+) -> i64 with Epistemic {
+    let count = composition.canonical_triples.len().unwrap("canonical count")
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let left = composition.canonical_triples[i]
+        if left.predicate == has_profile &&
+            left.object_sort == PIREUS_TERM_IRI {
+            let binding = PireusBinding {
+                variable_id: 0,
+                term_sort: PIREUS_TERM_IRI,
+                identity: left.object,
+                literal_value_bits: 0,
+            }
+            var j: i64 = 0
+            while j < count {
+                let right = composition.canonical_triples[j]
+                if binding_matches_position(&binding, PIREUS_TERM_IRI,
+                    right.subject, 0) && right.predicate == rdf_type &&
+                    right.object_sort == PIREUS_TERM_IRI &&
+                    right.object == profile_class {
+                    matches = matches + 1
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    matches
+}
+
+fn count_exact_iri_triple(
+    composition: &PireusComposition,
+    predicate: i64,
+    object: i64,
+) -> i64 with Epistemic {
+    let count = composition.canonical_triples.len().unwrap("canonical count")
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let t = composition.canonical_triples[i]
+        if t.predicate == predicate && t.object_sort == PIREUS_TERM_IRI &&
+            t.object == object {
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+    matches
+}
+
+fn count_occurrence_type_objects(
+    composition: &PireusComposition,
+    rdf_type: i64,
+    class_id: i64,
+) -> i64 with Epistemic {
+    let count = composition.occurrences.len().unwrap("occurrence count")
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let o = composition.occurrences[i]
+        if o.lifted_predicate == rdf_type &&
+            o.object_sort == PIREUS_TERM_IRI &&
+            o.lifted_object == class_id {
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+    matches
+}
+
+fn occurrence_accounting_complete(composition: &PireusComposition) -> bool
+    with Epistemic {
+    let canonical_count =
+        composition.canonical_triples.len().unwrap("canonical count")
+    let occurrence_count = composition.occurrences.len().unwrap("occurrence count")
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < canonical_count {
+        total = total + seq_get(composition.canonical_occurrence_counts, i)
+        i = i + 1
+    }
+    total == occurrence_count
+}
+
+fn provenance_complete(
+    composition: &PireusComposition,
+    admission: &PireusGraphIdentityAdmission,
+) -> bool with Epistemic {
+    let count = composition.occurrences.len().unwrap("occurrence count")
+    var i: i64 = 0
+    while i < count {
+        let o = composition.occurrences[i]
+        if o.graph_id < 0 || o.graph_id >= PIREUS_GRAPH_COUNT ||
+            o.canonical_index < 0 ||
+            o.canonical_index >= composition.canonical_triples.len().unwrap("canonical count") ||
+            !hash_nonzero(o.source_hash) {
+            return false
+        }
+        let p = admission.registry.producers[o.graph_id]
+        if o.parent_graph != p.parent_graph ||
+            o.producer_concept != p.producer_concept ||
+            !hash_equal(o.source_hash, p.source_hash) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn producer_pair_compatible(a: &PireusProducer, b: &PireusProducer) -> bool {
+    a.graph_id != b.graph_id &&
+        a.producer_concept != b.producer_concept &&
+        a.namespace_owner != b.namespace_owner
+}
+
+fn namespace_pair_compatible(
+    a: &PireusNamespace,
+    b: &PireusNamespace,
+) -> bool {
+    a.owner_id != b.owner_id && namespace_pair_disjoint(a, b)
+}
+
+fn parent_declaration_valid(
+    child_graph: i64,
+    child_rank: i64,
+    parent_graph: i64,
+    parent_rank: i64,
+    declared_parent_hash: [i64; 8],
+    actual_parent_hash: [i64; 8],
+) -> bool {
+    child_graph > 0 && parent_graph >= 0 &&
+        parent_graph != child_graph && parent_rank < child_rank &&
+        hash_nonzero(declared_parent_hash) &&
+        hash_equal(declared_parent_hash, actual_parent_hash)
+}
+
+fn term_mapping_claim_valid(
+    composition: &PireusComposition,
+    admission: &PireusGraphIdentityAdmission,
+    graph_id: i64,
+    local_id: i64,
+    term_sort: i64,
+    claimed_owner: i64,
+    claimed_lifted: i64,
+    claimed_reference_kind: i64,
+    explicit_edge: bool,
+) -> bool with Epistemic {
+    let index = find_term_ref(composition, graph_id, local_id, term_sort)
+    if index < 0 { return false }
+    let actual = composition.term_refs[index]
+    if actual.owner_id != claimed_owner || actual.lifted_id != claimed_lifted {
+        return false
+    }
+    if claimed_reference_kind == PIREUS_REF_SHARED {
+        return explicit_edge && actual.reference_kind == PIREUS_REF_SHARED
+    }
+    if claimed_reference_kind == PIREUS_REF_FOREIGN_PARENT {
+        if !explicit_edge || actual.reference_kind != PIREUS_REF_FOREIGN_PARENT {
+            return false
+        }
+        let graph_owner = admission.registry.producers[graph_id].namespace_owner
+        return actual.owner_id != graph_owner
+    }
+    if claimed_reference_kind == PIREUS_REF_OWNED {
+        let graph_owner = admission.registry.producers[graph_id].namespace_owner
+        return actual.reference_kind == PIREUS_REF_OWNED &&
+            actual.owner_id == graph_owner
+    }
+    false
+}
+
+fn local_query_promotion_valid(composition_receipt: bool) -> bool {
+    composition_receipt
+}
+
+fn capacity_accepts(current: i64, limit: i64) -> bool {
+    current >= 0 && current < limit
+}
+
+fn negative_surface(
+    composition: &PireusComposition,
+    admission: &PireusGraphIdentityAdmission,
+    target_count: i64,
+    target_occurrences: i64,
+    derived_collision_keys: i64,
+) -> PireusGraphIdentityNegatives with Epistemic {
+    let missing_producer = 99 >=
+        admission.registry.producers.len().unwrap("producer count")
+    let missing_hash = !hash_nonzero(zero_hash())
+    let p0 = admission.registry.producers[0]
+    let duplicate_producer = !producer_pair_compatible(&p0, &p0)
+    let ns0 = admission.registry.namespaces[0]
+    let duplicate_namespace = !namespace_pair_compatible(&ns0, &ns0)
+    let overlap_a = PireusNamespace { owner_id: 90,
+        allocation_start: 100, allocation_end: 300 }
+    let overlap_b = PireusNamespace { owner_id: 91,
+        allocation_start: 250, allocation_end: 450 }
+    let overlapping_namespace =
+        !namespace_pair_compatible(&overlap_a, &overlap_b)
+    let missing_parent = !parent_declaration_valid(
+        1, 1, 0 - 1, 0, zero_hash(), source_hash_for(0))
+    let cyclic_parent = !parent_declaration_valid(
+        1, 1, 1, 1, source_hash_for(1), source_hash_for(1))
+    let reordered_parent = !parent_declaration_valid(
+        1, 1, 2, 2, source_hash_for(2), source_hash_for(2))
+    let parent_hash_mismatch = !parent_declaration_valid(
+        1, 1, 0, 0, zero_hash(), source_hash_for(0))
+    let changed_a = Triple { subject: 1, predicate: 2, object_iri: 3,
+        object_literal: 0, object_value: 0.0, is_object_literal: false }
+    let changed_b = Triple { subject: 1, predicate: 2, object_iri: 4,
+        object_literal: 0, object_value: 0.0, is_object_literal: false }
+    let changed_parent_closure = !triple_equal(&changed_a, &changed_b)
+    let unregistered_iri = find_term_ref(composition,
+        PIREUS_GRAPH_APPLE_METAL, 999999, PIREUS_TERM_IRI) < 0
+    let xed_owned = lifted_for(composition, PIREUS_GRAPH_XED,
+        702000, PIREUS_TERM_IRI)
+    let owned_claimed_shared = !term_mapping_claim_valid(composition,
+        admission, PIREUS_GRAPH_XED, 702000, PIREUS_TERM_IRI,
+        PIREUS_OWNER_XED, xed_owned, PIREUS_REF_SHARED, false)
+    let owned_as_foreign = !term_mapping_claim_valid(composition,
+        admission, PIREUS_GRAPH_XED, 702000, PIREUS_TERM_IRI,
+        PIREUS_OWNER_XED, xed_owned, PIREUS_REF_FOREIGN_PARENT, true)
+    let rebound_lift = lift_identity(&admission.registry,
+        PIREUS_OWNER_APPLE_METAL, 703403, PIREUS_TERM_IRI)
+    let rebound_foreign = !term_mapping_claim_valid(composition,
+        admission, PIREUS_GRAPH_APPLE_METAL, 703403, PIREUS_TERM_IRI,
+        PIREUS_OWNER_APPLE_METAL, rebound_lift,
+        PIREUS_REF_FOREIGN_PARENT, true)
+    let foreign_rebound = owned_as_foreign && rebound_foreign
+    let execution_lift = lifted_for(composition,
+        PIREUS_GRAPH_EXECUTION_ENGINE, 703000, PIREUS_TERM_IRI)
+    let incompatible_lifted_meaning = !term_mapping_claim_valid(composition,
+        admission, PIREUS_GRAPH_AARCHMRS, 703000, PIREUS_TERM_IRI,
+        PIREUS_OWNER_AARCHMRS, execution_lift, PIREUS_REF_OWNED, false)
+    let target_lift = lifted_for(composition,
+        PIREUS_GRAPH_TARGET_PROFILE, 701000, PIREUS_TERM_IRI)
+    let double_local_mapping = !term_mapping_claim_valid(composition,
+        admission, PIREUS_GRAPH_TARGET_PROFILE, 701000, PIREUS_TERM_IRI,
+        PIREUS_OWNER_TARGET_PROFILE, target_lift + 1,
+        PIREUS_REF_OWNED, false)
+    let iri_binding = PireusBinding { variable_id: 0,
+        term_sort: PIREUS_TERM_IRI, identity: 42, literal_value_bits: 0 }
+    let literal_binding = PireusBinding { variable_id: 0,
+        term_sort: PIREUS_TERM_LITERAL, identity: 42,
+        literal_value_bits: f64_to_bits(1.0) }
+    let iri_literal_sort_swap = !binding_matches_position(
+        &iri_binding, PIREUS_TERM_LITERAL, 42, 0)
+    let query_binding_sort_swap = !binding_matches_position(
+        &literal_binding, PIREUS_TERM_IRI, 42, 0)
+    let missing_literal_owner = namespace_for(&admission.registry, 99) < 0
+    let lit_a = PireusCanonicalTriple { subject: 1, predicate: 2,
+        object: 3, object_sort: PIREUS_TERM_LITERAL,
+        literal_value_bits: f64_to_bits(1.0) }
+    let literal_value_bits_loss = !canonical_equal(&lit_a, 1, 2, 3,
+        PIREUS_TERM_LITERAL, f64_to_bits(2.0))
+    let lift_overflow = lift_identity(&admission.registry,
+        PIREUS_OWNER_CORE, PIREUS_LOCAL_BOUND, PIREUS_TERM_IRI) < 0
+    let capacity_exhaustion = !capacity_accepts(
+        PIREUS_MAX_OCCURRENCES, PIREUS_MAX_OCCURRENCES)
+    let inherited_query_inflation = target_occurrences > target_count &&
+        occurrence_accounting_complete(composition)
+    let occurrence_loss = occurrence_accounting_complete(composition)
+    let declaration_only_census = derived_collision_keys > 0
+    let provenance_loss = provenance_complete(composition, admission)
+    let local_query_promotion = !local_query_promotion_valid(false)
+
+    var passed: i64 = 0
+    if missing_producer { passed = passed + 1 }
+    if missing_hash { passed = passed + 1 }
+    if duplicate_producer { passed = passed + 1 }
+    if duplicate_namespace { passed = passed + 1 }
+    if overlapping_namespace { passed = passed + 1 }
+    if missing_parent { passed = passed + 1 }
+    if cyclic_parent { passed = passed + 1 }
+    if reordered_parent { passed = passed + 1 }
+    if parent_hash_mismatch { passed = passed + 1 }
+    if changed_parent_closure { passed = passed + 1 }
+    if unregistered_iri { passed = passed + 1 }
+    if owned_claimed_shared { passed = passed + 1 }
+    if foreign_rebound { passed = passed + 1 }
+    if incompatible_lifted_meaning { passed = passed + 1 }
+    if double_local_mapping { passed = passed + 1 }
+    if iri_literal_sort_swap { passed = passed + 1 }
+    if query_binding_sort_swap { passed = passed + 1 }
+    if missing_literal_owner { passed = passed + 1 }
+    if literal_value_bits_loss { passed = passed + 1 }
+    if lift_overflow { passed = passed + 1 }
+    if capacity_exhaustion { passed = passed + 1 }
+    if inherited_query_inflation { passed = passed + 1 }
+    if occurrence_loss { passed = passed + 1 }
+    if declaration_only_census { passed = passed + 1 }
+    if provenance_loss { passed = passed + 1 }
+    if local_query_promotion { passed = passed + 1 }
+
+    PireusGraphIdentityNegatives {
+        missing_producer: missing_producer,
+        missing_hash: missing_hash,
+        duplicate_producer: duplicate_producer,
+        duplicate_namespace: duplicate_namespace,
+        overlapping_namespace: overlapping_namespace,
+        missing_parent: missing_parent,
+        cyclic_parent: cyclic_parent,
+        reordered_parent: reordered_parent,
+        parent_hash_mismatch: parent_hash_mismatch,
+        changed_parent_closure: changed_parent_closure,
+        unregistered_iri: unregistered_iri,
+        owned_claimed_shared: owned_claimed_shared,
+        foreign_rebound: foreign_rebound,
+        incompatible_lifted_meaning: incompatible_lifted_meaning,
+        double_local_mapping: double_local_mapping,
+        iri_literal_sort_swap: iri_literal_sort_swap,
+        query_binding_sort_swap: query_binding_sort_swap,
+        missing_literal_owner: missing_literal_owner,
+        literal_value_bits_loss: literal_value_bits_loss,
+        lift_overflow: lift_overflow,
+        capacity_exhaustion: capacity_exhaustion,
+        inherited_query_inflation: inherited_query_inflation,
+        occurrence_loss: occurrence_loss,
+        declaration_only_census: declaration_only_census,
+        provenance_loss: provenance_loss,
+        local_query_promotion: local_query_promotion,
+        passed: passed,
+        total: 26,
+    }
+}
+
+pub fn pireus_graph_identity_compose(
+    admission: &PireusGraphIdentityAdmission,
+    model: &TripleStore,
+    target: &TripleStore,
+    execution: &TripleStore,
+    xed: &TripleStore,
+    aarchmrs: &TripleStore,
+    ptx: &TripleStore,
+    apple: &TripleStore,
+    reverse_arrival: bool,
+) -> PireusGraphIdentityResult with Mut, Panic, Div, Epistemic {
+    var composition = composition_new()
+    if !admission.valid {
+        composition.error = PIREUS_ERR_ADMISSION
+    } else {
+        stage_arrivals(&composition, reverse_arrival)
+        compose_staged(&composition, admission, model, target, execution,
+            xed, aarchmrs, ptx, apple)
+    }
+
+    let collision = collision_counts(&composition)
+    let collision_rows = collision_census(&composition)
+    let rdf_type = lifted_for(&composition, PIREUS_GRAPH_MODEL,
+        1, PIREUS_TERM_IRI)
+    let class_target = lifted_for(&composition,
+        PIREUS_GRAPH_TARGET_PROFILE, 701000, PIREUS_TERM_IRI)
+    let has_profile = lifted_for(&composition,
+        PIREUS_GRAPH_TARGET_PROFILE, 701101, PIREUS_TERM_IRI)
+    let class_profile = lifted_for(&composition,
+        PIREUS_GRAPH_TARGET_PROFILE, 701002, PIREUS_TERM_IRI)
+    let apple_blueprint_predicate = lifted_for(&composition,
+        PIREUS_GRAPH_APPLE_METAL, 705105, PIREUS_TERM_IRI)
+    let apple_blueprint = lifted_for(&composition,
+        PIREUS_GRAPH_APPLE_METAL, 703403, PIREUS_TERM_IRI)
+    let target_count = count_type_objects(&composition, rdf_type, class_target)
+    let profile_join_count = count_profile_join(&composition,
+        has_profile, rdf_type, class_profile)
+    let apple_links = count_exact_iri_triple(&composition,
+        apple_blueprint_predicate, apple_blueprint)
+    let target_occurrences = count_occurrence_type_objects(&composition,
+        rdf_type, class_target)
+
+    let canonical_count = composition.canonical_triples.len().unwrap("canonical count")
+    var inherited_count: i64 = 0
+    var duplicate_count: i64 = 0
+    var i: i64 = 0
+    while i < composition.occurrences.len().unwrap("occurrence count") {
+        if composition.occurrences[i].inherited {
+            inherited_count = inherited_count + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < canonical_count {
+        if seq_get(composition.canonical_occurrence_counts, i) > 1 {
+            duplicate_count = duplicate_count + 1
+        }
+        i = i + 1
+    }
+    var closures = true
+    i = 0
+    while i < PIREUS_GRAPH_COUNT {
+        if !composition.closure_verified[i] { closures = false }
+        i = i + 1
+    }
+    let negatives = negative_surface(&composition, admission,
+        target_count, target_occurrences, collision[2])
+
+    PireusGraphIdentityResult {
+        error: composition.error,
+        producer_count: admission.producer_count,
+        namespace_count: admission.namespace_count,
+        term_reference_count: composition.term_refs.len().unwrap("term ref count"),
+        canonical_triple_count: canonical_count,
+        occurrence_count: composition.occurrences.len().unwrap("occurrence count"),
+        inherited_occurrence_count: inherited_count,
+        duplicate_canonical_count: duplicate_count,
+        collision_key_count: collision[0],
+        collision_pair_count: collision[1],
+        derived_collision_key_count: collision[2],
+        canonical_target_count: target_count,
+        profile_join_count: profile_join_count,
+        apple_blueprint_link_count: apple_links,
+        target_occurrence_count: target_occurrences,
+        all_parent_closures_verified: closures,
+        collisions: collision_rows,
+        registry_digest: digest_final_registry(admission, &composition),
+        dependency_digest: admission.dependency_digest,
+        lifted_graph_digest: digest_lifted_graph(&composition),
+        occurrence_digest: digest_occurrences(&composition),
+        collision_digest: digest_collision_census(&composition),
+        provenance_digest: digest_provenance(&composition),
+        negatives: negatives,
+    }
+}
+
+pub fn pireus_graph_identity_results_equal(
+    a: &PireusGraphIdentityResult,
+    b: &PireusGraphIdentityResult,
+) -> bool {
+    a.error == b.error &&
+        a.term_reference_count == b.term_reference_count &&
+        a.canonical_triple_count == b.canonical_triple_count &&
+        a.occurrence_count == b.occurrence_count &&
+        a.collision_key_count == b.collision_key_count &&
+        a.collision_pair_count == b.collision_pair_count &&
+        a.derived_collision_key_count == b.derived_collision_key_count &&
+        a.canonical_target_count == b.canonical_target_count &&
+        a.profile_join_count == b.profile_join_count &&
+        a.apple_blueprint_link_count == b.apple_blueprint_link_count &&
+        pireus_digest_equal(&a.registry_digest, &b.registry_digest) &&
+        pireus_digest_equal(&a.dependency_digest, &b.dependency_digest) &&
+        pireus_digest_equal(&a.lifted_graph_digest, &b.lifted_graph_digest) &&
+        pireus_digest_equal(&a.occurrence_digest, &b.occurrence_digest) &&
+        pireus_digest_equal(&a.collision_digest, &b.collision_digest) &&
+        pireus_digest_equal(&a.provenance_digest, &b.provenance_digest)
+}
+
+fn digest_matches_words(digest: &PireusDigest, expected: [i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != expected[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// Accept exactly the result first produced by commit 122a3cc591.
+pub fn pireus_graph_identity_matches_frozen_semantics(
+    result: &PireusGraphIdentityResult,
+) -> bool {
+    result.error == 0 &&
+        result.producer_count == 7 &&
+        result.namespace_count == 8 &&
+        result.term_reference_count == 805 &&
+        result.canonical_triple_count == 650 &&
+        result.occurrence_count == 1621 &&
+        result.inherited_occurrence_count == 971 &&
+        result.duplicate_canonical_count == 290 &&
+        result.collision_key_count == 24 &&
+        result.collision_pair_count == 24 &&
+        result.derived_collision_key_count == 6 &&
+        result.canonical_target_count == 3 &&
+        result.target_occurrence_count == 18 &&
+        result.profile_join_count == 5 &&
+        result.apple_blueprint_link_count == 1 &&
+        result.all_parent_closures_verified &&
+        result.collisions.pair_count == 24 &&
+        result.negatives.passed == 26 &&
+        result.negatives.total == 26 &&
+        digest_matches_words(&result.registry_digest,
+            [0x9b56f6f0, 0x306d949e, 0x2266776e, 0xe34f05f3,
+             0xba1dec42, 0x39e0bba9, 0x411b3aed, 0x9c2b27ce]) &&
+        digest_matches_words(&result.dependency_digest,
+            [0x4dd37bf1, 0xcdd774e4, 0xab840e54, 0x44d7b18b,
+             0x8a1d0990, 0x063901b8, 0xa85743a7, 0xac2abbcc]) &&
+        digest_matches_words(&result.lifted_graph_digest,
+            [0x0bcf3ef8, 0xb9598cb4, 0x363864d9, 0xba75d9b0,
+             0x50a22df5, 0x01b80a09, 0xeda7290b, 0x3e331765]) &&
+        digest_matches_words(&result.occurrence_digest,
+            [0x57218fbb, 0x4a6d640e, 0x4651dea0, 0xd14a17a5,
+             0x4559a2f5, 0x59e45e31, 0x86a46df7, 0xd8a05950]) &&
+        digest_matches_words(&result.collision_digest,
+            [0x3a72cc51, 0x58aa0e84, 0x1b4b13de, 0x2a924d1b,
+             0xca516778, 0xb651ae3f, 0x1fe9be80, 0xd26925bb]) &&
+        digest_matches_words(&result.provenance_digest,
+            [0x1e962677, 0xcfb1846a, 0x5e5b9dd7, 0x0c13c25c,
+             0xae5f92ad, 0x905f6ad7, 0x95a8912b, 0x4e352f20])
+}

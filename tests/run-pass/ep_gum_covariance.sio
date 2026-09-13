@@ -1,0 +1,57 @@
+//@ run-pass
+//@ expect-stdout-contains: EP_GUM_COV_OK
+// The GUM rules in epistemic::knowledge drop the covariance term, so they hold
+// only for independent operands. Nothing said so, and nothing offers the term.
+//
+// Measured 2026-09-11 with x = {val 3.0, variance 0.25}, where the truth for a
+// single variable follows from Cov(X,X) = Var(X):
+//   ep_mul(&x, &x).variance  = 4.5   truth 9.0   UNDERSTATES by 2x
+//   ep_add(&x, &x).variance  = 0.5   truth 1.0   UNDERSTATES by 2x
+//   ep_sub(&x, &x).variance  = 0.5   truth 0     overstates (safe, still wrong)
+//   ep_square(&x).variance   = 9.0   truth 9.0   correct
+// The checker accepts all of it: Epistemic is a plain struct, so the E230
+// noise-set machinery that guards Knowledge<T> does not reach these calls.
+// Understating is the unsafe direction -- it claims more certainty than held.
+//
+// This file pins the covariance-aware forms. The self-correlated cases are the
+// cheapest check of the sign conventions, because each has a closed answer.
+
+use epistemic::knowledge::{Epistemic, ep_add, ep_mul, ep_add_cov, ep_sub_cov, ep_mul_cov, ep_div_cov, ep_square}
+
+// Prefixed, not `near`: epistemic::knowledge has its own `near(a, b, tol)`
+// helper, and the lean_single bootstrap bundles every module into ONE
+// namespace, so a bare `near` here shadows it and breaks the stdlib's own
+// internal calls with an arity mismatch. Madaros is modular and does not see
+// the clash, so this only shows up on the bundling engine.
+fn cov_near(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let d = a - b
+    let m = if d < 0.0 { 0.0 - d } else { d }
+    return m < 0.000000001
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let x = Epistemic { val: 3.0, variance: 0.25, confidence: 900 }
+    let cxx: f64 = 0.25   // Cov(X,X) = Var(X)
+
+    // 2X has twice the standard deviation, so four times the variance.
+    if !cov_near(ep_add_cov(&x, &x, cxx).variance, 1.0) { print("FAIL add_cov\n") return 1 }
+    // X - X is certain.
+    if !cov_near(ep_sub_cov(&x, &x, cxx).variance, 0.0) { print("FAIL sub_cov\n") return 1 }
+    // X * X must agree with the dedicated square, 4X^2 Var(X) = 9.
+    if !cov_near(ep_mul_cov(&x, &x, cxx).variance, 9.0) { print("FAIL mul_cov\n") return 1 }
+    if !cov_near(ep_mul_cov(&x, &x, cxx).variance, ep_square(&x).variance) { print("FAIL mul_cov vs square\n") return 1 }
+    // X / X is certain.
+    if !cov_near(ep_div_cov(&x, &x, cxx).variance, 0.0) { print("FAIL div_cov\n") return 1 }
+
+    // Independence is preserved exactly: cov = 0 reproduces the original rules.
+    let y = Epistemic { val: 2.0, variance: 0.09, confidence: 900 }
+    if ep_add_cov(&x, &y, 0.0).variance != ep_add(&x, &y).variance { print("FAIL add_cov indep\n") return 1 }
+    if ep_mul_cov(&x, &y, 0.0).variance != ep_mul(&x, &y).variance { print("FAIL mul_cov indep\n") return 1 }
+
+    // An inconsistent covariance must not produce a negative variance.
+    if ep_sub_cov(&x, &y, 99.0).variance < 0.0 { print("FAIL sub_cov clamp\n") return 1 }
+    if ep_div_cov(&x, &y, 99.0).variance < 0.0 { print("FAIL div_cov clamp\n") return 1 }
+
+    print("EP_GUM_COV_OK\n")
+    return 0
+}

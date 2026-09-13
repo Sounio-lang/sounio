@@ -19,7 +19,7 @@
 #   <prefix>/bin/madaros-linux-x86_64    (Stage1 modular compiler ELF, when built)
 #   <prefix>/lib/sounio/stdlib/...       (stdlib tree)
 #   <prefix>/lib/sounio/scripts/lib/...  (resolver + helpers used by launcher)
-#   <prefix>/share/doc/sounio/...        (INSTALL.md, KNOWN_LIMITATIONS.md)
+#   <prefix>/share/doc/sounio/...        (INSTALL.md, KNOWN_LIMITATIONS.md, MATURITY.md)
 #
 # Discriminator (G6):
 #   bash scripts/install.sh --prefix=/tmp/sounio-test
@@ -190,6 +190,10 @@ install -m 0644 "$ROOT_DIR/INSTALL.md" "$DOC_DIR/INSTALL.md"
 if [[ -f "$ROOT_DIR/docs/compiler/KNOWN_LIMITATIONS.md" ]]; then
   install -m 0644 "$ROOT_DIR/docs/compiler/KNOWN_LIMITATIONS.md" \
     "$DOC_DIR/KNOWN_LIMITATIONS.md"
+fi
+if [[ -f "$ROOT_DIR/docs/compiler/MATURITY.md" ]]; then
+  install -m 0644 "$ROOT_DIR/docs/compiler/MATURITY.md" \
+    "$DOC_DIR/MATURITY.md"
 fi
 
 # ------------------------------------------------------------------ tools/repl.sh (G5b backing)

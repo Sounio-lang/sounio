@@ -45,7 +45,23 @@ cd "$ROOT_DIR"
 unset SOUC_BIN SOUNIO_SOUC_BIN || true
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-SOUC="${MADAROS_RAW_BIN:-${SOUC:-$ROOT_DIR/bin/souc}}"
+# Raw Madaros needs >=512 MiB stack (see bin/madaros / MADAROS_STACK_KB).
+# Workflow ulimit in the build step does not persist into later steps; gates that
+# invoke MADAROS_RAW_BIN directly must reserve stack here or the host SEGVs
+# (rc=139) on default ~8 MiB runner stacks.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
+
+if [[ -x "$ROOT_DIR/bin/madaros" ]]; then
+  # Launcher applies MADAROS_STACK_KB and resolves MADAROS_RAW_BIN.
+  SOUC="$ROOT_DIR/bin/madaros"
+else
+  SOUC="${MADAROS_RAW_BIN:-${SOUC:-$ROOT_DIR/bin/souc}}"
+fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/f128-ladder-v0e510.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -102,7 +118,7 @@ fi
 # 2. lowerer: body-block tail and `return` literal routed to f128 limbs.
 if grep -Fq 'var LOWER_F128_FN_BODY_PENDING: bool = false' "$LOWER" \
   && grep -Fq 'LOWER_F128_FN_BODY_PENDING = (*lo).current_func_loaded && lower_fn_returns_f128(&(*(*lo).current_func))' "$LOWER" \
-  && grep -Fq 'if f128_body_tail && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box))' "$LOWER" \
+  && grep -Fq 'f128_lit_tail_ctx && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box))' "$LOWER" \
   && grep -Fq 'Some(ret_box2) => self.lower_f128_value_ref(&(*ret_box2))' "$LOWER"; then
   note_pass "lower_routes_f128_fn_literal_tail_and_return"
 else
@@ -268,7 +284,7 @@ else
   note_fail "souc_missing"
 fi
 
-echo "NOTE v0e510_deferred nested_block_literal_tail=pending driver_lexer_separators=pending f256=pending compound_assign=pending gum=pending"
+echo "NOTE v0e510_deferred driver_lexer_separators=pending f256=pending gum=pending kl8_residuals=closed_elsewhere"
 echo "NOTE adr009 python_softfloat=not_claim_clock rust=not_claim_clock lean_single_language=greenwash"
 
 echo "---"

@@ -402,6 +402,11 @@ var LAST_IS_LITERAL_F64: i64 = 0
 var LAST_LITERAL_F64_INT: i64 = 0
 var LAST_LITERAL_F64_FRAC: i64 = 0
 var LAST_LITERAL_F64_DENOM: i64 = 1
+// Float literal token and the code offset right after its lowering: when CL is
+// still LAST_F64_LIT_CL, the value in rax is exactly that literal (see
+// f128_widen_refuses_inexact_literal).
+var LAST_F64_LIT_TOK: i64 = 0 - 1
+var LAST_F64_LIT_CL: i64 = 0 - 1
 // PR-7: fractional parts of f64 predicate bounds (first and second predicate).
 var SCAN_PRED_BOUND_FRAC: i64 = 0
 var SCAN_PRED_BOUND_DENOM: i64 = 1
@@ -1065,6 +1070,12 @@ var F128_RT_SUB_BSS_OFF: i64 = 0
 var F128_RT_MUL_BSS_OFF: i64 = 0
 var F128_RT_DIV_BSS_OFF: i64 = 0
 var F128_RT_EQ_BSS_OFF: i64 = 0
+var F128_RT_NE_BSS_OFF: i64 = 0
+var F128_RT_LT_BSS_OFF: i64 = 0
+var F128_RT_LE_BSS_OFF: i64 = 0
+var F128_RT_GT_BSS_OFF: i64 = 0
+var F128_RT_GE_BSS_OFF: i64 = 0
+var F128_RT_TRUNC_BSS_OFF: i64 = 0
 var F128_RT_EXTEND_BSS_OFF: i64 = 0
 
 fn gpu_param_kind_scalar_i64() -> i64 { 1 }
@@ -3466,6 +3477,20 @@ fn cli_arg_eq(raw: string, kw: string) -> bool with Panic, Mut {
     return true
 }
 
+
+fn name_is_wide_float_spelling(ns: i64, ne: i64) -> bool with Panic, Mut {
+    // `f128` is a real kind (13, binary128) since #2387; only `f256` is refused.
+    if src_match(ns, ne - ns, "f256") { return true }
+    return false
+}
+
+fn tc_wide_float_refused(tok: i64) -> i64 with IO, Mut, Panic {
+    // KL-9: lean_single used to greenwash unknown lowercase names (including
+    // `f256`) as f64. Refuse the spelling fail-closed instead of emitting a
+    // binary with f64 arithmetic under a binary256 type name.
+    tc_error_hard(tok, "f256 is not implemented on lean_single; refuse rather than lower as f64")
+}
+
 fn name_is_lower(ns: i64, ne: i64) -> bool with Panic, Mut {
     if ne <= ns { return false }
     let c = sb(ns)
@@ -3544,7 +3569,8 @@ fn arr_ty_hash_with_elem(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> 
     return arr_hash_ext_base() + idx
 }
 
-fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with Panic, Mut {
+fn arr_ty_hash_for_elem_type(alen: i64, esiz: i64, elem_ty: i64, elem_hash: i64) -> i64 with IO, Panic, Mut {
+    if elem_ty == 13 { tc_error_hard(EP, "arrays of f128 are not implemented") }
     if elem_hash != 0 {
         if elem_ty == 6 || elem_ty == 7 { return arr_ty_hash_with_elem(alen, esiz, elem_ty, elem_hash) }
         // An array whose elements are themselves arrays must keep its element
@@ -6724,6 +6750,13 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         let ns = TS[p as usize]
         let ne = TE[p as usize]
         var saw_generic: i64 = 0
+        if name_is_wide_float_spelling(ns, ne) {
+            tc_wide_float_refused(p)
+            SCAN_TY = 0
+            SCAN_TY_HASH = 0
+            SCAN_TY_NEXT = p + 1
+            return
+        }
         if src_match(ns, ne - ns, "chan") {
             SCAN_TY = 0
             SCAN_TY_HASH = 0
@@ -6737,6 +6770,9 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
         }
         // Kind 13 = binary128. Distinct from f64 (2) and from Seq (12).
         if src_match(ns, ne - ns, "f128") {
+            if TARGET_OS != 0 || TARGET_ARCH != 0 {
+                tc_error_hard(p, "f128 is only implemented for the x86-64 Linux lean_single target")
+            }
             SCAN_TY = 13
             SCAN_TY_HASH = 0
             p = p + 1
@@ -8923,7 +8959,7 @@ fn emit_f128_resolve_sym_x86(sym: string, dst_off: i64) with Mut, Panic, Div {
     em(0x0f); em(0x85)
     let have = CL
     em32(0)
-    emit_f128_die_x86("error: f128 runtime missing a libgcc __*tf3 symbol\n")
+    emit_f128_die_x86("error: f128 runtime missing a libgcc __*tf* symbol\n")
     patch32(have, CL)
     emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + dst_off)
 }
@@ -8952,11 +8988,72 @@ fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
     emit_f128_resolve_sym_x86("__multf3", F128_RT_MUL_BSS_OFF)
     emit_f128_resolve_sym_x86("__divtf3", F128_RT_DIV_BSS_OFF)
     emit_f128_resolve_sym_x86("__extenddftf2", F128_RT_EXTEND_BSS_OFF)
+    emit_f128_resolve_sym_x86("__eqtf2", F128_RT_EQ_BSS_OFF)
+    emit_f128_resolve_sym_x86("__netf2", F128_RT_NE_BSS_OFF)
+    emit_f128_resolve_sym_x86("__lttf2", F128_RT_LT_BSS_OFF)
+    emit_f128_resolve_sym_x86("__letf2", F128_RT_LE_BSS_OFF)
+    emit_f128_resolve_sym_x86("__gttf2", F128_RT_GT_BSS_OFF)
+    emit_f128_resolve_sym_x86("__getf2", F128_RT_GE_BSS_OFF)
+    emit_f128_resolve_sym_x86("__trunctfdf2", F128_RT_TRUNC_BSS_OFF)
     emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + F128_RT_READY_BSS_OFF, 1)
     patch32(already, CL)
 }
 
-fn emit_widen_f64_to_f128_x86() with Mut, Panic, Div {
+// A float literal lowers through binary64 (cvtsi2sd/divsd/mulsd). Widening that
+// to binary128 is only the literal's value when the decimal is a binary64 value
+// the lowering reproduces exactly: |int| < 2^53, fraction dyadic, and an exponent
+// that keeps an integer below 2^53. Anything else (0.1, 1e-3, 1e23) would be an
+// f64 approximation under a binary128 type -- refuse it, as Madaros V0-E.5.9 does.
+fn f64_literal_is_exact_binary64(tok: i64) -> bool with Panic, Mut, Div {
+    let two53: i64 = 9007199254740992
+    let iv = TV[tok as usize]
+    let fv = TF[tok as usize]
+    let dv = TD[tok as usize]
+    let xv = TX[tok as usize]
+    if iv < 0 || iv >= two53 { return false }
+    if fv > 0 {
+        if xv != 0 { return false }
+        // denominator must be 10^d; the fraction fv/10^d is dyadic iff 5^d | fv
+        var d: i64 = 0
+        var den = dv
+        while den > 1 {
+            if den % 10 != 0 { return false }
+            den = den / 10
+            d = d + 1
+        }
+        if den != 1 || d > 52 { return false }
+        var f2 = fv
+        var k: i64 = 0
+        while k < d {
+            if f2 % 5 != 0 { return false }
+            f2 = f2 / 5
+            k = k + 1
+        }
+        // int + f2/2^d exact iff (int << d) + f2 < 2^53
+        if iv > (two53 >> d) { return false }
+        if (iv << d) + f2 >= two53 { return false }
+        return true
+    }
+    if xv < 0 { return iv == 0 }
+    var v = iv
+    var e: i64 = 0
+    while e < xv {
+        if v > two53 / 10 { return false }
+        v = v * 10
+        e = e + 1
+    }
+    return v < two53
+}
+
+fn f128_widen_refuses_inexact_literal() with IO, Mut, Panic, Div {
+    if LAST_IS_LITERAL_F64 != 1 || CL != LAST_F64_LIT_CL || LAST_F64_LIT_TOK < 0 { return }
+    if f64_literal_is_exact_binary64(LAST_F64_LIT_TOK) == false {
+        tc_error_hard(LAST_F64_LIT_TOK, "f128 literal is not exactly representable in binary64; lean_single would widen an f64 approximation")
+    }
+}
+
+fn emit_widen_f64_to_f128_x86() with IO, Mut, Panic, Div {
+    f128_widen_refuses_inexact_literal()
     let save = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
     emit_store_var(save)
@@ -8969,6 +9066,26 @@ fn emit_widen_f64_to_f128_x86() with Mut, Panic, Div {
     EXPR_TY = 13
     EXPR_TY_HASH = 0
     EXPR_IS_F64 = 0
+}
+
+// `x as f64` for binary128 x (rax:rdx): round to nearest binary64.
+fn emit_narrow_f128_to_f64_x86() with Mut, Panic, Div {
+    let lo = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let hi = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(lo)
+    emit_store_rdx_var(hi)
+    emit_f128_ensure_libgcc_x86()
+    emit_load_var(lo)
+    emit_load_rdx_var(hi)
+    emit_rax_rdx_to_xmm0_x86()
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + F128_RT_TRUNC_BSS_OFF)
+    emit_call_rax_aligned_x86()
+    em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)  // movq rax, xmm0
+    EXPR_TY = 2
+    EXPR_TY_HASH = 0
+    EXPR_IS_F64 = 1
 }
 
 fn emit_f128_rhs_widen_if_f64() with IO, Mut, Panic, Div {
@@ -9003,25 +9120,57 @@ fn emit_f128_binop_x86(op: i64, lhs_lo: i64, lhs_hi: i64) with Mut, Panic, Div {
     EXPR_IS_F64 = 0
 }
 
-fn emit_f128_eq_x86(lhs_lo: i64, lhs_hi: i64, invert: i64) with Mut, Panic, Div {
-    em(0x49); em(0x89); em(0xc0)
-    em(0x49); em(0x89); em(0xd1)
+// IEEE 754 comparison of lhs (spilled in lhs_lo/lhs_hi) against rhs (rax:rdx).
+// Comparing limbs bitwise is wrong twice over: NaN == NaN would be true and
+// -0.0 == +0.0 false. libgcc's soft-fp helpers return an int whose sign encodes
+// the relation, and fold "unordered" into the value that makes the predicate
+// false (true for !=).
+fn emit_f128_cmp_x86(op: i64, lhs_lo: i64, lhs_hi: i64) with Mut, Panic, Div {
+    let rhs_lo = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let rhs_hi = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(rhs_lo)
+    emit_store_rdx_var(rhs_hi)
+    emit_f128_ensure_libgcc_x86()
     emit_load_var(lhs_lo)
-    em(0x4c); em(0x31); em(0xc0)
-    em(0x49); em(0x89); em(0xc2)
-    emit_load_var(lhs_hi)
-    em(0x4c); em(0x31); em(0xc8)
-    em(0x4c); em(0x09); em(0xd0)
-    em(0x48); em(0x85); em(0xc0)
-    if invert == 0 {
-        em(0x0f); em(0x94); em(0xc0)
-    } else {
-        em(0x0f); em(0x95); em(0xc0)
-    }
-    em(0x48); em(0x0f); em(0xb6); em(0xc0)
+    emit_load_rdx_var(lhs_hi)
+    emit_rax_rdx_to_xmm0_x86()
+    emit_load_var(rhs_lo)
+    emit_load_rdx_var(rhs_hi)
+    emit_rax_rdx_to_xmm1_x86()
+    var ptr_off: i64 = F128_RT_EQ_BSS_OFF
+    if op == 22 { ptr_off = F128_RT_NE_BSS_OFF }
+    if op == 23 { ptr_off = F128_RT_LT_BSS_OFF }
+    if op == 24 { ptr_off = F128_RT_GT_BSS_OFF }
+    if op == 25 { ptr_off = F128_RT_LE_BSS_OFF }
+    if op == 26 { ptr_off = F128_RT_GE_BSS_OFF }
+    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + ptr_off)
+    emit_call_rax_aligned_x86()
+    em(0x85); em(0xc0)                                // test eax, eax
+    if op == 21 { em(0x0f); em(0x94); em(0xc0) }      // sete al   (__eqtf2 == 0)
+    if op == 22 { em(0x0f); em(0x95); em(0xc0) }      // setne al  (__netf2 != 0)
+    if op == 23 { em(0x0f); em(0x9c); em(0xc0) }      // setl al   (__lttf2 < 0)
+    if op == 24 { em(0x0f); em(0x9f); em(0xc0) }      // setg al   (__gttf2 > 0)
+    if op == 25 { em(0x0f); em(0x9e); em(0xc0) }      // setle al  (__letf2 <= 0)
+    if op == 26 { em(0x0f); em(0x9d); em(0xc0) }      // setge al  (__getf2 >= 0)
+    em(0x48); em(0x0f); em(0xb6); em(0xc0)            // movzx rax, al
     EXPR_IS_F64 = 0
     EXPR_TY = 4
     EXPR_TY_HASH = 0
+}
+
+// Call argument bound to an `f128` parameter: widen an f64 value, refuse
+// anything else that is not already binary128, and pass both limbs (lo, hi)
+// as two ABI slots. Returns the number of ABI slots pushed.
+fn emit_push_f128_call_arg_x86(call_tok: i64) -> i64 with IO, Mut, Panic, Div {
+    emit_f128_rhs_widen_if_f64()
+    if EXPR_TY != 13 && (EXPR_TY != 0 || EXPR_TY_HASH != 0) {
+        tc_error_hard(call_tok, "f128 parameter requires an f128 or f64 argument")
+    }
+    em(0x50)  // push rax (lo limb)
+    em(0x52)  // push rdx (hi limb)
+    return 2
 }
 
 fn emit_push_expr_as_slice_arg_x86(call_tok: i64) with IO, Mut, Panic, Div {
@@ -12764,6 +12913,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_TY = 2
         // PR-7: track f64 literal for compile-time predicate checking
         LAST_IS_LITERAL_F64 = 1
+        LAST_F64_LIT_TOK = EP - 1
+        LAST_F64_LIT_CL = CL
         LAST_LITERAL_F64_INT = fl_int
         LAST_LITERAL_F64_FRAC = fl_frac
         LAST_LITERAL_F64_DENOM = fl_denom
@@ -13313,6 +13464,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            var f128_ti: i64 = 0
+            while f128_ti < n && f128_ti < 16 {
+                if elem_ty[f128_ti as usize] == 13 { tc_error_hard(EP - 1, "f128 tuple elements are not implemented") }
+                f128_ti = f128_ti + 1
+            }
             let tup_count = n
             var real_n = n
             if real_n > 16 { real_n = 16 }
@@ -13409,7 +13565,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
             em(0x48); em(0x0f); em(0xba); em(0xfa); em(63)
         } else if EXPR_IS_F64 == 1 {
             // f64 negate: flip sign bit (bit 63)
+            let neg_of_lit = LAST_IS_LITERAL_F64 == 1 && CL == LAST_F64_LIT_CL
             em(0x48); em(0x0f); em(0xba); em(0xf8); em(63)  // btc rax, 63
+            if neg_of_lit { LAST_F64_LIT_CL = CL }  // `-lit` is still that literal for exactness
         } else {
             em(0x48); em(0xf7); em(0xd8)  // neg rax
             // Track negation in literal value so compile-time refinement checks use -N not N
@@ -13845,6 +14003,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     var static_argc: i64 = 0
                     while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or()
+                        if EXPR_TY == 13 { tc_error_hard(EP - 1, "f128 method arguments are not implemented") }
                         materialize_aggregate_expr_x86()
                         em(0x50)
                         static_argc = static_argc + 1
@@ -14290,6 +14449,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print(EP); EP = EP + 1
                 } else {
                     compile_or()
+                    if EXPR_TY == 13 {
+                        tc_error_hard(name_tok, "printing f128 is not implemented; print `x as f64`")
+                    }
                     // See println's identical unwrap just below (issue #633):
                     // &str and bare string are ABI-identical, unwrap for
                     // dispatch only, no codegen change.
@@ -14316,6 +14478,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_print_nl()
                 } else {
                     compile_or()
+                    if EXPR_TY == 13 {
+                        tc_error_hard(name_tok, "printing f128 is not implemented; print `x as f64`")
+                    }
                     // Observation boundary: println of Unobserved<T> is IO that collapses uncertainty
                     if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                         tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -16444,6 +16609,43 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
+            // softfloat_f128 limb intrinsics. Madaros lowers these at the call
+            // site and their stdlib bodies are placeholders that return 0, so
+            // calling the bodies would hand back zeros for every f128 value.
+            // Lower them here the same way: to_lo = rax, to_hi = rdx,
+            // from_limbs(lo, hi) = rax:rdx.
+            if ident_fi >= 0 && (src_match(ns, ne - ns, "f128_to_lo") || src_match(ns, ne - ns, "f128_to_hi")) {
+                let limb_hi = src_match(ns, ne - ns, "f128_to_hi")
+                EP = EP + 1  // skip (
+                compile_or()
+                if EXPR_TY != 13 { tc_error_hard(name_tok, "f128_to_lo/f128_to_hi require an f128 argument") }
+                if limb_hi { em(0x48); em(0x89); em(0xd0) }  // mov rax, rdx
+                if TK[EP as usize] != 7 { tc_wrong_arity_hard(name_tok, 1, 2) }
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+                return
+            }
+            if ident_fi >= 0 && src_match(ns, ne - ns, "f128_from_limbs") {
+                EP = EP + 1  // skip (
+                compile_or()
+                if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(name_tok, "f128_from_limbs requires integer limbs") }
+                emit_push()
+                if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity_hard(name_tok, 2, 1) }
+                compile_or()
+                if EXPR_TY != 0 && EXPR_TY != 1 { tc_error_hard(name_tok, "f128_from_limbs requires integer limbs") }
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (hi)
+                em(0x58)                      // pop rax (lo)
+                if TK[EP as usize] != 7 { tc_wrong_arity_hard(name_tok, 2, 3) }
+                while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                EXPR_TY = 13
+                EXPR_TY_HASH = 0
+                EXPR_IS_F64 = 0
+                return
+            }
             // User function call
             let fi = ident_fi
             let call_vslot = var_find(ns, ne)
@@ -16488,7 +16690,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if (SCAN_TY == 0 || SCAN_TY == 2) && unit_call_arg_mismatch(SCAN_TY_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
                     tc_linear_violation(call_tok, "unit mismatch in call argument")
                 }
-                if (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
+                if (SCAN_TY == 13 || EXPR_TY == 13) && fi < 0 {
+                    tc_error_hard(call_tok, "f128 through a function value is not implemented")
+                }
+                if SCAN_TY == 13 {
+                    abi_argc = abi_argc + emit_push_f128_call_arg_x86(call_tok)
+                } else if EXPR_TY == 13 {
+                    tc_error_hard(call_tok, "f128 argument requires an f128 parameter")
+                }
+                if SCAN_TY != 13 && (SCAN_TY != 0 || SCAN_TY_HASH != 0) && call_arg_type_compatible(SCAN_TY, SCAN_TY_HASH, EXPR_TY, EXPR_TY_HASH) == false {
                     if type_has_knowledge(SCAN_TY, SCAN_TY_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(call_tok)
                     } else {
@@ -16542,7 +16752,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         VAR_MOVED[LAST_EXPR_VAR_IDX as usize] = 1
                     }
                 }
-                if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                if SCAN_TY == 13 {
+                    // both limbs already pushed above
+                } else if (fi >= 0 || (call_sig > 0 && call_is_closure == 0)) && type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                     emit_push_expr_as_slice_arg_x86(call_tok)
                     abi_argc = abi_argc + 2
                 } else {
@@ -17395,7 +17607,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             scan_type(tp)
             var cast_ty = SCAN_TY
             var cast_hash = SCAN_TY_HASH
-            if cast_ty == 0 && name_is_lower(tns, tne) {
+            if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
+                tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
             }
@@ -17410,6 +17624,22 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 if src_dim == 0 || cast_dim == 0 || src_dim != cast_dim {
                     tc_arity_error(tp, "incompatible unit dimensions")
                 }
+            }
+            if src_ty == 13 || cast_ty == 13 {
+                if src_ty == 13 && cast_ty == 13 {
+                    // identity
+                } else if src_ty == 13 && cast_ty == 2 && cast_hash == 0 {
+                    emit_narrow_f128_to_f64_x86()
+                } else if cast_ty == 13 && (src_ty == 2 || src_is_f64 == 1) && src_hash == 0 {
+                    emit_widen_f64_to_f128_x86()
+                } else {
+                    tc_error_hard(tp, "f128 casts are only implemented to and from f64")
+                }
+                EXPR_TY = cast_ty
+                EXPR_TY_HASH = 0
+                if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+                EP = SCAN_TY_NEXT
+                continue
             }
             if cast_ty == 1 && src_is_f64 == 1 {
                 em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
@@ -18284,6 +18514,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     var margc: i64 = 1
                     while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or()
+                        if EXPR_TY == 13 { tc_error_hard(EP - 1, "f128 method arguments are not implemented") }
                         materialize_aggregate_expr_x86()
                         em(0x50)
                         margc = margc + 1
@@ -21253,6 +21484,9 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
                 }
             }
             try_apply_call_arg_refinement(call_tok)
+            if SCAN_TY == 13 || EXPR_TY == 13 {
+                tc_error_hard(call_tok, "f128 kernel arguments are not implemented")
+            }
             if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                 emit_push_expr_as_slice_arg_x86(call_tok)
                 abi_argc = abi_argc + 2
@@ -21411,12 +21645,7 @@ fn compile_comparison() with IO, Mut, Panic, Div {
             if EXPR_TY != 0 && EXPR_TY != 13 {
                 tc_error_hard(op_tok, "comparison operands must have the same type")
             }
-            if op != 21 && op != 22 {
-                tc_error_hard(op_tok, "ordered comparison of f128 is not implemented")
-            }
-            var invert_eq: i64 = 0
-            if op == 22 { invert_eq = 1 }
-            emit_f128_eq_x86(lhs_lo_c, lhs_hi_c, invert_eq)
+            emit_f128_cmp_x86(op, lhs_lo_c, lhs_hi_c)
             return
         }
         emit_push()
@@ -21467,13 +21696,14 @@ fn compile_comparison() with IO, Mut, Panic, Div {
             em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc1)  // movq xmm0, rcx
             em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)  // movq xmm1, rax
             em(0x66); em(0x0f); em(0x2e); em(0xc1)            // ucomisd xmm0, xmm1
-            // Use unsigned conditional sets for FP comparison
-            if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al (==)
-            if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al (!=)
-            if op == 23 { em(0x0f); em(0x92); em(0xc0) }  // setb al (<)
-            if op == 24 { em(0x0f); em(0x97); em(0xc0) }  // seta al (>)
-            if op == 25 { em(0x0f); em(0x96); em(0xc0) }  // setbe al (<=)
-            if op == 26 { em(0x0f); em(0x93); em(0xc0) }  // setae al (>=)
+            // PF-aware IEEE 754 compares (#2389): mask with setpo (ordered) or
+            // fold setpe (unordered) into !=.
+            if op == 21 { em(0x0f); em(0x94); em(0xc0); em(0x0f); em(0x9b); em(0xc1); em(0x22); em(0xc1) }  // sete; setpo cl; and al,cl
+            if op == 22 { em(0x0f); em(0x95); em(0xc0); em(0x0f); em(0x9a); em(0xc1); em(0x0a); em(0xc1) }  // setne; setpe cl; or al,cl
+            if op == 23 { em(0x0f); em(0x92); em(0xc0); em(0x0f); em(0x9b); em(0xc1); em(0x22); em(0xc1) }  // setb; setpo cl; and al,cl
+            if op == 24 { em(0x0f); em(0x97); em(0xc0) }  // seta al (>) — already false on NaN
+            if op == 25 { em(0x0f); em(0x96); em(0xc0); em(0x0f); em(0x9b); em(0xc1); em(0x22); em(0xc1) }  // setbe; setpo cl; and al,cl
+            if op == 26 { em(0x0f); em(0x93); em(0xc0); em(0x0f); em(0x9b); em(0xc1); em(0x22); em(0xc1) }  // setae; setpo cl; and al,cl
         } else {
             em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
             if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
@@ -24618,11 +24848,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     decl_ty = 0
                     decl_ty_hash = 0
                 }
-                if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
-                    if src_match(ann_ns, ann_ne - ann_ns, "f256") == false {
-                        decl_ty = 2
-                        decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
-                    }
+                if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
+                    tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
+                    decl_ty = 2
+                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
                 }
                 if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     decl_ty = 2
@@ -25258,7 +25488,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 if VAR_MUT[ty_vi as usize] == 0 {
                     tc_error_hard(name_tok, "assignment to immutable binding requires var/Mut")
                 }
-                if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
+                if (VAR_TY[ty_vi as usize] == 13) != (rhs_ty == 13) && (rhs_ty != 0 || rhs_ty_hash != 0) {
+                    tc_error_hard(EP - 1, "assignment type mismatch")
+                } else if ty_eq(VAR_TY[ty_vi as usize], VAR_TY_HASH[ty_vi as usize], rhs_ty, rhs_ty_hash) == false {
                     tc_error(EP - 1, "assignment type mismatch")
                 }
                 // Linear reassignment: old value must be consumed before overwrite
@@ -25646,6 +25878,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             em(0x31); em(0xc0)
             EXPR_TY = 5
             EXPR_TY_HASH = 0
+        }
+        // binary128 return: widen an f64 value; never let a binary128 value
+        // through the numeric-coercion allowance below in either direction.
+        if CURRENT_RET_TY == 13 && (EXPR_TY == 2 || EXPR_IS_F64 == 1) {
+            emit_widen_f64_to_f128_x86()
+        }
+        if (CURRENT_RET_TY == 13) != (EXPR_TY == 13) && (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (EXPR_TY != 0 || EXPR_TY_HASH != 0) {
+            tc_error_hard(EP - 1, "return type does not match function signature")
         }
         if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, EXPR_TY, EXPR_TY_HASH) == false {
             // Allow numeric coercions (i32→i64, unit→f64, etc.)
@@ -30267,6 +30507,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if TK[p as usize] == 43 {
                             p = p + 1
                             scan_type(p)
+                            if SCAN_TY == 13 { tc_error_hard(p, "f128 struct fields are not implemented") }
                             ST_FTY[(si * 128 + ffi) as usize] = SCAN_TY
                             ST_FHASH[(si * 128 + ffi) as usize] = SCAN_TY_HASH
                             p = SCAN_TY_NEXT
@@ -30479,6 +30720,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     if type_is_struct_like(SCAN_TY, SCAN_TY_HASH) || knowledge_hash_is(SCAN_TY_HASH) {
                         scalar_bytes = struct_like_nslots(SCAN_TY_HASH) * 8
                     }
+                    if SCAN_TY == 13 { tc_error_hard(p, "f128 globals are not implemented") }
                     let gix = gl_add(gns, gne, scalar_bytes, 0)
                     if gix >= 0 {
                         GL_TY[gix as usize] = SCAN_TY
@@ -30552,6 +30794,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     F128_RT_MUL_BSS_OFF = bss_alloc_aligned(8)
     F128_RT_DIV_BSS_OFF = bss_alloc_aligned(8)
     F128_RT_EQ_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_NE_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_LT_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_LE_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_GT_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_GE_BSS_OFF = bss_alloc_aligned(8)
+    F128_RT_TRUNC_BSS_OFF = bss_alloc_aligned(8)
     F128_RT_EXTEND_BSS_OFF = bss_alloc_aligned(8)
     PTX_LEN = 0
     NEEDS_GPU_RUNTIME_DYNLINK = 0
@@ -31445,7 +31693,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
                         // fn-type parameters are always called with closure ABI (env_ptr in rdi)
                         if SCAN_TY == 9 { VAR_IS_CLOSURE[(VAR_COUNT - 1) as usize] = 1 }
-                        if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
+                        if SCAN_TY == 13 && FN_RECV_HASH[fn_idx as usize] != 0 {
+                            tc_error_hard(p, "f128 method parameters are not implemented")
+                        }
+                        if SCAN_TY == 13 {
+                            // binary128 param: lo limb in VAR_SLOT, hi limb in VAR_SLOT + 1
+                            // (the layout var_add_f128 gives a local).
+                            NEXT_SLOT = NEXT_SLOT + 1
+                            VAR_ESIZ[(VAR_COUNT - 1) as usize] = 16
+                        } else if type_is_slice_ref(SCAN_TY, SCAN_TY_HASH) {
                             let len_slot = VAR_SLOT[(VAR_COUNT - 1) as usize]
                             let ptr_slot = NEXT_SLOT
                             NEXT_SLOT = NEXT_SLOT + 1
@@ -31534,6 +31790,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             abi_arg_idx = abi_arg_idx + 1
             if type_is_slice_ref(VAR_TY[param_vi as usize], VAR_TY_HASH[param_vi as usize]) {
                 emit_store_incoming_arg_x86(abi_arg_idx, VAR_LEN_SLOT[param_vi as usize])
+                abi_arg_idx = abi_arg_idx + 1
+            } else if VAR_TY[param_vi as usize] == 13 {
+                emit_store_incoming_arg_x86(abi_arg_idx, VAR_SLOT[param_vi as usize] + 1)
                 abi_arg_idx = abi_arg_idx + 1
             }
             param_vi = param_vi + 1
@@ -31663,6 +31922,19 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             } else if LAST_STMT_HAS_VALUE == 0 {
                 em(0x31); em(0xc0)
             } else {
+                if CURRENT_RET_TY == 13 && LAST_STMT_TY == 2 {
+                    emit_widen_f64_to_f128_x86()
+                    LAST_STMT_TY = 13
+                    LAST_STMT_TY_HASH = 0
+                }
+                if (CURRENT_RET_TY == 13) != (LAST_STMT_TY == 13) && (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
+                    print("error[E218]: tail type mismatch at ")
+                    print_src_loc_for_tok(EP - 1)
+                    print(" (bundle line ")
+                    print_int(TL[(EP - 1) as usize])
+                    print(")\n")
+                    tc_mark_failed()
+                }
                 if ty_eq(CURRENT_RET_TY, CURRENT_RET_HASH, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
                     if (ty_is_numeric(CURRENT_RET_TY) && ty_is_numeric(LAST_STMT_TY)) == false {
                         if (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) && (LAST_STMT_TY != 0 || LAST_STMT_TY_HASH != 0) {
@@ -37230,7 +37502,9 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             scan_type(tp)
             var cast_ty = SCAN_TY
             var cast_hash = SCAN_TY_HASH
-            if cast_ty == 0 && name_is_lower(tns, tne) {
+            if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
+                tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
             }
@@ -39011,11 +39285,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     decl_ty = 0
                     decl_ty_hash = 0
                 }
-                if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
-                    if src_match(ann_ns, ann_ne - ann_ns, "f256") == false {
-                        decl_ty = 2
-                        decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
-                    }
+                if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
+                    tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
+                    decl_ty = 2
+                    decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
                 }
                 if decl_ty == 0 && decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
                     decl_ty = 2
@@ -42022,6 +42296,10 @@ fn append_native_prelude() with Mut, Panic, Div {
     // "0.000000".
     append_src_lit("fn __native_print_f64_n(x: f64, decimals: i64) with IO, Mut, Panic, Div {\n")
     append_src_lit("    if x != x { print(\"nan\"); return }\n")
+    append_src_lit("    if x * 0.0 != 0.0 {\n")
+    append_src_lit("        if x < 0.0 { print(\"-inf\") } else { print(\"inf\") }\n")
+    append_src_lit("        return\n")
+    append_src_lit("    }\n")
     append_src_lit("    var d = decimals\n")
     append_src_lit("    if d < 0 { d = 0 }\n")
     append_src_lit("    if d > 12 { d = 12 }\n")
