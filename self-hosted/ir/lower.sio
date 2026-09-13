@@ -6761,6 +6761,15 @@ fn lower_expr_is_f64_array_literal_ref(e: &Expr) -> bool with Mut, Panic, Div {
 
 fn lower_struct_field_float_kind_ref(e: &Expr) -> i64 with Mut, Panic, Div {
     if lower_expr_is_f64_array_literal_ref(e) { return 2 }
+    // Comparisons and boolean connectives yield bool (i64 0/1), never an f64
+    // field slot — even when operands are float (`2.0 > 0.0`). Treating the
+    // subtree as float here reclassified declared `bool` fields to is_float=1,
+    // so later field_get stamped IR_FLOAT_REG_MARKER_FLAG and `p.a && p.b`
+    // became a float binop that native-v2 refuses (KL-12 thinlink rc=12).
+    if (*e).kind == ExprKind::ExprBinary {
+        if lower_binary_op_is_compare((*e).bin_op) { return 0 }
+        if (*e).bin_op == BinaryOp::OpAnd || (*e).bin_op == BinaryOp::OpOr { return 0 }
+    }
     if lower_expr_has_float_source_ref(e) { return 1 }
     0
 }
@@ -15036,7 +15045,13 @@ impl Lowerer {
                                         // V0-E.5.7: same for `arr: [f128; N]` — a `[1.0; N]` /
                                         // `[a, b]` initialiser must not stamp is_float=2
                                         // (array of f64) on a handle-slot array field.
-                                        if !ir_name_eq(ir_name_at((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].named_type_name_id), make_name("f128"))
+                                        // KL-12: declared bool/integer (is_float=3) and
+                                        // pointer-like (is_float=4) slots must not be
+                                        // greenwashed to float from a float-operand
+                                        // expression in field position.
+                                        let existing_kind = (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float
+                                        if existing_kind != 3 && existing_kind != 4
+                                            && !ir_name_eq(ir_name_at((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].named_type_name_id), make_name("f128"))
                                             && !ir_name_eq(ir_name_at((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].elem_type_name_id), make_name("f128")) {
                                             (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float = literal_float_kind
                                         }
