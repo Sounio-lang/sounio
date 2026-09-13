@@ -5106,6 +5106,25 @@ fn tc_rust_attribute_lex(line: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// E260: compound assignment (`+=` `-=` `*=` `/=` `%=` `&=` `|=` `^=` `<<=` `>>=`).
+// `tok` is the operator token; its `=` is the next source byte. Sets TYPECHECK_FAILED
+// directly, like tc_unbalanced_braces: this runs during lexing, and tc_mark_failed's
+// imported-fn exemption must not be able to swallow it.
+fn tc_compound_assign_lex(tok: i64) with IO, Mut, Panic {
+    print("error[E260]: compound assignment `")
+    var ci: i64 = TS[tok as usize]
+    while ci < TE[tok as usize] { print_char(SRC[ci as usize] as i64); ci = ci + 1 }
+    print("=` is not supported by lean_single at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n  help: write it out, e.g. `x = x ")
+    ci = TS[tok as usize]
+    while ci < TE[tok as usize] { print_char(SRC[ci as usize] as i64); ci = ci + 1 }
+    print(" (e)`\n")
+    TYPECHECK_FAILED = 1
+}
+
 fn tc_rust_macro(tok: i64) with IO, Mut, Panic {
     print("error[E043]: Sounio does not use Rust macros (ident!()) at line ")
     print_int(TL[tok as usize])
@@ -7529,6 +7548,32 @@ fn lex_all() with IO, Mut, Panic, Div {
         if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 52; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 38 && p + 1 < SRC_LEN && sb(p + 1) == 38 { TK[TC as usize] = 30; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 124 && p + 1 < SRC_LEN && sb(p + 1) == 124 { TK[TC as usize] = 31; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
+        // Compound assignment (E260). lean_single has no `op=` statement form: `x += e`
+        // used to lex as `x` `+` `=` `e`, fall through compile_stmt to the expression-
+        // statement arm, and compile as a discarded expression -- `x` unchanged, no
+        // diagnostic. Refuse it here, where both backends share one token stream. The
+        // operator token is still emitted (and `=` lexed as before) so parsing proceeds
+        // exactly as it did; the typecheck gate in compile_all / compile_all_arm64 then
+        // refuses to write the binary.
+        if (c == 60 || c == 62) && p + 2 < SRC_LEN && sb(p + 1) == c && sb(p + 2) == 61 {
+            if c == 62 { TK[TC as usize] = 39 } else { TK[TC as usize] = 40 }
+            TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2
+            tc_compound_assign_lex(TC - 1)
+            continue
+        }
+        if p + 1 < SRC_LEN && sb(p + 1) == 61 && (c == 43 || c == 45 || c == 42 || c == 47 || c == 37 || c == 38 || c == 124 || c == 94) {
+            var cak: i64 = 17
+            if c == 45 { cak = 18 }
+            if c == 42 { cak = 19 }
+            if c == 47 { cak = 20 }
+            if c == 37 { cak = 29 }
+            if c == 38 { cak = 44 }
+            if c == 124 { cak = 45 }
+            if c == 94 { cak = 56 }
+            TK[TC as usize] = cak; TS[TC as usize] = p; TE[TC as usize] = p + 1; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 1
+            tc_compound_assign_lex(TC - 1)
+            continue
+        }
         if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 39; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 60 { TK[TC as usize] = 40; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         // Rust attribute rejection: #[
