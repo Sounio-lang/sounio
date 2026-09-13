@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-12 | thin-link `rc=12` probes | madaros |
+| KL-12 | thin-link `rc=12` (bool-cmp closed; zero-prov open) | madaros |
 | KL-13 | derived units, unit loss at call boundary (#2388) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
@@ -88,16 +88,19 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-12 — thin-link `rc=12`
 
-- Engine: `madaros` native-v2. Two fail-closed probes:
-  `tests/known_failures/thinlink_bool_cmp_field_probe.sio` (`Pair { a: 2.0 >
-  0.0, b: 3.0 > 0.0 }`, ~3 fn) and
-  `tests/known_failures/zero_provenance_native_v2_probe.sio`
-  (sedenion + `eisa::core_v2`, ~111 fn). Both stop in
+- **Bool-cmp-in-field (closed):** Madaros native-v2 now accepts
+  `Pair { a: 2.0 > 0.0, b: 3.0 > 0.0 }`. Root cause was
+  `ensure_struct_literal_layout_ref` / `lower_struct_field_float_kind_ref`
+  stamping `is_float=1` on declared bool slots from float-operand
+  comparisons, so later `field_get` + `&&` looked like float ops.
+  Pin: `tests/run-pass/thinlink_bool_cmp_field.sio`,
+  `scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh`. BLK
+  `docs/handoff/BLK-20260805-thinlink-ir-threshold.md` marked closed.
+- **Still open:** `tests/known_failures/zero_provenance_native_v2_probe.sio`
+  (sedenion + `eisa::core_v2`, ~111 fn) still fail-closes in
   `compile_ir_function_v2_from_ir_into` (`codegen_x86_linux.sio:12515-12541`)
-  with `NV2_IR unsupported fn=` and no opcode named.
-- Pin: `scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh`,
-  `scripts/ci/madaros_zero_provenance_failclosed_gate.sh`. BLKs:
-  `docs/handoff/BLK-20260805-thinlink-ir-threshold.md`,
+  with `NV2_IR unsupported fn=` and no opcode named. Pin:
+  `scripts/ci/madaros_zero_provenance_failclosed_gate.sh`. BLK:
   `docs/handoff/BLK-20260805-p0b-zero-provenance.md`. The compact
   zero-provenance smoke (`zero_provenance_native_v2_smoke.sio`) is a
   distinct, smaller CU — do not cite it for the combined import.
