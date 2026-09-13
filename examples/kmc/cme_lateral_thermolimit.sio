@@ -42,11 +42,39 @@
 //      theta_infinity approximated the way finite-size thermodynamics
 //      always is: (K/(N*h)) * (Z_N(K+h) - Z_N(K-h)) / Z_N(K).
 //
-// AND A THIRD CHECK TYING THIS FILE TO THE EXACT ONE: the same trace-based
-// method run at the SMALL N already solved exactly (9 and 10) should
-// reproduce those decimals to floating precision. If it does not, the
-// transfer-matrix construction itself is wrong, independent of any
-// large-N or thermodynamic-limit question.
+// A THIRD CHECK USED TO LIVE HERE AND WAS WRONG. It ran the trace method at
+// N=9 and N=10 and required the answer to reproduce cme_lateral_crt.sio's
+// exact coverages (0.287876, 0.263568) to a thousandth. It could never
+// pass, and the reason is not arithmetic: this file's transfer matrix sums
+// over ALL 2^N ring configurations, while those exact numbers are averages
+// over only the configurations KMC can reach from a clean surface --
+// the Q=0 class, which at N=10 is 252 states out of 1024. Two different
+// ensembles, agreeing only in the N -> infinity limit. Gating on their
+// finite-N agreement was a category error that reported FAILED on a file
+// whose actual computation was correct.
+//
+// What replaces it is a check of a claim that IS this file's own: the
+// unrestricted ensemble converges EXPONENTIALLY in N, because a 1D system
+// away from criticality has a transfer matrix with a gap, and corrections
+// to Tr(T^N) go as |lambda2/lambda1|^N. The run computes that ratio (about
+// 0.13) and requires both that it predicts a sub-1e-6 correction by N=9 AND
+// that theta at N=9 and N=10 actually equals theta at N=300 to that
+// precision. The threshold is derived from the spectrum, not picked to pass.
+//
+// Said plainly, so this gate is not mistaken for more than it is: it does
+// NOT test that T encodes the right Boltzmann weights -- routes 1 and 2
+// below both start from the same T, and so does the convergence check.
+// That validation lives in cme_lateral_reachable_thermolimit.sio, which
+// uses the identical T(a,b) = K^(a/2) * w^(a*b) and reproduces the exact
+// rational coverages at N=8 and N=10 to six decimals.
+//
+// The comparison against the exact class averages belongs to
+// cme_lateral_reachable_thermolimit.sio, which computes the RESTRICTED
+// ensemble with a Q-bookkeeping transfer matrix, reproduces 0.256793 and
+// 0.263568 exactly at N=8 and N=10, and shows that restricted ensemble
+// converging to the same theta_infinity this file computes -- as ~1/N
+// rather than exponentially, which is why the two disagree so visibly at
+// small even N.
 
 fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
@@ -65,6 +93,14 @@ fn lambda_max_of(k: f64, w: f64) -> f64 with Mut, Div, Panic {
     let det = u * (w - 1.0)
     let disc = tr * tr - 4.0 * det
     (tr + sqrt_newton(disc)) / 2.0
+}
+
+fn lambda_min_of(k: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let u = sqrt_newton(k)
+    let tr = 1.0 + u * w
+    let det = u * (w - 1.0)
+    let disc = tr * tr - 4.0 * det
+    (tr - sqrt_newton(disc)) / 2.0
 }
 
 // Z_N(K) via N explicit 2x2 multiplications -- shares no code with the
@@ -110,26 +146,35 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let w: f64 = 0.5
     let h: f64 = 0.000001
 
-    println("-- cross-check: does the transfer matrix reproduce the exact")
-    println("   finite-N results already solved by linear algebra? --")
+    println("-- the unrestricted ensemble converges exponentially in N --")
     // n_sites, not class size: the ring has 9 (or 10) SITES, whatever the
     // reachable-class size (256, 252) happened to be in the exact solve.
-    // Those two numbers look similar enough in this file's own comments that
-    // they got swapped on the first attempt -- caught only because the
-    // anti-vacuity threshold below refused to call 0.024 close enough.
+    // Those two numbers got swapped on the first attempt at this file.
     let th9 = theta_from_trace(k0, w, 9, h)
     let th10 = theta_from_trace(k0, w, 10, h)
-    print("  N=9  transfer-matrix theta = ") print_f64(th9)
-    print("   exact (cme_lateral_crt.sio) = 0.287876")
-    print("   diff = ") print_f64(abs_f(th9 - 0.287876)) println("")
-    print("  N=10 transfer-matrix theta = ") print_f64(th10)
-    print("   exact (cme_lateral_crt.sio) = 0.263568")
-    print("   diff = ") print_f64(abs_f(th10 - 0.263568)) println("")
+    let th300 = theta_from_trace(k0, w, 300, h)
+    print("  N=9    theta = ") print_f64(th9)
+    print("   |N=9 - N=300| = ") print_f64(abs_f(th9 - th300)) println("")
+    print("  N=10   theta = ") print_f64(th10)
+    print("   |N=10 - N=300| = ") print_f64(abs_f(th10 - th300)) println("")
+    print("  N=300  theta = ") print_f64(th300) println("")
+    // The threshold is justified by the spectrum, computed here rather than
+    // by hand: finite-size corrections to Tr(T^N) go as |lambda2/lambda1|^N.
+    let gap_ratio = abs_f(lambda_min_of(k0, w) / lambda_max_of(k0, w))
+    var gp: f64 = 1.0
+    var gi: i64 = 0
+    while gi < 9 { gp = gp * gap_ratio  gi = gi + 1 }
+    print("  |lambda2/lambda1| = ") print_f64(gap_ratio)
+    print("   so the N=9 correction scale is ~") print_f64(gp * 1000000.0) println(" x 1e-6")
+    let expo_converged = abs_f(th9 - th300) < 0.000001 && abs_f(th10 - th300) < 0.000001 && gp < 0.000001
+    print("  converged to 1e-6 by N=9: ")
+    if expo_converged { println("yes") } else { println("NO") }
     println("")
-    println("(N above is the TRANSFER-MATRIX RING LENGTH, not the class size --")
-    println("this is deliberately the same finite-difference machinery used for")
-    println("the N->infinity estimate below, just evaluated at a length already")
-    println("solved exactly, as the check that the construction itself is right.)")
+    println("  These are NOT comparable to cme_lateral_crt.sio's exact N=9/N=10")
+    println("  coverages (0.287876, 0.263568): those average over the Q=0 class KMC")
+    println("  can reach, this sums over all 2^N configurations. The restricted")
+    println("  ensemble is computed, and matched exactly, in")
+    println("  cme_lateral_reachable_thermolimit.sio.")
     println("")
 
     let lp = lambda_max_of(k0 + h, w)
@@ -168,7 +213,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print_f64((mf - theta_eigen) / theta_eigen * 100.0)
     println("%")
     println("")
-    println("for reference, the exact finite-ring table:")
+    println("for reference, the exact finite-ring table over the KMC-REACHABLE class")
+    println("(cme_lateral_crt.sio -- a different ensemble at finite N, same limit):")
     println("  N= 5  0.295720   -16.581%")
     println("  N= 7  0.288808   -14.585%")
     println("  N= 9  0.287876   -14.308%   odd branch, already close to the limit")
@@ -176,7 +222,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("  N=10  0.263568    -6.405%   even branch, still climbing toward it")
     println("")
 
-    if abs_f(th9 - 0.287876) < 0.001 && abs_f(th10 - 0.263568) < 0.001 && agree {
+    if expo_converged && agree {
         println("M3E_THERMODYNAMIC_LIMIT_OK")
     } else {
         println("M3E_THERMODYNAMIC_LIMIT_FAILED")
