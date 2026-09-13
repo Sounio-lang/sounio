@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# E3 waiver gate: combined sedenion+eisa zero-provenance is fail-closed under
-# stock Madaros (thin-link rc=12, no segfault) and green under lean_single.
+# KL-12: combined sedenion+eisa::core_v2 zero-provenance is Madaros-green.
+# Script name kept for frozen gate-list stability; semantics flipped from
+# fail-closed waiver to PASS after the bool-cmp-in-field layout fix.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 SOUC="${SOUC:-$ROOT/bin/souc}"
-SRC="tests/known_failures/zero_provenance_native_v2_probe.sio"
+SRC="tests/run-pass/zero_provenance_native_v2_combined.sio"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
 echo "== madaros_zero_provenance_failclosed_gate =="
@@ -16,23 +17,23 @@ set +e
 "$SOUC" run "$SRC" >"$OUT/madaros.log" 2>&1
 MRC=$?
 set -e
-if [[ "$MRC" -eq 0 ]]; then
-  echo "FAIL: Madaros unexpectedly succeeded; promote path needs a green gate, not failclosed"
-  cat "$OUT/madaros.log" || true
-  exit 1
-fi
-grep -Fq 'Failed to write native binary' "$OUT/madaros.log" || {
-  echo "FAIL: missing fail-closed native emit marker"
+[[ "$MRC" -eq 0 ]] || {
+  echo "FAIL: Madaros combined zero-provenance rc=$MRC"
   cat "$OUT/madaros.log" || true
   exit 1
 }
-if grep -Fq 'Segmentation fault' "$OUT/madaros.log"; then
-  echo "FAIL: segfault (not an allowed fail-closed mode)"
+grep -Fq 'ZERO_PROVENANCE PASS' "$OUT/madaros.log" || {
+  echo "FAIL: Madaros missing ZERO_PROVENANCE PASS"
+  cat "$OUT/madaros.log" || true
+  exit 1
+}
+if grep -Fq 'Failed to write native binary' "$OUT/madaros.log"; then
+  echo "FAIL: Madaros still fail-closed on native emit (rc=12 regression)"
   cat "$OUT/madaros.log" || true
   exit 1
 fi
-if grep -Fq 'ZERO_PROVENANCE PASS' "$OUT/madaros.log"; then
-  echo "FAIL: Madaros printed PASS while rc!=0"
+if grep -Fq 'Segmentation fault' "$OUT/madaros.log"; then
+  echo "FAIL: segfault"
   cat "$OUT/madaros.log" || true
   exit 1
 fi
