@@ -1,0 +1,1425 @@
+//! Sounio-first admission of sealed XOR material-parity receipts.
+//!
+//! Material producers own observations. This module owns only the typed
+//! admission rules and refuses to infer unnamed node coverage or cost.
+
+use hardware::pireus::xor_lowering_legality::{
+    PIREUS_XOR_LOWERING_OK,
+    pireus_xor_lowering_evaluate,
+    pireus_xor_lowering_matches_frozen_semantics,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_XOR_ADMISSION_NODE_COUNT: i64 = 5
+pub const PIREUS_XOR_ADMISSION_TARGET_COUNT: i64 = 3
+
+pub const PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON: i64 = 1
+pub const PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON: i64 = 2
+pub const PIREUS_XOR_ADMISSION_TARGET_DGX: i64 = 3
+
+pub const PIREUS_XOR_ADMISSION_NODE_UNRESOLVED: i64 = 0
+pub const PIREUS_XOR_ADMISSION_NODE_ADMITTED: i64 = 1
+pub const PIREUS_XOR_ADMISSION_NODE_REFUSED: i64 = 2
+
+pub const PIREUS_XOR_ADMISSION_ENCODING_UNCOMPARED: i64 = 0
+pub const PIREUS_XOR_ADMISSION_ENCODING_EQUAL: i64 = 1
+pub const PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT: i64 = 2
+
+pub const PIREUS_XOR_ADMISSION_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_XOR_ADMISSION_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_XOR_ADMISSION_STAGE_PARITY_OPEN: i64 = 4
+
+pub const PIREUS_XOR_ADMISSION_OK: i64 = 0
+pub const PIREUS_XOR_ADMISSION_ERR_PARENT: i64 = 1
+pub const PIREUS_XOR_ADMISSION_ERR_RECEIPT: i64 = 2
+pub const PIREUS_XOR_ADMISSION_ERR_COVERAGE: i64 = 3
+pub const PIREUS_XOR_ADMISSION_ERR_AUTHORITY: i64 = 4
+
+const PIREUS_XOR_ADMISSION_BINDING_OK: i64 = 0
+const PIREUS_XOR_ADMISSION_BINDING_RECEIPT: i64 = 1
+const PIREUS_XOR_ADMISSION_BINDING_EVIDENCE: i64 = 2
+const PIREUS_XOR_ADMISSION_BINDING_PARENT: i64 = 3
+const PIREUS_XOR_ADMISSION_BINDING_COMMAND: i64 = 4
+
+pub struct PireusXorAdmissionDigest {
+    pub words: [i64; 8],
+}
+
+struct PireusXorAdmissionLoweringAuthority {
+    live: bool,
+    semantic_authorized: [bool; 5],
+}
+
+pub struct PireusXorAdmissionParents {
+    pub garden_commit_sha1: [i64; 5],
+    pub binding_digest: PireusXorAdmissionDigest,
+    pub lowering_live_match: bool,
+    pub valid: bool,
+}
+
+pub struct PireusXorMaterialFilePaths {
+    pub darwin_receipt: string,
+    pub darwin_evidence: string,
+    pub apple_receipt: string,
+    pub apple_evidence: string,
+    pub dgx_receipt: string,
+    pub dgx_evidence: string,
+}
+
+pub struct PireusXorMaterialReceiptInput {
+    pub target_id: i64,
+    pub binding_target_id: i64,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub receipt_stage: i64,
+    pub parity_receipt_valid: bool,
+    pub claim_ready: bool,
+    pub binding_error: i64,
+    pub explicit_node_evidence: [bool; 5],
+    pub sufficient_node_evidence: [bool; 5],
+    pub unnamed_resolved_node_count: i64,
+    pub payload_exact: bool,
+    pub operand_encoding_status: i64,
+    pub static_selector_sites: i64,
+    pub secondary_selector_sites: i64,
+    pub result_pass: bool,
+    pub result_reproducible: bool,
+    pub binary_reproducible: bool,
+}
+
+pub struct PireusXorMaterialAdmissionRecord {
+    pub target_id: i64,
+    pub binding_error: i64,
+    pub receipt_admitted: bool,
+    pub coordinate_exact: bool,
+    pub payload_exact: bool,
+    pub output_exact: bool,
+    pub node_status: [i64; 5],
+    pub admitted_node_count: i64,
+    pub unresolved_node_count: i64,
+    pub refused_node_count: i64,
+    pub unnamed_resolved_node_count: i64,
+    pub whole_operation_covered: bool,
+    pub operand_encoding_status: i64,
+    pub static_selector_sites: i64,
+    pub secondary_selector_sites: i64,
+    pub result_reproducible: bool,
+    pub binary_reproducible: bool,
+}
+
+pub struct PireusXorAdmissionNegatives {
+    pub missing_garden_binding: bool,
+    pub mismatched_lowering_parent: bool,
+    pub missing_lowering_live_match: bool,
+    pub mismatched_receipt_hash: bool,
+    pub mismatched_evidence_hash: bool,
+    pub mismatched_semantic_parent: bool,
+    pub wrong_producer_role: bool,
+    pub wrong_receipt_stage: bool,
+    pub invalid_parity_receipt: bool,
+    pub zero_command_binding: bool,
+    pub coordinate_mismatch: bool,
+    pub unchecked_payload_promotion: bool,
+    pub unnamed_node_inference: bool,
+    pub selector_to_whole_promotion: bool,
+    pub static_site_to_cost_promotion: bool,
+    pub encoding_equality_promotion: bool,
+    pub cross_isa_promotion: bool,
+    pub target_receipt_transplant: bool,
+    pub transform_promotion: bool,
+    pub review_promotion: bool,
+    pub parity_before_freeze: bool,
+    pub claim_ready_promotion: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusXorSelectorAdmissionResult {
+    pub valid: bool,
+    pub error: i64,
+    pub parents: PireusXorAdmissionParents,
+    pub darwin: PireusXorMaterialAdmissionRecord,
+    pub apple: PireusXorMaterialAdmissionRecord,
+    pub dgx: PireusXorMaterialAdmissionRecord,
+    pub receipt_count: i64,
+    pub material_file_match_mask: i64,
+    pub material_file_match_count: i64,
+    pub material_files_valid: bool,
+    pub admitted_receipt_count: i64,
+    pub admitted_node_count: i64,
+    pub unresolved_node_count: i64,
+    pub refused_node_count: i64,
+    pub selector_target_count: i64,
+    pub whole_operation_target_count: i64,
+    pub incomplete_target_count: i64,
+    pub unnamed_node_claim_count: i64,
+    pub encoding_difference_count: i64,
+    pub material_observation_count: i64,
+    pub compiler_emission_observation_count: i64,
+    pub cost_record_count: i64,
+    pub generic_instruction_cost: bool,
+    pub cross_isa_equivalence: bool,
+    pub transform_authorized: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub admission_digest: PireusXorAdmissionDigest,
+    pub negatives: PireusXorAdmissionNegatives,
+    pub failures: i64,
+}
+
+fn pxa_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxa_hash_nonzero(value: &[i64; 8]) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if value[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn pxa_commit_equal(left: &[i64; 5], right: &[i64; 5]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 5 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn pxa_expected_garden_commit() -> [i64; 5] {
+    [0xb5311535, 0x8687f2d6, 0x60d3bc55, 0x96f07a37, 0xaa4929fb]
+}
+
+fn pxa_garden_source_hash() -> [i64; 8] {
+    [
+        0x68b28449, 0x34cc1e75, 0x44794dd5, 0xfdb35d56,
+        0x387a58ad, 0x2a536075, 0xd81a6378, 0xfeda34fe
+    ]
+}
+
+fn pxa_lowering_source_hash() -> [i64; 8] {
+    [
+        0x7087649a, 0x5cfdb41a, 0x884aa9a2, 0xe1b0b64b,
+        0xbe2d25da, 0x3ca3cd1d, 0x54d5b704, 0x29854edb
+    ]
+}
+
+fn pxa_lowering_semantics_hash() -> [i64; 8] {
+    [
+        0x9e92f256, 0xc25a7749, 0x79a1b02c, 0xb10d5d39,
+        0xa1ae702c, 0xcec3a273, 0x044f9193, 0x0f03a970
+    ]
+}
+
+fn pxa_lowering_receipt_hash() -> [i64; 8] {
+    [
+        0xdaef832e, 0xe6370b65, 0x6e93ae84, 0xc76ba6d1,
+        0x7c98aaf5, 0xad1dd866, 0x74dee27b, 0xa0f84346
+    ]
+}
+
+fn pxa_darwin_receipt_hash() -> [i64; 8] {
+    [
+        0x342d8ba8, 0x808c2a92, 0x6bb2bbf0, 0xc09488f7,
+        0xb8499672, 0x39c93268, 0x7952ec6a, 0xe789a906
+    ]
+}
+
+fn pxa_darwin_evidence_hash() -> [i64; 8] {
+    [
+        0xee37914b, 0xc738eb82, 0x9f358924, 0x9f228e4a,
+        0x8312310f, 0xbffa0b00, 0x636cd0c9, 0xed9a40d1
+    ]
+}
+
+fn pxa_apple_receipt_hash() -> [i64; 8] {
+    [
+        0xc00a3d4e, 0x55668882, 0x9efadbbf, 0x640ea858,
+        0xcfe9520d, 0xc04103fa, 0x745cf1a8, 0x101f7840
+    ]
+}
+
+fn pxa_apple_evidence_hash() -> [i64; 8] {
+    [
+        0x2877bfd4, 0x63b4d28d, 0xc3311b75, 0xc69bec2a,
+        0xa1c62b43, 0x0d083149, 0x89187d44, 0xb32a781e
+    ]
+}
+
+fn pxa_dgx_receipt_hash() -> [i64; 8] {
+    [
+        0x3c10882e, 0xff43d3b1, 0x97428839, 0x996c7a04,
+        0xc009c8f5, 0x37d0c145, 0x1bdf3e8a, 0x13e2f385
+    ]
+}
+
+fn pxa_dgx_evidence_hash() -> [i64; 8] {
+    [
+        0x2c6b6e44, 0x8265a556, 0x6d17df9a, 0x674246ea,
+        0x62c05210, 0xe432e48e, 0x418d1635, 0x8496853b
+    ]
+}
+
+fn pxa_parent_binding_valid(
+    commit: &[i64; 5],
+    binding_digest: &PireusXorAdmissionDigest,
+    lowering_live: bool,
+) -> bool
+with Mut, Panic, Div {
+    let expected_commit = pxa_expected_garden_commit()
+    let expected_digest = pxa_parent_bindings_digest()
+    pxa_commit_equal(commit, &expected_commit) &&
+        pxa_hash_equal(&binding_digest.words, &expected_digest.words) &&
+        lowering_live
+}
+
+fn pxa_binding_error(receipt_match: bool, evidence_match: bool) -> i64 {
+    if !receipt_match { return PIREUS_XOR_ADMISSION_BINDING_RECEIPT }
+    if !evidence_match { return PIREUS_XOR_ADMISSION_BINDING_EVIDENCE }
+    PIREUS_XOR_ADMISSION_BINDING_OK
+}
+
+fn pxa_darwin_receipt(
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialReceiptInput {
+    PireusXorMaterialReceiptInput {
+        target_id: PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON,
+        binding_target_id: PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON,
+        producer_language: PIREUS_XOR_ADMISSION_LANGUAGE_CPP,
+        producer_role: PIREUS_XOR_ADMISSION_ROLE_MATERIAL_PARITY,
+        receipt_stage: PIREUS_XOR_ADMISSION_STAGE_PARITY_OPEN,
+        parity_receipt_valid: true,
+        claim_ready: false,
+        binding_error: pxa_binding_error(receipt_match, evidence_match),
+        explicit_node_evidence: [true, true, true, true, true],
+        sufficient_node_evidence: [true, true, true, true, true],
+        unnamed_resolved_node_count: 0,
+        payload_exact: false,
+        operand_encoding_status: PIREUS_XOR_ADMISSION_ENCODING_UNCOMPARED,
+        static_selector_sites: 3,
+        secondary_selector_sites: 0,
+        result_pass: true,
+        result_reproducible: true,
+        binary_reproducible: true,
+    }
+}
+
+fn pxa_apple_semantics_hash() -> [i64; 8] {
+    [
+        0x377aed20, 0xffd302ae, 0xb3ff71f6, 0x609643f1,
+        0x7d2a9983, 0x129e319d, 0x5545b81c, 0x589dc3e6
+    ]
+}
+
+fn pxa_apple_receipt(
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialReceiptInput {
+    PireusXorMaterialReceiptInput {
+        target_id: PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON,
+        binding_target_id: PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON,
+        producer_language: PIREUS_XOR_ADMISSION_LANGUAGE_CPP,
+        producer_role: PIREUS_XOR_ADMISSION_ROLE_MATERIAL_PARITY,
+        receipt_stage: PIREUS_XOR_ADMISSION_STAGE_PARITY_OPEN,
+        parity_receipt_valid: true,
+        claim_ready: false,
+        binding_error: pxa_binding_error(receipt_match, evidence_match),
+        explicit_node_evidence: [true, false, false, false, false],
+        sufficient_node_evidence: [true, false, false, false, false],
+        unnamed_resolved_node_count: 0,
+        payload_exact: true,
+        operand_encoding_status: PIREUS_XOR_ADMISSION_ENCODING_UNCOMPARED,
+        static_selector_sites: 1,
+        secondary_selector_sites: 0,
+        result_pass: true,
+        result_reproducible: true,
+        binary_reproducible: true,
+    }
+}
+
+fn pxa_dgx_semantics_hash() -> [i64; 8] {
+    [
+        0xa163f592, 0x4428de0f, 0x8f2a33a5, 0x4ea864d8,
+        0x2bfab753, 0xcf80dc04, 0xb8c9698c, 0x4a225336
+    ]
+}
+
+fn pxa_dgx_receipt(
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialReceiptInput {
+    PireusXorMaterialReceiptInput {
+        target_id: PIREUS_XOR_ADMISSION_TARGET_DGX,
+        binding_target_id: PIREUS_XOR_ADMISSION_TARGET_DGX,
+        producer_language: PIREUS_XOR_ADMISSION_LANGUAGE_CPP,
+        producer_role: PIREUS_XOR_ADMISSION_ROLE_MATERIAL_PARITY,
+        receipt_stage: PIREUS_XOR_ADMISSION_STAGE_PARITY_OPEN,
+        parity_receipt_valid: true,
+        claim_ready: false,
+        binding_error: pxa_binding_error(receipt_match, evidence_match),
+        explicit_node_evidence: [true, false, false, false, false],
+        sufficient_node_evidence: [true, false, false, false, false],
+        unnamed_resolved_node_count: 1,
+        payload_exact: true,
+        operand_encoding_status: PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT,
+        static_selector_sites: 32,
+        secondary_selector_sites: 32,
+        result_pass: true,
+        result_reproducible: true,
+        binary_reproducible: false,
+    }
+}
+
+fn pxa_receipt_identity_valid(receipt: &PireusXorMaterialReceiptInput) -> bool
+{
+    let known_target =
+        receipt.target_id == PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON ||
+        receipt.target_id == PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON ||
+        receipt.target_id == PIREUS_XOR_ADMISSION_TARGET_DGX
+    known_target && receipt.target_id == receipt.binding_target_id &&
+        receipt.binding_error == PIREUS_XOR_ADMISSION_BINDING_OK
+}
+
+fn pxa_coordinate_exact(receipt: &PireusXorMaterialReceiptInput) -> bool {
+    receipt.explicit_node_evidence[0] && receipt.sufficient_node_evidence[0]
+}
+
+fn pxa_payload_exact(receipt: &PireusXorMaterialReceiptInput) -> bool {
+    receipt.payload_exact
+}
+
+fn pxa_output_exact(receipt: &PireusXorMaterialReceiptInput) -> bool {
+    receipt.sufficient_node_evidence[4]
+}
+
+fn pxa_receipt_core_valid(receipt: &PireusXorMaterialReceiptInput) -> bool
+with Mut, Panic {
+    pxa_receipt_identity_valid(receipt) &&
+        receipt.producer_language == PIREUS_XOR_ADMISSION_LANGUAGE_CPP &&
+        receipt.producer_role == PIREUS_XOR_ADMISSION_ROLE_MATERIAL_PARITY &&
+        receipt.receipt_stage == PIREUS_XOR_ADMISSION_STAGE_PARITY_OPEN &&
+        receipt.parity_receipt_valid && !receipt.claim_ready &&
+        receipt.result_pass && receipt.result_reproducible &&
+        pxa_coordinate_exact(receipt)
+}
+
+fn pxa_node_evidence_sufficient(
+    receipt: &PireusXorMaterialReceiptInput,
+    node: i64,
+) -> bool with Panic {
+    if !receipt.explicit_node_evidence[node] { return false }
+    receipt.sufficient_node_evidence[node]
+}
+
+fn pxa_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn pxa_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    pxa_digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn pxa_digest_add_hash(state: SHA256State, value: &[i64; 8]) -> SHA256State
+with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = pxa_digest_add_i64(next, value[i])
+        i = i + 1
+    }
+    next
+}
+
+fn pxa_digest_finish(state: SHA256State) -> PireusXorAdmissionDigest
+with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(&digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusXorAdmissionDigest { words: words }
+}
+
+fn pxa_parent_bindings_digest() -> PireusXorAdmissionDigest
+with Mut, Panic, Div {
+    let garden = pxa_garden_source_hash()
+    let lowering_source = pxa_lowering_source_hash()
+    let lowering_semantics = pxa_lowering_semantics_hash()
+    let lowering_receipt = pxa_lowering_receipt_hash()
+    let darwin_receipt = pxa_darwin_receipt_hash()
+    let darwin_evidence = pxa_darwin_evidence_hash()
+    let apple_receipt = pxa_apple_receipt_hash()
+    let apple_evidence = pxa_apple_evidence_hash()
+    let dgx_receipt = pxa_dgx_receipt_hash()
+    let dgx_evidence = pxa_dgx_evidence_hash()
+    var state = pxa_digest_add_i64(sha256_init(), 0x5058415041523031)
+    state = pxa_digest_add_hash(state, &garden)
+    state = pxa_digest_add_hash(state, &lowering_source)
+    state = pxa_digest_add_hash(state, &lowering_semantics)
+    state = pxa_digest_add_hash(state, &lowering_receipt)
+    state = pxa_digest_add_hash(state, &darwin_receipt)
+    state = pxa_digest_add_hash(state, &darwin_evidence)
+    state = pxa_digest_add_hash(state, &apple_receipt)
+    state = pxa_digest_add_hash(state, &apple_evidence)
+    state = pxa_digest_add_hash(state, &dgx_receipt)
+    state = pxa_digest_add_hash(state, &dgx_evidence)
+    pxa_digest_finish(state)
+}
+
+fn pxa_file_hash_matches(path: string, expected: &[i64; 8]) -> bool
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size <= 0 || size >= 1048576 { return false }
+    let raw = read_file(path)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var byte = raw[(pos + i) as usize] as i64
+            if byte < 0 { byte = byte + 256 }
+            window[i as usize] = byte as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    let digest = pxa_digest_finish(state)
+    pxa_hash_equal(&digest.words, expected)
+}
+
+fn pxa_material_file_match(path: string, index: i64) -> bool
+with IO, Mut, Panic, Div, Alloc {
+    if index == 0 {
+        let expected = pxa_darwin_receipt_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    if index == 1 {
+        let expected = pxa_darwin_evidence_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    if index == 2 {
+        let expected = pxa_apple_receipt_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    if index == 3 {
+        let expected = pxa_apple_evidence_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    if index == 4 {
+        let expected = pxa_dgx_receipt_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    if index == 5 {
+        let expected = pxa_dgx_evidence_hash()
+        return pxa_file_hash_matches(path, &expected)
+    }
+    false
+}
+
+fn pxa_material_file_match_mask(
+    paths: &PireusXorMaterialFilePaths,
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var mask: i64 = 0
+    if pxa_material_file_match(paths.darwin_receipt, 0) { mask = mask | 1 }
+    if pxa_material_file_match(paths.darwin_evidence, 1) { mask = mask | 2 }
+    if pxa_material_file_match(paths.apple_receipt, 2) { mask = mask | 4 }
+    if pxa_material_file_match(paths.apple_evidence, 3) { mask = mask | 8 }
+    if pxa_material_file_match(paths.dgx_receipt, 4) { mask = mask | 16 }
+    if pxa_material_file_match(paths.dgx_evidence, 5) { mask = mask | 32 }
+    mask
+}
+
+pub fn pireus_xor_material_file_matches(mask: i64, index: i64) -> bool {
+    index >= 0 && index < 6 && ((mask >> index) & 1) == 1
+}
+
+pub fn pireus_xor_admission_digest_nonzero(
+    digest: &PireusXorAdmissionDigest,
+) -> bool with Mut, Panic {
+    pxa_hash_nonzero(&digest.words)
+}
+
+fn pxa_digest_target_bindings(
+    state: SHA256State,
+    target_id: i64,
+) -> SHA256State with Mut, Panic, Div {
+    var next = state
+    if target_id == PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON {
+        let semantics = pxa_lowering_semantics_hash()
+        let source = [
+            0xc5d1ab99, 0xda8d7567, 0x387772f1, 0xb98baf4a,
+            0x162618b8, 0x23788768, 0x53a57ff0, 0x362b6cf8
+        ]
+        let receipt = pxa_darwin_receipt_hash()
+        let evidence = pxa_darwin_evidence_hash()
+        let toolchain = [
+            0x1d1e239e, 0x199ce5e7, 0x416e3d5c, 0x66892121,
+            0xee7bfd14, 0x36d1cb2f, 0x5f77a486, 0xaff85b72
+        ]
+        let hardware = [
+            0x93e3daf8, 0xbd024bf2, 0x664d379b, 0x4ccbc030,
+            0x5ce58232, 0x85148cc7, 0x1058aabd, 0xc3c0f550
+        ]
+        let command = [
+            0xd6fde54a, 0x113edc76, 0x291ab6f6, 0xb94168e9,
+            0x43e13ce0, 0x577d4d78, 0x5a4ba09a, 0x34b89d3b
+        ]
+        let result = [
+            0xfe851ccc, 0xb1487d39, 0x77c49142, 0x6cd89e14,
+            0x45e3c234, 0xfbce8c54, 0x44972a44, 0x1b8876e4
+        ]
+        next = pxa_digest_add_hash(next, &semantics)
+        next = pxa_digest_add_hash(next, &source)
+        next = pxa_digest_add_hash(next, &receipt)
+        next = pxa_digest_add_hash(next, &evidence)
+        next = pxa_digest_add_hash(next, &toolchain)
+        next = pxa_digest_add_hash(next, &hardware)
+        next = pxa_digest_add_hash(next, &command)
+        return pxa_digest_add_hash(next, &result)
+    }
+    if target_id == PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON {
+        let semantics = pxa_apple_semantics_hash()
+        let source = [
+            0x7bb640be, 0x1093b3ad, 0xd99961c4, 0x3d7c53da,
+            0x276cceac, 0xef70b7ee, 0x9e2002c9, 0x61c5d66e
+        ]
+        let receipt = pxa_apple_receipt_hash()
+        let evidence = pxa_apple_evidence_hash()
+        let toolchain = [
+            0x2e20f3f4, 0x4c17d6fc, 0x4c1e58b2, 0x6c38cf3a,
+            0xf1ea2df8, 0x87778d0a, 0xa723e6dd, 0xfe4b72e1
+        ]
+        let hardware = [
+            0x49702cf6, 0xd0b079bf, 0x52bf26f9, 0x8f377266,
+            0xe41d4ce2, 0x32fea99e, 0xb80c30d6, 0x554dbc28
+        ]
+        let command = [
+            0xe290c25b, 0xf7cf3d5c, 0x47d3c255, 0xd11ab89d,
+            0x8a5eba77, 0x5a63685f, 0xbe0b981c, 0xfd76bff5
+        ]
+        let result = [
+            0xbd64bc56, 0x037a64a9, 0x3c0136fa, 0x29a6ff1a,
+            0x294e8b84, 0xbe549a5a, 0x4abfeaaf, 0x81a2e700
+        ]
+        next = pxa_digest_add_hash(next, &semantics)
+        next = pxa_digest_add_hash(next, &source)
+        next = pxa_digest_add_hash(next, &receipt)
+        next = pxa_digest_add_hash(next, &evidence)
+        next = pxa_digest_add_hash(next, &toolchain)
+        next = pxa_digest_add_hash(next, &hardware)
+        next = pxa_digest_add_hash(next, &command)
+        return pxa_digest_add_hash(next, &result)
+    }
+    if target_id == PIREUS_XOR_ADMISSION_TARGET_DGX {
+        let semantics = pxa_dgx_semantics_hash()
+        let source = [
+            0x6820fa05, 0xff91cb89, 0x012bb0a7, 0x651896e1,
+            0x96d5ff37, 0x9be8f90a, 0xfdc0b8ae, 0x08a8688a
+        ]
+        let receipt = pxa_dgx_receipt_hash()
+        let evidence = pxa_dgx_evidence_hash()
+        let toolchain = [
+            0x10ab88d9, 0x27b1285a, 0x5ccc6e71, 0x7c5beb72,
+            0x1d76f6e0, 0x74c4d0c1, 0xe9d2f360, 0x72c57cf5
+        ]
+        let hardware = [
+            0x8b048f0a, 0x20ac0967, 0xaf562260, 0x6935aa4e,
+            0xa4e6caf0, 0xbaef6a3d, 0xcd9b7ff5, 0x8f2a66d4
+        ]
+        let command = [
+            0xcf1796b7, 0x8caaedc7, 0x866e26ba, 0x2885cd2f,
+            0xdc3224bd, 0xd948e40f, 0x8b72fea0, 0x92223a72
+        ]
+        let result = [
+            0x1e776e65, 0x5761bd9e, 0x59322ac6, 0x4e736629,
+            0xbd35586a, 0x958d503e, 0xa814dddd, 0xaa865f3c
+        ]
+        next = pxa_digest_add_hash(next, &semantics)
+        next = pxa_digest_add_hash(next, &source)
+        next = pxa_digest_add_hash(next, &receipt)
+        next = pxa_digest_add_hash(next, &evidence)
+        next = pxa_digest_add_hash(next, &toolchain)
+        next = pxa_digest_add_hash(next, &hardware)
+        next = pxa_digest_add_hash(next, &command)
+        return pxa_digest_add_hash(next, &result)
+    }
+    next
+}
+
+fn pxa_digest_record(
+    record: &PireusXorMaterialAdmissionRecord,
+) -> PireusXorAdmissionDigest with Mut, Panic, Div {
+    var state = pxa_digest_add_i64(sha256_init(), 0x5058415245433031)
+    state = pxa_digest_add_i64(state, record.target_id)
+    state = pxa_digest_target_bindings(state, record.target_id)
+    state = pxa_digest_add_i64(state, record.binding_error)
+    state = pxa_digest_add_bool(state, record.receipt_admitted)
+    state = pxa_digest_add_bool(state, record.coordinate_exact)
+    state = pxa_digest_add_bool(state, record.payload_exact)
+    state = pxa_digest_add_bool(state, record.output_exact)
+    var node: i64 = 0
+    while node < 5 {
+        state = pxa_digest_add_i64(state, record.node_status[node])
+        node = node + 1
+    }
+    state = pxa_digest_add_i64(state, record.admitted_node_count)
+    state = pxa_digest_add_i64(state, record.unresolved_node_count)
+    state = pxa_digest_add_i64(state, record.refused_node_count)
+    state = pxa_digest_add_i64(state, record.unnamed_resolved_node_count)
+    state = pxa_digest_add_bool(state, record.whole_operation_covered)
+    state = pxa_digest_add_i64(state, record.operand_encoding_status)
+    state = pxa_digest_add_i64(state, record.static_selector_sites)
+    state = pxa_digest_add_i64(state, record.secondary_selector_sites)
+    state = pxa_digest_add_bool(state, record.result_reproducible)
+    state = pxa_digest_add_bool(state, record.binary_reproducible)
+    pxa_digest_finish(state)
+}
+
+fn pxa_admit_receipt(
+    semantic_authorized: &[bool; 5],
+    receipt: &PireusXorMaterialReceiptInput,
+) -> PireusXorMaterialAdmissionRecord with Mut, Panic, Div {
+    let receipt_admitted = pxa_receipt_core_valid(receipt)
+    let coordinate_exact = pxa_coordinate_exact(receipt)
+    let payload_exact = pxa_payload_exact(receipt)
+    let output_exact = pxa_output_exact(receipt)
+    var node_status: [i64; 5] = [PIREUS_XOR_ADMISSION_NODE_UNRESOLVED; 5]
+    var admitted: i64 = 0
+    var unresolved: i64 = 0
+    var refused: i64 = 0
+    var node: i64 = 0
+    while node < 5 {
+        if receipt.explicit_node_evidence[node] {
+            if receipt_admitted && semantic_authorized[node] &&
+                pxa_node_evidence_sufficient(receipt, node) {
+                node_status[node] = PIREUS_XOR_ADMISSION_NODE_ADMITTED
+                admitted = admitted + 1
+            } else {
+                node_status[node] = PIREUS_XOR_ADMISSION_NODE_REFUSED
+                refused = refused + 1
+            }
+        } else {
+            unresolved = unresolved + 1
+        }
+        node = node + 1
+    }
+    PireusXorMaterialAdmissionRecord {
+        target_id: receipt.target_id,
+        binding_error: receipt.binding_error,
+        receipt_admitted: receipt_admitted,
+        coordinate_exact: coordinate_exact,
+        payload_exact: payload_exact,
+        output_exact: output_exact,
+        node_status: node_status,
+        admitted_node_count: admitted,
+        unresolved_node_count: unresolved,
+        refused_node_count: refused,
+        unnamed_resolved_node_count: receipt.unnamed_resolved_node_count,
+        whole_operation_covered: admitted == 5 && refused == 0,
+        operand_encoding_status: receipt.operand_encoding_status,
+        static_selector_sites: receipt.static_selector_sites,
+        secondary_selector_sites: receipt.secondary_selector_sites,
+        result_reproducible: receipt.result_reproducible,
+        binary_reproducible: receipt.binary_reproducible,
+    }
+}
+
+fn pxa_payload_claim_allowed(
+    receipt: &PireusXorMaterialReceiptInput,
+    requested: bool,
+) -> bool {
+    !requested || pxa_payload_exact(receipt)
+}
+
+fn pxa_encoding_equality_allowed(
+    receipt: &PireusXorMaterialReceiptInput,
+    requested: bool,
+) -> bool {
+    !requested ||
+        receipt.operand_encoding_status == PIREUS_XOR_ADMISSION_ENCODING_EQUAL
+}
+
+fn pxa_claim_boundary_valid(
+    cost_records: i64,
+    cross_isa: bool,
+    transform: bool,
+    review_promoted: bool,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    cost_records == 0 && !cross_isa && !transform && !review_promoted &&
+        !parity_open && !claim_ready
+}
+
+fn pxa_negative_missing_garden_binding() -> bool with Mut, Panic, Div {
+    var commit = pxa_expected_garden_commit()
+    let digest = pxa_parent_bindings_digest()
+    commit[0] = 0
+    !pxa_parent_binding_valid(&commit, &digest, true)
+}
+
+fn pxa_negative_mismatched_lowering_parent() -> bool with Mut, Panic, Div {
+    let commit = pxa_expected_garden_commit()
+    var digest = pxa_parent_bindings_digest()
+    digest.words[0] = digest.words[0] ^ 1
+    !pxa_parent_binding_valid(&commit, &digest, true)
+}
+
+fn pxa_negative_missing_lowering_live_match() -> bool with Mut, Panic, Div {
+    let commit = pxa_expected_garden_commit()
+    let digest = pxa_parent_bindings_digest()
+    !pxa_parent_binding_valid(&commit, &digest, false)
+}
+
+fn pxa_negative_mismatched_receipt_hash() -> bool with Mut, Panic {
+    let receipt = pxa_darwin_receipt(false, true)
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_mismatched_evidence_hash() -> bool with Mut, Panic {
+    let receipt = pxa_apple_receipt(true, false)
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_mismatched_semantic_parent() -> bool with Mut, Panic {
+    var receipt = pxa_dgx_receipt(true, true)
+    receipt.binding_error = PIREUS_XOR_ADMISSION_BINDING_PARENT
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_wrong_producer_role() -> bool with Mut, Panic {
+    var receipt = pxa_darwin_receipt(true, true)
+    receipt.producer_role = 1
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_wrong_receipt_stage() -> bool with Mut, Panic {
+    var receipt = pxa_apple_receipt(true, true)
+    receipt.receipt_stage = 3
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_invalid_parity_receipt() -> bool with Mut, Panic {
+    var receipt = pxa_dgx_receipt(true, true)
+    receipt.parity_receipt_valid = false
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_zero_command_binding() -> bool with Mut, Panic {
+    var receipt = pxa_darwin_receipt(true, true)
+    receipt.binding_error = PIREUS_XOR_ADMISSION_BINDING_COMMAND
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_coordinate_mismatch() -> bool with Mut, Panic {
+    var receipt = pxa_apple_receipt(true, true)
+    receipt.sufficient_node_evidence[0] = false
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_negative_unchecked_payload_promotion() -> bool {
+    let receipt = pxa_darwin_receipt(true, true)
+    !pxa_payload_claim_allowed(&receipt, true)
+}
+
+fn pxa_negative_unnamed_node_inference(
+    semantic_authorized: &[bool; 5],
+) -> bool with Mut, Panic, Div {
+    var receipt = pxa_dgx_receipt(true, true)
+    receipt.explicit_node_evidence[4] = true
+    let record = pxa_admit_receipt(semantic_authorized, &receipt)
+    record.node_status[4] == PIREUS_XOR_ADMISSION_NODE_REFUSED &&
+        !record.whole_operation_covered
+}
+
+fn pxa_negative_selector_to_whole_promotion(
+    semantic_authorized: &[bool; 5],
+) -> bool with Mut, Panic, Div {
+    var receipt = pxa_apple_receipt(true, true)
+    var node: i64 = 1
+    while node < 5 {
+        receipt.explicit_node_evidence[node] = true
+        node = node + 1
+    }
+    let record = pxa_admit_receipt(semantic_authorized, &receipt)
+    !record.whole_operation_covered
+}
+
+fn pxa_negative_encoding_equality_promotion() -> bool {
+    let receipt = pxa_dgx_receipt(true, true)
+    !pxa_encoding_equality_allowed(&receipt, true)
+}
+
+fn pxa_negative_target_receipt_transplant() -> bool with Mut, Panic {
+    var receipt = pxa_darwin_receipt(true, true)
+    receipt.target_id = PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON
+    !pxa_receipt_core_valid(&receipt)
+}
+
+fn pxa_exercise_negatives(
+    semantic_authorized: &[bool; 5],
+) -> PireusXorAdmissionNegatives with Mut, Panic, Div {
+    let missing_garden_binding = pxa_negative_missing_garden_binding()
+    let mismatched_lowering_parent = pxa_negative_mismatched_lowering_parent()
+    let missing_lowering_live_match =
+        pxa_negative_missing_lowering_live_match()
+    let mismatched_receipt_hash = pxa_negative_mismatched_receipt_hash()
+    let mismatched_evidence_hash = pxa_negative_mismatched_evidence_hash()
+    let mismatched_semantic_parent = pxa_negative_mismatched_semantic_parent()
+    let wrong_producer_role = pxa_negative_wrong_producer_role()
+    let wrong_receipt_stage = pxa_negative_wrong_receipt_stage()
+    let invalid_parity_receipt = pxa_negative_invalid_parity_receipt()
+    let zero_command_binding = pxa_negative_zero_command_binding()
+    let coordinate_mismatch = pxa_negative_coordinate_mismatch()
+    let unchecked_payload_promotion =
+        pxa_negative_unchecked_payload_promotion()
+    let unnamed_node_inference =
+        pxa_negative_unnamed_node_inference(semantic_authorized)
+    let selector_to_whole_promotion =
+        pxa_negative_selector_to_whole_promotion(semantic_authorized)
+    let static_site_to_cost_promotion =
+        !pxa_claim_boundary_valid(1, false, false, false, false, false)
+    let encoding_equality_promotion =
+        pxa_negative_encoding_equality_promotion()
+    let cross_isa_promotion =
+        !pxa_claim_boundary_valid(0, true, false, false, false, false)
+    let target_receipt_transplant = pxa_negative_target_receipt_transplant()
+    let transform_promotion =
+        !pxa_claim_boundary_valid(0, false, true, false, false, false)
+    let review_promotion =
+        !pxa_claim_boundary_valid(0, false, false, true, false, false)
+    let parity_before_freeze =
+        !pxa_claim_boundary_valid(0, false, false, false, true, false)
+    let claim_ready_promotion =
+        !pxa_claim_boundary_valid(0, false, false, false, false, true)
+
+    let values: [bool; 22] = [
+        missing_garden_binding, mismatched_lowering_parent,
+        missing_lowering_live_match, mismatched_receipt_hash,
+        mismatched_evidence_hash, mismatched_semantic_parent,
+        wrong_producer_role, wrong_receipt_stage, invalid_parity_receipt,
+        zero_command_binding, coordinate_mismatch,
+        unchecked_payload_promotion, unnamed_node_inference,
+        selector_to_whole_promotion, static_site_to_cost_promotion,
+        encoding_equality_promotion, cross_isa_promotion,
+        target_receipt_transplant, transform_promotion, review_promotion,
+        parity_before_freeze, claim_ready_promotion
+    ]
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < 22 {
+        if values[i] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusXorAdmissionNegatives {
+        missing_garden_binding: missing_garden_binding,
+        mismatched_lowering_parent: mismatched_lowering_parent,
+        missing_lowering_live_match: missing_lowering_live_match,
+        mismatched_receipt_hash: mismatched_receipt_hash,
+        mismatched_evidence_hash: mismatched_evidence_hash,
+        mismatched_semantic_parent: mismatched_semantic_parent,
+        wrong_producer_role: wrong_producer_role,
+        wrong_receipt_stage: wrong_receipt_stage,
+        invalid_parity_receipt: invalid_parity_receipt,
+        zero_command_binding: zero_command_binding,
+        coordinate_mismatch: coordinate_mismatch,
+        unchecked_payload_promotion: unchecked_payload_promotion,
+        unnamed_node_inference: unnamed_node_inference,
+        selector_to_whole_promotion: selector_to_whole_promotion,
+        static_site_to_cost_promotion: static_site_to_cost_promotion,
+        encoding_equality_promotion: encoding_equality_promotion,
+        cross_isa_promotion: cross_isa_promotion,
+        target_receipt_transplant: target_receipt_transplant,
+        transform_promotion: transform_promotion,
+        review_promotion: review_promotion,
+        parity_before_freeze: parity_before_freeze,
+        claim_ready_promotion: claim_ready_promotion,
+        passed: passed,
+        total: 22,
+    }
+}
+
+fn pxa_digest_admission(
+    parents: &PireusXorAdmissionParents,
+    darwin: &PireusXorMaterialAdmissionRecord,
+    apple: &PireusXorMaterialAdmissionRecord,
+    dgx: &PireusXorMaterialAdmissionRecord,
+    negatives: &PireusXorAdmissionNegatives,
+    material_file_match_mask: i64,
+    counts: &[i64; 14],
+    boundaries: &[bool; 7],
+) -> PireusXorAdmissionDigest with Mut, Panic, Div {
+    let darwin_digest = pireus_xor_material_admission_record_digest(darwin)
+    let apple_digest = pireus_xor_material_admission_record_digest(apple)
+    let dgx_digest = pireus_xor_material_admission_record_digest(dgx)
+    var state = pxa_digest_add_i64(sha256_init(), 0x50584141444d3031)
+    var commit_word: i64 = 0
+    while commit_word < 5 {
+        state = pxa_digest_add_i64(
+            state, parents.garden_commit_sha1[commit_word])
+        commit_word = commit_word + 1
+    }
+    state = pxa_digest_add_hash(state, &parents.binding_digest.words)
+    state = pxa_digest_add_bool(state, parents.lowering_live_match)
+    state = pxa_digest_add_bool(state, parents.valid)
+    state = pxa_digest_add_hash(state, &darwin_digest.words)
+    state = pxa_digest_add_hash(state, &apple_digest.words)
+    state = pxa_digest_add_hash(state, &dgx_digest.words)
+    var file: i64 = 0
+    while file < 6 {
+        state = pxa_digest_add_bool(
+            state,
+            pireus_xor_material_file_matches(material_file_match_mask, file))
+        file = file + 1
+    }
+    var count: i64 = 0
+    while count < 14 {
+        state = pxa_digest_add_i64(state, counts[count])
+        count = count + 1
+    }
+    var boundary: i64 = 0
+    while boundary < 7 {
+        state = pxa_digest_add_bool(state, boundaries[boundary])
+        boundary = boundary + 1
+    }
+    let negative_values: [bool; 22] = [
+        negatives.missing_garden_binding,
+        negatives.mismatched_lowering_parent,
+        negatives.missing_lowering_live_match,
+        negatives.mismatched_receipt_hash,
+        negatives.mismatched_evidence_hash,
+        negatives.mismatched_semantic_parent,
+        negatives.wrong_producer_role,
+        negatives.wrong_receipt_stage,
+        negatives.invalid_parity_receipt,
+        negatives.zero_command_binding,
+        negatives.coordinate_mismatch,
+        negatives.unchecked_payload_promotion,
+        negatives.unnamed_node_inference,
+        negatives.selector_to_whole_promotion,
+        negatives.static_site_to_cost_promotion,
+        negatives.encoding_equality_promotion,
+        negatives.cross_isa_promotion,
+        negatives.target_receipt_transplant,
+        negatives.transform_promotion,
+        negatives.review_promotion,
+        negatives.parity_before_freeze,
+        negatives.claim_ready_promotion
+    ]
+    var negative: i64 = 0
+    while negative < 22 {
+        state = pxa_digest_add_bool(state, negative_values[negative])
+        negative = negative + 1
+    }
+    state = pxa_digest_add_i64(state, negatives.passed)
+    state = pxa_digest_add_i64(state, negatives.total)
+    pxa_digest_finish(state)
+}
+
+pub fn pireus_xor_material_admission_record_digest(
+    record: &PireusXorMaterialAdmissionRecord,
+) -> PireusXorAdmissionDigest with Mut, Panic, Div {
+    if record.target_id == PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON ||
+        record.target_id == PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON ||
+        record.target_id == PIREUS_XOR_ADMISSION_TARGET_DGX {
+        return pxa_digest_record(record)
+    }
+    PireusXorAdmissionDigest { words: [0; 8] }
+}
+
+fn pxa_lowering_authority(
+    pdf_path: string,
+    xed_path: string,
+) -> PireusXorAdmissionLoweringAuthority
+with IO, Mut, Panic, Div, Alloc {
+    let lowering = pireus_xor_lowering_evaluate(pdf_path, xed_path)
+    let live = lowering.valid &&
+        lowering.error == PIREUS_XOR_LOWERING_OK &&
+        pireus_xor_lowering_matches_frozen_semantics(&lowering)
+    PireusXorAdmissionLoweringAuthority {
+        live: live,
+        semantic_authorized: lowering.plan.semantic_authorized,
+    }
+}
+
+fn pxa_admit_darwin(
+    semantic_authorized: &[bool; 5],
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialAdmissionRecord with Mut, Panic, Div {
+    let receipt = pxa_darwin_receipt(receipt_match, evidence_match)
+    pxa_admit_receipt(semantic_authorized, &receipt)
+}
+
+fn pxa_admit_apple(
+    semantic_authorized: &[bool; 5],
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialAdmissionRecord with Mut, Panic, Div {
+    let receipt = pxa_apple_receipt(receipt_match, evidence_match)
+    pxa_admit_receipt(semantic_authorized, &receipt)
+}
+
+fn pxa_admit_dgx(
+    semantic_authorized: &[bool; 5],
+    receipt_match: bool,
+    evidence_match: bool,
+) -> PireusXorMaterialAdmissionRecord with Mut, Panic, Div {
+    let receipt = pxa_dgx_receipt(receipt_match, evidence_match)
+    pxa_admit_receipt(semantic_authorized, &receipt)
+}
+
+pub fn pireus_xor_selector_material_admission_evaluate(
+    pdf_path: string,
+    xed_path: string,
+    material_paths: &PireusXorMaterialFilePaths,
+) -> PireusXorSelectorAdmissionResult
+with IO, Mut, Panic, Div, Alloc {
+    let authority = pxa_lowering_authority(pdf_path, xed_path)
+    let material_file_match_mask = pxa_material_file_match_mask(material_paths)
+    var material_file_match_count: i64 = 0
+    var file: i64 = 0
+    while file < 6 {
+        if pireus_xor_material_file_matches(material_file_match_mask, file) {
+            material_file_match_count = material_file_match_count + 1
+        }
+        file = file + 1
+    }
+    let material_files_valid = material_file_match_count == 6
+    let parent_commit = pxa_expected_garden_commit()
+    let parent_digest = pxa_parent_bindings_digest()
+    let parent_valid = pxa_parent_binding_valid(
+        &parent_commit, &parent_digest, authority.live)
+    let parents = PireusXorAdmissionParents {
+        garden_commit_sha1: parent_commit,
+        binding_digest: parent_digest,
+        lowering_live_match: authority.live,
+        valid: parent_valid,
+    }
+
+    let darwin = pxa_admit_darwin(
+        &authority.semantic_authorized,
+        pireus_xor_material_file_matches(material_file_match_mask, 0),
+        pireus_xor_material_file_matches(material_file_match_mask, 1))
+    let apple = pxa_admit_apple(
+        &authority.semantic_authorized,
+        pireus_xor_material_file_matches(material_file_match_mask, 2),
+        pireus_xor_material_file_matches(material_file_match_mask, 3))
+    let dgx = pxa_admit_dgx(
+        &authority.semantic_authorized,
+        pireus_xor_material_file_matches(material_file_match_mask, 4),
+        pireus_xor_material_file_matches(material_file_match_mask, 5))
+    let negatives = pxa_exercise_negatives(&authority.semantic_authorized)
+
+    let admitted_receipts =
+        (if darwin.receipt_admitted { 1 } else { 0 }) +
+        (if apple.receipt_admitted { 1 } else { 0 }) +
+        (if dgx.receipt_admitted { 1 } else { 0 })
+    let admitted_nodes = darwin.admitted_node_count +
+        apple.admitted_node_count + dgx.admitted_node_count
+    let unresolved_nodes = darwin.unresolved_node_count +
+        apple.unresolved_node_count + dgx.unresolved_node_count
+    let refused_nodes = darwin.refused_node_count +
+        apple.refused_node_count + dgx.refused_node_count
+    let selector_targets =
+        (if darwin.node_status[0] == PIREUS_XOR_ADMISSION_NODE_ADMITTED {
+            1
+        } else { 0 }) +
+        (if apple.node_status[0] == PIREUS_XOR_ADMISSION_NODE_ADMITTED {
+            1
+        } else { 0 }) +
+        (if dgx.node_status[0] == PIREUS_XOR_ADMISSION_NODE_ADMITTED {
+            1
+        } else { 0 })
+    let whole_targets =
+        (if darwin.whole_operation_covered { 1 } else { 0 }) +
+        (if apple.whole_operation_covered { 1 } else { 0 }) +
+        (if dgx.whole_operation_covered { 1 } else { 0 })
+    let incomplete_targets = 3 - whole_targets
+    let unnamed_claims = darwin.unnamed_resolved_node_count +
+        apple.unnamed_resolved_node_count + dgx.unnamed_resolved_node_count
+    let encoding_differences =
+        (if darwin.operand_encoding_status ==
+            PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT { 1 } else { 0 }) +
+        (if apple.operand_encoding_status ==
+            PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT { 1 } else { 0 }) +
+        (if dgx.operand_encoding_status ==
+            PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT { 1 } else { 0 })
+    let material_observation_count: i64 = 3
+    let compiler_emission_observation_count: i64 = 3
+    let cost_record_count: i64 = 0
+    let generic_instruction_cost = false
+    let cross_isa_equivalence = false
+    let transform_authorized = false
+    let review_promoted = false
+    let parity_open = false
+    let claim_ready = false
+    let claim_boundary_valid = pxa_claim_boundary_valid(
+        cost_record_count, cross_isa_equivalence, transform_authorized,
+        review_promoted, parity_open, claim_ready)
+    let digest_counts: [i64; 14] = [
+        3, material_file_match_count, admitted_receipts, admitted_nodes,
+        unresolved_nodes, refused_nodes, selector_targets, whole_targets,
+        incomplete_targets, unnamed_claims, encoding_differences,
+        material_observation_count, compiler_emission_observation_count,
+        cost_record_count
+    ]
+    let digest_boundaries: [bool; 7] = [
+        material_files_valid, generic_instruction_cost,
+        cross_isa_equivalence, transform_authorized, review_promoted,
+        parity_open, claim_ready
+    ]
+    let admission_digest = pxa_digest_admission(
+        &parents, &darwin, &apple, &dgx, &negatives,
+        material_file_match_mask, &digest_counts, &digest_boundaries)
+    let darwin_digest = pireus_xor_material_admission_record_digest(&darwin)
+    let apple_digest = pireus_xor_material_admission_record_digest(&apple)
+    let dgx_digest = pireus_xor_material_admission_record_digest(&dgx)
+
+    var error = PIREUS_XOR_ADMISSION_OK
+    if !parents.valid { error = PIREUS_XOR_ADMISSION_ERR_PARENT }
+    else if !darwin.receipt_admitted || !apple.receipt_admitted ||
+        !dgx.receipt_admitted { error = PIREUS_XOR_ADMISSION_ERR_RECEIPT }
+    else if darwin.refused_node_count != 0 || apple.refused_node_count != 0 ||
+        dgx.refused_node_count != 0 {
+        error = PIREUS_XOR_ADMISSION_ERR_COVERAGE
+    } else if negatives.passed != negatives.total || !claim_boundary_valid {
+        error = PIREUS_XOR_ADMISSION_ERR_AUTHORITY
+    }
+
+    var failures: i64 = 0
+    if error != PIREUS_XOR_ADMISSION_OK { failures = failures + 1 }
+    if !pireus_xor_admission_digest_nonzero(&darwin_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_admission_digest_nonzero(&apple_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_admission_digest_nonzero(&dgx_digest) {
+        failures = failures + 1
+    }
+    if !pireus_xor_admission_digest_nonzero(&admission_digest) {
+        failures = failures + 1
+    }
+
+    PireusXorSelectorAdmissionResult {
+        valid: error == PIREUS_XOR_ADMISSION_OK && failures == 0,
+        error: error,
+        parents: parents,
+        darwin: darwin,
+        apple: apple,
+        dgx: dgx,
+        receipt_count: 3,
+        material_file_match_mask: material_file_match_mask,
+        material_file_match_count: material_file_match_count,
+        material_files_valid: material_files_valid,
+        admitted_receipt_count: admitted_receipts,
+        admitted_node_count: admitted_nodes,
+        unresolved_node_count: unresolved_nodes,
+        refused_node_count: refused_nodes,
+        selector_target_count: selector_targets,
+        whole_operation_target_count: whole_targets,
+        incomplete_target_count: incomplete_targets,
+        unnamed_node_claim_count: unnamed_claims,
+        encoding_difference_count: encoding_differences,
+        material_observation_count: material_observation_count,
+        compiler_emission_observation_count:
+            compiler_emission_observation_count,
+        cost_record_count: cost_record_count,
+        generic_instruction_cost: generic_instruction_cost,
+        cross_isa_equivalence: cross_isa_equivalence,
+        transform_authorized: transform_authorized,
+        parity_open: parity_open,
+        claim_ready: claim_ready,
+        admission_digest: admission_digest,
+        negatives: negatives,
+        failures: failures,
+    }
+}
+
+fn pxa_record_matches_frozen_semantics(
+    record: &PireusXorMaterialAdmissionRecord,
+) -> bool with Mut, Panic, Div {
+    if record.binding_error != PIREUS_XOR_ADMISSION_BINDING_OK ||
+        !record.receipt_admitted || !record.coordinate_exact ||
+        record.refused_node_count != 0 || !record.result_reproducible {
+        return false
+    }
+
+    var expected_status: [i64; 5] = [PIREUS_XOR_ADMISSION_NODE_UNRESOLVED; 5]
+    var expected_digest: [i64; 8] = [0; 8]
+    var expected_payload = true
+    var expected_output = false
+    var expected_admitted: i64 = 1
+    var expected_unresolved: i64 = 4
+    var expected_unnamed: i64 = 0
+    var expected_whole = false
+    var expected_encoding = PIREUS_XOR_ADMISSION_ENCODING_UNCOMPARED
+    var expected_static_sites: i64 = 1
+    var expected_secondary_sites: i64 = 0
+    var expected_binary_reproducible = true
+    expected_status[0] = PIREUS_XOR_ADMISSION_NODE_ADMITTED
+
+    if record.target_id == PIREUS_XOR_ADMISSION_TARGET_DARWIN_XEON {
+        var node: i64 = 1
+        while node < 5 {
+            expected_status[node] = PIREUS_XOR_ADMISSION_NODE_ADMITTED
+            node = node + 1
+        }
+        expected_digest = [
+            3500460042, 535259591, 2326513808, 3224911087,
+            1734937489, 1992726449, 2327971184, 3455846257
+        ]
+        expected_payload = false
+        expected_output = true
+        expected_admitted = 5
+        expected_unresolved = 0
+        expected_whole = true
+        expected_static_sites = 3
+    } else if record.target_id == PIREUS_XOR_ADMISSION_TARGET_APPLE_SILICON {
+        expected_digest = [
+            4128037373, 2968517972, 275166301, 843980919,
+            2897963936, 177801273, 2520874503, 391658731
+        ]
+    } else if record.target_id == PIREUS_XOR_ADMISSION_TARGET_DGX {
+        expected_digest = [
+            3400682017, 537641554, 1229578524, 2856974856,
+            2840878714, 2939595095, 1922878528, 3271869735
+        ]
+        expected_unnamed = 1
+        expected_encoding = PIREUS_XOR_ADMISSION_ENCODING_DIFFERENT
+        expected_static_sites = 32
+        expected_secondary_sites = 32
+        expected_binary_reproducible = false
+    } else {
+        return false
+    }
+
+    var node: i64 = 0
+    while node < 5 {
+        if record.node_status[node] != expected_status[node] { return false }
+        node = node + 1
+    }
+    if record.payload_exact != expected_payload ||
+        record.output_exact != expected_output ||
+        record.admitted_node_count != expected_admitted ||
+        record.unresolved_node_count != expected_unresolved ||
+        record.unnamed_resolved_node_count != expected_unnamed ||
+        record.whole_operation_covered != expected_whole ||
+        record.operand_encoding_status != expected_encoding ||
+        record.static_selector_sites != expected_static_sites ||
+        record.secondary_selector_sites != expected_secondary_sites ||
+        record.binary_reproducible != expected_binary_reproducible {
+        return false
+    }
+    let digest = pireus_xor_material_admission_record_digest(record)
+    pxa_hash_equal(&digest.words, &expected_digest)
+}
+
+/// Exact predicate written only after the first Sounio authority stream.
+pub fn pireus_xor_selector_material_admission_matches_frozen_semantics(
+    result: &PireusXorSelectorAdmissionResult,
+) -> bool with Mut, Panic, Div {
+    if !result.valid || result.error != PIREUS_XOR_ADMISSION_OK ||
+        result.failures != 0 || !result.parents.valid ||
+        !pxa_parent_binding_valid(
+            &result.parents.garden_commit_sha1,
+            &result.parents.binding_digest,
+            result.parents.lowering_live_match) ||
+        !pxa_record_matches_frozen_semantics(&result.darwin) ||
+        !pxa_record_matches_frozen_semantics(&result.apple) ||
+        !pxa_record_matches_frozen_semantics(&result.dgx) {
+        return false
+    }
+
+    if result.receipt_count != 3 || !result.material_files_valid ||
+        result.material_file_match_count != 6 ||
+        result.admitted_receipt_count != 3 ||
+        result.admitted_node_count != 7 || result.unresolved_node_count != 8 ||
+        result.refused_node_count != 0 || result.selector_target_count != 3 ||
+        result.whole_operation_target_count != 1 ||
+        result.incomplete_target_count != 2 ||
+        result.unnamed_node_claim_count != 1 ||
+        result.encoding_difference_count != 1 ||
+        result.material_observation_count != 3 ||
+        result.compiler_emission_observation_count != 3 ||
+        result.cost_record_count != 0 || result.generic_instruction_cost ||
+        result.cross_isa_equivalence || result.transform_authorized ||
+        result.parity_open || result.claim_ready {
+        return false
+    }
+    var file: i64 = 0
+    while file < 6 {
+        if !pireus_xor_material_file_matches(
+            result.material_file_match_mask, file) { return false }
+        file = file + 1
+    }
+
+    let expected_digest: [i64; 8] = [
+        1981472606, 3869995793, 2634373272, 1299673842,
+        1000193586, 119066938, 1531096938, 209245254
+    ]
+    if !pxa_hash_equal(&result.admission_digest.words, &expected_digest) ||
+        result.negatives.passed != 22 || result.negatives.total != 22 {
+        return false
+    }
+
+    result.negatives.missing_garden_binding &&
+        result.negatives.mismatched_lowering_parent &&
+        result.negatives.missing_lowering_live_match &&
+        result.negatives.mismatched_receipt_hash &&
+        result.negatives.mismatched_evidence_hash &&
+        result.negatives.mismatched_semantic_parent &&
+        result.negatives.wrong_producer_role &&
+        result.negatives.wrong_receipt_stage &&
+        result.negatives.invalid_parity_receipt &&
+        result.negatives.zero_command_binding &&
+        result.negatives.coordinate_mismatch &&
+        result.negatives.unchecked_payload_promotion &&
+        result.negatives.unnamed_node_inference &&
+        result.negatives.selector_to_whole_promotion &&
+        result.negatives.static_site_to_cost_promotion &&
+        result.negatives.encoding_equality_promotion &&
+        result.negatives.cross_isa_promotion &&
+        result.negatives.target_receipt_transplant &&
+        result.negatives.transform_promotion &&
+        result.negatives.review_promotion &&
+        result.negatives.parity_before_freeze &&
+        result.negatives.claim_ready_promotion
+}

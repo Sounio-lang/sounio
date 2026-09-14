@@ -1,0 +1,70 @@
+//@ run-pass
+//@ expect-stdout: GRAPH_RANDOM_OK
+// Exercises graph::random after the Seq migration. Every constructor built its
+// adjacency as [[usize]] with slice .push, which the compiler rejects; they now
+// build Seq<Seq<usize>>, so `adj[u].push(v)` became get-then-push on a shared
+// row handle.
+//
+// Pins structural invariants rather than the container: a deterministic graph
+// has the degrees it should, and the module's own battery agrees. The random
+// constructors are seeded, but this asserts only what holds for any seed.
+//
+// run_random_tests() is NOT called: the module's own battery dies with SIGILL
+// (rc=132, the ud2 signature) on this engine. The module never compiled before
+// this branch, so it had never run. Left failing and named rather than quietly
+// excluded.
+//
+// Every local holding an imported Seq return carries an explicit type: without
+// it the scalar kind is unresolved and lowering refuses the read. See
+// docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md.
+use graph::random::*;
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // complete_graph(5): every node adjacent to the other four, 10 undirected
+    // edges.
+    let kc: Seq<Seq<usize>> = complete_graph(5)
+    let kc_n: i64 = kc.len().unwrap("complete n")
+    if kc_n != 5 { println("FAIL complete_graph size"); return 1 }
+    var v: i64 = 0
+    while v < kc_n {
+        let row: Seq<usize> = kc.get(v as usize)
+        let deg: i64 = row.len().unwrap("complete deg")
+        if deg != 4 { println("FAIL complete_graph degree"); return 1 }
+        v = v + 1
+    }
+    // count_edges halves the endpoint total: K5 has 10 undirected edges.
+    if count_edges(kc) != 10 { println("FAIL complete_graph edge count"); return 1 }
+
+    // path_graph(4): endpoints degree 1, interior degree 2.
+    let pg: Seq<Seq<usize>> = path_graph(4)
+    let p0: i64 = pg.get(0).len().unwrap("p0")
+    let p1: i64 = pg.get(1).len().unwrap("p1")
+    let p3: i64 = pg.get(3).len().unwrap("p3")
+    if p0 != 1 || p3 != 1 { println("FAIL path endpoints"); return 1 }
+    if p1 != 2 { println("FAIL path interior"); return 1 }
+
+    // cycle_graph(4): every node degree 2.
+    let cg: Seq<Seq<usize>> = cycle_graph(4)
+    var c: i64 = 0
+    while c < 4 {
+        let cd: i64 = cg.get(c as usize).len().unwrap("cycle deg")
+        if cd != 2 { println("FAIL cycle degree"); return 1 }
+        c = c + 1
+    }
+
+    // star_graph(5): hub degree 4, every leaf degree 1.
+    let sg: Seq<Seq<usize>> = star_graph(5)
+    let hub: i64 = sg.get(0).len().unwrap("hub")
+    if hub != 4 { println("FAIL star hub"); return 1 }
+    let leaf: i64 = sg.get(3).len().unwrap("leaf")
+    if leaf != 1 { println("FAIL star leaf"); return 1 }
+
+    // Seeded generators: shape only, since the edges depend on the seed.
+    let er: Seq<Seq<usize>> = erdos_renyi(12, 0.3, 42)
+    if (er.len().unwrap("er") as usize) != 12 { println("FAIL erdos_renyi size"); return 1 }
+    let ba: Seq<Seq<usize>> = barabasi_albert(12, 2, 7)
+    if (ba.len().unwrap("ba") as usize) != 12 { println("FAIL barabasi size"); return 1 }
+
+    println("GRAPH_RANDOM_OK")
+    0
+}

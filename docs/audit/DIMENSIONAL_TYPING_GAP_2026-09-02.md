@@ -99,6 +99,23 @@ and is stale. Recorded in `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ---
 
+## Correction, 2026-09-13 — Repro 3 is closed (KL-13 partial)
+
+`unit_lost_at_call_boundary.sio` now fails `souc check` on lean_single and
+Madaros with `unit mismatch in call argument`. Moved to
+`tests/compile-fail/unit_lost_at_call_boundary.sio`. Explicit `as f64` remains
+green (`tests/run-pass/unit_call_cast_strips_brand.sio`).
+
+What closed it is item **3** of this document's "What would close it" list —
+unit-typed arguments into bare `f64` parameters are refused unless cast.
+lean_single: `unit_call_arg_mismatch` treats `param_dim == 0 && expr_dim != 0`
+as a mismatch. Madaros: `check_call_arg_unit_boundary` refuses
+`provided.unit_id >= 0 && expected.unit_id < 0`.
+
+Repro 1 (derived unit annotations) remains open.
+
+---
+
 ## Correction, 2026-09-05 — Repro 2 is closed
 
 `derived_unit_dropped_by_inference.sio` no longer passes, and has moved out of

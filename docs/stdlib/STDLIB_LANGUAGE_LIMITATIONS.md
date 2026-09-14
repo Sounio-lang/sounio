@@ -9,222 +9,189 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-
 
 # Stdlib Module Language Limitations
 
-## Summary
+This page describes language constructs that stdlib modules cannot use today,
+and what to write instead. Everything below was measured against the committed
+compiler (`bin/madaros-linux-x86_64`, Madaros v0.80.0) with
+`SOUNIO_STDLIB_PATH` pinned to this tree's `stdlib/`. Reproduce with:
 
-Three critical library modules required for GitHub Issue #18 (multi-phase scientific computing workflow) have been designed but **cannot yet be implemented** in Sounio due to current language parser limitations.
-
-These modules are essential for network science research:
-- `stdlib/stats/effect_sizes.sio` - Statistical effect size calculations (Cliff's delta, Cohen's d, confidence intervals)
-- `stdlib/data/csv_loader.sio` - CSV edge list loading and parsing
-- `stdlib/graph/nulls/configuration.sio` - Configuration model null hypothesis generation
-
-## Identified Limitations
-
-### 1. Generic Type Parameters in Function Calls
-
-**Current Status**: ❌ Not supported
-
-```sio
-// DOESN'T WORK:
-var v = vec_new::<f64>()
-var adj = vec_new::<Vec<usize>>()
-
-// WORKAROUND NEEDED:
-// Type inference or explicit wrapper functions
+```bash
+bash scripts/dev/language_limitation_sweep.sh
 ```
 
-**Impact**: Cannot create vectors with type hints. Must rely on type inference from context.
+The sweep writes one row per file to `artifacts/audit/`. The figures quoted
+here come from `artifacts/audit/language_limitation_sweep_20260903.tsv`.
 
-**Affected Modules**: All three (effect_sizes, csv_loader, configuration)
+## Scale
 
----
+Over `stdlib/`, `examples/` and `tests/run-pass/` — 4539 files:
 
-### 2. Method Call Syntax with Type Parameters
+| tree | files | accepted by `souc check` |
+|---|---|---|
+| `tests/run-pass` | 1912 | 1760 (92%) |
+| `stdlib` | 1611 | 1176 (73%) |
+| `examples` | 1016 | 621 (61%) |
 
-**Current Status**: ❌ Not supported
+**Most rejections are not language limitations.** The two largest error classes
+in the tree are wiring and dead code, not constructs the compiler refuses to
+support:
 
-```sio
-// DOESN'T WORK:
-let value = string_value.parse::<usize>()
+- **E137 (`use of undeclared variable`)** — 323 files. 191 of them contain no
+  `use` statement at all while calling functions from other modules (2947 of
+  3623 occurrences). Of the 676 occurrences in files that *do* import
+  something, 529 name a function that is defined nowhere in the tree and 147
+  name one that exists but is not imported. None name a function that exists
+  **and** is imported, which is the only shape that would implicate name
+  resolution.
+- **E035 (`effect not declared in function signature`)** — was 199 files. The
+  dominant cause was a single over-declared effect row on a stdlib
+  constructor, since corrected; the current figure is far lower. Effects are
+  reported faithfully — the errors were real, the annotation they propagated
+  was not.
 
-// WORKAROUND NEEDED:
-// Standalone parsing functions or manual parsing
-pub fn parse_usize(s: &str) -> Result<usize, ParseError> {
-    // Manual digit-by-digit parsing
-}
-```
+Read a large error count as a claim about that file, not about the language.
 
-**Impact**: Cannot use polymorphic methods. Must provide type-specific functions.
+## Actual language limitations
 
-**Affected Modules**: csv_loader (needs to parse usize, f64 from strings)
+### Slices are fixed-length; `Seq<T>` is the growable one
 
----
+**Status**: by design.
 
-### 3. Complex Nested Generic Return Types
-
-**Current Status**: Partially working
-
-```sio
-// PROBLEMATIC:
-pub fn configuration_model_replicates(
-    adj: &[Vec<usize>],
-    num_replicates: usize
-) -> Vec<Vec<Vec<usize>>> with IO, Alloc {
-    // Triple-nested Vec
-}
-
-// WORKS in function signatures but...
-// May fail in complex struct definitions or method chaining
-```
-
-**Impact**: Can define return types but type inference breaks down in complex scenarios.
-
-**Affected Modules**: configuration (multiple nested vector types)
-
----
-
-## Proposed Solutions
-
-### Option A: Language Enhancement (Compiler Work)
-
-Enhance Sounio's parser and type inference to support:
-
-1. **Generic type parameters in function calls**
-   ```sio
-   fn vec_new<T>() -> Vec<T>
-   ```
-
-2. **Method call syntax with type parameters**
-   ```sio
-   fn String.parse<T>(self) -> Result<T, ParseError>
-   ```
-
-3. **Polymorphic parsing**
-   ```sio
-   trait FromStr<T> {
-       fn from_str(s: &str) -> Result<T, ParseError>
-   }
-   ```
-
-**Effort**: Significant compiler work (parser, type checker, codegen)
-
-**Timeline**: Phase 3+ work
-
----
-
-### Option B: Stdlib Workaround (Library Work)
-
-Rewrite modules to work within current language constraints:
-
-#### csv_loader.sio - Type-Specific Parsing Functions
+`[T]` supports `.len()` and nothing else. `.push()`, `.pop()`, `.insert()` and
+`.remove()` on a slice receiver are rejected with **E019** (`method calls are
+not supported for this type`).
 
 ```sio
-pub fn parse_usize_line(line: &str) -> Result<usize, String> with Alloc {
-    // Manual digit-by-digit parsing without type parameters
-    var result = 0
-    for c in line.chars() {
-        if c >= '0' && c <= '9' {
-            result = result * 10 + (c as usize - '0' as usize)
-        } else {
-            return Err(string_from("Invalid digit"))
-        }
-    }
-    Ok(result)
-}
+// Rejected — E019
+var xs: [i64] = []
+xs.push(1)
 
-pub fn parse_f64_line(line: &str) -> Result<f64, String> with Alloc {
-    // Manual float parsing
-    // (More complex: handle exponent, fractional parts)
-}
+// Write this instead
+var xs: Seq<i64> = seq_new()
+xs.push(1)
+let n = xs.len().unwrap("len")
 ```
 
-**Workaround**: Create separate functions for each type:
-- `parse_edge_line_usize()`
-- `parse_edge_line_f64()`
+`Seq<T>` carries `.push`, `.get`, `.set` and `.len`, and nests: `Seq<Seq<i64>>`
+checks clean. See `tests/run-pass/seq_methods.sio`.
 
-#### effect_sizes.sio - Keep as-is
+Note the third idiom in the tree: `stdlib/collections/vec.sio` offers `IntVec`
+and `FloatVec`, fixed-capacity 256-element structs with their own `push`. They
+work because struct methods work, not because slices grew one.
 
-Return types like `(f64, f64)` should work. Main issue is if the module tries to use generic parse methods.
+**Scope**: 46 stdlib files use `.push(` across 349 call sites; 40 of them are
+rejected. The six that pass do not push onto a slice — they push onto their own
+struct type or onto a `Seq`. `stdlib/stats/validation.sio` is the clearest
+precedent: its header records that it was written against fixed `&[f64; 256]`
+buffers with an explicit length argument precisely because the imported
+multi-module path rejects `[f64].push()` with E019.
 
-#### configuration.sio - Simplify Type Nesting
+### Character literals break outside a simple binding
 
-Break complex types into named structs:
+**Status**: open defect, frontend.
+
+A character literal is accepted as the whole right-hand side of a binding, and
+as the operand of an unparenthesised `as`. Anywhere a bracket encloses it, the
+parser fails:
+
 ```sio
-pub struct DegreeSequence {
-    pub degrees: Vec<usize>,
-    pub total: usize,
-}
+let c = '0'              // OK
+let d = '0' as i64       // OK
 
-pub struct GraphAdjacency {
-    pub nodes: Vec<Vec<usize>>,  // Instead of Vec<Vec<Vec<usize>>>
-}
+let e = ('0')            // parse error
+let f = g('0')           // parse error
+let h = ['0']            // parse error
 ```
 
-**Effort**: Medium (refactor each module, ~4-6 hours)
+The token reported after the literal varies with the character, so the failure
+is in tokenising or advancing past the literal rather than in the grammar for
+any one bracket form.
 
-**Timeline**: Can be done now if needed
+Separately, `char` does not combine with `i64`:
 
----
+```sio
+if c >= '0' { }   // E004: expected i64, found char
+```
 
-## Current Phase Blockers
+`as` is the documented conversion, but only outside brackets, so the practical
+form is a separate binding:
 
-- **GitHub Issue #17**: Phase 2 configuration model testing blocked until `stdlib/graph/nulls/configuration.sio` is available
-- **GitHub Issue #18**: Multi-module composition testing blocked until all three modules compile
-- **GitHub Issue #21**: Build system linking issues may also be relevant
+```sio
+let zero = '0' as i64
+if c >= zero { }
+```
 
----
+Most of the stdlib avoids the construct entirely and compares ASCII codes
+returned by `str_char_at`, as in `stdlib/darwin_pbpk/io/observed_csv.sio` and
+`stdlib/genomics/io/fasta.sio`. That is the idiom to follow.
 
-## Recommendation
+### Type arguments on method calls are accepted and ignored
 
-1. **Short-term (Now)**:
-   - Document these limitations in compiler roadmap
-   - Create simple working alternatives that demonstrate the pattern
-   - File enhancement issues for parser improvements
+**Status**: open.
 
-2. **Medium-term (v0.70-v0.72)**:
-   - Implement generic type parameter syntax
-   - Add method call support with type hints
-   - Implement trait-based polymorphism (FromStr, Into, etc.)
+`x.m::<T>()` parses, and the type arguments are then discarded — the checker
+does not read them and code generation has no notion of generics. Nothing
+warns. Do not write it; it means nothing.
 
-3. **Long-term (v1.0)**:
-   - Full generic type system with bounds
-   - Monomorphization in codegen
-   - Optimization for generic code
+There is no `parse` method on `string` and no `FromStr` trait. Use the
+type-specific free functions: `str_to_i64` and `str_to_f64` in
+`stdlib/str/lib.sio`, or `parse_i64` / `parse_f64` in `stdlib/data/csv_loader.sio`.
 
----
+### One instantiation per generic template
 
-## Files Affected
+**Status**: bounded.
 
-Created but not yet compilable:
+Turbofish at a call site works — `f::<T>()`, `f::<T, U>()`, `f::<A, B, C>()` —
+but a template may be instantiated with only **one** type-argument list per
+compilation unit. Distinct scalar arguments still behave (`pick::<i64>` and
+`pick::<f64>` together return the right values); with any non-scalar argument
+the compilation is refused rather than silently mis-specialised. Nested type
+arguments are fine on their own: depth was never the constraint.
 
-1. `stdlib/stats/effect_sizes.sio` (~525 LOC)
-   - Status: Tuple return types likely OK, but needs testing
-   - Issue: May have parse method usage
+See `docs/compiler/KNOWN_LIMITATIONS.md` for the compiler-side detail and the
+undocumented caps (4 type parameters, 256 generic functions, 256 generic
+structs).
 
-2. `stdlib/data/csv_loader.sio` (~309 LOC)
-   - Status: BLOCKED - requires `.parse::<T>()` method syntax
-   - Workaround: Replace with type-specific parsing functions
+## The three modules this page used to be about
 
-3. `stdlib/graph/nulls/configuration.sio` (~423 LOC)
-   - Status: BLOCKED - deeply nested generic types
-   - Workaround: Use named struct intermediates
+This page previously stated that three modules "cannot yet be implemented"
+because of generic type parameters in call position, method calls with type
+parameters, and deeply nested generic return types. **All three claims were
+wrong.** Turbofish works, nesting depth was never the issue, and none of the
+three modules contains the constructs it blamed — they use `[[usize]]`, not
+`Vec<Vec<Vec<usize>>>`, and they parse integers with hand-written
+`parse_i64` / `parse_f64` rather than `.parse::<T>()`. The modules were
+rewritten into real Sounio syntax in early 2026 and this page was never
+updated.
 
----
+Measured today:
 
-## Example Demonstration Programs
+| module | verdict | why |
+|---|---|---|
+| `stdlib/stats/effect_sizes.sio` | rejected | 2× E019 — `.push()` on a slice |
+| `stdlib/graph/nulls/configuration.sio` | rejected | 22× E019 + 5× E009 |
+| `stdlib/data/csv_loader.sio` | rejected | 16 parse errors — character literals |
 
-Created to show intended workflow (compile but can't run without stdlib):
+None of that is about generics.
 
-1. `examples/stats/effect_sizes_demo.sio` - Shows API usage pattern
-2. `examples/network/null_hypothesis_demo.sio` - Shows full research workflow
+The wiring matters as much as the compilation:
 
-These can serve as reference implementations once the compiler limitations are addressed.
+- `stdlib/stats/lib.sio` does not export `effect_sizes`, and nothing imports
+  it. It is also largely superseded by `stdlib/stats/effect_size.sio` and
+  `stdlib/stats/effect_convert.sio`, which are self-testing `//@ run-pass`
+  modules. Cliff's delta is the part with no successor.
+- `stdlib/graph/lib.sio` does not reach `nulls`, so
+  `graph::nulls::configuration` is unreachable through the `graph` entry point.
+  Its configuration-model code has no successor anywhere in the tree.
+- `stdlib/data/csv_loader.sio` is the only one with a live test
+  (`tests/stdlib/data/test_csv_e2e.sio`) and keeps a distinct role — graph edge
+  lists — beside `stdlib/data/csv.sio`, `stdlib/data/csv_reader.sio` and
+  `stdlib/csv/`.
 
----
+None of the three is inside the `stdlib.surface` support contract checked by
+`scripts/ci/sounio_stdlib_surface_support_gate.sh`.
 
 ## See Also
 
-- [MINIMUM_VIABLE_SOUNIO.md](../guide/MINIMUM_VIABLE_SOUNIO.md) - Current language capabilities
-- [DEVELOPER_WORKFLOW.md](../contributor-guide/DEVELOPER_WORKFLOW.md) - Development guidelines
-- GitHub Issue #18 - Stdlib Module Design RFC
-- GitHub Issue #21 - Multi-module linking issues
+- [KNOWN_LIMITATIONS.md](../compiler/KNOWN_LIMITATIONS.md) — compiler-side detail
+- [MINIMUM_VIABLE_SOUNIO.md](../guide/MINIMUM_VIABLE_SOUNIO.md) — current language capabilities
+- `scripts/dev/language_limitation_sweep.sh` — the measurement behind this page

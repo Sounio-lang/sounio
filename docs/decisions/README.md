@@ -2,7 +2,7 @@
 topic_id: repo.docs.decisions.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-06
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.readme
 -->
@@ -54,6 +54,8 @@ Grounded in: commit, artifact, or empirical result
 | 005 | `algebra` keyword is compiler infrastructure | accepted | 2026-03-30 |
 | 006 | Self-hosting fixed-point as trust anchor | accepted | 2026-03-30 |
 | 007 | Madaros second-order compilation | experimental | 2026-07-12 |
+| 008 | Single semantic clock for language/library claims | accepted | 2026-08-06 |
+| 009 | Verified foreign reference oracles | accepted | 2026-09-04 |
 
 ## Files
 
@@ -64,6 +66,9 @@ Grounded in: commit, artifact, or empirical result
 - [ADR-005](./adr-005-algebra-keyword-compiler-infrastructure.md)
 - [ADR-006](./adr-006-fixed-point-trust-anchor.md)
 - [ADR-007](./adr-007-second-order-compilation.md)
+- [ADR-008](./adr-008-claim-oracle-semantic-clock.md)
+- [ADR-009](./adr-009-verified-foreign-reference.md)
+- [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
 

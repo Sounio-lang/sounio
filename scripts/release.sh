@@ -79,9 +79,11 @@ Extract and add to PATH:
 Documentation:
     share/doc/sounio/INSTALL.md
     share/doc/sounio/KNOWN_LIMITATIONS.md
+    share/doc/sounio/MATURITY.md
 
 Maturity: this is a beta release. Honest scope lives in
-share/doc/sounio/KNOWN_LIMITATIONS.md. Read it before claims.
+share/doc/sounio/MATURITY.md (tiers) and share/doc/sounio/KNOWN_LIMITATIONS.md
+(open-defect ledger). Read them before claims.
 EOF
 
 mkdir -p "$OUT_DIR"

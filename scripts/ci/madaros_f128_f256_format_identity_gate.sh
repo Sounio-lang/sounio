@@ -99,11 +99,11 @@ assert_structural_containment() {
   }
 
   if function_body is_numeric_type | grep -Eq 'TyF128|TyF256'; then
-    echo "FAIL wide identity leaked into is_numeric_type" >&2
+    echo "FAIL wide floats must stay out of is_numeric_type (use wide_float_* dispatch)" >&2
     exit 1
   fi
   if function_body is_float_type | grep -Eq 'TyF128|TyF256'; then
-    echo "FAIL wide identity leaked into is_float_type" >&2
+    echo "FAIL wide floats must stay out of is_float_type (use wide_float_* dispatch)" >&2
     exit 1
   fi
   if ! function_body is_wide_float_type | grep -Fq 'TyF128'; then
@@ -114,24 +114,32 @@ assert_structural_containment() {
     echo "FAIL is_wide_float_type omits TyF256" >&2
     exit 1
   fi
+  if ! grep -Fq 'wide_float_binary_result_type' self-hosted/check/compat.sio; then
+    echo "FAIL wide_float_binary_result_type missing (V0-E.2 ops dispatch)" >&2
+    exit 1
+  fi
   if ! grep -Fq 'if is_wide_float_type(left) || is_wide_float_type(right)' self-hosted/check/compat.sio; then
-    echo "FAIL binary operator containment guard missing" >&2
+    echo "FAIL binary operator wide-float dispatch guard missing" >&2
     exit 1
   fi
   if ! grep -Fq 'if is_wide_float_type(operand)' self-hosted/check/compat.sio; then
-    echo "FAIL unary operator containment guard missing" >&2
+    echo "FAIL unary operator wide-float dispatch guard missing" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL in-place TypeExpr boundary does not have exactly one E249 interceptor" >&2
+  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 0 ]]; then
+    echo "FAIL in-place TypeExpr still emits live E249 after V0-B lift" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'c.report_error_at(te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL by-value TypeExpr boundary does not have exactly one E249 interceptor" >&2
+  if [[ "$(grep -Fc 'c.report_error_at(te.span, 249' self-hosted/check/check.sio)" -ne 0 ]]; then
+    echo "FAIL by-value TypeExpr still emits live E249 after V0-B lift" >&2
     exit 1
   fi
   if [[ "$(grep -Fc 'parser_reject_reserved_wide_float_path(' self-hosted/parser/types.sio)" -ne 3 ]]; then
-    echo "FAIL parser TypeNamed constructors do not both enforce E249" >&2
+    echo "FAIL parser TypeNamed constructors do not keep reject-helper call sites" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'fn parser_reject_reserved_wide_float_path' self-hosted/parser/types.sio; then
+    echo "FAIL parser_reject_reserved_wide_float_path helper missing" >&2
     exit 1
   fi
   for exact in \

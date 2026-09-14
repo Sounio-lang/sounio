@@ -3,8 +3,7 @@
 #
 # Parity / golden-regression harness for the Sounio compiler.
 #
-# Background (see docs/compiler/KNOWN_LIMITATIONS.md, section
-# "Single-source build path"): bin/souc is built today from
+# Background (see docs/compiler/BOOTSTRAP_SEED.md): bin/souc is built today from
 # self-hosted/compiler/lean_single.sio; the modular tree at
 # self-hosted/{lexer,parser,check,ir,native} is a future target
 # kept in lock-step by discipline.  This harness exists to catch
