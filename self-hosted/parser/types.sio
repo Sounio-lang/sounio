@@ -328,7 +328,7 @@ impl Parser {
             let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
             let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
-            (p2, TypeExpr {
+            var unit_ty = TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
@@ -338,8 +338,61 @@ impl Parser {
                 effects: None,
                 knowledge_info: None,
                 refinement_info: None,
-            })
+            }
+            // KL-13b: bare derived unit annotations `mol/cm3`, `cal/mol/K`.
+            // Same TypeReference=/ TypeRefMut=* encoding as parse_unit_item.
+            var p_unit = p2
+            while parser_peek(p_unit) == TokenKind::Slash || parser_peek(p_unit) == TokenKind::Star {
+                let op = parser_peek(p_unit)
+                p_unit = p_unit.advance()
+                let rhs_pair = p_unit.parse_named_type_atom()
+                p_unit = rhs_pair.0
+                let rhs_ty = rhs_pair.1
+                let unit_kind = if op == TokenKind::Slash {
+                    TypeExprKind::TypeReference
+                } else {
+                    TypeExprKind::TypeRefMut
+                }
+                let op_span = p_unit.span_from(start)
+                unit_ty = TypeExpr {
+                    kind: unit_kind,
+                    span: op_span,
+                    path: empty_path(),
+                    type_args: Some(Box::new(TypeExprList {
+                        head: unit_ty,
+                        tail: None,
+                    })),
+                    inner: Some(Box::new(rhs_ty)),
+                    array_size: None,
+                    effects: None,
+                    knowledge_info: None,
+                    refinement_info: None,
+                }
+            }
+            (p_unit, unit_ty)
         }
+    }
+
+    // Named type without trailing `/` `*` unit-expr chains (used as RHS of those chains).
+    fn parse_named_type_atom(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let pair = self.parse_type_path()
+        let p1 = pair.0
+        let path = pair.1
+        let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
+        let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
+        let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
+        (p2, TypeExpr {
+            kind: TypeExprKind::TypeNamed,
+            span: span,
+            path: path,
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
     }
 
     // ============================================================
@@ -517,14 +570,69 @@ impl Parser {
         var p = self.advance()  // skip <
         let pair = p.parse_type()
         p = pair.0
-        let first_ty = pair.1
+        var first_ty = pair.1
+        // KL-13b: allow `f64<m/s>` / `f64<m/s/s>` — unit chains inside the arg.
+        while parser_peek(p) == TokenKind::Slash || parser_peek(p) == TokenKind::Star {
+            let op = parser_peek(p)
+            p = p.advance()
+            let rhs_pair = p.parse_named_type_atom()
+            p = rhs_pair.0
+            let rhs_ty = rhs_pair.1
+            let unit_kind = if op == TokenKind::Slash {
+                TypeExprKind::TypeReference
+            } else {
+                TypeExprKind::TypeRefMut
+            }
+            let op_span = p.span_from(first_ty.span)
+            first_ty = TypeExpr {
+                kind: unit_kind,
+                span: op_span,
+                path: empty_path(),
+                type_args: Some(Box::new(TypeExprList {
+                    head: first_ty,
+                    tail: None,
+                })),
+                inner: Some(Box::new(rhs_ty)),
+                array_size: None,
+                effects: None,
+                knowledge_info: None,
+                refinement_info: None,
+            }
+        }
         var rev_list = TypeExprList { head: first_ty, tail: None }
 
         while parser_peek(p) == TokenKind::Comma {
             p = p.advance()  // skip ,
             let pair2 = p.parse_type()
             p = pair2.0
-            let next_ty = pair2.1
+            var next_ty = pair2.1
+            while parser_peek(p) == TokenKind::Slash || parser_peek(p) == TokenKind::Star {
+                let op = parser_peek(p)
+                p = p.advance()
+                let rhs_pair = p.parse_named_type_atom()
+                p = rhs_pair.0
+                let rhs_ty = rhs_pair.1
+                let unit_kind = if op == TokenKind::Slash {
+                    TypeExprKind::TypeReference
+                } else {
+                    TypeExprKind::TypeRefMut
+                }
+                let op_span = p.span_from(next_ty.span)
+                next_ty = TypeExpr {
+                    kind: unit_kind,
+                    span: op_span,
+                    path: empty_path(),
+                    type_args: Some(Box::new(TypeExprList {
+                        head: next_ty,
+                        tail: None,
+                    })),
+                    inner: Some(Box::new(rhs_ty)),
+                    array_size: None,
+                    effects: None,
+                    knowledge_info: None,
+                    refinement_info: None,
+                }
+            }
             rev_list = TypeExprList { head: next_ty, tail: Some(Box::new(rev_list)) }
         }
 
