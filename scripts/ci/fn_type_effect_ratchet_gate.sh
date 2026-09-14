@@ -42,10 +42,13 @@ strip_noise() {
   sed -e 's|//.*$||' -e 's/"[^"]*"//g' "$1"
 }
 
+# artifacts/research/ holds recorded experiment inputs, not live source: a probe of
+# this very gap (e.g. an effectful fn passed to a bare fn-typed parameter) must
+# keep its bare type or its recorded result no longer describes the file.
 enumerate() {
   git ls-files -z '*.sio' \
     | tr '\0' '\n' \
-    | grep -vE '^(archive|bootstrap)/' \
+    | grep -vE '^(archive|bootstrap|artifacts/research)/' \
     | grep -vE '\.sio\.old$' \
     | while IFS= read -r f; do
         [ -f "$f" ] || continue
@@ -103,7 +106,7 @@ selftest >/dev/null 2>&1 || {
 # Anti-vacuity: the sweep must see the corpus at all. If enumerate returns
 # nothing because the pattern rotted or the file list came back empty, that is a
 # broken instrument, not a repository with zero bare function types.
-ficheiros=$(git ls-files '*.sio' | grep -vE '^(archive|bootstrap)/' | wc -l | tr -d ' ')
+ficheiros=$(git ls-files '*.sio' | grep -vE '^(archive|bootstrap|artifacts/research)/' | wc -l | tr -d ' ')
 require_nonempty "$ficheiros" "the .sio file list came back empty"
 require_min_count "$ficheiros" 500 "live .sio files"
 
