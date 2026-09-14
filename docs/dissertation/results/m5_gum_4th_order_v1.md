@@ -174,10 +174,12 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
 > **Current state (2026-09-14).** Since `36f9b34cc7`, `main` declares `Epistemic`, the
-> known-failure tag is gone, and the test carries `//@ timeout: 90`. Run through lean_single's raw
-> interface, from the repository root because it resolves stdlib imports relative to the working
-> directory,
-> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf && /tmp/m5_gum_4th_order.elf`
+> known-failure tag is gone, and the test carries `//@ timeout: 90`. The command below needs its
+> `chmod +x` step: this lean_single build (sha256 below) wrote the ELF with mode `-rw-r--r--` under
+> umask 0022, and without that step, as in the command this note gave before, running the ELF
+> stopped at `Permission denied` (exit 126). Run through lean_single's raw interface, from the
+> repository root because it resolves stdlib imports relative to the working directory,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf && chmod +x /tmp/m5_gum_4th_order.elf && /tmp/m5_gum_4th_order.elf`
 > (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
 > printed `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS` and `PASS`, and all ten numeric values in the
 > Output table below equal its output. The `(CL_hep)` label on dominant correction index 0 is not
