@@ -1854,9 +1854,33 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
          do generation pin falha com EROFS no proprio lock e o agente nunca ve o
          prompt. Respeita SOUNIO_COORD_DIR como o activation epoch ja faz. *)
       let writable_roots =
-        [ (match Sys.getenv_opt "SOUNIO_COORD_DIR" with
-           | Some path when path <> "" -> path
-           | _ -> Filename.concat (git_common_dir cwd) "sounio-coord-state") ]
+        let common = git_common_dir cwd in
+        (* Logs de decisao e auditoria que o proprio codigo do hook grava de
+           dentro da membrana (loom_hook, loom_exec, loom_exec_ingress,
+           loom_membrane). O estado de sessao do daemon, sounio-loom, fica de
+           fora de proposito: o daemon roda fora da membrana e o agente nao tem
+           por que escrever nele. *)
+        (match Sys.getenv_opt "SOUNIO_COORD_DIR" with
+         | Some path when path <> "" -> path
+         | _ -> Filename.concat common "sounio-coord-state")
+        :: List.map (Filename.concat common)
+             [ "sounio-loom-language-authority";
+               "sounio-loom-execution-authority";
+               "sounio-loom-execution-capabilities";
+               "sounio-loom-product-exec-ingress";
+               "sounio-loom-subprocess-membrane.tsv";
+               "sounio-loom-product-activation-dark.tsv" ]
+        |> List.map (fun path ->
+               (* O codigo do hook cria alguns desses caminhos sob demanda. Aqui
+                  o filho ainda enxerga o disco gravavel, entao cria o que falta:
+                  depois dos binds read-only, criar la dentro daria EROFS. *)
+               (if not (Sys.file_exists path) then
+                  try
+                    if Filename.check_suffix path ".tsv" then
+                      Unix.close (Unix.openfile path [ O_WRONLY; O_CREAT ] 0o600)
+                    else Unix.mkdir path 0o700
+                  with Unix_error (EEXIST, _, _) -> ());
+               path)
         |> List.filter Sys.file_exists
         |> List.map Unix.realpath |> List.sort_uniq String.compare
         |> Array.of_list

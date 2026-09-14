@@ -3828,7 +3828,11 @@ coord_obligation_supervisor_owned_pids() {
             break
             ;;
         esac
-      done < "$proc/environ"
+      done 2>/dev/null < "$proc/environ" || true
+      # De dentro da membrana do change kernel o supervisor roda noutro
+      # namespace de usuario: o kernel nega abrir o environ dele mesmo com o
+      # [[ -r ]] passando. Sem ler, cai na regra de baixo, que ja e a do caso
+      # normal (supervisor do bundle usa o sounio-coord-state do git common).
     fi
     if [[ -z "$observed_state_dir" && -n "$runtime_root" ]]; then
       case "$script_path" in
