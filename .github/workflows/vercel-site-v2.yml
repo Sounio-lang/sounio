@@ -43,10 +43,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Os scripts de medição leem `origin/main`. Um checkout raso não o
-          # tem, e eles falhariam — o que é o modo de falha certo, mas custa
-          # um ciclo de CI para descobrir.
+          # Os scripts de medição leem HEAD e contam os commits do histórico.
+          # Um checkout raso conta 1 commit e publicaria um número errado.
           fetch-depth: 0
+
+      # O job roda como root dentro do contêiner, e o checkout pertence ao
+      # usuário do runner. O git recusa o repositório ("dubious ownership") e
+      # os scripts de medição falham no primeiro `git ls-tree`
+      # (run 34905146272).
+      - name: Trust the checkout inside the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Verify required credentials
         run: |
@@ -82,8 +88,11 @@ jobs:
       # de um commit que já não existe, ou de a CI reescrevê-los sem que
       # nenhum commit explique a mudança.
       #
-      # `generated_at` é um carimbo de hora e muda a cada execução: é
-      # descartado da comparação, que é sobre as medições.
+      # Três campos ficam fora da comparação, que é sobre as medições:
+      # `generated_at` muda a cada execução; `commit` e `metrics.commits`
+      # descrevem o próprio commit medido, e commitar os artefatos já cria
+      # outro. Comparados, reprovariam todo build. Os valores publicados são
+      # os remedidos aqui, então o site ainda nomeia o commit de que foi feito.
       - name: Measurement artifacts are current
         working-directory: site-next
         run: |
@@ -94,7 +103,9 @@ jobs:
           if ! node -e '
             const fs = require("node:fs"), path = require("node:path");
             const strip = f => { const d = JSON.parse(fs.readFileSync(f, "utf8"));
-                                 delete d.generated_at; return JSON.stringify(d); };
+                                 delete d.generated_at; delete d.commit;
+                                 if (d.metrics) delete d.metrics.commits;
+                                 return JSON.stringify(d); };
             const dir = process.argv[1], now = "../artifacts/site";
             let drift = [];
             for (const f of fs.readdirSync(now)) {
