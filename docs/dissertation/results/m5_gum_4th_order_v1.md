@@ -184,8 +184,8 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`), stops at
 > `error[E035] … missing: Epistemic` in `main`. Line 82 of the test calls
 > `m5_pbpk28_convergence_budget`, which is declared `with Mut, Div, Panic, Epistemic`
-> (`stdlib/darwin_pbpk/cumulants.sio:442`). The test is still annotated `//@ run-pass`, with no
-> `//@ known-failure`, so the test harness expects it to pass.
+> (`stdlib/darwin_pbpk/cumulants.sio:442`). Since `cf42e812bd` (2026-09-14) the test also carries
+> `//@ known-failure` for this, so the test suite reports it as a known failure, not a failure.
 > The `canonical u_MC` row is a literal in the source, not a value this test computes: line 83
 > prints `print_f64(0.357945)`, and `m5_pbpk28_convergence_budget` passes the same literal as the
 > `u_mc` argument of `variance_budget_4th_from_hessian` (`stdlib/darwin_pbpk/cumulants.sio:449`;
