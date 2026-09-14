@@ -186,7 +186,7 @@ verify_manifest_file "$RUNTIME_MANIFEST" coord_runtime_sha256 \
   "$RUNTIME_BUNDLE/bin/sounio-coord-runtime"
 AUTHORITY_ROOT="$RUNTIME_BUNDLE/policy/language-authority"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_manifest_sha256 \
-  "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1"
+  "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v2"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_source_sha256 \
   "$AUTHORITY_ROOT/stdlib/coordination/loom_language_authority.sio"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_entrypoint_sha256 \
