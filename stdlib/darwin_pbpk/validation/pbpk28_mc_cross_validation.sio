@@ -221,10 +221,14 @@ fn mc28_lognormal_from_z(mean: f64, variance: f64, z: f64) -> f64 with Mut, Div,
 // FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h)
 // ============================================================================
 
+// Steps one state in place with one reused work value, so a sample costs no GC
+// handles per step under Madaros (handles are never reclaimed; the by-value
+// step allocated per step and N=2000 samples per prior overflowed the table).
 fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
     let t_end = 168.0
     let dt    = 0.5
     var st    = pbpk28_state_zero()
+    var work  = pbpk28_cn_work_zero()
     st.cv[0]  = dose_mg / prm.v_ref[0]
     var t     = 0.0
     var auc   = 0.0
@@ -233,15 +237,14 @@ fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
     while t < t_end {
         if steps > 1000 { return 0.0 }
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new  = st_new.cv[0]
+        pbpk28_full_cn_step_ref(&!st, &prm, &!work, 0.0, dt_use)
+        let c_new  = st.cv[0]
         if c_new != c_new { return 0.0 }
         if c_new < 0.0    { return 0.0 }
         if c_new > 1.0e12 { return 0.0 }
         auc    = auc + 0.5 * (c_prev + c_new) * dt_use
         c_prev = c_new
         t      = t + dt_use
-        st     = st_new
         steps  = steps + 1
     }
     return auc
