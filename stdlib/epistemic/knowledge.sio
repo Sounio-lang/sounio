@@ -232,8 +232,15 @@ pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
 // construction, the way indep_measured refuses an out-of-range rho. The PSD test
 // for the 2x2 is Cov^2 <= Var(X)*Var(Y); the (1 + 1e-10) slack admits the exact
 // self-correlated boundary (Cov = Var, e.g. ep_sub_cov(x, x, Var) -> 0) against
-// floating-point rounding. With the input proven PSD the propagated variance is
-// >= 0 and no clamp is needed.
+// floating-point rounding.
+// The slack also means an ACCEPTED input can sit up to ~5e-11 (relative) past the
+// boundary, where the propagated variance comes out slightly negative -- measured:
+// Var X ~ Var Y ~ 606759.19 (one ulp apart), Cov one ulp above sqrt(VarX*VarY) gives
+// ep_sub_cov -4.7e-10. So the output is still floored at zero. The floor is not the
+// old clamp: inconsistent input is refused above, and on accepted input it can only
+// absorb that slack or rounding noise, at a point where the true variance is ~0.
+// An unfloored negative would reach ep_merge as a non-positive variance and be
+// weighted as near-certainty (1e15).
 
 // Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)
 pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
@@ -243,7 +250,7 @@ pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Pani
     let v = a.variance + b.variance + 2.0 * cov
     Epistemic {
         val: a.val + b.val,
-        variance: v,
+        variance: if v < 0.0 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
@@ -256,7 +263,7 @@ pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Pani
     let v = a.variance + b.variance - 2.0 * cov
     Epistemic {
         val: a.val - b.val,
-        variance: v,
+        variance: if v < 0.0 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
@@ -270,7 +277,7 @@ pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Pani
         + 2.0 * a.val * b.val * cov
     Epistemic {
         val: a.val * b.val,
-        variance: v,
+        variance: if v < 0.0 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }
@@ -288,7 +295,7 @@ pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div,
         - 2.0 * a.val * cov / y3
     Epistemic {
         val: a.val / b.val,
-        variance: v,
+        variance: if v < 0.0 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }
