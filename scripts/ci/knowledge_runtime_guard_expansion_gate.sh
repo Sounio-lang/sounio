@@ -106,14 +106,54 @@ else
   exit 1
 fi
 
+if bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio "$CURRENT_SOUC" >"$BUILD_LOG" 2>&1; then
+  chmod +x "$CURRENT_SOUC"
+  printf 'PASS  built current-source lean_single compiler for the obligation probe and internal-label runtime guard gate\n'
+else
+  printf 'FAIL  could not build current-source lean_single compiler for the obligation probe and internal-label runtime guard gate\n' >&2
+  cat "$BUILD_LOG" >&2
+  exit 1
+fi
+
+# The current-source lean_single has the raw CLI `souc SRC OUT` and no verbs.
+# bin/souc's SOUNIO_SOUC_BIN override execs that ELF with its arguments
+# unchanged, so `SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run f.sio` compiled a
+# source literally named `run` and failed with error[E221]: no main, never
+# compiling f.sio. The reject step below then PASSED on that E221. Measured
+# 2026-09-13: both internal-label steps exited 1 with E221 through the wrapper.
+# Call the raw ABI, and keep compile and execution separate so the reject step
+# can only pass on the runtime guard trap (a failed lean_single assert exits 1
+# with no output), not on a compile error.
+lean_compile() {  # lean_compile <src> <out>
+  rm -f "$2"
+  "$CURRENT_SOUC" "$1" "$2" || return $?
+  chmod +x "$2"
+}
+
+# The obligation probe is compiled once, by the current-source lean_single, and
+# run directly. Through `bin/souc run` it was compiled by the committed prebuilt
+# bin/madaros-linux-x86_64, which left 13 parser methods it imports (peek,
+# advance, expect, parse_type, parse_type_args, parse_indep_knowledge_args, ...)
+# without lowered bodies and emitted them as ud2 stubs (NATIVE_REFUSAL
+# kind=empty_stub_ud2 reason=missing_lowered_body). The probe then died with
+# SIGILL (rc=132, no output) on the first Knowledge<T where {...}> type, so
+# return-positive failed before any obligation was counted. Measured 2026-09-13.
+PROBE_BIN="$TMP_DIR/knowledge-runtime-obligation-probe.lean"
+PROBE_BUILD_LOG="$TMP_DIR/knowledge-runtime-obligation-probe-build.log"
+if ! lean_compile "$OBLIGATION_PROBE" "$PROBE_BIN" >"$PROBE_BUILD_LOG" 2>&1; then
+  printf 'FAIL  could not compile the Knowledge runtime obligation probe with current-source lean_single\n' >&2
+  cat "$PROBE_BUILD_LOG" >&2
+  exit 1
+fi
+
 assert_obligation_drained() {
   local label="$1"
   local source_file="$2"
   local expanded_file="$3"
   local source_log="$TMP_DIR/${label}-source-obligations.log"
   local expanded_log="$TMP_DIR/${label}-expanded-obligations.log"
-  if bin/souc run "$OBLIGATION_PROBE" -- "$source_file" >"$source_log" 2>&1 &&
-     bin/souc run "$OBLIGATION_PROBE" -- "$expanded_file" >"$expanded_log" 2>&1 &&
+  if "$PROBE_BIN" "$source_file" >"$source_log" 2>&1 &&
+     "$PROBE_BIN" "$expanded_file" >"$expanded_log" 2>&1 &&
      grep -q 'knowledge_runtime_obligation_verdict=0' "$source_log" &&
      grep -Eq 'knowledge_runtime_obligation_count=[1-9][0-9]*' "$source_log" &&
      grep -q 'knowledge_runtime_obligation_verdict=0' "$expanded_log" &&
@@ -571,30 +611,6 @@ else
   cat "$INTERNAL_LABEL_POSITIVE_EXPANDED" >&2
   exit 1
 fi
-
-if bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio "$CURRENT_SOUC" >"$BUILD_LOG" 2>&1; then
-  chmod +x "$CURRENT_SOUC"
-  printf 'PASS  built current-source lean_single compiler for internal-label runtime guard gate\n'
-else
-  printf 'FAIL  could not build current-source lean_single compiler for internal-label runtime guard gate\n' >&2
-  cat "$BUILD_LOG" >&2
-  exit 1
-fi
-
-# The current-source lean_single has the raw CLI `souc SRC OUT` and no verbs.
-# bin/souc's SOUNIO_SOUC_BIN override execs that ELF with its arguments
-# unchanged, so `SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run f.sio` compiled a
-# source literally named `run` and failed with error[E221]: no main, never
-# compiling f.sio. The reject step below then PASSED on that E221. Measured
-# 2026-09-13: both internal-label steps exited 1 with E221 through the wrapper.
-# Call the raw ABI, and keep compile and execution separate so the reject step
-# can only pass on the runtime guard trap (a failed lean_single assert exits 1
-# with no output), not on a compile error.
-lean_compile() {  # lean_compile <src> <out>
-  rm -f "$2"
-  "$CURRENT_SOUC" "$1" "$2" || return $?
-  chmod +x "$2"
-}
 
 INTERNAL_LABEL_POSITIVE_LOG="$TMP_DIR/internal-label-positive.log"
 INTERNAL_LABEL_POSITIVE_BIN="$TMP_DIR/internal-label-positive.lean"
