@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-language-authority-v1-20260827.txt"
+MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-language-authority-v2-20260914.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-language-authority-freeze.XXXXXX")"
 RUNTIME="$TEST_ROOT/sounio-language-authority"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
@@ -42,12 +42,19 @@ stream_hash() {
 
 [[ -f "$MANIFEST" ]] || fail "freeze manifest is missing"
 [[ -f "$EVIDENCE" ]] || fail "freeze evidence is missing"
-[[ "$(field schema)" == loom-language-authority-freeze-v1 ]] || fail "unknown manifest schema"
+[[ "$(field schema)" == loom-language-authority-freeze-v2 ]] || fail "unknown manifest schema"
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail "manifest is not frozen"
 [[ "$(field producing_language)" == Sounio ]] || fail "producer is not Sounio"
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail "producer role is not semantic authority"
 [[ "$(field parity_open)" == false ]] || fail "freeze manifest opened parity"
 [[ "$(field claim_ready)" == false ]] || fail "freeze manifest promoted a claim"
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS ]] || fail "unexpected change class"
+[[ "$(field semantics_module_changed)" == false ]] || fail "v2 must not change the semantic module"
+predecessor_path="$(field predecessor_manifest_path)"
+[[ "$predecessor_path" == tools/loom/language_authority.freeze.v1 ]] || fail "unexpected predecessor"
+[[ "$(file_hash "$ROOT_DIR/$predecessor_path")" == "$(field predecessor_manifest_sha256)" ]] || fail "predecessor manifest drifted"
+git -C "$ROOT_DIR" cat-file -e "$(field toolchain_commit)^{commit}" || fail "toolchain commit is absent"
+[[ "$(field source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$predecessor_path" | cut -d= -f2)" ]] || fail "semantic module differs from predecessor"
 
 garden_commit="$(field garden_commit)"
 executable_commit="$(field sounio_executable_commit)"
@@ -79,7 +86,7 @@ build_script_path="$(field build_script_path)"
 # The live compiler is allowed to advance. Reconstruct the exact frozen
 # toolchain from the executable commit so this receipt remains reproducible.
 mkdir -p "$TOOLCHAIN_ROOT"
-git -C "$ROOT_DIR" archive "$executable_commit" "$wrapper_path" "$compiler_path" |
+git -C "$ROOT_DIR" archive "$(field toolchain_commit)" "$wrapper_path" "$compiler_path" |
   tar -x -C "$TOOLCHAIN_ROOT"
 [[ "$(file_hash "$TOOLCHAIN_ROOT/$wrapper_path")" == "$(field toolchain_wrapper_sha256)" ]] ||
   fail "frozen compiler wrapper drifted"
