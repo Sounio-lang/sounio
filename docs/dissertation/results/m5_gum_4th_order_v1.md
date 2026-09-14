@@ -195,8 +195,28 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > differ from the lean_single output in three lines, where lean_single prints a small magnitude in
 > exponent form and Madaros prints `0.000000`: `Gaussian fixture kappa4` (lean_single
 > `4.440892e-16`) and the `rel_err` of `dAUC/dCL` (`8.452175e-13`) and of `d2AUC/dCL2`
-> (`1.337220e-9`). The printed text does not show whether the underlying values differ. The same
-> tree run through the previous prebuilt, sha256
+> (`1.337220e-9`). Those three values do not differ. A scratch copy of the test was made in which
+> every `print_f64(x); println("")` also prints `f64_to_bits(x)`, `check_close` also prints the bits
+> of its got and expected values, and `main` first prints three known constants
+> (`1.0 / 2251799813685248.0`, 2000 times that, and `1.0 / 1000000000.0`); `diff` against the test
+> shows no other changed line. Run at HEAD `0fc28e7fed` with the same two binaries (the worktree
+> also held uncommitted edits to compiler and collections sources, none of them in the test's
+> imports), it gave identical bit patterns for the three values on both engines. The constants also
+> have identical bits on both engines but print in exponent form on lean_single and as `0.000000`
+> on Madaros, so the three lines differ only in how `print_f64` formats small magnitudes. The probe
+> prints the bits of 26 of the test's values. 10 of them differ between the engines but print
+> identically to the six decimals shown, which is why they are not among the differing lines above.
+> As relative differences from the lean_single value, computed from the bits: `var_1st` 3.4e-12,
+> `u_1st` 1.7e-12, `u_2nd_hessian` 7.3e-11, `rel_hess_residual` 3.4e-10, `var_skewness` 3.5e-10,
+> `var_kurtosis` 6.2e-10, `u_total` 6.7e-10, `var_total` 1.3e-9, `var_cubic` 2.1e-9 and
+> `rel_fourth_residual` 1.2e-8. None of these differences changes a value recorded in this note:
+> the tables are unchanged, and both engines print the same ten Output values. The other 16 are
+> bit-identical: the two Gaussian fixture kappas, the three lognormal values, the `rel_err`, got
+> and expected of each of the three derivative checks (nine values), `u_MC canonical` and the
+> dominant index. Each engine reproduced its own bits on a second run. Where in the budget
+> computation the two engines first diverge has not been traced.
+>
+> The unmodified test at `2a8e7ad145`, run through the previous prebuilt, sha256
 > `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24` (extracted from commit
 > `2952a88fa2` and selected with `MADAROS_RAW_BIN`), exited 0 in 29 s with byte-identical program
 > output. The test suite, also from the repository root,
