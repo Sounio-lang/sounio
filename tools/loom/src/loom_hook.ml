@@ -4,7 +4,7 @@ exception Error of string
 exception Forwarded of int
 
 let pinned_manifest_sha256 =
-  "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
+  "7019af35cddccddd2c34e7dca0f40300bc446f5e7add52c37b0325b6ae9c1037"
 
 let pinned_native_hook_cutover_manifest_sha256 =
   "16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a"
@@ -999,7 +999,7 @@ let runtime_authority_root () =
 
 let authority_policy_root worktree_root =
   let local_manifest =
-    Filename.concat worktree_root "tools/loom/language_authority.freeze.v1"
+    Filename.concat worktree_root "tools/loom/language_authority.freeze.v2"
   in
   let selected =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT" with
@@ -1022,7 +1022,7 @@ let authorize_guard root _raw_event base_receipt =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then failf "Sounio-authority-policy-missing";
   if sha256_file manifest_path <> pinned_manifest_sha256 then

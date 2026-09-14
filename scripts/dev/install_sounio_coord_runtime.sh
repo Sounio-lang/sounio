@@ -322,7 +322,7 @@ activate_runtime() {
       die "installed runtime declares an authority capsule without the native hook: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_language_authority_policy_manifest_sha256 \
-      "$authority_capsule/tools/loom/language_authority.freeze.v1"
+      "$authority_capsule/tools/loom/language_authority.freeze.v2"
     verify_manifest_binary_sha256 "$manifest" \
       loom_language_authority_policy_source_sha256 \
       "$authority_capsule/stdlib/coordination/loom_language_authority.sio"
@@ -1001,7 +1001,7 @@ loom_message_source="$loom_project/message_bridge/loom_message_bridge.ml"
 loom_message_dune="$loom_project/message_bridge/dune"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
-loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
+loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v2"
 loom_routing_garden="$SOURCE_ROOT/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md"
 loom_routing_entrypoint="$SOURCE_ROOT/tools/loom/routing_authority_main.sio"
 loom_routing_module="$SOURCE_ROOT/stdlib/coordination/loom_routing_authority.sio"
@@ -1962,7 +1962,7 @@ else
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
   install -m 0644 "$loom_language_authority_freeze" \
-    "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1"
+    "$stage/policy/language-authority/tools/loom/language_authority.freeze.v2"
   install -m 0644 "$loom_language_authority_entrypoint" \
     "$stage/policy/language-authority/tools/loom/language_authority_main.sio"
   install -m 0644 "$loom_language_authority_module" \
@@ -2255,7 +2255,7 @@ else
     sha256sum "$stage/policy/routing-authority/tools/loom/routing_authority.freeze.v1" | awk '{print $1}'
   )"
   loom_language_authority_policy_manifest_sha256="$(
-    sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1" | awk '{print $1}'
+    sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v2" | awk '{print $1}'
   )"
   loom_language_authority_policy_source_sha256="$(
     sha256sum "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio" | awk '{print $1}'

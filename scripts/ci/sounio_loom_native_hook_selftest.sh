@@ -6,7 +6,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.XXXXXX")"
 AUTHORITY_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 CUTOVER_RUNTIME="$TEST_ROOT/sounio-loom-native-hook-cutover"
 CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
@@ -142,7 +142,7 @@ for provider_config in \
   grep -Eq '"timeout"[[:space:]]*:[[:space:]]*30' "$provider_config" ||
     fail "provider hook does not preserve the 30s outer deadline: $provider_config"
 done
-frozen_executable_commit="$(sed -n 's/^sounio_executable_commit=//p' "$AUTHORITY_MANIFEST")"
+frozen_executable_commit="$(sed -n 's/^toolchain_commit=//p' "$AUTHORITY_MANIFEST")"
 [[ -n "$frozen_executable_commit" ]] || fail 'language-authority manifest omitted its executable commit'
 mkdir -p "$TOOLCHAIN_ROOT"
 git -C "$ROOT_DIR" archive "$frozen_executable_commit" \
@@ -315,7 +315,7 @@ set -e
 [[ "$MISSING_RC" -eq 2 && "$MISSING_OUTPUT" == *'Sounio-authority-policy-missing'* ]] ||
   fail "missing policy did not fail closed: rc=$MISSING_RC output=$MISSING_OUTPUT"
 
-cp "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$TEST_ROOT/tampered.freeze"
+cp "$ROOT_DIR/tools/loom/language_authority.freeze.v2" "$TEST_ROOT/tampered.freeze"
 printf '\n' >>"$TEST_ROOT/tampered.freeze"
 set +e
 TAMPER_OUTPUT="$(printf '%s\n' "$write_event" | \

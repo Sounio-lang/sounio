@@ -150,7 +150,7 @@ cp "$ROOT_DIR/tools/loom/message_bridge/dune" \
   "$ROOT_DIR/tools/loom/message_bridge/loom_message_bridge.ml" \
   "$REPO/tools/loom/message_bridge/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v2" \
   "$ROOT_DIR/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md" \
   "$ROOT_DIR/tools/loom/routing_authority_main.sio" \
   "$ROOT_DIR/tools/loom/routing_authority.freeze.v1" \
@@ -853,12 +853,12 @@ grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
 grep -q '^loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff$' \
   "$first_manifest" || fail 'installed native hook is not bound to frozen Sounio semantics'
 authority_capsule="$RUNTIME_ROOT/versions/$first_id/policy/language-authority"
-[[ -f "$authority_capsule/tools/loom/language_authority.freeze.v1" && \
+[[ -f "$authority_capsule/tools/loom/language_authority.freeze.v2" && \
   -f "$authority_capsule/tools/loom/language_authority_main.sio" && \
   -f "$authority_capsule/stdlib/coordination/loom_language_authority.sio" ]] || \
   fail 'installed runtime omitted the frozen Sounio authority capsule'
 for binding in \
-  "loom_language_authority_policy_manifest_sha256:$authority_capsule/tools/loom/language_authority.freeze.v1" \
+  "loom_language_authority_policy_manifest_sha256:$authority_capsule/tools/loom/language_authority.freeze.v2" \
   "loom_language_authority_policy_source_sha256:$authority_capsule/stdlib/coordination/loom_language_authority.sio" \
   "loom_language_authority_policy_entrypoint_sha256:$authority_capsule/tools/loom/language_authority_main.sio"; do
   key="${binding%%:*}"
@@ -1635,7 +1635,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$BAD/tools/loom/"
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v2" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \

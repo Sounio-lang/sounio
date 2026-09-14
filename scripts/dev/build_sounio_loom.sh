@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 NATIVE_HOOK_CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
 EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
 EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
@@ -144,7 +144,7 @@ prepare_frozen_toolchain() {
     echo 'error: frozen Sounio authority manifests are required' >&2
     exit 1
   }
-  executable_commit="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" sounio_executable_commit)"
+  executable_commit="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_commit)"
   wrapper_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
   compiler_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_compiler_sha256)"
   execution_wrapper_sha="$(manifest_value "$EXECUTION_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
