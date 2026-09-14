@@ -123,7 +123,65 @@ def distance_suffices(rmax=40):
     return True
 
 
-if __name__ == "__main__" and "--table" in __import__("sys").argv:
+# Lin & Jiang, J. Phys. Chem. Lett. 14, 7513 (2023) (arXiv:2304.10812), Fig. 3b:
+# O-O distance distribution after O2 dissociation on Pd(100), EANN potential,
+# 400 trajectories at 160 K. Digitised from the arXiv figure rendered at 600
+# dpi: bar tops read in pixels against the 0 / 0.2 / 0.4 axis ticks. The eleven
+# bars sum to 0.996, a check on the reading. Distances in surface lattice
+# constants; each is an allowed hollow-hollow separation, so |D|^2 is exact.
+LIN_JIANG_PD100 = {1: 0.0404, 2: 0.0378, 4: 0.4318, 5: 0.2426, 8: 0.0439, 9: 0.0955,
+                   10: 0.0662, 13: 0.0138, 16: 0.0095, 17: 0.0112, 25: 0.0017}
+LIN_JIANG_N = 400
+
+
+def triple_from_d2(weights):
+    """R triple from a distribution over |D|^2, using the mod-4 rule."""
+    tot = sum(weights.values())
+    p = {0: 0.0, 1: 0.0, 2: 0.0}
+    for d2, w in weights.items():
+        p[d2 % 4] += w / tot
+    r0 = 2 * (p[0] + p[2])
+    r12 = 2 * (p[0] + 0.5 * p[1])
+    return r0, r12, p
+
+
+def lin_jiang_prediction(n_boot=4000, seed=12345):
+    import random
+    r0, r12, p = triple_from_d2(LIN_JIANG_PD100)
+    rng = random.Random(seed)
+    keys = list(LIN_JIANG_PD100)
+    tot = sum(LIN_JIANG_PD100.values())
+    probs = [LIN_JIANG_PD100[k] / tot for k in keys]
+    cum = [sum(probs[:i + 1]) for i in range(len(probs))]
+    b0, b12 = [], []
+    for _ in range(n_boot):
+        counts = dict.fromkeys(keys, 0)
+        for _ in range(LIN_JIANG_N):
+            u = rng.random()
+            counts[keys[next(i for i, c in enumerate(cum) if u <= c)]] += 1
+        a, b, _ = triple_from_d2(counts)
+        b0.append(a)
+        b12.append(b)
+    sd = lambda v: (sum((x - sum(v) / len(v)) ** 2 for x in v) / (len(v) - 1)) ** 0.5
+    print("O2/Pd(100), Lin & Jiang 2023 Fig. 3b (400 trajectories, 160 K), digitised:")
+    print(f"  class weights: |D|^2 odd {p[1]:.3f}   = 2 mod 4 {p[2]:.3f}   = 0 mod 4 {p[0]:.3f}")
+    print(f"  R (1/2,1/2) = {r0:.3f} +- {sd(b0):.3f}   R (0,1/2) = R (1/2,0) = {r12:.3f} +- {sd(b12):.3f}")
+    print("  errors: multinomial bootstrap over the 400 trajectories; digitisation error is smaller")
+    # cross-check the mod-4 route against explicit lattice vectors for the same distances
+    vec = {1: (1, 0), 2: (1, 1), 4: (2, 0), 5: (2, 1), 8: (2, 2), 9: (3, 0), 10: (3, 1),
+           13: (3, 2), 16: (4, 0), 17: (4, 1), 25: (5, 0)}
+    hist = {vec[k]: w / tot for k, w in LIN_JIANG_PD100.items()}   # same normalisation as the mod-4 route
+    rv = ratios(hist)
+    ok = abs(rv[0] - r0) < 1e-9 and abs(rv[1] - r12) < 1e-9 and abs(rv[2] - r12) < 1e-9
+    print(f"  explicit-vector route: {rv[0]:.3f} / {rv[1]:.3f} / {rv[2]:.3f}   "
+          f"{'agrees' if ok else 'DISAGREES'} with the |D|^2 mod 4 route")
+    print("  comparison: Bukas-Reuter (4,0) -> 2.000 / 2.000 / 2.000;  (1,1) -> 2.000 / 0.000 / 0.000")
+    return ok
+
+
+if __name__ == "__main__" and "--linjiang" in __import__("sys").argv:
+    print("LIN_JIANG_OK" if lin_jiang_prediction() else "LIN_JIANG_FAILED")
+elif __name__ == "__main__" and "--table" in __import__("sys").argv:
     separation_table()
     print("\nIs the class a function of |D|^2 mod 4? (exhaustive, |dx|,|dy| <= 40)")
     print("DISTANCE_SUFFICES_OK" if distance_suffices() else "DISTANCE_SUFFICES_FAILED")
