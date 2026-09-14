@@ -3860,11 +3860,16 @@ let acquire_kernel_lock paths =
   lock
 
 let launch_guardian paths agent lane session_id cwd command instance_id
-    output_path guardian_journal_path kernel_lock =
+    output_path guardian_journal_path kernel_lock kernel_listener =
   (try Unix.unlink paths.guardian_descriptor_path with _ -> ());
   match Unix.fork () with
   | 0 ->
       Unix.close kernel_lock;
+      (* serve_session binds the kernel listener before releasing the Guardian.
+         The Guardian must not keep that descriptor: otherwise a crashed kernel's
+         socket keeps accepting connections that nobody answers, and recover
+         blocks forever in its STATUS probe. *)
+      Unix.close kernel_listener;
       ignore (Unix.setsid ());
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
       Sys.set_signal Sys.sigchld Sys.Signal_default;
@@ -4008,7 +4013,7 @@ let serve_session paths agent lane session_id cwd command =
     try
       ignore
         (launch_guardian paths agent lane session_id cwd command instance_id
-           output_path guardian_journal_path lock);
+           output_path guardian_journal_path lock listener);
       let journal = open_journal journal_path in
       ignore
         (append_event journal "SESSION_STARTED"
