@@ -37,7 +37,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-12 | thin-link `rc=12` probes | madaros |
 | KL-13 | derived units, unit loss at call boundary (#2388) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
@@ -49,11 +48,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-9 — seed: #1494 imported-module typecheck errors
 
-- **`f128` greenwash on lean_single — CLOSED (KL-9 partial, 2026-09-12).**
-  The seed refuses `f128`/`f256` spellings fail-closed (`tc_wide_float_refused`)
-  instead of lowering them as f64 via the lowercase-unknown-type rule.
-  Pin: `scripts/ci/language_gap_ratchet_gate.sh` (`f128 refused by lean_single`);
-  witness: `tests/compile-fail/f128_refused_on_lean_single.sio`.
+- **`f128` greenwash on lean_single — CLOSED (KL-9 partial, 2026-09-12; #2387).**
+  `f128` lowers as real binary128 (kind 13, libgcc `__*tf*`); the probe
+  `examples/numerics/f128_is_f64_probe.sio` reports 113 halvings. `f256` has no
+  lowering and is refused fail-closed (`tc_wide_float_refused`) instead of being
+  lowered as f64 via the lowercase-unknown-type rule.
+  Pins: `scripts/ci/language_gap_ratchet_gate.sh` (`f128 halvings on lean_single`,
+  `f256 refused by lean_single`);
+  witness: `tests/compile-fail/f256_refused_on_lean_single.sio`.
 - **Imported-module typecheck errors are non-fatal (#1494).** Engine:
   `lean_single`. `CONVERGENCE FIX` block stubs an imported fn only above 10
   errors; below that the partial codegen ships. The current build tolerates
@@ -85,22 +87,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
   FO across arbitrary user `fn` bodies, remain open.
 
-
-### KL-12 — thin-link `rc=12`
-
-- Engine: `madaros` native-v2. Two fail-closed probes:
-  `tests/known_failures/thinlink_bool_cmp_field_probe.sio` (`Pair { a: 2.0 >
-  0.0, b: 3.0 > 0.0 }`, ~3 fn) and
-  `tests/known_failures/zero_provenance_native_v2_probe.sio`
-  (sedenion + `eisa::core_v2`, ~111 fn). Both stop in
-  `compile_ir_function_v2_from_ir_into` (`codegen_x86_linux.sio:12515-12541`)
-  with `NV2_IR unsupported fn=` and no opcode named.
-- Pin: `scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh`,
-  `scripts/ci/madaros_zero_provenance_failclosed_gate.sh`. BLKs:
-  `docs/handoff/BLK-20260805-thinlink-ir-threshold.md`,
-  `docs/handoff/BLK-20260805-p0b-zero-provenance.md`. The compact
-  zero-provenance smoke (`zero_provenance_native_v2_smoke.sio`) is a
-  distinct, smaller CU — do not cite it for the combined import.
 
 ### KL-13 — derived units and unit loss (#2388)
 
