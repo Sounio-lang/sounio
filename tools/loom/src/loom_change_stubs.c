@@ -53,8 +53,9 @@ static void deny_setgroups(void) {
     fail_errno("write-setgroups", "/proc/self/setgroups");
 }
 
-CAMLprim value sounio_loom_enter_readonly_namespace(value roots_value) {
-  CAMLparam1(roots_value);
+CAMLprim value sounio_loom_enter_readonly_namespace(value roots_value,
+                                                    value writable_value) {
+  CAMLparam2(roots_value, writable_value);
 #ifdef __linux__
   const uid_t uid = getuid();
   const gid_t gid = getgid();
@@ -78,6 +79,21 @@ CAMLprim value sounio_loom_enter_readonly_namespace(value roots_value) {
               MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV,
               NULL) != 0)
       fail_errno("mount-readonly", path);
+  }
+  /* O estado de coordenacao mora dentro do git common dir, que acabou de ficar
+     read-only. Sem reabrir esse subdiretorio, o proprio hook do agente nao
+     consegue gravar o lock do generation pin e recusa o prompt com EROFS. O
+     bind novo herda o MS_RDONLY do pai, entao o remount sem a flag e o que
+     devolve a escrita; o pai continua ro no mountinfo, que e o que o change
+     kernel confere em provider_root_readonly. */
+  const mlsize_t writable_count = Wosize_val(writable_value);
+  for (mlsize_t index = 0; index < writable_count; ++index) {
+    const char *path = String_val(Field(writable_value, index));
+    if (mount(path, path, NULL, MS_BIND, NULL) != 0)
+      fail_errno("mount-writable-bind", path);
+    if (mount(NULL, path, NULL, MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV,
+              NULL) != 0)
+      fail_errno("mount-writable", path);
   }
   if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0)
     fail_errno("prctl-dumpable", NULL);

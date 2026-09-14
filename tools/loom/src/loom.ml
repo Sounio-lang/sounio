@@ -18,7 +18,7 @@ external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsi
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
-external enter_readonly_namespace : string array -> unit =
+external enter_readonly_namespace : string array -> string array -> unit =
   "sounio_loom_enter_readonly_namespace"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
@@ -1850,7 +1850,18 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
         |> List.map Unix.realpath |> List.sort_uniq String.compare
         |> Array.of_list
       in
-      enter_readonly_namespace selected_roots);
+      (* O coord-state volta a ser gravavel dentro da membrana: sem isso o hook
+         do generation pin falha com EROFS no proprio lock e o agente nunca ve o
+         prompt. Respeita SOUNIO_COORD_DIR como o activation epoch ja faz. *)
+      let writable_roots =
+        [ (match Sys.getenv_opt "SOUNIO_COORD_DIR" with
+           | Some path when path <> "" -> path
+           | _ -> Filename.concat (git_common_dir cwd) "sounio-coord-state") ]
+        |> List.filter Sys.file_exists
+        |> List.map Unix.realpath |> List.sort_uniq String.compare
+        |> Array.of_list
+      in
+      enter_readonly_namespace selected_roots writable_roots);
     Unix.chdir cwd;
     let environment =
       Array.append (Unix.environment ())
