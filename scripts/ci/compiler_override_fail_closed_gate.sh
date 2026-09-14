@@ -88,11 +88,13 @@ check "souc: strict mode refuses a non-committed ELF"    expect-reject "not the 
 check "madaros: strict mode refuses a non-committed ELF" expect-reject "not the committed" \
   env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/local.elf" ./bin/madaros --version
 for _verb in run check compile build; do
-  check "souc: '$_verb' verb under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "SOUNIO_SOUC_BIN is a raw exec" \
+  why_rc0="Nothing fell back: bin/souc passed '$_verb' to the named ELF as its first argument instead of refusing." \
+    check "souc: '$_verb' verb under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "SOUNIO_SOUC_BIN is a raw exec" \
     env SOUNIO_SOUC_BIN="$W/lean.elf" ./bin/souc "$_verb" "$W/t.sio" -o "$W/verb.elf"
 done
 unset _verb
-check "souc: 'check' verb under raw SOUNIO_SOUC_BIN (Madaros)" expect-reject "set MADAROS_RAW_BIN instead" \
+why_rc0="Nothing fell back: the named Madaros ELF ran 'check' itself, bypassing bin/madaros (temp run dir, vmem guard)." \
+  check "souc: 'check' verb under raw SOUNIO_SOUC_BIN (Madaros)" expect-reject "set MADAROS_RAW_BIN instead" \
   env SOUNIO_SOUC_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
 why_rc0="Nothing fell back: bin/souc passed '-o' to the named ELF as the output path instead of refusing (lean_single writes a file named '-o')." \
   check "souc: bare 'SRC -o OUT' under raw SOUNIO_SOUC_BIN (lean_single)" expect-reject "would treat '-o' as the output filename" \
@@ -168,8 +170,9 @@ fi
 if [[ $fails -gt 0 ]]; then
   echo >&2
   echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE: $fails case(s) wrong." >&2
-  echo "  Naming a compiler that cannot be used must stop the run. Falling through" >&2
-  echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
+  echo "  A named compiler must be used as named, or the run must stop. Exiting 0" >&2
+  echo "  after falling through to another ELF, or after the named ELF misread its" >&2
+  echo "  argv, answers a question nobody asked. Each FAIL above says which." >&2
   exit 1
 fi
 echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 30 cases, 17 of them refusals, each behaved as stated"
