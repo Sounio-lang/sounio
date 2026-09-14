@@ -6643,6 +6643,20 @@ fn lower_wide_limb_count(bits: i64) -> i64 {
     (bits + 63) / 64
 }
 
+// `t op= e` lowers as `t = t op e` (lower_assign_stmt_ref). Same table as
+// check/compat.sio compound_assign_to_binop, except an operator with no
+// arithmetic lowering reports false instead of falling back to OpAdd.
+fn lower_compound_assign_binop(op: AssignOp) -> (bool, BinaryOp) {
+    match op {
+        AssignOp::AssignAdd => (true, BinaryOp::OpAdd),
+        AssignOp::AssignSub => (true, BinaryOp::OpSub),
+        AssignOp::AssignMul => (true, BinaryOp::OpMul),
+        AssignOp::AssignDiv => (true, BinaryOp::OpDiv),
+        AssignOp::AssignRem => (true, BinaryOp::OpRem),
+        _ => (false, BinaryOp::OpAdd),
+    }
+}
+
 fn lower_binary_op_to_wide_cmp(op: BinaryOp) -> i64 {
     if op == BinaryOp::OpEq { return 0 }
     if op == BinaryOp::OpNe { return 1 }
@@ -17851,6 +17865,63 @@ impl Lowerer {
                 None => return lower_f128_fail(self, "missing f128 compound-assign target"),
             }
         }
+        // `t op= e` lowers exactly as `t = t op e`: the synthesized ExprBinary goes
+        // through lower_binary_expr_ref, so f64, unsigned div/rem, wide-int, string
+        // and Knowledge dispatch match a written-out binary, and the stored variance
+        // is the binary's derived one. Evaluation stays left to right (target read,
+        // then `e`). The previous inline lowering mapped every op except `+=` to
+        // OpSub and emitted the integer op for f64 operands (`a *= 4` gave 3-4;
+        // `x += 2.0` added IEEE bits).
+        if s.assign_op != AssignOp::AssignEq {
+            let mapped = lower_compound_assign_binop(s.assign_op)
+            let has_rhs = match s.expr {
+                Some(_rhs_c) => true,
+                None => false,
+            }
+            match s.target {
+                Some(target_c) => {
+                    if mapped.0 && has_rhs {
+                        // The checker rejects f64 `%=` (E050); there is no f64 rem
+                        // lowering, so if anything reaches here unchecked, refuse
+                        // rather than emit an integer rem over IEEE bits.
+                        if mapped.1 == BinaryOp::OpRem
+                            && (self.opt_expr_result_is_float_ref(&s.target) || self.opt_expr_result_is_float_ref(&s.expr)) {
+                            print("error: `%=` on f64 has no Madaros lowering (`%` requires integer operands, E050; fail-closed)\n")
+                            var lo_rem_refuse = self
+                            lowerer_mark_hard_error(&! lo_rem_refuse)
+                            return (lo_rem_refuse, 0)
+                        }
+                        var bin_expr = *target_c
+                        bin_expr.kind = ExprKind::ExprBinary
+                        bin_expr.span = s.span
+                        bin_expr.bin_op = mapped.1
+                        bin_expr.left = s.target
+                        bin_expr.right = s.expr
+                        bin_expr.block = None
+                        bin_expr.else_expr = None
+                        bin_expr.args = None
+                        bin_expr.arms = None
+                        bin_expr.fields = None
+                        bin_expr.cast_type = None
+                        bin_expr.handler_block = None
+                        bin_expr.closure_params = None
+                        bin_expr.closure_return = None
+                        bin_expr.closure_effects = None
+                        bin_expr.closure_body = None
+                        bin_expr.type_args = None
+                        var desugared = *s
+                        desugared.assign_op = AssignOp::AssignEq
+                        desugared.expr = Some(Box::new(bin_expr))
+                        return self.lower_assign_stmt_ref(&desugared)
+                    }
+                }
+                None => {}
+            }
+            print("error: compound assignment has no Madaros lowering for this operator/shape (fail-closed)\n")
+            var lo_ca_refuse = self
+            lowerer_mark_hard_error(&! lo_ca_refuse)
+            return (lo_ca_refuse, 0)
+        }
         let pair_rhs = if target_is_f128 {
             match s.expr {
                 Some(rhs_f128) => {
@@ -17868,7 +17939,7 @@ impl Lowerer {
             self.lower_opt_expr_ref(&s.expr)
         }
         var lo = pair_rhs.0
-        var rhs = pair_rhs.1
+        let rhs = pair_rhs.1
         var rhs_variance: i64 = -1
         var rhs_is_float: bool = false
         match s.expr {
@@ -17882,22 +17953,6 @@ impl Lowerer {
             _ => {}
         }
         let target_opt: Option<Box<Expr>> = s.target
-
-        if s.assign_op != AssignOp::AssignEq {
-            let old_pair = lo.lower_opt_expr_ref(&target_opt)
-            lo = old_pair.0
-            let old_val = old_pair.1
-            let bin_op = if s.assign_op == AssignOp::AssignAdd {
-                BinaryOp::OpAdd
-            } else {
-                BinaryOp::OpSub
-            }
-            let pair_dst = lo.fresh_reg()
-            lo = pair_dst.0
-            let compound_reg = pair_dst.1
-            lo = lo.emit(ir_binop(compound_reg, old_val, bin_op, rhs))
-            rhs = compound_reg
-        }
 
         match target_opt {
             Some(target_expr) => {
