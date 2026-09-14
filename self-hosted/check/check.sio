@@ -8505,6 +8505,11 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
         || arg_ty.kind == TypeKind::TyUnit
         || arg_ty.kind == TypeKind::TyString
         || arg_ty.kind == TypeKind::TyChar {
+            // KL-13: TyF64/TyI64 kind match must still enforce unit brands —
+            // otherwise `takes_f64(t_k)` with `t_k: K` skips the boundary.
+            if arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64 {
+                checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+            }
             return
         }
     }
@@ -8594,6 +8599,10 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
             }
         }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+        // KL-13: primitive kind match still enforces unit brands on f64/i64.
+        if has_param_info && primitive_exact && (arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64) {
+            checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+        }
         if has_param_info && !primitive_exact {
             if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
                 checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
@@ -10355,13 +10364,20 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
     let provided_ty = call_ref_inner_or_self(arg_ty)
     let expected_unit = expected_ty.unit_id
     let provided_unit = provided_ty.unit_id
-    if expected_unit < 0 || provided_unit < 0 {
-        return
-    }
     if expected_ty.kind == TypeKind::TyError || expected_ty.kind == TypeKind::TyUnknown || expected_ty.kind == TypeKind::TyNever {
         return
     }
     if provided_ty.kind == TypeKind::TyError || provided_ty.kind == TypeKind::TyUnknown || provided_ty.kind == TypeKind::TyNever {
+        return
+    }
+    // KL-13: unit-tagged argument into a bare (unit_id < 0) parameter is a
+    // call-boundary loss — refuse; require an explicit cast.
+    if provided_unit >= 0 && expected_unit < 0 {
+        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
+        checker_store_from_value(c, t)
+        return
+    }
+    if expected_unit < 0 || provided_unit < 0 {
         return
     }
     if expected_unit != provided_unit {
@@ -26923,6 +26939,10 @@ impl Checker {
         let provided_ty = call_ref_inner_or_self(arg_ty)
         if is_error_or_unknown(expected_ty) || is_error_or_unknown(provided_ty) {
             return self
+        }
+        // KL-13: refuse unit-tagged args into bare f64/i64 parameters.
+        if provided_ty.unit_id >= 0 && expected_ty.unit_id < 0 {
+            return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
         if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)

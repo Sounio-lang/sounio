@@ -50,8 +50,12 @@ expect "control: direct unit mismatch caught by lean_single" "1" "$([[ $(rc lean
 # progress, and the ratchet is red in both directions, so this line is what
 # stops it reopening.
 expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_quotient_keeps_dimension.sio) -ne 0 ]] && echo 1 || echo 0)"
-# #2388 (3) -- still open: K still enters an f64 parameter unchecked.
-expect "unit lost at call boundary (lean_single accepts)" "0" "$(rc lean check $UNITS/unit_lost_at_call_boundary.sio)"
+# #2388 (3) / KL-13 partial — CLOSED: unit-typed args no longer enter bare f64
+# parameters on lean_single (or Madaros). Explicit `as f64` remains the escape.
+# Witness moved to tests/compile-fail/; cast escape in run-pass.
+expect "unit lost at call boundary (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_lost_at_call_boundary.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "unit lost at call boundary (Madaros refuses)" "1" "$([[ $(rc mad check tests/compile-fail/unit_lost_at_call_boundary.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "explicit cast strips unit brand (lean_single)" "0" "$(rc lean check tests/run-pass/unit_call_cast_strips_brand.sio)"
 
 # #2389 / KL-2 — CLOSED 2026-09-11. IEEE f64 compares are PF-aware on both
 # engines; print_f64 / println emit "inf" and "nan". Witnesses moved to
