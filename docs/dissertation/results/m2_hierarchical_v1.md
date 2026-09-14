@@ -85,30 +85,36 @@ recorded numbers were actually produced cannot be established from this reposito
 SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 ./bin/souc run tests/run-pass/pbpk28_m2_hierarchical_prior.sio
 ```
 
-> **Reproduction status (2026-09-13).** `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments
+> **Reproduction status (2026-09-13, updated 2026-09-14).** `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments
 > unchanged (it already did at the merge that added this file, `bebd78d74c`; earlier history is
 > not in this clone). Measured on 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc` began
-> refusing the form: lean_single stopped at `error: no main` (a current-source lean_single shows
+> refusing the form: called that way, lean_single stopped at `error: no main` (a current-source lean_single shows
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
-> **The table below is the original record and has not been regenerated: the test does not
-> compile today on either engine.** Through lean_single's raw interface, from the repository root
-> because it resolves stdlib imports relative to the working directory,
-> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m2_hierarchical_prior.sio /tmp/m2_hierarchical.elf`
+> **Current state (2026-09-14).** Since `2c4b0e7739`, `main` declares `Epistemic`. Run through
+> lean_single's raw interface, from the repository root because it resolves stdlib imports
+> relative to the working directory,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m2_hierarchical_prior.sio /tmp/m2_hierarchical.elf && /tmp/m2_hierarchical.elf`
 > (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
-> stops at `error: effect not declared in function signature at line 12`. The default Madaros
-> engine, `bin/souc run tests/run-pass/pbpk28_m2_hierarchical_prior.sio` with no `SOUNIO_SOUC_BIN`
-> set (`bin/madaros-linux-x86_64` sha256
-> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`), stops at
-> `error[E035] … missing: Epistemic`. In the source, `main`
-> (`tests/run-pass/pbpk28_m2_hierarchical_prior.sio:11`, declared `with IO, Mut, Div, Panic`)
-> calls `mc28_hierarchical_selftest_main` on line 12, which is declared
+> printed `M2_HIERARCHICAL_PRIOR_OUTPUT` and `PASS`, and all twelve numeric entries in the table
+> below equal its output. The table's "Hessian <=10%?" column (NO / informational) is not printed;
+> the program prints `individual_hessian_criterion: OUTPUT (rel_Hess_individual > 0.10)`,
+> consistent with the individual row's NO. The table cells are the original record and were not
+> edited on 2026-09-14; the re-run matches their numbers with the current tree and does not
+> establish how they were first produced. The test still carries `//@ known-failure`, with the
+> reason on its line 2 updated in `2c4b0e7739`: the test suite runs it through `bin/souc run`, i.e.
+> the default Madaros engine (`bin/madaros-linux-x86_64` sha256
+> `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24`, refreshed in `054380db89`),
+> which compiles the test and then exits 182 at run time after printing `madaros: handles full`,
+> in 21 s; the previous prebuilt (sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) did the same after 337 s.
+> **History (2026-09-13).** Called through its raw interface on the test file, lean_single
+> (`bin/souc-linux-x86_64`) stopped at `error: effect not declared in function signature at line
+> 12`, and the default Madaros engine at `error[E035] … missing: Epistemic`: `main` was declared
+> `with IO, Mut, Div, Panic`, while the `mc28_hierarchical_selftest_main` it calls is declared
 > `with IO, Mut, Div, Panic, Epistemic`
-> (`stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio:599`). The test's
-> `//@ known-failure` annotation, added in #2290, reads: "measured 2026-08-30 under
-> SOUNIO_SOUC_ENGINE=lean_single — error[E035] effect not declared in function signature at line
-> 10". Today lean_single reports the error at line 12 without an E-code, and `error[E035]` comes
-> from Madaros.
+> (`stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio:599`). The test carried
+> `//@ known-failure` from #2290.
 
 | Level | u_GUM (mg.h/L) | u_Hessian (mg.h/L) | u_MC (mg.h/L) | MC mean AUC (mg.h/L) | rel_GUM | rel_Hess | Hessian <=10%? |
 |---|---:|---:|---:|---:|---:|---:|---|

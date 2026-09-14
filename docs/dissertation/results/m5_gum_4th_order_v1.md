@@ -167,26 +167,36 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
   bin/souc run tests/run-pass/pbpk28_m5_gum_4th_order.sio
 ```
 
-> **Reproduction status (2026-09-13).** `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments
+> **Reproduction status (2026-09-13, updated 2026-09-14).** `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments
 > unchanged (it already did at the merge that added this file, `bebd78d74c`; earlier history is
 > not in this clone). Measured on 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc` began
-> refusing the form: lean_single stopped at `error: no main` (a current-source lean_single shows
+> refusing the form: called that way, lean_single stopped at `error: no main` (a current-source lean_single shows
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
-> **The Output table below is the original record and has not been regenerated: the test does not
-> compile today on either engine.** Through lean_single's raw interface, from the repository root
-> because it resolves stdlib imports relative to the working directory,
-> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf`
+> **Current state (2026-09-14).** Since `36f9b34cc7`, `main` declares `Epistemic`, the
+> known-failure tag is gone, and the test carries `//@ timeout: 90`. Run through lean_single's raw
+> interface, from the repository root because it resolves stdlib imports relative to the working
+> directory,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf && /tmp/m5_gum_4th_order.elf`
 > (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
-> stops at `error: effect not declared in function signature at line 82`. The default Madaros
-> engine, `bin/souc run tests/run-pass/pbpk28_m5_gum_4th_order.sio` with no `SOUNIO_SOUC_BIN` set
-> (`bin/madaros-linux-x86_64` sha256
-> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`), stops at
-> `error[E035] … missing: Epistemic` in `main`. Line 82 of the test calls
-> `m5_pbpk28_convergence_budget`, which is declared `with Mut, Div, Panic, Epistemic`
-> (`stdlib/darwin_pbpk/cumulants.sio:442`). Since `cf42e812bd` (2026-09-14) the test also carries
-> `//@ known-failure` for this, so the test suite reports it as a known failure, not a failure.
-> The `canonical u_MC` row is a literal in the source, not a value this test computes: line 83
+> printed `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS` and `PASS`, and all ten numeric values in the
+> Output table below equal its output. The `(CL_hep)` label on dominant correction index 0 is not
+> printed; the program prints `dominant_correction_idx: 0.000000`. The table cells are the original
+> record and were not edited on 2026-09-14; the re-run matches their numbers with the current tree
+> and does not establish how they were first produced. The test suite runs the test through
+> `bin/souc run`, i.e. the default Madaros engine (`bin/madaros-linux-x86_64` sha256
+> `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24`, refreshed in `054380db89`).
+> Run directly through that prebuilt, the test printed the same markers in 17 s; the previous
+> prebuilt (sha256 `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) took 102 s.
+> The suite run filtered to this test, with `//@ timeout: 90`, reported `Pass: 1` in 21 s wall
+> time.
+> **History.** On 2026-09-13, called through its raw interface on the test file, lean_single
+> (`bin/souc-linux-x86_64`) stopped at `error: effect not declared in function signature at line
+> 82`, and the default Madaros engine at `error[E035] … missing: Epistemic` in `main`: `main` did
+> not declare `Epistemic`, while the `m5_pbpk28_convergence_budget` it calls is declared
+> `with Mut, Div, Panic, Epistemic` (`stdlib/darwin_pbpk/cumulants.sio:442`). On 2026-09-14,
+> before the fix, `cf42e812bd` marked the test `//@ known-failure`.
+> The `canonical u_MC` row is a literal in the source, not a value this test computes: the test
 > prints `print_f64(0.357945)`, and `m5_pbpk28_convergence_budget` passes the same literal as the
 > `u_mc` argument of `variance_budget_4th_from_hessian` (`stdlib/darwin_pbpk/cumulants.sio:449`;
 > parameter at `:386`), next to a comment citing `docs/dissertation/results/m6_prior_update_v1.md`.
