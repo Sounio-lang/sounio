@@ -79,4 +79,9 @@ expect_check_fail \
   'expected ErasedZeroF64' \
   'explicit-discharge-type-boundary'
 
-echo '[zero-event] PASS: receipts, evidence, explicit discharge, and derived EISA flags are verified'
+expect_check_fail \
+  "$ROOT_DIR/tests/compile-fail/zero_event_private_field_access.sio" \
+  'error[E259' \
+  'private-field-access'
+
+echo '[zero-event] PASS: receipts, evidence, explicit discharge, private-field privacy, and derived EISA flags are verified'

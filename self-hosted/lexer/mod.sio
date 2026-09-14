@@ -727,6 +727,16 @@ pub fn sourcefile_trace_enable() with Mut {
     SOURCEFILE_TRACE = 1
 }
 
+// V0-E.5.10: `_` at CURSOR_SOURCE[pos] that is followed by a (hex) digit — a
+// digit separator inside a numeric literal, never a trailing suffix start.
+fn lex_flat_sep_before_digit(pos: i64, n: i64) -> bool with Mut, Panic {
+    CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_digit(CURSOR_SOURCE[(pos + 1) as usize])
+}
+
+fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
+    CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_hex_digit(CURSOR_SOURCE[(pos + 1) as usize])
+}
+
 // Runs the full lexer over CURSOR_SOURCE[0..source_len], emitting all tokens
 // via parser_set_token_at() only — no LexerState or token array allocation.
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
@@ -838,7 +848,9 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                (CURSOR_SOURCE[(pos + 1) as usize] == 120 as i8 || CURSOR_SOURCE[(pos + 1) as usize] == 88 as i8) {
                 pos = pos + 2
                 col = col + 2
-                while pos < n && is_hex_digit(CURSOR_SOURCE[pos as usize]) {
+                // V0-E.5.10: `_` between hex digits is a separator (`0x1_0`);
+                // it is only consumed when a hex digit follows.
+                while pos < n && (is_hex_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_hex_digit(pos, n)) {
                     let hc = CURSOR_SOURCE[pos as usize]
                     if hc >= 48 as i8 && hc <= 57 as i8 {
                         value = value * 16 + ((hc - 48 as i8) as i64)
@@ -854,15 +866,23 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 if tc < 0 { break }
                 continue
             }
-            while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
-                value = value * 10 + ((CURSOR_SOURCE[pos as usize] - 48 as i8) as i64)
+            // V0-E.5.10: digit separators. The spec (2.6.1) promised `1_000_000`
+            // and this lexer split it into `1` + Ident(`_000_000`) (E137); the
+            // Cursor-based scan_number that accepted `_` is unreachable code
+            // below `return tc`. A `_` is consumed only when a digit follows, in
+            // the integer part, the fraction and the exponent, so a trailing
+            // `_mg`-style suffix still ends the number.
+            while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
+                if CURSOR_SOURCE[pos as usize] != 95 as i8 {
+                    value = value * 10 + ((CURSOR_SOURCE[pos as usize] - 48 as i8) as i64)
+                }
                 pos = pos + 1
                 col = col + 1
             }
             if pos + 1 < n && CURSOR_SOURCE[pos as usize] == 46 as i8 && is_digit(CURSOR_SOURCE[(pos + 1) as usize]) {
                 pos = pos + 1
                 col = col + 1
-                while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
+                while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
                     pos = pos + 1
                     col = col + 1
                 }
@@ -880,7 +900,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                         pos = pos + 1
                         col = col + 1
                     }
-                    while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
+                    while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
                         pos = pos + 1
                         col = col + 1
                     }

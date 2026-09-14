@@ -53,6 +53,7 @@ sab_env_for() {
     hessian-chain)    echo "SOUNIO_SABOTAGE_HESSIAN_CHAIN" ;;
     correlate-rho)    echo "SOUNIO_SABOTAGE_CORRELATE_RHO" ;;
     wide-mul)         echo "SOUNIO_WIDE_MUL_SABOTAGE" ;;
+    ieee-f64-special) echo "SOUNIO_SABOTAGE_IEEE_F64_SPECIAL" ;;
     *)                echo "" ;;
   esac
 }

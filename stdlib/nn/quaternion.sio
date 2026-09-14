@@ -15,7 +15,7 @@
 //! Every quaternion operation propagates uncertainty using the delta method
 //! and maintains confidence through transformation chains.
 
-use epistemic::lib::{EpistemicValue, uncertainty_std, epistemic_std, add_epistemic, sub_epistemic, mul_epistemic, div_epistemic, uncert_to_std}
+use epistemic::lib::{EpistemicValue, uncertainty_std, epistemic_std, add_epistemic, sub_epistemic, mul_epistemic, div_epistemic, get_value, get_confidence, get_std_uncertainty}
 
 // ============================================================================
 // LOCAL CONFIDENCE TYPE (simplified Beta-posterior confidence)
@@ -158,19 +158,19 @@ pub fn quaternion_zero() -> Quaternion {
 // ============================================================================
 
 pub fn quaternion_get_w(q: Quaternion) -> f64 {
-    q.w.value
+    get_value(q.w)
 }
 
 pub fn quaternion_get_x(q: Quaternion) -> f64 {
-    q.x.value
+    get_value(q.x)
 }
 
 fn quaternion_get_y(q: Quaternion) -> f64 {
-    q.y.value
+    get_value(q.y)
 }
 
 fn quaternion_get_z(q: Quaternion) -> f64 {
-    q.z.value
+    get_value(q.z)
 }
 
 fn quaternion_get_confidence(q: Quaternion) -> f64 {
@@ -178,19 +178,19 @@ fn quaternion_get_confidence(q: Quaternion) -> f64 {
 }
 
 fn quaternion_get_std_w(q: Quaternion) -> f64 {
-    uncert_to_std(q.w.uncert)
+    get_std_uncertainty(q.w)
 }
 
 fn quaternion_get_std_x(q: Quaternion) -> f64 {
-    uncert_to_std(q.x.uncert)
+    get_std_uncertainty(q.x)
 }
 
 fn quaternion_get_std_y(q: Quaternion) -> f64 {
-    uncert_to_std(q.y.uncert)
+    get_std_uncertainty(q.y)
 }
 
 fn quaternion_get_std_z(q: Quaternion) -> f64 {
-    uncert_to_std(q.z.uncert)
+    get_std_uncertainty(q.z)
 }
 
 // ============================================================================
@@ -219,8 +219,8 @@ fn quaternion_norm(q: Quaternion) -> EpistemicValue {
     let sum = add_epistemic(add_epistemic(w2, x2), add_epistemic(y2, z2))
     
     // sqrt using series expansion for uncertainty propagation
-    let norm_value = sqrt_f64(sum.value)
-    let sum_std = uncert_to_std(sum.uncert)
+    let norm_value = sqrt_f64(get_value(sum))
+    let sum_std = get_std_uncertainty(sum)
     let std_combined = if norm_value > 1.0e-10 { sum_std / (2.0 * norm_value) } else { sum_std }
     
     epistemic_std(norm_value, std_combined, qconf_mean(q.confidence))
@@ -289,9 +289,9 @@ pub fn quaternion_mul(a: Quaternion, b: Quaternion) -> Quaternion {
     )
     
     let min_conf = min_f64(min_f64(min_f64(qconf_mean(a.confidence), qconf_mean(b.confidence)),
-                                  min_f64(a.w.conf, b.w.conf)),
-                          min_f64(min_f64(a.x.conf, b.x.conf),
-                                 min_f64(a.y.conf, b.y.conf)))
+                                  min_f64(get_confidence(a.w), get_confidence(b.w))),
+                          min_f64(min_f64(get_confidence(a.x), get_confidence(b.x)),
+                                 min_f64(get_confidence(a.y), get_confidence(b.y))))
     
     Quaternion {
         w: w,
@@ -379,7 +379,7 @@ fn quaternion_slerp(q1: Quaternion, q2: Quaternion, t: f64) -> Quaternion {
 
 // Dot product between quaternions (component-wise)
 fn quaternion_dot(a: Quaternion, b: Quaternion) -> f64 {
-    a.w.value * b.w.value + a.x.value * b.x.value + a.y.value * b.y.value + a.z.value * b.z.value
+    get_value(a.w) * get_value(b.w) + get_value(a.x) * get_value(b.x) + get_value(a.y) * get_value(b.y) + get_value(a.z) * get_value(b.z)
 }
 
 // ============================================================================
@@ -389,10 +389,10 @@ fn quaternion_dot(a: Quaternion, b: Quaternion) -> f64 {
 // Quaternion ReLU activation component-wise
 fn quaternion_relu(q: Quaternion) -> Quaternion {
     Quaternion {
-        w: if q.w.value > 0.0 { q.w } else { epistemic_std(0.0, uncert_to_std(q.w.uncert), q.w.conf) },
-        x: if q.x.value > 0.0 { q.x } else { epistemic_std(0.0, uncert_to_std(q.x.uncert), q.x.conf) },
-        y: if q.y.value > 0.0 { q.y } else { epistemic_std(0.0, uncert_to_std(q.y.uncert), q.y.conf) },
-        z: if q.z.value > 0.0 { q.z } else { epistemic_std(0.0, uncert_to_std(q.z.uncert), q.z.conf) },
+        w: if get_value(q.w) > 0.0 { q.w } else { epistemic_std(0.0, get_std_uncertainty(q.w), get_confidence(q.w)) },
+        x: if get_value(q.x) > 0.0 { q.x } else { epistemic_std(0.0, get_std_uncertainty(q.x), get_confidence(q.x)) },
+        y: if get_value(q.y) > 0.0 { q.y } else { epistemic_std(0.0, get_std_uncertainty(q.y), get_confidence(q.y)) },
+        z: if get_value(q.z) > 0.0 { q.z } else { epistemic_std(0.0, get_std_uncertainty(q.z), get_confidence(q.z)) },
         confidence: qconf_decay(q.confidence, 0.95),
         provenance_id: q.provenance_id + 1,
     }
@@ -400,10 +400,10 @@ fn quaternion_relu(q: Quaternion) -> Quaternion {
 
 // Quaternion Sigmoid activation component-wise
 fn quaternion_sigmoid(q: Quaternion) -> Quaternion {
-    let sigmoid_w = sigmoid_f64(q.w.value)
-    let sigmoid_x = sigmoid_f64(q.x.value)
-    let sigmoid_y = sigmoid_f64(q.y.value)
-    let sigmoid_z = sigmoid_f64(q.z.value)
+    let sigmoid_w = sigmoid_f64(get_value(q.w))
+    let sigmoid_x = sigmoid_f64(get_value(q.x))
+    let sigmoid_y = sigmoid_f64(get_value(q.y))
+    let sigmoid_z = sigmoid_f64(get_value(q.z))
     
     // Propagate uncertainty through sigmoid using delta method
     let dsigmoid_w = sigmoid_w * (1.0 - sigmoid_w)
@@ -412,10 +412,10 @@ fn quaternion_sigmoid(q: Quaternion) -> Quaternion {
     let dsigmoid_z = sigmoid_z * (1.0 - sigmoid_z)
     
     Quaternion {
-        w: epistemic_std(sigmoid_w, uncert_to_std(q.w.uncert) * abs_f64(dsigmoid_w), q.w.conf),
-        x: epistemic_std(sigmoid_x, uncert_to_std(q.x.uncert) * abs_f64(dsigmoid_x), q.x.conf),
-        y: epistemic_std(sigmoid_y, uncert_to_std(q.y.uncert) * abs_f64(dsigmoid_y), q.y.conf),
-        z: epistemic_std(sigmoid_z, uncert_to_std(q.z.uncert) * abs_f64(dsigmoid_z), q.z.conf),
+        w: epistemic_std(sigmoid_w, get_std_uncertainty(q.w) * abs_f64(dsigmoid_w), get_confidence(q.w)),
+        x: epistemic_std(sigmoid_x, get_std_uncertainty(q.x) * abs_f64(dsigmoid_x), get_confidence(q.x)),
+        y: epistemic_std(sigmoid_y, get_std_uncertainty(q.y) * abs_f64(dsigmoid_y), get_confidence(q.y)),
+        z: epistemic_std(sigmoid_z, get_std_uncertainty(q.z) * abs_f64(dsigmoid_z), get_confidence(q.z)),
         confidence: qconf_decay(q.confidence, 0.95),
         provenance_id: q.provenance_id + 1,
     }
@@ -423,10 +423,10 @@ fn quaternion_sigmoid(q: Quaternion) -> Quaternion {
 
 // Quaternion Tanh activation component-wise
 fn quaternion_tanh(q: Quaternion) -> Quaternion {
-    let tanh_w = tanh_f64(q.w.value)
-    let tanh_x = tanh_f64(q.x.value)
-    let tanh_y = tanh_f64(q.y.value)
-    let tanh_z = tanh_f64(q.z.value)
+    let tanh_w = tanh_f64(get_value(q.w))
+    let tanh_x = tanh_f64(get_value(q.x))
+    let tanh_y = tanh_f64(get_value(q.y))
+    let tanh_z = tanh_f64(get_value(q.z))
     
     // Propagate uncertainty through tanh using delta method
     let dtanh_w = 1.0 - tanh_w * tanh_w
@@ -435,10 +435,10 @@ fn quaternion_tanh(q: Quaternion) -> Quaternion {
     let dtanh_z = 1.0 - tanh_z * tanh_z
     
     Quaternion {
-        w: epistemic_std(tanh_w, uncert_to_std(q.w.uncert) * abs_f64(dtanh_w), q.w.conf),
-        x: epistemic_std(tanh_x, uncert_to_std(q.x.uncert) * abs_f64(dtanh_x), q.x.conf),
-        y: epistemic_std(tanh_y, uncert_to_std(q.y.uncert) * abs_f64(dtanh_y), q.y.conf),
-        z: epistemic_std(tanh_z, uncert_to_std(q.z.uncert) * abs_f64(dtanh_z), q.z.conf),
+        w: epistemic_std(tanh_w, get_std_uncertainty(q.w) * abs_f64(dtanh_w), get_confidence(q.w)),
+        x: epistemic_std(tanh_x, get_std_uncertainty(q.x) * abs_f64(dtanh_x), get_confidence(q.x)),
+        y: epistemic_std(tanh_y, get_std_uncertainty(q.y) * abs_f64(dtanh_y), get_confidence(q.y)),
+        z: epistemic_std(tanh_z, get_std_uncertainty(q.z) * abs_f64(dtanh_z), get_confidence(q.z)),
         confidence: qconf_decay(q.confidence, 0.95),
         provenance_id: q.provenance_id + 1,
     }

@@ -25,18 +25,53 @@
 
 pub fn ep_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y = 0.5 * (y + x / y)
-    y
+    // Range-reduce into [1, 4] by powers of 4, Newton there, then scale back by
+    // the matching power of 2. Heron converges quadratically only once the
+    // iterate is near the root; started far away it first needs ~log2(sqrt(x))
+    // halving steps just to get close, so a fixed step count silently bounds
+    // the range over which the result is a square root at all.
+    //
+    // Measured 2026-09-09 as relative residual |y*y - x| / x, ten unrolled
+    // steps from y = x (what this function used to do):
+    //   x = 1e4    5e-9        x = 1e6    0.68
+    //   x = 1e8    95          x = 1e12   > 1000
+    // Accurate only for x in about [1e-4, 1e4], and catastrophically wrong
+    // outside it -- not merely imprecise. With range reduction the relative
+    // residual is at most ~1 ulp (2^-52 ~ 2.2e-16) for every finite positive
+    // f64, measured from the smallest denormal 5e-324 to 1.7976931348623157e308.
+    // It is exactly 0 only where x is a perfect square in f64 (1, 4, 1e6, and
+    // the powers): for x = 2 the residual is 2.2e-16, for x = 3, 1.4e-16.
+    // An earlier version of this note claimed a residual of 0 everywhere; that
+    // was an artefact of truncating the measurement to integer parts-per-
+    // billion, and a math-review offload caught it.
+    //
+    // The guards are load-bearing, not defensive decoration: on +inf the
+    // scaling loop never terminates (measured -- the unguarded form hangs
+    // rather than returning), because inf * 0.25 is inf. 1100 iterations of
+    // *4 covers 4^1100, far past the f64 range, so no finite input reaches
+    // the bound.
+    var scaled = x
+    var scale_back = 1.0
+    var guard = 0
+    while scaled < 1.0 && guard < 1100 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+        guard = guard + 1
+    }
+    while scaled > 4.0 && guard < 2200 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+        guard = guard + 1
+    }
+    // From y = 1.5 on [1, 4) Newton reaches f64 accuracy in about five steps;
+    // ten is slack, and cheap.
+    var y = 1.5
+    var k = 0
+    while k < 10 {
+        y = 0.5 * (y + scaled / y)
+        k = k + 1
+    }
+    return y / scale_back
 }
 
 fn ep_abs(x: f64) -> f64 {
@@ -60,9 +95,9 @@ pub fn ep_clamp_conf(c: i64) -> i64 {
 // ============================================================================
 
 pub struct Epistemic {
-    val: f64,
-    variance: f64,
-    confidence: i64,
+    pub val: f64,
+    pub variance: f64,
+    pub confidence: i64,
 }
 
 pub fn ep_new(val: f64, variance: f64, confidence: i64) -> Epistemic {
@@ -90,7 +125,15 @@ pub fn ep_is_credible(e: &Epistemic, min_conf: i64) -> bool {
     e.confidence >= min_conf
 }
 
-// GUM: Var(X+Y) = Var(X) + Var(Y); conf = min scaled
+// Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y). This drops the 2Cov term, so it is
+// the UNCORRELATED case only (Cov = 0) -- a precondition on the caller, not an
+// identity. First-order propagation needs only a vanishing covariance, not the
+// stronger independence: no higher moment enters the formula.
+// If the operands share a source it UNDERSTATES: ep_add(&x, &x) reports
+// Var(X)+Var(X) where 2X has 4Var(X), i.e. half the true variance.
+// Use ep_add_cov when the covariance is known, or the tracked CorrelatedValue
+// in epistemic::correlation when it is not.
+// conf = min scaled
 pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val + b.val,
@@ -99,7 +142,11 @@ pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM: Var(X-Y) = Var(X) + Var(Y)
+// Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y). This drops the 2Cov term, so it is
+// the UNCORRELATED case only (Cov = 0). For positively correlated operands it
+// OVERSTATES,
+// which is the safe direction but still wrong: ep_sub(&x, &x) reports
+// 2Var(X) where X-X is certain. Use ep_sub_cov when the covariance is known.
 pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val - b.val,
@@ -108,7 +155,13 @@ pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM delta method: Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+// GUM delta method, UNCORRELATED case only (Cov = 0):
+//   Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y), and the 2XY·Cov is dropped.
+// Consequence worth stating out loud: ep_mul(&x, &x) gives 2X²·Var(X) while
+// ep_square(&x), three functions below, gives the correct 4X²·Var(X) for the
+// same quantity. The multiply UNDERSTATES by a factor of two when both operands
+// are the same variable. Use ep_square for X², or ep_mul_cov with the known
+// covariance.
 pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
     let new_var = b.val * b.val * a.variance + a.val * a.val * b.variance
     Epistemic {
@@ -118,7 +171,9 @@ pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
     }
 }
 
-// GUM delta method: Var(X/Y) ≈ Var(X)/Y² + X²·Var(Y)/Y⁴
+// GUM delta method, UNCORRELATED case only (Cov = 0):
+//   Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³, and the last term is
+// dropped. Use ep_div_cov when the covariance is known.
 pub fn ep_div(a: &Epistemic, b: &Epistemic) -> Epistemic with Div, Panic {
     let y2 = b.val * b.val
     let y4 = y2 * y2
@@ -148,7 +203,200 @@ pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
     }
 }
 
-// Var(X²) ≈ 4X²·Var(X)
+// ============================================================================
+// Covariance-aware forms
+// ============================================================================
+//
+// The four rules above drop the covariance term and are therefore valid only
+// when the operands are uncorrelated. Uncorrelated, not independent: these are
+// first-order expressions, so only Cov(X,Y) enters and no higher moment does. These take Cov(X,Y) explicitly and carry
+// the full first-order GUM expression, so a caller who knows the covariance is
+// no longer forced to choose between a wrong answer and writing the algebra by
+// hand.
+//
+// Where Cov comes from: epistemic::correlation tracks it through a source id
+// (`CorrelatedValue`, `covariance(a, b)`), and epistemic::covariance carries a
+// full matrix with Jacobian propagation. Neither is replaced here; these are
+// the one-line forms for when the number is already in hand.
+//
+// The sign conventions are the ones that make the self-correlated cases come
+// out right, which is the cheapest way to check them (Cov(X,X) = Var(X)):
+//   ep_add_cov(x, x, Var) -> 4Var       (2X has twice the standard deviation)
+//   ep_sub_cov(x, x, Var) -> 0          (X - X is certain)
+//   ep_mul_cov(x, x, Var) -> 4X²Var     (agrees with ep_square)
+// A negative variance cannot be produced by a VALID covariance -- for a positive
+// semi-definite 2x2 covariance matrix S = [[Var X, Cov],[Cov, Var Y]] the
+// propagated variance is g'Sg >= 0 for every Jacobian g. So all four forms check
+// that the input IS such a matrix and REFUSE anything else, the way
+// indep_measured refuses an out-of-range rho. A negative result is never clamped
+// to zero on inconsistent input: that would report inconsistent evidence as
+// apparent maximum certainty, because ep_merge weights a non-positive variance as
+// near-certainty.
+//
+// ep_cov_input_verdict requires, in order:
+//   1. Var X, Var Y and Cov finite, with magnitude at most 1e308 (NaN and +/-inf
+//      are refused);
+//   2. Var X >= 0 and Var Y >= 0. Cov^2 <= Var X * Var Y alone admits
+//      Var X = Var Y = -1, Cov = 0, whose S is negative definite;
+//   3. Cov exactly 0 when either variance is exactly 0, where the bound is exactly 0;
+//   4. Var X * Var Y within range. Past that the bound cannot be evaluated in this
+//      form, so the input is refused rather than waved through;
+//   5. Cov^2 <= Var X * Var Y * (1 + 1.8e-15).
+// 1.8e-15 is about 8 ulps: room for a boundary covariance a caller computed in
+// floating point (for example from sqrt(Var X * Var Y)), not a semantic slack.
+// The 1e-10 slack this replaces admitted covariances about 5e-11 past the boundary,
+// where the propagated variance came out negative.
+//
+// On exactly-PSD input the propagated variance is >= 0. The 1.8e-15 tolerance lets
+// an accepted input sit slightly past the boundary, where the exact variance can be
+// negative by at most about 1.8e-15 / 4 of s, the sum of the magnitudes of the terms
+// of v; floating-point evaluation adds a few ulps of s on top. ep_cov_output_verdict
+// reports a negative computed value as 0 when |v| <= 7.2e-15 * s, about 16 times
+// the tolerance bound, and refuses a larger negative or a NaN. The means are not
+// range-checked: if a product of means overflows (for example inf * 0), the variance
+// is NaN and the call is refused. A variance of exactly 0 from valid input is a real
+// certainty (Var(X - X) = 0), so ep_merge's weight for it is correct.
+//
+// Every float comparison below uses >= or >, so the guard stays fail-closed on a
+// compiler built before KL-2 (9b370a778f, #2492). Measured 2026-09-14: on such builds
+// (lean_single and Madaros from a branch based on 3ade13282c) a NaN operand makes <, <=
+// and == evaluate TRUE and != evaluate FALSE, so a check written with them lets a NaN
+// through; lean_single and Madaros from 70fa39522f follow IEEE 754. >= and > evaluate
+// FALSE for a NaN on every build measured.
+
+// True when x is finite and |x| <= 1e308; false for NaN and +/-inf.
+fn ep_cov_in_range(x: f64) -> bool {
+    x >= 0.0 - 1.0e308 && 1.0e308 >= x
+}
+
+fn ep_cov_abs(x: f64) -> f64 {
+    if x >= 0.0 { x } else { 0.0 - x }
+}
+
+// 0 valid; 1 non-finite input; 2 negative variance; 3 non-zero Cov with a zero
+// variance; 4 Var X * Var Y out of range; 5 Cov^2 exceeds Var X * Var Y (non-PSD).
+fn ep_cov_input_verdict(va: f64, vb: f64, cov: f64) -> i64 {
+    if ep_cov_in_range(va) && ep_cov_in_range(vb) && ep_cov_in_range(cov) {
+        if va >= 0.0 && vb >= 0.0 {
+            if va > 0.0 && vb > 0.0 {
+                if ep_cov_in_range(va * vb) {
+                    if va * vb * (1.0 + 1.8e-15) >= cov * cov { 0 } else { 5 }
+                } else {
+                    4
+                }
+            } else {
+                if cov > 0.0 || 0.0 > cov { 3 } else { 0 }
+            }
+        } else {
+            2
+        }
+    } else {
+        1
+    }
+}
+
+// 0 keep v; 1 rounding-sized negative, report 0; 2 NaN; 3 negative beyond rounding.
+fn ep_cov_output_verdict(v: f64, s: f64) -> i64 {
+    if v >= 0.0 {
+        0
+    } else {
+        if 0.0 > v {
+            if 7.2e-15 * s >= 0.0 - v { 1 } else { 3 }
+        } else {
+            2
+        }
+    }
+}
+
+// Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)
+pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_add_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_add_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_add_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_add_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_add_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
+    let v = a.variance + b.variance + 2.0 * cov
+    let out = ep_cov_output_verdict(v, a.variance + b.variance + 2.0 * ep_cov_abs(cov))
+    if out == 2 { panic("ep_add_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_add_cov: propagated variance negative beyond rounding") }
+    Epistemic {
+        val: a.val + b.val,
+        variance: if out == 1 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y)
+pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_sub_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_sub_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_sub_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_sub_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_sub_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
+    let v = a.variance + b.variance - 2.0 * cov
+    let out = ep_cov_output_verdict(v, a.variance + b.variance + 2.0 * ep_cov_abs(cov))
+    if out == 2 { panic("ep_sub_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_sub_cov: propagated variance negative beyond rounding") }
+    Epistemic {
+        val: a.val - b.val,
+        variance: if out == 1 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
+    }
+}
+
+// GUM delta method: Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y)
+pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_mul_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_mul_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_mul_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_mul_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_mul_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
+    let v = b.val * b.val * a.variance + a.val * a.val * b.variance
+        + 2.0 * a.val * b.val * cov
+    let s = b.val * b.val * a.variance + a.val * a.val * b.variance
+        + 2.0 * ep_cov_abs(a.val * b.val * cov)
+    let out = ep_cov_output_verdict(v, s)
+    if out == 2 { panic("ep_mul_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_mul_cov: propagated variance negative beyond rounding") }
+    Epistemic {
+        val: a.val * b.val,
+        variance: if out == 1 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// GUM delta method: Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³
+// The partials are 1/Y and -X/Y², so the cross term enters NEGATIVE.
+pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div, Panic {
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_div_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_div_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_div_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_div_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_div_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
+    let y2 = b.val * b.val
+    let y3 = y2 * b.val
+    let y4 = y2 * y2
+    let v = a.variance / y2 + a.val * a.val * b.variance / y4
+        - 2.0 * a.val * cov / y3
+    let s = a.variance / y2 + a.val * a.val * b.variance / y4
+        + 2.0 * ep_cov_abs(a.val * cov / y3)
+    let out = ep_cov_output_verdict(v, s)
+    if out == 2 { panic("ep_div_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_div_cov: propagated variance negative beyond rounding") }
+    Epistemic {
+        val: a.val / b.val,
+        variance: if out == 1 { 0.0 } else { v },
+        confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
+    }
+}
+
+// Var(X²) ~ 4X²·Var(X). This is the delta method for f(X)=X², f'(X)=2X, and it
+// is the CORRELATED truth for a single variable -- equivalently ep_mul_cov(x, x,
+// Var(X)), since Cov(X,X) = Var(X). It is NOT what ep_mul(&x, &x) returns.
 pub fn ep_square(a: &Epistemic) -> Epistemic {
     Epistemic {
         val: a.val * a.val,

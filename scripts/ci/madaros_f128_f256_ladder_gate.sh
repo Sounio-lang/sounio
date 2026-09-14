@@ -42,7 +42,7 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3|v0e4|v0e41|v0e5" >&2
+  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3|v0e4|v0e41|v0e5|v0e51|v0e52|v0e53|v0e54|v0e55|v0e56|v0e57|v0e58|v0e59|v0e510" >&2
   exit 64
 fi
 
@@ -78,8 +78,48 @@ if [[ "$STAGE" == "v0e5" ]]; then
   exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e5_softfloat_add_gate.sh" "$@"
 fi
 
+if [[ "$STAGE" == "v0e51" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e51_language_add_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e52" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e52_language_mul_neg_cmp_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e53" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e53_language_div_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e54" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e54_language_params_abi_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e55" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e55_language_struct_fields_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e57" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e58" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e58_print_f128_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e56" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e56_language_methods_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e59" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e59_exact_literals_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e510" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e510_surface_closure_gate.sh" "$@"
+fi
+
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3, v0e4, v0e41, v0e5)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3, v0e4, v0e41, v0e5, v0e51, v0e52, v0e53, v0e54, v0e55, v0e56, v0e57, v0e58, v0e59, v0e510)" >&2
   exit 64
 fi
 

@@ -1,0 +1,73 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout-contains: HEXFLOAT_EDGES_OK
+//@ description: C99 hex-float literals at the edges, bit-exact against C strtod (IEEE round-to-nearest-even).
+//
+// Follow-up to #2481 (overflow -> inf). Covers what that test did not:
+//   - subnormal / underflow boundary, including ties that round to 0 or to the
+//     minimum subnormal, and the subnormal -> minimum-normal carry;
+//   - pathological exponents (p+99999999, p-99999999) and long leading-zero
+//     mantissas whose exponent is far from the written one;
+//   - sticky bits beyond the 56-bit significand the reader keeps;
+//   - a fraction that starts with a decimal digit and continues with a hex
+//     letter (0x1.0fp+0, pi = 0x1.921fb54442d18p+1). The lexer delivers those as
+//     IntLit + Ident, and the parser used to read them as `0x1` `.0` field
+//     access (E012 "no field 0 on type i64").
+//
+// Every expected value is the strtod result written as m * 2^e with m < 2^53,
+// rebuilt here by exact doubling/halving, so the comparison is bit-for-bit and
+// does not go through the hex-float reader under test.
+
+fn is_pos_inf(x: f64) -> bool with Div { return x > 0.0 && x == x / 2.0 }
+fn is_pos_zero(x: f64) -> bool with Div { return x == 0.0 && 1.0 / x > 0.0 }
+
+fn exact(m: i64, e: i64) -> f64 with Mut, Div {
+    var v: f64 = m as f64
+    var k: i64 = 0
+    if e > 0 { while k < e { v = v * 2.0; k = k + 1 } }
+    if e < 0 { while k < 0 - e { v = v / 2.0; k = k + 1 } }
+    return v
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var fails: i64 = 0
+    if !(0x1p-1074 == exact(1, -1074)) { print("FAIL 0x1p-1074 expected 0x0.0000000000001p-1022\n"); fails = fails + 1 }
+    if !(is_pos_zero(0x1p-1075)) { print("FAIL 0x1p-1075 expected +0\n"); fails = fails + 1 }
+    if !(0x1.8p-1075 == exact(1, -1074)) { print("FAIL 0x1.8p-1075 expected 0x0.0000000000001p-1022\n"); fails = fails + 1 }
+    if !(0x1.0000000000001p-1075 == exact(1, -1074)) { print("FAIL 0x1.0000000000001p-1075 expected 0x0.0000000000001p-1022\n"); fails = fails + 1 }
+    if !(is_pos_zero(0x1p-1076)) { print("FAIL 0x1p-1076 expected +0\n"); fails = fails + 1 }
+    if !(0x3p-1076 == exact(1, -1074)) { print("FAIL 0x3p-1076 expected 0x0.0000000000001p-1022\n"); fails = fails + 1 }
+    if !(0x0.0000000000001p-1022 == exact(1, -1074)) { print("FAIL 0x0.0000000000001p-1022 expected 0x0.0000000000001p-1022\n"); fails = fails + 1 }
+    if !(0x1.fffffffffffffp-1023 == exact(1, -1022)) { print("FAIL 0x1.fffffffffffffp-1023 expected 0x1p-1022\n"); fails = fails + 1 }
+    if !(0x1.fffffffffffff8p-1023 == exact(1, -1022)) { print("FAIL 0x1.fffffffffffff8p-1023 expected 0x1p-1022\n"); fails = fails + 1 }
+    if !(0x1p-1022 == exact(1, -1022)) { print("FAIL 0x1p-1022 expected 0x1p-1022\n"); fails = fails + 1 }
+    if !(0x1.00000000000008p-1022 == exact(1, -1022)) { print("FAIL 0x1.00000000000008p-1022 expected 0x1p-1022\n"); fails = fails + 1 }
+    if !(0x1.00000000000018p-1022 == exact(2251799813685249, -1073)) { print("FAIL 0x1.00000000000018p-1022 expected 0x1.0000000000002p-1022\n"); fails = fails + 1 }
+    if !(0x1.ffffffffffffe8p-1023 == exact(4503599627370495, -1074)) { print("FAIL 0x1.ffffffffffffe8p-1023 expected 0x0.fffffffffffffp-1022\n"); fails = fails + 1 }
+    if !(is_pos_inf(0x1p+99999999)) { print("FAIL 0x1p+99999999 expected +inf\n"); fails = fails + 1 }
+    if !(is_pos_zero(0x1p-99999999)) { print("FAIL 0x1p-99999999 expected +0\n"); fails = fails + 1 }
+    if !(is_pos_inf(0x0.000001p+1048)) { print("FAIL 0x0.000001p+1048 expected +inf\n"); fails = fails + 1 }
+    if !(0x0.0000000000000000000001p+1100 == exact(1, 1012)) { print("FAIL 0x0.0000000000000000000001p+1100 expected 0x1p+1012\n"); fails = fails + 1 }
+    if !(0x100000000000000000000p-80 == exact(1, 0)) { print("FAIL 0x100000000000000000000p-80 expected 0x1p+0\n"); fails = fails + 1 }
+    if !(is_pos_zero(0x0p+99999999)) { print("FAIL 0x0p+99999999 expected +0\n"); fails = fails + 1 }
+    if !(0x0.00000000000000000000000000000000000001p+0 == exact(1, -152)) { print("FAIL 0x0.00000000000000000000000000000000000001p+0 expected 0x1p-152\n"); fails = fails + 1 }
+    if !(0x1.00000000000008p+0 == exact(1, 0)) { print("FAIL 0x1.00000000000008p+0 expected 0x1p+0\n"); fails = fails + 1 }
+    if !(0x1.00000000000008000000000000001p+0 == exact(4503599627370497, -52)) { print("FAIL 0x1.00000000000008000000000000001p+0 expected 0x1.0000000000001p+0\n"); fails = fails + 1 }
+    if !(0x1.000000000000080000000000000000p+0 == exact(1, 0)) { print("FAIL 0x1.000000000000080000000000000000p+0 expected 0x1p+0\n"); fails = fails + 1 }
+    if !(0x1.0000000000000800000000000000000000001p+0 == exact(4503599627370497, -52)) { print("FAIL 0x1.0000000000000800000000000000000000001p+0 expected 0x1.0000000000001p+0\n"); fails = fails + 1 }
+    if !(0x1.fffffffffffff7ffffffffffffffp+0 == exact(9007199254740991, -52)) { print("FAIL 0x1.fffffffffffff7ffffffffffffffp+0 expected 0x1.fffffffffffffp+0\n"); fails = fails + 1 }
+    if !(0x1.fffffffffffff8p+0 == exact(1, 1)) { print("FAIL 0x1.fffffffffffff8p+0 expected 0x1p+1\n"); fails = fails + 1 }
+    if !(0xffffffffffffffffffffp+0 == exact(1, 80)) { print("FAIL 0xffffffffffffffffffffp+0 expected 0x1p+80\n"); fails = fails + 1 }
+    if !(0x123456789abcdef0123456789p-40 == exact(5124095576030431, 4)) { print("FAIL 0x123456789abcdef0123456789p-40 expected 0x1.23456789abcdfp+56\n"); fails = fails + 1 }
+    if !(0x1.0000000000000fffffffffffffffffp+0 == exact(4503599627370497, -52)) { print("FAIL 0x1.0000000000000fffffffffffffffffp+0 expected 0x1.0000000000001p+0\n"); fails = fails + 1 }
+    if !(0x1.0fp+0 == exact(271, -8)) { print("FAIL 0x1.0fp+0 expected 0x1.0fp+0\n"); fails = fails + 1 }
+    if !(0x1.9ap+0 == exact(205, -7)) { print("FAIL 0x1.9ap+0 expected 0x1.9ap+0\n"); fails = fails + 1 }
+    if !(0x1.921fb54442d18p+1 == exact(884279719003555, -48)) { print("FAIL 0x1.921fb54442d18p+1 expected 0x1.921fb54442d18p+1\n"); fails = fails + 1 }
+    if !(0x1.0e5p+0 == exact(4325, -12)) { print("FAIL 0x1.0e5p+0 expected 0x1.0e5p+0\n"); fails = fails + 1 }
+    if !(0x1.1e5fp+0 == exact(73311, -16)) { print("FAIL 0x1.1e5fp+0 expected 0x1.1e5fp+0\n"); fails = fails + 1 }
+    if !(0x1.0f5e3p-3 == exact(1111523, -23)) { print("FAIL 0x1.0f5e3p-3 expected 0x1.0f5e3p-3\n"); fails = fails + 1 }
+    if !(0x1.0Fp+0 == exact(271, -8)) { print("FAIL 0x1.0Fp+0 expected 0x1.0fp+0\n"); fails = fails + 1 }
+    if fails != 0 { return 1 }
+    print("HEXFLOAT_EDGES_OK\n")
+    return 0
+}

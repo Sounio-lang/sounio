@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SOURCE="$ROOT_DIR/tests/known_failures/zero_provenance_native_v2_probe.sio"
+SOURCE="$ROOT_DIR/tests/run-pass/zero_provenance_native_v2_combined.sio"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zero-provenance.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

@@ -33,9 +33,8 @@ Evidence: scripts/ci/madaros_seq_f64_scalar_kind_gate.sh ->
   step "Seq<f64> element reads classify as float" -> success.
 Fallback-Path: bind the read to a typed local before use.
 LLM-Offload: not-required
-Residual: `&Seq<T>` PARAMETER is NOT fixed -- separate path, wrong value in one
-  shape and SIGSEGV in another, on any element type. Moved to
-  docs/compiler/KNOWN_LIMITATIONS.md and ratcheted; see Closure.
+Residual: `&Seq<T>` PARAMETER -- CLOSED 2026-09-09, see Residual closure. It was
+  NOT a separate pre-existing path as recorded below: PR #2413 introduced it.
 Next-Action: none for this blocker. The parameter path is tracked separately.
 ```
 
@@ -179,3 +178,35 @@ It now lives in three places that stay open:
 To re-open this blocker: `bash scripts/ci/madaros_seq_f64_scalar_kind_gate.sh`.
 A non-zero exit or a missing sentinel re-opens it. The parameter residual is a
 different failure and does not re-open this record.
+
+## Residual closure (2026-09-09) — and a correction
+
+The `&Seq<T>` parameter residual is fixed. `lower_seq_recv_base_ref` in
+`self-hosted/ir/lower.sio` loads through the reference before handing the handle
+to the Seq intrinsics. Fixture
+`tests/run-pass/seq_ref_param_delivers_handle.sio`, gate
+`scripts/ci/madaros_seq_ref_param_gate.sh`; both verified able to fail against a
+compiler built without the change.
+
+**The framing above is wrong and is corrected here.** This record called the
+parameter path "separate" and implicitly pre-existing. It was neither. Measured
+on a compiler built from PR #2413's merge-base `d8048c7ad9`, `s.len()` on a
+`&Seq<i64>` is refused:
+
+```
+error[E019] ... method calls are not supported for this type
+```
+
+PR #2413's own reference-receiver fix — unwrapping a `TyRef` receiver to its
+`TyNamed` pointee in the checker — made the call resolve, with no counterpart in
+lowering. A clean rejection became silent wrong code, and it shipped that way
+for three days. The residual was not something this blocker inherited; it was
+something the blocker's own branch created and then documented as inherited.
+
+The mechanism that caught it was the ratchet line added when the residual was
+recorded: it asserts the defect and goes red when the defect closes. It did,
+naming the witness, which is what triggered this migration.
+
+A/B on one worktree with only the engine swapped (`750c19bd` without the fix,
+`6f961a02` with it): `graph` and `generic` suites have byte-identical failure
+sets, and `seq` differs by exactly the new fixture. Zero regressions.

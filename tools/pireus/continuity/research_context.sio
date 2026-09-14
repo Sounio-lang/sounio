@@ -1,0 +1,75 @@
+// Research-context producer over the existing Pireus target ontology.
+// New primitive declarations have research-local IRIs and declared provenance.
+// They do not turn the historical store's zero observed Sparks into observations.
+use ontology::query::{
+    TripleStore, triple_store_add, triple_iri, sparql_new, sparql_select,
+    sparql_add_pattern, sparql_execute, triple_pattern_new,
+    queryterm_iri, queryterm_variable, sparql_result_count,
+}
+use hardware::pireus::model::pireus_result_contains
+use hardware::pireus::target_profile::{
+    pireus_v01_store, pireus_query_canonical_targets, PIREUS_TARGET_DGX_SPARK,
+}
+const DECLARED_TRUE: i64 = 790001
+const DECLARED_FALSE: i64 = 790002
+const DECLARED_UNKNOWN: i64 = 790003
+// Predicates 790100..790105: f64 load, multiply, add, indexed select,
+// 16-lane shuffle, exact sign multiplication. Predicate 790106 is warp width.
+// Predicate 790107 is evidence role (declared=790004), not an observed GPU.
+fn query_state(store: &TripleStore, predicate: i64, state: i64) -> bool with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(PIREUS_TARGET_DGX_SPARK), queryterm_iri(predicate),
+        queryterm_variable(0)))
+    let result = sparql_execute(store, &query)
+    pireus_result_contains(&result, state)
+}
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // Optional integer control: 1 removes shuffle, 2 contradicts shuffle,
+    // 3 makes f64 load unknown. No control is used for research production.
+    var control: i64 = 0
+    if arg_count() > 1 { return 2 }
+    if arg_count() == 1 {
+        let arg = get_arg(0)
+        if str_len(arg) != 1 { return 2 }
+        control = str_char_at(arg, 0) - 48
+        if control < 1 || control > 3 { return 2 }
+    }
+    var store = pireus_v01_store()
+    let targets = pireus_query_canonical_targets(&store)
+    if !pireus_result_contains(&targets, PIREUS_TARGET_DGX_SPARK) { return 3 }
+    var bit: i64 = 0
+    while bit < 6 {
+        var state = DECLARED_TRUE
+        if bit == 3 { state = DECLARED_FALSE }
+        if control == 1 && bit == 4 { state = DECLARED_FALSE }
+        if control == 3 && bit == 0 { state = DECLARED_UNKNOWN }
+        triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790100 + bit, state))
+        bit = bit + 1
+    }
+    if control == 2 {
+        triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790104, DECLARED_FALSE))
+    }
+    triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790106, 790132))
+    triple_store_add(&store, triple_iri(PIREUS_TARGET_DGX_SPARK, 790107, 790004))
+    var capabilities: i64 = 0
+    var facts_state: i64 = 1
+    bit = 0
+    while bit < 6 {
+        let yes = query_state(&store, 790100 + bit, DECLARED_TRUE)
+        let no = query_state(&store, 790100 + bit, DECLARED_FALSE)
+        let unknown = query_state(&store, 790100 + bit, DECLARED_UNKNOWN)
+        if yes && no { facts_state = 2 }
+        else if unknown || (!yes && !no) { if facts_state != 2 { facts_state = 0 } }
+        if yes { capabilities = capabilities | (1 << bit) }
+        bit = bit + 1
+    }
+    if !query_state(&store, 790107, 790004) { return 4 }
+    var width: i64 = 0
+    if query_state(&store, 790106, 790132) { width = 32 }
+    print("{\"schema\":1,\"target\":701202,\"dimension\":16,\"precision\":64,\"order\":1,\"fma\":0,\"capabilities\":")
+    print_int(capabilities); print(",\"lane_width\":"); print_int(width)
+    print(",\"facts_state\":"); print_int(facts_state); print("}\n")
+    0
+}

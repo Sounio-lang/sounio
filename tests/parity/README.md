@@ -6,8 +6,8 @@ The shipped compiler `bin/souc-linux-x86_64` is built from the single
 file `self-hosted/compiler/lean_single.sio`.  The modular tree at
 `self-hosted/{lexer,parser,check,ir,native}/` is a future target kept
 in lock-step by discipline, not by a test.  See
-[`docs/compiler/KNOWN_LIMITATIONS.md`](../../docs/compiler/KNOWN_LIMITATIONS.md),
-section *"Single-source build path"*, for the full context.
+[`docs/compiler/BOOTSTRAP_SEED.md`](../../docs/compiler/BOOTSTRAP_SEED.md)
+for the full context.
 
 This directory exists so that:
 

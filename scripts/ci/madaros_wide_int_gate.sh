@@ -250,8 +250,68 @@ source_42 "source_u256_mul_add_ne" 'fn main() -> i64 { let a: u256 = 4294967296 
 source_42 "source_i128_sub_eq_zero" 'fn main() -> i64 { let a: i128 = 4294967296 as i128; let b: i128 = 4294967296 as i128; let c: i128 = a * b; let d: i128 = c - c; let z: i128 = 0 as i128; if d == z { return 42 } 1 }'
 
 # ---------------------------------------------------------------------------
+# 18. KL-7 fail-closed print contract.  A wide value must never reach the i64
+#     print builtin and produce a plausible low-limb lie.  Typecheck stays OK;
+#     lowering refuses during build and must leave no ELF behind.
+# ---------------------------------------------------------------------------
+WIDE_PRINT_FIXTURE="$ROOT_DIR/tests/compile-fail/kl7_wide_int_print.sio"
+"$MADAROS" check "$WIDE_PRINT_FIXTURE" >"$WORK/kl7_print_check.log" 2>&1
+expect_log_contains "check: OK" "$WORK/kl7_print_check.log"
+rm -f "$WORK/kl7_print.elf"
+expect_exit 1 "$MADAROS" build "$WIDE_PRINT_FIXTURE" -o "$WORK/kl7_print.elf" >"$WORK/kl7_print_build.log" 2>&1
+expect_log_contains "wide integer print is not implemented; use shifts and casts to print verified 64-bit limbs" "$WORK/kl7_print_build.log"
+[[ ! -e "$WORK/kl7_print.elf" ]] || fail "wide println refusal still produced an ELF"
+pass "KL-7 wide println fails closed before ELF emission"
+
+# Sabotage/control: the same print shape with an i64 must remain an ordinary
+# runnable println(-1), proving the refusal is keyed to wide shape rather than
+# a vacuous fixture or a generally broken print path.
+cat >"$WORK/kl7_print_narrow_control.sio" <<'EOF'
+fn main() -> i64 with IO {
+    let x: i64 = 0 - 1
+    println(x)
+    0
+}
+EOF
+"$MADAROS" check "$WORK/kl7_print_narrow_control.sio" >"$WORK/kl7_print_narrow_check.log" 2>&1
+expect_log_contains "check: OK" "$WORK/kl7_print_narrow_check.log"
+"$MADAROS" build "$WORK/kl7_print_narrow_control.sio" -o "$WORK/kl7_print_narrow.elf" >"$WORK/kl7_print_narrow_build.log" 2>&1
+chmod +x "$WORK/kl7_print_narrow.elf"
+"$WORK/kl7_print_narrow.elf" >"$WORK/kl7_print_narrow.stdout"
+[[ "$(cat "$WORK/kl7_print_narrow.stdout")" == "-1" ]] || fail "narrow sabotage control did not print -1"
+pass "KL-7 print refusal narrow control runs and prints -1"
+
+# ---------------------------------------------------------------------------
+# 19. Signed widening and wide unary negation.  The witness inspects high limbs
+#     and additive inverses, so a low-limb-only implementation cannot pass.
+# ---------------------------------------------------------------------------
+SIGN_FIXTURE="$ROOT_DIR/tests/run-pass/kl7_wide_sign_extension.sio"
+"$MADAROS" check "$SIGN_FIXTURE" >"$WORK/kl7_sign_check.log" 2>&1
+expect_log_contains "check: OK" "$WORK/kl7_sign_check.log"
+"$MADAROS" build "$SIGN_FIXTURE" -o "$WORK/kl7_sign.elf" >"$WORK/kl7_sign_build.log" 2>&1
+chmod +x "$WORK/kl7_sign.elf"
+"$WORK/kl7_sign.elf" >"$WORK/kl7_sign.stdout"
+[[ "$(cat "$WORK/kl7_sign.stdout")" == "KL7_WIDE_SIGN_EXTENSION_OK" ]] || fail "signed-wide witness output/exit mismatch"
+pass "KL-7 i256/i512 sign extension, signed comparison and -(2^200)"
+
+set +e
+SOUNIO_WIDE_MUL_SABOTAGE=1 "$MADAROS" build "$SIGN_FIXTURE" -o "$WORK/kl7_sign_sabotaged.elf" >"$WORK/kl7_sign_sabotaged_build.log" 2>&1
+sabotage_build_rc=$?
+set -e
+if [[ "$sabotage_build_rc" == "0" ]]; then
+  chmod +x "$WORK/kl7_sign_sabotaged.elf"
+  set +e
+  "$WORK/kl7_sign_sabotaged.elf" >"$WORK/kl7_sign_sabotaged.stdout" 2>&1
+  sabotage_run_rc=$?
+  set -e
+  [[ "$sabotage_run_rc" != "0" ]] || fail "wide-mul sabotage did not break KL-7 sign witness"
+fi
+pass "KL-7 sign-extension sabotage control fires"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "[wide-int] PASS: type identity, type safety, casts, i128/i256 compile"
 echo "[wide-int] PASS: IrWideAdd/Sub/Mul/Shr/Div/Mod/Cmp/DivFull/ModFull witnesses"
 echo "[wide-int] PASS: source-level i128/i256/u128/u256 add/sub/mul/cmp check/build/run"
+echo "[wide-int] PASS: KL-7 fail-closed wide print + signed high-limb witnesses"
