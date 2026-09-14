@@ -48,11 +48,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-9 — seed: #1494 imported-module typecheck errors
 
-- **`f128` greenwash on lean_single — CLOSED (KL-9 partial, 2026-09-12).**
-  The seed refuses `f128`/`f256` spellings fail-closed (`tc_wide_float_refused`)
-  instead of lowering them as f64 via the lowercase-unknown-type rule.
-  Pin: `scripts/ci/language_gap_ratchet_gate.sh` (`f128 refused by lean_single`);
-  witness: `tests/compile-fail/f128_refused_on_lean_single.sio`.
+- **`f128` greenwash on lean_single — CLOSED (KL-9 partial, 2026-09-12; #2387).**
+  `f128` lowers as real binary128 (kind 13, libgcc `__*tf*`); the probe
+  `examples/numerics/f128_is_f64_probe.sio` reports 113 halvings. `f256` has no
+  lowering and is refused fail-closed (`tc_wide_float_refused`) instead of being
+  lowered as f64 via the lowercase-unknown-type rule.
+  Pins: `scripts/ci/language_gap_ratchet_gate.sh` (`f128 halvings on lean_single`,
+  `f256 refused by lean_single`);
+  witness: `tests/compile-fail/f256_refused_on_lean_single.sio`.
 - **Imported-module typecheck errors are non-fatal (#1494).** Engine:
   `lean_single`. `CONVERGENCE FIX` block stubs an imported fn only above 10
   errors; below that the partial codegen ships. The current build tolerates
