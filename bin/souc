@@ -246,6 +246,71 @@ case "${1:-}" in
     ;;
 esac
 
+# Knowledge<T where {...}> runtime guards: an opt-in pre-native expansion.
+#
+# `souc run|compile|build FILE.sio` first rewrites FILE through
+# scripts/ontology/expand_knowledge_runtime_guards.sh -- which wraps each
+# `value: T { ... }` in a helper that assert()s the numeric constraint and lowers
+# the proof-context type to plain Knowledge<T> -- and then compiles the rewritten
+# copy with whichever engine the rest of this file selects. Two ways to ask:
+#   SOUNIO_KNOWLEDGE_RUNTIME_GUARDS=1           in the environment
+#   //@ knowledge-runtime-guards                as a line in the source file
+#
+# WHY THIS EXISTS HERE. knowledge_runtime_guard_expansion_gate.sh and
+# semantic_knowledge_spine_gate.sh described this bridge and the gate exercised
+# it, but nothing implemented it: `souc run` compiled the unexpanded source.
+# Measured 2026-09-14: the call-boundary reject witness exited 0 (no guard, no
+# trap) while its expanded form trapped with 1.
+#
+# The rewritten copy is a hidden temporary file NEXT TO the source, not in /tmp,
+# so everything that depends on where the source lives still sees the same
+# directory: relative `use` resolution and bin/madaros's science-manifest lookup,
+# which walks up from the source's directory. It is removed on exit. The copy is
+# compiled by re-entering this script with a one-shot marker, so the directive the
+# copy still carries does not expand it twice, and the exit status is the child's.
+#
+# Fail closed: an opt-in that cannot be honoured stops. A guard the expander does
+# not support must not quietly become an unguarded run.
+_krg_marker="${_SOUNIO_KRG_EXPANDED:-}"
+unset _SOUNIO_KRG_EXPANDED
+case "${1:-}" in
+  run|compile|build)
+    if [[ -z "$_krg_marker" && -n "${2:-}" ]]; then
+      _krg_src="$2"
+      _krg_on=0
+      if [[ "${SOUNIO_KNOWLEDGE_RUNTIME_GUARDS:-0}" == "1" ]]; then
+        _krg_on=1
+      elif [[ -f "$_krg_src" ]] &&
+           grep -Eq '^[[:space:]]*//@[[:space:]]*knowledge-runtime-guards([[:space:]]|$)' "$_krg_src"; then
+        _krg_on=1
+      fi
+      if [[ $_krg_on -eq 1 ]]; then
+        if [[ ! -f "$_krg_src" || "$_krg_src" != *.sio ]]; then
+          echo "souc: refused: knowledge runtime guards expand a single .sio file, and '$_krg_src' is not one" >&2
+          exit 64
+        fi
+        _krg_dir="$(cd "$(dirname "$_krg_src")" && pwd)"
+        _krg_abs="$_krg_dir/$(basename "$_krg_src")"
+        if ! _krg_out="$(mktemp --suffix=.sio "$_krg_dir/.souc-krg-$(basename "$_krg_src" .sio).XXXXXX" 2>/dev/null)"; then
+          echo "souc: refused: cannot write the guard-expanded copy next to $_krg_abs" >&2
+          exit 73
+        fi
+        trap 'rm -f "$_krg_out"' EXIT
+        if ! bash "$ROOT_DIR/scripts/ontology/expand_knowledge_runtime_guards.sh" "$_krg_abs" "$_krg_out"; then
+          echo "souc: refused: knowledge runtime guard expansion failed for $_krg_src; not compiling it unguarded" >&2
+          exit 65
+        fi
+        set +e
+        _SOUNIO_KRG_EXPANDED=1 "$ROOT_DIR/bin/souc" "$1" "$_krg_out" "${@:3}"
+        _krg_rc=$?
+        set -e
+        exit "$_krg_rc"
+      fi
+    fi
+    ;;
+esac
+unset _krg_marker
+
 # 1) Explicit ELF override: honor it directly (raw lean_single-style CLI).
 if _is_elf "${SOUNIO_SOUC_BIN:-}"; then
   if _science_boundary_requested "$@" || _package_release_requested "$@"; then
