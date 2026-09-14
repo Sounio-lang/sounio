@@ -836,6 +836,20 @@ let state_root ?override cwd =
   Unix.chmod root 0o700;
   Unix.realpath root
 
+let change_stage_parent session_dir =
+  (* O change kernel redireciona o Write do agente para o staging. Sob .git o
+     proprio Claude Code bloqueia a escrita como caminho sensivel, e dentro da
+     membrana o .git e read-only. SOUNIO_LOOM_CHANGE_STAGING_ROOT poe o staging
+     fora dos dois. Nao e fronteira de seguranca: o consume confere o conteudo
+     staged contra o hash esperado antes de o kernel materializar. *)
+  match Sys.getenv_opt "SOUNIO_LOOM_CHANGE_STAGING_ROOT" with
+  | Some root when root <> "" ->
+      let parent = Filename.concat root (Filename.basename session_dir) in
+      mkdir_p parent;
+      Unix.chmod parent 0o700;
+      parent
+  | _ -> Filename.concat session_dir "change-staging"
+
 let product_activation_policy_root () =
   let manifest_relative =
     "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
@@ -2960,7 +2974,7 @@ let handle_request kernel client line =
                  (git_common_dir kernel.cwd)
           in
           Loom_change.prepare ~root:kernel.cwd
-            ~stage_parent:(Filename.concat kernel.paths.session_dir "change-staging")
+            ~stage_parent:(change_stage_parent kernel.paths.session_dir)
             ~kernel_generation:kernel.kernel_generation ~session_id ~call_id
             ~event_sha256 ~patch_sha256 ~mutation_payload ~paths
             ~provider_root_readonly
