@@ -27,9 +27,13 @@ rc() { "$@" >/dev/null 2>&1; echo $?; }
 UNITS=tests/known-gaps/units
 NUM=tests/known-gaps/numerics
 
-# #2387 / KL-9 — CLOSED: lean_single refuses f128/f256 spellings fail-closed
-# (no more f64 greenwash). Probe moved to tests/compile-fail/.
-expect "f128 refused by lean_single" "1" "$([[ $(rc lean check tests/compile-fail/f128_refused_on_lean_single.sio) -ne 0 ]] && echo 1 || echo 0)"
+# #2387 -- CLOSED on lean_single: binary128 (113 halvings until 1+e == 1).
+# Madaros still refuses at parse (E249 / V0-A). The ratchet stays red in both
+# directions: lean must keep 113, Madaros must keep refusing.
+h=$(lean run examples/numerics/f128_is_f64_probe.sio 2>/dev/null | tail -1 | tr -d '[:space:]')
+expect "f128 halvings on lean_single (f64 would be 53, binary128 113)" "113" "$h"
+# KL-9 -- f256 stays refused fail-closed on lean_single (no f64 greenwash).
+expect "f256 refused by lean_single" "1" "$([[ $(rc lean check tests/compile-fail/f256_refused_on_lean_single.sio) -ne 0 ]] && echo 1 || echo 0)"
 expect "f128 refused by Madaros check (exit != 0)" "1" "$([[ $(rc mad check examples/numerics/f128_is_f64_probe.sio) -ne 0 ]] && echo 1 || echo 0)"
 
 # #2388 (1) -- derived unit annotations do not parse on either engine
