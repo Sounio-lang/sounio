@@ -270,6 +270,11 @@ pub struct ODESolution {
     total_error: f64,
     n_rhs_evals: i64,
     n_rejected: i64,
+    // 1: variances come from the full first-order covariance of (state, params)
+    //    carried through every step. 0: diagonal-only fallback, used only when
+    //    n_dims + n_params > 64; it drops all correlations and is known to
+    //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
+    pub covariance_mode: i64,
 }
 
 fn ode_solution_new(n_dims: i64) -> ODESolution {
@@ -282,6 +287,7 @@ fn ode_solution_new(n_dims: i64) -> ODESolution {
         total_error: 0.0,
         n_rhs_evals: 0,
         n_rejected: 0,
+        covariance_mode: 1,
     }
 }
 
@@ -856,6 +862,204 @@ fn propagate_variance_gum(
 }
 
 // ============================================================================
+// Full first-order covariance propagation (GUM, JCGM 100:2008 eq. 13)
+//
+// propagate_variance_gum above keeps only the diagonal and linearises the step
+// as I + dt*J. Both lose information that matters: an intermediate species
+// inherits its uncertainty through its CORRELATION with the species feeding
+// it, and a rate constant's uncertainty compounds through state-parameter
+// correlation that is rebuilt from zero at every step. Measured on the
+// A->B, B->C, A+B->D network (system 5, t = 2, dt = 0.1): the diagonal
+// scheme gave sigma_B = 0.0027, sigma_C = 0.000055, sigma_D = 0.00074, while a
+// first-order GUM through the whole RK4 map and a 20 000-sample Monte Carlo
+// both give 0.0119, 0.00072 and 0.0052 -- understated 4x to 13x.
+//
+// Here the augmented vector z = (y_0..y_{n-1}, p_0..p_{np-1}) carries a full
+// covariance P. Each accepted step y' = Phi(y, p) is differentiated as a whole
+// (central differences of the integrator's own step, taken at the PRE-step
+// point), J = [[dPhi/dy, dPhi/dp], [0, I]], and P <- J P J^T. Parameters are
+// constant, so their block propagates unchanged and their correlation with
+// the state accumulates exactly. Storage is P[a * 64 + b]; requires
+// n + np <= 64.
+//
+// Known limits, stated rather than hidden (math-review 2026-09-14):
+//   - The Jacobian is a central difference with h = max(1e-7 |z_j|, 1e-7). For
+//     a component at or near zero h is absolute, so the minus-perturbation can
+//     evaluate the RHS at a slightly negative state; for a stiff explicit step
+//     the difference of two large, nearly equal steps loses digits, and the
+//     loss compounds through the product of Jacobians.
+//   - In the adaptive solver, J is the derivative of the step actually taken
+//     at fixed dt; the dependence of the controller's dt on z is not included.
+// ============================================================================
+
+struct AugCov {
+    data: [f64; 4096],
+    dim: i64,
+}
+
+fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, Panic {
+    var cov = AugCov { data: [0.0; 4096], dim: n + p.n_params }
+    var i = 0
+    while i < n {
+        if i < 64 { cov.data[i * 64 + i] = state.variances[i] }
+        i = i + 1
+    }
+    var k = 0
+    while k < p.n_params {
+        let a = n + k
+        if a < 64 { cov.data[a * 64 + a] = p.param_variances[k] }
+        k = k + 1
+    }
+    cov
+}
+
+// the state block's diagonal becomes the reported variances
+fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) with Mut {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = cov.data[i * 64 + i]
+            state.variances[i] = if v > 0.0 { v } else { 0.0 }
+        }
+        i = i + 1
+    }
+}
+
+// One step of the chosen integrator, values only: mode 0 = classical RK4,
+// mode 1 = Dormand-Prince 5th-order solution (as solve_ode_adaptive accepts it)
+fn eode_step_values(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    mode: i64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    if mode == 0 {
+        eode_rk4_advance(sys, t, state, p, dt, n_evals)
+    } else {
+        var err_unused = 0.0
+        rk45_step(sys, t, state, p, dt, &!err_unused, n_evals)
+    }
+}
+
+fn propagate_covariance_step(
+    sys: &ODESystem,
+    t: f64,
+    before: &EState,
+    p: &ODEParams,
+    dt: f64,
+    mode: i64,
+    cov: &!AugCov,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
+    let np = p.n_params
+    let dim = n + np
+    let eps = 1.0e-7
+    var jm: [f64; 4096] = [0.0; 4096]
+
+    var j = 0
+    while j < dim {
+        if j < 64 {
+            var yp = estate_new(n)
+            var ym = estate_new(n)
+            estate_copy(&!yp, before)
+            estate_copy(&!ym, before)
+            var pp = ode_params_new()
+            var pm = ode_params_new()
+            var m = 0
+            while m < np {
+                if m < 64 {
+                    pp.params[m] = p.params[m]
+                    pm.params[m] = p.params[m]
+                }
+                m = m + 1
+            }
+            pp.n_params = np
+            pm.n_params = np
+            var h = eps
+            if j < n {
+                h = ode_max(eps * ode_abs(before.values[j]), eps)
+                yp.values[j] = before.values[j] + h
+                ym.values[j] = before.values[j] - h
+            } else {
+                let k = j - n
+                h = ode_max(eps * ode_abs(p.params[k]), eps)
+                pp.params[k] = p.params[k] + h
+                pm.params[k] = p.params[k] - h
+            }
+            eode_step_values(sys, t, &!yp, &pp, dt, mode, n_evals)
+            eode_step_values(sys, t, &!ym, &pm, dt, mode, n_evals)
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 { jm[i * 64 + j] = (yp.values[i] - ym.values[i]) * inv_2h }
+                i = i + 1
+            }
+        }
+        j = j + 1
+    }
+    var q = 0
+    while q < np {
+        let a = n + q
+        if a < 64 { jm[a * 64 + a] = 1.0 }
+        q = q + 1
+    }
+
+    // tmp = J P, then P' = tmp J^T
+    var tmp: [f64; 4096] = [0.0; 4096]
+    var r = 0
+    while r < dim {
+        var c = 0
+        while c < dim {
+            var s = 0.0
+            var a = 0
+            while a < dim {
+                s = s + jm[r * 64 + a] * cov.data[a * 64 + c]
+                a = a + 1
+            }
+            tmp[r * 64 + c] = s
+            c = c + 1
+        }
+        r = r + 1
+    }
+    r = 0
+    while r < dim {
+        var c = 0
+        while c < dim {
+            var s = 0.0
+            var b = 0
+            while b < dim {
+                s = s + tmp[r * 64 + b] * jm[c * 64 + b]
+                b = b + 1
+            }
+            cov.data[r * 64 + c] = s
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // J P J^T is symmetric in exact arithmetic; in f64 the two triangles drift
+    // by O(dim eps |J|^2 |P|), which over long products can push an eigenvalue
+    // below zero and feed it into the next step. Re-symmetrise every step.
+    // Negative diagonals are clamped only where variances are REPORTED
+    // (augcov_write_variances), never inside P.
+    r = 0
+    while r < dim {
+        var c = r + 1
+        while c < dim {
+            let avg = 0.5 * (cov.data[r * 64 + c] + cov.data[c * 64 + r])
+            cov.data[r * 64 + c] = avg
+            cov.data[c * 64 + r] = avg
+            c = c + 1
+        }
+        r = r + 1
+    }
+    cov.dim = dim
+}
+
+// ============================================================================
 // General-Purpose RK4 Step
 // ============================================================================
 
@@ -876,6 +1080,20 @@ fn bump_n_evals(n: &!i64) with Mut {
 // this module's internal call and silently miscompile. Private helper, so the
 // rename is local to this file.
 fn eode_rk4_step(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    eode_rk4_advance(sys, t, state, p, dt, n_evals)
+    // Diagonal-only GUM: the fallback when n_dims + n_params > 64
+    propagate_variance_gum(sys, t, state, p, dt, n_evals)
+}
+
+// Classical RK4, values only
+fn eode_rk4_advance(
     sys: &ODESystem,
     t: f64,
     state: &!EState,
@@ -918,9 +1136,6 @@ fn eode_rk4_step(
         }
         i = i + 1
     }
-
-    // GUM variance propagation through this step
-    propagate_variance_gum(sys, t, state, p, dt, n_evals)
 }
 
 // ============================================================================
@@ -1071,6 +1286,9 @@ fn solve_ode(
     var t = t_start
     var step = 0
     var n_evals = 0
+    let full_cov = sys.n_dims + p.n_params <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims)
+    if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
 
@@ -1078,7 +1296,15 @@ fn solve_ode(
         let dt = ode_min(opts.dt, t_end - t)
         if dt <= 0.0 { t = t_end }
         else {
-            eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
+            if full_cov {
+                var before = estate_new(sys.n_dims)
+                estate_copy(&!before, &state)
+                eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
+                propagate_covariance_step(&sys, t, &before, &p, dt, 0, &!cov, &!n_evals)
+                augcov_write_variances(&cov, &!state, sys.n_dims)
+            } else {
+                eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
+            }
             t = t + dt
             step = step + 1
             solution_record(&!sol, t, &state)
@@ -1109,6 +1335,9 @@ fn solve_ode_adaptive(
     var step = 0
     var n_evals = 0
     var n_rejected = 0
+    let full_cov = sys.n_dims + p.n_params <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims)
+    if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
 
@@ -1125,8 +1354,14 @@ fn solve_ode_adaptive(
 
             let tol = opts.atol + opts.rtol * err
             if err <= opts.rtol || dt <= 1.0e-12 {
-                // Accept step — propagate variance
-                propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
+                // Accept step — propagate uncertainty through the step just taken,
+                // differentiated at the pre-step point
+                if full_cov {
+                    propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
+                    augcov_write_variances(&cov, &!state, sys.n_dims)
+                } else {
+                    propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
+                }
                 t = t + dt
                 step = step + 1
                 solution_record(&!sol, t, &state)
