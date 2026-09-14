@@ -246,6 +246,13 @@ fn spec_path_single_name(path: AstPath) -> Name {
     Name { buf: path.segments.head_buf, len: path.segments.head_len }
 }
 
+fn spec_string_list_last_name(sl: StringList) -> Name with Mut, Panic, Div {
+    match sl.tail {
+        Some(rest) => spec_string_list_last_name(*rest),
+        None => Name { buf: sl.head_buf, len: sl.head_len },
+    }
+}
+
 // ============================================================
 // Known type names (structs/enums declared in this item list)
 // ============================================================
@@ -1791,6 +1798,19 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
             let n = spec_path_single_name(e.path)
             if !name_is_empty(n) {
                 var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+            }
+        } else if e.path.seg_count >= 2 && e.path.segments.head_len > 0 {
+            // `mod::f(..)` / `a::mod::f(..)`: keep the free fn `f` alive. The
+            // lowerer resolves module-qualified calls to the terminal name
+            // (lower.sio LOWER_USE_MODULE_HASH); unmarked, `f` was deleted here
+            // and the call became a body-less ud2 stub. Uppercase roots
+            // (Type::method, Enum::Variant) are left as they were.
+            let c0 = (e.path.segments.head_buf[0] as i64) & 255
+            if !(c0 >= 65 && c0 <= 90) {
+                let n = spec_string_list_last_name(e.path.segments)
+                if !name_is_empty(n) {
+                    var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+                }
             }
         }
     }
