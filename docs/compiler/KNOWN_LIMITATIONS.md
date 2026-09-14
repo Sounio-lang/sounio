@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-13 | derived units, unit loss at call boundary (#2388) | both |
+| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call-boundary closed) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
@@ -88,19 +88,45 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   FO across arbitrary user `fn` bodies, remain open.
 
 
+### KL-12 — thin-link `rc=12`
+
+- **Bool-cmp-in-field (closed):** Madaros native-v2 now accepts
+  `Pair { a: 2.0 > 0.0, b: 3.0 > 0.0 }`. Root cause was
+  `ensure_struct_literal_layout_ref` / `lower_struct_field_float_kind_ref`
+  stamping `is_float=1` on declared bool slots from float-operand
+  comparisons, so later `field_get` + `&&` looked like float ops.
+  Pin: `tests/run-pass/thinlink_bool_cmp_field.sio`,
+  `scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh`. BLK
+  `docs/handoff/BLK-20260805-thinlink-ir-threshold.md` marked closed.
+- **Still open:** `tests/known_failures/zero_provenance_native_v2_probe.sio`
+  (sedenion + `eisa::core_v2`, ~111 fn) still fail-closes in
+  `compile_ir_function_v2_from_ir_into` (`codegen_x86_linux.sio:12515-12541`)
+  with `NV2_IR unsupported fn=` and no opcode named. Pin:
+  `scripts/ci/madaros_zero_provenance_failclosed_gate.sh`. BLK:
+  `docs/handoff/BLK-20260805-p0b-zero-provenance.md`. The compact
+  zero-provenance smoke (`zero_provenance_native_v2_smoke.sio`) is a
+  distinct, smaller CU — do not cite it for the combined import.
+
 ### KL-13 — derived units and unit loss (#2388)
 
-- Engine: `both`. `mol/cm3` does not parse on either engine
+- **Call-boundary loss — CLOSED (KL-13 partial).** A unit-typed value
+  (`t_k: K`) no longer enters a bare `f64` parameter unchecked.
+  lean_single: `unit_call_arg_mismatch` refuses when `param_dim == 0` and
+  `expr_dim != 0`. Madaros: `check_call_arg_unit_boundary` refuses
+  `provided.unit_id >= 0 && expected.unit_id < 0`, and the primitive
+  kind-match fast path still runs the unit boundary. Explicit `as f64`
+  remains the escape hatch. Pins:
+  `tests/compile-fail/unit_lost_at_call_boundary.sio`,
+  `tests/run-pass/unit_call_cast_strips_brand.sio`,
+  `scripts/ci/language_gap_ratchet_gate.sh`.
+- **Still open:** `mol/cm3` does not parse on either engine
   (`parser/items.sio:4117-4172` `parse_unit_item` has no unit-expression
   grammar); `unit velocity = m / s` declares a dimensionless unit
-  (`check.sio:20169` `collect_unit_decl` ignores the expression); a
-  quotient of unit-typed values loses its dimension on `lean_single`; a `K`
-  value passes into an `f64` parameter unchecked on both
-  (`check.sio:26765` `check_call_arg_unit_boundary`, seed
-  `lean_single.sio:7416-7437`). Direct `mol + K` is rejected on both (E041).
-- Repro: `tests/known-gaps/units/{derived_unit_annotation_unparsed,direct_unit_mismatch_is_caught,unit_lost_at_call_boundary}.sio`.
-- Pin: `scripts/ci/language_gap_ratchet_gate.sh`. Audit:
-  `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
+  (`check.sio:20169` `collect_unit_decl` ignores the expression). Direct
+  `mol + K` is rejected on both (E041). Quotient dimension retention is
+  already closed (2026-09-05).
+- Repro (open): `tests/known-gaps/units/derived_unit_annotation_unparsed.sio`.
+- Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
 
 ### KL-14 — FFI
 
