@@ -6,6 +6,7 @@ use parser::ast::*
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready}
+use check::units::{builtin_unit_count, builtin_unit_name_at}
 use io::trace::*
 use io::env::{read_env}
 
@@ -456,6 +457,20 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 var IR_LOWER_HARD_ERROR_FN_BUF: [i8; 128]
 var IR_LOWER_HARD_ERROR_FN_LEN: i64 = 0
 var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
+
+// Measurement-unit names, so lower_type_expr_is_f64 classifies a unit-typed value
+// as float the way the checker types it (a registered unit name is f64 carrying
+// that unit). Without this, `fn g() -> mg { return 250.0 }` got returns_float=0,
+// its call result was lowered as an integer, and `g() as f64` printed
+// 4643000109586448384.0 -- the IEEE-754 bits of 250.0 converted as an integer
+// (measured 2026-09-14). A unit-typed runtime guard then compared that and never
+// trapped. Builtins are copied from check::units on first use; `unit X;` items
+// are added by lower_unit_names_collect_items at each lowering entry point.
+// Names are stored in fixed 64-byte slots; a longer name is not a unit here.
+var LOWER_UNIT_NAME_BUF: [i8; 16384]
+var LOWER_UNIT_NAME_LEN: [i64; 256]
+var LOWER_UNIT_COUNT: i64 = 0
+var LOWER_UNIT_BUILTINS_SEEDED: i64 = 0
 // 0=unspecified, 1=instruction capacity, 2=unresolved print ABI.
 var IR_LOWER_HARD_ERROR_REASON: i64 = 0
 // Same flat-array treatment, same reason.
@@ -5415,20 +5430,85 @@ fn lowerer_lower_program_items_mut(
     }
 }
 
+fn lower_unit_names_index(buf: [i8; 384], len: i64) -> i64 with Mut, Panic, Div {
+    if len <= 0 || len > 64 { return 0 - 1 }
+    var i: i64 = 0
+    while i < LOWER_UNIT_COUNT {
+        if LOWER_UNIT_NAME_LEN[i as usize] == len {
+            let base = i * 64
+            var j: i64 = 0
+            while j < len && LOWER_UNIT_NAME_BUF[(base + j) as usize] == buf[j as usize] {
+                j = j + 1
+            }
+            if j == len { return i }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn lower_unit_names_add(buf: [i8; 384], len: i64) with Mut, Panic, Div {
+    if len <= 0 || len > 64 || LOWER_UNIT_COUNT >= 256 { return }
+    if lower_unit_names_index(buf, len) >= 0 { return }
+    let base = LOWER_UNIT_COUNT * 64
+    var j: i64 = 0
+    while j < len {
+        LOWER_UNIT_NAME_BUF[(base + j) as usize] = buf[j as usize]
+        j = j + 1
+    }
+    LOWER_UNIT_NAME_LEN[LOWER_UNIT_COUNT as usize] = len
+    LOWER_UNIT_COUNT = LOWER_UNIT_COUNT + 1
+}
+
+fn lower_unit_names_seed_builtins() with Mut, Panic, Div {
+    if LOWER_UNIT_BUILTINS_SEEDED == 1 { return }
+    LOWER_UNIT_BUILTINS_SEEDED = 1
+    let n = builtin_unit_count()
+    var i: i64 = 0
+    while i < n {
+        let name = builtin_unit_name_at(i)
+        lower_unit_names_add(name.buf, name.len)
+        i = i + 1
+    }
+}
+
+fn lower_unit_names_collect_items(items: &Option<Box<ItemList>>) with Mut, Panic, Div {
+    lower_unit_names_seed_builtins()
+    match *items {
+        Some(list) => {
+            let item = &(*list).head
+            if item.kind == ItemKind::ItemUnit {
+                let unit_name = item.name
+                lower_unit_names_add(unit_name.buf, unit_name.len)
+            }
+            lower_unit_names_collect_items(&(*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn lower_unit_names_collect_programs(programs: &! [Program; 256], program_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < program_count && i < 256 {
+        let p = (*programs)[i as usize]
+        lower_unit_names_collect_items(&p.items)
+        i = i + 1
+    }
+}
+
 // Sprint 87: helpers for ExprCast type-aware lowering
 fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     // Accepts f32 as well -- see lower_type_expr_is_f64. `as f32` matched neither
     // this nor the integer classifier, so a float source fell through to the
     // float_to_int arm of lower_cast_expr_ref and (1.5 as f32) became 1.0.
+    //
+    // A measurement unit is a float target for the same reason, so this now asks
+    // the same predicate that classifies declared types. While it matched only
+    // f64/f32, `140.0 as mg_dL` took float_to_int: `let y: mg = 140.0 as mg` and
+    // `fn g() -> mg_dL { return 140.0 as mg_dL }` stored the integer 140 in a float
+    // slot and read back 0.000000 (measured 2026-09-14).
     match *ct {
-        Some(te) => {
-            let seg = (*te).path.segments
-            if seg.head_len != 3 { return false }
-            if seg.head_buf[0] as i64 != 102 { return false }   // f
-            let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
-            let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
-            is_64 || is_32
-        }
+        Some(te) => lower_type_expr_is_f64(&(*te)),
         None => false,
     }
 }
@@ -5450,17 +5530,34 @@ fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
 fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
-    if seg.head_len != 3 { return false }
-    if seg.head_buf[0] as i64 != 102 { return false }   // f
-    // Accept BOTH f64 and f32: the backend has no separate f32 representation
-    // (f32 is carried as f64), so all 17 call sites of this predicate mean
-    // -- is this a float scalar? -- not -- is this spelled f64?. While f32 was
-    // rejected here, a local declared f32 got scalar_kind 0 instead of 2, so
-    // `x as f64` on it took the int_to_float arm and reinterpreted the bit
-    // pattern of a double as an integer.
-    let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
-    let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
-    is_64 || is_32
+    if seg.head_len == 3 && seg.head_buf[0] as i64 == 102 {   // f
+        // Accept BOTH f64 and f32: the backend has no separate f32 representation
+        // (f32 is carried as f64), so all 17 call sites of this predicate mean
+        // -- is this a float scalar? -- not -- is this spelled f64?. While f32 was
+        // rejected here, a local declared f32 got scalar_kind 0 instead of 2, so
+        // `x as f64` on it took the int_to_float arm and reinterpreted the bit
+        // pattern of a double as an integer.
+        let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
+        let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
+        if is_64 || is_32 { return true }
+    }
+    // A registered measurement unit is f64 too: the checker types `mg`, `mg_dL`, or a
+    // `unit X;` name as f64 carrying that unit before any other lookup
+    // (checker_lower_named_type_mut), so this classification follows it exactly --
+    // including where the checker's choice is itself questionable, such as a generic
+    // parameter spelled like a builtin unit (`K`). Diverging here would lower a
+    // program the checker accepted under different types than it was checked with.
+    match (*te).type_args {
+        Some(_args) => { return false }
+        None => {}
+    }
+    match seg.tail {
+        Some(_rest) => false,
+        None => {
+            lower_unit_names_seed_builtins()
+            lower_unit_names_index(seg.head_buf, seg.head_len) >= 0
+        }
+    }
 }
 
 fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
@@ -22782,6 +22879,7 @@ pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div,
 }
 
 pub fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic: &IrEpistemicSection) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_unit_names_collect_items(&prog.items)
     var lo = lowerer_new_with_epistemic(epistemic)
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
@@ -22811,6 +22909,8 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     self_index: i64,
     epistemic: &IrEpistemicSection
 ) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_unit_names_collect_items(&(*prog).items)
+    lower_unit_names_collect_programs(programs, program_count)
     var lo = lowerer_new_with_epistemic(epistemic)
     // DCE reconstructs Item values to remove unreachable functions. Preserve
     // non-function metadata from the original AST before that aggregate copy.
@@ -23147,6 +23247,8 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     self_index: i64,
     acc: Box<IrModule>
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    lower_unit_names_collect_items(items)
+    lower_unit_names_collect_programs(programs, program_count)
     var lo = lowerer_from_acc_module(acc)
     var i: i64 = 0
     while i < program_count {
