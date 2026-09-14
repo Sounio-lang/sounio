@@ -158,12 +158,42 @@ kappa4(CL)     = 1302.266361
 
 ## 4.14.6 Convergence study
 
-Focused command:
+Focused command, as originally recorded. It does not work as written, and how the recorded
+output was actually produced cannot be established from this repository's history (see the note
+after it):
 
 ```bash
 SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
   bin/souc run tests/run-pass/pbpk28_m5_gum_4th_order.sio
 ```
+
+> **Reproduction status (2026-09-13).** `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments
+> unchanged (it already did at the merge that added this file, `bebd78d74c`; earlier history is
+> not in this clone). Measured on 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc` began
+> refusing the form: lean_single stopped at `error: no main` (a current-source lean_single shows
+> why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
+> `3cbea2b4…`) is no longer in the repository.
+> **The Output table below is the original record and has not been regenerated: the test does not
+> compile today on either engine.** Through lean_single's raw interface, from the repository root
+> because it resolves stdlib imports relative to the working directory,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf`
+> (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
+> stops at `error: effect not declared in function signature at line 82`. The default Madaros
+> engine, `bin/souc run tests/run-pass/pbpk28_m5_gum_4th_order.sio` with no `SOUNIO_SOUC_BIN` set
+> (`bin/madaros-linux-x86_64` sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`), stops at
+> `error[E035] … missing: Epistemic` in `main`. Line 82 of the test calls
+> `m5_pbpk28_convergence_budget`, which is declared `with Mut, Div, Panic, Epistemic`
+> (`stdlib/darwin_pbpk/cumulants.sio:442`). The test is still annotated `//@ run-pass`, with no
+> `//@ known-failure`, so the test harness expects it to pass.
+> The `canonical u_MC` row is a literal in the source, not a value this test computes: line 83
+> prints `print_f64(0.357945)`, and `m5_pbpk28_convergence_budget` passes the same literal as the
+> `u_mc` argument of `variance_budget_4th_from_hessian` (`stdlib/darwin_pbpk/cumulants.sio:449`;
+> parameter at `:386`), next to a comment citing `docs/dissertation/results/m6_prior_update_v1.md`.
+> The recorded Monte Carlo runs do not agree on that value: re-run on 2026-09-13,
+> `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio` printed a summary `u_MC` of
+> 0.357945 mg.h/L, while `runs/m1_copula_sweep_v1.txt` records 0.549197 mg.h/L on the same summary
+> line.
 
 Output:
 

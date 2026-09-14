@@ -43,11 +43,28 @@ path. The final D.3 rerun commit keeps all work scoped to
 
 ## Validation Result
 
-Focused test:
+> **Reproduction command corrected (2026-09-13).** The command first recorded here was
+> `SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run <test>`. `bin/souc`
+> execs that override with its arguments unchanged (it already did at the merge that added
+> this file, `bebd78d74c`). Measured on 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc`
+> began refusing the form: lean_single stopped at
+> `error: no main` (a current-source lean_single shows why: it opens `run`, which does not exist,
+> as a 0-byte source). How the recorded values were originally produced cannot be established
+> from this repository's history. `bin/souc` now refuses the form (exit 64). The command below uses the
+> ELF's raw `<source.sio> <output>` interface. Run it from the repository root: lean_single
+> resolves stdlib imports relative to the working directory. The pinned binary (sha256
+> `3cbea2b4…`) is no longer in the repository; the re-run used `bin/souc-linux-x86_64`, sha256
+> `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`.
+> Re-run 2026-09-13: lean_single printed `D3_NN_PRIMITIVES_PASS`. Only that marker was
+> re-checked; every other value in this file is the original record. The default Madaros engine
+> (`bin/souc run <test>` with no `SOUNIO_SOUC_BIN` set; `bin/madaros-linux-x86_64` sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) rejects this test today
+> with `error[E037]` in `stdlib/tensor/ops.sio`.
+
+Focused test (from the repository root):
 
 ```text
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
-  bin/souc run tests/stdlib/nn/test_nn_primitives_d3.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
 
 D3_NN_PRIMITIVES_PASS
 ```

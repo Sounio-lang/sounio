@@ -34,6 +34,33 @@ Execution used the repo wrapper with `SOUNIO_SOUC_BIN=$SOUC_NATIVE` where the
 command surface required `bin/souc run`; the pinned native binary itself exposes
 the raw self-hosted compiler interface (`<source.sio> <output>`).
 
+> **Reproduction status (2026-09-13).** The wrapper route above does not work as described:
+> `bin/souc` execs `SOUNIO_SOUC_BIN` with its arguments unchanged (it already did at the merge
+> that added this file, `bebd78d74c`; earlier history is not in this clone). Measured on
+> 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc` began refusing the form: lean_single
+> stopped at `error: no main` (a current-source lean_single shows why: it opens `run`, which does
+> not exist, as a 0-byte source). How the recorded values were originally produced cannot be
+> established from this repository's history. `bin/souc`
+> now refuses the form (exit 64). The working form is the raw interface, from the repository root,
+> because lean_single resolves stdlib imports relative to the working directory:
+>
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio /tmp/mc28.elf && /tmp/mc28.elf`
+>
+> The pinned binary (sha256 `3cbea2b4…`) is no longer in the repository. Re-run 2026-09-13 with
+> `bin/souc-linux-x86_64` (sha256
+> `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`): it printed
+> `M1_COPULA_CHOLESKY_PASS` and `M1_COPULA_SWEEP_PASS`. The values below match
+> `runs/m1_copula_sweep_v1.txt`, but **not the re-run**: `u_GUM` 0.317093 recorded against
+> 0.228175 re-run, `u_Hessian` 0.464032 against 0.295160, summary `u_MC` 0.549197 against 0.357945,
+> `rel_GUM` 0.422624 against 0.362543 and `rel_Hess` 0.155073 against 0.175405; each of `sweep_1`–`sweep_5` and `combined` also
+> differs in mean AUC, `u_MC`, `rel_GUM` and `rel_Hess` (for example `combined` `u_MC` 0.407610
+> against 0.254122). `N`, `seed`, `n_valid` and the rho settings are the same. The re-run's
+> `rel_Hess` 0.175405 is the value `d6_full_integration_v1.md` records and the value the audit note
+> below says the dispatch expected. The default Madaros engine,
+> `bin/souc run stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio` with no
+> `SOUNIO_SOUC_BIN` set (`bin/madaros-linux-x86_64` sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`), exits 182 on this source.
+
 ## Results
 
 Fixed settings:
