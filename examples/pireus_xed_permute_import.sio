@@ -1,0 +1,239 @@
+//@ run-pass
+//!
+//! Sounio semantic-authority witness for the first pinned Intel XED slice.
+
+use hardware::pireus::target_profile::{
+    PIREUS_ACCESS_WRITE, PIREUS_ACCESS_READ_WRITE,
+}
+use hardware::pireus::xed_import::{
+    PireusXedBuffer,
+    pireus_xed_load, pireus_xed_parse, pireus_xed_find,
+    pireus_xed_inventory_store, pireus_xed_query_forms_by,
+    pireus_xed_expected_sha256,
+    PIREUS_XED_OK, PIREUS_XED_ERR_HASH,
+    PIREUS_XED_ERR_UNKNOWN_FIELD, PIREUS_XED_ERR_MISSING_FIELD,
+    PIREUS_XED_FAMILY_VPERMI2PD, PIREUS_XED_FAMILY_VPERMPD,
+    PIREUS_XED_FAMILY_VPERMT2PD,
+    PIREUS_XED_SELECTOR_UNASSIGNED, PIREUS_XED_SELECTOR_UIMM8,
+    PIREUS_XED_SELECTOR_REGISTER_INDEX,
+    PIREUS_XED_STORAGE_REGISTER, PIREUS_XED_STORAGE_MEMORY,
+    PIREUS_XED_HAS_CORPUS, PIREUS_XED_HAS_ICLASS,
+    PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX, PIREUS_XED_HAS_STORAGE_KIND,
+    PIREUS_XED_HAS_DESTINATION_ACCESS,
+    PIREUS_XED_CORPUS_AVX512F_2026_08_23,
+    PIREUS_XED_ICLASS_VPERMI2PD, PIREUS_XED_ICLASS_VPERMPD,
+    PIREUS_XED_ICLASS_VPERMT2PD,
+    PIREUS_XED_SELECTOR_RAW_UNASSIGNED, PIREUS_XED_SELECTOR_RAW_UIMM8,
+    PIREUS_XED_SELECTOR_RAW_REGISTER_INDEX,
+    PIREUS_XED_STORAGE_RAW_REGISTER, PIREUS_XED_STORAGE_RAW_MEMORY,
+}
+use ontology::query::{triple_store_count, sparql_result_count}
+
+fn bool_as_i64(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc, Epistemic {
+    let argc = arg_count()
+    if argc != 1 {
+        print("usage: pireus_xed_permute_import <avx512-foundation-isa.xed.txt>\n")
+        return 2
+    }
+    let path = get_arg(0)
+    var failures: i64 = 0
+    var corpus = pireus_xed_load(path)
+    let inv = pireus_xed_parse(&corpus, true)
+    if inv.error != PIREUS_XED_OK { failures = failures + 1 }
+    if !inv.digest_match { failures = failures + 1 }
+    if inv.count != 8 { failures = failures + 1 }
+    if inv.unknown_fields != 0 { failures = failures + 1 }
+
+    var i2: i64 = 0
+    var perm: i64 = 0
+    var t2: i64 = 0
+    var dest_write: i64 = 0
+    var dest_rw: i64 = 0
+    var selector_unassigned: i64 = 0
+    var selector_uimm8: i64 = 0
+    var selector_register: i64 = 0
+    var storage_register: i64 = 0
+    var storage_memory: i64 = 0
+    var operand_total: i64 = 0
+    var read_total: i64 = 0
+    var mask_total: i64 = 0
+    var dest_zf64_total: i64 = 0
+    var register_zf64_total: i64 = 0
+    var memory_f64_total: i64 = 0
+    var immediate_total: i64 = 0
+    var i: i64 = 0
+    while i < inv.count {
+        let form = inv.forms[i as usize]
+        if form.family == PIREUS_XED_FAMILY_VPERMI2PD { i2 = i2 + 1 }
+        if form.family == PIREUS_XED_FAMILY_VPERMPD { perm = perm + 1 }
+        if form.family == PIREUS_XED_FAMILY_VPERMT2PD { t2 = t2 + 1 }
+        if form.destination_access == PIREUS_ACCESS_WRITE {
+            dest_write = dest_write + 1
+        }
+        if form.destination_access == PIREUS_ACCESS_READ_WRITE {
+            dest_rw = dest_rw + 1
+        }
+        if form.raw_selector_syntax == PIREUS_XED_SELECTOR_UNASSIGNED {
+            selector_unassigned = selector_unassigned + 1
+        }
+        if form.raw_selector_syntax == PIREUS_XED_SELECTOR_UIMM8 {
+            selector_uimm8 = selector_uimm8 + 1
+        }
+        if form.raw_selector_syntax == PIREUS_XED_SELECTOR_REGISTER_INDEX {
+            selector_register = selector_register + 1
+        }
+        if form.storage_kind == PIREUS_XED_STORAGE_REGISTER {
+            storage_register = storage_register + 1
+        }
+        if form.storage_kind == PIREUS_XED_STORAGE_MEMORY {
+            storage_memory = storage_memory + 1
+        }
+        operand_total = operand_total + form.operand_count
+        read_total = read_total + form.read_operand_count
+        mask_total = mask_total + form.mask_read_count
+        dest_zf64_total = dest_zf64_total + form.destination_zf64_count
+        register_zf64_total = register_zf64_total + form.register_read_zf64_count
+        memory_f64_total = memory_f64_total + form.memory_read_f64_count
+        immediate_total = immediate_total + form.immediate_read_count
+        i = i + 1
+    }
+
+    if i2 != 2 || perm != 4 || t2 != 2 { failures = failures + 1 }
+    if dest_write != 4 || dest_rw != 4 { failures = failures + 1 }
+    if selector_unassigned != 4 || selector_uimm8 != 2 || selector_register != 2 {
+        failures = failures + 1
+    }
+    if storage_register != 4 || storage_memory != 4 { failures = failures + 1 }
+    if operand_total != 32 || read_total != 24 || mask_total != 8 {
+        failures = failures + 1
+    }
+    if dest_zf64_total != 8 || register_zf64_total != 10 ||
+        memory_f64_total != 4 || immediate_total != 2 {
+        failures = failures + 1
+    }
+
+    var store = pireus_xed_inventory_store(&inv)
+    let triples = triple_store_count(&store)
+    let all_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_CORPUS, PIREUS_XED_CORPUS_AVX512F_2026_08_23)
+    let q_i2 = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS, PIREUS_XED_ICLASS_VPERMI2PD)
+    let q_perm = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS, PIREUS_XED_ICLASS_VPERMPD)
+    let q_t2 = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS, PIREUS_XED_ICLASS_VPERMT2PD)
+    let q_write = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_DESTINATION_ACCESS, PIREUS_ACCESS_WRITE)
+    let q_rw = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_DESTINATION_ACCESS, PIREUS_ACCESS_READ_WRITE)
+    let q_unassigned = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX,
+        PIREUS_XED_SELECTOR_RAW_UNASSIGNED)
+    let q_uimm8 = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX,
+        PIREUS_XED_SELECTOR_RAW_UIMM8)
+    let q_register_index = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_RAW_SELECTOR_SYNTAX,
+        PIREUS_XED_SELECTOR_RAW_REGISTER_INDEX)
+    let q_reg_storage = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_STORAGE_KIND, PIREUS_XED_STORAGE_RAW_REGISTER)
+    let q_mem_storage = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_STORAGE_KIND, PIREUS_XED_STORAGE_RAW_MEMORY)
+
+    let all_count = sparql_result_count(&all_forms)
+    let qi2_count = sparql_result_count(&q_i2)
+    let qperm_count = sparql_result_count(&q_perm)
+    let qt2_count = sparql_result_count(&q_t2)
+    let qwrite_count = sparql_result_count(&q_write)
+    let qrw_count = sparql_result_count(&q_rw)
+    let qunassigned_count = sparql_result_count(&q_unassigned)
+    let quimm8_count = sparql_result_count(&q_uimm8)
+    let qregister_count = sparql_result_count(&q_register_index)
+    let qreg_storage_count = sparql_result_count(&q_reg_storage)
+    let qmem_storage_count = sparql_result_count(&q_mem_storage)
+    if triples != 246 || all_count != 8 { failures = failures + 1 }
+    if qi2_count != 2 || qperm_count != 4 || qt2_count != 2 {
+        failures = failures + 1
+    }
+    if qwrite_count != 4 || qrw_count != 4 { failures = failures + 1 }
+    if qunassigned_count != 4 || quimm8_count != 2 || qregister_count != 2 {
+        failures = failures + 1
+    }
+    if qreg_storage_count != 4 || qmem_storage_count != 4 {
+        failures = failures + 1
+    }
+
+    var hash_negative_pass = false
+    if corpus.len > 0 {
+        let original = corpus.data[0]
+        corpus.data[0] = (original as i64 ^ 1) as i8
+        let negative = pireus_xed_parse(&corpus, true)
+        hash_negative_pass = negative.error == PIREUS_XED_ERR_HASH
+        corpus.data[0] = original
+    }
+    if !hash_negative_pass { failures = failures + 1 }
+
+    var unknown_field_pass = false
+    let first_target = pireus_xed_find(&corpus, 0, "ICLASS:      VPERMI2PD")
+    let cpl = if first_target >= 0 {
+        pireus_xed_find(&corpus, first_target, "CPL:")
+    } else { 0 - 1 }
+    if cpl >= 0 {
+        let original = corpus.data[cpl as usize]
+        corpus.data[cpl as usize] = 81 as i8
+        let negative = pireus_xed_parse(&corpus, false)
+        unknown_field_pass = negative.error == PIREUS_XED_ERR_UNKNOWN_FIELD
+        corpus.data[cpl as usize] = original
+    }
+    if !unknown_field_pass { failures = failures + 1 }
+
+    var missing_field_pass = false
+    let iform = if first_target >= 0 {
+        pireus_xed_find(&corpus, first_target, "IFORM:")
+    } else { 0 - 1 }
+    if iform >= 0 {
+        let original = corpus.data[iform as usize]
+        corpus.data[iform as usize] = 35 as i8
+        let negative = pireus_xed_parse(&corpus, false)
+        missing_field_pass = negative.error == PIREUS_XED_ERR_MISSING_FIELD
+        corpus.data[iform as usize] = original
+    }
+    if !missing_field_pass { failures = failures + 1 }
+
+    print("SOUNIO_AUTHORITY schema=pireus-xed-permute.v0 role=SEMANTIC_AUTHORITY\n")
+    print("PIREUS_XED_CORPUS release=v2026.08.23 commit=0bcb6237345c5066726dcc08b3d87928df3b5b26")
+    print(" file=avx512-foundation-isa.xed.txt bytes="); print_int(corpus.len)
+    print(" sha256="); print(pireus_xed_expected_sha256())
+    print(" digest_match="); print_int(bool_as_i64(inv.digest_match)); print("\n")
+    print("PIREUS_XED_FORMS total="); print_int(inv.count)
+    print(" vpermi2pd="); print_int(i2)
+    print(" vpermpd="); print_int(perm)
+    print(" vpermt2pd="); print_int(t2); print("\n")
+    print("PIREUS_XED_ACCESS write="); print_int(dest_write)
+    print(" read_write="); print_int(dest_rw)
+    print(" mask_read="); print_int(mask_total); print("\n")
+    print("PIREUS_XED_SELECTOR raw_unassigned="); print_int(selector_unassigned)
+    print(" uimm8="); print_int(selector_uimm8)
+    print(" register_index="); print_int(selector_register)
+    print(" semantic_role_assignments=0\n")
+    print("PIREUS_XED_STORAGE register="); print_int(storage_register)
+    print(" memory="); print_int(storage_memory); print("\n")
+    print("PIREUS_XED_OPERANDS total="); print_int(operand_total)
+    print(" read="); print_int(read_total)
+    print(" dest_zf64="); print_int(dest_zf64_total)
+    print(" register_read_zf64="); print_int(register_zf64_total)
+    print(" memory_read_f64="); print_int(memory_f64_total)
+    print(" immediate_read="); print_int(immediate_total); print("\n")
+    print("PIREUS_XED_ONTOLOGY triples="); print_int(triples)
+    print(" forms="); print_int(all_count)
+    print(" family_counts="); print_int(qi2_count); print(",")
+    print_int(qperm_count); print(","); print_int(qt2_count); print("\n")
+    print("PIREUS_XED_NEGATIVE hash="); print_int(bool_as_i64(hash_negative_pass))
+    print(" unknown_field="); print_int(bool_as_i64(unknown_field_pass))
+    print(" missing_field="); print_int(bool_as_i64(missing_field_pass)); print("\n")
+    print("PIREUS_XED_SUMMARY failures="); print_int(failures); print("\n")
+
+    if failures == 0 { 0 } else { 1 }
+}

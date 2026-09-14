@@ -2,8 +2,8 @@
 topic_id: repo.tests.vectors.f128-f256-v0d.gate-consumption
 authority: repo_only
 audience: internal+codex
-last_validated: 2026-08-17
-validated_by: grok-cli3
+last_validated: 2026-09-06
+validated_by: cursor-agent
 source_of_truth: scripts/ci/madaros_f128_f256_v0d_softfloat_gate.sh
 -->
 
@@ -19,6 +19,8 @@ source_of_truth: scripts/ci/madaros_f128_f256_v0d_softfloat_gate.sh
 | Scaffold probes (descriptor / payload) | **lean_single seed ELF** |
 | V0-D green | **Compiler-owned softfloat limb routines** bit-identical to MPFR `result` on the hard corpus — not host libm, not widen-f64 |
 
+**Consumer (required):** `scripts/dev/ws_g_v0d_softfloat_corpus_runner.py` driving `scripts/dev/softfloat_limb.py` (limb bigint, RNE). Oracle exit 0 requires runner bit-identity — file presence alone is insufficient.
+
 ## Correctness bar (beyond plausible values)
 
 Green is **not** “ops return something near the right magnitude on easy inputs.”
@@ -27,7 +29,11 @@ A consumer must:
 
 1. Bit-identity `result.limbs` for **every** hard row under RNE.
 2. Treat `MUST_TRAP_IDS` as mandatory (halfway / sticky / cancel / rump).
-3. For `family=rump`, compare to `result` (MPFR), **never** `f64_result`.
+3. For `family=rump`, compare to `result` (MPFR), **never** `f64_result`. `f*_rump1988` is evaluated at extended precision then packed once (matches MPFR EXT corpus), not stepwise binaryN AST (which loses the residual).
+
+## Corpus note (sticky sub wire fix)
+
+Rows `f128_arith_0010` / `f256_arith_0063` store **IEEE results on encoded limbs**. The generator’s exact MPFR inputs `1+ulp/2+tiny` are not binaryN-representable; `encode(a)` rounded before the op, so the old `result` was unreachable by any correct wire softfloat. Results updated 2026-09-06; MD5 pins in the oracle.
 
 ## Widen-f64 shortcut: which entries catch it
 
@@ -51,10 +57,9 @@ Classification from `scripts/dev/ws_g_v0d_softfloat_corpus_oracle.py` (re-run wi
 
 These rows are still required for **full** bit-identity green; they are not sufficient as the only tests.
 
-## Fail today
+## Green receipt
 
 ```
-diagnosis=V0-D_scaffold_alive_but_softfloat_hard_corpus_unconsumed
+PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp/sqrt/rump limb_routines=green const_fold=exact rounded=ieee754-2019 must_trap=… catch_widen_f64=… miss_widen_f64=… bit_identity=all_hard_rows
+PASS madaros_f128_f256_ladder_gate stage=v0d
 ```
-
-No consumer yet at the marker paths listed in the oracle.

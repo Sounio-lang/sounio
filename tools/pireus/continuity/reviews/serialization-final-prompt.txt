@@ -1,0 +1,823 @@
+Final targeted review of UNDEPLOYED host serialization revision. Return CLEAR or concrete remaining BLOCKERs. Please assess executable evidence, not earlier reviewer prose.
+
+The previous Grok claim that flock --close FILE CMD immediately releases the lock is factually incorrect. Official util-linux v2.39.3 sys-utils/flock.c lines 323-357 forks by default, closes the FD only in the child, and retains the parent waiting in waitpid. --no-fork is incompatible with --close. Source: https://github.com/util-linux/util-linux/blob/v2.39.3/sys-utils/flock.c#L323-L357
+We executed util-linux 2.39.3: /proc/PID/cmdline still identified the flock parent, its FD pointed at the lock, a competing nonblocking lock returned 1 while the child slept, then 0 after child exit. The actual old/new interleaving test was executed and passed, not merely described. Evidence below. Keep --close; changing it to satisfy that hallucination is not justified.
+
+The valid time-budget issue is addressed by GPU_CONTAINER_STOP_GRACE_SECONDS=5 for only the already-managed legacy GPU container stop set (protected services excluded), rather than 30. Operation timeout remains45 + kill2; regular lock wait10; emergency wait60; systemd Stop120, KillMode control-group; watchdog60/fresh55 unchanged. Tests now execute the actual stop_gpu_docker_containers, enforce_fenced_compute_state and status_once bodies against a Docker simulator that asserts stop -t5 and completes after5s. This replaces the sleep32 placeholder. Failures/timeouts never refresh heartbeat.
+
+Additional dependency fix found in canonical flow: install_host_fence must stage the old bridge under old admission rules, install exact new admission rules and sync, verify generic GPU dry-run remains denied, THEN create the new content-addressed host Pods. Test proves this ordering and refuses failed deny control. The same native action29 owns this material installation. Migration allows the four exact freeze-key changes (host manifest, policy content-address key, three admission name replacements, reviewed backend installation ordering). Native Sounio grant predicates, GPU barrier code and 32768 MiB floor unchanged. Sequential journal/lease CAS is NOT multi-object atomicity.
+
+No live installation or restored Slurm ownership is claimed.
+
+EXECUTED EVIDENCE flock-close-parent-proof.json
+{
+  "tool": "flock from util-linux 2.39.3",
+  "source": "https://github.com/util-linux/util-linux/blob/master/sys-utils/flock.c#L452-L486",
+  "holder_pid": 3928638,
+  "holder_command": "flock --close /workspace/.tmp/tmp06_6plq3/lock bash -c touch \"$1\"; sleep 2 probe /workspace/.tmp/tmp06_6plq3/ready ",
+  "competing_lock_rc_during_child": 1,
+  "holder_open_fds": [
+    "pipe:[2406934046]",
+    "pipe:[2406887353]",
+    "pipe:[2406887354]",
+    "/workspace/.tmp/tmp06_6plq3/lock"
+  ],
+  "competing_lock_rc_after_child": 0
+}
+
+EXECUTED EVIDENCE /tmp/pireus-host-lock-controls-v3.log
+PIREUS_HOST_TRANSITION_LOCK_PASS old_interleaving_reproduced=1 serialized_commit_survives=1 contention_refused=1 hang_bounded=1 lock_reusable=1 failed_cycle_heartbeat_refused=1 escaped_child_lock_released=1 emergency_outwaits_owner=1 real_fence_stop_status_bounded=1
+
+EXECUTED EVIDENCE /tmp/pireus-host-revision-order.log
+PIREUS_HOST_REVISION_ORDER_PASS stage_before_admission=1 deny_before_host_pods=1 failed_negative_control_refused=1 transport=mock
+diff --git a/scripts/dev/spark_pair_arbiter_k8s_backend.sh b/scripts/dev/spark_pair_arbiter_k8s_backend.sh
+index 6c18a1cef6..c9e264f6da 100755
+--- a/scripts/dev/spark_pair_arbiter_k8s_backend.sh
++++ b/scripts/dev/spark_pair_arbiter_k8s_backend.sh
+@@ -2307,6 +2307,18 @@ install_host_fence() {
+   guard_mutation host-fence "$holder" "$epoch" "$receipt"
+   [[ "$(policy_value "$POLICY" host_runtime_restart_required)" == false ]] || \
+     fail 'host fence installation would require a forbidden runtime restart'
++  # A content-addressed host script revision also changes the exact admission
++  # references. Stage the existing bridge while its old rules still apply,
++  # then install the new fail-closed rules before creating the new host Pods.
++  if ! admission_current; then
++    stage_existing_host_fence_for_bootstrap "$holder" "$epoch"
++    kubectl apply --server-side --force-conflicts \
++      --field-manager=pireus-spark-pair \
++      -f "$(repo_root)/$(policy_value "$POLICY" admission_manifest)" >/dev/null
++    sync_admission_projection
++    wait_for 'current fail-closed host revision admission' admission_current "$holder" "$epoch"
++    bootstrap_gpu_admission_denied || fail 'generic GPU admission opened during host revision install'
++  fi
+   manifest="$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)"
+   bootstrap_key="$(policy_value "$POLICY" host_fence_bootstrap_selector_key)"
+   bootstrap_value="$(policy_value "$POLICY" host_fence_bootstrap_selector_value)"
+diff --git a/tools/cluster/spark_pair_arbiter.freeze.v1 b/tools/cluster/spark_pair_arbiter.freeze.v1
+index a0d841f8fd..4ff019a897 100644
+--- a/tools/cluster/spark_pair_arbiter.freeze.v1
++++ b/tools/cluster/spark_pair_arbiter.freeze.v1
+@@ -18,15 +18,15 @@ compiler_identity=Madaros v0.80.0 -- the Sounio self-hosted compiler
+ compiler_sha256=7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb
+ compiler_engine=madaros
+ material_policy_source=tools/cluster/spark_pair_arbiter.policy.v1
+-material_policy_sha256=255084251c471a722f5cbb58fa1d827d5ad7025f9baad37ef6c7795073fc4924
++material_policy_sha256=0823ae650bdc0596cb99eea288a0413b24a4de01d9c9f8345ef1ae62a3944741
+ material_controller_source=scripts/dev/spark_pair_arbiter.sh
+ material_controller_sha256=261ba60a84196c897a0b2a7e63f9af2f8581212a68fcaf9b0df043791a037822
+ material_backend_source=scripts/dev/spark_pair_arbiter_k8s_backend.sh
+-material_backend_sha256=2daf6df41434cd9b9d9a723b7675c9d2d2eda46850d2e66d0a67817f4b8e828d
++material_backend_sha256=2ff21dba49967be2800eec5e60ed210b091aebe71c3429e00f23b95e4ff3e4ca
+ admission_manifest_source=tools/cluster/spark_pair_arbiter_admission.yaml
+-admission_manifest_sha256=3035c374b7ec440857de4390350441b81d8847828088ce6273bce9bee291f31f
++admission_manifest_sha256=03a5ab44fd8eea45c13fc37506032443998b0b9b9ac3e95cacb86355c8194190
+ host_fence_manifest_source=tools/cluster/spark_pair_host_fence.yaml
+-host_fence_manifest_sha256=341ca6a39676f61ee366e3ca317b1d858bb1a7d12fa776699414c5a9a502dee9
++host_fence_manifest_sha256=9729d65809db04bfdd752b2a2683ef8032f487fb22d6a3ab23801e3a2a0498a9
+ device_barrier_source=tools/cluster/pireus_spark_device_barrier.cpp
+ device_barrier_source_sha256=ac3cfa4aeb70f557f0ab0f1323f7fd7f5dca55896284ccef66374daf24c61240
+ device_barrier_arm64_gate_source=scripts/dev/spark_pair_device_barrier_arm64_gate.sh
+diff --git a/tools/cluster/spark_pair_arbiter.policy.v1 b/tools/cluster/spark_pair_arbiter.policy.v1
+index ebc92acb26..86b8975a55 100644
+--- a/tools/cluster/spark_pair_arbiter.policy.v1
++++ b/tools/cluster/spark_pair_arbiter.policy.v1
+@@ -57,7 +57,7 @@ admission_parameter_resource=pireussparkpairparameters
+ admission_manifest=tools/cluster/spark_pair_arbiter_admission.yaml
+ bootstrap_journal=pireus-spark-pair-bootstrap-journal
+ host_fence_manifest=tools/cluster/spark_pair_host_fence.yaml
+-host_fence_configmap=pireus-spark-host-fence-1b67a02d2c88
++host_fence_configmap=pireus-spark-host-fence-36c9c8a2a17d
+ host_device_barrier_source=tools/cluster/pireus_spark_device_barrier.cpp
+ host_device_barrier_configmap=pireus-spark-device-barrier-ac3cfa4aeb70
+ host_device_inventory_names=nvidia,drm,dma_heap,nvidia-uvm,nvidia-caps
+diff --git a/tools/cluster/spark_pair_arbiter_admission.yaml b/tools/cluster/spark_pair_arbiter_admission.yaml
+index c2911bc7e2..0db108874c 100644
+--- a/tools/cluster/spark_pair_arbiter_admission.yaml
++++ b/tools/cluster/spark_pair_arbiter_admission.yaml
+@@ -113,7 +113,7 @@ spec:
+         object.spec.volumes.size() == 4 &&
+         object.spec.volumes.exists(v,
+           v.name == 'fence-script' &&
+-          v.configMap.name == 'pireus-spark-host-fence-1b67a02d2c88' &&
++          v.configMap.name == 'pireus-spark-host-fence-36c9c8a2a17d' &&
+           v.configMap.defaultMode == 365
+         ) &&
+         object.spec.volumes.exists(v,
+@@ -422,7 +422,7 @@ spec:
+           object.spec.volumes.size() == 4 &&
+           object.spec.volumes.exists(v,
+             v.name == 'fence-script' &&
+-            v.configMap.name == 'pireus-spark-host-fence-1b67a02d2c88' &&
++            v.configMap.name == 'pireus-spark-host-fence-36c9c8a2a17d' &&
+             v.configMap.defaultMode == 365
+           ) &&
+           object.spec.volumes.exists(v,
+@@ -708,7 +708,7 @@ spec:
+           (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+             'pireus-spark-pair-bootstrap-journal',
+             'pireus-spark-pair-reservation-probe-bce2666d07f0',
+-            'pireus-spark-host-fence-1b67a02d2c88',
++            'pireus-spark-host-fence-36c9c8a2a17d',
+             'pireus-spark-device-barrier-ac3cfa4aeb70'
+           ]
+         ) ||
+diff --git a/tools/cluster/spark_pair_host_fence.yaml b/tools/cluster/spark_pair_host_fence.yaml
+index 6b3e1e101b..20f357a19e 100644
+--- a/tools/cluster/spark_pair_host_fence.yaml
++++ b/tools/cluster/spark_pair_host_fence.yaml
+@@ -8,7 +8,7 @@ automountServiceAccountToken: false
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+-  name: pireus-spark-host-fence-1b67a02d2c88
++  name: pireus-spark-host-fence-36c9c8a2a17d
+   namespace: beagle
+ immutable: true
+ data:
+@@ -18,7 +18,9 @@ data:
+ 
+     readonly NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
+     readonly MINIMUM_FREE_MEMORY_MB=32768
++    readonly GPU_CONTAINER_STOP_GRACE_SECONDS=5
+     readonly HOST_ROOT="${PIREUS_HOST_ROOT:-/host}"
++    readonly HOST_FENCE_SOURCE="${BASH_SOURCE[0]}"
+     readonly GRANT_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-grant"
+     readonly PREPARE_FILE="$HOST_ROOT/var/lib/pireus-spark-pair/host-prepare"
+     readonly PROTECTED_BASELINE="$HOST_ROOT/var/lib/pireus-spark-pair/protected-baseline"
+@@ -41,6 +43,37 @@ data:
+     readonly WATCHDOG_FRESH_SECONDS=55
+     readonly CRI_RUNTIME_ENDPOINT=unix:///var/run/containerd/containerd.sock
+ 
++    # Cross-process serialization includes observations and every host grant mutation.
++    # Operations are bounded separately from lock acquisition. Emergency fencing
++    # can outwait a bounded pod-side owner; systemd stop includes that full budget.
++    with_host_transition_lock_wait() (
++      local wait_seconds="$1"
++      shift
++      umask 077
++      mkdir -p "$HOST_ROOT/var/lib/pireus-spark-pair"
++      # The flock parent stays outside timeout's process group and alone owns
++      # the descriptor. Escaped host children cannot retain the lock.
++      /usr/bin/flock --close --exclusive --wait "$wait_seconds" \
++        --conflict-exit-code 75 \
++        "$HOST_ROOT/var/lib/pireus-spark-pair/host-transition.lock" \
++        /usr/bin/timeout --kill-after=2s 45s \
++        /usr/bin/env PIREUS_HOST_FENCE_LIBRARY_MODE=1 /bin/bash -c \
++        'source "$1"; shift; "$@"' host-transition "$HOST_FENCE_SOURCE" "$@"
++    )
++
++    with_host_transition_lock() {
++      with_host_transition_lock_wait 10 "$@"
++    }
++
++    fence_and_status() {
++      fence_pair "$@"
++      status_once
++    }
++
++    emergency_fence_if_active() {
++      if [[ -r "$ACTIVATED_FILE" ]]; then fence_invalid_local; fi
++    }
++
+     host_ns() {
+       if [[ "$HOST_ROOT" == / ]]; then
+         /usr/bin/timeout --kill-after=2s "${HOST_COMMAND_TIMEOUT_SECONDS}s" "$@"
+@@ -196,7 +229,7 @@ data:
+         docker_host update --restart=no "$id" >/dev/null
+         running="$(docker_host inspect --format '{{.State.Running}}' "$id")"
+         if [[ "$running" == true ]]; then
+-          docker_host stop -t 30 "$id" >/dev/null
++          docker_host stop -t "$GPU_CONTAINER_STOP_GRACE_SECONDS" "$id" >/dev/null
+         elif [[ "$running" != false ]]; then
+           return 1
+         fi
+@@ -859,9 +892,9 @@ data:
+     Restart=on-failure
+     RestartSec=2
+     TimeoutStartSec=60
+-    TimeoutStopSec=8
++    TimeoutStopSec=120
+     WatchdogSec=${SYSTEMD_WATCHDOG_SECONDS}s
+-    KillMode=mixed
++    KillMode=control-group
+ 
+     [Install]
+     WantedBy=multi-user.target
+@@ -881,7 +914,7 @@ data:
+     Environment=NODE_NAME=$NODE_NAME
+     Environment=PIREUS_HOST_ROOT=/
+     ExecStart=/usr/local/lib/pireus/spark-pair-host-fence boot-fence
+-    TimeoutStartSec=5
++    TimeoutStartSec=60
+     RemainAfterExit=yes
+ 
+     [Install]
+@@ -1215,22 +1248,21 @@ data:
+ 
+     case "${1:-}" in
+       status)
+-        status_once
++        with_host_transition_lock status_once
+         ;;
+       report)
+-        report_once
++        with_host_transition_lock report_once
+         ;;
+       fence)
+-        fence_pair "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
++        with_host_transition_lock fence_and_status "${2:-}" "${3:-}" "${4:-}" "${5:-}" \
+           "${6:-}" "${7:-}" "${8:-}" "${9:-}"
+-        status_once
+         ;;
+       prepare)
+-        prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
++        with_host_transition_lock prepare_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+           "${7:-}" "${8:-}" "${9:-}" "${10:-}"
+         ;;
+       commit)
+-        commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
++        with_host_transition_lock commit_grant "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" \
+           "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" \
+           "${13:-}" "${14:-}"
+         ;;
+@@ -1238,7 +1270,7 @@ data:
+         install_watchdog "${2:-}" "${3:-}" "${4:-}"
+         ;;
+       capture-baseline)
+-        capture_protected_baseline
++        with_host_transition_lock capture_protected_baseline
+         ;;
+       probe)
+         case "${2:-}" in
+@@ -1255,22 +1287,30 @@ data:
+         esac
+         ;;
+       boot-fence)
+-        boot_fence
++        with_host_transition_lock boot_fence
+         ;;
+       emergency-fence)
+-        if [[ -r "$ACTIVATED_FILE" ]]; then
+-          fence_invalid_local
+-        fi
++        with_host_transition_lock_wait 60 emergency_fence_if_active
+         ;;
+       enforce-notify)
+-        capture_protected_baseline
++        with_host_transition_lock capture_protected_baseline
+         ready=0
+         while true; do
++          cycle_rc=0
+           if [[ -r "$ACTIVATED_FILE" ]]; then
+-            active_enforcement_cycle || true
++            with_host_transition_lock active_enforcement_cycle || cycle_rc=$?
+           else
+-            passive_armed_cycle
++            with_host_transition_lock passive_armed_cycle || cycle_rc=$?
+           fi
++          case "$cycle_rc" in
++            0) ;;
++            *)
++              # A failed/incomplete cycle is not a fresh observation. Do not forge a
++              # fresh heartbeat; the next cycle or systemd watchdog handles recovery.
++              sleep 2
++              continue
++              ;;
++          esac
+           if [[ $ready -eq 0 ]]; then
+             watchdog_notify_ready
+             ready=1
+@@ -1287,6 +1327,7 @@ data:
+         exit 64
+         ;;
+     esac
++
+ ---
+ apiVersion: apps/v1
+ kind: DaemonSet
+@@ -1364,7 +1405,7 @@ spec:
+       volumes:
+         - name: fence-script
+           configMap:
+-            name: pireus-spark-host-fence-1b67a02d2c88
++            name: pireus-spark-host-fence-36c9c8a2a17d
+             defaultMode: 0555
+         - name: device-barrier-source
+           configMap:
+
+FILE runtime/recovery_serialize.py
+#!/usr/bin/env python3
+"""Observe and CAS a pinned observer-only freeze migration, admitted by Sounio."""
+import argparse,datetime,hashlib,json,os,subprocess,sys
+from pathlib import Path
+HERE=Path(__file__).resolve().parent
+def sha(data):return hashlib.sha256(data).hexdigest()
+def fields(text):return dict(line.split("=",1) for line in text.splitlines() if "=" in line)
+def tokens(text):return dict(x.split("=",1) for x in text.split() if "=" in x)
+def kube(*a):return subprocess.check_output(["kubectl",*a],text=True,timeout=60)
+def get(*a):return json.loads(kube(*a,"-o","json"))
+def main():
+ ap=argparse.ArgumentParser()
+ for key in ("old-root","new-root","engine","evidence"):ap.add_argument("--"+key,type=Path,required=True)
+ ap.add_argument("--holder",required=True);ap.add_argument("--apply",action="store_true");a=ap.parse_args()
+ if not os.environ.get("TMUX"):raise ValueError("remote tmux required")
+ lock=json.loads((HERE/"recovery-serialization-lock.json").read_text())
+ assert sha(a.engine.read_bytes())==lock["engine_sha256"]
+ for name,value in lock["sources"].items():assert sha((HERE/name).read_bytes())==value
+ old_path=a.old_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ new_path=a.new_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ assert sha(old_path.read_bytes())==lock["old_freeze"]
+ assert sha(new_path.read_bytes())==lock["new_freeze"]
+ old=fields(old_path.read_text());new=fields(new_path.read_text())
+ assert {k for k in old.keys()|new.keys() if old.get(k)!=new.get(k)}=={"host_fence_manifest_sha256","material_policy_sha256","admission_manifest_sha256","material_backend_sha256"}
+ cfg=fields((a.old_root/"tools/cluster/spark_pair_arbiter.policy.v1").read_text())
+ new_cfg=fields((a.new_root/"tools/cluster/spark_pair_arbiter.policy.v1").read_text())
+ assert {k for k in cfg.keys()|new_cfg.keys() if cfg.get(k)!=new_cfg.get(k)}=={"host_fence_configmap"}
+ assert new_cfg["host_fence_configmap"]==lock["new_host_fence_configmap"]
+ old_admission=(a.old_root/old["admission_manifest_source"]).read_bytes()
+ new_admission=(a.new_root/new["admission_manifest_source"]).read_bytes()
+ assert old_admission.count(cfg["host_fence_configmap"].encode())==3
+ assert new_admission==old_admission.replace(cfg["host_fence_configmap"].encode(),new_cfg["host_fence_configmap"].encode())
+ for root in (a.old_root,a.new_root):
+  output=subprocess.check_output([str(root/"scripts/dev/spark_pair_arbiter.sh"),"verify"],text=True,timeout=60)
+  assert output.startswith("SPARK_PAIR_VERIFY_PASS")
+ a.evidence.mkdir(parents=True,exist_ok=False)
+ def save(name,value):
+  data=value.encode() if isinstance(value,str) else (json.dumps(value,sort_keys=True,indent=2)+"\n").encode()
+  path=a.evidence/name
+  with path.open("wb") as out:out.write(data);out.flush();os.fsync(out.fileno())
+  fd=os.open(a.evidence,os.O_DIRECTORY)
+  try:os.fsync(fd)
+  finally:os.close(fd)
+  return path
+ frame_raw=subprocess.check_output([str(a.old_root/"scripts/dev/spark_pair_arbiter_k8s_backend.sh"),
+  "--policy",str(a.old_root/"tools/cluster/spark_pair_arbiter.policy.v1"),"--freeze",str(old_path),
+  "facts","--holder",a.holder],text=True,timeout=190)
+ frame=tokens(frame_raw);save("old-frame.txt",frame_raw)
+ lease=get("-n","beagle","get","lease","pireus-spark-pair")
+ journal=get("-n","beagle","get","configmap",cfg["bootstrap_journal"])
+ nodes=[get("get","node",cfg["node_"+str(i)+"_k8s"]) for i in range(2)]
+ nodeset=get("-n",cfg["nodeset_namespace"],"get","nodeset",cfg["nodeset_name"])
+ pods=get("get","pods","-A")["items"]
+ save("lease-before.json",lease);save("journal-before.json",journal);save("nodes-before.json",nodes)
+ reports=[]
+ for i in range(2):
+  node=cfg["node_"+str(i)+"_k8s"]
+  selected=[p for p in pods if p["spec"].get("nodeName")==node and p["metadata"]["namespace"]=="beagle"
+    and p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(selected)==1
+  raw=kube("-n","beagle","exec",selected[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(node+".report.txt",raw);reports.append(tokens(raw))
+ ann=lease["metadata"]["annotations"];epoch=ann[cfg["epoch_annotation"]]
+ expiry=datetime.datetime.fromisoformat(lease["spec"]["renewTime"].replace("Z","+00:00")).timestamp()+lease["spec"]["leaseDurationSeconds"]
+ now=datetime.datetime.now(datetime.timezone.utc).timestamp()
+ jd=journal["data"]
+ journal_bound=jd.get("semanticsFreezeSha256")==lock["old_freeze"]
+ # A crash after the first CAS is replayable only for this exact lease/revision.
+ journal_partial=(jd.get("semanticsFreezeSha256")==lock["new_freeze"] and
+   jd.get("recoveryObserverFromFreeze")==lock["old_freeze"] and
+   jd.get("recoveryObserverLeaseUID")==lease["metadata"]["uid"] and
+   jd.get("recoveryObserverOldLeaseRV")==lease["metadata"]["resourceVersion"])
+ worker_pods=[p for p in pods if p["metadata"]["namespace"]==cfg["nodeset_namespace"] and
+   any(o.get("uid")==cfg["nodeset_uid"] for o in p["metadata"].get("ownerReferences",[]))]
+ selector=nodeset.get("status",{}).get("selector","")
+ labels=dict(x.split("=",1) for x in selector.split(",") if "=" in x)
+ assert labels,"unknown worker selector"
+ worker_pods += [p for p in pods if p["metadata"]["namespace"]==cfg["nodeset_namespace"] and
+   all(p["metadata"].get("labels",{}).get(k)==v for k,v in labels.items())]
+ unwanted=[p for p in pods if any(p["metadata"].get("labels",{}).get(k)=="true" for k in
+   ("pireus.sounio.dev/spark-pair-reservation","pireus.sounio.dev/spark-pair-workload"))]
+ save("workload-inventory.json",dict(worker_uids=[p["metadata"]["uid"] for p in worker_pods],
+  unwanted_uids=[p["metadata"]["uid"] for p in unwanted],nodeset_uid=nodeset["metadata"]["uid"],selector=selector))
+ checks=[
+  old["authority_sha256"]==new["authority_sha256"] and old["native_executable_sha256"]==new["native_executable_sha256"],
+  ann[cfg["freeze_hash_annotation"]]==lock["old_freeze"] and ann[cfg["source_hash_annotation"]]==old["authority_sha256"],
+  all(n["metadata"]["uid"]==cfg["node_"+str(i)+"_uid"] for i,n in enumerate(nodes)) and nodeset["metadata"]["uid"]==cfg["nodeset_uid"],
+  ann[cfg["state_annotation"]]=="RECOVERY_REQUIRED" and lease["spec"]["holderIdentity"]==a.holder and expiry<now,
+  all(cfg["slurmd_selector_key"] not in n["metadata"]["labels"] for n in nodes),
+  not worker_pods,
+  all(r["grant_mode"]=="FENCED" and r["grant_valid"]=="0" for r in reports),
+  all(r["freeze_sha256"]==lock["old_freeze"] and r["source_sha256"]==old["authority_sha256"] and
+    r["boot_id"]==ann[cfg["host_boot_"+str(i)+"_annotation"]] for i,r in enumerate(reports)),
+  all(r["watchdog"]=="1" and 0<=int(r["reported_monotonic"])-int(r["watchdog_monotonic"])<=55 for r in reports),
+  all(r["device_barrier"]=="1" and r["device_barrier_source_sha256"]==old["device_barrier_source_sha256"] for r in reports),
+  all(r["protected"]=="1" for r in reports),
+  all(all(r[k]=="1" for k in ("inventory","services","restarts","docker_claims","consumers","cgroups")) for r in reports),
+  not unwanted,
+  frame["epoch"]==epoch and frame["observed_epoch"]==epoch and all(r["grant_epoch"]==epoch and
+    r["lease_uid"]==lease["metadata"]["uid"] and r["grant_owner"]==a.holder for r in reports),
+  int(frame["slurm_mask"]),
+  (journal_bound or journal_partial) and jd.get("sounioSourceSha256")==old["authority_sha256"],
+ ]
+ path=save("facts.v1"," ".join(map(str,[1]+[int(x) for x in checks]+[int(r["mem_available_mb"]) for r in reports]))+"\n")
+ run=subprocess.run([str(a.engine.resolve()),str(path.resolve())],capture_output=True,text=True,timeout=60)
+ save("decision.json",run.stdout);receipt=json.loads(run.stdout)
+ save("custody.json",dict(lock=lock,facts_sha256=sha(path.read_bytes()),apply=a.apply))
+ assert run.returncode==0 and receipt["authority"]=="Sounio" and receipt["decision"]=="ALLOW"
+ assert receipt["action"]=="REBIND_RECOVERY_OBSERVER" and receipt["gpu_grant"] is False and receipt["resume"] is False
+ if not a.apply:print("RECOVERY_OBSERVER_MIGRATION_REVIEWABLE_ALLOW");return
+ # A second complete native admission immediately precedes the commit sequence.
+ fresh=a.evidence/"recheck"
+ subprocess.run([sys.executable,str(Path(__file__).resolve()),"--old-root",str(a.old_root.resolve()),
+  "--new-root",str(a.new_root.resolve()),"--engine",str(a.engine.resolve()),"--holder",a.holder,
+  "--evidence",str(fresh.resolve())],check=True,timeout=240)
+ fresh_lease=json.loads((fresh/"lease-before.json").read_text())
+ assert fresh_lease["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"]
+ fresh_journal=json.loads((fresh/"journal-before.json").read_text())
+ assert fresh_journal["metadata"]["resourceVersion"]==journal["metadata"]["resourceVersion"]
+ # Journal prepares first, lease CAS commits. Neither changes scheduler state.
+ current=get("-n","beagle","get","lease","pireus-spark-pair")
+ assert current["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"]
+ def esc(s):return s.replace("~","~0").replace("/","~1")
+ updated=dict(jd,semanticsFreezeSha256=lock["new_freeze"],recoveryObserverFromFreeze=lock["old_freeze"],
+   recoveryObserverToFreeze=lock["new_freeze"],recoveryObserverLeaseUID=lease["metadata"]["uid"],
+   recoveryObserverOldLeaseRV=lease["metadata"]["resourceVersion"],recoveryObserverDecisionSHA=sha(run.stdout.encode()))
+ jp=[dict(op="test",path="/metadata/uid",value=journal["metadata"]["uid"]),
+   dict(op="test",path="/metadata/resourceVersion",value=journal["metadata"]["resourceVersion"]),
+   dict(op="replace",path="/data",value=updated)]
+ save("journal-patch.json",jp);save("phase.json",dict(phase="JOURNAL_INTENT"))
+ save("journal-effect.txt",kube("-n","beagle","patch","configmap",cfg["bootstrap_journal"],"--type=json","-p",json.dumps(jp)))
+ lp=[dict(op="test",path="/metadata/uid",value=lease["metadata"]["uid"]),
+   dict(op="test",path="/metadata/resourceVersion",value=lease["metadata"]["resourceVersion"]),
+   dict(op="test",path="/metadata/annotations/"+esc(cfg["state_annotation"]),value="RECOVERY_REQUIRED"),
+   dict(op="test",path="/metadata/annotations/"+esc(cfg["freeze_hash_annotation"]),value=lock["old_freeze"]),
+   dict(op="replace",path="/metadata/annotations/"+esc(cfg["freeze_hash_annotation"]),value=lock["new_freeze"])]
+ save("lease-patch.json",lp);save("phase.json",dict(phase="LEASE_INTENT"))
+ save("lease-effect.txt",kube("-n","beagle","patch","lease","pireus-spark-pair","--type=json","-p",json.dumps(lp)))
+ post=get("-n","beagle","get","lease","pireus-spark-pair");save("lease-after.json",post)
+ assert post["spec"]==lease["spec"]
+ expected=dict(ann);expected[cfg["freeze_hash_annotation"]]=lock["new_freeze"]
+ assert post["metadata"]["annotations"]==expected
+ post_journal=get("-n","beagle","get","configmap",cfg["bootstrap_journal"]);save("journal-after.json",post_journal)
+ assert post_journal["data"]==updated
+ for i in range(2):
+  node=cfg["node_"+str(i)+"_k8s"]
+  fresh_pods=get("-n","beagle","get","pods")["items"]
+  selected=[p for p in fresh_pods if p["spec"].get("nodeName")==node and
+    p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(selected)==1
+  raw=kube("-n","beagle","exec",selected[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(node+".post-report.txt",raw);r=tokens(raw)
+  assert r["grant_mode"]=="FENCED" and r["grant_valid"]=="0"
+  assert all(r[k]=="1" for k in ("watchdog","device_barrier","protected"))
+ save("phase.json",dict(phase="OBSERVER_REBOUND",gpu_grant=False,scheduler_state="RECOVERY_REQUIRED"))
+ print("RECOVERY_OBSERVER_REBOUND; canonical recovery required")
+if __name__=="__main__":main()
+
+FILE runtime/recovery-serialization-lock.json
+{
+  "schema": 1,
+  "action": "REBIND_RECOVERY_OBSERVER",
+  "old_freeze": "452289a8a9c201271f6631973c65cbc428cbe3a7f7228e2483e9768a875fb46b",
+  "new_freeze": "b13dd7fa17a1cddc2f57f7942f500a35a399a4ec60b22ae0da24c892b657b4d6",
+  "engine_sha256": "4a42d75370d03ef7889f83ac7e51e18f360f71e29ad9b82cf12acc66d3abf493",
+  "sources": {
+    "recovery_serialize.py": "adda991dbb7a0b2435434cbe416a35ca7f70d983ed095b6e7f318750279dc610",
+    "recovery_migrate.sio": "ab344153988b49c0e2503f44ae3aed55d029b53f20e5cf43c6a0074558ce4f3a"
+  },
+  "source_authority_unchanged": true,
+  "minimum_free_memory_mb": 32768,
+  "scope": "Host serialization and bounded legacy GPU stop; content-addressed ConfigMap references and canonical fail-closed admission installation ordering; native predicates, barrier and 32768 MiB floor unchanged",
+  "new_host_fence_configmap": "pireus-spark-host-fence-36c9c8a2a17d"
+}
+
+FILE runtime/test_host_transition_lock.py
+#!/usr/bin/env python3
+"""Real process/lock tests using a temporary host root; never touches a GPU."""
+import os,subprocess,tempfile,time,sys,re
+from pathlib import Path
+def main():
+ source=Path(sys.argv[1]).read_text()
+ mocks=r'''
+grant_valid() { return 1; }
+device_barrier_attached() {
+  touch "$HOST_ROOT/ready"
+  while [[ ! -e "$HOST_ROOT/release" ]]; do sleep .02; done
+  return 0
+}
+enforce_fenced_compute_state() { printf 'mode=FENCED\n' > "$GRANT_FILE"; }
+legacy_gpu_inventory_exact() { return 0; }
+known_gpu_services_quiesced() { return 0; }
+managed_gpu_restarts_blocked() { return 0; }
+active_docker_gpu_claims_zero() { return 0; }
+gpu_consumer_set_exact() { return 0; }
+managed_gpu_cgroups_empty() { return 0; }
+live_memory_floor_met() { return 0; }
+protected_resources_unchanged() { return 0; }
+test_commit() { printf 'mode=SLURM\n' > "$GRANT_FILE"; touch "$HOST_ROOT/committed"; }
+test_hang() { sleep 90; }
+test_docker_grace() {
+  device_barrier_attach() { return 0; }
+  device_barrier_relation_valid() { return 0; }
+  disable_known_gpu_services() { return 0; }
+  kill_kubernetes_compute_processes() { return 0; }
+  fenced_compute_set_empty() { return 0; }
+  docker_container_has_gpu_claim() { return 0; }
+  docker_host() {
+    case "$1" in
+      ps) printf 'known-gpu-container\n' ;;
+      update) [[ "$2" == --restart=no && "$3" == known-gpu-container ]] ;;
+      inspect)
+        if [[ -e "$HOST_ROOT/docker-stopped" ]]; then printf 'false\n'; else printf 'true\n'; fi
+        ;;
+      stop)
+        [[ "$2" == -t && "$3" == 5 && "$4" == known-gpu-container ]]
+        sleep "$3"
+        touch "$HOST_ROOT/docker-stopped"
+        ;;
+      *) return 64 ;;
+    esac
+  }
+  real_enforce_fenced_compute_state
+  status_once
+  [[ -e "$HOST_ROOT/docker-stopped" ]]
+}
+test_escape() { setsid sleep 15 >/dev/null 2>&1 & echo $! > "$HOST_ROOT/escaped-pid"; }
+'''
+ real_enforce=re.search(r"^enforce_fenced_compute_state\(\) \{.*?^\}",source,re.M|re.S).group(0).replace("enforce_fenced_compute_state()","real_enforce_fenced_compute_state()",1)
+ mocks=real_enforce+"\n"+mocks
+ with tempfile.TemporaryDirectory() as directory:
+  root=Path(directory)
+  script=root/"fence.sh"
+  script.write_text(source.replace('if [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then',mocks+'\nif [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then'))
+  env=os.environ.copy();env.update(NODE_NAME="spark-3c59",PIREUS_HOST_ROOT=str(root),PIREUS_HOST_FENCE_LIBRARY_MODE="1")
+  grant=root/"var/lib/pireus-spark-pair/host-grant";grant.parent.mkdir(parents=True)
+  def launch(command):
+   return subprocess.Popen(["bash","-c",'source "$1"; '+command,"test",str(script)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+  def wait_file(path):
+   end=time.monotonic()+5
+   while not path.exists():
+    assert time.monotonic()<end,"fixture synchronization timeout"
+    time.sleep(.01)
+  for locked in (False,True):
+   for name in ("ready","release","committed"):
+    (root/name).unlink(missing_ok=True)
+   grant.write_text("mode=FENCED\n")
+   prefix="with_host_transition_lock " if locked else ""
+   watchdog=launch(prefix+"active_enforcement_cycle")
+   wait_file(root/"ready")
+   commit=launch(prefix+"test_commit")
+   if locked:
+    time.sleep(.2);assert not (root/"committed").exists(),"commit bypassed watchdog lock"
+   else:wait_file(root/"committed")
+   (root/"release").touch()
+   for proc in (watchdog,commit):
+    stdout,stderr=proc.communicate(timeout=8)
+    assert proc.returncode==0,(stdout,stderr)
+   assert grant.read_text()==("mode=SLURM\n" if locked else "mode=FENCED\n")
+  lock=grant.parent/"host-transition.lock"
+  # Contention has its own refusal code and must not execute the operation.
+  holder=subprocess.Popen(["flock",str(lock),"sleep","12"])
+  try:
+   time.sleep(.2);start=time.monotonic()
+   proc=launch("with_host_transition_lock test_commit");out,err=proc.communicate(timeout=13)
+   assert proc.returncode==75,(proc.returncode,out,err)
+   assert 9<=time.monotonic()-start<13
+  finally:
+   holder.wait(timeout=4)
+  # A wedged operation loses the entire process group within the bounded timeout.
+  start=time.monotonic()
+  proc=launch("with_host_transition_lock test_hang");out,err=proc.communicate(timeout=49)
+  assert proc.returncode==124,(proc.returncode,out,err)
+  assert 44<=time.monotonic()-start<49
+  proc=launch("with_host_transition_lock test_commit")
+  out,err=proc.communicate(timeout=5);assert proc.returncode==0,(out,err)
+  # A child in a new session survives its caller, but must not inherit the lock.
+  proc=launch("with_host_transition_lock test_escape")
+  out,err=proc.communicate(timeout=4);assert proc.returncode==0,(out,err)
+  escaped=int((root/"escaped-pid").read_text())
+  try:
+   os.kill(escaped,0)
+   start=time.monotonic();proc=launch("with_host_transition_lock test_commit")
+   out,err=proc.communicate(timeout=4)
+   assert proc.returncode==0 and time.monotonic()-start<3,(out,err)
+   os.kill(escaped,0)
+  finally:os.kill(escaped,15)
+  # The emergency path can outwait an owner that exceeds normal lock patience.
+  holder=subprocess.Popen(["flock",str(lock),"sleep","12"])
+  try:
+   time.sleep(.2);start=time.monotonic()
+   proc=launch("with_host_transition_lock_wait 60 test_commit")
+   out,err=proc.communicate(timeout=16)
+   assert proc.returncode==0 and 10<time.monotonic()-start<16,(out,err)
+  finally:holder.wait(timeout=4)
+  # Execute the real fence/stop/status functions with a bounded simulated Docker daemon.
+  start=time.monotonic();proc=launch("with_host_transition_lock test_docker_grace")
+  out,err=proc.communicate(timeout=10);assert proc.returncode==0,(out,err)
+  assert 5<=time.monotonic()-start<10
+  assert "TimeoutStopSec=120" in source and "KillMode=control-group" in source
+  assert "WatchdogSec=${SYSTEMD_WATCHDOG_SECONDS}s" in source
+  # Exercise the actual daemon dispatch: failure cannot refresh its heartbeat.
+  base_fixture=script.read_text()
+  (root/"var/lib/pireus-spark-pair/activated").touch()
+  for code in (1,0):
+   (root/"ping").unlink(missing_ok=True)
+   overrides='\ncapture_protected_baseline() { :; }\nwatchdog_notify_ready() { :; }\nwatchdog_ping() { touch "$HOST_ROOT/ping"; }\nactive_enforcement_cycle() { return '+str(code)+'; }\n'
+   script.write_text(base_fixture.replace('if [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then',overrides+'if [[ "${PIREUS_HOST_FENCE_LIBRARY_MODE:-0}" == 1 ]]; then'))
+   daemon_env=env|{"PIREUS_HOST_FENCE_LIBRARY_MODE":"0"}
+   result=subprocess.run(["timeout","1","bash",str(script),"enforce-notify"],env=daemon_env,capture_output=True,timeout=4)
+   assert result.returncode==124,(result.returncode,result.stderr)
+   assert (root/"ping").exists()==(code==0),"failed daemon cycle forged a heartbeat"
+ print("PIREUS_HOST_TRANSITION_LOCK_PASS old_interleaving_reproduced=1 serialized_commit_survives=1 contention_refused=1 hang_bounded=1 lock_reusable=1 failed_cycle_heartbeat_refused=1 escaped_child_lock_released=1 emergency_outwaits_owner=1 real_fence_stop_status_bounded=1")
+if __name__=="__main__":main()
+
+
+FILE runtime/test_host_revision_order.py
+#!/usr/bin/env python3
+"""Mock transport test: stage old bridge before exact new admission and host Pods."""
+import subprocess,sys,tempfile
+from pathlib import Path
+HARNESS=r'''
+set -euo pipefail
+export SOUNIO_SPARK_PAIR_BACKEND_LIBRARY_MODE=1
+source "$1"
+work="$2";negative="$3"
+POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
+guard_mutation() { :; }
+admission_current() { [[ -e "$work/current" ]]; }
+stage_existing_host_fence_for_bootstrap() { printf 'stage\n' >> "$work/trace"; }
+sync_admission_projection() { printf 'sync\n' >> "$work/trace"; }
+wait_for() { "$2"; }
+bootstrap_gpu_admission_denied() {
+  printf 'deny-control\n' >> "$work/trace"
+  [[ "$negative" == 0 ]]
+}
+kubectl() {
+  if [[ "$1" == apply ]]; then
+    if [[ "${@: -1}" == "-" ]]; then cat >/dev/null;return 0;fi
+    [[ "$(cat "$work/trace")" == stage ]]
+    printf 'apply-admission\n' >> "$work/trace"
+    touch "$work/current"
+  elif [[ "$1 $2" == "get nodes" ]]; then printf '{"items":[]}\n'
+  else printf 'unexpected mock transport: %s\n' "$*" >&2;return 99
+  fi
+}
+device_barrier_config_json() { printf 'host-manifest-boundary\n' >> "$work/trace";exit 77; }
+install_host_fence --holder test --epoch 12 --receipt ignored
+'''
+def main():
+ backend=Path(sys.argv[1]).resolve()
+ for negative in (0,1):
+  with tempfile.TemporaryDirectory() as directory:
+   result=subprocess.run(["bash","-c",HARNESS,"test",str(backend),directory,str(negative)],capture_output=True,text=True,timeout=15)
+   assert result.returncode==(42 if negative else 77),(result.returncode,result.stdout,result.stderr)
+   trace=(Path(directory)/"trace").read_text().splitlines()
+   assert trace==["stage","apply-admission","sync","deny-control"]+([] if negative else ["host-manifest-boundary"]),trace
+ print("PIREUS_HOST_REVISION_ORDER_PASS stage_before_admission=1 deny_before_host_pods=1 failed_negative_control_refused=1 transport=mock")
+if __name__=="__main__":main()
+
+
+HOST BODY
+stop_gpu_docker_containers() {
+  local id ids running claim_status
+  legacy_gpu_inventory_exact || return 1
+  ids="$(docker_host ps -aq)" || return 1
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if docker_container_has_gpu_claim "$id"; then claim_status=0; else claim_status=$?; fi
+    [[ $claim_status -ne 2 ]] || return 1
+    [[ $claim_status -eq 0 ]] || continue
+    docker_host update --restart=no "$id" >/dev/null
+    running="$(docker_host inspect --format '{{.State.Running}}' "$id")"
+    if [[ "$running" == true ]]; then
+      docker_host stop -t "$GPU_CONTAINER_STOP_GRACE_SECONDS" "$id" >/dev/null
+    elif [[ "$running" != false ]]; then
+      return 1
+    fi
+  done <<<"$ids"
+}
+
+
+HOST BODY
+fenced_compute_set_empty() {
+  local pid
+  device_barrier_attached || return 1
+  active_docker_gpu_claims_zero || return 1
+  known_gpu_services_quiesced || return 1
+  managed_gpu_restarts_blocked || return 1
+  managed_pair_cgroups_empty || return 1
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pid_is_admitted_gpu_consumer "$pid" ||
+      pid_is_platform_gpu_fd_holder "$pid" || return 1
+  done < <(gpu_device_fd_holder_pids)
+}
+
+enforce_fenced_compute_state() {
+  local failed=0
+  device_barrier_attach || failed=1
+  stop_gpu_docker_containers || failed=1
+  disable_known_gpu_services || failed=1
+  kill_kubernetes_compute_processes || failed=1
+  fenced_compute_set_empty || failed=1
+  [[ $failed -eq 0 ]]
+}
+
+
+HOST BODY
+commit_grant() {
+  local mode="$1" epoch="$2" owner="$3" source="$4" freeze="$5"
+  local transaction="$6" lease_uid="$7" base_lease_rv="$8" decision_sha="$9"
+  local prepare0="${10}" prepare1="${11}" pair_digest="${12}" intent_lease_rv="${13}"
+  local deadline prepared_sha expected_pair expected_local_prepare
+  [[ "$mode" == SLURM || "$mode" == K8S ]] || return 64
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ "$owner" =~ ^[A-Za-z0-9._:-]+$ ]] || return 64
+  [[ "$source" =~ ^[0-9a-f]{64}$ && "$freeze" =~ ^[0-9a-f]{64}$ ]] || return 64
+  commit_context_valid "$transaction" "$lease_uid" "$base_lease_rv" "$decision_sha" || return 64
+  [[ "$prepare0" =~ ^[0-9a-f]{64}$ && "$prepare1" =~ ^[0-9a-f]{64}$ &&
+      "$pair_digest" =~ ^[0-9a-f]{64}$ && "$intent_lease_rv" =~ ^[1-9][0-9]*$ ]] || return 64
+  [[ -r "$PREPARE_FILE" ]] || return 1
+  [[ "$(grant_field_from "$PREPARE_FILE" mode)" == "PREPARED_$mode" &&
+      "$(grant_field_from "$PREPARE_FILE" epoch)" == "$epoch" &&
+      "$(grant_field_from "$PREPARE_FILE" owner)" == "$owner" &&
+      "$(grant_field_from "$PREPARE_FILE" source_sha256)" == "$source" &&
+      "$(grant_field_from "$PREPARE_FILE" freeze_sha256)" == "$freeze" &&
+      "$(grant_field_from "$PREPARE_FILE" transaction_id)" == "$transaction" &&
+      "$(grant_field_from "$PREPARE_FILE" lease_uid)" == "$lease_uid" &&
+      "$(grant_field_from "$PREPARE_FILE" lease_resource_version)" == "$base_lease_rv" &&
+      "$(grant_field_from "$PREPARE_FILE" decision_receipt_sha256)" == "$decision_sha" ]] || return 1
+  prepared_sha="$(sha256sum "$PREPARE_FILE" | cut -d ' ' -f 1)"
+  [[ "$prepared_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  case "$NODE_NAME" in
+    spark-3c59) expected_local_prepare="$prepare0" ;;
+    spark-8e54) expected_local_prepare="$prepare1" ;;
+    *) return 1 ;;
+  esac
+  [[ "$prepared_sha" == "$expected_local_prepare" ]] || return 1
+  expected_pair="$(printf 'transaction_id=%s\nlease_uid=%s\nbase_lease_resource_version=%s\nnode0_prepare=%s\nnode1_prepare=%s\n' \
+    "$transaction" "$lease_uid" "$base_lease_rv" "$prepare0" "$prepare1" | \
+    sha256sum | cut -d ' ' -f 1)"
+  [[ "$pair_digest" == "$expected_pair" ]] || return 1
+  status_once
+  deadline=0
+  if [[ "$mode" == K8S ]]; then
+    deadline=$(( $(monotonic_seconds) + K8S_GRANT_TTL_SECONDS ))
+  fi
+  write_grant_record "$GRANT_FILE" "COMMITTING_$mode" "$epoch" "$owner" "$source" \
+    "$freeze" "$(( $(monotonic_seconds) + COMMIT_TRANSITION_SECONDS ))" "$transaction" "$lease_uid" \
+    "$intent_lease_rv" "$decision_sha" "$pair_digest"
+  if ! device_barrier_detach; then
+    fence_invalid_local || true
+    return 1
+  fi
+  write_grant_record "$GRANT_FILE" "$mode" "$epoch" "$owner" "$source" \
+    "$freeze" "$deadline" "$transaction" "$lease_uid" "$intent_lease_rv" \
+    "$decision_sha" "$pair_digest"
+  rm -f "$PREPARE_FILE"
+  status_once
+}
+
+
+HOST BODY
+status_once() {
+  device_barrier_relation_valid &&
+    legacy_gpu_inventory_exact &&
+    known_gpu_services_quiesced &&
+    managed_gpu_restarts_blocked &&
+    active_docker_gpu_claims_zero &&
+    gpu_consumer_set_exact &&
+    managed_gpu_cgroups_empty &&
+    live_memory_floor_met &&
+    protected_resources_unchanged
+}
+
+
+HOST BODY
+active_enforcement_cycle() {
+  local mode deadline now failed=0
+  mode="$(grant_field mode || true)"
+  case "$mode" in
+    COMMITTING_SLURM|COMMITTING_K8S)
+      deadline="$(grant_field deadline_monotonic || true)"
+      now="$(monotonic_seconds)"
+      if [[ -r "$PREPARE_FILE" && "$deadline" =~ ^[0-9]+$ &&
+            "$now" =~ ^[0-9]+$ && $now -le $deadline ]]; then
+        return 0
+      fi
+      fence_invalid_local || true
+      return 1
+      ;;
+  esac
+  if grant_valid && device_barrier_relation_valid; then
+    stop_gpu_docker_containers || failed=1
+    disable_known_gpu_services || failed=1
+  elif [[ "$mode" == FENCED ]] && device_barrier_attached; then
+    enforce_fenced_compute_state || failed=1
+  else
+    fence_invalid_local || failed=1
+  fi
+  legacy_gpu_inventory_exact || failed=1
+  known_gpu_services_quiesced || failed=1
+  managed_gpu_restarts_blocked || failed=1
+  active_docker_gpu_claims_zero || failed=1
+  gpu_consumer_set_exact || failed=1
+  managed_gpu_cgroups_empty || failed=1
+  live_memory_floor_met || failed=1
+  protected_resources_unchanged || failed=1
+  if [[ $failed -ne 0 ]]; then
+    fence_invalid_local || true
+    return 1
+  fi
+}
+

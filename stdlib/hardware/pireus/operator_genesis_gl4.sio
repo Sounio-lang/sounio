@@ -1,0 +1,2211 @@
+//! Sounio authority for Operator Genesis under GL(4,2), sign gauges, and swap.
+//!
+//! Commit fd2ff88871 preserves the first executable with no frozen winner or
+//! digest. This source now also carries the subsequently admitted v1 matcher.
+//! The search itself remains exhaustive and emits only bounded monomial-gauge
+//! novelty.
+
+use algebra::cayley_dickson::cd_sigma
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_GL4_GENESIS_SCHEMA: i64 = 721000
+pub const PIREUS_GL4_BITS: i64 = 4
+pub const PIREUS_GL4_DIMENSION: i64 = 16
+pub const PIREUS_GL4_CANDIDATE_COUNT: i64 = 16
+pub const PIREUS_GL4_CORPUS_COUNT: i64 = 3
+pub const PIREUS_GL4_MATRIX_ENCODINGS: i64 = 65536
+pub const PIREUS_GL4_MATRIX_COUNT: i64 = 20160
+pub const PIREUS_GL4_SWAP_COUNT: i64 = 2
+pub const PIREUS_GL4_LINEAR_SWAP_ACTIONS: i64 = 40320
+pub const PIREUS_GL4_GAUGE_COUNT: i64 = 32768
+pub const PIREUS_GL4_GAUGE_KERNEL_COUNT: i64 = 16
+pub const PIREUS_GL4_GAUGE_ACTION_COUNT: i64 = 2048
+pub const PIREUS_GL4_DECLARED_ACTION_UNIVERSE: i64 = 82575360
+pub const PIREUS_GL4_SEED: i64 = 9
+
+pub const PIREUS_GL4_LANGUAGE_SOUNIO: i64 = 1
+pub const PIREUS_GL4_LANGUAGE_LEAN: i64 = 2
+pub const PIREUS_GL4_LANGUAGE_KOKA: i64 = 3
+pub const PIREUS_GL4_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_GL4_LANGUAGE_HASKELL: i64 = 5
+pub const PIREUS_GL4_LANGUAGE_LLM: i64 = 6
+pub const PIREUS_GL4_LANGUAGE_PYTHON: i64 = 7
+pub const PIREUS_GL4_LANGUAGE_RUST: i64 = 8
+
+pub const PIREUS_GL4_ROLE_SEMANTIC_AUTHORITY: i64 = 1
+pub const PIREUS_GL4_ROLE_FORMAL_PARITY: i64 = 2
+pub const PIREUS_GL4_ROLE_EFFECT_PARITY: i64 = 3
+pub const PIREUS_GL4_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_GL4_ROLE_DENOTATIONAL_BASELINE: i64 = 5
+pub const PIREUS_GL4_ROLE_REVIEW_ONLY: i64 = 6
+pub const PIREUS_GL4_ROLE_FORBIDDEN_ORACLE: i64 = 7
+
+pub const PIREUS_GL4_STAGE_GARDEN: i64 = 1
+pub const PIREUS_GL4_STAGE_SOUNIO_EXECUTABLE: i64 = 2
+pub const PIREUS_GL4_STAGE_SEMANTICS_FROZEN: i64 = 3
+pub const PIREUS_GL4_STAGE_PARITY_OPEN: i64 = 4
+pub const PIREUS_GL4_STAGE_CLAIM_READY: i64 = 5
+
+pub const PIREUS_GL4_CORPUS_UNTWISTED_XOR: i64 = 1
+pub const PIREUS_GL4_CORPUS_CAYLEY_DICKSON_16: i64 = 2
+pub const PIREUS_GL4_CORPUS_DIAGONAL_BICHARACTER: i64 = 3
+
+pub const PIREUS_GL4_OK: i64 = 0
+pub const PIREUS_GL4_ERR_AUTHORITY: i64 = 1
+pub const PIREUS_GL4_ERR_STAGE: i64 = 2
+pub const PIREUS_GL4_ERR_POLICY: i64 = 3
+pub const PIREUS_GL4_ERR_SPACE: i64 = 4
+pub const PIREUS_GL4_ERR_CLAIM_SCOPE: i64 = 5
+pub const PIREUS_GL4_ERR_WAIVER: i64 = 6
+
+pub struct GL4GenesisDigest {
+    pub words: [i64; 8],
+}
+
+struct GL4SignTable {
+    cells: [i64; 256],
+}
+
+struct GL4MatrixUniverse {
+    codes: [i64; 20160],
+    encodings_scanned: i64,
+    matrix_count: i64,
+    bfs_count: i64,
+    set_mismatches: i64,
+    bfs_noninvertible: i64,
+    bfs_overflow: bool,
+    identity_present: bool,
+    sorted_unique: bool,
+}
+
+pub struct GL4GroupCertificate {
+    pub encodings_scanned: i64,
+    pub matrix_count: i64,
+    pub bfs_count: i64,
+    pub set_mismatches: i64,
+    pub bfs_noninvertible: i64,
+    pub bfs_overflow: bool,
+    pub identity_present: bool,
+    pub sorted_unique: bool,
+    pub operand_orders: i64,
+    pub linear_swap_actions: i64,
+    pub complete: bool,
+}
+
+pub struct GL4GaugeCertificate {
+    pub gauge_functions: i64,
+    pub kernel_count: i64,
+    pub distinct_actions: i64,
+    pub tree_edges: i64,
+    pub quotient_exact: bool,
+}
+
+pub struct GL4CanonicalKey {
+    pub valid: bool,
+    pub matrix_code: i64,
+    pub swap_operands: bool,
+    pub actions_considered: i64,
+    pub diagonal_finalists: i64,
+    pub commutator_finalists: i64,
+    pub normalized_actions: i64,
+    pub diagonal: [i64; 16],
+    pub commutator: [i64; 256],
+    pub table: [i64; 256],
+}
+
+pub struct GL4AuthorityRequest {
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub stage: i64,
+    pub policy_present: bool,
+    pub grammar_present: bool,
+    pub corpus_present: bool,
+    pub matrix_universe_present: bool,
+    pub gauge_quotient_present: bool,
+    pub declared_candidates: i64,
+    pub declared_matrix_encodings: i64,
+    pub declared_matrices: i64,
+    pub declared_gauges: i64,
+    pub declared_gauge_kernel: i64,
+    pub declared_gauge_actions: i64,
+    pub declared_action_universe: i64,
+    pub semantics_frozen: bool,
+    pub parity_requested: bool,
+    pub orbit_hamming_claimed: bool,
+    pub relative_algebraic_novelty_requested: bool,
+    pub global_novelty_requested: bool,
+    pub historical_novelty_requested: bool,
+    pub priority_requested: bool,
+    pub algorithmic_novelty_requested: bool,
+    pub material_novelty_requested: bool,
+    pub scientific_novelty_requested: bool,
+    pub claim_ready_requested: bool,
+    pub external_review_promoted: bool,
+    pub fingerprint_only_proof: bool,
+    pub waiver_present: bool,
+    pub waiver_founder: bool,
+    pub waiver_scoped: bool,
+    pub waiver_purpose_bound: bool,
+    pub waiver_live: bool,
+}
+
+pub struct GL4GeneratedCandidate {
+    pub generation_ordinal: i64,
+    pub phase_mask: i64,
+    pub canonical_matrix: i64,
+    pub canonical_swap: bool,
+    pub canonical_quotient_distance: i64,
+    pub nearest_corpus_id: i64,
+    pub equivalent_to_corpus: bool,
+    pub declared_gl4_gauge_inequivalence: bool,
+}
+
+pub struct GL4SearchCertificate {
+    pub candidates_evaluated: i64,
+    pub corpus_canonicalized: i64,
+    pub matrices_per_table: i64,
+    pub linear_swap_actions_per_table: i64,
+    pub candidate_masks: [i64; 16],
+    pub candidate_distances: [i64; 16],
+    pub candidate_matrices: [i64; 16],
+    pub candidate_swaps: [bool; 16],
+    pub candidate_nearest_corpus: [i64; 16],
+    pub candidate_equivalent: [bool; 16],
+    pub candidate_equivalence_classes: [i64; 16],
+    pub candidate_equivalence_class_count: i64,
+    pub candidate_canonical_digest_words: [i64; 128],
+    pub corpus_canonical_digest_words: [i64; 24],
+    pub selected: GL4GeneratedCandidate,
+}
+
+pub struct GL4InequivalenceWitness {
+    pub present: bool,
+    pub corpus_id: i64,
+    pub i: i64,
+    pub j: i64,
+    pub candidate_sign: i64,
+    pub corpus_sign: i64,
+    pub canonical_quotient_distance: i64,
+}
+
+pub struct GL4OperatorFingerprint {
+    pub positive_count: i64,
+    pub negative_count: i64,
+    pub commutator_defects: i64,
+    pub associator_defects: i64,
+    pub displacement_negative_counts: [i64; 16],
+}
+
+pub struct GL4NoveltyReceipt {
+    pub schema: i64,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub stage: i64,
+    pub grammar_hash_bound: bool,
+    pub matrix_hash_bound: bool,
+    pub gauge_hash_bound: bool,
+    pub corpus_hash_bound: bool,
+    pub declared_corpus_only: bool,
+    pub declared_grammar_exhaustive: bool,
+    pub all_sign_tables_exhausted: bool,
+    pub base_twist_assumed: bool,
+    pub exhaustive_search: bool,
+    pub relative_semantic_novelty: bool,
+    pub declared_gl4_gauge_inequivalence: bool,
+    pub relative_monomial_gauge_novelty: bool,
+    pub relative_algebraic_novelty: bool,
+    pub algebra_isomorphism_complete: bool,
+    pub quotient_distance_not_orbit_hamming: bool,
+    pub algorithmic_novelty: bool,
+    pub material_novelty: bool,
+    pub scientific_novelty: bool,
+    pub global_novelty: bool,
+    pub historical_novelty: bool,
+    pub priority_claim: bool,
+    pub external_prior_art_complete: bool,
+    pub source_hash_bound: bool,
+    pub semantics_hash_bound: bool,
+    pub receipt_frozen: bool,
+    pub receipt_admitted: bool,
+    pub formal_parity_open: bool,
+    pub effect_parity_open: bool,
+    pub material_parity_count: i64,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+}
+
+pub struct GL4GenesisNegatives {
+    pub missing_policy: bool,
+    pub missing_grammar: bool,
+    pub missing_corpus: bool,
+    pub missing_matrix_universe: bool,
+    pub missing_gauge_quotient: bool,
+    pub incomplete_candidates: bool,
+    pub incomplete_matrix_scan: bool,
+    pub incomplete_gl4: bool,
+    pub incomplete_gauges: bool,
+    pub wrong_gauge_kernel: bool,
+    pub wrong_gauge_actions: bool,
+    pub wrong_action_universe: bool,
+    pub python_oracle: bool,
+    pub rust_oracle: bool,
+    pub cpp_authority: bool,
+    pub llm_authority: bool,
+    pub parity_prefreeze: bool,
+    pub orbit_hamming_promotion: bool,
+    pub algebraic_promotion: bool,
+    pub global_promotion: bool,
+    pub historical_promotion: bool,
+    pub priority_promotion: bool,
+    pub algorithmic_promotion: bool,
+    pub material_promotion: bool,
+    pub scientific_promotion: bool,
+    pub claim_ready_promotion: bool,
+    pub review_promotion: bool,
+    pub fingerprint_promotion: bool,
+    pub invalid_waiver: bool,
+    pub zero_distance_promotion: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct GL4GenesisResult {
+    pub valid: bool,
+    pub error: i64,
+    pub group: GL4GroupCertificate,
+    pub gauge: GL4GaugeCertificate,
+    pub search: GL4SearchCertificate,
+    pub selected_key: GL4CanonicalKey,
+    pub witness: GL4InequivalenceWitness,
+    pub fingerprint: GL4OperatorFingerprint,
+    pub gauge_invariance_checks: i64,
+    pub gauge_invariance_failures: i64,
+    pub generator_invariance_checks: i64,
+    pub generator_invariance_failures: i64,
+    pub negatives: GL4GenesisNegatives,
+    pub receipt: GL4NoveltyReceipt,
+    pub grammar_digest: GL4GenesisDigest,
+    pub matrix_digest: GL4GenesisDigest,
+    pub gauge_digest: GL4GenesisDigest,
+    pub corpus_digest: GL4GenesisDigest,
+    pub search_digest: GL4GenesisDigest,
+    pub candidate_digest: GL4GenesisDigest,
+    pub canonical_digest: GL4GenesisDigest,
+    pub witness_digest: GL4GenesisDigest,
+    pub receipt_digest: GL4GenesisDigest,
+    pub failures: i64,
+}
+
+fn parity4(value: i64) -> i64 with Mut {
+    var parity: i64 = 0
+    var bit: i64 = 0
+    while bit < 4 {
+        if (value & (1 << bit)) != 0 { parity = parity ^ 1 }
+        bit = bit + 1
+    }
+    parity
+}
+
+fn highest_basis_bit(value: i64) -> i64 with Mut {
+    var selected: i64 = 0
+    var bit: i64 = 0
+    while bit < 4 {
+        let basis = 1 << bit
+        if (value & basis) != 0 { selected = basis }
+        bit = bit + 1
+    }
+    selected
+}
+
+fn is_basis_vector(value: i64) -> bool {
+    value == 1 || value == 2 || value == 4 || value == 8
+}
+
+fn sign_to_bit(sign: i64) -> i64 {
+    if sign < 0 { 1 } else { 0 }
+}
+
+fn bit_to_sign(bit: i64) -> i64 {
+    if bit == 0 { 1 } else { 0 - 1 }
+}
+
+fn candidate_bit(mask: i64, i: i64, j: i64) -> i64
+with Mut, Panic, Div {
+    let base = cd_sigma(i as i32, j as i32, 4) as i64
+    let phase = parity4(mask & i & j)
+    sign_to_bit(if phase == 0 { base } else { 0 - base })
+}
+
+fn corpus_bit(corpus_id: i64, i: i64, j: i64) -> i64
+with Mut, Panic, Div {
+    if corpus_id == PIREUS_GL4_CORPUS_UNTWISTED_XOR { return 0 }
+    if corpus_id == PIREUS_GL4_CORPUS_CAYLEY_DICKSON_16 {
+        return sign_to_bit(cd_sigma(i as i32, j as i32, 4) as i64)
+    }
+    parity4(i & j)
+}
+
+fn candidate_table(mask: i64) -> GL4SignTable with Mut, Panic, Div {
+    var cells: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            cells[i * 16 + j] = candidate_bit(mask, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4SignTable { cells: cells }
+}
+
+fn corpus_table(corpus_id: i64) -> GL4SignTable with Mut, Panic, Div {
+    var cells: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            cells[i * 16 + j] = corpus_bit(corpus_id, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4SignTable { cells: cells }
+}
+
+fn matrix_row(code: i64, row: i64) -> i64 {
+    (code >> (row * 4)) & 15
+}
+
+fn matrix_apply(code: i64, vector: i64) -> i64 with Mut {
+    var result: i64 = 0
+    var row: i64 = 0
+    while row < 4 {
+        if parity4(matrix_row(code, row) & vector) == 1 {
+            result = result | (1 << row)
+        }
+        row = row + 1
+    }
+    result
+}
+
+fn matrix_invertible(code: i64) -> bool with Mut, Panic {
+    var seen: [bool; 16] = [false; 16]
+    var vector: i64 = 0
+    while vector < 16 {
+        let image = matrix_apply(code, vector)
+        if seen[image] { return false }
+        seen[image] = true
+        vector = vector + 1
+    }
+    true
+}
+
+fn matrix_compose(left: i64, right: i64) -> i64 with Mut {
+    var code: i64 = 0
+    var row: i64 = 0
+    while row < 4 {
+        let selector = matrix_row(left, row)
+        var composed_row: i64 = 0
+        var source_row: i64 = 0
+        while source_row < 4 {
+            if (selector & (1 << source_row)) != 0 {
+                composed_row = composed_row ^ matrix_row(right, source_row)
+            }
+            source_row = source_row + 1
+        }
+        code = code | (composed_row << (row * 4))
+        row = row + 1
+    }
+    code
+}
+
+fn generator_code(index: i64) -> i64 {
+    if index == 0 { return 33810 } // swap rows 0 and 1
+    if index == 1 { return 33345 } // swap rows 1 and 2
+    if index == 2 { return 18465 } // swap rows 2 and 3
+    33827                         // row 0 <- row 0 + row 1
+}
+
+fn build_matrix_universe() -> GL4MatrixUniverse with Mut, Panic {
+    var codes: [i64; 20160] = [0; 20160]
+    var count: i64 = 0
+    var code: i64 = 0
+    var identity_present: bool = false
+    var sorted_unique: bool = true
+    while code < PIREUS_GL4_MATRIX_ENCODINGS {
+        if matrix_invertible(code) {
+            if count >= PIREUS_GL4_MATRIX_COUNT {
+                sorted_unique = false
+            } else {
+                if count > 0 && codes[count - 1] >= code {
+                    sorted_unique = false
+                }
+                codes[count] = code
+                if code == 33825 { identity_present = true }
+                count = count + 1
+            }
+        }
+        code = code + 1
+    }
+
+    var visited: [bool; 65536] = [false; 65536]
+    var queue: [i64; 20160] = [0; 20160]
+    var head: i64 = 0
+    var tail: i64 = 1
+    var overflow: bool = false
+    var noninvertible: i64 = 0
+    queue[0] = 33825
+    visited[33825] = true
+    while head < tail {
+        let current = queue[head]
+        var generator: i64 = 0
+        while generator < 4 {
+            let next = matrix_compose(generator_code(generator), current)
+            if !visited[next] {
+                if tail >= PIREUS_GL4_MATRIX_COUNT {
+                    overflow = true
+                } else {
+                    visited[next] = true
+                    queue[tail] = next
+                    tail = tail + 1
+                    if !matrix_invertible(next) {
+                        noninvertible = noninvertible + 1
+                    }
+                }
+            }
+            generator = generator + 1
+        }
+        head = head + 1
+    }
+
+    var mismatches: i64 = 0
+    code = 0
+    while code < PIREUS_GL4_MATRIX_ENCODINGS {
+        if visited[code] != matrix_invertible(code) {
+            mismatches = mismatches + 1
+        }
+        code = code + 1
+    }
+    GL4MatrixUniverse {
+        codes: codes,
+        encodings_scanned: PIREUS_GL4_MATRIX_ENCODINGS,
+        matrix_count: count,
+        bfs_count: tail,
+        set_mismatches: mismatches,
+        bfs_noninvertible: noninvertible,
+        bfs_overflow: overflow,
+        identity_present: identity_present,
+        sorted_unique: sorted_unique,
+    }
+}
+
+fn group_certificate(universe: &GL4MatrixUniverse) -> GL4GroupCertificate {
+    let complete = universe.encodings_scanned == PIREUS_GL4_MATRIX_ENCODINGS &&
+        universe.matrix_count == PIREUS_GL4_MATRIX_COUNT &&
+        universe.bfs_count == PIREUS_GL4_MATRIX_COUNT &&
+        universe.set_mismatches == 0 && universe.bfs_noninvertible == 0 &&
+        !universe.bfs_overflow && universe.identity_present &&
+        universe.sorted_unique
+    GL4GroupCertificate {
+        encodings_scanned: universe.encodings_scanned,
+        matrix_count: universe.matrix_count,
+        bfs_count: universe.bfs_count,
+        set_mismatches: universe.set_mismatches,
+        bfs_noninvertible: universe.bfs_noninvertible,
+        bfs_overflow: universe.bfs_overflow,
+        identity_present: universe.identity_present,
+        sorted_unique: universe.sorted_unique,
+        operand_orders: PIREUS_GL4_SWAP_COUNT,
+        linear_swap_actions: PIREUS_GL4_LINEAR_SWAP_ACTIONS,
+        complete: complete,
+    }
+}
+
+fn gauge_value(mask: i64, index: i64) -> i64 {
+    if index == 0 { 0 } else { (mask >> (index - 1)) & 1 }
+}
+
+fn gauge_is_kernel(mask: i64) -> bool with Mut {
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            if (gauge_value(mask, i) ^ gauge_value(mask, j) ^
+                gauge_value(mask, i ^ j)) != 0 {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn gauge_certificate() -> GL4GaugeCertificate with Mut, Div {
+    var kernel: i64 = 0
+    var mask: i64 = 0
+    while mask < PIREUS_GL4_GAUGE_COUNT {
+        if gauge_is_kernel(mask) { kernel = kernel + 1 }
+        mask = mask + 1
+    }
+    let actions = if kernel > 0 { PIREUS_GL4_GAUGE_COUNT / kernel } else { 0 }
+    GL4GaugeCertificate {
+        gauge_functions: PIREUS_GL4_GAUGE_COUNT,
+        kernel_count: kernel,
+        distinct_actions: actions,
+        tree_edges: 11,
+        quotient_exact: kernel == PIREUS_GL4_GAUGE_KERNEL_COUNT &&
+            actions == PIREUS_GL4_GAUGE_ACTION_COUNT,
+    }
+}
+
+fn apply_gauge(table: &GL4SignTable, mask: i64) -> GL4SignTable
+with Mut, Panic {
+    var cells: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            cells[i * 16 + j] = table.cells[i * 16 + j] ^
+                gauge_value(mask, i) ^ gauge_value(mask, j) ^
+                gauge_value(mask, i ^ j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4SignTable { cells: cells }
+}
+
+fn normalize_gauge(table: &GL4SignTable) -> GL4SignTable with Mut, Panic {
+    var q: [i64; 16] = [0; 16]
+    var x: i64 = 1
+    while x < 16 {
+        if !is_basis_vector(x) {
+            let edge = highest_basis_bit(x)
+            let parent = x ^ edge
+            q[x] = table.cells[parent * 16 + edge] ^ q[parent]
+        }
+        x = x + 1
+    }
+    var cells: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            cells[i * 16 + j] = table.cells[i * 16 + j] ^
+                q[i] ^ q[j] ^ q[i ^ j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4SignTable { cells: cells }
+}
+
+fn tree_cells_zero(table: &GL4SignTable) -> bool with Mut, Panic {
+    var x: i64 = 1
+    while x < 16 {
+        if !is_basis_vector(x) {
+            let edge = highest_basis_bit(x)
+            let parent = x ^ edge
+            if table.cells[parent * 16 + edge] != 0 { return false }
+        }
+        x = x + 1
+    }
+    true
+}
+
+fn tables_equal(left: &GL4SignTable, right: &GL4SignTable) -> bool
+with Mut, Panic {
+    var index: i64 = 0
+    while index < 256 {
+        if left.cells[index] != right.cells[index] { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn table_less(left: &GL4SignTable, right: &GL4SignTable) -> bool
+with Mut, Panic {
+    var index: i64 = 0
+    while index < 256 {
+        if left.cells[index] < right.cells[index] { return true }
+        if left.cells[index] > right.cells[index] { return false }
+        index = index + 1
+    }
+    false
+}
+
+fn transformed_bit(
+    table: &GL4SignTable,
+    matrix: i64,
+    swap: bool,
+    i: i64,
+    j: i64,
+) -> i64 with Mut, Panic {
+    let mapped_i = matrix_apply(matrix, i)
+    let mapped_j = matrix_apply(matrix, j)
+    if swap {
+        table.cells[mapped_j * 16 + mapped_i]
+    } else {
+        table.cells[mapped_i * 16 + mapped_j]
+    }
+}
+
+fn transform_table(
+    table: &GL4SignTable,
+    matrix: i64,
+    swap: bool,
+) -> GL4SignTable with Mut, Panic {
+    var cells: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            cells[i * 16 + j] = transformed_bit(table, matrix, swap, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4SignTable { cells: cells }
+}
+
+fn diagonal_compare(
+    table: &GL4SignTable,
+    matrix: i64,
+    best: &[i64; 16],
+) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < 16 {
+        let cell = transformed_bit(table, matrix, false, i, i)
+        if cell < best[i] { return 0 - 1 }
+        if cell > best[i] { return 1 }
+        i = i + 1
+    }
+    0
+}
+
+fn fill_diagonal(
+    table: &GL4SignTable,
+    matrix: i64,
+) -> [i64; 16] with Mut, Panic {
+    var diagonal: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        diagonal[i] = transformed_bit(table, matrix, false, i, i)
+        i = i + 1
+    }
+    diagonal
+}
+
+fn commutator_cell(
+    table: &GL4SignTable,
+    matrix: i64,
+    i: i64,
+    j: i64,
+) -> i64 with Mut, Panic {
+    transformed_bit(table, matrix, false, i, j) ^
+        transformed_bit(table, matrix, false, j, i)
+}
+
+fn commutator_compare(
+    table: &GL4SignTable,
+    matrix: i64,
+    best: &[i64; 256],
+) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let index = i * 16 + j
+            let cell = commutator_cell(table, matrix, i, j)
+            if cell < best[index] { return 0 - 1 }
+            if cell > best[index] { return 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn fill_commutator(
+    table: &GL4SignTable,
+    matrix: i64,
+) -> [i64; 256] with Mut, Panic {
+    var commutator: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            commutator[i * 16 + j] = commutator_cell(table, matrix, i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    commutator
+}
+
+fn canonicalize(
+    table: &GL4SignTable,
+    universe: &GL4MatrixUniverse,
+) -> GL4CanonicalKey with Mut, Panic {
+    var best_diagonal: [i64; 16] = [0; 16]
+    var has_diagonal: bool = false
+    var matrix_index: i64 = 0
+    while matrix_index < universe.matrix_count {
+        let matrix = universe.codes[matrix_index]
+        if !has_diagonal || diagonal_compare(table, matrix, &best_diagonal) < 0 {
+            best_diagonal = fill_diagonal(table, matrix)
+            has_diagonal = true
+        }
+        matrix_index = matrix_index + 1
+    }
+
+    var diagonal_finalists: i64 = 0
+    var best_commutator: [i64; 256] = [0; 256]
+    var has_commutator: bool = false
+    matrix_index = 0
+    while matrix_index < universe.matrix_count {
+        let matrix = universe.codes[matrix_index]
+        if diagonal_compare(table, matrix, &best_diagonal) == 0 {
+            diagonal_finalists = diagonal_finalists + 1
+            if !has_commutator ||
+                commutator_compare(table, matrix, &best_commutator) < 0 {
+                best_commutator = fill_commutator(table, matrix)
+                has_commutator = true
+            }
+        }
+        matrix_index = matrix_index + 1
+    }
+
+    var commutator_finalists: i64 = 0
+    var normalized_actions: i64 = 0
+    var best_table = GL4SignTable { cells: [0; 256] }
+    var best_matrix: i64 = 0 - 1
+    var best_swap: bool = false
+    var has_table: bool = false
+    matrix_index = 0
+    while matrix_index < universe.matrix_count {
+        let matrix = universe.codes[matrix_index]
+        if diagonal_compare(table, matrix, &best_diagonal) == 0 &&
+            commutator_compare(table, matrix, &best_commutator) == 0 {
+            commutator_finalists = commutator_finalists + 1
+            var swap_index: i64 = 0
+            while swap_index < 2 {
+                let transformed = transform_table(table, matrix, swap_index == 1)
+                let normalized = normalize_gauge(&transformed)
+                normalized_actions = normalized_actions + 1
+                if !has_table || table_less(&normalized, &best_table) {
+                    best_table = normalized
+                    best_matrix = matrix
+                    best_swap = swap_index == 1
+                    has_table = true
+                }
+                swap_index = swap_index + 1
+            }
+        }
+        matrix_index = matrix_index + 1
+    }
+    GL4CanonicalKey {
+        valid: has_diagonal && has_commutator && has_table &&
+            tree_cells_zero(&best_table),
+        matrix_code: best_matrix,
+        swap_operands: best_swap,
+        actions_considered: universe.matrix_count * 2,
+        diagonal_finalists: diagonal_finalists,
+        commutator_finalists: commutator_finalists,
+        normalized_actions: normalized_actions,
+        diagonal: best_diagonal,
+        commutator: best_commutator,
+        table: best_table.cells,
+    }
+}
+
+fn canonical_keys_equal(left: &GL4CanonicalKey, right: &GL4CanonicalKey)
+    -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < 16 {
+        if left.diagonal[i] != right.diagonal[i] { return false }
+        i = i + 1
+    }
+    i = 0
+    while i < 256 {
+        if left.commutator[i] != right.commutator[i] ||
+            left.table[i] != right.table[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn canonical_distance(left: &GL4CanonicalKey, right: &GL4CanonicalKey)
+    -> i64 with Mut, Panic {
+    var distance: i64 = 0
+    var index: i64 = 0
+    while index < 256 {
+        if left.table[index] != right.table[index] {
+            distance = distance + 1
+        }
+        index = index + 1
+    }
+    distance
+}
+
+struct GL4CorpusKeys {
+    untwisted: GL4CanonicalKey,
+    cayley_dickson: GL4CanonicalKey,
+    diagonal: GL4CanonicalKey,
+}
+
+struct GL4SearchWork {
+    search: GL4SearchCertificate,
+    selected_raw: GL4SignTable,
+    selected_key: GL4CanonicalKey,
+    corpus: GL4CorpusKeys,
+}
+
+fn empty_canonical_key() -> GL4CanonicalKey {
+    GL4CanonicalKey {
+        valid: false,
+        matrix_code: 0 - 1,
+        swap_operands: false,
+        actions_considered: 0,
+        diagonal_finalists: 0,
+        commutator_finalists: 0,
+        normalized_actions: 0,
+        diagonal: [0; 16],
+        commutator: [0; 256],
+        table: [0; 256],
+    }
+}
+
+fn empty_candidate() -> GL4GeneratedCandidate {
+    GL4GeneratedCandidate {
+        generation_ordinal: 0 - 1,
+        phase_mask: 0 - 1,
+        canonical_matrix: 0 - 1,
+        canonical_swap: false,
+        canonical_quotient_distance: 0 - 1,
+        nearest_corpus_id: 0,
+        equivalent_to_corpus: false,
+        declared_gl4_gauge_inequivalence: false,
+    }
+}
+
+fn corpus_key_by_id(corpus: &GL4CorpusKeys, corpus_id: i64)
+    -> GL4CanonicalKey {
+    if corpus_id == PIREUS_GL4_CORPUS_UNTWISTED_XOR {
+        return corpus.untwisted
+    }
+    if corpus_id == PIREUS_GL4_CORPUS_CAYLEY_DICKSON_16 {
+        return corpus.cayley_dickson
+    }
+    corpus.diagonal
+}
+
+fn build_corpus_keys(universe: &GL4MatrixUniverse) -> GL4CorpusKeys
+with Mut, Panic, Div {
+    let untwisted_raw = corpus_table(PIREUS_GL4_CORPUS_UNTWISTED_XOR)
+    let cayley_raw = corpus_table(PIREUS_GL4_CORPUS_CAYLEY_DICKSON_16)
+    let diagonal_raw = corpus_table(PIREUS_GL4_CORPUS_DIAGONAL_BICHARACTER)
+    GL4CorpusKeys {
+        untwisted: canonicalize(&untwisted_raw, universe),
+        cayley_dickson: canonicalize(&cayley_raw, universe),
+        diagonal: canonicalize(&diagonal_raw, universe),
+    }
+}
+
+fn run_search(universe: &GL4MatrixUniverse) -> GL4SearchWork
+with Mut, Panic, Div, Epistemic {
+    let corpus = build_corpus_keys(universe)
+    var masks: [i64; 16] = [0; 16]
+    var distances: [i64; 16] = [0; 16]
+    var matrices: [i64; 16] = [0; 16]
+    var swaps: [bool; 16] = [false; 16]
+    var nearest_corpus: [i64; 16] = [0; 16]
+    var equivalents: [bool; 16] = [false; 16]
+    var declared_equivalence_classes: [i64; 16] = [0; 16]
+    var declared_equivalence_class_count: i64 = 0
+    var canonical_diagonals: [i64; 256] = [0; 256]
+    var canonical_commutators: [i64; 4096] = [0; 4096]
+    var canonical_tables: [i64; 4096] = [0; 4096]
+    var candidate_digest_words: [i64; 128] = [0; 128]
+    var corpus_digest_words: [i64; 24] = [0; 24]
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GL4_CORPUS_COUNT {
+        let corpus_key = corpus_key_by_id(&corpus, corpus_id)
+        let corpus_key_digest = digest_canonical(&corpus_key)
+        var word: i64 = 0
+        while word < 8 {
+            corpus_digest_words[(corpus_id - 1) * 8 + word] =
+                corpus_key_digest.words[word]
+            word = word + 1
+        }
+        corpus_id = corpus_id + 1
+    }
+    var selected = empty_candidate()
+    var selected_raw = GL4SignTable { cells: [0; 256] }
+    var selected_key = empty_canonical_key()
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GL4_CANDIDATE_COUNT {
+        let mask = (ordinal + PIREUS_GL4_SEED) % PIREUS_GL4_CANDIDATE_COUNT
+        let raw = candidate_table(mask)
+        let key = canonicalize(&raw, universe)
+        let d1 = canonical_distance(&key, &corpus.untwisted)
+        let d2 = canonical_distance(&key, &corpus.cayley_dickson)
+        let d3 = canonical_distance(&key, &corpus.diagonal)
+        var score = d1
+        var nearest = PIREUS_GL4_CORPUS_UNTWISTED_XOR
+        if d2 < score {
+            score = d2
+            nearest = PIREUS_GL4_CORPUS_CAYLEY_DICKSON_16
+        }
+        if d3 < score {
+            score = d3
+            nearest = PIREUS_GL4_CORPUS_DIAGONAL_BICHARACTER
+        }
+        let equivalent = canonical_keys_equal(&key, &corpus.untwisted) ||
+            canonical_keys_equal(&key, &corpus.cayley_dickson) ||
+            canonical_keys_equal(&key, &corpus.diagonal)
+        let candidate = GL4GeneratedCandidate {
+            generation_ordinal: ordinal,
+            phase_mask: mask,
+            canonical_matrix: key.matrix_code,
+            canonical_swap: key.swap_operands,
+            canonical_quotient_distance: score,
+            nearest_corpus_id: nearest,
+            equivalent_to_corpus: equivalent,
+            declared_gl4_gauge_inequivalence: !equivalent && score > 0,
+        }
+        var declared_equivalence_class: i64 = 0 - 1
+        var prior: i64 = 0
+        while prior < ordinal && declared_equivalence_class < 0 {
+            var same: bool = true
+            var diagonal_cell: i64 = 0
+            while diagonal_cell < 16 && same {
+                if key.diagonal[diagonal_cell] !=
+                    canonical_diagonals[prior * 16 + diagonal_cell] {
+                    same = false
+                }
+                diagonal_cell = diagonal_cell + 1
+            }
+            var cell: i64 = 0
+            while cell < 256 && same {
+                if key.commutator[cell] !=
+                        canonical_commutators[prior * 256 + cell] ||
+                    key.table[cell] != canonical_tables[prior * 256 + cell] {
+                    same = false
+                }
+                cell = cell + 1
+            }
+            if same {
+                declared_equivalence_class = declared_equivalence_classes[prior]
+            }
+            prior = prior + 1
+        }
+        if declared_equivalence_class < 0 {
+            declared_equivalence_class = declared_equivalence_class_count
+            declared_equivalence_class_count =
+                declared_equivalence_class_count + 1
+        }
+        declared_equivalence_classes[ordinal] = declared_equivalence_class
+        var diagonal_cell: i64 = 0
+        while diagonal_cell < 16 {
+            canonical_diagonals[ordinal * 16 + diagonal_cell] =
+                key.diagonal[diagonal_cell]
+            diagonal_cell = diagonal_cell + 1
+        }
+        var cell: i64 = 0
+        while cell < 256 {
+            canonical_commutators[ordinal * 256 + cell] = key.commutator[cell]
+            canonical_tables[ordinal * 256 + cell] = key.table[cell]
+            cell = cell + 1
+        }
+        let key_digest = digest_canonical(&key)
+        var word: i64 = 0
+        while word < 8 {
+            candidate_digest_words[ordinal * 8 + word] = key_digest.words[word]
+            word = word + 1
+        }
+        masks[ordinal] = mask
+        distances[ordinal] = score
+        matrices[ordinal] = key.matrix_code
+        swaps[ordinal] = key.swap_operands
+        nearest_corpus[ordinal] = nearest
+        equivalents[ordinal] = equivalent
+        if selected.generation_ordinal < 0 ||
+            candidate.canonical_quotient_distance >
+                selected.canonical_quotient_distance {
+            selected = candidate
+            selected_raw = raw
+            selected_key = key
+        }
+        ordinal = ordinal + 1
+    }
+    GL4SearchWork {
+        search: GL4SearchCertificate {
+            candidates_evaluated: PIREUS_GL4_CANDIDATE_COUNT,
+            corpus_canonicalized: PIREUS_GL4_CORPUS_COUNT,
+            matrices_per_table: universe.matrix_count,
+            linear_swap_actions_per_table: universe.matrix_count * 2,
+            candidate_masks: masks,
+            candidate_distances: distances,
+            candidate_matrices: matrices,
+            candidate_swaps: swaps,
+            candidate_nearest_corpus: nearest_corpus,
+            candidate_equivalent: equivalents,
+            candidate_equivalence_classes: declared_equivalence_classes,
+            candidate_equivalence_class_count: declared_equivalence_class_count,
+            candidate_canonical_digest_words: candidate_digest_words,
+            corpus_canonical_digest_words: corpus_digest_words,
+            selected: selected,
+        },
+        selected_raw: selected_raw,
+        selected_key: selected_key,
+        corpus: corpus,
+    }
+}
+
+fn exhaustive_gauge_invariance_failures(table: &GL4SignTable)
+    -> i64 with Mut, Panic {
+    let expected = normalize_gauge(table)
+    var failures: i64 = 0
+    var mask: i64 = 0
+    while mask < PIREUS_GL4_GAUGE_COUNT {
+        let gauged = apply_gauge(table, mask)
+        let normalized = normalize_gauge(&gauged)
+        if !tables_equal(&expected, &normalized) ||
+            !tree_cells_zero(&normalized) {
+            failures = failures + 1
+        }
+        mask = mask + 1
+    }
+    failures
+}
+
+fn generator_invariance_failures(
+    table: &GL4SignTable,
+    expected: &GL4CanonicalKey,
+    universe: &GL4MatrixUniverse,
+) -> i64 with Mut, Panic {
+    var failures: i64 = 0
+    var generator: i64 = 0
+    while generator < 4 {
+        let transformed = transform_table(table, generator_code(generator), false)
+        let key = canonicalize(&transformed, universe)
+        if !canonical_keys_equal(expected, &key) {
+            failures = failures + 1
+        }
+        generator = generator + 1
+    }
+    let swapped = transform_table(table, 33825, true)
+    let swap_key = canonicalize(&swapped, universe)
+    if !canonical_keys_equal(expected, &swap_key) {
+        failures = failures + 1
+    }
+    failures
+}
+
+fn build_witness(work: &GL4SearchWork) -> GL4InequivalenceWitness
+with Mut, Panic {
+    let corpus_key = corpus_key_by_id(
+        &work.corpus, work.search.selected.nearest_corpus_id)
+    var index: i64 = 0
+    while index < 256 {
+        if work.selected_key.table[index] != corpus_key.table[index] {
+            return GL4InequivalenceWitness {
+                present: true,
+                corpus_id: work.search.selected.nearest_corpus_id,
+                i: index / 16,
+                j: index % 16,
+                candidate_sign: bit_to_sign(work.selected_key.table[index]),
+                corpus_sign: bit_to_sign(corpus_key.table[index]),
+                canonical_quotient_distance:
+                    work.search.selected.canonical_quotient_distance,
+            }
+        }
+        index = index + 1
+    }
+    GL4InequivalenceWitness {
+        present: false,
+        corpus_id: work.search.selected.nearest_corpus_id,
+        i: 0 - 1,
+        j: 0 - 1,
+        candidate_sign: 0,
+        corpus_sign: 0,
+        canonical_quotient_distance:
+            work.search.selected.canonical_quotient_distance,
+    }
+}
+
+fn fingerprint(key: &GL4CanonicalKey) -> GL4OperatorFingerprint
+with Mut, Panic {
+    var positive: i64 = 0
+    var negative: i64 = 0
+    var commutator_defects: i64 = 0
+    var associator_defects: i64 = 0
+    var displacement: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let bit = key.table[i * 16 + j]
+            if bit == 0 { positive = positive + 1 }
+            else {
+                negative = negative + 1
+                displacement[i ^ j] = displacement[i ^ j] + 1
+            }
+            if bit != key.table[j * 16 + i] {
+                commutator_defects = commutator_defects + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            var k: i64 = 0
+            while k < 16 {
+                let lhs = key.table[i * 16 + j] ^
+                    key.table[(i ^ j) * 16 + k]
+                let rhs = key.table[j * 16 + k] ^
+                    key.table[i * 16 + (j ^ k)]
+                if lhs != rhs { associator_defects = associator_defects + 1 }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    GL4OperatorFingerprint {
+        positive_count: positive,
+        negative_count: negative,
+        commutator_defects: commutator_defects,
+        associator_defects: associator_defects,
+        displacement_negative_counts: displacement,
+    }
+}
+
+pub fn pireus_operator_genesis_gl4_request() -> GL4AuthorityRequest {
+    GL4AuthorityRequest {
+        producer_language: PIREUS_GL4_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_GL4_ROLE_SEMANTIC_AUTHORITY,
+        stage: PIREUS_GL4_STAGE_SOUNIO_EXECUTABLE,
+        policy_present: true,
+        grammar_present: true,
+        corpus_present: true,
+        matrix_universe_present: true,
+        gauge_quotient_present: true,
+        declared_candidates: PIREUS_GL4_CANDIDATE_COUNT,
+        declared_matrix_encodings: PIREUS_GL4_MATRIX_ENCODINGS,
+        declared_matrices: PIREUS_GL4_MATRIX_COUNT,
+        declared_gauges: PIREUS_GL4_GAUGE_COUNT,
+        declared_gauge_kernel: PIREUS_GL4_GAUGE_KERNEL_COUNT,
+        declared_gauge_actions: PIREUS_GL4_GAUGE_ACTION_COUNT,
+        declared_action_universe: PIREUS_GL4_DECLARED_ACTION_UNIVERSE,
+        semantics_frozen: false,
+        parity_requested: false,
+        orbit_hamming_claimed: false,
+        relative_algebraic_novelty_requested: false,
+        global_novelty_requested: false,
+        historical_novelty_requested: false,
+        priority_requested: false,
+        algorithmic_novelty_requested: false,
+        material_novelty_requested: false,
+        scientific_novelty_requested: false,
+        claim_ready_requested: false,
+        external_review_promoted: false,
+        fingerprint_only_proof: false,
+        waiver_present: false,
+        waiver_founder: false,
+        waiver_scoped: false,
+        waiver_purpose_bound: false,
+        waiver_live: false,
+    }
+}
+
+fn request_error(request: &GL4AuthorityRequest) -> i64 {
+    if request.producer_language != PIREUS_GL4_LANGUAGE_SOUNIO ||
+        request.producer_role != PIREUS_GL4_ROLE_SEMANTIC_AUTHORITY {
+        return PIREUS_GL4_ERR_AUTHORITY
+    }
+    if request.stage != PIREUS_GL4_STAGE_SOUNIO_EXECUTABLE ||
+        request.semantics_frozen || request.parity_requested {
+        return PIREUS_GL4_ERR_STAGE
+    }
+    if !request.policy_present { return PIREUS_GL4_ERR_POLICY }
+    if !request.grammar_present || !request.corpus_present ||
+        !request.matrix_universe_present || !request.gauge_quotient_present ||
+        request.declared_candidates != PIREUS_GL4_CANDIDATE_COUNT ||
+        request.declared_matrix_encodings != PIREUS_GL4_MATRIX_ENCODINGS ||
+        request.declared_matrices != PIREUS_GL4_MATRIX_COUNT ||
+        request.declared_gauges != PIREUS_GL4_GAUGE_COUNT ||
+        request.declared_gauge_kernel != PIREUS_GL4_GAUGE_KERNEL_COUNT ||
+        request.declared_gauge_actions != PIREUS_GL4_GAUGE_ACTION_COUNT ||
+        request.declared_action_universe !=
+            PIREUS_GL4_DECLARED_ACTION_UNIVERSE {
+        return PIREUS_GL4_ERR_SPACE
+    }
+    if request.orbit_hamming_claimed ||
+        request.relative_algebraic_novelty_requested ||
+        request.global_novelty_requested ||
+        request.historical_novelty_requested || request.priority_requested ||
+        request.algorithmic_novelty_requested ||
+        request.material_novelty_requested ||
+        request.scientific_novelty_requested ||
+        request.claim_ready_requested || request.external_review_promoted ||
+        request.fingerprint_only_proof {
+        return PIREUS_GL4_ERR_CLAIM_SCOPE
+    }
+    if request.waiver_present && !(request.waiver_founder &&
+        request.waiver_scoped && request.waiver_purpose_bound &&
+        request.waiver_live) {
+        return PIREUS_GL4_ERR_WAIVER
+    }
+    PIREUS_GL4_OK
+}
+
+fn request_refused(request: &GL4AuthorityRequest) -> bool {
+    request_error(request) != PIREUS_GL4_OK
+}
+
+fn novelty_claim_valid(distance: i64, equivalent: bool, complete: bool) -> bool {
+    distance > 0 && !equivalent && complete
+}
+
+fn exercise_negatives() -> GL4GenesisNegatives with Mut {
+    var request = pireus_operator_genesis_gl4_request()
+    request.policy_present = false
+    let missing_policy = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.grammar_present = false
+    let missing_grammar = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.corpus_present = false
+    let missing_corpus = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.matrix_universe_present = false
+    let missing_matrix = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.gauge_quotient_present = false
+    let missing_gauge = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_candidates = 15
+    let incomplete_candidates = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_matrix_encodings = 65535
+    let incomplete_matrix_scan = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_matrices = 20159
+    let incomplete_gl4 = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_gauges = 32767
+    let incomplete_gauges = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_gauge_kernel = 15
+    let wrong_kernel = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_gauge_actions = 2047
+    let wrong_gauge_actions = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.declared_action_universe = 82575359
+    let wrong_action_universe = request_refused(&request)
+
+    request = pireus_operator_genesis_gl4_request()
+    request.producer_language = PIREUS_GL4_LANGUAGE_PYTHON
+    request.producer_role = PIREUS_GL4_ROLE_FORBIDDEN_ORACLE
+    let python_oracle = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.producer_language = PIREUS_GL4_LANGUAGE_RUST
+    request.producer_role = PIREUS_GL4_ROLE_FORBIDDEN_ORACLE
+    let rust_oracle = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.producer_language = PIREUS_GL4_LANGUAGE_CPP
+    request.producer_role = PIREUS_GL4_ROLE_MATERIAL_PARITY
+    let cpp_authority = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.producer_language = PIREUS_GL4_LANGUAGE_LLM
+    request.producer_role = PIREUS_GL4_ROLE_REVIEW_ONLY
+    let llm_authority = request_refused(&request)
+
+    request = pireus_operator_genesis_gl4_request()
+    request.parity_requested = true
+    let parity_prefreeze = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.orbit_hamming_claimed = true
+    let orbit_hamming = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.relative_algebraic_novelty_requested = true
+    let algebraic = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.global_novelty_requested = true
+    let global = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.historical_novelty_requested = true
+    let historical = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.priority_requested = true
+    let priority = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.algorithmic_novelty_requested = true
+    let algorithmic = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.material_novelty_requested = true
+    let material = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.scientific_novelty_requested = true
+    let scientific = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.claim_ready_requested = true
+    let claim_ready = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.external_review_promoted = true
+    let review = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.fingerprint_only_proof = true
+    let fingerprint_only = request_refused(&request)
+    request = pireus_operator_genesis_gl4_request()
+    request.waiver_present = true
+    request.waiver_founder = true
+    request.waiver_scoped = false
+    request.waiver_purpose_bound = true
+    request.waiver_live = true
+    let invalid_waiver = request_refused(&request)
+    let zero_distance = !novelty_claim_valid(0, false, true)
+
+    var passed: i64 = 0
+    if missing_policy { passed = passed + 1 }
+    if missing_grammar { passed = passed + 1 }
+    if missing_corpus { passed = passed + 1 }
+    if missing_matrix { passed = passed + 1 }
+    if missing_gauge { passed = passed + 1 }
+    if incomplete_candidates { passed = passed + 1 }
+    if incomplete_matrix_scan { passed = passed + 1 }
+    if incomplete_gl4 { passed = passed + 1 }
+    if incomplete_gauges { passed = passed + 1 }
+    if wrong_kernel { passed = passed + 1 }
+    if wrong_gauge_actions { passed = passed + 1 }
+    if wrong_action_universe { passed = passed + 1 }
+    if python_oracle { passed = passed + 1 }
+    if rust_oracle { passed = passed + 1 }
+    if cpp_authority { passed = passed + 1 }
+    if llm_authority { passed = passed + 1 }
+    if parity_prefreeze { passed = passed + 1 }
+    if orbit_hamming { passed = passed + 1 }
+    if algebraic { passed = passed + 1 }
+    if global { passed = passed + 1 }
+    if historical { passed = passed + 1 }
+    if priority { passed = passed + 1 }
+    if algorithmic { passed = passed + 1 }
+    if material { passed = passed + 1 }
+    if scientific { passed = passed + 1 }
+    if claim_ready { passed = passed + 1 }
+    if review { passed = passed + 1 }
+    if fingerprint_only { passed = passed + 1 }
+    if invalid_waiver { passed = passed + 1 }
+    if zero_distance { passed = passed + 1 }
+    GL4GenesisNegatives {
+        missing_policy: missing_policy,
+        missing_grammar: missing_grammar,
+        missing_corpus: missing_corpus,
+        missing_matrix_universe: missing_matrix,
+        missing_gauge_quotient: missing_gauge,
+        incomplete_candidates: incomplete_candidates,
+        incomplete_matrix_scan: incomplete_matrix_scan,
+        incomplete_gl4: incomplete_gl4,
+        incomplete_gauges: incomplete_gauges,
+        wrong_gauge_kernel: wrong_kernel,
+        wrong_gauge_actions: wrong_gauge_actions,
+        wrong_action_universe: wrong_action_universe,
+        python_oracle: python_oracle,
+        rust_oracle: rust_oracle,
+        cpp_authority: cpp_authority,
+        llm_authority: llm_authority,
+        parity_prefreeze: parity_prefreeze,
+        orbit_hamming_promotion: orbit_hamming,
+        algebraic_promotion: algebraic,
+        global_promotion: global,
+        historical_promotion: historical,
+        priority_promotion: priority,
+        algorithmic_promotion: algorithmic,
+        material_promotion: material,
+        scientific_promotion: scientific,
+        claim_ready_promotion: claim_ready,
+        review_promotion: review,
+        fingerprint_promotion: fingerprint_only,
+        invalid_waiver: invalid_waiver,
+        zero_distance_promotion: zero_distance,
+        passed: passed,
+        total: 30,
+    }
+}
+
+fn digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var index: i64 = 0
+    while index < 8 {
+        bytes[index] = ((value >> (56 - index * 8)) & 255) as u8
+        index = index + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn digest_add_digest(state: SHA256State, digest: &GL4GenesisDigest)
+    -> SHA256State with Mut, Panic, Div {
+    var next = state
+    var index: i64 = 0
+    while index < 8 {
+        next = digest_add_i64(next, digest.words[index])
+        index = index + 1
+    }
+    next
+}
+
+fn digest_finish(state: SHA256State) -> GL4GenesisDigest
+with Mut, Panic, Div, Epistemic {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    GL4GenesisDigest { words: words }
+}
+
+fn digest_add_key(state: SHA256State, key: &GL4CanonicalKey)
+    -> SHA256State with Mut, Panic, Div {
+    var next = digest_add_bool(state, key.valid)
+    next = digest_add_i64(next, key.matrix_code)
+    next = digest_add_bool(next, key.swap_operands)
+    next = digest_add_i64(next, key.actions_considered)
+    next = digest_add_i64(next, key.diagonal_finalists)
+    next = digest_add_i64(next, key.commutator_finalists)
+    next = digest_add_i64(next, key.normalized_actions)
+    var index: i64 = 0
+    while index < 16 {
+        next = digest_add_i64(next, key.diagonal[index])
+        index = index + 1
+    }
+    index = 0
+    while index < 256 {
+        next = digest_add_i64(next, key.commutator[index])
+        next = digest_add_i64(next, key.table[index])
+        index = index + 1
+    }
+    next
+}
+
+fn digest_add_semantic_key(state: SHA256State, key: &GL4CanonicalKey)
+    -> SHA256State with Mut, Panic, Div {
+    var next = state
+    var index: i64 = 0
+    while index < 16 {
+        next = digest_add_i64(next, key.diagonal[index])
+        index = index + 1
+    }
+    index = 0
+    while index < 256 {
+        next = digest_add_i64(next, key.commutator[index])
+        next = digest_add_i64(next, key.table[index])
+        index = index + 1
+    }
+    next
+}
+
+fn digest_grammar() -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, PIREUS_GL4_CANDIDATE_COUNT)
+    state = digest_add_i64(state, PIREUS_GL4_SEED)
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GL4_CANDIDATE_COUNT {
+        let mask = (ordinal + PIREUS_GL4_SEED) % PIREUS_GL4_CANDIDATE_COUNT
+        state = digest_add_i64(state, mask)
+        var i: i64 = 0
+        while i < 16 {
+            var j: i64 = 0
+            while j < 16 {
+                state = digest_add_i64(state, candidate_bit(mask, i, j))
+                j = j + 1
+            }
+            i = i + 1
+        }
+        ordinal = ordinal + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_matrix_universe(universe: &GL4MatrixUniverse)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, universe.encodings_scanned)
+    state = digest_add_i64(state, universe.matrix_count)
+    state = digest_add_i64(state, universe.bfs_count)
+    state = digest_add_i64(state, universe.set_mismatches)
+    state = digest_add_i64(state, universe.bfs_noninvertible)
+    state = digest_add_bool(state, universe.bfs_overflow)
+    state = digest_add_bool(state, universe.identity_present)
+    state = digest_add_bool(state, universe.sorted_unique)
+    var index: i64 = 0
+    while index < universe.matrix_count {
+        state = digest_add_i64(state, universe.codes[index])
+        index = index + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_gauge(gauge: &GL4GaugeCertificate)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, gauge.gauge_functions)
+    state = digest_add_i64(state, gauge.kernel_count)
+    state = digest_add_i64(state, gauge.distinct_actions)
+    state = digest_add_i64(state, gauge.tree_edges)
+    state = digest_add_bool(state, gauge.quotient_exact)
+    var mask: i64 = 0
+    while mask < PIREUS_GL4_GAUGE_COUNT {
+        state = digest_add_i64(state, mask)
+        state = digest_add_bool(state, gauge_is_kernel(mask))
+        mask = mask + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_corpus(corpus: &GL4CorpusKeys)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GL4_CORPUS_COUNT {
+        state = digest_add_i64(state, corpus_id)
+        var i: i64 = 0
+        while i < 16 {
+            var j: i64 = 0
+            while j < 16 {
+                state = digest_add_i64(state, corpus_bit(corpus_id, i, j))
+                j = j + 1
+            }
+            i = i + 1
+        }
+        let key = corpus_key_by_id(corpus, corpus_id)
+        state = digest_add_key(state, &key)
+        corpus_id = corpus_id + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_search(search: &GL4SearchCertificate)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, search.candidates_evaluated)
+    state = digest_add_i64(state, search.corpus_canonicalized)
+    state = digest_add_i64(state, search.matrices_per_table)
+    state = digest_add_i64(state, search.linear_swap_actions_per_table)
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GL4_CANDIDATE_COUNT {
+        state = digest_add_i64(state, ordinal)
+        state = digest_add_i64(state, search.candidate_masks[ordinal])
+        state = digest_add_i64(state, search.candidate_distances[ordinal])
+        state = digest_add_i64(state, search.candidate_matrices[ordinal])
+        state = digest_add_bool(state, search.candidate_swaps[ordinal])
+        state = digest_add_i64(state, search.candidate_nearest_corpus[ordinal])
+        state = digest_add_bool(state, search.candidate_equivalent[ordinal])
+        state = digest_add_i64(
+            state, search.candidate_equivalence_classes[ordinal])
+        var word: i64 = 0
+        while word < 8 {
+            state = digest_add_i64(
+                state, search.candidate_canonical_digest_words[ordinal * 8 + word])
+            word = word + 1
+        }
+        ordinal = ordinal + 1
+    }
+    state = digest_add_i64(state, search.candidate_equivalence_class_count)
+    var corpus_word: i64 = 0
+    while corpus_word < 24 {
+        state = digest_add_i64(
+            state, search.corpus_canonical_digest_words[corpus_word])
+        corpus_word = corpus_word + 1
+    }
+    state = digest_add_i64(state, search.selected.generation_ordinal)
+    state = digest_add_i64(state, search.selected.phase_mask)
+    state = digest_add_i64(state, search.selected.canonical_matrix)
+    state = digest_add_bool(state, search.selected.canonical_swap)
+    state = digest_add_i64(
+        state, search.selected.canonical_quotient_distance)
+    state = digest_add_i64(state, search.selected.nearest_corpus_id)
+    state = digest_add_bool(state, search.selected.equivalent_to_corpus)
+    state = digest_add_bool(
+        state, search.selected.declared_gl4_gauge_inequivalence)
+    digest_finish(state)
+}
+
+fn digest_candidate(candidate: &GL4GeneratedCandidate, raw: &GL4SignTable)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, candidate.generation_ordinal)
+    state = digest_add_i64(state, candidate.phase_mask)
+    state = digest_add_i64(state, candidate.canonical_matrix)
+    state = digest_add_bool(state, candidate.canonical_swap)
+    state = digest_add_i64(state, candidate.canonical_quotient_distance)
+    state = digest_add_i64(state, candidate.nearest_corpus_id)
+    state = digest_add_bool(state, candidate.equivalent_to_corpus)
+    state = digest_add_bool(
+        state, candidate.declared_gl4_gauge_inequivalence)
+    var index: i64 = 0
+    while index < 256 {
+        state = digest_add_i64(state, raw.cells[index])
+        index = index + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_canonical(key: &GL4CanonicalKey)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    digest_finish(digest_add_semantic_key(sha256_init(), key))
+}
+
+fn digest_witness(witness: &GL4InequivalenceWitness)
+    -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_bool(state, witness.present)
+    state = digest_add_i64(state, witness.corpus_id)
+    state = digest_add_i64(state, witness.i)
+    state = digest_add_i64(state, witness.j)
+    state = digest_add_i64(state, witness.candidate_sign)
+    state = digest_add_i64(state, witness.corpus_sign)
+    state = digest_add_i64(state, witness.canonical_quotient_distance)
+    digest_finish(state)
+}
+
+fn create_receipt(
+    request: &GL4AuthorityRequest,
+    group: &GL4GroupCertificate,
+    gauge: &GL4GaugeCertificate,
+    search: &GL4SearchCertificate,
+    gauge_failures: i64,
+    generator_failures: i64,
+) -> GL4NoveltyReceipt {
+    let witnessed = group.complete && gauge.quotient_exact &&
+        search.candidates_evaluated == PIREUS_GL4_CANDIDATE_COUNT &&
+        search.corpus_canonicalized == PIREUS_GL4_CORPUS_COUNT &&
+        gauge_failures == 0 && generator_failures == 0 &&
+        search.selected.declared_gl4_gauge_inequivalence
+    GL4NoveltyReceipt {
+        schema: PIREUS_GL4_GENESIS_SCHEMA,
+        producer_language: request.producer_language,
+        producer_role: request.producer_role,
+        stage: request.stage,
+        grammar_hash_bound: true,
+        matrix_hash_bound: true,
+        gauge_hash_bound: true,
+        corpus_hash_bound: true,
+        declared_corpus_only: true,
+        declared_grammar_exhaustive: true,
+        all_sign_tables_exhausted: false,
+        base_twist_assumed: true,
+        exhaustive_search: witnessed,
+        relative_semantic_novelty: witnessed,
+        declared_gl4_gauge_inequivalence: witnessed,
+        relative_monomial_gauge_novelty: witnessed,
+        relative_algebraic_novelty: false,
+        algebra_isomorphism_complete: false,
+        quotient_distance_not_orbit_hamming: true,
+        algorithmic_novelty: false,
+        material_novelty: false,
+        scientific_novelty: false,
+        global_novelty: false,
+        historical_novelty: false,
+        priority_claim: false,
+        external_prior_art_complete: false,
+        source_hash_bound: false,
+        semantics_hash_bound: false,
+        receipt_frozen: false,
+        receipt_admitted: false,
+        formal_parity_open: false,
+        effect_parity_open: false,
+        material_parity_count: 0,
+        parity_open: false,
+        claim_ready: false,
+    }
+}
+
+fn digest_receipt(
+    receipt: &GL4NoveltyReceipt,
+    grammar_digest: &GL4GenesisDigest,
+    matrix_digest: &GL4GenesisDigest,
+    gauge_digest: &GL4GenesisDigest,
+    corpus_digest: &GL4GenesisDigest,
+    search_digest: &GL4GenesisDigest,
+    candidate_digest: &GL4GenesisDigest,
+    canonical_digest: &GL4GenesisDigest,
+    witness_digest: &GL4GenesisDigest,
+) -> GL4GenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, receipt.schema)
+    state = digest_add_i64(state, receipt.producer_language)
+    state = digest_add_i64(state, receipt.producer_role)
+    state = digest_add_i64(state, receipt.stage)
+    state = digest_add_bool(state, receipt.grammar_hash_bound)
+    state = digest_add_bool(state, receipt.matrix_hash_bound)
+    state = digest_add_bool(state, receipt.gauge_hash_bound)
+    state = digest_add_bool(state, receipt.corpus_hash_bound)
+    state = digest_add_bool(state, receipt.declared_corpus_only)
+    state = digest_add_bool(state, receipt.declared_grammar_exhaustive)
+    state = digest_add_bool(state, receipt.all_sign_tables_exhausted)
+    state = digest_add_bool(state, receipt.base_twist_assumed)
+    state = digest_add_bool(state, receipt.exhaustive_search)
+    state = digest_add_bool(state, receipt.relative_semantic_novelty)
+    state = digest_add_bool(
+        state, receipt.declared_gl4_gauge_inequivalence)
+    state = digest_add_bool(state, receipt.relative_monomial_gauge_novelty)
+    state = digest_add_bool(state, receipt.relative_algebraic_novelty)
+    state = digest_add_bool(state, receipt.algebra_isomorphism_complete)
+    state = digest_add_bool(
+        state, receipt.quotient_distance_not_orbit_hamming)
+    state = digest_add_bool(state, receipt.algorithmic_novelty)
+    state = digest_add_bool(state, receipt.material_novelty)
+    state = digest_add_bool(state, receipt.scientific_novelty)
+    state = digest_add_bool(state, receipt.global_novelty)
+    state = digest_add_bool(state, receipt.historical_novelty)
+    state = digest_add_bool(state, receipt.priority_claim)
+    state = digest_add_bool(state, receipt.external_prior_art_complete)
+    state = digest_add_bool(state, receipt.source_hash_bound)
+    state = digest_add_bool(state, receipt.semantics_hash_bound)
+    state = digest_add_bool(state, receipt.receipt_frozen)
+    state = digest_add_bool(state, receipt.receipt_admitted)
+    state = digest_add_bool(state, receipt.formal_parity_open)
+    state = digest_add_bool(state, receipt.effect_parity_open)
+    state = digest_add_i64(state, receipt.material_parity_count)
+    state = digest_add_bool(state, receipt.parity_open)
+    state = digest_add_bool(state, receipt.claim_ready)
+    state = digest_add_digest(state, grammar_digest)
+    state = digest_add_digest(state, matrix_digest)
+    state = digest_add_digest(state, gauge_digest)
+    state = digest_add_digest(state, corpus_digest)
+    state = digest_add_digest(state, search_digest)
+    state = digest_add_digest(state, candidate_digest)
+    state = digest_add_digest(state, canonical_digest)
+    state = digest_add_digest(state, witness_digest)
+    digest_finish(state)
+}
+
+pub fn pireus_gl4_genesis_digest_nonzero(digest: &GL4GenesisDigest) -> bool
+with Mut {
+    var index: i64 = 0
+    while index < 8 {
+        if digest.words[index] != 0 { return true }
+        index = index + 1
+    }
+    false
+}
+
+pub fn pireus_operator_genesis_gl4_evaluate(
+    request: &GL4AuthorityRequest,
+) -> GL4GenesisResult with Mut, Panic, Div, Epistemic {
+    let error = request_error(request)
+    let universe = build_matrix_universe()
+    let group = group_certificate(&universe)
+    let gauge = gauge_certificate()
+    let work = run_search(&universe)
+    let gauge_failures = exhaustive_gauge_invariance_failures(&work.selected_raw)
+    let generator_failures = generator_invariance_failures(
+        &work.selected_raw, &work.selected_key, &universe)
+    let witness = build_witness(&work)
+    let selected_fingerprint = fingerprint(&work.selected_key)
+    let negatives = exercise_negatives()
+    let receipt = create_receipt(
+        request, &group, &gauge, &work.search,
+        gauge_failures, generator_failures)
+
+    let grammar_digest = digest_grammar()
+    let matrix_digest = digest_matrix_universe(&universe)
+    let gauge_digest = digest_gauge(&gauge)
+    let corpus_digest = digest_corpus(&work.corpus)
+    let search_digest = digest_search(&work.search)
+    let candidate_digest = digest_candidate(
+        &work.search.selected, &work.selected_raw)
+    let canonical_digest = digest_canonical(&work.selected_key)
+    let witness_digest = digest_witness(&witness)
+    let receipt_digest = digest_receipt(
+        &receipt, &grammar_digest, &matrix_digest, &gauge_digest,
+        &corpus_digest, &search_digest, &candidate_digest,
+        &canonical_digest, &witness_digest)
+
+    var failures: i64 = 0
+    if error != PIREUS_GL4_OK { failures = failures + 1 }
+    if !group.complete || !gauge.quotient_exact {
+        failures = failures + 1
+    }
+    if work.search.candidates_evaluated != PIREUS_GL4_CANDIDATE_COUNT ||
+        work.search.corpus_canonicalized != PIREUS_GL4_CORPUS_COUNT ||
+        work.search.matrices_per_table != PIREUS_GL4_MATRIX_COUNT ||
+        work.search.linear_swap_actions_per_table !=
+            PIREUS_GL4_LINEAR_SWAP_ACTIONS || !work.selected_key.valid {
+        failures = failures + 1
+    }
+    if work.search.candidate_equivalence_class_count <= 0 ||
+        work.search.candidate_equivalence_class_count >
+            PIREUS_GL4_CANDIDATE_COUNT {
+        failures = failures + 1
+    }
+    if gauge_failures != 0 || generator_failures != 0 {
+        failures = failures + 1
+    }
+    if work.search.selected.equivalent_to_corpus ||
+        !work.search.selected.declared_gl4_gauge_inequivalence ||
+        work.search.selected.canonical_quotient_distance <= 0 ||
+        !witness.present {
+        failures = failures + 1
+    }
+    if selected_fingerprint.positive_count +
+        selected_fingerprint.negative_count != 256 {
+        failures = failures + 1
+    }
+    if negatives.passed != negatives.total { failures = failures + 1 }
+    if !receipt.relative_semantic_novelty ||
+        !receipt.declared_gl4_gauge_inequivalence ||
+        !receipt.relative_monomial_gauge_novelty ||
+        !receipt.declared_corpus_only ||
+        !receipt.declared_grammar_exhaustive ||
+        receipt.all_sign_tables_exhausted || !receipt.base_twist_assumed ||
+        receipt.relative_algebraic_novelty ||
+        receipt.algebra_isomorphism_complete ||
+        !receipt.quotient_distance_not_orbit_hamming ||
+        receipt.algorithmic_novelty || receipt.material_novelty ||
+        receipt.scientific_novelty || receipt.global_novelty ||
+        receipt.historical_novelty || receipt.priority_claim ||
+        receipt.source_hash_bound || receipt.semantics_hash_bound ||
+        receipt.receipt_frozen || receipt.receipt_admitted ||
+        receipt.parity_open || receipt.claim_ready {
+        failures = failures + 1
+    }
+    if !pireus_gl4_genesis_digest_nonzero(&grammar_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&matrix_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&gauge_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&corpus_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&search_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&candidate_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&canonical_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&witness_digest) ||
+        !pireus_gl4_genesis_digest_nonzero(&receipt_digest) {
+        failures = failures + 1
+    }
+    GL4GenesisResult {
+        valid: failures == 0,
+        error: error,
+        group: group,
+        gauge: gauge,
+        search: work.search,
+        selected_key: work.selected_key,
+        witness: witness,
+        fingerprint: selected_fingerprint,
+        gauge_invariance_checks: PIREUS_GL4_GAUGE_COUNT,
+        gauge_invariance_failures: gauge_failures,
+        generator_invariance_checks: 5,
+        generator_invariance_failures: generator_failures,
+        negatives: negatives,
+        receipt: receipt,
+        grammar_digest: grammar_digest,
+        matrix_digest: matrix_digest,
+        gauge_digest: gauge_digest,
+        corpus_digest: corpus_digest,
+        search_digest: search_digest,
+        candidate_digest: candidate_digest,
+        canonical_digest: canonical_digest,
+        witness_digest: witness_digest,
+        receipt_digest: receipt_digest,
+        failures: failures,
+    }
+}
+
+fn gl4_digest_matches(
+    digest: &GL4GenesisDigest,
+    expected: &[i64; 8],
+) -> bool with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if digest.words[word] != expected[word] { return false }
+        word = word + 1
+    }
+    true
+}
+
+fn gl4_expected_class_digest_word(class_id: i64, word: i64)
+    -> i64 with Panic {
+    let class_0: [i64; 8] = [
+        2760106619, 4068173581, 1397156592, 4034672790,
+        965532095, 702338662, 855013530, 3853629388
+    ]
+    let class_1: [i64; 8] = [
+        3232950120, 1045321158, 2021165847, 1956050805,
+        478117551, 1477496824, 4208277146, 2012443260
+    ]
+    let class_2: [i64; 8] = [
+        1182811649, 3849587124, 3518287297, 2077484926,
+        2890069610, 716080654, 1746029927, 2292003081
+    ]
+    let class_3: [i64; 8] = [
+        4064601639, 2277203810, 2831905647, 1610215288,
+        2814312291, 2238388768, 124481399, 1587165752
+    ]
+    if class_id == 0 { return class_0[word] }
+    if class_id == 1 { return class_1[word] }
+    if class_id == 2 { return class_2[word] }
+    class_3[word]
+}
+
+fn gl4_expected_corpus_digest_word(corpus_id: i64, word: i64)
+    -> i64 with Panic {
+    let corpus_1: [i64; 8] = [
+        225535035, 4204842351, 280377562, 2703759856,
+        437217875, 2692232683, 290663237, 3985678916
+    ]
+    let corpus_2: [i64; 8] = [
+        3232950120, 1045321158, 2021165847, 1956050805,
+        478117551, 1477496824, 4208277146, 2012443260
+    ]
+    let corpus_3: [i64; 8] = [
+        4162798415, 1820772647, 1381549159, 1894276970,
+        3726495408, 772145684, 2399744598, 3749214944
+    ]
+    if corpus_id == 1 { return corpus_1[word] }
+    if corpus_id == 2 { return corpus_2[word] }
+    corpus_3[word]
+}
+
+/// Exact v1 result admitted only after Sounio produced the first transcript.
+pub fn pireus_operator_genesis_gl4_frozen_mismatch_code(
+    result: &GL4GenesisResult,
+) -> i64 with Mut, Panic {
+    if !result.valid || result.error != PIREUS_GL4_OK ||
+        result.failures != 0 ||
+        result.group.encodings_scanned != PIREUS_GL4_MATRIX_ENCODINGS ||
+        result.group.matrix_count != PIREUS_GL4_MATRIX_COUNT ||
+        result.group.bfs_count != PIREUS_GL4_MATRIX_COUNT ||
+        result.group.set_mismatches != 0 ||
+        result.group.bfs_noninvertible != 0 || result.group.bfs_overflow ||
+        !result.group.identity_present || !result.group.sorted_unique ||
+        result.group.operand_orders != PIREUS_GL4_SWAP_COUNT ||
+        result.group.linear_swap_actions != PIREUS_GL4_LINEAR_SWAP_ACTIONS ||
+        PIREUS_GL4_DECLARED_ACTION_UNIVERSE != 82575360 ||
+        !result.group.complete {
+        return 1
+    }
+    if result.gauge.gauge_functions != PIREUS_GL4_GAUGE_COUNT ||
+        result.gauge.kernel_count != PIREUS_GL4_GAUGE_KERNEL_COUNT ||
+        result.gauge.distinct_actions != PIREUS_GL4_GAUGE_ACTION_COUNT ||
+        result.gauge.tree_edges != 11 || !result.gauge.quotient_exact ||
+        result.gauge_invariance_checks != PIREUS_GL4_GAUGE_COUNT ||
+        result.gauge_invariance_failures != 0 ||
+        result.generator_invariance_checks != 5 ||
+        result.generator_invariance_failures != 0 {
+        return 2
+    }
+
+    let expected_masks: [i64; 16] = [
+        9, 10, 11, 12, 13, 14, 15, 0,
+        1, 2, 3, 4, 5, 6, 7, 8
+    ]
+    let expected_distances: [i64; 16] = [
+        96, 96, 96, 96, 96, 96, 96, 0,
+        96, 96, 96, 96, 96, 96, 96, 112
+    ]
+    let expected_matrices: [i64; 16] = [
+        59041, 58906, 59051, 57706, 59047, 59002, 59053, 4953,
+        58207, 58357, 58202, 61237, 58204, 58309, 58201, 62024
+    ]
+    let expected_classes: [i64; 16] = [
+        0, 0, 0, 0, 0, 0, 0, 1,
+        2, 2, 2, 2, 2, 2, 2, 3
+    ]
+    if result.search.candidates_evaluated != PIREUS_GL4_CANDIDATE_COUNT ||
+        result.search.corpus_canonicalized != PIREUS_GL4_CORPUS_COUNT ||
+        result.search.matrices_per_table != PIREUS_GL4_MATRIX_COUNT ||
+        result.search.linear_swap_actions_per_table !=
+            PIREUS_GL4_LINEAR_SWAP_ACTIONS ||
+        result.search.candidate_equivalence_class_count != 4 {
+        return 3
+    }
+    var ordinal: i64 = 0
+    while ordinal < 16 {
+        let expected_class = expected_classes[ordinal]
+        if result.search.candidate_masks[ordinal] != expected_masks[ordinal] ||
+            result.search.candidate_distances[ordinal] !=
+                expected_distances[ordinal] ||
+            result.search.candidate_matrices[ordinal] !=
+                expected_matrices[ordinal] ||
+            result.search.candidate_swaps[ordinal] ||
+            result.search.candidate_nearest_corpus[ordinal] !=
+                (if ordinal == 15 { 1 } else { 2 }) ||
+            result.search.candidate_equivalent[ordinal] != (ordinal == 7) ||
+            result.search.candidate_equivalence_classes[ordinal] !=
+                expected_class {
+            return 4
+        }
+        var word: i64 = 0
+        while word < 8 {
+            if result.search.candidate_canonical_digest_words[
+                    ordinal * 8 + word] !=
+                gl4_expected_class_digest_word(expected_class, word) {
+                return 5
+            }
+            word = word + 1
+        }
+        ordinal = ordinal + 1
+    }
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GL4_CORPUS_COUNT {
+        var word: i64 = 0
+        while word < 8 {
+            if result.search.corpus_canonical_digest_words[
+                    (corpus_id - 1) * 8 + word] !=
+                gl4_expected_corpus_digest_word(corpus_id, word) {
+                return 6
+            }
+            word = word + 1
+        }
+        corpus_id = corpus_id + 1
+    }
+
+    let selected = &result.search.selected
+    if selected.generation_ordinal != 15 || selected.phase_mask != 8 ||
+        selected.canonical_matrix != 62024 || selected.canonical_swap ||
+        selected.canonical_quotient_distance != 112 ||
+        selected.nearest_corpus_id != PIREUS_GL4_CORPUS_UNTWISTED_XOR ||
+        selected.equivalent_to_corpus ||
+        !selected.declared_gl4_gauge_inequivalence ||
+        !result.selected_key.valid ||
+        result.selected_key.matrix_code != 62024 ||
+        result.selected_key.swap_operands ||
+        result.selected_key.actions_considered !=
+            PIREUS_GL4_LINEAR_SWAP_ACTIONS ||
+        result.selected_key.diagonal_finalists != 1344 ||
+        result.selected_key.commutator_finalists != 1344 ||
+        result.selected_key.normalized_actions != 2688 {
+        return 7
+    }
+    if !result.witness.present ||
+        result.witness.corpus_id != PIREUS_GL4_CORPUS_UNTWISTED_XOR ||
+        result.witness.i != 1 || result.witness.j != 6 ||
+        result.witness.candidate_sign != 0 - 1 ||
+        result.witness.corpus_sign != 1 ||
+        result.witness.canonical_quotient_distance != 112 {
+        return 8
+    }
+    if result.fingerprint.positive_count != 144 ||
+        result.fingerprint.negative_count != 112 ||
+        result.fingerprint.commutator_defects != 210 ||
+        result.fingerprint.associator_defects != 1848 {
+        return 9
+    }
+    var displacement: i64 = 0
+    while displacement < 16 {
+        if result.fingerprint.displacement_negative_counts[displacement] != 7 {
+            return 10
+        }
+        displacement = displacement + 1
+    }
+    if result.negatives.passed != 30 || result.negatives.total != 30 ||
+        !result.receipt.grammar_hash_bound ||
+        !result.receipt.matrix_hash_bound ||
+        !result.receipt.gauge_hash_bound ||
+        !result.receipt.corpus_hash_bound ||
+        !result.receipt.declared_corpus_only ||
+        !result.receipt.declared_grammar_exhaustive ||
+        result.receipt.all_sign_tables_exhausted ||
+        !result.receipt.base_twist_assumed ||
+        !result.receipt.exhaustive_search ||
+        !result.receipt.relative_semantic_novelty ||
+        !result.receipt.declared_gl4_gauge_inequivalence ||
+        !result.receipt.relative_monomial_gauge_novelty ||
+        result.receipt.relative_algebraic_novelty ||
+        result.receipt.algebra_isomorphism_complete ||
+        !result.receipt.quotient_distance_not_orbit_hamming ||
+        result.receipt.algorithmic_novelty || result.receipt.material_novelty ||
+        result.receipt.scientific_novelty || result.receipt.global_novelty ||
+        result.receipt.historical_novelty || result.receipt.priority_claim ||
+        result.receipt.external_prior_art_complete ||
+        result.receipt.source_hash_bound || result.receipt.semantics_hash_bound ||
+        result.receipt.receipt_frozen || result.receipt.receipt_admitted ||
+        result.receipt.formal_parity_open || result.receipt.effect_parity_open ||
+        result.receipt.material_parity_count != 0 ||
+        result.receipt.parity_open || result.receipt.claim_ready {
+        return 11
+    }
+
+    let expected_grammar: [i64; 8] = [
+        1793770414, 3596605389, 3846498539, 3166589795,
+        2873959943, 2944342869, 2969302947, 3062170044
+    ]
+    let expected_matrix: [i64; 8] = [
+        755398037, 1851778121, 3568868165, 1717633248,
+        1648359748, 313491211, 758581877, 4044503720
+    ]
+    let expected_gauge: [i64; 8] = [
+        1111855660, 609659236, 1573782502, 1340697759,
+        3221543783, 647377610, 199249447, 3451558743
+    ]
+    let expected_corpus: [i64; 8] = [
+        955706987, 2711967393, 3947352345, 122002224,
+        691029401, 3222860357, 943311825, 1012422981
+    ]
+    let expected_search: [i64; 8] = [
+        2268389035, 570170058, 2806865214, 2789628812,
+        373044869, 3367679257, 642183977, 2960017993
+    ]
+    let expected_candidate: [i64; 8] = [
+        1354854286, 3393898007, 1657056276, 2167064108,
+        3276458198, 1018008441, 1362534267, 3409201966
+    ]
+    let expected_canonical: [i64; 8] = [
+        4064601639, 2277203810, 2831905647, 1610215288,
+        2814312291, 2238388768, 124481399, 1587165752
+    ]
+    let expected_witness: [i64; 8] = [
+        4231779539, 1525680881, 1473941873, 1998826445,
+        2694657053, 2729760164, 1847567857, 3755186688
+    ]
+    let expected_receipt: [i64; 8] = [
+        3435816126, 2853659979, 2568270999, 1766970935,
+        2202081304, 3446974603, 511952213, 1138119276
+    ]
+    if !gl4_digest_matches(&result.grammar_digest, &expected_grammar) {
+        return 12
+    }
+    if !gl4_digest_matches(&result.matrix_digest, &expected_matrix) { return 13 }
+    if !gl4_digest_matches(&result.gauge_digest, &expected_gauge) { return 14 }
+    if !gl4_digest_matches(&result.corpus_digest, &expected_corpus) { return 15 }
+    if !gl4_digest_matches(&result.search_digest, &expected_search) { return 16 }
+    if !gl4_digest_matches(&result.candidate_digest, &expected_candidate) {
+        return 17
+    }
+    if !gl4_digest_matches(&result.canonical_digest, &expected_canonical) {
+        return 18
+    }
+    if !gl4_digest_matches(&result.witness_digest, &expected_witness) { return 19 }
+    if !gl4_digest_matches(&result.receipt_digest, &expected_receipt) { return 20 }
+    0
+}
+
+pub fn pireus_operator_genesis_gl4_matches_frozen_semantics(
+    result: &GL4GenesisResult,
+) -> bool with Mut, Panic {
+    pireus_operator_genesis_gl4_frozen_mismatch_code(result) == 0
+}

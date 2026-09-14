@@ -1,0 +1,63 @@
+//@ requires: madaros
+// graph::sinkhorn's Seq migration needs method calls to resolve through a
+// reference receiver, which is a modular-checker fix
+// (self-hosted/check/check.sio, 47156c820e). Measured 2026-09-05, same
+// worktree, engine swapped: lean_single rc=1; Madaros built from this branch
+// rc=0. The committed bin/madaros-linux-x86_64 (2026-09-03) gives rc=1 with
+// four E019 "method calls are not supported for this type" -- it predates the
+// fix, so this needs a refreshed prebuilt before a Madaros job can run it.
+//@ run-pass
+//@ expect-stdout: GRAPH_SINKHORN_OK
+// Covers graph::sinkhorn after the Seq migration. ProbMeasure.weights and
+// CostMatrix.data were [f64] built with slice .push (E019) and are Seq<f64>
+// now, as are the scaling vectors inside the algorithm.
+//
+// The module's own battery IS called. It was excluded when this test was first
+// written, on the reading that test_exp_approx failed on pre-existing numerics
+// -- true, but the description was far too mild. exp_approx seeded a Taylor
+// series at x/16 and then squared sixteen times, which is the 65536th power, so
+// it computed exp(4096*x): exp(1) saturated at 2^63. One line fixed it and all
+// four cases pass, test_sinkhorn_simple included, which depended on it.
+use graph::sinkhorn::*;
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // Measures: built by growing, read back through a &ProbMeasure receiver.
+    let mu = ProbMeasure::uniform(4)
+    let total: f64 = mu.total()
+    if total < 0.9999999 || total > 1.0000001 {
+        println("FAIL uniform total")
+        return 1
+    }
+    if mu.size() != 4 {
+        println("FAIL uniform size")
+        return 1
+    }
+
+    // Cost matrix: n*m runtime length, set then read through both receivers.
+    var cost = CostMatrix::new(2, 3)
+    cost.set(0, 0, 1.5)
+    cost.set(1, 2, 2.5)
+    let c00: f64 = cost.get(0, 0)
+    let c12: f64 = cost.get(1, 2)
+    let c01: f64 = cost.get(0, 1)
+    if c00 < 1.49 || c00 > 1.51 { println("FAIL cost get(0,0)"); return 1 }
+    if c12 < 2.49 || c12 > 2.51 { println("FAIL cost get(1,2)"); return 1 }
+    if c01 > 0.0001 { println("FAIL cost default"); return 1 }
+
+    // Out of range reads stay clamped rather than reading past the row.
+    let oob: f64 = cost.get(5, 5)
+    if oob > 0.0001 { println("FAIL cost out of range"); return 1 }
+
+    if !test_sinkhorn_identity() {
+        println("FAIL sinkhorn identity")
+        return 1
+    }
+
+    if !run_sinkhorn_tests() {
+        println("FAIL module battery")
+        return 1
+    }
+
+    println("GRAPH_SINKHORN_OK")
+    0
+}
