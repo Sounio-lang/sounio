@@ -262,6 +262,16 @@ esac
 # Measured 2026-09-14: the call-boundary reject witness exited 0 (no guard, no
 # trap) while its expanded form trapped with 1.
 #
+# The raw forms under SOUNIO_SOUC_BIN are expanded the same way, with SRC as the
+# first argument: `souc SRC OUT [flags]` (lean_single) and `souc SRC -o OUT`
+# (Madaros). Measured 2026-09-14 at 95d19dcfd2, before this: with the opt-in on,
+# the Madaros raw form built every tests/frontend/knowledge_runtime_guard_*reject
+# witness (9 guard shapes; the directive witness also with the directive alone)
+# into an ELF that exited 0 -- no guard -- while the same source expanded first
+# trapped with 1. lean_single's raw form failed on the unexpanded source with
+# error[P0003] instead. souc verbs under the override are expanded and then
+# refused (rc=64), as before.
+#
 # The rewritten copy is a hidden temporary file NEXT TO the source, not in /tmp,
 # so everything that depends on where the source lives still sees the same
 # directory: relative `use` resolution and bin/madaros's science-manifest lookup,
@@ -273,43 +283,56 @@ esac
 # not support must not quietly become an unguarded run.
 _krg_marker="${_SOUNIO_KRG_EXPANDED:-}"
 unset _SOUNIO_KRG_EXPANDED
-case "${1:-}" in
-  run|compile|build)
-    if [[ -z "$_krg_marker" && -n "${2:-}" ]]; then
-      _krg_src="$2"
-      _krg_on=0
-      if [[ "${SOUNIO_KNOWLEDGE_RUNTIME_GUARDS:-0}" == "1" ]]; then
-        _krg_on=1
-      elif [[ -f "$_krg_src" ]] &&
-           grep -Eq '^[[:space:]]*//@[[:space:]]*knowledge-runtime-guards([[:space:]]|$)' "$_krg_src"; then
-        _krg_on=1
-      fi
-      if [[ $_krg_on -eq 1 ]]; then
-        if [[ ! -f "$_krg_src" || "$_krg_src" != *.sio ]]; then
-          echo "souc: refused: knowledge runtime guards expand a single .sio file, and '$_krg_src' is not one" >&2
-          exit 64
-        fi
-        _krg_dir="$(cd "$(dirname "$_krg_src")" && pwd)"
-        _krg_abs="$_krg_dir/$(basename "$_krg_src")"
-        if ! _krg_out="$(mktemp --suffix=.sio "$_krg_dir/.souc-krg-$(basename "$_krg_src" .sio).XXXXXX" 2>/dev/null)"; then
-          echo "souc: refused: cannot write the guard-expanded copy next to $_krg_abs" >&2
-          exit 73
-        fi
-        trap 'rm -f "$_krg_out"' EXIT
-        if ! bash "$ROOT_DIR/scripts/ontology/expand_knowledge_runtime_guards.sh" "$_krg_abs" "$_krg_out"; then
-          echo "souc: refused: knowledge runtime guard expansion failed for $_krg_src; not compiling it unguarded" >&2
-          exit 65
-        fi
-        set +e
-        _SOUNIO_KRG_EXPANDED=1 "$ROOT_DIR/bin/souc" "$1" "$_krg_out" "${@:3}"
-        _krg_rc=$?
-        set -e
-        exit "$_krg_rc"
-      fi
+_krg_mode=""
+if [[ -z "$_krg_marker" ]]; then
+  case "${1:-}" in
+    run|compile|build)
+      if [[ -n "${2:-}" ]]; then _krg_mode="verb"; fi
+      ;;
+    ""|-*|check|info|pkg|install|search|ontology)
+      ;;
+    *)
+      if _is_elf "${SOUNIO_SOUC_BIN:-}"; then _krg_mode="raw"; fi
+      ;;
+  esac
+fi
+if [[ -n "$_krg_mode" ]]; then
+  if [[ "$_krg_mode" == "verb" ]]; then _krg_src="$2"; else _krg_src="$1"; fi
+  _krg_on=0
+  if [[ "${SOUNIO_KNOWLEDGE_RUNTIME_GUARDS:-0}" == "1" ]]; then
+    _krg_on=1
+  elif [[ -f "$_krg_src" ]] &&
+       grep -Eq '^[[:space:]]*//@[[:space:]]*knowledge-runtime-guards([[:space:]]|$)' "$_krg_src"; then
+    _krg_on=1
+  fi
+  if [[ $_krg_on -eq 1 ]]; then
+    if [[ ! -f "$_krg_src" || "$_krg_src" != *.sio ]]; then
+      echo "souc: refused: knowledge runtime guards expand a single .sio file, and '$_krg_src' is not one" >&2
+      exit 64
     fi
-    ;;
-esac
-unset _krg_marker
+    _krg_dir="$(cd "$(dirname "$_krg_src")" && pwd)"
+    _krg_abs="$_krg_dir/$(basename "$_krg_src")"
+    if ! _krg_out="$(mktemp --suffix=.sio "$_krg_dir/.souc-krg-$(basename "$_krg_src" .sio).XXXXXX" 2>/dev/null)"; then
+      echo "souc: refused: cannot write the guard-expanded copy next to $_krg_abs" >&2
+      exit 73
+    fi
+    trap 'rm -f "$_krg_out"' EXIT
+    if ! bash "$ROOT_DIR/scripts/ontology/expand_knowledge_runtime_guards.sh" "$_krg_abs" "$_krg_out"; then
+      echo "souc: refused: knowledge runtime guard expansion failed for $_krg_src; not compiling it unguarded" >&2
+      exit 65
+    fi
+    set +e
+    if [[ "$_krg_mode" == "verb" ]]; then
+      _SOUNIO_KRG_EXPANDED=1 "$ROOT_DIR/bin/souc" "$1" "$_krg_out" "${@:3}"
+    else
+      _SOUNIO_KRG_EXPANDED=1 "$ROOT_DIR/bin/souc" "$_krg_out" "${@:2}"
+    fi
+    _krg_rc=$?
+    set -e
+    exit "$_krg_rc"
+  fi
+fi
+unset _krg_marker _krg_mode
 
 # 1) Explicit ELF override: honor it directly (raw lean_single-style CLI).
 if _is_elf "${SOUNIO_SOUC_BIN:-}"; then
