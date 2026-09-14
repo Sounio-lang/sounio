@@ -82,12 +82,12 @@ require_rc zp_compact 0
 require_marker zp_compact 'ZERO_PROVENANCE PASS'
 reject_marker zp_compact 'Segmentation fault'
 
-# Full eisa::core_v2 + sedenion combined import still thin-link fail-closed
-run_capture combined tests/known_failures/zero_provenance_native_v2_probe.sio
-require_rc combined 1
-require_marker combined 'Failed to write native binary'
+# Full eisa::core_v2 + sedenion combined import (KL-12 closed with bool-cmp fix)
+run_capture combined tests/run-pass/zero_provenance_native_v2_combined.sio
+require_rc combined 0
+require_marker combined 'ZERO_PROVENANCE PASS'
+reject_marker combined 'Failed to write native binary'
 reject_marker combined 'Segmentation fault'
-reject_marker combined 'ZERO_PROVENANCE PASS'
 
 # Bool-cmp-in-struct-field shape residual (not an IR fn-count ceiling)
 run_capture bool_cmp_precomp tests/run-pass/thinlink_bool_cmp_field_precomp_smoke.sio
@@ -108,4 +108,4 @@ require_marker receipt 'Compilation successful!'
 require_marker receipt 'ZERO_EVENT_STDLIB PASS'
 reject_marker receipt 'Segmentation fault'
 
-echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+bool_cmp_precomp+bool_cmp_probe+receipt green; eisa+sedenion combined fail-closed'
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+combined+bool_cmp_precomp+bool_cmp_probe+receipt green'
