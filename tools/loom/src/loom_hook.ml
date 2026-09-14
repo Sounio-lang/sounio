@@ -2088,7 +2088,15 @@ let execute_event tool_root root event agent lane raw_session_id
       refresh_hook_capability tool_root presence_root agent lane raw_session_id;
       refresh_endpoint tool_root presence_root agent lane raw_session_id;
       if event_name = "SessionStart" then (
-        if obligation_supervisor_enabled then
+        (* Um agente dentro da membrana do change kernel nao gerencia daemons do
+           host. De la o /proc/<pid>/exe do supervisor le vazio atraves do
+           namespace de usuario, o ensure nao consegue provar que o supervisor e
+           dele e recusa a sessao inteira. Quem garante o supervisor e a ativacao
+           do runtime e os agentes nao mediados. *)
+        let material_readonly =
+          Sys.getenv_opt "SOUNIO_LOOM_MATERIAL_READONLY" = Some "1"
+        in
+        if obligation_supervisor_enabled && not material_readonly then
           ignore
             (coord_ok tool_root root
                [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
