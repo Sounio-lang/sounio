@@ -26,7 +26,8 @@ use epistemic::knowledge::{Epistemic, ep_add, ep_mul, ep_add_cov, ep_sub_cov, ep
 fn cov_near(a: f64, b: f64) -> bool with Mut, Div, Panic {
     let d = a - b
     let m = if d < 0.0 { 0.0 - d } else { d }
-    return m < 0.000000001
+    // 0.000000001 > m, not m < 0.000000001: both compilers evaluate < as TRUE for a NaN.
+    return 0.000000001 > m
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
@@ -48,11 +49,36 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if ep_add_cov(&x, &y, 0.0).variance != ep_add(&x, &y).variance { print("FAIL add_cov indep\n") return 1 }
     if ep_mul_cov(&x, &y, 0.0).variance != ep_mul(&x, &y).variance { print("FAIL mul_cov indep\n") return 1 }
 
-    // An inconsistent (non-PSD) covariance is now REFUSED at construction rather
-    // than clamped to a false zero-variance certainty: ep_*_cov panic when
-    // Cov^2 > Var(X)*Var(Y). That refusal aborts, so it cannot be asserted from a
-    // run-pass fixture; scripts/ci/ep_gum_covariance_gate.sh probes it directly
-    // (feeds cov = 99.0 and requires a non-zero exit with no EP_GUM_COV_OK).
+    // A covariance a hair past the boundary (4e-16 relative, rounding scale) is
+    // ACCEPTED, and the variance, exactly 0 in the true limit, comes back as 0.
+    // Before the projection each form returned a small negative (measured
+    // 2026-09-14 on both engines: sub -3.55e-15, add -3.55e-15, mul -1.42e-14,
+    // div -8.9e-16), which ep_merge would weight as near-certainty. The checks use
+    // >= only: both compilers evaluate != as FALSE for a NaN, so `!= 0.0` would
+    // let a NaN through.
+    let bw = Epistemic { val: 2.0, variance: 4.0, confidence: 900 }
+    let cov_hi = 4.0 * (1.0 + 4.0e-16)
+    let cov_lo = 0.0 - cov_hi
+    let vs = ep_sub_cov(&bw, &bw, cov_hi).variance
+    if !(vs >= 0.0 && 0.0 >= vs) { print("FAIL sub_cov boundary not reported as 0\n") return 1 }
+    let va = ep_add_cov(&bw, &bw, cov_lo).variance
+    if !(va >= 0.0 && 0.0 >= va) { print("FAIL add_cov boundary not reported as 0\n") return 1 }
+    let vm = ep_mul_cov(&bw, &bw, cov_lo).variance
+    if !(vm >= 0.0 && 0.0 >= vm) { print("FAIL mul_cov boundary not reported as 0\n") return 1 }
+    let vd = ep_div_cov(&bw, &bw, cov_hi).variance
+    if !(vd >= 0.0 && 0.0 >= vd) { print("FAIL div_cov boundary not reported as 0\n") return 1 }
+
+    // A zero variance with Cov = 0 is a valid (degenerate) covariance matrix.
+    let c0 = Epistemic { val: 5.0, variance: 0.0, confidence: 1000 }
+    let vz = ep_add_cov(&x, &c0, 0.0).variance
+    if !(vz >= 0.25 && 0.25 >= vz) { print("FAIL add_cov zero-variance operand\n") return 1 }
+
+    // Inputs outside the covariance-matrix domain are REFUSED at construction:
+    // ep_*_cov panic instead of producing a variance. A refusal aborts, so it cannot
+    // be asserted from a run-pass fixture. scripts/ci/ep_gum_covariance_gate.sh
+    // probes each case directly: a non-PSD Cov, the old 1e-10 slack, negative
+    // variances, a NaN Cov, an infinite variance, and a non-zero Cov with a zero
+    // variance.
 
     print("EP_GUM_COV_OK\n")
     return 0

@@ -60,43 +60,62 @@ for marker in 'UNCORRELATED case only' 'ep_add_cov' 'ep_mul_cov'; do
   }
 done
 
-# Refusal probe: a non-PSD covariance (Cov^2 > Var(X)*Var(Y)) must be REFUSED at
-# construction, not clamped to a false zero variance. There is no run-fail test
-# harness, so drive it here: compile a program that feeds cov = 99.0 (with
-# Var 0.25, 0.09 -> 99^2 = 9801 >> 0.0225) and require the run to ABORT (non-zero
-# exit) WITHOUT printing the sentinel. A clean exit or the sentinel means the
-# clamp came back and inconsistent evidence is again read as certainty.
-PROBE_SRC="$OUT/ep_gum_cov_refuse.sio"
-PROBE_ELF="$OUT/ep_gum_cov_refuse.elf"
-cat > "$PROBE_SRC" <<'PROBE'
+# Refusal probes: every input outside the covariance-matrix domain must be REFUSED
+# at construction, never turned into a variance. There is no run-fail test harness,
+# so each probe is compiled and run here and must ABORT (non-zero exit) WITHOUT
+# printing the escape sentinel. A clean exit or the sentinel means inconsistent
+# evidence reached a variance again, and ep_merge reads a zero or NaN variance as
+# near-certainty.
+#   nonpsd   Var 0.25, 0.09, Cov 99 (99^2 >> 0.0225)
+#   slack    Var 4, 4, Cov 4*(1 + 2e-11): the case the old 1e-10 slack accepted
+#   negvar   Var -1, -1, Cov 0: Cov^2 <= Var X * Var Y holds, S is negative definite
+#   nancov   Cov = inf - inf
+#   infvar   Var X = 1e200 * 1e200: infinite, refused as non-finite
+#   ovfprod  Var X 1e200, Var Y 1e200, Cov 0: finite variances whose product
+#            overflows, so the bound cannot be evaluated
+#   zerovar  Var X 0, Var Y 1, Cov 1e-300: the bound is exactly 0
+probe() {
+  local name="$1" op="$2" va="$3" vb="$4" cov="$5"
+  local src="$OUT/ep_gum_cov_refuse_${name}.sio" elf="$OUT/ep_gum_cov_refuse_${name}.elf"
+  cat > "$src" <<PROBE
 //@ run-pass
-use epistemic::knowledge::{Epistemic, ep_sub_cov}
+use epistemic::knowledge::{Epistemic, ${op}}
 fn main() -> i32 with IO, Div, Panic {
-    let x = Epistemic { val: 3.0, variance: 0.25, confidence: 900 }
-    let y = Epistemic { val: 2.0, variance: 0.09, confidence: 900 }
-    // Non-PSD: must panic here, never reach the print below.
-    let r = ep_sub_cov(&x, &y, 99.0)
+    let t = 1.0e200
+    let big = t * t
+    let x = Epistemic { val: 3.0, variance: ${va}, confidence: 900 }
+    let y = Epistemic { val: 2.0, variance: ${vb}, confidence: 900 }
+    // Outside the domain: must panic here, never reach the print below.
+    let r = ${op}(&x, &y, ${cov})
     print("EP_GUM_COV_REFUSE_ESCAPED ")
     print_int(r.variance as i64)
     print("\n")
     return 0
 }
 PROBE
-if ! "$SOUC" compile "$PROBE_SRC" -o "$PROBE_ELF" >"$OUT/probe_compile.log" 2>&1; then
-  echo "FAIL: refusal probe did not compile"
-  tail -40 "$OUT/probe_compile.log" || true
-  exit 1
-fi
-chmod +x "$PROBE_ELF"
-set +e
-"$PROBE_ELF" >"$OUT/probe_run.log" 2>&1
-PROBE_RC=$?
-set -e
-if [ "$PROBE_RC" -eq 0 ] || grep -q 'EP_GUM_COV_REFUSE_ESCAPED' "$OUT/probe_run.log"; then
-  echo "FAIL: non-PSD covariance was NOT refused (clamp regression)"
-  cat "$OUT/probe_run.log" || true
-  exit 1
-fi
-echo "  refusal probe ok: non-PSD covariance rejected (rc $PROBE_RC)"
+  if ! "$SOUC" compile "$src" -o "$elf" >"$OUT/probe_${name}_compile.log" 2>&1; then
+    echo "FAIL: refusal probe '$name' did not compile"
+    tail -40 "$OUT/probe_${name}_compile.log" || true
+    exit 1
+  fi
+  chmod +x "$elf"
+  set +e
+  "$elf" >"$OUT/probe_${name}_run.log" 2>&1
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] || grep -q 'EP_GUM_COV_REFUSE_ESCAPED' "$OUT/probe_${name}_run.log"; then
+    echo "FAIL: refusal probe '$name' was NOT refused"
+    cat "$OUT/probe_${name}_run.log" || true
+    exit 1
+  fi
+  echo "  refusal probe ok: $name (rc $rc)"
+}
+probe nonpsd  ep_sub_cov 0.25 0.09 99.0
+probe slack   ep_sub_cov 4.0 4.0 "4.0 * (1.0 + 2.0e-11)"
+probe negvar  ep_add_cov "0.0 - 1.0" "0.0 - 1.0" 0.0
+probe nancov  ep_mul_cov 0.25 0.09 "big - big"
+probe infvar  ep_div_cov big 0.09 0.0
+probe ovfprod ep_add_cov 1.0e200 1.0e200 0.0
+probe zerovar ep_add_cov 0.0 1.0 1.0e-300
 
 echo "MADAROS_EP_GUM_COVARIANCE_GATE_OK"

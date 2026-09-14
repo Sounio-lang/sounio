@@ -226,51 +226,142 @@ pub fn ep_shift(a: &Epistemic, c: f64) -> Epistemic {
 //   ep_mul_cov(x, x, Var) -> 4X²Var     (agrees with ep_square)
 // A negative variance cannot be produced by a VALID covariance -- for a positive
 // semi-definite 2x2 covariance matrix S = [[Var X, Cov],[Cov, Var Y]] the
-// propagated variance is g'Sg >= 0 for every Jacobian g. So rather than clamp a
-// negative result to zero (which would report inconsistent evidence as apparent
-// maximum certainty), all four forms REFUSE a non-PSD input up front, at
-// construction, the way indep_measured refuses an out-of-range rho. The PSD test
-// for the 2x2 is Cov^2 <= Var(X)*Var(Y); the (1 + 1e-10) slack admits the exact
-// self-correlated boundary (Cov = Var, e.g. ep_sub_cov(x, x, Var) -> 0) against
-// floating-point rounding. With the input proven PSD the propagated variance is
-// >= 0 and no clamp is needed.
+// propagated variance is g'Sg >= 0 for every Jacobian g. So all four forms check
+// that the input IS such a matrix and REFUSE anything else, the way
+// indep_measured refuses an out-of-range rho. A negative result is never clamped
+// to zero on inconsistent input: that would report inconsistent evidence as
+// apparent maximum certainty, because ep_merge weights a non-positive variance as
+// near-certainty.
+//
+// ep_cov_input_verdict requires, in order:
+//   1. Var X, Var Y and Cov finite, with magnitude at most 1e308 (NaN and +/-inf
+//      are refused);
+//   2. Var X >= 0 and Var Y >= 0. Cov^2 <= Var X * Var Y alone admits
+//      Var X = Var Y = -1, Cov = 0, whose S is negative definite;
+//   3. Cov exactly 0 when either variance is exactly 0, where the bound is exactly 0;
+//   4. Var X * Var Y within range. Past that the bound cannot be evaluated in this
+//      form, so the input is refused rather than waved through;
+//   5. Cov^2 <= Var X * Var Y * (1 + 1.8e-15).
+// 1.8e-15 is about 8 ulps: room for a boundary covariance a caller computed in
+// floating point (for example from sqrt(Var X * Var Y)), not a semantic slack.
+// The 1e-10 slack this replaces admitted covariances about 5e-11 past the boundary,
+// where the propagated variance came out negative.
+//
+// On exactly-PSD input the propagated variance is >= 0. The 1.8e-15 tolerance lets
+// an accepted input sit slightly past the boundary, where the exact variance can be
+// negative by at most about 1.8e-15 / 4 of s, the sum of the magnitudes of the terms
+// of v; floating-point evaluation adds a few ulps of s on top. ep_cov_output_verdict
+// reports a negative computed value as 0 when |v| <= 7.2e-15 * s, about 16 times
+// the tolerance bound, and refuses a larger negative or a NaN. The means are not
+// range-checked: if a product of means overflows (for example inf * 0), the variance
+// is NaN and the call is refused. A variance of exactly 0 from valid input is a real
+// certainty (Var(X - X) = 0), so ep_merge's weight for it is correct.
+//
+// Every float comparison below uses >= or >. Measured 2026-09-14 on lean_single and
+// Madaros: with a NaN operand, <, <= and == evaluate TRUE and != evaluates FALSE,
+// the opposite of IEEE 754, so a check written with them lets a NaN through.
+// >= and > evaluate FALSE for NaN on both, as IEEE 754 requires.
+
+// True when x is finite and |x| <= 1e308; false for NaN and +/-inf.
+fn ep_cov_in_range(x: f64) -> bool {
+    x >= 0.0 - 1.0e308 && 1.0e308 >= x
+}
+
+fn ep_cov_abs(x: f64) -> f64 {
+    if x >= 0.0 { x } else { 0.0 - x }
+}
+
+// 0 valid; 1 non-finite input; 2 negative variance; 3 non-zero Cov with a zero
+// variance; 4 Var X * Var Y out of range; 5 Cov^2 exceeds Var X * Var Y (non-PSD).
+fn ep_cov_input_verdict(va: f64, vb: f64, cov: f64) -> i64 {
+    if ep_cov_in_range(va) && ep_cov_in_range(vb) && ep_cov_in_range(cov) {
+        if va >= 0.0 && vb >= 0.0 {
+            if va > 0.0 && vb > 0.0 {
+                if ep_cov_in_range(va * vb) {
+                    if va * vb * (1.0 + 1.8e-15) >= cov * cov { 0 } else { 5 }
+                } else {
+                    4
+                }
+            } else {
+                if cov > 0.0 || 0.0 > cov { 3 } else { 0 }
+            }
+        } else {
+            2
+        }
+    } else {
+        1
+    }
+}
+
+// 0 keep v; 1 rounding-sized negative, report 0; 2 NaN; 3 negative beyond rounding.
+fn ep_cov_output_verdict(v: f64, s: f64) -> i64 {
+    if v >= 0.0 {
+        0
+    } else {
+        if 0.0 > v {
+            if 7.2e-15 * s >= 0.0 - v { 1 } else { 3 }
+        } else {
+            2
+        }
+    }
+}
 
 // Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)
 pub fn ep_add_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
-    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
-        panic("ep_add_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
-    }
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_add_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_add_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_add_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_add_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_add_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
     let v = a.variance + b.variance + 2.0 * cov
+    let out = ep_cov_output_verdict(v, a.variance + b.variance + 2.0 * ep_cov_abs(cov))
+    if out == 2 { panic("ep_add_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_add_cov: propagated variance negative beyond rounding") }
     Epistemic {
         val: a.val + b.val,
-        variance: v,
+        variance: if out == 1 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
 
 // Var(X-Y) = Var(X) + Var(Y) - 2Cov(X,Y)
 pub fn ep_sub_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
-    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
-        panic("ep_sub_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
-    }
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_sub_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_sub_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_sub_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_sub_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_sub_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
     let v = a.variance + b.variance - 2.0 * cov
+    let out = ep_cov_output_verdict(v, a.variance + b.variance + 2.0 * ep_cov_abs(cov))
+    if out == 2 { panic("ep_sub_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_sub_cov: propagated variance negative beyond rounding") }
     Epistemic {
         val: a.val - b.val,
-        variance: v,
+        variance: if out == 1 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 99 / 100),
     }
 }
 
 // GUM delta method: Var(XY) ~ Y²·Var(X) + X²·Var(Y) + 2XY·Cov(X,Y)
 pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Panic {
-    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
-        panic("ep_mul_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
-    }
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_mul_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_mul_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_mul_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_mul_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_mul_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
     let v = b.val * b.val * a.variance + a.val * a.val * b.variance
         + 2.0 * a.val * b.val * cov
+    let s = b.val * b.val * a.variance + a.val * a.val * b.variance
+        + 2.0 * ep_cov_abs(a.val * b.val * cov)
+    let out = ep_cov_output_verdict(v, s)
+    if out == 2 { panic("ep_mul_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_mul_cov: propagated variance negative beyond rounding") }
     Epistemic {
         val: a.val * b.val,
-        variance: v,
+        variance: if out == 1 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }
@@ -278,17 +369,25 @@ pub fn ep_mul_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Pani
 // GUM delta method: Var(X/Y) ~ Var(X)/Y² + X²·Var(Y)/Y⁴ - 2X·Cov(X,Y)/Y³
 // The partials are 1/Y and -X/Y², so the cross term enters NEGATIVE.
 pub fn ep_div_cov(a: &Epistemic, b: &Epistemic, cov: f64) -> Epistemic with Div, Panic {
-    if cov * cov > a.variance * b.variance * (1.0 + 1.0e-10) {
-        panic("ep_div_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)")
-    }
+    let why = ep_cov_input_verdict(a.variance, b.variance, cov)
+    if why == 1 { panic("ep_div_cov: non-finite variance or covariance") }
+    if why == 2 { panic("ep_div_cov: negative variance -- not a covariance matrix") }
+    if why == 3 { panic("ep_div_cov: non-zero covariance with a zero variance (non-PSD)") }
+    if why == 4 { panic("ep_div_cov: Var(X)*Var(Y) out of range -- PSD bound cannot be checked") }
+    if why == 5 { panic("ep_div_cov: inconsistent covariance -- Cov^2 exceeds Var(X)*Var(Y) (non-PSD)") }
     let y2 = b.val * b.val
     let y3 = y2 * b.val
     let y4 = y2 * y2
     let v = a.variance / y2 + a.val * a.val * b.variance / y4
         - 2.0 * a.val * cov / y3
+    let s = a.variance / y2 + a.val * a.val * b.variance / y4
+        + 2.0 * ep_cov_abs(a.val * cov / y3)
+    let out = ep_cov_output_verdict(v, s)
+    if out == 2 { panic("ep_div_cov: propagated variance is NaN") }
+    if out == 3 { panic("ep_div_cov: propagated variance negative beyond rounding") }
     Epistemic {
         val: a.val / b.val,
-        variance: v,
+        variance: if out == 1 { 0.0 } else { v },
         confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 98 / 100),
     }
 }
