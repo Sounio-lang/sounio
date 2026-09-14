@@ -15362,8 +15362,11 @@ impl Lowerer {
             // Intrinsic `.len()` on arrays/slices/strings → i64. Without this,
             // lowering emits IrArrayLen (no fn symbol), so the mangled-method
             // lookup below misses and kind stays 0 → println's char* printer SEGVs.
+            // A struct's own `len`/`count` falls through to the mangled lookup below.
             if ir_name_eq((*e).name, make_name("len")) || ir_name_eq((*e).name, make_name("count")) {
-                return 1
+                if !self.recv_type_owns_method(self.lower_method_recv_type(&(*e).left), (*e).name) {
+                    return 1
+                }
             }
             // `seq.get(i)` on a Seq whose elements are floats. Seq access is an
             // intrinsic like .len() above -- it lowers to __sounio_seq_get with no
@@ -22783,6 +22786,21 @@ impl Lowerer {
         (lo_recv.emit(ir_unaryop(dst_deref, UnaryOp::OpDeref, base_recv)), dst_deref)
     }
 
+    // Whether `recv.len()` / `recv.count()` names a user method rather than the
+    // intrinsic. The intrinsic covers strings, arrays, and slices; a struct has no
+    // intrinsic length, so `impl W { fn len(self: &W) -> i64 }` must dispatch to
+    // `W_len`. Treating it as IrArrayLen read 0 off the struct handle: `w.len()`
+    // returned 0 after two pushes while `w.len` read 2.
+    fn recv_type_owns_method(self, recv_type: Name, method_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if recv_type.len == 0 || lower_name_is_string_type(recv_type) || ir_name_eq(recv_type, make_name("Seq")) {
+            return false
+        }
+        if lower_struct_layout_index_of(&(*self.struct_layouts), recv_type) >= 0 {
+            return true
+        }
+        lowerer_lookup_fn_id_by_name_ref(&self, ir_mangle_method_name(recv_type, method_name)) >= 0
+    }
+
     fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
         match *left {
             Some(recv) => {
@@ -23026,8 +23044,10 @@ impl Lowerer {
         }
         // `.len()` is intrinsic for strings, arrays, and open slices. It is
         // accepted by the checker, but lowering it as an ordinary method invents
-        // a body-less `len` function and crashes the native path.
-        if ir_name_eq(e.name, make_name("len")) && !ir_name_eq(recv_type, make_name("Seq")) {
+        // a body-less `len` function and crashes the native path. A receiver whose
+        // type declares its own `len` is NOT intrinsic: it takes the mangled path.
+        if ir_name_eq(e.name, make_name("len")) && !ir_name_eq(recv_type, make_name("Seq"))
+            && !self.recv_type_owns_method(recv_type, e.name) {
             match e.args {
                 None => {
                     match e.left {
