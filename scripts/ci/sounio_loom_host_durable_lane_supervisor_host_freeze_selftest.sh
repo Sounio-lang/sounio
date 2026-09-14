@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/host_durable_lane_supervisor.runtime.v1"
+MANIFEST="$ROOT_DIR/tools/loom/host_durable_lane_supervisor.runtime.v2"
 
 fail() {
   printf 'sounio-loom-host-durable-lane-supervisor-host-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -58,7 +58,7 @@ receipt_value() {
 EVIDENCE="$ROOT_DIR/$(field evidence_path)"
 [[ -f "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail 'host evidence is missing or linked'
 
-expect schema loom-host-durable-lane-supervisor-runtime-v1
+expect schema loom-host-durable-lane-supervisor-runtime-v2
 expect stage MATERIAL_SAME_PHYSICAL_REATTACH_FROZEN
 expect semantic_authority Sounio
 expect semantic_action 9032

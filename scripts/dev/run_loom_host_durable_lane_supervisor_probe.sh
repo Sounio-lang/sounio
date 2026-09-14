@@ -8,7 +8,7 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 BUILDER="$ROOT_DIR/scripts/dev/build_loom_host_durable_lane_capsule.sh"
 PROMOTER="$ROOT_DIR/scripts/dev/promote_loom_host_exec_quorum_capsule.sh"
 ACTION_BUILDER="$ROOT_DIR/scripts/dev/build_sounio_loom_host_durable_lane_supervisor_fixture.sh"
-ACTION_FREEZE="$ROOT_DIR/tools/loom/host_durable_lane_supervisor.freeze.v1"
+ACTION_FREEZE="$ROOT_DIR/tools/loom/host_durable_lane_supervisor.freeze.v2"
 HOST_GATE="$ROOT_DIR/scripts/ci/sounio_loom_host_durable_lane_supervisor_host_selftest.sh"
 
 fail() {
