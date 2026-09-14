@@ -1,0 +1,61 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/chemistry/test_chem_network_ode_sys5.sio
+//
+// Runtime coverage for the EState/solve_ode path of chemistry::kinetics
+// (epistemic::ode system_id 5, ode_system_chem_simple). Before system 5 had a
+// right-hand side in ode_rhs_dispatch, solve_ode took the zero-derivative
+// fallback and every species stayed at its initial value.
+//
+// Network (A, B, C, D):  A -> B (k1),  B -> C (k2),  A + B -> D (k3)
+// References: independent Python RK4, identical dt / step count.
+
+use chemistry::kinetics::*
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn near(a: f64, b: f64, tol: f64) -> bool { abs_t(a - b) < tol }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+
+    // k = [0.1, 0.05, 0.2], dt = 0.1, 20 steps (t = 2):
+    // A=0.792896 B=0.143561 C=0.008016 D=0.027764
+    let iv: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let is: [f64; 4] = [0.01, 0.0, 0.0, 0.0]
+    let ks: [f64; 3] = [0.1, 0.05, 0.2]
+    let us: [f64; 3] = [0.001, 0.0005, 0.002]
+    let (ov, ou) = simulate_chem_network_full(&iv, &is, &ks, &us, 0.1, 20)
+    println(ov[0]); println(ov[1]); println(ov[2]); println(ov[3])
+    println(ou[0]); println(ou[1])
+    if !near(ov[0], 0.792896, 1.0e-4) { fail = fail + 1; println("FAIL sys5 A") }
+    if !near(ov[1], 0.143561, 1.0e-4) { fail = fail + 1; println("FAIL sys5 B") }
+    if !near(ov[2], 0.008016, 1.0e-4) { fail = fail + 1; println("FAIL sys5 C") }
+    if !near(ov[3], 0.027764, 1.0e-4) { fail = fail + 1; println("FAIL sys5 D") }
+    // Mass balance for this network: A + B + C + 2D = A0
+    if !near(ov[0] + ov[1] + ov[2] + 2.0 * ov[3], 1.0, 1.0e-9) { fail = fail + 1; println("FAIL sys5 mass balance") }
+    // Rate uncertainty must reach the intermediate, which starts with zero variance
+    if !(ou[0] > 0.0) { fail = fail + 1; println("FAIL sys5 uA") }
+    if !(ou[1] > 0.0) { fail = fail + 1; println("FAIL sys5 uB") }
+
+    // More than 63 recorded steps: k = [0.05, 0.02, 0.01], dt = 0.33, 72 steps.
+    // Used to overrun ODESolution storage (fixed stride 64 over 4096 slots).
+    // A=0.281759 B=0.484066 C=0.157405 D=0.038385
+    let iv2: [f64; 4] = [1.0, 0.0, 0.0, 0.0]
+    let is2: [f64; 4] = [0.05, 0.0, 0.0, 0.0]
+    let ks2: [f64; 3] = [0.05, 0.02, 0.01]
+    let us2: [f64; 3] = [0.004, 0.002, 0.0015]
+    let (lv, lu) = simulate_chem_network_full(&iv2, &is2, &ks2, &us2, 0.33, 72)
+    println(lv[0]); println(lv[1]); println(lv[2]); println(lv[3])
+    if !near(lv[0], 0.281759, 1.0e-4) { fail = fail + 1; println("FAIL sys5 long A") }
+    if !near(lv[1], 0.484066, 1.0e-4) { fail = fail + 1; println("FAIL sys5 long B") }
+    if !near(lv[2], 0.157405, 1.0e-4) { fail = fail + 1; println("FAIL sys5 long C") }
+    if !near(lv[3], 0.038385, 1.0e-4) { fail = fail + 1; println("FAIL sys5 long D") }
+    if !(lu[1] > 0.0) { fail = fail + 1; println("FAIL sys5 long uB") }
+
+    if !test_chem_full() { fail = fail + 1; println("FAIL chem_full") }
+    if !test_pbpk_bridge() { fail = fail + 1; println("FAIL pbpk_bridge") }
+    if !test_pbpk_full() { fail = fail + 1; println("FAIL pbpk_full") }
+
+    if fail == 0 { println("CHEM ODE SYS5 PASS") }
+    fail
+}

@@ -19,6 +19,7 @@
 //   SYSTEM_PBPK_14    (2) — 14-compartment PBPK (rapamycin/CYP3A4)
 //   SYSTEM_LINEAR_2   (3) — generic 2-compartment linear PK
 //   SYSTEM_LINEAR_3   (4) — generic 3-compartment linear PK
+//   SYSTEM_CHEM_SIMPLE (5) — A->B, B->C, A+B->D mass-action network
 //
 // User-defined systems: IDs 100+. Add branches to ode_rhs_dispatch.
 //
@@ -172,6 +173,7 @@ fn ode_params_get_variance(p: &ODEParams, idx: i64) -> f64 {
 // SYSTEM_PBPK_14    = 2
 // SYSTEM_LINEAR_2   = 3
 // SYSTEM_LINEAR_3   = 4
+// SYSTEM_CHEM_SIMPLE = 5
 // User-defined: 100+
 
 struct ODESystem {
@@ -250,14 +252,18 @@ fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -
 
 // ============================================================================
 // ODE Solution: trajectory storage
-// Max 1024 time points, max 64 state dimensions
+// values/variances hold 4096 slots, strided by n_dims: capacity is
+// min(1024, 4096 / n_dims) time points (1024 for n_dims <= 4, 292 for 14).
+// Once full, the last slot keeps being overwritten, so step n_steps - 1 is
+// always the final state. (A fixed stride of 64 used to overrun both arrays
+// from the 64th recorded point on.)
 // ============================================================================
 
 pub struct ODESolution {
     times: [f64; 1024],
-    // State values at each time: values[step * 64 + dim]
+    // State values at each time: values[step * n_dims + dim]
     values: [f64; 4096],
-    // Variances at each time: variances[step * 64 + dim]
+    // Variances at each time: variances[step * n_dims + dim]
     variances: [f64; 4096],
     pub n_steps: i64,
     n_dims: i64,
@@ -284,30 +290,30 @@ fn solution_record(
     t: f64,
     state: &EState
 ) with Mut, Div, Panic {
-    if sol.n_steps >= 1024 { return }
-    let step = sol.n_steps
+    var step = sol.n_steps
+    if step >= 1024 || (step + 1) * sol.n_dims > 4096 { step = step - 1 }
     sol.times[step] = t
     var i = 0
     while i < sol.n_dims {
         if i < 64 {
-            sol.values[step * 64 + i] = state.values[i]
-            sol.variances[step * 64 + i] = state.variances[i]
+            sol.values[step * sol.n_dims + i] = state.values[i]
+            sol.variances[step * sol.n_dims + i] = state.variances[i]
         }
         i = i + 1
     }
-    sol.n_steps = sol.n_steps + 1
+    sol.n_steps = step + 1
 }
 
 fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.values[step * 64 + dim]
+    sol.values[step * sol.n_dims + dim]
 }
 
 fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.variances[step * 64 + dim]
+    sol.variances[step * sol.n_dims + dim]
 }
 
 fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut, Div, Panic {
-    ode_sqrt(sol.variances[step * 64 + dim])
+    ode_sqrt(sol.variances[step * sol.n_dims + dim])
 }
 
 // ============================================================================
@@ -593,6 +599,34 @@ fn rhs_linear_3(
 }
 
 // ============================================================================
+// Built-in RHS: Simple chemical reaction network (system_id = 5)
+// y[0] = A, y[1] = B, y[2] = C, y[3] = D
+// Mass action:  A -> B (k1),  B -> C (k2),  A + B -> D (k3)
+// p[0] = k1, p[1] = k2, p[2] = k3
+// Same network as chemistry::kinetics dc_dt / stoich_matrix.
+// Conserves A + B + C + 2D.
+// ============================================================================
+
+fn rhs_chem_simple(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let k1 = p.params[0]
+    let k2 = p.params[1]
+    let k3 = p.params[2]
+    let r0 = k1 * y.values[0]
+    let r1 = k2 * y.values[1]
+    let r2 = k3 * y.values[0] * y.values[1]
+    out.values[0] = 0.0 - r0 - r2
+    out.values[1] = r0 - r1 - r2
+    out.values[2] = r1
+    out.values[3] = r2
+    out.n = 4
+}
+
+// ============================================================================
 // RHS Dispatch: routes system_id to the correct RHS function
 //
 // To add a user-defined system: add an `if sys.system_id == YOUR_ID` branch.
@@ -613,6 +647,8 @@ fn ode_rhs_dispatch(
         rhs_linear_2(t, y, p, out)
     } else if sys.system_id == 4 {
         rhs_linear_3(t, y, p, out)
+    } else if sys.system_id == 5 {
+        rhs_chem_simple(t, y, p, out)
     } else {
         // Unknown system: zero derivatives (safe fallback)
         out.n = y.n
