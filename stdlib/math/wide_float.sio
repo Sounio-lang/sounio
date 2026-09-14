@@ -1,0 +1,170 @@
+//! stdlib/math/wide_float.sio — V0-E.1 limb surface for binary128 / binary256
+//!
+//! Semantic-Lane-ID: WS-G-V0E-STDLIB-GUM-SURFACE (print/API slice)
+//!
+//! Language `f128`/`f256` Madaros-run softfloat lowering is V0-E.4.1
+//! fail-closed. General IEEE add/sub for F128Bits is V0-E.5
+//! (`stdlib/math/softfloat_f128.sio`). This module is the runnable wire-limb
+//! API aligned with V0-D softfloat corpora (LSW-first i64 limbs), including
+//! exact-case tables used by V0-E.3/V0-E.4 seed smokes (ADR-008/009).
+//! V0-E.4 ops are `f128_bits_exact_case_*` returning `F128ExactCase` — tabulated
+//! domain only; `supported=false` is not an IEEE NaN.
+
+pub struct F128Bits {
+    pub lo: i64,
+    pub hi: i64,
+}
+
+pub struct F256Bits {
+    pub l0: i64,
+    pub l1: i64,
+    pub l2: i64,
+    pub l3: i64,
+}
+
+pub fn f128_bits_zero() -> F128Bits {
+    F128Bits { lo: 0, hi: 0 }
+}
+
+pub fn f128_bits_one() -> F128Bits {
+    F128Bits { lo: 0, hi: 4611404543450677248 }
+}
+
+pub fn f128_bits_two() -> F128Bits {
+    F128Bits { lo: 0, hi: 4611686018427387904 }
+}
+
+pub fn f128_bits_half() -> F128Bits {
+    F128Bits { lo: 0, hi: 4611123068473966592 }
+}
+
+pub fn f128_bits_neg_one() -> F128Bits {
+    F128Bits { lo: 0, hi: -4611967493404098560 }
+}
+
+pub fn f256_bits_one() -> F256Bits {
+    F256Bits { l0: 0, l1: 0, l2: 0, l3: 4611668426241343488 }
+}
+
+pub fn f128_bits_eq(a: F128Bits, b: F128Bits) -> bool {
+    a.lo == b.lo && a.hi == b.hi
+}
+
+pub fn f256_bits_eq(a: F256Bits, b: F256Bits) -> bool {
+    a.l0 == b.l0 && a.l1 == b.l1 && a.l2 == b.l2 && a.l3 == b.l3
+}
+
+/// ~1e-20 as binary128 limbs (Fraction(1,10^20) via softfloat_limb; measurement-only origin).
+pub fn f128_bits_approx_1e_neg20() -> F128Bits {
+    F128Bits { lo: 3746994889972252672, hi: 4592679628783035426 }
+}
+
+/// Capability refinement: exact-case lookup only — NOT general IEEE softfloat.
+/// `supported=false` means the pair is outside the tabulated domain (distinct from a
+/// valid NaN payload; bits are unspecified when unsupported).
+pub struct F128ExactCase {
+    pub supported: bool,
+    pub bits: F128Bits,
+}
+
+fn f128_exact_case_ok(bits: F128Bits) -> F128ExactCase {
+    F128ExactCase { supported: true, bits: bits }
+}
+
+fn f128_exact_case_unsupported() -> F128ExactCase {
+    F128ExactCase { supported: false, bits: f128_bits_zero() }
+}
+
+/// Tabulated binary128 add for the V0-E.3/E.4 seed case set (ADR-008/009 native expecteds).
+/// Domain: zero/one/two/half/neg_one/three/approx_1e-20 pairs listed in the body only.
+pub fn f128_bits_exact_case_add(a: F128Bits, b: F128Bits) -> F128ExactCase {
+    let z = f128_bits_zero()
+    let one = f128_bits_one()
+    let two = f128_bits_two()
+    let half = f128_bits_half()
+    let neg = f128_bits_neg_one()
+    let three = F128Bits { lo: 0, hi: 4611826755915743232 }
+    let tiny = f128_bits_approx_1e_neg20()
+    let one_plus_tiny = F128Bits { lo: 51922968585348, hi: 4611404543450677248 }
+    if f128_bits_eq(a, z) { return f128_exact_case_ok(b) }
+    if f128_bits_eq(b, z) { return f128_exact_case_ok(a) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, one) { return f128_exact_case_ok(two) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, two) { return f128_exact_case_ok(three) }
+    if f128_bits_eq(a, two) && f128_bits_eq(b, one) { return f128_exact_case_ok(three) }
+    if f128_bits_eq(a, half) && f128_bits_eq(b, half) { return f128_exact_case_ok(one) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, neg) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, neg) && f128_bits_eq(b, one) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, one) && f128_bits_eq(b, tiny) { return f128_exact_case_ok(one_plus_tiny) }
+    if f128_bits_eq(a, tiny) && f128_bits_eq(b, one) { return f128_exact_case_ok(one_plus_tiny) }
+    f128_exact_case_unsupported()
+}
+
+/// Tabulated binary128 sub for V0-E.4 anti-f64: `(1+tiny)-1` recovers non-zero.
+/// Same exact-case capability as `f128_bits_exact_case_add` — not general softfloat.
+pub fn f128_bits_exact_case_sub(a: F128Bits, b: F128Bits) -> F128ExactCase {
+    let one = f128_bits_one()
+    let one_plus_tiny = F128Bits { lo: 51922968585348, hi: 4611404543450677248 }
+    let recover = F128Bits { lo: 0, hi: 4592679628783035424 }
+    let z = f128_bits_zero()
+    if f128_bits_eq(a, b) { return f128_exact_case_ok(z) }
+    if f128_bits_eq(a, one_plus_tiny) && f128_bits_eq(b, one) { return f128_exact_case_ok(recover) }
+    let neg_b = F128Bits { lo: b.lo, hi: b.hi ^ -9223372036854775808 }
+    f128_bits_exact_case_add(a, neg_b)
+}
+
+fn print_hex_nibble(n: i64) with IO {
+    if n == 0 { print("0"); return }
+    if n == 1 { print("1"); return }
+    if n == 2 { print("2"); return }
+    if n == 3 { print("3"); return }
+    if n == 4 { print("4"); return }
+    if n == 5 { print("5"); return }
+    if n == 6 { print("6"); return }
+    if n == 7 { print("7"); return }
+    if n == 8 { print("8"); return }
+    if n == 9 { print("9"); return }
+    if n == 10 { print("a"); return }
+    if n == 11 { print("b"); return }
+    if n == 12 { print("c"); return }
+    if n == 13 { print("d"); return }
+    if n == 14 { print("e"); return }
+    print("f")
+}
+
+fn print_u32_hex8(u: i64) with IO, Mut, Panic, Div {
+    // u holds an unsigned 32-bit value in the low half of i64
+    var shift: i64 = 28
+    var i: i64 = 0
+    while i < 8 {
+        let nibble = (u >> shift) & 15
+        print_hex_nibble(nibble)
+        shift = shift - 4
+        i = i + 1
+    }
+}
+
+/// Print one i64 limb as 16 lowercase hex digits of its raw u64 bits.
+pub fn print_limb_hex16(limb: i64) with IO, Mut, Panic, Div {
+    let mask: i64 = 4294967295
+    let hi32 = (limb >> 32) & mask
+    let lo32 = limb & mask
+    print_u32_hex8(hi32)
+    print_u32_hex8(lo32)
+}
+
+/// LSW-first wire: `lo:hi` — matches softfloat_limb.limbs_to_hex_wire(f128).
+pub fn print_f128_bits_hex_wire(x: F128Bits) with IO, Mut, Panic, Div {
+    print_limb_hex16(x.lo)
+    print(":")
+    print_limb_hex16(x.hi)
+}
+
+pub fn print_f256_bits_hex_wire(x: F256Bits) with IO, Mut, Panic, Div {
+    print_limb_hex16(x.l0)
+    print(":")
+    print_limb_hex16(x.l1)
+    print(":")
+    print_limb_hex16(x.l2)
+    print(":")
+    print_limb_hex16(x.l3)
+}

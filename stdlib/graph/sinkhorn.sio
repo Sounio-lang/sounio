@@ -11,48 +11,53 @@ module graph::sinkhorn
 // =============================================================================
 
 pub struct ProbMeasure {
-    pub weights: [f64],  // Probability weights (must sum to 1)
+    // Seq, not [f64]: built by growing in `uniform`, and slices are fixed.
+    pub weights: Seq<f64>,  // Probability weights (must sum to 1)
 }
 
 impl ProbMeasure {
-    pub fn new(weights: [f64]) -> ProbMeasure {
-        ProbMeasure { weights }
+    pub fn new(weights: Seq<f64>) -> ProbMeasure {
+        ProbMeasure { weights: weights }
     }
 
-    pub fn uniform(n: usize) -> ProbMeasure {
-        var weights: [f64] = []
+    pub fn uniform(n: usize) -> ProbMeasure with Mut, Panic, Div {
+        var weights: Seq<f64> = seq_new()
         let w = 1.0 / (n as f64)
         var i: usize = 0
         while i < n {
             weights.push(w)
             i = i + 1
         }
-        ProbMeasure { weights }
+        ProbMeasure { weights: weights }
     }
 
-    pub fn total(&self) -> f64 {
+    pub fn total(self: &ProbMeasure) -> f64 with Mut, Panic, Epistemic {
         var sum: f64 = 0.0
-        var i: usize = 0
-        while i < self.weights.len() {
-            sum = sum + self.weights[i]
+        let k: i64 = self.weights.len().unwrap("total")
+        var i: i64 = 0
+        while i < k {
+            sum = sum + self.weights.get(i as usize)
             i = i + 1
         }
         sum
     }
 
-    pub fn normalize(&! self) {
+    pub fn normalize(self: &!ProbMeasure) with Mut, Panic, Div, Epistemic {
         let total = self.total()
         if total > 0.0 {
-            var i: usize = 0
-            while i < self.weights.len() {
-                self.weights[i] = self.weights[i] / total
+            let k: i64 = self.weights.len().unwrap("normalize")
+            var i: i64 = 0
+            while i < k {
+                let idx = i as usize
+                self.weights.set(idx, self.weights.get(idx) / total)
                 i = i + 1
             }
         }
     }
 
-    pub fn size(&self) -> usize {
-        self.weights.len()
+    pub fn size(self: &ProbMeasure) -> usize with Mut, Panic, Epistemic {
+        let k: i64 = self.weights.len().unwrap("size")
+        k as usize
     }
 }
 
@@ -63,22 +68,24 @@ impl ProbMeasure {
 pub struct CostMatrix {
     pub n: usize,         // rows
     pub m: usize,         // columns
-    pub data: [f64],      // row-major
+    // Seq, not [f64]: sized n*m at runtime, and array repeat literals need a
+    // compile-time constant length.
+    pub data: Seq<f64>,   // row-major
 }
 
 impl CostMatrix {
-    pub fn new(n: usize, m: usize) -> CostMatrix {
-        var data: [f64] = []
+    pub fn new(n: usize, m: usize) -> CostMatrix with Mut, Panic {
+        var data: Seq<f64> = seq_new()
         let size = n * m
         var i: usize = 0
         while i < size {
             data.push(0.0)
             i = i + 1
         }
-        CostMatrix { n, m, data }
+        CostMatrix { n: n, m: m, data: data }
     }
 
-    pub fn from_distances(distances: &[[i64]], nodes_a: &[usize], nodes_b: &[usize]) -> CostMatrix {
+    pub fn from_distances(distances: &[[i64]], nodes_a: &[usize], nodes_b: &[usize]) -> CostMatrix with Mut, Panic {
         let n = nodes_a.len()
         let m = nodes_b.len()
         var mat = CostMatrix::new(n, m)
@@ -96,17 +103,17 @@ impl CostMatrix {
         mat
     }
 
-    pub fn get(&self, i: usize, j: usize) -> f64 {
+    pub fn get(self: &CostMatrix, i: usize, j: usize) -> f64 with Mut, Panic {
         if i < self.n && j < self.m {
-            self.data[i * self.m + j]
+            self.data.get(i * self.m + j)
         } else {
             0.0
         }
     }
 
-    pub fn set(&! self, i: usize, j: usize, val: f64) {
+    pub fn set(self: &!CostMatrix, i: usize, j: usize, val: f64) with Mut, Panic {
         if i < self.n && j < self.m {
-            self.data[i * self.m + j] = val
+            self.data.set(i * self.m + j, val)
         }
     }
 }
@@ -140,7 +147,7 @@ pub struct SinkhornResult {
 }
 
 // Compute exp(-c/epsilon) for Gibbs kernel
-fn compute_gibbs_kernel(cost: &CostMatrix, epsilon: f64) -> CostMatrix {
+fn compute_gibbs_kernel(cost: &CostMatrix, epsilon: f64) -> CostMatrix with Mut, Panic, Div {
     var kmat = CostMatrix::new(cost.n, cost.m)
     var i: usize = 0
     while i < cost.n {
@@ -164,9 +171,21 @@ fn exp_approx(x: f64) -> f64 {
     // For large positive x, cap it
     if x > 20.0 { return 485165195.0 }  // exp(20) approx
 
-    // Use identity: exp(x) = exp(x/n)^n for better range
+    // Use identity: exp(x) = exp(x / 2^n)^(2^n) for better range.
+    // The loop below squares n times, which raises the seed to the 2^n-th
+    // power, so the pre-scale divisor is 2^n -- derived from n here rather
+    // than written as a literal, so the two cannot drift apart. They once did:
+    // a hardcoded `x / 16.0` against 16 squarings computed exp(4096*x), where
+    // exp_approx(1.0) saturated at 2^63 and exp_approx(-1.0) returned 0, which
+    // is why test_exp_approx failed.
     let n = 16  // Number of squarings
-    let scaled = x / 16.0
+    var divisor = 1.0
+    var d: usize = 0
+    while d < n {
+        divisor = divisor * 2.0
+        d = d + 1
+    }
+    let scaled = x / divisor
 
     // Taylor: exp(x) ≈ 1 + x + x²/2 + x³/6 + x⁴/24 + ...
     let x2 = scaled * scaled
@@ -213,7 +232,7 @@ fn abs_f64(x: f64) -> f64 {
 
 // Main Sinkhorn algorithm
 // Computes regularized Wasserstein distance between two distributions
-pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &SinkhornParams) -> SinkhornResult {
+pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &SinkhornParams) -> SinkhornResult with Div, Epistemic, Mut, Panic {
     let n = mu.size()
     let m = nu.size()
 
@@ -225,8 +244,8 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
     let kmat = compute_gibbs_kernel(cost, params.epsilon)
 
     // Initialize scaling vectors u and v
-    var u: [f64] = []
-    var v: [f64] = []
+    var u: Seq<f64> = seq_new()
+    var v: Seq<f64> = seq_new()
     var i: usize = 0
     while i < n { u.push(1.0); i = i + 1 }
     i = 0
@@ -237,9 +256,9 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
 
     while iter < params.max_iter {
         // Store old u for convergence check
-        var u_old: [f64] = []
+        var u_old: Seq<f64> = seq_new()
         i = 0
-        while i < n { u_old.push(u[i]); i = i + 1 }
+        while i < n { u_old.push(u.get(i)); i = i + 1 }
 
         // Update u: u = mu ./ (K * v)
         i = 0
@@ -247,13 +266,13 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
             var sum: f64 = 0.0
             var j: usize = 0
             while j < m {
-                sum = sum + kmat.get(i, j) * v[j]
+                sum = sum + kmat.get(i, j) * v.get(j)
                 j = j + 1
             }
             if sum > 1e-10 {
-                u[i] = mu.weights[i] / sum
+                u.set(i, mu.weights.get(i) / sum)
             } else {
-                u[i] = 1.0
+                u.set(i, 1.0)
             }
             i = i + 1
         }
@@ -264,13 +283,13 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
             var sum: f64 = 0.0
             i = 0
             while i < n {
-                sum = sum + kmat.get(i, j) * u[i]
+                sum = sum + kmat.get(i, j) * u.get(i)
                 i = i + 1
             }
             if sum > 1e-10 {
-                v[j] = nu.weights[j] / sum
+                v.set(j, nu.weights.get(j) / sum)
             } else {
-                v[j] = 1.0
+                v.set(j, 1.0)
             }
             j = j + 1
         }
@@ -279,7 +298,7 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
         var max_diff: f64 = 0.0
         i = 0
         while i < n {
-            let diff = abs_f64(u[i] - u_old[i])
+            let diff = abs_f64(u.get(i) - u_old.get(i))
             if diff > max_diff { max_diff = diff }
             i = i + 1
         }
@@ -298,7 +317,7 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
     while i < n {
         var j: usize = 0
         while j < m {
-            let transport = u[i] * kmat.get(i, j) * v[j]
+            let transport = u.get(i) * kmat.get(i, j) * v.get(j)
             distance = distance + transport * cost.get(i, j)
             j = j + 1
         }
@@ -313,14 +332,14 @@ pub fn sinkhorn(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, params: &
 }
 
 // Compute 1-Wasserstein distance using Sinkhorn
-pub fn wasserstein_distance(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix) -> f64 {
+pub fn wasserstein_distance(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix) -> f64 with Div, Epistemic, Mut, Panic {
     let params = SinkhornParams::default()
     let result = sinkhorn(mu, nu, cost, &params)
     result.distance
 }
 
 // Compute 1-Wasserstein with custom epsilon
-pub fn wasserstein_with_epsilon(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, epsilon: f64) -> f64 {
+pub fn wasserstein_with_epsilon(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostMatrix, epsilon: f64) -> f64 with Mut, Panic, Div, Epistemic {
     var params = SinkhornParams::default()
     params.epsilon = epsilon
     let result = sinkhorn(mu, nu, cost, &params)
@@ -331,7 +350,7 @@ pub fn wasserstein_with_epsilon(mu: &ProbMeasure, nu: &ProbMeasure, cost: &CostM
 // Tests
 // =============================================================================
 
-pub fn test_uniform_measure() -> bool {
+pub fn test_uniform_measure() -> bool with Mut, Panic, Div, Epistemic {
     let mu = ProbMeasure::uniform(4)
     let total = mu.total()
     abs_f64(total - 1.0) < 1e-10
@@ -350,7 +369,7 @@ pub fn test_exp_approx() -> bool {
     abs_f64(em1 - 0.367879441) < 0.01
 }
 
-pub fn test_sinkhorn_identity() -> bool {
+pub fn test_sinkhorn_identity() -> bool with Mut, Panic, Div, Epistemic {
     // Transport from uniform to uniform with zero cost
     let mu = ProbMeasure::uniform(2)
     let nu = ProbMeasure::uniform(2)
@@ -361,10 +380,17 @@ pub fn test_sinkhorn_identity() -> bool {
     result.distance < 0.01  // Should be ~0
 }
 
-pub fn test_sinkhorn_simple() -> bool {
+pub fn test_sinkhorn_simple() -> bool with Mut, Panic, Div, Epistemic {
     // Two points, transport from [1,0] to [0,1] with distance 1
-    var mu = ProbMeasure::new([1.0, 0.0])
-    var nu = ProbMeasure::new([0.0, 1.0])
+    // ProbMeasure::new takes Seq<f64> now; an array literal is a fixed slice.
+    var w_mu: Seq<f64> = seq_new()
+    w_mu.push(1.0)
+    w_mu.push(0.0)
+    var mu = ProbMeasure::new(w_mu)
+    var w_nu: Seq<f64> = seq_new()
+    w_nu.push(0.0)
+    w_nu.push(1.0)
+    var nu = ProbMeasure::new(w_nu)
     var cost = CostMatrix::new(2, 2)
     cost.set(0, 0, 0.0)
     cost.set(0, 1, 1.0)
@@ -377,7 +403,7 @@ pub fn test_sinkhorn_simple() -> bool {
     abs_f64(result.distance - 1.0) < 0.1
 }
 
-pub fn run_sinkhorn_tests() -> bool {
+pub fn run_sinkhorn_tests() -> bool with Mut, Panic, Div, Epistemic {
     test_uniform_measure() &&
     test_exp_approx() &&
     test_sinkhorn_identity() &&

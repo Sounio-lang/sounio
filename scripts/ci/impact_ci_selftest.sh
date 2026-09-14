@@ -73,27 +73,90 @@ live="$(cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
       CI_BASE_SHA="$root_commit" CI_HEAD_SHA=HEAD "$CLASSIFIER")"
 expect "$live" full true
 
-good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"}}'
+# Derive one needs-fixture from another by replacing a job's result.
+#
+# This used to be done with `${var/pattern/replacement}`, which bash terminates
+# at the first unescaped `}` -- and every pattern here contains one, inside
+# {"result":"..."}. The substitution matched a prefix and produced malformed
+# JSON, so two of the negative controls below ("decision accepted failed
+# contracts", "decision accepted failed selected Madaros witness gate") were
+# passing because the evaluator crashed on a JSON parse error, NOT because it
+# rejected the failed job. They would have kept passing if the evaluator had
+# stopped checking those jobs entirely.
+#
+# `sed` has no such brace rule. The JSON validity assertion is what stops the
+# class from coming back silently: a fixture that stops being a fixture must
+# fail loudly here rather than counting as a rejection downstream.
+json_sub() {
+  local subject="$1" from="$2" to="$3" out
+  out="$(printf '%s' "$subject" | sed "s|${from}|${to}|")"
+  if [[ "$out" == "$subject" ]]; then
+    echo "impact-ci-selftest: fixture substitution matched nothing: $from" >&2
+    exit 1
+  fi
+  printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
+    echo "impact-ci-selftest: fixture substitution produced malformed JSON: $from" >&2
+    exit 1
+  }
+  printf '%s' "$out"
+}
+
+good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
 NEEDS_JSON="$good_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
-bad_needs="${good_needs/\"contracts\":{\"result\":\"success\"}/\"contracts\":{\"result\":\"failure\"}}"
+bad_needs="$(json_sub "$good_needs" '"contracts":{"result":"success"}' '"contracts":{"result":"failure"}')"
 if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed contracts" >&2
   exit 1
 fi
 
-compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"}}'
+compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
 if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed current-source Madaros gate" >&2
   exit 1
 fi
 compiler_green_needs="${compiler_needs/\"failure\"/\"success\"}"
 NEEDS_JSON="$compiler_green_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
-witness_failed_needs="${compiler_green_needs/\"madaros-witness-gate\":{\"result\":\"success\"}/\"madaros-witness-gate\":{\"result\":\"failure\"}}"
+witness_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-witness-gate":{"result":"success"}' '"madaros-witness-gate":{"result":"failure"}')"
 if NEEDS_JSON="$witness_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed selected Madaros witness gate" >&2
   exit 1
 fi
+
+# r6-corpus-sweep is the one job selected by the EVENT rather than by impact
+# classification: nightly-only, so `skipped` is the correct outcome on a pull
+# request and a non-evaluation on a scheduled run. Isolating it into its own job
+# (#2392) fixed a timeout there skipping the ~66 gates that followed it inside
+# Contracts, but left it out of both ci-decision's needs and the evaluator, so a
+# red R6 stopped reaching the verdict at all. The needs/evaluator consistency
+# check below cannot catch that on its own -- absent from both sides, the two
+# still agree. These four cases are what notices.
+r6_skipped="$good_needs"
+r6_green="$(json_sub "$good_needs" '"r6-corpus-sweep":{"result":"skipped"}' '"r6-corpus-sweep":{"result":"success"}')"
+r6_red="$(json_sub "$good_needs" '"r6-corpus-sweep":{"result":"skipped"}' '"r6-corpus-sweep":{"result":"failure"}')"
+
+# On a scheduled run, a skipped R6 is a required gate that never ran.
+if NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=schedule python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a skipped R6 on a nightly run" >&2
+  exit 1
+fi
+# On a scheduled run with R6 green, the decision passes.
+NEEDS_JSON="$r6_green" GITHUB_EVENT_NAME=schedule python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# On a pull request, a skipped R6 is correct and must not fail the decision.
+NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# A red R6 fails the decision whatever the event: it ran and it failed.
+if NEEDS_JSON="$r6_red" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a failed R6" >&2
+  exit 1
+fi
+# workflow_dispatch follows the `nightly` input, mirroring the job's own `if:`.
+if NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=true \
+     python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a skipped R6 on an explicit nightly dispatch" >&2
+  exit 1
+fi
+NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=false \
+  python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
 python3 - "$ROOT_DIR" <<'PY'
 import ast
@@ -122,6 +185,13 @@ for line in lines:
     if in_needs:
         if line.startswith("      - "):
             workflow_needs.add(line.split("-", 1)[1].strip())
+            continue
+        # Comments and blank lines inside the list used to end the scan, which
+        # silently produced a SHORTER needs set -- and a short set still
+        # compares equal to an evaluator that is missing the same job, so the
+        # consistency check below would have reported agreement it had not
+        # verified. Skip them instead of truncating.
+        if not line.strip() or line.strip().startswith("#"):
             continue
         break
 if not workflow_needs:
@@ -152,7 +222,7 @@ if workflow_needs != required_keys:
     )
 PY
 
-stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"}}'
+stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted stdlib suite without native compiler/full suite" >&2
   exit 1

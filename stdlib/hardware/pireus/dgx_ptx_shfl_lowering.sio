@@ -1,0 +1,1148 @@
+//! Sounio-first DGX candidate for the frozen XOR selector.
+//!
+//! The importer verifies the committed Garden and frozen parents, reuses the
+//! complete pinned PTX corpus import, parses the selected `shfl.sync` section,
+//! and derives a finite `.bfly` lane candidate. PTX semantics remain distinct
+//! from generated SASS, DGX material support, and compiler emission.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+use hardware::pireus::xor_lowering_legality::{
+    PIREUS_XOR_LOWERING_BITS,
+    PIREUS_XOR_LOWERING_DIMENSION,
+}
+use hardware::pireus::ptx_import::{
+    PIREUS_PTX_OK,
+    pireus_ptx_expected_sha256,
+    pireus_ptx_import_chunks,
+}
+
+pub const PIREUS_DGX_PTX_OK: i64 = 0
+pub const PIREUS_DGX_PTX_ERR_FILE: i64 = 1
+pub const PIREUS_DGX_PTX_ERR_HASH: i64 = 2
+pub const PIREUS_DGX_PTX_ERR_HTML: i64 = 3
+pub const PIREUS_DGX_PTX_ERR_SHAPE: i64 = 4
+pub const PIREUS_DGX_PTX_ERR_PARENT: i64 = 5
+pub const PIREUS_DGX_PTX_ERR_CANDIDATE: i64 = 6
+pub const PIREUS_DGX_PTX_ERR_AUTHORITY: i64 = 7
+
+const DGX_CAPTURE_NONE: i64 = 0
+const DGX_CAPTURE_SYNTAX: i64 = 1
+const DGX_CAPTURE_SEMANTICS: i64 = 2
+const DGX_FROZEN_OPERATION_NODES: i64 = 5
+const DGX_RESOLVED_SELECTOR_NODES: i64 = 1
+
+pub struct PireusDgxDigest {
+    pub words: [i64; 8],
+}
+
+struct DgxFileDigest {
+    valid: bool,
+    bytes: i64,
+    words: [i64; 8],
+}
+
+pub struct PireusDgxParentBindings {
+    pub garden_match: bool,
+    pub lowering_source_match: bool,
+    pub lowering_semantics_match: bool,
+    pub lowering_receipt_match: bool,
+    pub ptx_source_match: bool,
+    pub ptx_semantics_match: bool,
+    pub ptx_receipt_match: bool,
+    pub ptx_corpus_binding_match: bool,
+    pub ptx_chunk_one_match: bool,
+    pub valid: bool,
+}
+
+pub struct PireusDgxPtxSemantics {
+    pub corpus_bytes: i64,
+    pub corpus_chunks: i64,
+    pub corpus_digest_match: bool,
+    pub prmt_parent_sections: i64,
+    pub selected_sections: i64,
+    pub syntax_blocks: i64,
+    pub semantics_blocks: i64,
+    pub instruction_b32: bool,
+    pub modes_up_down_bfly_idx: bool,
+    pub membermask_width_bits: i64,
+    pub wait_membermask_rule: bool,
+    pub lane_width_bits: i64,
+    pub bval_width_bits: i64,
+    pub cval_width_bits: i64,
+    pub segmask_width_bits: i64,
+    pub source_active_rule: bool,
+    pub inactive_source_undefined: bool,
+    pub nonmember_source_undefined: bool,
+    pub max_lane_rule: bool,
+    pub min_lane_rule: bool,
+    pub bfly_xor_rule: bool,
+    pub own_lane_fallback_rule: bool,
+    pub source_copy_rule: bool,
+    pub executing_nonmember_undefined: bool,
+    pub introduced_ptx_major: i64,
+    pub introduced_ptx_minor: i64,
+    pub target_sm_min: i64,
+    pub complete: bool,
+}
+
+pub struct PireusDgxPtxCandidate {
+    pub logical_bits: i64,
+    pub logical_dimension: i64,
+    pub warp_lane_bits: i64,
+    pub warp_lanes: i64,
+    pub admitted_logical_lanes: i64,
+    pub membermask_bits: i64,
+    pub membermask_low: i64,
+    pub bval_bits: i64,
+    pub cval: i64,
+    pub segmask: i64,
+    pub packed_c: i64,
+    pub payload_bits_per_instruction: i64,
+    pub f64_components: i64,
+    pub displacement_count: i64,
+    pub logical_cells: i64,
+    pub matched_cells: i64,
+    pub mismatched_cells: i64,
+    pub in_range_cells: i64,
+    pub own_lane_fallback_cells: i64,
+    pub active_source_cells: i64,
+    pub member_source_cells: i64,
+    pub payload_component_cells: i64,
+    pub symbolic_payload_bits: i64,
+    pub matched_payload_bits: i64,
+    pub max_source_lane: i64,
+    pub abstract_shfl_sync_instructions: i64,
+    pub identity_shfl_sync_instructions: i64,
+    pub nontrivial_shfl_sync_instructions: i64,
+    pub logical_index_coverage: bool,
+    pub symbolic_payload_address_preservation: bool,
+    pub xor_permute_candidate: bool,
+    pub unresolved_other_nodes: i64,
+    pub exact_tree_reduction_refused: bool,
+    pub digest: PireusDgxDigest,
+}
+
+pub struct PireusDgxPtxNegatives {
+    pub garden_missing: bool,
+    pub parent_hash_drift: bool,
+    pub corpus_drift: bool,
+    pub selected_section_shape: bool,
+    pub prose_promoted: bool,
+    pub prmt_promoted: bool,
+    pub foreign_control: bool,
+    pub logical_alias: bool,
+    pub invalid_membermask: bool,
+    pub inactive_source: bool,
+    pub out_of_bound_source: bool,
+    pub payload_address_loss: bool,
+    pub selector_cell_drift: bool,
+    pub selector_promoted_to_operation: bool,
+    pub foreign_operation: bool,
+    pub tree_promoted_to_exact: bool,
+    pub ptx_promoted_to_sass: bool,
+    pub canonical_promoted_to_observed: bool,
+    pub cost_claim: bool,
+    pub non_sounio_authority: bool,
+    pub parity_before_freeze: bool,
+    pub claim_before_parity: bool,
+    pub ptx_parent_hash_drift: bool,
+    pub semantic_shape_drift: bool,
+    pub canonical_target_missing: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusDgxPtxResult {
+    pub valid: bool,
+    pub error: i64,
+    pub parents: PireusDgxParentBindings,
+    pub semantics: PireusDgxPtxSemantics,
+    pub candidate: PireusDgxPtxCandidate,
+    pub negatives: PireusDgxPtxNegatives,
+    pub dgx_canonical: bool,
+    pub dgx_observed: bool,
+    pub ptx_sass_equivalence_count: i64,
+    pub dgx_material_receipt_count: i64,
+    pub compiler_emission_count: i64,
+    pub cost_record_count: i64,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub failures: i64,
+}
+
+struct DgxSectionParser {
+    line: [i8; 4096],
+    line_len: i64,
+    line_overflow: bool,
+    selected_active: bool,
+    selected_done: bool,
+    capture_pending: i64,
+    capture_kind: i64,
+    selected_sections: i64,
+    syntax_blocks: i64,
+    semantics_blocks: i64,
+    instruction_b32: bool,
+    modes_rule: bool,
+    membermask_32: bool,
+    wait_rule: bool,
+    lane_rule: bool,
+    bval_rule: bool,
+    cval_rule: bool,
+    segmask_rule: bool,
+    active_guard_rule: bool,
+    source_write_rule: bool,
+    inactive_undefined: bool,
+    nonmember_undefined: bool,
+    max_lane_rule: bool,
+    min_lane_rule: bool,
+    bfly_rule: bool,
+    fallback_rule: bool,
+    copy_rule: bool,
+    executing_nonmember_undefined: bool,
+    ptx_6_0: bool,
+    sm_30: bool,
+    error: i64,
+}
+
+fn dgx_zero_digest() -> PireusDgxDigest {
+    PireusDgxDigest { words: [0; 8] }
+}
+
+fn dgx_hash_words(digest: &SHA256Digest) -> [i64; 8]
+with Mut, Panic {
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    words
+}
+
+fn dgx_file_digest(path: string) -> DgxFileDigest
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size < 0 || size >= 1048576 {
+        return DgxFileDigest { valid: false, bytes: size, words: [0; 8] }
+    }
+    let raw = read_file(path)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var b = raw[(pos + i) as usize] as i64
+            if b < 0 { b = b + 256 }
+            window[i as usize] = b as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    let digest = sha256_finalize(state)
+    DgxFileDigest { valid: true, bytes: size, words: dgx_hash_words(&digest) }
+}
+
+fn dgx_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn dgx_expected_garden_hash() -> [i64; 8] {
+    [0xc084d7a6, 0xebe72893, 0x1371b60a, 0xf0c41d3c,
+     0xa1dad719, 0x8fc8bacd, 0xaf8ce9c4, 0x91f884a2]
+}
+
+fn dgx_expected_lowering_source_hash() -> [i64; 8] {
+    [0x7087649a, 0x5cfdb41a, 0x884aa9a2, 0xe1b0b64b,
+     0xbe2d25da, 0x3ca3cd1d, 0x54d5b704, 0x29854edb]
+}
+
+fn dgx_expected_lowering_semantics_hash() -> [i64; 8] {
+    [0x9e92f256, 0xc25a7749, 0x79a1b02c, 0xb10d5d39,
+     0xa1ae702c, 0xcec3a273, 0x044f9193, 0x0f03a970]
+}
+
+fn dgx_expected_lowering_receipt_hash() -> [i64; 8] {
+    [0xdaef832e, 0xe6370b65, 0x6e93ae84, 0xc76ba6d1,
+     0x7c98aaf5, 0xad1dd866, 0x74dee27b, 0xa0f84346]
+}
+
+fn dgx_expected_ptx_source_hash() -> [i64; 8] {
+    [0xca2760d5, 0x39c4602c, 0x85841ac8, 0x475a9ffd,
+     0x8a2f7603, 0x13a8169f, 0xaf99a329, 0x56063bba]
+}
+
+fn dgx_expected_ptx_semantics_hash() -> [i64; 8] {
+    [0x1454e6a2, 0x12f320fb, 0xf4194b3c, 0xbb220a30,
+     0xabed56fb, 0xf5e8041c, 0xe076b7de, 0xe5cae697]
+}
+
+fn dgx_expected_ptx_receipt_hash() -> [i64; 8] {
+    [0xe68f6eda, 0xcfa85c48, 0xcd3cb51a, 0xb4929975,
+     0xa187174b, 0x0b1ab980, 0xa2c0f086, 0x8f5f38fa]
+}
+
+fn dgx_expected_chunk_one_hash() -> [i64; 8] {
+    [0x3e080ba7, 0xe8e556e2, 0x9aed0c69, 0xef818de3,
+     0x9cb48b67, 0xee6b442b, 0xd018dcb6, 0xffa9bd8d]
+}
+
+fn dgx_ascii_string_eq(left: string, right: string) -> bool with Mut, Panic {
+    let n = str_len(left)
+    if n != str_len(right) { return false }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(left, i) != str_char_at(right, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn dgx_chunk_one_path(prefix: string) -> string with Mut, Panic, Div, Alloc {
+    var out: [i8; 512] = [0; 512]
+    let n = str_len(prefix)
+    if n > 500 { return "" }
+    var i: i64 = 0
+    while i < n {
+        out[i as usize] = str_char_at(prefix, i) as i8
+        i = i + 1
+    }
+    out[i as usize] = 48
+    out[(i + 1) as usize] = 48
+    out[(i + 2) as usize] = 49
+    out[(i + 3) as usize] = 46
+    out[(i + 4) as usize] = 112
+    out[(i + 5) as usize] = 97
+    out[(i + 6) as usize] = 114
+    out[(i + 7) as usize] = 116
+    str_from_bytes(out, i + 8)
+}
+
+fn dgx_parent_bindings(
+    garden_path: string,
+    lowering_source_path: string,
+    lowering_semantics_path: string,
+    lowering_receipt_path: string,
+    ptx_source_path: string,
+    ptx_semantics_path: string,
+    ptx_receipt_path: string,
+    chunk_prefix: string,
+) -> PireusDgxParentBindings with IO, Mut, Panic, Div, Alloc {
+    let garden = dgx_file_digest(garden_path)
+    let lowering_source = dgx_file_digest(lowering_source_path)
+    let lowering_semantics = dgx_file_digest(lowering_semantics_path)
+    let lowering_receipt = dgx_file_digest(lowering_receipt_path)
+    let ptx_source = dgx_file_digest(ptx_source_path)
+    let ptx_semantics = dgx_file_digest(ptx_semantics_path)
+    let ptx_receipt = dgx_file_digest(ptx_receipt_path)
+    let chunk_one = dgx_file_digest(dgx_chunk_one_path(chunk_prefix))
+    let expected_garden = dgx_expected_garden_hash()
+    let expected_lowering_source = dgx_expected_lowering_source_hash()
+    let expected_lowering_semantics = dgx_expected_lowering_semantics_hash()
+    let expected_lowering_receipt = dgx_expected_lowering_receipt_hash()
+    let expected_ptx_source = dgx_expected_ptx_source_hash()
+    let expected_ptx_semantics = dgx_expected_ptx_semantics_hash()
+    let expected_ptx_receipt = dgx_expected_ptx_receipt_hash()
+    let expected_chunk_one = dgx_expected_chunk_one_hash()
+    let garden_match = garden.valid && garden.bytes == 10557 &&
+        dgx_hash_equal(&garden.words, &expected_garden)
+    let lowering_source_match = lowering_source.valid &&
+        lowering_source.bytes == 51200 &&
+        dgx_hash_equal(&lowering_source.words, &expected_lowering_source)
+    let lowering_semantics_match = lowering_semantics.valid &&
+        lowering_semantics.bytes == 5974 &&
+        dgx_hash_equal(&lowering_semantics.words, &expected_lowering_semantics)
+    let lowering_receipt_match = lowering_receipt.valid &&
+        lowering_receipt.bytes == 8808 &&
+        dgx_hash_equal(&lowering_receipt.words, &expected_lowering_receipt)
+    let ptx_source_match = ptx_source.valid && ptx_source.bytes == 35158 &&
+        dgx_hash_equal(&ptx_source.words, &expected_ptx_source)
+    let ptx_semantics_match = ptx_semantics.valid &&
+        ptx_semantics.bytes == 4674 &&
+        dgx_hash_equal(&ptx_semantics.words, &expected_ptx_semantics)
+    let ptx_receipt_match = ptx_receipt.valid && ptx_receipt.bytes == 9855 &&
+        dgx_hash_equal(&ptx_receipt.words, &expected_ptx_receipt)
+    let corpus_binding = dgx_ascii_string_eq(
+        pireus_ptx_expected_sha256(),
+        "fd013df0c9560d9f86672c379b57b30a6d5efb2eccbb0c6c487950032e6d3457")
+    let chunk_one_match = chunk_one.valid && chunk_one.bytes == 1000000 &&
+        dgx_hash_equal(&chunk_one.words, &expected_chunk_one)
+    let valid = garden_match && lowering_source_match &&
+        lowering_semantics_match && lowering_receipt_match &&
+        ptx_source_match && ptx_semantics_match && ptx_receipt_match &&
+        corpus_binding && chunk_one_match
+    PireusDgxParentBindings {
+        garden_match: garden_match,
+        lowering_source_match: lowering_source_match,
+        lowering_semantics_match: lowering_semantics_match,
+        lowering_receipt_match: lowering_receipt_match,
+        ptx_source_match: ptx_source_match,
+        ptx_semantics_match: ptx_semantics_match,
+        ptx_receipt_match: ptx_receipt_match,
+        ptx_corpus_binding_match: corpus_binding,
+        ptx_chunk_one_match: chunk_one_match,
+        valid: valid,
+    }
+}
+
+fn dgx_parser_new() -> DgxSectionParser with Mut {
+    DgxSectionParser {
+        line: [0; 4096],
+        line_len: 0,
+        line_overflow: false,
+        selected_active: false,
+        selected_done: false,
+        capture_pending: DGX_CAPTURE_NONE,
+        capture_kind: DGX_CAPTURE_NONE,
+        selected_sections: 0,
+        syntax_blocks: 0,
+        semantics_blocks: 0,
+        instruction_b32: false,
+        modes_rule: false,
+        membermask_32: false,
+        wait_rule: false,
+        lane_rule: false,
+        bval_rule: false,
+        cval_rule: false,
+        segmask_rule: false,
+        active_guard_rule: false,
+        source_write_rule: false,
+        inactive_undefined: false,
+        nonmember_undefined: false,
+        max_lane_rule: false,
+        min_lane_rule: false,
+        bfly_rule: false,
+        fallback_rule: false,
+        copy_rule: false,
+        executing_nonmember_undefined: false,
+        ptx_6_0: false,
+        sm_30: false,
+        error: PIREUS_DGX_PTX_OK,
+    }
+}
+
+fn dgx_line_eq(parser: &DgxSectionParser, value: string) -> bool
+with Mut, Panic {
+    let n = str_len(value)
+    if parser.line_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.line[i as usize] as i64 != str_char_at(value, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn dgx_line_contains(parser: &DgxSectionParser, value: string) -> bool
+with Mut, Panic {
+    let n = str_len(value)
+    if n <= 0 || n > parser.line_len { return false }
+    var start: i64 = 0
+    while start + n <= parser.line_len {
+        var matched = true
+        var i: i64 = 0
+        while i < n {
+            if parser.line[(start + i) as usize] as i64 != str_char_at(value, i) {
+                matched = false
+                break
+            }
+            i = i + 1
+        }
+        if matched { return true }
+        start = start + 1
+    }
+    false
+}
+
+fn dgx_line_reset(parser: &!DgxSectionParser) with Mut {
+    parser.line_len = 0
+    parser.line_overflow = false
+}
+
+fn dgx_process_line(parser: &!DgxSectionParser) with Mut, Panic {
+    let selected_start = dgx_line_eq(
+        parser,
+        "<section id=\"data-movement-and-conversion-instructions-shfl-sync\">")
+    if selected_start {
+        parser.selected_sections = parser.selected_sections + 1
+        if parser.selected_active || parser.selected_done ||
+            parser.selected_sections != 1 {
+            parser.error = PIREUS_DGX_PTX_ERR_SHAPE
+            dgx_line_reset(parser)
+            return
+        }
+        parser.selected_active = true
+    }
+    if !parser.selected_active {
+        dgx_line_reset(parser)
+        return
+    }
+    if parser.line_overflow {
+        parser.error = PIREUS_DGX_PTX_ERR_HTML
+        dgx_line_reset(parser)
+        return
+    }
+    if dgx_line_eq(parser, "<p class=\"rubric\">Syntax</p>") {
+        parser.capture_pending = DGX_CAPTURE_SYNTAX
+    }
+    if dgx_line_eq(parser, "<p class=\"rubric\">Semantics</p>") {
+        parser.capture_pending = DGX_CAPTURE_SEMANTICS
+    }
+    if dgx_line_contains(parser, "<pre>") {
+        parser.capture_kind = parser.capture_pending
+        parser.capture_pending = DGX_CAPTURE_NONE
+        if parser.capture_kind == DGX_CAPTURE_SYNTAX {
+            parser.syntax_blocks = parser.syntax_blocks + 1
+        }
+        if parser.capture_kind == DGX_CAPTURE_SEMANTICS {
+            parser.semantics_blocks = parser.semantics_blocks + 1
+        }
+    }
+    if parser.capture_kind == DGX_CAPTURE_SYNTAX {
+        if dgx_line_contains(
+            parser, "shfl.sync.mode.b32  d[|p], a, b, c, membermask;") {
+            parser.instruction_b32 = true
+        }
+        if dgx_line_contains(parser, ".mode = { .up, .down, .bfly, .idx };") {
+            parser.modes_rule = true
+        }
+    }
+    if parser.capture_kind == DGX_CAPTURE_SEMANTICS {
+        if dgx_line_contains(parser, "wait_for_specified_threads(membermask);") {
+            parser.wait_rule = true
+        }
+        if dgx_line_contains(parser, "lane[4:0]  = [Thread].laneid;") {
+            parser.lane_rule = true
+        }
+        if dgx_line_contains(parser, "bval[4:0] = b[4:0];") {
+            parser.bval_rule = true
+        }
+        if dgx_line_contains(parser, "cval[4:0] = c[4:0];") {
+            parser.cval_rule = true
+        }
+        if dgx_line_contains(parser, "segmask[4:0] = c[12:8];") {
+            parser.segmask_rule = true
+        }
+        if dgx_line_contains(
+            parser, "if (isActive(Thread) &amp;&amp; isGuardPredicateTrue(Thread)) {") {
+            parser.active_guard_rule = true
+        }
+        if dgx_line_contains(parser, "SourceA[lane] = a;") {
+            parser.source_write_rule = true
+        }
+        if dgx_line_contains(
+            parser,
+            "maxLane = (lane[4:0] &amp; segmask[4:0]) | (cval[4:0] &amp; ~segmask[4:0]);") {
+            parser.max_lane_rule = true
+        }
+        if dgx_line_contains(
+            parser, "minLane = (lane[4:0] &amp; segmask[4:0]);") {
+            parser.min_lane_rule = true
+        }
+        if dgx_line_contains(
+            parser,
+            "case .bfly:  j = lane ^ bval; pval = (j &lt;= maxLane); break;") {
+            parser.bfly_rule = true
+        }
+        if dgx_line_contains(parser, "if (!pval) j = lane;") {
+            parser.fallback_rule = true
+        }
+        if dgx_line_contains(parser, "d = SourceA[j];") {
+            parser.copy_rule = true
+        }
+    }
+    if dgx_line_contains(
+        parser, "specifies a 32-bit integer which is a mask indicating threads") {
+        parser.membermask_32 = true
+    }
+    if dgx_line_contains(
+        parser, "results are undefined if a thread sources a register from an inactive thread") {
+        parser.inactive_undefined = true
+    }
+    if dgx_line_contains(
+        parser, "that is not in <code class=\"docutils literal notranslate\"><span class=\"pre\">membermask") {
+        parser.nonmember_undefined = true
+    }
+    if dgx_line_contains(
+        parser, "undefined if the executing thread is not in the <code") {
+        parser.executing_nonmember_undefined = true
+    }
+    if dgx_line_contains(parser, "Introduced in PTX ISA version 6.0.") {
+        parser.ptx_6_0 = true
+    }
+    if dgx_line_contains(parser, "Requires <code") &&
+        dgx_line_contains(parser, "sm_30") &&
+        dgx_line_contains(parser, "or higher.") {
+        parser.sm_30 = true
+    }
+    if dgx_line_contains(parser, "</pre>") {
+        parser.capture_kind = DGX_CAPTURE_NONE
+    }
+    if dgx_line_eq(parser, "</section>") {
+        parser.selected_active = false
+        parser.selected_done = true
+        parser.capture_kind = DGX_CAPTURE_NONE
+        parser.capture_pending = DGX_CAPTURE_NONE
+    }
+    dgx_line_reset(parser)
+}
+
+fn dgx_feed(parser: &!DgxSectionParser, byte: i64) with Mut, Panic {
+    if parser.error != PIREUS_DGX_PTX_OK { return }
+    if byte == 10 {
+        dgx_process_line(parser)
+        return
+    }
+    if byte == 13 { return }
+    if parser.line_len >= 4096 {
+        parser.line_overflow = true
+        return
+    }
+    parser.line[parser.line_len as usize] = byte as i8
+    parser.line_len = parser.line_len + 1
+}
+
+fn dgx_semantics_empty() -> PireusDgxPtxSemantics {
+    PireusDgxPtxSemantics {
+        corpus_bytes: 0,
+        corpus_chunks: 0,
+        corpus_digest_match: false,
+        prmt_parent_sections: 0,
+        selected_sections: 0,
+        syntax_blocks: 0,
+        semantics_blocks: 0,
+        instruction_b32: false,
+        modes_up_down_bfly_idx: false,
+        membermask_width_bits: 0,
+        wait_membermask_rule: false,
+        lane_width_bits: 0,
+        bval_width_bits: 0,
+        cval_width_bits: 0,
+        segmask_width_bits: 0,
+        source_active_rule: false,
+        inactive_source_undefined: false,
+        nonmember_source_undefined: false,
+        max_lane_rule: false,
+        min_lane_rule: false,
+        bfly_xor_rule: false,
+        own_lane_fallback_rule: false,
+        source_copy_rule: false,
+        executing_nonmember_undefined: false,
+        introduced_ptx_major: 0,
+        introduced_ptx_minor: 0,
+        target_sm_min: 0,
+        complete: false,
+    }
+}
+
+fn dgx_parse_semantics(chunk_prefix: string) -> PireusDgxPtxSemantics
+with IO, Mut, Panic, Div, Alloc {
+    let inventory = pireus_ptx_import_chunks(chunk_prefix)
+    let path = dgx_chunk_one_path(chunk_prefix)
+    let size = file_size(path)
+    if size != 1000000 { return dgx_semantics_empty() }
+    let raw = read_file(path)
+    var parser = dgx_parser_new()
+    var i: i64 = 0
+    while i < size {
+        var byte = raw[i as usize] as i64
+        if byte < 0 { byte = byte + 256 }
+        dgx_feed(&!parser, byte)
+        if parser.error != PIREUS_DGX_PTX_OK { break }
+        i = i + 1
+    }
+    if parser.error == PIREUS_DGX_PTX_OK && parser.line_len > 0 {
+        dgx_process_line(&!parser)
+    }
+    let corpus_ok = inventory.error == PIREUS_PTX_OK &&
+        inventory.total_bytes == 3428895 && inventory.chunk_count == 4 &&
+        inventory.digest_match
+    let complete = corpus_ok && parser.error == PIREUS_DGX_PTX_OK &&
+        parser.selected_sections == 1 && parser.selected_done &&
+        !parser.selected_active && parser.syntax_blocks == 1 &&
+        parser.semantics_blocks == 1 && parser.instruction_b32 &&
+        parser.modes_rule && parser.membermask_32 && parser.wait_rule &&
+        parser.lane_rule && parser.bval_rule && parser.cval_rule &&
+        parser.segmask_rule && parser.active_guard_rule &&
+        parser.source_write_rule && parser.inactive_undefined &&
+        parser.nonmember_undefined && parser.max_lane_rule &&
+        parser.min_lane_rule && parser.bfly_rule && parser.fallback_rule &&
+        parser.copy_rule && parser.executing_nonmember_undefined &&
+        parser.ptx_6_0 && parser.sm_30
+    PireusDgxPtxSemantics {
+        corpus_bytes: inventory.total_bytes,
+        corpus_chunks: inventory.chunk_count,
+        corpus_digest_match: inventory.digest_match,
+        prmt_parent_sections: inventory.selected_sections,
+        selected_sections: parser.selected_sections,
+        syntax_blocks: parser.syntax_blocks,
+        semantics_blocks: parser.semantics_blocks,
+        instruction_b32: parser.instruction_b32,
+        modes_up_down_bfly_idx: parser.modes_rule,
+        membermask_width_bits: if parser.membermask_32 { 32 } else { 0 },
+        wait_membermask_rule: parser.wait_rule,
+        lane_width_bits: if parser.lane_rule { 5 } else { 0 },
+        bval_width_bits: if parser.bval_rule { 5 } else { 0 },
+        cval_width_bits: if parser.cval_rule { 5 } else { 0 },
+        segmask_width_bits: if parser.segmask_rule { 5 } else { 0 },
+        source_active_rule: parser.active_guard_rule && parser.source_write_rule,
+        inactive_source_undefined: parser.inactive_undefined,
+        nonmember_source_undefined: parser.nonmember_undefined,
+        max_lane_rule: parser.max_lane_rule,
+        min_lane_rule: parser.min_lane_rule,
+        bfly_xor_rule: parser.bfly_rule,
+        own_lane_fallback_rule: parser.fallback_rule,
+        source_copy_rule: parser.copy_rule,
+        executing_nonmember_undefined: parser.executing_nonmember_undefined,
+        introduced_ptx_major: if parser.ptx_6_0 { 6 } else { 0 },
+        introduced_ptx_minor: 0,
+        target_sm_min: if parser.sm_30 { 30 } else { 0 },
+        complete: complete,
+    }
+}
+
+fn dgx_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        bytes[i as usize] = ((value >> (56 - i * 8)) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn dgx_candidate_empty() -> PireusDgxPtxCandidate {
+    PireusDgxPtxCandidate {
+        logical_bits: PIREUS_XOR_LOWERING_BITS,
+        logical_dimension: PIREUS_XOR_LOWERING_DIMENSION,
+        warp_lane_bits: 0,
+        warp_lanes: 0,
+        admitted_logical_lanes: 0,
+        membermask_bits: 0,
+        membermask_low: 0,
+        bval_bits: 0,
+        cval: 0,
+        segmask: 0,
+        packed_c: 0,
+        payload_bits_per_instruction: 0,
+        f64_components: 0,
+        displacement_count: 0,
+        logical_cells: 0,
+        matched_cells: 0,
+        mismatched_cells: 0,
+        in_range_cells: 0,
+        own_lane_fallback_cells: 0,
+        active_source_cells: 0,
+        member_source_cells: 0,
+        payload_component_cells: 0,
+        symbolic_payload_bits: 0,
+        matched_payload_bits: 0,
+        max_source_lane: -1,
+        abstract_shfl_sync_instructions: 0,
+        identity_shfl_sync_instructions: 0,
+        nontrivial_shfl_sync_instructions: 0,
+        logical_index_coverage: false,
+        symbolic_payload_address_preservation: false,
+        xor_permute_candidate: false,
+        unresolved_other_nodes:
+            DGX_FROZEN_OPERATION_NODES - DGX_RESOLVED_SELECTOR_NODES,
+        exact_tree_reduction_refused: true,
+        digest: dgx_zero_digest(),
+    }
+}
+
+fn dgx_candidate_from_semantics(
+    semantics: &PireusDgxPtxSemantics,
+) -> PireusDgxPtxCandidate with Mut, Panic, Div {
+    if !semantics.complete { return dgx_candidate_empty() }
+    let lane_bits = semantics.lane_width_bits
+    let warp_lanes = 1 << lane_bits
+    let logical_lanes = PIREUS_XOR_LOWERING_DIMENSION
+    let membermask_bits = semantics.membermask_width_bits
+    let membermask_low = (1 << logical_lanes) - 1
+    let bval_bits = semantics.bval_width_bits
+    let cval = logical_lanes - 1
+    let segmask: i64 = 0
+    let packed_c = cval | (segmask << 8)
+    let payload_bits = 32
+    let components = 64 / payload_bits
+    var logical_cells: i64 = 0
+    var matched_cells: i64 = 0
+    var in_range_cells: i64 = 0
+    var fallback_cells: i64 = 0
+    var active_cells: i64 = 0
+    var member_cells: i64 = 0
+    var component_cells: i64 = 0
+    var symbolic_bits: i64 = 0
+    var matched_bits: i64 = 0
+    var max_source: i64 = -1
+    var state = dgx_digest_add_i64(sha256_init(), 0x4450585348463031)
+    var d: i64 = 0
+    while d < logical_lanes {
+        var lane: i64 = 0
+        while lane < logical_lanes {
+            let bval = d & ((1 << bval_bits) - 1)
+            let max_lane = (lane & segmask) |
+                (cval & (((1 << lane_bits) - 1) ^ segmask))
+            let source = lane ^ bval
+            let in_range = source <= max_lane
+            let decoded_source = if in_range { source } else { lane }
+            let expected_source = lane ^ d
+            let source_active = decoded_source >= 0 && decoded_source < logical_lanes
+            let source_member = source_active &&
+                ((membermask_low >> decoded_source) & 1) == 1
+            logical_cells = logical_cells + 1
+            if in_range { in_range_cells = in_range_cells + 1 }
+            else { fallback_cells = fallback_cells + 1 }
+            if source_active { active_cells = active_cells + 1 }
+            if source_member { member_cells = member_cells + 1 }
+            if decoded_source == expected_source && source_active && source_member {
+                matched_cells = matched_cells + 1
+            }
+            if decoded_source > max_source { max_source = decoded_source }
+            state = dgx_digest_add_i64(state, d)
+            state = dgx_digest_add_i64(state, lane)
+            state = dgx_digest_add_i64(state, bval)
+            state = dgx_digest_add_i64(state, packed_c)
+            state = dgx_digest_add_i64(state, decoded_source)
+            var component: i64 = 0
+            while component < components {
+                component_cells = component_cells + 1
+                var bit: i64 = 0
+                while bit < payload_bits {
+                    let source_bit = expected_source * 64 +
+                        component * payload_bits + bit
+                    let reconstructed_bit = decoded_source * 64 +
+                        component * payload_bits + bit
+                    symbolic_bits = symbolic_bits + 1
+                    if in_range && source_active && source_member &&
+                        source_bit == reconstructed_bit {
+                        matched_bits = matched_bits + 1
+                    }
+                    state = dgx_digest_add_i64(state, source_bit)
+                    state = dgx_digest_add_i64(state, reconstructed_bit)
+                    bit = bit + 1
+                }
+                component = component + 1
+            }
+            lane = lane + 1
+        }
+        d = d + 1
+    }
+    let finalized = sha256_finalize(state)
+    let digest = PireusDgxDigest { words: dgx_hash_words(&finalized) }
+    let dimension_valid = logical_lanes == (1 << PIREUS_XOR_LOWERING_BITS) &&
+        logical_lanes > 0 && logical_lanes <= membermask_bits &&
+        logical_lanes <= warp_lanes
+    let index_coverage = dimension_valid &&
+        logical_cells == logical_lanes * logical_lanes &&
+        matched_cells == logical_cells &&
+        in_range_cells == logical_cells && active_cells == logical_cells &&
+        member_cells == logical_cells && max_source < logical_lanes
+    let bit_preservation = symbolic_bits == logical_cells * 64 &&
+        matched_bits == symbolic_bits && component_cells == logical_cells * components
+    PireusDgxPtxCandidate {
+        logical_bits: PIREUS_XOR_LOWERING_BITS,
+        logical_dimension: logical_lanes,
+        warp_lane_bits: lane_bits,
+        warp_lanes: warp_lanes,
+        admitted_logical_lanes: logical_lanes,
+        membermask_bits: membermask_bits,
+        membermask_low: membermask_low,
+        bval_bits: bval_bits,
+        cval: cval,
+        segmask: segmask,
+        packed_c: packed_c,
+        payload_bits_per_instruction: payload_bits,
+        f64_components: components,
+        displacement_count: logical_lanes,
+        logical_cells: logical_cells,
+        matched_cells: matched_cells,
+        mismatched_cells: logical_cells - matched_cells,
+        in_range_cells: in_range_cells,
+        own_lane_fallback_cells: fallback_cells,
+        active_source_cells: active_cells,
+        member_source_cells: member_cells,
+        payload_component_cells: component_cells,
+        symbolic_payload_bits: symbolic_bits,
+        matched_payload_bits: matched_bits,
+        max_source_lane: max_source,
+        abstract_shfl_sync_instructions: logical_lanes * components,
+        identity_shfl_sync_instructions: components,
+        nontrivial_shfl_sync_instructions: (logical_lanes - 1) * components,
+        logical_index_coverage: index_coverage,
+        symbolic_payload_address_preservation: bit_preservation,
+        xor_permute_candidate: index_coverage && bit_preservation,
+        unresolved_other_nodes:
+            DGX_FROZEN_OPERATION_NODES - DGX_RESOLVED_SELECTOR_NODES,
+        exact_tree_reduction_refused: true,
+        digest: digest,
+    }
+}
+
+fn dgx_candidate_gate(
+    garden: bool,
+    lowering_parent: bool,
+    ptx_parent: bool,
+    corpus: bool,
+    section: bool,
+    semantics: bool,
+    prose_promoted: bool,
+    prmt_promoted: bool,
+    foreign_control: bool,
+    mapping_complete: bool,
+    membermask_valid: bool,
+    source_active: bool,
+    source_bounded: bool,
+    payload_addresses_preserved: bool,
+    cells: i64,
+    unresolved_other_nodes: i64,
+    foreign_operation: bool,
+    tree_exact: bool,
+    ptx_sass_equivalent: bool,
+    canonical: bool,
+    observed: bool,
+    cost_claim: bool,
+    sounio_authority: bool,
+    parity_open: bool,
+    claim_ready: bool,
+) -> bool {
+    garden && lowering_parent && ptx_parent && corpus && section && semantics &&
+        !prose_promoted && !prmt_promoted && !foreign_control &&
+        mapping_complete && membermask_valid && source_active && source_bounded &&
+        payload_addresses_preserved &&
+        cells == PIREUS_XOR_LOWERING_DIMENSION *
+            PIREUS_XOR_LOWERING_DIMENSION &&
+        unresolved_other_nodes == 4 &&
+        !foreign_operation && !tree_exact && !ptx_sass_equivalent && canonical &&
+        !observed && !cost_claim && sounio_authority && !parity_open &&
+        !claim_ready
+}
+
+fn dgx_negative_case(witness: i64) -> bool {
+    var garden = true
+    var lowering_parent = true
+    var ptx_parent = true
+    var corpus = true
+    var section = true
+    var semantics = true
+    var prose_promoted = false
+    var prmt_promoted = false
+    var foreign_control = false
+    var mapping_complete = true
+    var membermask_valid = true
+    var source_active = true
+    var source_bounded = true
+    var payload_addresses_preserved = true
+    var cells: i64 = 256
+    var unresolved_other_nodes: i64 = 4
+    var foreign_operation = false
+    var tree_exact = false
+    var ptx_sass = false
+    var canonical = true
+    var observed = false
+    var cost_claim = false
+    var sounio_authority = true
+    var parity_open = false
+    var claim_ready = false
+    if witness == 1 { garden = false }
+    if witness == 2 { lowering_parent = false }
+    if witness == 3 { corpus = false }
+    if witness == 4 { section = false }
+    if witness == 5 { prose_promoted = true }
+    if witness == 6 { prmt_promoted = true }
+    if witness == 7 { foreign_control = true }
+    if witness == 8 { mapping_complete = false }
+    if witness == 9 { membermask_valid = false }
+    if witness == 10 { source_active = false }
+    if witness == 11 { source_bounded = false }
+    if witness == 12 { payload_addresses_preserved = false }
+    if witness == 13 { cells = 255 }
+    if witness == 14 { unresolved_other_nodes = 0 }
+    if witness == 15 { foreign_operation = true }
+    if witness == 16 { tree_exact = true }
+    if witness == 17 { ptx_sass = true }
+    if witness == 18 { observed = true }
+    if witness == 19 { cost_claim = true }
+    if witness == 20 { sounio_authority = false }
+    if witness == 21 { parity_open = true }
+    if witness == 22 { claim_ready = true }
+    if witness == 23 { ptx_parent = false }
+    if witness == 24 { semantics = false }
+    if witness == 25 { canonical = false }
+    let baseline = dgx_candidate_gate(
+        true, true, true, true, true, true, false, false, false, true,
+        true, true, true, true, 256, 4, false, false, false, true, false,
+        false, true, false, false)
+    baseline && !dgx_candidate_gate(
+        garden, lowering_parent, ptx_parent, corpus, section, semantics,
+        prose_promoted, prmt_promoted, foreign_control, mapping_complete,
+        membermask_valid, source_active, source_bounded,
+        payload_addresses_preserved,
+        cells, unresolved_other_nodes, foreign_operation, tree_exact, ptx_sass,
+        canonical, observed, cost_claim, sounio_authority, parity_open, claim_ready)
+}
+
+fn dgx_negatives() -> PireusDgxPtxNegatives with Mut, Panic {
+    let values: [bool; 25] = [
+        dgx_negative_case(1), dgx_negative_case(2), dgx_negative_case(3),
+        dgx_negative_case(4), dgx_negative_case(5), dgx_negative_case(6),
+        dgx_negative_case(7), dgx_negative_case(8), dgx_negative_case(9),
+        dgx_negative_case(10), dgx_negative_case(11), dgx_negative_case(12),
+        dgx_negative_case(13), dgx_negative_case(14), dgx_negative_case(15),
+        dgx_negative_case(16), dgx_negative_case(17), dgx_negative_case(18),
+        dgx_negative_case(19), dgx_negative_case(20), dgx_negative_case(21),
+        dgx_negative_case(22), dgx_negative_case(23), dgx_negative_case(24),
+        dgx_negative_case(25)
+    ]
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < 25 {
+        if values[i] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusDgxPtxNegatives {
+        garden_missing: values[0],
+        parent_hash_drift: values[1],
+        corpus_drift: values[2],
+        selected_section_shape: values[3],
+        prose_promoted: values[4],
+        prmt_promoted: values[5],
+        foreign_control: values[6],
+        logical_alias: values[7],
+        invalid_membermask: values[8],
+        inactive_source: values[9],
+        out_of_bound_source: values[10],
+        payload_address_loss: values[11],
+        selector_cell_drift: values[12],
+        selector_promoted_to_operation: values[13],
+        foreign_operation: values[14],
+        tree_promoted_to_exact: values[15],
+        ptx_promoted_to_sass: values[16],
+        canonical_promoted_to_observed: values[17],
+        cost_claim: values[18],
+        non_sounio_authority: values[19],
+        parity_before_freeze: values[20],
+        claim_before_parity: values[21],
+        ptx_parent_hash_drift: values[22],
+        semantic_shape_drift: values[23],
+        canonical_target_missing: values[24],
+        passed: passed,
+        total: 25,
+    }
+}
+
+pub fn pireus_dgx_ptx_shfl_evaluate(
+    garden_path: string,
+    lowering_source_path: string,
+    lowering_semantics_path: string,
+    lowering_receipt_path: string,
+    ptx_source_path: string,
+    ptx_semantics_path: string,
+    ptx_receipt_path: string,
+    chunk_prefix: string,
+) -> PireusDgxPtxResult with IO, Mut, Panic, Div, Alloc {
+    let parents = dgx_parent_bindings(
+        garden_path, lowering_source_path, lowering_semantics_path,
+        lowering_receipt_path, ptx_source_path, ptx_semantics_path,
+        ptx_receipt_path, chunk_prefix)
+    let semantics = dgx_parse_semantics(chunk_prefix)
+    let candidate = dgx_candidate_from_semantics(&semantics)
+    let negatives = dgx_negatives()
+    let dgx_canonical = true
+    let dgx_observed = false
+    let ptx_sass_equivalence_count: i64 = 0
+    let dgx_material_receipt_count: i64 = 0
+    let compiler_emission_count: i64 = 0
+    let cost_record_count: i64 = 0
+    let parity_open = false
+    let claim_ready = false
+    let authority_gate = dgx_candidate_gate(
+        parents.garden_match,
+        parents.lowering_source_match && parents.lowering_semantics_match &&
+            parents.lowering_receipt_match,
+        parents.ptx_source_match && parents.ptx_semantics_match &&
+            parents.ptx_receipt_match,
+        semantics.corpus_digest_match && parents.ptx_corpus_binding_match &&
+            parents.ptx_chunk_one_match,
+        semantics.selected_sections == 1 && semantics.syntax_blocks == 1 &&
+            semantics.semantics_blocks == 1,
+        semantics.complete,
+        false,
+        false,
+        false,
+        candidate.logical_index_coverage,
+        candidate.member_source_cells == candidate.logical_cells,
+        candidate.active_source_cells == candidate.logical_cells,
+        candidate.in_range_cells == candidate.logical_cells &&
+            candidate.max_source_lane < candidate.logical_dimension,
+        candidate.symbolic_payload_address_preservation,
+        candidate.logical_cells,
+        candidate.unresolved_other_nodes,
+        false,
+        !candidate.exact_tree_reduction_refused,
+        ptx_sass_equivalence_count > 0,
+        dgx_canonical,
+        dgx_observed,
+        cost_record_count > 0,
+        true,
+        parity_open,
+        claim_ready)
+    var error = PIREUS_DGX_PTX_OK
+    if !parents.valid { error = PIREUS_DGX_PTX_ERR_PARENT }
+    else if !semantics.complete { error = PIREUS_DGX_PTX_ERR_SHAPE }
+    else if !candidate.xor_permute_candidate ||
+        candidate.matched_cells != candidate.logical_cells ||
+        candidate.matched_payload_bits != candidate.symbolic_payload_bits {
+        error = PIREUS_DGX_PTX_ERR_CANDIDATE
+    }
+    else if !authority_gate || negatives.passed != negatives.total {
+        error = PIREUS_DGX_PTX_ERR_AUTHORITY
+    }
+    var failures: i64 = 0
+    if error != PIREUS_DGX_PTX_OK { failures = failures + 1 }
+    if !dgx_canonical || dgx_observed || ptx_sass_equivalence_count != 0 ||
+        dgx_material_receipt_count != 0 || compiler_emission_count != 0 ||
+        cost_record_count != 0 || parity_open || claim_ready {
+        failures = failures + 1
+    }
+    PireusDgxPtxResult {
+        valid: failures == 0,
+        error: error,
+        parents: parents,
+        semantics: semantics,
+        candidate: candidate,
+        negatives: negatives,
+        dgx_canonical: dgx_canonical,
+        dgx_observed: dgx_observed,
+        ptx_sass_equivalence_count: ptx_sass_equivalence_count,
+        dgx_material_receipt_count: dgx_material_receipt_count,
+        compiler_emission_count: compiler_emission_count,
+        cost_record_count: cost_record_count,
+        parity_open: parity_open,
+        claim_ready: claim_ready,
+        failures: failures,
+    }
+}

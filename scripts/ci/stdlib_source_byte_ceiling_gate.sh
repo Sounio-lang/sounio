@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# stdlib_source_byte_ceiling_gate.sh — no stdlib .sio may exceed the lexer source-byte wall.
+# stdlib_source_byte_ceiling_gate.sh — no stdlib .sio may exceed 2 MiB.
 #
-# CAP = 2097152 matches CURSOR_SOURCE / lex_file clip (E229 after refusal lands).
+# CAP = 2097152 NO LONGER matches the lexer wall, and that is deliberate. It did
+# until 2026-09-05, when CURSOR_SOURCE moved to 16777216 so Madaros could read
+# its own 2.1 MB lean_single.sio. This gate keeps the 2 MiB number as a STDLIB
+# POLICY, not as a mirror of the lexer: the failure it was built for was
+# stdlib/theorem/portfolio.sio re-monolithing, and the fix for that is splitting
+# the module, which is what the line below already says. Raising this to follow
+# the lexer would retire a working policy for no reason.
 # Soft warn at 1.5 MiB so catalogs cannot silently re-monolith toward the hard wall.
 #
 # Positive control: this gate must FAIL if a file over CAP is present. The historical

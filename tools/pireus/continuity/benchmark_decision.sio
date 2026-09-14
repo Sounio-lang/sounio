@@ -1,0 +1,122 @@
+// Frozen material-gain rule, computed only in Sounio.
+// Four files: candidate/direct and candidate/shuffle on Spark3, then Spark8.
+// Each has 30 lines: block_index control_first candidate_total_ns control_total_ns.
+// Resident-layout kernel timing; per-block gain in ppm, paired percentile bootstrap.
+// 4000 deterministic resamples; 95% interval = sorted samples [99], [3899].
+// Both-node / both-control eligibility requires median >= 50000 and CI low > 0.
+// This finite experiment never closes formal/scientific claims.
+struct Gain { valid: bool, median: i64, low: i64, high: i64 }
+fn invalid() -> Gain { Gain { valid: false, median: 0, low: 0, high: 0 } }
+fn evaluate(path: string) -> Gain with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 || size > 8192 { return invalid() }
+    let text = read_file(path)
+    if str_len(text) != size { return invalid() }
+    var gains: [i64; 30] = [0; 30]
+    var position: i64 = 0
+    var block: i64 = 0
+    while block < 30 {
+        var values: [i64; 4] = [0; 4]
+        var field: i64 = 0
+        while field < 4 {
+            var value: i64 = 0
+            var digits: i64 = 0
+            while position < size {
+                let c = str_char_at(text, position)
+                if c < 48 || c > 57 { break }
+                if digits >= 9 { return invalid() }
+                value = value * 10 + c - 48
+                digits = digits + 1
+                position = position + 1
+            }
+            if digits == 0 || position >= size { return invalid() }
+            let delimiter = if field == 3 { 10 } else { 32 }
+            if str_char_at(text, position) != delimiter { return invalid() }
+            position = position + 1
+            values[field as usize] = value
+            field = field + 1
+        }
+        if values[0] != block || values[1] != (block % 2) { return invalid() }
+        if values[2] <= 0 || values[3] <= 0 { return invalid() }
+        gains[block as usize] = ((values[3] - values[2]) * 1000000) / values[3]
+        block = block + 1
+    }
+    if position != size { return invalid() }
+    var original: [i64; 30] = [0; 30]
+    var copy_index: i64 = 0
+    while copy_index < 30 { original[copy_index as usize] = gains[copy_index as usize]; copy_index = copy_index + 1 }
+    var i: i64 = 1
+    while i < 30 {
+        let key = original[i as usize]
+        var j = i
+        while j > 0 && original[(j - 1) as usize] > key {
+            original[j as usize] = original[(j - 1) as usize]
+            j = j - 1
+        }
+        original[j as usize] = key
+        i = i + 1
+    }
+    let median = (original[14] + original[15]) / 2
+    var boot: [i64; 4000] = [0; 4000]
+    var state: i64 = 20260906
+    var repetition: i64 = 0
+    while repetition < 4000 {
+        var sample: [i64; 30] = [0; 30]
+        i = 0
+        while i < 30 {
+            state = (state * 48271) % 2147483647
+            sample[i as usize] = gains[(state % 30) as usize]
+            i = i + 1
+        }
+        i = 1
+        while i < 30 {
+            let key = sample[i as usize]
+            var j = i
+            while j > 0 && sample[(j - 1) as usize] > key {
+                sample[j as usize] = sample[(j - 1) as usize]
+                j = j - 1
+            }
+            sample[j as usize] = key
+            i = i + 1
+        }
+        boot[repetition as usize] = (sample[14] + sample[15]) / 2
+        repetition = repetition + 1
+    }
+    i = 1
+    while i < 4000 {
+        let key = boot[i as usize]
+        var j = i
+        while j > 0 && boot[(j - 1) as usize] > key {
+            boot[j as usize] = boot[(j - 1) as usize]
+            j = j - 1
+        }
+        boot[j as usize] = key
+        i = i + 1
+    }
+    Gain { valid: true, median: median, low: boot[99], high: boot[3899] }
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 4 { return 2 }
+    var index: i64 = 0
+    var eligible = true
+    // Validate all files before emitting a receipt.
+    while index < 4 {
+        let result = evaluate(get_arg(index))
+        if !result.valid { return 2 }
+        index = index + 1
+    }
+    print("{\"authority\":\"Sounio\",\"method\":\"paired-median-ppm-bootstrap4000-v1\",\"scope\":\"resident-layout-kernel\",\"comparisons\":[")
+    index = 0
+    while index < 4 {
+        let result = evaluate(get_arg(index))
+        if index > 0 { print(",") }
+        print("{\"median_gain_ppm\":"); print_int(result.median)
+        print(",\"ci95_low_ppm\":"); print_int(result.low)
+        print(",\"ci95_high_ppm\":"); print_int(result.high); print("}")
+        if result.median < 50000 || result.low <= 0 { eligible = false }
+        index = index + 1
+    }
+    print("],\"gain_gate\":\""); if eligible { print("PASS") } else { print("NO_GAIN") }
+    print("\",\"requires_material_parity\":true,\"claim_ready\":false,\"scientific_novelty\":false}\n")
+    0
+}

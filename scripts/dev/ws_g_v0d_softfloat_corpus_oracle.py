@@ -15,15 +15,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VEC = ROOT / "tests" / "vectors" / "f128_f256_v0d"
+RUNNER = ROOT / "scripts" / "dev" / "ws_g_v0d_softfloat_corpus_runner.py"
 
 EXPECTED_MD5 = {
-    "arith_hard_f128.jsonl": "2daa40def9d6ba64bac9151332994293",
-    "arith_hard_f256.jsonl": "b4026ca0fe4ef157fd90b486fb1a3149",
+    # 2026-09-06: sticky sub rows f128_arith_0010 / f256_arith_0063 result.limbs
+    # corrected to IEEE ops on encoded wire operands (generator previously used
+    # unrepresentable exact MPFR inputs; encode(a)≠a made result unreachable).
+    "arith_hard_f128.jsonl": "4e49d07307dceff293fa2fc0666486a7",
+    "arith_hard_f256.jsonl": "bef3744e774292ab622448bc2d6b63f1",
 }
 
 EXPECTED_COUNTS = {
@@ -228,6 +233,37 @@ def main() -> int:
             "PASS v0d_softfloat_consumer_present "
             + ",".join(str(p.relative_to(ROOT)) for p in found)
         )
+
+    # Hard bar: runner must execute and assert bit-identity (file presence alone
+    # is not green — V0-D “de verdade”).
+    if not RUNNER.is_file():
+        print("FAIL v0d_softfloat_runner_missing scripts/dev/ws_g_v0d_softfloat_corpus_runner.py")
+        rc = 1
+    else:
+        proc = subprocess.run(
+            [sys.executable, str(RUNNER)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in (proc.stdout or "").splitlines():
+            print(line)
+        if proc.stderr:
+            for line in proc.stderr.splitlines():
+                print(f"NOTE runner_stderr {line}")
+        if proc.returncode != 0:
+            print(
+                "FAIL v0d_softfloat_bit_identity_runner "
+                f"exit={proc.returncode} (limb softfloat must match MPFR result.limbs "
+                f"on all hard rows including must_trap_ids n={len(must_trap_ids)})"
+            )
+            rc = 1
+        elif "bit_identity=all_hard_rows" not in (proc.stdout or ""):
+            print("FAIL v0d_softfloat_runner_missing_bit_identity_receipt")
+            rc = 1
+        else:
+            print("PASS v0d_softfloat_bit_identity_runner")
 
     return rc
 

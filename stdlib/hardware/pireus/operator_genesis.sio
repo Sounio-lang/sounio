@@ -1,0 +1,1668 @@
+//! Sounio authority for bounded generation of operator novelty candidates.
+//!
+//! v0 exhausts a 16-member TwistedXor16 grammar, canonicalizes each sign
+//! table under 48 declared actions, and measures exact Hamming distance to a
+//! three-operator frozen internal corpus. Novelty remains corpus- and
+//! group-relative; no historical, material, or scientific novelty is emitted.
+
+use algebra::cayley_dickson::cd_sigma
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_GENESIS_SCHEMA: i64 = 720000
+pub const PIREUS_GENESIS_BITS: i64 = 4
+pub const PIREUS_GENESIS_DIMENSION: i64 = 16
+pub const PIREUS_GENESIS_CANDIDATE_COUNT: i64 = 16
+pub const PIREUS_GENESIS_PERMUTATION_COUNT: i64 = 24
+pub const PIREUS_GENESIS_ACTION_COUNT: i64 = 48
+pub const PIREUS_GENESIS_CORPUS_COUNT: i64 = 3
+pub const PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE: i64 = 144
+pub const PIREUS_GENESIS_SEED: i64 = 9
+
+pub const PIREUS_GENESIS_LANGUAGE_SOUNIO: i64 = 1
+pub const PIREUS_GENESIS_LANGUAGE_LEAN: i64 = 2
+pub const PIREUS_GENESIS_LANGUAGE_KOKA: i64 = 3
+pub const PIREUS_GENESIS_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_GENESIS_LANGUAGE_HASKELL: i64 = 5
+pub const PIREUS_GENESIS_LANGUAGE_LLM: i64 = 6
+pub const PIREUS_GENESIS_LANGUAGE_PYTHON: i64 = 7
+pub const PIREUS_GENESIS_LANGUAGE_RUST: i64 = 8
+
+pub const PIREUS_GENESIS_ROLE_SEMANTIC_AUTHORITY: i64 = 1
+pub const PIREUS_GENESIS_ROLE_FORMAL_PARITY: i64 = 2
+pub const PIREUS_GENESIS_ROLE_EFFECT_PARITY: i64 = 3
+pub const PIREUS_GENESIS_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_GENESIS_ROLE_DENOTATIONAL_BASELINE: i64 = 5
+pub const PIREUS_GENESIS_ROLE_REVIEW_ONLY: i64 = 6
+pub const PIREUS_GENESIS_ROLE_FORBIDDEN_ORACLE: i64 = 7
+
+pub const PIREUS_GENESIS_STAGE_GARDEN: i64 = 1
+pub const PIREUS_GENESIS_STAGE_SOUNIO_EXECUTABLE: i64 = 2
+pub const PIREUS_GENESIS_STAGE_SEMANTICS_FROZEN: i64 = 3
+pub const PIREUS_GENESIS_STAGE_PARITY_OPEN: i64 = 4
+pub const PIREUS_GENESIS_STAGE_CLAIM_READY: i64 = 5
+
+pub const PIREUS_GENESIS_CORPUS_UNTWISTED_XOR: i64 = 1
+pub const PIREUS_GENESIS_CORPUS_CAYLEY_DICKSON_16: i64 = 2
+pub const PIREUS_GENESIS_CORPUS_DIAGONAL_BICHARACTER: i64 = 3
+
+pub const PIREUS_GENESIS_OK: i64 = 0
+pub const PIREUS_GENESIS_ERR_AUTHORITY: i64 = 1
+pub const PIREUS_GENESIS_ERR_STAGE: i64 = 2
+pub const PIREUS_GENESIS_ERR_POLICY: i64 = 3
+pub const PIREUS_GENESIS_ERR_SPACE: i64 = 4
+pub const PIREUS_GENESIS_ERR_CLAIM_SCOPE: i64 = 5
+pub const PIREUS_GENESIS_ERR_WAIVER: i64 = 6
+
+pub struct PireusGenesisDigest {
+    pub words: [i64; 8],
+}
+
+pub struct OperatorSpace {
+    pub bits: i64,
+    pub dimension: i64,
+    pub coefficient_values: i64,
+    pub destination_is_xor: bool,
+    pub accumulation_is_ascending_i: bool,
+    pub valid: bool,
+}
+
+pub struct OperatorGrammar {
+    pub grammar_id: i64,
+    pub base_twist_id: i64,
+    pub phase_formula_id: i64,
+    pub seed: i64,
+    pub candidate_count: i64,
+    pub exhaustive: bool,
+    pub stochastic: bool,
+    pub base_twist_table_bound: bool,
+}
+
+pub struct EquivalenceGroup {
+    pub group_id: i64,
+    pub coordinate_permutations: i64,
+    pub operand_exchange_actions: i64,
+    pub action_count: i64,
+    pub lexicographic_sign_order: bool,
+    pub lowest_action_tie_break: bool,
+    pub unique_action_count: i64,
+    pub closure_failures: i64,
+    pub inverse_failures: i64,
+    pub verified_group: bool,
+    pub gl4_complete: bool,
+    pub sign_gauge_complete: bool,
+    pub isotopy_complete: bool,
+}
+
+pub struct GenesisAuthorityRequest {
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub stage: i64,
+    pub policy_present: bool,
+    pub grammar_present: bool,
+    pub corpus_present: bool,
+    pub group_present: bool,
+    pub declared_candidate_count: i64,
+    pub declared_action_count: i64,
+    pub declared_comparisons_per_candidate: i64,
+    pub semantics_frozen: bool,
+    pub parity_requested: bool,
+    pub global_novelty_requested: bool,
+    pub historical_novelty_requested: bool,
+    pub priority_requested: bool,
+    pub algorithmic_novelty_requested: bool,
+    pub material_novelty_requested: bool,
+    pub scientific_novelty_requested: bool,
+    pub claim_ready_requested: bool,
+    pub external_review_promoted: bool,
+    pub fingerprint_only_proof: bool,
+    pub waiver_present: bool,
+    pub waiver_founder: bool,
+    pub waiver_scoped: bool,
+    pub waiver_purpose_bound: bool,
+    pub waiver_live: bool,
+}
+
+pub struct GeneratedCandidate {
+    pub generation_ordinal: i64,
+    pub phase_mask: i64,
+    pub canonical_action: i64,
+    pub score: i64,
+    pub nearest_corpus_id: i64,
+    pub nearest_corpus_action: i64,
+    pub nearest_distance: i64,
+    pub comparisons_completed: i64,
+    pub equivalent_to_corpus: bool,
+    pub relative_novelty_witnessed: bool,
+}
+
+pub struct InequivalenceWitness {
+    pub present: bool,
+    pub corpus_id: i64,
+    pub corpus_action: i64,
+    pub i: i64,
+    pub j: i64,
+    pub candidate_value: i64,
+    pub corpus_value: i64,
+    pub hamming_distance: i64,
+    pub comparisons_completed: i64,
+    pub comparisons_expected: i64,
+}
+
+pub struct OperatorFingerprint {
+    pub positive_count: i64,
+    pub negative_count: i64,
+    pub other_count: i64,
+    pub commutator_defect_count: i64,
+    pub associator_defect_count: i64,
+    pub displacement_negative_counts: [i64; 16],
+}
+
+pub struct GenesisSearch {
+    pub candidates_evaluated: i64,
+    pub actions_per_candidate: i64,
+    pub comparisons_per_candidate: i64,
+    pub candidate_masks: [i64; 16],
+    pub candidate_scores: [i64; 16],
+    pub candidate_canonical_actions: [i64; 16],
+    pub candidate_nearest_corpus: [i64; 16],
+    pub candidate_nearest_actions: [i64; 16],
+    pub candidate_equivalent: [bool; 16],
+    pub selected: GeneratedCandidate,
+}
+
+pub struct NoveltyReceipt {
+    pub schema: i64,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub stage: i64,
+    pub source_hash_bound: bool,
+    pub semantics_hash_bound: bool,
+    pub grammar_hash_bound: bool,
+    pub corpus_hash_bound: bool,
+    pub group_hash_bound: bool,
+    pub exhaustive_search: bool,
+    pub relative_semantic_novelty: bool,
+    pub relative_algebraic_novelty: bool,
+    pub declared_action_inequivalence: bool,
+    pub algebra_isomorphism_complete: bool,
+    pub algorithmic_novelty: bool,
+    pub material_novelty: bool,
+    pub scientific_novelty: bool,
+    pub global_novelty: bool,
+    pub historical_novelty: bool,
+    pub priority_claim: bool,
+    pub external_prior_art_complete: bool,
+    pub formal_parity_open: bool,
+    pub effect_parity_open: bool,
+    pub material_parity_count: i64,
+    pub receipt_frozen: bool,
+    pub receipt_admitted: bool,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+}
+
+pub struct GenesisNegatives {
+    pub missing_policy: bool,
+    pub missing_grammar: bool,
+    pub missing_corpus: bool,
+    pub missing_group: bool,
+    pub incomplete_candidates: bool,
+    pub incomplete_actions: bool,
+    pub incomplete_comparisons: bool,
+    pub python_oracle: bool,
+    pub rust_oracle: bool,
+    pub cpp_authority: bool,
+    pub llm_authority: bool,
+    pub parity_prefreeze: bool,
+    pub global_promotion: bool,
+    pub historical_promotion: bool,
+    pub priority_promotion: bool,
+    pub algorithmic_promotion: bool,
+    pub material_promotion: bool,
+    pub scientific_promotion: bool,
+    pub claim_ready_promotion: bool,
+    pub review_promotion: bool,
+    pub fingerprint_promotion: bool,
+    pub invalid_waiver: bool,
+    pub zero_distance_promotion: bool,
+    pub incomplete_exhaustion_promotion: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct OperatorGenesisResult {
+    pub valid: bool,
+    pub error: i64,
+    pub space: OperatorSpace,
+    pub grammar: OperatorGrammar,
+    pub group: EquivalenceGroup,
+    pub search: GenesisSearch,
+    pub witness: InequivalenceWitness,
+    pub fingerprint: OperatorFingerprint,
+    pub receipt: NoveltyReceipt,
+    pub negatives: GenesisNegatives,
+    pub space_digest: PireusGenesisDigest,
+    pub grammar_digest: PireusGenesisDigest,
+    pub group_digest: PireusGenesisDigest,
+    pub corpus_digest: PireusGenesisDigest,
+    pub search_digest: PireusGenesisDigest,
+    pub candidate_digest: PireusGenesisDigest,
+    pub canonical_digest: PireusGenesisDigest,
+    pub fingerprint_digest: PireusGenesisDigest,
+    pub witness_digest: PireusGenesisDigest,
+    pub receipt_digest: PireusGenesisDigest,
+    pub failures: i64,
+}
+
+pub fn pireus_operator_genesis_request() -> GenesisAuthorityRequest {
+    GenesisAuthorityRequest {
+        producer_language: PIREUS_GENESIS_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_GENESIS_ROLE_SEMANTIC_AUTHORITY,
+        stage: PIREUS_GENESIS_STAGE_SOUNIO_EXECUTABLE,
+        policy_present: true,
+        grammar_present: true,
+        corpus_present: true,
+        group_present: true,
+        declared_candidate_count: PIREUS_GENESIS_CANDIDATE_COUNT,
+        declared_action_count: PIREUS_GENESIS_ACTION_COUNT,
+        declared_comparisons_per_candidate:
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+        semantics_frozen: false,
+        parity_requested: false,
+        global_novelty_requested: false,
+        historical_novelty_requested: false,
+        priority_requested: false,
+        algorithmic_novelty_requested: false,
+        material_novelty_requested: false,
+        scientific_novelty_requested: false,
+        claim_ready_requested: false,
+        external_review_promoted: false,
+        fingerprint_only_proof: false,
+        waiver_present: false,
+        waiver_founder: false,
+        waiver_scoped: false,
+        waiver_purpose_bound: false,
+        waiver_live: false,
+    }
+}
+
+fn operator_space() -> OperatorSpace {
+    OperatorSpace {
+        bits: PIREUS_GENESIS_BITS,
+        dimension: PIREUS_GENESIS_DIMENSION,
+        coefficient_values: 2,
+        destination_is_xor: true,
+        accumulation_is_ascending_i: true,
+        valid: true,
+    }
+}
+
+fn operator_grammar() -> OperatorGrammar {
+    OperatorGrammar {
+        grammar_id: 720010,
+        base_twist_id: 720011,
+        phase_formula_id: 720012,
+        seed: PIREUS_GENESIS_SEED,
+        candidate_count: PIREUS_GENESIS_CANDIDATE_COUNT,
+        exhaustive: true,
+        stochastic: false,
+        base_twist_table_bound: true,
+    }
+}
+
+fn equivalence_group(maps: &[i64; 384]) -> EquivalenceGroup
+with Mut, Panic {
+    var unique_actions: i64 = 0
+    var action: i64 = 0
+    while action < PIREUS_GENESIS_ACTION_COUNT {
+        var duplicate: bool = false
+        var prior: i64 = 0
+        while prior < action && !duplicate {
+            var same: bool = true
+            var i: i64 = 0
+            while i < PIREUS_GENESIS_DIMENSION && same {
+                var j: i64 = 0
+                while j < PIREUS_GENESIS_DIMENSION && same {
+                    let action_i = if action % 2 == 0 {
+                        mapped_index(maps, action, i)
+                    } else { mapped_index(maps, action, j) }
+                    let action_j = if action % 2 == 0 {
+                        mapped_index(maps, action, j)
+                    } else { mapped_index(maps, action, i) }
+                    let prior_i = if prior % 2 == 0 {
+                        mapped_index(maps, prior, i)
+                    } else { mapped_index(maps, prior, j) }
+                    let prior_j = if prior % 2 == 0 {
+                        mapped_index(maps, prior, j)
+                    } else { mapped_index(maps, prior, i) }
+                    if action_i != prior_i || action_j != prior_j {
+                        same = false
+                    }
+                    j = j + 1
+                }
+                i = i + 1
+            }
+            if same { duplicate = true }
+            prior = prior + 1
+        }
+        if !duplicate { unique_actions = unique_actions + 1 }
+        action = action + 1
+    }
+
+    var closure_failures: i64 = 0
+    var left: i64 = 0
+    while left < PIREUS_GENESIS_ACTION_COUNT {
+        var right: i64 = 0
+        while right < PIREUS_GENESIS_ACTION_COUNT {
+            let expected_swap = (left % 2) ^ (right % 2)
+            var found: bool = false
+            var candidate: i64 = expected_swap
+            while candidate < PIREUS_GENESIS_ACTION_COUNT && !found {
+                var same: bool = true
+                var index: i64 = 0
+                while index < PIREUS_GENESIS_DIMENSION && same {
+                    // The checked product is the function composition
+                    // left(right(index)); no multiplication table is assumed.
+                    let composed = mapped_index(
+                        maps, left, mapped_index(maps, right, index))
+                    if mapped_index(maps, candidate, index) != composed {
+                        same = false
+                    }
+                    index = index + 1
+                }
+                if same { found = true }
+                candidate = candidate + 2
+            }
+            if !found { closure_failures = closure_failures + 1 }
+            right = right + 1
+        }
+        left = left + 1
+    }
+
+    var inverse_failures: i64 = 0
+    action = 0
+    while action < PIREUS_GENESIS_ACTION_COUNT {
+        var inverse_found: bool = false
+        var inverse: i64 = action % 2
+        while inverse < PIREUS_GENESIS_ACTION_COUNT && !inverse_found {
+            var same: bool = true
+            var index: i64 = 0
+            while index < PIREUS_GENESIS_DIMENSION && same {
+                let composed = mapped_index(
+                    maps, action, mapped_index(maps, inverse, index))
+                if composed != index { same = false }
+                index = index + 1
+            }
+            if same { inverse_found = true }
+            inverse = inverse + 2
+        }
+        if !inverse_found { inverse_failures = inverse_failures + 1 }
+        action = action + 1
+    }
+
+    EquivalenceGroup {
+        group_id: 720020,
+        coordinate_permutations: PIREUS_GENESIS_PERMUTATION_COUNT,
+        operand_exchange_actions: 2,
+        action_count: PIREUS_GENESIS_ACTION_COUNT,
+        lexicographic_sign_order: true,
+        lowest_action_tie_break: true,
+        unique_action_count: unique_actions,
+        closure_failures: closure_failures,
+        inverse_failures: inverse_failures,
+        verified_group: unique_actions == PIREUS_GENESIS_ACTION_COUNT &&
+            closure_failures == 0 && inverse_failures == 0,
+        gl4_complete: false,
+        sign_gauge_complete: false,
+        isotopy_complete: false,
+    }
+}
+
+fn parity_i64(value: i64) -> i64 with Mut {
+    var bits = value
+    var parity: i64 = 0
+    while bits != 0 {
+        parity = parity ^ (bits & 1)
+        bits = bits >> 1
+    }
+    parity
+}
+
+fn phase_value(mask: i64, i: i64, j: i64) -> i64 with Mut {
+    if parity_i64(mask & i & j) == 0 { 1 } else { 0 - 1 }
+}
+
+fn candidate_cell(mask: i64, i: i64, j: i64) -> i64
+with Mut, Panic, Div {
+    (cd_sigma(i as i32, j as i32, PIREUS_GENESIS_BITS as i32) as i64) *
+        phase_value(mask, i, j)
+}
+
+fn corpus_cell(corpus_id: i64, i: i64, j: i64) -> i64
+with Mut, Panic, Div {
+    if corpus_id == PIREUS_GENESIS_CORPUS_UNTWISTED_XOR { return 1 }
+    if corpus_id == PIREUS_GENESIS_CORPUS_CAYLEY_DICKSON_16 {
+        return cd_sigma(
+            i as i32, j as i32, PIREUS_GENESIS_BITS as i32) as i64
+    }
+    if corpus_id == PIREUS_GENESIS_CORPUS_DIAGONAL_BICHARACTER {
+        return phase_value(15, i, j)
+    }
+    0
+}
+
+fn fill_permutation_axes(ordinal: i64, axes: &![i64; 4]) with Mut, Panic {
+    var count: i64 = 0
+    var a: i64 = 0
+    while a < 4 {
+        var b: i64 = 0
+        while b < 4 {
+            if b != a {
+                var c: i64 = 0
+                while c < 4 {
+                    if c != a && c != b {
+                        var d: i64 = 0
+                        while d < 4 {
+                            if d != a && d != b && d != c {
+                                if count == ordinal {
+                                    axes[0] = a
+                                    axes[1] = b
+                                    axes[2] = c
+                                    axes[3] = d
+                                    return
+                                }
+                                count = count + 1
+                            }
+                            d = d + 1
+                        }
+                    }
+                    c = c + 1
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn build_index_maps() -> [i64; 384] with Mut, Panic {
+    var maps: [i64; 384] = [0; 384]
+    var permutation: i64 = 0
+    while permutation < PIREUS_GENESIS_PERMUTATION_COUNT {
+        var axes: [i64; 4] = [0; 4]
+        fill_permutation_axes(permutation, &!axes)
+        var index: i64 = 0
+        while index < PIREUS_GENESIS_DIMENSION {
+            var mapped: i64 = 0
+            var source_bit: i64 = 0
+            while source_bit < 4 {
+                let bit = (index >> source_bit) & 1
+                mapped = mapped | (bit << axes[source_bit])
+                source_bit = source_bit + 1
+            }
+            maps[permutation * PIREUS_GENESIS_DIMENSION + index] = mapped
+            index = index + 1
+        }
+        permutation = permutation + 1
+    }
+    maps
+}
+
+fn mapped_index(maps: &[i64; 384], action: i64, index: i64) -> i64
+with Mut, Panic {
+    maps[(action / 2) * PIREUS_GENESIS_DIMENSION + index]
+}
+
+fn transformed_candidate_cell(
+    mask: i64,
+    action: i64,
+    i: i64,
+    j: i64,
+    maps: &[i64; 384],
+) -> i64 with Mut, Panic, Div {
+    let mapped_i = mapped_index(maps, action, i)
+    let mapped_j = mapped_index(maps, action, j)
+    if action % 2 == 0 {
+        candidate_cell(mask, mapped_i, mapped_j)
+    } else {
+        candidate_cell(mask, mapped_j, mapped_i)
+    }
+}
+
+fn transformed_corpus_cell(
+    corpus_id: i64,
+    action: i64,
+    i: i64,
+    j: i64,
+    maps: &[i64; 384],
+) -> i64 with Mut, Panic, Div {
+    let mapped_i = mapped_index(maps, action, i)
+    let mapped_j = mapped_index(maps, action, j)
+    if action % 2 == 0 {
+        corpus_cell(corpus_id, mapped_i, mapped_j)
+    } else {
+        corpus_cell(corpus_id, mapped_j, mapped_i)
+    }
+}
+
+fn compare_candidate_actions(
+    mask: i64,
+    left_action: i64,
+    right_action: i64,
+    maps: &[i64; 384],
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            let left = transformed_candidate_cell(
+                mask, left_action, i, j, maps)
+            let right = transformed_candidate_cell(
+                mask, right_action, i, j, maps)
+            if left < right { return 0 - 1 }
+            if left > right { return 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn canonical_candidate_action(mask: i64, maps: &[i64; 384]) -> i64
+with Mut, Panic, Div {
+    var best: i64 = 0
+    var action: i64 = 1
+    while action < PIREUS_GENESIS_ACTION_COUNT {
+        let order = compare_candidate_actions(mask, action, best, maps)
+        if order < 0 || (order == 0 && action < best) { best = action }
+        action = action + 1
+    }
+    best
+}
+
+fn candidate_corpus_distance(
+    mask: i64,
+    candidate_action: i64,
+    corpus_id: i64,
+    corpus_action: i64,
+    maps: &[i64; 384],
+) -> i64 with Mut, Panic, Div {
+    var distance: i64 = 0
+    var i: i64 = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            if transformed_candidate_cell(
+                mask, candidate_action, i, j, maps) !=
+                transformed_corpus_cell(
+                    corpus_id, corpus_action, i, j, maps) {
+                distance = distance + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    distance
+}
+
+fn evaluate_candidate(
+    ordinal: i64,
+    mask: i64,
+    maps: &[i64; 384],
+) -> GeneratedCandidate with Mut, Panic, Div {
+    let canonical_action = canonical_candidate_action(mask, maps)
+    var nearest_distance: i64 = 257
+    var nearest_corpus: i64 = 0
+    var nearest_action: i64 = 0
+    var comparisons: i64 = 0
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GENESIS_CORPUS_COUNT {
+        var action: i64 = 0
+        while action < PIREUS_GENESIS_ACTION_COUNT {
+            let distance = candidate_corpus_distance(
+                mask, canonical_action, corpus_id, action, maps)
+            comparisons = comparisons + 1
+            if distance < nearest_distance {
+                nearest_distance = distance
+                nearest_corpus = corpus_id
+                nearest_action = action
+            }
+            action = action + 1
+        }
+        corpus_id = corpus_id + 1
+    }
+    let equivalent = nearest_distance == 0
+    GeneratedCandidate {
+        generation_ordinal: ordinal,
+        phase_mask: mask,
+        canonical_action: canonical_action,
+        score: nearest_distance,
+        nearest_corpus_id: nearest_corpus,
+        nearest_corpus_action: nearest_action,
+        nearest_distance: nearest_distance,
+        comparisons_completed: comparisons,
+        equivalent_to_corpus: equivalent,
+        relative_novelty_witnessed: !equivalent &&
+            comparisons == PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+    }
+}
+
+fn empty_candidate() -> GeneratedCandidate {
+    GeneratedCandidate {
+        generation_ordinal: 0 - 1,
+        phase_mask: 0 - 1,
+        canonical_action: 0 - 1,
+        score: 0 - 1,
+        nearest_corpus_id: 0,
+        nearest_corpus_action: 0 - 1,
+        nearest_distance: 0 - 1,
+        comparisons_completed: 0,
+        equivalent_to_corpus: false,
+        relative_novelty_witnessed: false,
+    }
+}
+
+fn run_search(maps: &[i64; 384]) -> GenesisSearch with Mut, Panic, Div {
+    var masks: [i64; 16] = [0; 16]
+    var scores: [i64; 16] = [0; 16]
+    var canonical_actions: [i64; 16] = [0; 16]
+    var nearest_corpus: [i64; 16] = [0; 16]
+    var nearest_actions: [i64; 16] = [0; 16]
+    var equivalent: [bool; 16] = [false; 16]
+    var selected = empty_candidate()
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GENESIS_CANDIDATE_COUNT {
+        let mask = (ordinal + PIREUS_GENESIS_SEED) %
+            PIREUS_GENESIS_CANDIDATE_COUNT
+        let candidate = evaluate_candidate(ordinal, mask, maps)
+        masks[ordinal] = mask
+        scores[ordinal] = candidate.score
+        canonical_actions[ordinal] = candidate.canonical_action
+        nearest_corpus[ordinal] = candidate.nearest_corpus_id
+        nearest_actions[ordinal] = candidate.nearest_corpus_action
+        equivalent[ordinal] = candidate.equivalent_to_corpus
+        if selected.generation_ordinal < 0 || candidate.score > selected.score {
+            selected = candidate
+        }
+        ordinal = ordinal + 1
+    }
+    GenesisSearch {
+        candidates_evaluated: PIREUS_GENESIS_CANDIDATE_COUNT,
+        actions_per_candidate: PIREUS_GENESIS_ACTION_COUNT,
+        comparisons_per_candidate:
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+        candidate_masks: masks,
+        candidate_scores: scores,
+        candidate_canonical_actions: canonical_actions,
+        candidate_nearest_corpus: nearest_corpus,
+        candidate_nearest_actions: nearest_actions,
+        candidate_equivalent: equivalent,
+        selected: selected,
+    }
+}
+
+fn build_inequivalence_witness(
+    candidate: &GeneratedCandidate,
+    maps: &[i64; 384],
+) -> InequivalenceWitness with Mut, Panic, Div {
+    if !candidate.relative_novelty_witnessed {
+        return InequivalenceWitness {
+            present: false,
+            corpus_id: candidate.nearest_corpus_id,
+            corpus_action: candidate.nearest_corpus_action,
+            i: 0 - 1, j: 0 - 1,
+            candidate_value: 0, corpus_value: 0,
+            hamming_distance: candidate.nearest_distance,
+            comparisons_completed: candidate.comparisons_completed,
+            comparisons_expected: PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+        }
+    }
+    var i: i64 = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            let left = transformed_candidate_cell(
+                candidate.phase_mask, candidate.canonical_action, i, j, maps)
+            let right = transformed_corpus_cell(
+                candidate.nearest_corpus_id,
+                candidate.nearest_corpus_action, i, j, maps)
+            if left != right {
+                return InequivalenceWitness {
+                    present: true,
+                    corpus_id: candidate.nearest_corpus_id,
+                    corpus_action: candidate.nearest_corpus_action,
+                    i: i, j: j,
+                    candidate_value: left,
+                    corpus_value: right,
+                    hamming_distance: candidate.nearest_distance,
+                    comparisons_completed: candidate.comparisons_completed,
+                    comparisons_expected:
+                        PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    InequivalenceWitness {
+        present: false,
+        corpus_id: candidate.nearest_corpus_id,
+        corpus_action: candidate.nearest_corpus_action,
+        i: 0 - 1, j: 0 - 1,
+        candidate_value: 0, corpus_value: 0,
+        hamming_distance: candidate.nearest_distance,
+        comparisons_completed: candidate.comparisons_completed,
+        comparisons_expected: PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE,
+    }
+}
+
+fn fingerprint_candidate(
+    candidate: &GeneratedCandidate,
+    maps: &[i64; 384],
+) -> OperatorFingerprint with Mut, Panic, Div {
+    var positive: i64 = 0
+    var negative: i64 = 0
+    var other: i64 = 0
+    var commutator_defects: i64 = 0
+    var associator_defects: i64 = 0
+    var displacement_negatives: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            let value = transformed_candidate_cell(
+                candidate.phase_mask, candidate.canonical_action, i, j, maps)
+            if value == 1 { positive = positive + 1 }
+            else if value == 0 - 1 {
+                negative = negative + 1
+                displacement_negatives[i ^ j] =
+                    displacement_negatives[i ^ j] + 1
+            } else { other = other + 1 }
+            let reversed = transformed_candidate_cell(
+                candidate.phase_mask, candidate.canonical_action, j, i, maps)
+            if value != reversed {
+                commutator_defects = commutator_defects + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            var k: i64 = 0
+            while k < PIREUS_GENESIS_DIMENSION {
+                let lhs = transformed_candidate_cell(
+                    candidate.phase_mask, candidate.canonical_action,
+                    i, j, maps) * transformed_candidate_cell(
+                    candidate.phase_mask, candidate.canonical_action,
+                    i ^ j, k, maps)
+                let rhs = transformed_candidate_cell(
+                    candidate.phase_mask, candidate.canonical_action,
+                    j, k, maps) * transformed_candidate_cell(
+                    candidate.phase_mask, candidate.canonical_action,
+                    i, j ^ k, maps)
+                if lhs != rhs { associator_defects = associator_defects + 1 }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    OperatorFingerprint {
+        positive_count: positive,
+        negative_count: negative,
+        other_count: other,
+        commutator_defect_count: commutator_defects,
+        associator_defect_count: associator_defects,
+        displacement_negative_counts: displacement_negatives,
+    }
+}
+
+fn request_error(request: &GenesisAuthorityRequest) -> i64 {
+    if request.producer_language != PIREUS_GENESIS_LANGUAGE_SOUNIO ||
+        request.producer_role != PIREUS_GENESIS_ROLE_SEMANTIC_AUTHORITY {
+        return PIREUS_GENESIS_ERR_AUTHORITY
+    }
+    if request.stage != PIREUS_GENESIS_STAGE_SOUNIO_EXECUTABLE ||
+        request.semantics_frozen || request.parity_requested {
+        return PIREUS_GENESIS_ERR_STAGE
+    }
+    if !request.policy_present { return PIREUS_GENESIS_ERR_POLICY }
+    if !request.grammar_present || !request.corpus_present ||
+        !request.group_present ||
+        request.declared_candidate_count != PIREUS_GENESIS_CANDIDATE_COUNT ||
+        request.declared_action_count != PIREUS_GENESIS_ACTION_COUNT ||
+        request.declared_comparisons_per_candidate !=
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE {
+        return PIREUS_GENESIS_ERR_SPACE
+    }
+    if request.global_novelty_requested ||
+        request.historical_novelty_requested || request.priority_requested ||
+        request.algorithmic_novelty_requested ||
+        request.material_novelty_requested ||
+        request.scientific_novelty_requested ||
+        request.claim_ready_requested || request.external_review_promoted ||
+        request.fingerprint_only_proof {
+        return PIREUS_GENESIS_ERR_CLAIM_SCOPE
+    }
+    if request.waiver_present && !(request.waiver_founder &&
+        request.waiver_scoped && request.waiver_purpose_bound &&
+        request.waiver_live) {
+        return PIREUS_GENESIS_ERR_WAIVER
+    }
+    PIREUS_GENESIS_OK
+}
+
+fn request_refused(request: &GenesisAuthorityRequest) -> bool {
+    request_error(request) != PIREUS_GENESIS_OK
+}
+
+fn relative_novelty_claim_valid(
+    minimum_distance: i64,
+    comparisons_completed: i64,
+    fingerprint_only: bool,
+) -> bool {
+    minimum_distance > 0 &&
+        comparisons_completed ==
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE &&
+        !fingerprint_only
+}
+
+fn exercise_negatives() -> GenesisNegatives with Mut {
+    var request = pireus_operator_genesis_request()
+    request.policy_present = false
+    let missing_policy = request_refused(&request)
+
+    request = pireus_operator_genesis_request()
+    request.grammar_present = false
+    let missing_grammar = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.corpus_present = false
+    let missing_corpus = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.group_present = false
+    let missing_group = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.declared_candidate_count = 15
+    let incomplete_candidates = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.declared_action_count = 47
+    let incomplete_actions = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.declared_comparisons_per_candidate = 143
+    let incomplete_comparisons = request_refused(&request)
+
+    request = pireus_operator_genesis_request()
+    request.producer_language = PIREUS_GENESIS_LANGUAGE_PYTHON
+    request.producer_role = PIREUS_GENESIS_ROLE_FORBIDDEN_ORACLE
+    let python_oracle = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.producer_language = PIREUS_GENESIS_LANGUAGE_RUST
+    request.producer_role = PIREUS_GENESIS_ROLE_FORBIDDEN_ORACLE
+    let rust_oracle = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.producer_language = PIREUS_GENESIS_LANGUAGE_CPP
+    request.producer_role = PIREUS_GENESIS_ROLE_MATERIAL_PARITY
+    let cpp_authority = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.producer_language = PIREUS_GENESIS_LANGUAGE_LLM
+    request.producer_role = PIREUS_GENESIS_ROLE_REVIEW_ONLY
+    let llm_authority = request_refused(&request)
+
+    request = pireus_operator_genesis_request()
+    request.parity_requested = true
+    let parity_prefreeze = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.global_novelty_requested = true
+    let global_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.historical_novelty_requested = true
+    let historical_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.priority_requested = true
+    let priority_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.algorithmic_novelty_requested = true
+    let algorithmic_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.material_novelty_requested = true
+    let material_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.scientific_novelty_requested = true
+    let scientific_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.claim_ready_requested = true
+    let claim_ready_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.external_review_promoted = true
+    let review_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.fingerprint_only_proof = true
+    let fingerprint_promotion = request_refused(&request)
+    request = pireus_operator_genesis_request()
+    request.waiver_present = true
+    request.waiver_founder = true
+    request.waiver_scoped = false
+    request.waiver_purpose_bound = true
+    request.waiver_live = true
+    let invalid_waiver = request_refused(&request)
+
+    let zero_distance_promotion = !relative_novelty_claim_valid(
+        0, PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE, false)
+    let incomplete_exhaustion_promotion = !relative_novelty_claim_valid(
+        1, PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE - 1, false)
+
+    var passed: i64 = 0
+    if missing_policy { passed = passed + 1 }
+    if missing_grammar { passed = passed + 1 }
+    if missing_corpus { passed = passed + 1 }
+    if missing_group { passed = passed + 1 }
+    if incomplete_candidates { passed = passed + 1 }
+    if incomplete_actions { passed = passed + 1 }
+    if incomplete_comparisons { passed = passed + 1 }
+    if python_oracle { passed = passed + 1 }
+    if rust_oracle { passed = passed + 1 }
+    if cpp_authority { passed = passed + 1 }
+    if llm_authority { passed = passed + 1 }
+    if parity_prefreeze { passed = passed + 1 }
+    if global_promotion { passed = passed + 1 }
+    if historical_promotion { passed = passed + 1 }
+    if priority_promotion { passed = passed + 1 }
+    if algorithmic_promotion { passed = passed + 1 }
+    if material_promotion { passed = passed + 1 }
+    if scientific_promotion { passed = passed + 1 }
+    if claim_ready_promotion { passed = passed + 1 }
+    if review_promotion { passed = passed + 1 }
+    if fingerprint_promotion { passed = passed + 1 }
+    if invalid_waiver { passed = passed + 1 }
+    if zero_distance_promotion { passed = passed + 1 }
+    if incomplete_exhaustion_promotion { passed = passed + 1 }
+
+    GenesisNegatives {
+        missing_policy: missing_policy,
+        missing_grammar: missing_grammar,
+        missing_corpus: missing_corpus,
+        missing_group: missing_group,
+        incomplete_candidates: incomplete_candidates,
+        incomplete_actions: incomplete_actions,
+        incomplete_comparisons: incomplete_comparisons,
+        python_oracle: python_oracle,
+        rust_oracle: rust_oracle,
+        cpp_authority: cpp_authority,
+        llm_authority: llm_authority,
+        parity_prefreeze: parity_prefreeze,
+        global_promotion: global_promotion,
+        historical_promotion: historical_promotion,
+        priority_promotion: priority_promotion,
+        algorithmic_promotion: algorithmic_promotion,
+        material_promotion: material_promotion,
+        scientific_promotion: scientific_promotion,
+        claim_ready_promotion: claim_ready_promotion,
+        review_promotion: review_promotion,
+        fingerprint_promotion: fingerprint_promotion,
+        invalid_waiver: invalid_waiver,
+        zero_distance_promotion: zero_distance_promotion,
+        incomplete_exhaustion_promotion: incomplete_exhaustion_promotion,
+        passed: passed,
+        total: 24,
+    }
+}
+
+fn digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+with Mut, Panic, Div {
+    digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn digest_add_digest(
+    state: SHA256State,
+    digest: &PireusGenesisDigest,
+) -> SHA256State with Mut, Panic, Div {
+    var next = state
+    var i: i64 = 0
+    while i < 8 {
+        next = digest_add_i64(next, digest.words[i])
+        i = i + 1
+    }
+    next
+}
+
+fn digest_finish(state: SHA256State) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusGenesisDigest { words: words }
+}
+
+fn digest_space(space: &OperatorSpace) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, space.bits)
+    state = digest_add_i64(state, space.dimension)
+    state = digest_add_i64(state, space.coefficient_values)
+    state = digest_add_bool(state, space.destination_is_xor)
+    state = digest_add_bool(state, space.accumulation_is_ascending_i)
+    state = digest_add_bool(state, space.valid)
+    digest_finish(state)
+}
+
+fn digest_grammar(grammar: &OperatorGrammar) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, grammar.grammar_id)
+    state = digest_add_i64(state, grammar.base_twist_id)
+    state = digest_add_i64(state, grammar.phase_formula_id)
+    state = digest_add_i64(state, grammar.seed)
+    state = digest_add_i64(state, grammar.candidate_count)
+    state = digest_add_bool(state, grammar.exhaustive)
+    state = digest_add_bool(state, grammar.stochastic)
+    state = digest_add_bool(state, grammar.base_twist_table_bound)
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GENESIS_CANDIDATE_COUNT {
+        let mask = (ordinal + grammar.seed) %
+            PIREUS_GENESIS_CANDIDATE_COUNT
+        state = digest_add_i64(state, mask)
+        var i: i64 = 0
+        while i < PIREUS_GENESIS_DIMENSION {
+            var j: i64 = 0
+            while j < PIREUS_GENESIS_DIMENSION {
+                state = digest_add_i64(state, candidate_cell(mask, i, j))
+                j = j + 1
+            }
+            i = i + 1
+        }
+        ordinal = ordinal + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_group(
+    group: &EquivalenceGroup,
+    maps: &[i64; 384],
+) -> PireusGenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, group.group_id)
+    state = digest_add_i64(state, group.coordinate_permutations)
+    state = digest_add_i64(state, group.operand_exchange_actions)
+    state = digest_add_i64(state, group.action_count)
+    state = digest_add_bool(state, group.lexicographic_sign_order)
+    state = digest_add_bool(state, group.lowest_action_tie_break)
+    state = digest_add_i64(state, group.unique_action_count)
+    state = digest_add_i64(state, group.closure_failures)
+    state = digest_add_i64(state, group.inverse_failures)
+    state = digest_add_bool(state, group.verified_group)
+    state = digest_add_bool(state, group.gl4_complete)
+    state = digest_add_bool(state, group.sign_gauge_complete)
+    state = digest_add_bool(state, group.isotopy_complete)
+    var action: i64 = 0
+    while action < PIREUS_GENESIS_ACTION_COUNT {
+        state = digest_add_i64(state, action)
+        state = digest_add_i64(state, action % 2)
+        var index: i64 = 0
+        while index < PIREUS_GENESIS_DIMENSION {
+            state = digest_add_i64(state, mapped_index(maps, action, index))
+            index = index + 1
+        }
+        action = action + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_corpus(maps: &[i64; 384]) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, PIREUS_GENESIS_CORPUS_COUNT)
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GENESIS_CORPUS_COUNT {
+        state = digest_add_i64(state, corpus_id)
+        var i: i64 = 0
+        while i < PIREUS_GENESIS_DIMENSION {
+            var j: i64 = 0
+            while j < PIREUS_GENESIS_DIMENSION {
+                state = digest_add_i64(state, corpus_cell(corpus_id, i, j))
+                j = j + 1
+            }
+            i = i + 1
+        }
+        corpus_id = corpus_id + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_search(search: &GenesisSearch) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, search.candidates_evaluated)
+    state = digest_add_i64(state, search.actions_per_candidate)
+    state = digest_add_i64(state, search.comparisons_per_candidate)
+    var ordinal: i64 = 0
+    while ordinal < PIREUS_GENESIS_CANDIDATE_COUNT {
+        state = digest_add_i64(state, ordinal)
+        state = digest_add_i64(state, search.candidate_masks[ordinal])
+        state = digest_add_i64(state, search.candidate_scores[ordinal])
+        state = digest_add_i64(
+            state, search.candidate_canonical_actions[ordinal])
+        state = digest_add_i64(
+            state, search.candidate_nearest_corpus[ordinal])
+        state = digest_add_i64(
+            state, search.candidate_nearest_actions[ordinal])
+        state = digest_add_bool(state, search.candidate_equivalent[ordinal])
+        ordinal = ordinal + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_candidate(candidate: &GeneratedCandidate) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, candidate.generation_ordinal)
+    state = digest_add_i64(state, candidate.phase_mask)
+    state = digest_add_i64(state, candidate.canonical_action)
+    state = digest_add_i64(state, candidate.score)
+    state = digest_add_i64(state, candidate.nearest_corpus_id)
+    state = digest_add_i64(state, candidate.nearest_corpus_action)
+    state = digest_add_i64(state, candidate.nearest_distance)
+    state = digest_add_i64(state, candidate.comparisons_completed)
+    state = digest_add_bool(state, candidate.equivalent_to_corpus)
+    state = digest_add_bool(state, candidate.relative_novelty_witnessed)
+    digest_finish(state)
+}
+
+fn digest_canonical(
+    candidate: &GeneratedCandidate,
+    maps: &[i64; 384],
+) -> PireusGenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, PIREUS_GENESIS_DIMENSION)
+    var i: i64 = 0
+    while i < PIREUS_GENESIS_DIMENSION {
+        var j: i64 = 0
+        while j < PIREUS_GENESIS_DIMENSION {
+            state = digest_add_i64(state, transformed_candidate_cell(
+                candidate.phase_mask, candidate.canonical_action, i, j, maps))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_fingerprint(fingerprint: &OperatorFingerprint)
+    -> PireusGenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, fingerprint.positive_count)
+    state = digest_add_i64(state, fingerprint.negative_count)
+    state = digest_add_i64(state, fingerprint.other_count)
+    state = digest_add_i64(state, fingerprint.commutator_defect_count)
+    state = digest_add_i64(state, fingerprint.associator_defect_count)
+    var d: i64 = 0
+    while d < PIREUS_GENESIS_DIMENSION {
+        state = digest_add_i64(
+            state, fingerprint.displacement_negative_counts[d])
+        d = d + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_witness(witness: &InequivalenceWitness) -> PireusGenesisDigest
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_bool(state, witness.present)
+    state = digest_add_i64(state, witness.corpus_id)
+    state = digest_add_i64(state, witness.corpus_action)
+    state = digest_add_i64(state, witness.i)
+    state = digest_add_i64(state, witness.j)
+    state = digest_add_i64(state, witness.candidate_value)
+    state = digest_add_i64(state, witness.corpus_value)
+    state = digest_add_i64(state, witness.hamming_distance)
+    state = digest_add_i64(state, witness.comparisons_completed)
+    state = digest_add_i64(state, witness.comparisons_expected)
+    digest_finish(state)
+}
+
+fn digest_receipt(
+    receipt: &NoveltyReceipt,
+    space_digest: &PireusGenesisDigest,
+    grammar_digest: &PireusGenesisDigest,
+    group_digest: &PireusGenesisDigest,
+    corpus_digest: &PireusGenesisDigest,
+    search_digest: &PireusGenesisDigest,
+    candidate_digest: &PireusGenesisDigest,
+    canonical_digest: &PireusGenesisDigest,
+    fingerprint_digest: &PireusGenesisDigest,
+    witness_digest: &PireusGenesisDigest,
+) -> PireusGenesisDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, receipt.schema)
+    state = digest_add_i64(state, receipt.producer_language)
+    state = digest_add_i64(state, receipt.producer_role)
+    state = digest_add_i64(state, receipt.stage)
+    state = digest_add_bool(state, receipt.source_hash_bound)
+    state = digest_add_bool(state, receipt.semantics_hash_bound)
+    state = digest_add_bool(state, receipt.grammar_hash_bound)
+    state = digest_add_bool(state, receipt.corpus_hash_bound)
+    state = digest_add_bool(state, receipt.group_hash_bound)
+    state = digest_add_bool(state, receipt.exhaustive_search)
+    state = digest_add_bool(state, receipt.relative_semantic_novelty)
+    state = digest_add_bool(state, receipt.relative_algebraic_novelty)
+    state = digest_add_bool(state, receipt.declared_action_inequivalence)
+    state = digest_add_bool(state, receipt.algebra_isomorphism_complete)
+    state = digest_add_bool(state, receipt.algorithmic_novelty)
+    state = digest_add_bool(state, receipt.material_novelty)
+    state = digest_add_bool(state, receipt.scientific_novelty)
+    state = digest_add_bool(state, receipt.global_novelty)
+    state = digest_add_bool(state, receipt.historical_novelty)
+    state = digest_add_bool(state, receipt.priority_claim)
+    state = digest_add_bool(state, receipt.external_prior_art_complete)
+    state = digest_add_bool(state, receipt.formal_parity_open)
+    state = digest_add_bool(state, receipt.effect_parity_open)
+    state = digest_add_i64(state, receipt.material_parity_count)
+    state = digest_add_bool(state, receipt.receipt_frozen)
+    state = digest_add_bool(state, receipt.receipt_admitted)
+    state = digest_add_bool(state, receipt.parity_open)
+    state = digest_add_bool(state, receipt.claim_ready)
+    state = digest_add_digest(state, space_digest)
+    state = digest_add_digest(state, grammar_digest)
+    state = digest_add_digest(state, group_digest)
+    state = digest_add_digest(state, corpus_digest)
+    state = digest_add_digest(state, search_digest)
+    state = digest_add_digest(state, candidate_digest)
+    state = digest_add_digest(state, canonical_digest)
+    state = digest_add_digest(state, fingerprint_digest)
+    state = digest_add_digest(state, witness_digest)
+    digest_finish(state)
+}
+
+pub fn pireus_genesis_digest_nonzero(digest: &PireusGenesisDigest) -> bool
+with Mut {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn create_receipt(
+    request: &GenesisAuthorityRequest,
+    search: &GenesisSearch,
+) -> NoveltyReceipt {
+    let witnessed = search.selected.relative_novelty_witnessed &&
+        search.candidates_evaluated == PIREUS_GENESIS_CANDIDATE_COUNT &&
+        search.actions_per_candidate == PIREUS_GENESIS_ACTION_COUNT &&
+        search.comparisons_per_candidate ==
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE
+    NoveltyReceipt {
+        schema: PIREUS_GENESIS_SCHEMA,
+        producer_language: request.producer_language,
+        producer_role: request.producer_role,
+        stage: request.stage,
+        source_hash_bound: false,
+        semantics_hash_bound: false,
+        grammar_hash_bound: true,
+        corpus_hash_bound: true,
+        group_hash_bound: true,
+        exhaustive_search: witnessed,
+        relative_semantic_novelty: witnessed,
+        relative_algebraic_novelty: false,
+        declared_action_inequivalence: witnessed,
+        algebra_isomorphism_complete: false,
+        algorithmic_novelty: false,
+        material_novelty: false,
+        scientific_novelty: false,
+        global_novelty: false,
+        historical_novelty: false,
+        priority_claim: false,
+        external_prior_art_complete: false,
+        formal_parity_open: false,
+        effect_parity_open: false,
+        material_parity_count: 0,
+        receipt_frozen: false,
+        receipt_admitted: false,
+        parity_open: false,
+        claim_ready: false,
+    }
+}
+
+pub fn pireus_operator_genesis_evaluate(
+    request: &GenesisAuthorityRequest,
+) -> OperatorGenesisResult with Mut, Panic, Div, Epistemic {
+    let error = request_error(request)
+    let space = operator_space()
+    let grammar = operator_grammar()
+    let maps = build_index_maps()
+    let group = equivalence_group(&maps)
+    let search = run_search(&maps)
+    let witness = build_inequivalence_witness(&search.selected, &maps)
+    let fingerprint = fingerprint_candidate(&search.selected, &maps)
+    let negatives = exercise_negatives()
+    let receipt = create_receipt(request, &search)
+
+    let space_digest = digest_space(&space)
+    let grammar_digest = digest_grammar(&grammar)
+    let group_digest = digest_group(&group, &maps)
+    let corpus_digest = digest_corpus(&maps)
+    let search_digest = digest_search(&search)
+    let candidate_digest = digest_candidate(&search.selected)
+    let canonical_digest = digest_canonical(&search.selected, &maps)
+    let fingerprint_digest = digest_fingerprint(&fingerprint)
+    let witness_digest = digest_witness(&witness)
+    let receipt_digest = digest_receipt(
+        &receipt, &space_digest, &grammar_digest, &group_digest,
+        &corpus_digest, &search_digest, &candidate_digest,
+        &canonical_digest, &fingerprint_digest, &witness_digest)
+
+    var failures: i64 = 0
+    if error != PIREUS_GENESIS_OK { failures = failures + 1 }
+    if !space.valid || !grammar.exhaustive || grammar.stochastic ||
+        !grammar.base_twist_table_bound || !group.verified_group ||
+        group.unique_action_count != PIREUS_GENESIS_ACTION_COUNT ||
+        group.closure_failures != 0 || group.inverse_failures != 0 {
+        failures = failures + 1
+    }
+    if search.candidates_evaluated != PIREUS_GENESIS_CANDIDATE_COUNT ||
+        search.actions_per_candidate != PIREUS_GENESIS_ACTION_COUNT ||
+        search.comparisons_per_candidate !=
+            PIREUS_GENESIS_COMPARISONS_PER_CANDIDATE {
+        failures = failures + 1
+    }
+    if !search.selected.relative_novelty_witnessed ||
+        search.selected.equivalent_to_corpus || search.selected.score <= 0 {
+        failures = failures + 1
+    }
+    if !witness.present || witness.hamming_distance <= 0 ||
+        witness.comparisons_completed != witness.comparisons_expected {
+        failures = failures + 1
+    }
+    if fingerprint.positive_count + fingerprint.negative_count +
+        fingerprint.other_count != 256 {
+        failures = failures + 1
+    }
+    if negatives.passed != negatives.total { failures = failures + 1 }
+    if !receipt.relative_semantic_novelty ||
+        receipt.relative_algebraic_novelty ||
+        !receipt.declared_action_inequivalence ||
+        receipt.algebra_isomorphism_complete || receipt.receipt_frozen ||
+        receipt.receipt_admitted || receipt.parity_open || receipt.claim_ready ||
+        receipt.algorithmic_novelty || receipt.material_novelty ||
+        receipt.scientific_novelty || receipt.global_novelty ||
+        receipt.historical_novelty || receipt.priority_claim {
+        failures = failures + 1
+    }
+    if !pireus_genesis_digest_nonzero(&space_digest) ||
+        !pireus_genesis_digest_nonzero(&grammar_digest) ||
+        !pireus_genesis_digest_nonzero(&group_digest) ||
+        !pireus_genesis_digest_nonzero(&corpus_digest) ||
+        !pireus_genesis_digest_nonzero(&search_digest) ||
+        !pireus_genesis_digest_nonzero(&candidate_digest) ||
+        !pireus_genesis_digest_nonzero(&canonical_digest) ||
+        !pireus_genesis_digest_nonzero(&fingerprint_digest) ||
+        !pireus_genesis_digest_nonzero(&witness_digest) ||
+        !pireus_genesis_digest_nonzero(&receipt_digest) {
+        failures = failures + 1
+    }
+
+    OperatorGenesisResult {
+        valid: failures == 0,
+        error: error,
+        space: space,
+        grammar: grammar,
+        group: group,
+        search: search,
+        witness: witness,
+        fingerprint: fingerprint,
+        receipt: receipt,
+        negatives: negatives,
+        space_digest: space_digest,
+        grammar_digest: grammar_digest,
+        group_digest: group_digest,
+        corpus_digest: corpus_digest,
+        search_digest: search_digest,
+        candidate_digest: candidate_digest,
+        canonical_digest: canonical_digest,
+        fingerprint_digest: fingerprint_digest,
+        witness_digest: witness_digest,
+        receipt_digest: receipt_digest,
+        failures: failures,
+    }
+}
+
+fn genesis_digest_matches(
+    digest: &PireusGenesisDigest,
+    expected: &[i64; 8],
+) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != expected[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// Exact v0 result admitted only after the first Sounio execution existed.
+pub fn pireus_operator_genesis_frozen_mismatch_code(
+    result: &OperatorGenesisResult,
+) -> i64 with Mut, Panic {
+    if !result.valid || result.error != PIREUS_GENESIS_OK ||
+        result.failures != 0 || !result.space.valid ||
+        result.space.bits != 4 || result.space.dimension != 16 ||
+        result.space.coefficient_values != 2 ||
+        !result.space.destination_is_xor ||
+        !result.space.accumulation_is_ascending_i ||
+        result.grammar.seed != 9 || result.grammar.candidate_count != 16 ||
+        !result.grammar.exhaustive || result.grammar.stochastic ||
+        !result.grammar.base_twist_table_bound ||
+        result.group.coordinate_permutations != 24 ||
+        result.group.operand_exchange_actions != 2 ||
+        result.group.action_count != 48 ||
+        result.group.unique_action_count != 48 ||
+        result.group.closure_failures != 0 ||
+        result.group.inverse_failures != 0 || !result.group.verified_group ||
+        result.group.gl4_complete || result.group.sign_gauge_complete ||
+        result.group.isotopy_complete ||
+        result.search.candidates_evaluated != 16 ||
+        result.search.actions_per_candidate != 48 ||
+        result.search.comparisons_per_candidate != 144 {
+        return 1
+    }
+
+    let expected_masks: [i64; 16] = [
+        9, 10, 11, 12, 13, 14, 15, 0,
+        1, 2, 3, 4, 5, 6, 7, 8
+    ]
+    let expected_scores: [i64; 16] = [
+        86, 92, 86, 76, 100, 84, 84, 0,
+        64, 64, 64, 64, 96, 64, 64, 64
+    ]
+    let expected_canonical_actions: [i64; 16] = [
+        28, 24, 28, 1, 19, 1, 46, 46,
+        46, 44, 46, 40, 40, 38, 46, 28
+    ]
+    let expected_nearest_actions: [i64; 16] = [
+        39, 26, 47, 3, 17, 11, 0, 46,
+        46, 44, 44, 40, 40, 36, 36, 28
+    ]
+    var ordinal: i64 = 0
+    while ordinal < 16 {
+        if result.search.candidate_masks[ordinal] != expected_masks[ordinal] ||
+            result.search.candidate_scores[ordinal] !=
+                expected_scores[ordinal] ||
+            result.search.candidate_canonical_actions[ordinal] !=
+                expected_canonical_actions[ordinal] ||
+            result.search.candidate_nearest_corpus[ordinal] != 2 ||
+            result.search.candidate_nearest_actions[ordinal] !=
+                expected_nearest_actions[ordinal] ||
+            result.search.candidate_equivalent[ordinal] != (ordinal == 7) {
+            return 2
+        }
+        ordinal = ordinal + 1
+    }
+
+    let selected = &result.search.selected
+    if selected.generation_ordinal != 4 || selected.phase_mask != 13 ||
+        selected.canonical_action != 19 || selected.score != 100 ||
+        selected.nearest_corpus_id != 2 ||
+        selected.nearest_corpus_action != 17 ||
+        selected.nearest_distance != 100 ||
+        selected.comparisons_completed != 144 ||
+        selected.equivalent_to_corpus ||
+        !selected.relative_novelty_witnessed {
+        return 3
+    }
+
+    if !result.witness.present || result.witness.corpus_id != 2 ||
+        result.witness.corpus_action != 17 || result.witness.i != 1 ||
+        result.witness.j != 4 || result.witness.candidate_value != 0 - 1 ||
+        result.witness.corpus_value != 1 ||
+        result.witness.hamming_distance != 100 ||
+        result.witness.comparisons_completed != 144 ||
+        result.witness.comparisons_expected != 144 {
+        return 4
+    }
+
+    if result.fingerprint.positive_count != 144 ||
+        result.fingerprint.negative_count != 112 ||
+        result.fingerprint.other_count != 0 ||
+        result.fingerprint.commutator_defect_count != 210 ||
+        result.fingerprint.associator_defect_count != 1848 {
+        return 5
+    }
+    var displacement: i64 = 0
+    while displacement < 16 {
+        if result.fingerprint.displacement_negative_counts[displacement] != 7 {
+            return 6
+        }
+        displacement = displacement + 1
+    }
+
+    if result.negatives.passed != 24 || result.negatives.total != 24 ||
+        !result.receipt.grammar_hash_bound ||
+        !result.receipt.corpus_hash_bound ||
+        !result.receipt.group_hash_bound ||
+        !result.receipt.exhaustive_search ||
+        !result.receipt.relative_semantic_novelty ||
+        result.receipt.relative_algebraic_novelty ||
+        !result.receipt.declared_action_inequivalence ||
+        result.receipt.algebra_isomorphism_complete ||
+        result.receipt.source_hash_bound ||
+        result.receipt.semantics_hash_bound ||
+        result.receipt.receipt_frozen || result.receipt.receipt_admitted ||
+        result.receipt.parity_open || result.receipt.claim_ready ||
+        result.receipt.algorithmic_novelty ||
+        result.receipt.material_novelty ||
+        result.receipt.scientific_novelty || result.receipt.global_novelty ||
+        result.receipt.historical_novelty || result.receipt.priority_claim ||
+        result.receipt.external_prior_art_complete ||
+        result.receipt.formal_parity_open ||
+        result.receipt.effect_parity_open ||
+        result.receipt.material_parity_count != 0 {
+        return 7
+    }
+
+    let expected_space: [i64; 8] = [
+        2951069706, 3458728418, 1854117859, 2101663528,
+        2268696417, 1381639539, 107250856, 91398482
+    ]
+    let expected_grammar: [i64; 8] = [
+        1770608981, 218527837, 1979825251, 1771587730,
+        4149539696, 2472425958, 1425218048, 448805334
+    ]
+    let expected_group: [i64; 8] = [
+        3909817910, 3742628339, 1563921998, 2093790908,
+        1159395466, 3569850705, 1008796196, 2627559470
+    ]
+    let expected_corpus: [i64; 8] = [
+        1417909513, 3031494131, 1562874213, 2477437734,
+        483260930, 3059054866, 1597872228, 2594285085
+    ]
+    let expected_search: [i64; 8] = [
+        1840769212, 3721179552, 508485894, 4173394574,
+        2174160851, 1012111882, 394714431, 2290290114
+    ]
+    let expected_candidate: [i64; 8] = [
+        545218364, 1429245000, 345360507, 2077132326,
+        1601744723, 1049718395, 3528280788, 694334824
+    ]
+    let expected_canonical: [i64; 8] = [
+        996217571, 2713634974, 892735728, 3137536953,
+        869210828, 958088411, 4251968475, 1788247020
+    ]
+    let expected_fingerprint: [i64; 8] = [
+        893241390, 3899333995, 2412149676, 3768364267,
+        2337540052, 1808094413, 3763725187, 1071212750
+    ]
+    let expected_witness: [i64; 8] = [
+        1803795790, 3382800293, 1234639168, 671937616,
+        2534504114, 3323355135, 180527048, 306090870
+    ]
+    let expected_receipt: [i64; 8] = [
+        12442592, 294011339, 2802469115, 1637759506,
+        2427336358, 4065839163, 899616455, 4252781158
+    ]
+
+    if !genesis_digest_matches(&result.space_digest, &expected_space) {
+        return 8
+    }
+    if !genesis_digest_matches(&result.grammar_digest, &expected_grammar) {
+        return 9
+    }
+    if !genesis_digest_matches(&result.group_digest, &expected_group) {
+        return 10
+    }
+    if !genesis_digest_matches(&result.corpus_digest, &expected_corpus) {
+        return 11
+    }
+    if !genesis_digest_matches(&result.search_digest, &expected_search) {
+        return 12
+    }
+    if !genesis_digest_matches(&result.candidate_digest, &expected_candidate) {
+        return 13
+    }
+    if !genesis_digest_matches(&result.canonical_digest, &expected_canonical) {
+        return 14
+    }
+    if !genesis_digest_matches(
+        &result.fingerprint_digest, &expected_fingerprint) { return 15 }
+    if !genesis_digest_matches(&result.witness_digest, &expected_witness) {
+        return 16
+    }
+    if !genesis_digest_matches(&result.receipt_digest, &expected_receipt) {
+        return 17
+    }
+    0
+}
+
+pub fn pireus_operator_genesis_matches_frozen_semantics(
+    result: &OperatorGenesisResult,
+) -> bool with Mut, Panic {
+    pireus_operator_genesis_frozen_mismatch_code(result) == 0
+}
