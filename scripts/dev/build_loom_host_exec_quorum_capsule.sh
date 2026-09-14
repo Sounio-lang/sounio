@@ -75,7 +75,7 @@ chmod 0700 "$AUTHORITY_ROOT/.git"
 
 CONTROLLER_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
 RESIDENT_V4_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
-LANGUAGE_AUTHORITY_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+LANGUAGE_AUTHORITY_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 FROZEN_CONTROLLER_COMMIT="$(manifest_value "$CONTROLLER_MANIFEST_SOURCE" controller_commit)"
 FROZEN_RESIDENT_V4_COMMIT="$(manifest_value "$RESIDENT_V4_MANIFEST_SOURCE" sounio_resident_v4_commit)"
 FROZEN_LANGUAGE_AUTHORITY_COMMIT="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" sounio_executable_commit)"
@@ -94,6 +94,18 @@ git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
   tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
 git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_AUTHORITY_COMMIT" |
   tar -x -C "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
+# Language authority v2 keeps the frozen v1 compiler bytes: overlay the toolchain
+# from toolchain_commit on top of the executable-commit tree.
+FROZEN_LANGUAGE_TOOLCHAIN_COMMIT="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_commit)"
+[[ "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'frozen language-authority toolchain commit is not canonical'
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" bin/souc bin/souc-lean-single-x86_64 |
+  tar -x -C "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
+[[ "$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc")" == \
+     "$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_wrapper_sha256)" && \
+   "$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc-lean-single-x86_64")" == \
+     "$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_compiler_sha256)" ]] ||
+  fail 'frozen language-authority toolchain drifted'
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BIN/loom-kernel-principal-broker" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
@@ -185,7 +197,7 @@ AUTHORITY_FILES=(
   tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md
   tools/loom/process_witness_handshake_payload_main.sio
   scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh
-  tools/loom/language_authority.freeze.v1
+  tools/loom/language_authority.freeze.v2
   stdlib/coordination/loom_language_authority.sio
   tools/loom/language_authority_main.sio
   tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md
@@ -322,7 +334,7 @@ PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/proce
 PRODUCT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-runtime")"
 PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256="$(sha256_file "$BIN/sounio-loom-provider-hook-fixture")"
 PRODUCT_LANGUAGE_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-language-authority-runtime")"
-PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1")"
+PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v2")"
 PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5")"
 PRODUCT_INGRESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1")"
 PRODUCT_INGRESS_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md")"
@@ -478,7 +490,7 @@ product_provider_hook_fixture_path=bin/sounio-loom-provider-hook-fixture
 product_provider_hook_fixture_sha256=$PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
 product_language_runtime_sha256=$PRODUCT_LANGUAGE_RUNTIME_SHA256
-product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v1
+product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v2
 product_language_manifest_sha256=$PRODUCT_LANGUAGE_MANIFEST_SHA256
 product_language_frozen_commit=$FROZEN_LANGUAGE_AUTHORITY_COMMIT
 product_language_frozen_source_path=authority-root/frozen/language-authority/stdlib/coordination/loom_language_authority.sio
