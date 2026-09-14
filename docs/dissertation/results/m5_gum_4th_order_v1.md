@@ -173,7 +173,7 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > refusing the form: called that way, lean_single stopped at `error: no main` (a current-source lean_single shows
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
-> **Current state (2026-09-14).** Since `36f9b34cc7`, `main` declares `Epistemic`, the
+> **Current state (2026-09-14, re-measured at HEAD `2a8e7ad145`).** Since `36f9b34cc7`, `main` declares `Epistemic`, the
 > known-failure tag is gone, and the test carries `//@ timeout: 90`. The command below needs its
 > `chmod +x` step: this lean_single build (sha256 below) wrote the ELF with mode `-rw-r--r--` under
 > umask 0022, and without that step, as in the command this note gave before, running the ELF
@@ -186,12 +186,27 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > printed; the program prints `dominant_correction_idx: 0.000000`. The table cells are the original
 > record and were not edited on 2026-09-14; the re-run matches their numbers with the current tree
 > and does not establish how they were first produced. The test suite runs the test through
-> `bin/souc run`, i.e. the default Madaros engine (`bin/madaros-linux-x86_64` sha256
-> `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24`, refreshed in `054380db89`).
-> Run directly through that prebuilt, the test printed the same markers in 17 s; the previous
-> prebuilt (sha256 `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) took 102 s.
-> The suite run filtered to this test, with `//@ timeout: 90`, reported `Pass: 1` in 21 s wall
-> time.
+> `bin/souc run`, i.e. the default Madaros engine. Measured at HEAD `2a8e7ad145`, with a clean
+> worktree and the prebuilt installed in `aaecebd878` (`bin/madaros-linux-x86_64` sha256
+> `a1307ca6297963f89a12eec23f282b4bcff691be5c2cc6d1a00dbce4a30d8dd0`), from the repository root,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc run tests/run-pass/pbpk28_m5_gum_4th_order.sio`
+> exited 0 in 23 s. Its stdout begins with 49 lines of compiler progress log. The remaining 30
+> lines print `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS`, `PASS` and the same ten Output values, and
+> differ from the lean_single output in three lines, where lean_single prints a small magnitude in
+> exponent form and Madaros prints `0.000000`: `Gaussian fixture kappa4` (lean_single
+> `4.440892e-16`) and the `rel_err` of `dAUC/dCL` (`8.452175e-13`) and of `d2AUC/dCL2`
+> (`1.337220e-9`). The printed text does not show whether the underlying values differ. The same
+> tree run through the previous prebuilt, sha256
+> `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24` (extracted from commit
+> `2952a88fa2` and selected with `MADAROS_RAW_BIN`), exited 0 in 29 s with byte-identical program
+> output. The test suite, also from the repository root,
+> `cd "$(git rev-parse --show-toplevel)" && bash scripts/run_sio_test_suite.sh --filter-exact pbpk28_m5_gum_4th_order.sio --jobs 1`,
+> reported `engine=madaros` and Pass: 1, Fail: 0, Total: 1, in 50 s wall time. The host is shared;
+> its load average was about 21 during these runs, so the timings are not a benchmark.
+> Before `aaecebd878` replaced that prebuilt, on 2026-09-14, the test run directly through it
+> (refreshed in `054380db89`) printed the same markers in 17 s; the prebuilt before it (sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) took 102 s; and the suite run
+> filtered to this test, with `//@ timeout: 90`, reported `Pass: 1` in 21 s wall time.
 > **History.** On 2026-09-13, called through its raw interface on the test file, lean_single
 > (`bin/souc-linux-x86_64`) stopped at `error: effect not declared in function signature at line
 > 82`, and the default Madaros engine at `error[E035] … missing: Epistemic` in `main`: `main` did
