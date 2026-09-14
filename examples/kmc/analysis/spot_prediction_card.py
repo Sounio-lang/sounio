@@ -81,5 +81,51 @@ def main():
     print("SPOT_CARD_OK" if ok else "SPOT_CARD_MISMATCH")
 
 
-if __name__ == "__main__":
+def separation_table(rmax=5):
+    """Every final separation up to |dx|,|dy| <= rmax, up to lattice symmetry:
+    what each half-order spot sees. D = dipole (conserved, contributes to a
+    centre-suppressed spot), M = monopole (plateau). A measured STM histogram
+    of pair separations maps onto the three spot ratios by weighting these rows.
+    Only meaningful on bipartite lattices (square or rectangular); on
+    triangular lattices no sublattice charge is conserved by nearest-neighbour
+    pairs (checked for all non-degenerate linear colourings with 2-4 classes)."""
+    print(f"{'D=(dx,dy)':<10} {'|D|':>6}   (1/2,1/2)  (0,1/2)  (1/2,0)   R triple")
+    seen = set()
+    for dx in range(0, rmax + 1):
+        for dy in range(0, dx + 1):
+            if (dx, dy) == (0, 0) or (dx, dy) in seen:
+                continue
+            seen.add((dx, dy))
+            r = ratios({(dx, dy): 1.0})
+            tag = lambda v: "D" if v == 0.0 else ("M" if v == 2.0 else "mixed")
+            print(f"({dx},{dy}){'':<{10 - len(f'({dx},{dy})')}} {((dx*dx+dy*dy) ** 0.5):6.3f}   "
+                  f"{tag(r[0]):^9}  {tag(r[1]):^7}  {tag(r[2]):^7}   {r[0]:.1f} / {r[1]:.1f} / {r[2]:.1f}")
+
+
+def distance_suffices(rmax=40):
+    """The parity class of D is a function of |D|^2 mod 4 alone: x^2 = x (mod 2)
+    and odd^2 = 1 (mod 4), so |D|^2 odd <=> dx+dy odd; |D|^2 = 2 (mod 4) <=>
+    dx, dy both odd; |D|^2 = 0 (mod 4) <=> both even. Hence a DISTANCE-only
+    pair histogram (lattice known) already fixes all three spot ratios.
+    Checked exhaustively for |dx|, |dy| <= rmax."""
+    seen = {}
+    for dx in range(-rmax, rmax + 1):
+        for dy in range(-rmax, rmax + 1):
+            if (dx, dy) == (0, 0):
+                continue
+            cls = tuple(ratios({(dx, dy): 1.0}))
+            key = (dx * dx + dy * dy) % 4
+            if seen.setdefault(key, cls) != cls:
+                print(f"COUNTEREXAMPLE at {(dx, dy)}")
+                return False
+    for key in sorted(seen):
+        print(f"  |D|^2 mod 4 = {key}: R triple {seen[key]}")
+    return True
+
+
+if __name__ == "__main__" and "--table" in __import__("sys").argv:
+    separation_table()
+    print("\nIs the class a function of |D|^2 mod 4? (exhaustive, |dx|,|dy| <= 40)")
+    print("DISTANCE_SUFFICES_OK" if distance_suffices() else "DISTANCE_SUFFICES_FAILED")
+elif __name__ == "__main__":
     main()
