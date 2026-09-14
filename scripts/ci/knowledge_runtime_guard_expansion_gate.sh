@@ -130,6 +130,24 @@ lean_compile() {  # lean_compile <src> <out>
   chmod +x "$2"
 }
 
+# Every `bin/souc run|compile` step below uses Madaros built from current source,
+# through MADAROS_RAW_BIN. The committed prebuilt bin/madaros-linux-x86_64 lags
+# self-hosted/: measured 2026-09-13, it rejected the unit-suffixed witnesses
+# (E001/E004/E008) that current source accepts, so this gate could only report on
+# the prebuilt, never on the source it is meant to cover. The current-source
+# lean_single built above is the seed (build_modular_madaros.sh uses a provided
+# SOUC_BIN directly), so no second seed is derived.
+CURRENT_MADAROS="$TMP_DIR/madaros-current-source"
+MADAROS_BUILD_LOG="$TMP_DIR/build-madaros-current-source.log"
+if SOUC_BIN="$CURRENT_SOUC" bash scripts/ci/build_modular_madaros.sh "$CURRENT_MADAROS" >"$MADAROS_BUILD_LOG" 2>&1; then
+  export MADAROS_RAW_BIN="$CURRENT_MADAROS"
+  printf 'PASS  built current-source Madaros for the native runtime guard steps\n'
+else
+  printf 'FAIL  could not build current-source Madaros for the native runtime guard steps\n' >&2
+  tail -n 40 "$MADAROS_BUILD_LOG" >&2
+  exit 1
+fi
+
 # The obligation probe is compiled once, by the current-source lean_single, and
 # run directly. Through `bin/souc run` it was compiled by the committed prebuilt
 # bin/madaros-linux-x86_64, which left 13 parser methods it imports (peek,
