@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v2"
 
 fail() {
   printf 'sounio-loom-sovereign-execution-kernel-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -44,7 +44,7 @@ expect_commit_hash() {
 }
 
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'freeze manifest is absent or linked'
-expect_value schema loom-sovereign-execution-kernel-freeze-v1
+expect_value schema loom-sovereign-execution-kernel-freeze-v2
 expect_value stage SEMANTICS_FROZEN
 expect_value semantic_authority Sounio
 expect_value producing_language Sounio
@@ -71,6 +71,12 @@ expect_value production_activation false
 expect_value exec_attached false
 expect_value parity_open false
 expect_value claim_ready false
+
+expect_value change_class ENTRYPOINT_INPUT_ROBUSTNESS
+expect_value semantics_module_changed false
+expect_hash "$(manifest_value predecessor_manifest_path)" "$(manifest_value predecessor_manifest_sha256)"
+[[ "$(manifest_value source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$(manifest_value predecessor_manifest_path)" | cut -d= -f2)" ]] ||
+  fail 'semantic module differs from predecessor'
 
 for key in garden contract concept_registry source entrypoint build_script selftest \
   freeze_selftest first_manifest first_evidence parent_9025 parent_9030 \
