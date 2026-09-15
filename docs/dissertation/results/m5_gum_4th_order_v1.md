@@ -213,8 +213,38 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > the tables are unchanged, and both engines print the same ten Output values. The other 16 are
 > bit-identical: the two Gaussian fixture kappas, the three lognormal values, the `rel_err`, got
 > and expected of each of the three derivative checks (nine values), `u_MC canonical` and the
-> dominant index. Each engine reproduced its own bits on a second run. Where in the budget
-> computation the two engines first diverge has not been traced.
+> dominant index. Each engine reproduced its own bits on a second run.
+> The first divergence is one input value. A second scratch probe, run at HEAD `0f6b452765` with
+> the stdlib exported from that commit and the same two binaries, printed 5,274 bit records from
+> three sites. The probe's `main` printed the 85 inputs of `hessian_pbpk28_auc`: the 71 PBPK
+> parameters of `ep28_rapamycin_params()`, which returns `pbpk28_params_rapamycin()`, and the 14
+> prior means and variances. It also printed the result's `var_first_order` and
+> `var_second_order`. A traced copy of `h28_simulate_auc` printed the base simulation's initial
+> concentration and, for each of its 1,681 steps, the blood concentration, the running AUC and the
+> time. A print helper in `hessian_pbpk28_auc` (`stdlib/darwin_pbpk/epistemic_pbpk28_hessian.sio`)
+> printed the base AUC, the 7 step sizes, the 14 first-order and 84 off-diagonal perturbed AUCs,
+> the 7 sensitivities, the 7 diagonal and 21 off-diagonal Hessian entries, and the two variance
+> sums. The `var_first_order` bits equal those of the first probe on both engines. Of the 85
+> inputs, only `vasc_frac[10]` differs: the literal `0.041` on line 56 of
+> `stdlib/darwin_pbpk/core/pbpk28_params.sio`, which lean_single turns into the bits
+> `4586069543746904522` and Madaros into `4586069543746904523`. Exact integer arithmetic gives
+> `4586069543746904523` as the correctly rounded binary64 value, so lean_single's value is one ULP
+> low; for all 13 inexact `vasc_frac` literals the same check agrees with Madaros's bits.
+> Downstream, the step sizes and the time grid are identical, and the rest differs: the base blood
+> concentration first at step 6 and at 1,666 of the 1,681 steps, the running AUC at 1,668 steps,
+> the base AUC, all 14 first-order and 83 of the 84 off-diagonal perturbed AUCs, all sensitivities
+> and Hessian entries, both variance sums, `var_first_order` and `var_second_order`. Replacing that
+> one literal with `41.0 / 1000.0`, a single division that both engines round to
+> `4586069543746904523`, removes every difference: in scratch copies of the stdlib, all 5,274
+> records of this probe and all 29 values of the first probe are bit-identical on the two engines,
+> and Madaros's 29 values are unchanged. lean_single's source
+> (`self-hosted/compiler/lean_single.sio` at `0f6b452765`) shows why the literal comes out low.
+> When a literal's integer part is 0, the lexer moves the zeros right after the decimal point into
+> the exponent. The code generator computes `int + frac / denom`, then divides or multiplies by
+> `10.0` once per unit of the remaining exponent, rounding at each step, so `0.041` becomes
+> `(41.0 / 100.0) / 10.0`. Evaluated for all 85 input literals, that computation misses the
+> correctly rounded value for `0.041` only, which matches the single input difference the probe
+> found.
 >
 > The unmodified test at `2a8e7ad145`, run through the previous prebuilt, sha256
 > `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24` (extracted from commit
