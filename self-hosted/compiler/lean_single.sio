@@ -2117,6 +2117,8 @@ fn init_unit_table() with Mut, Panic {
     unit_register_h(37732744875,     DIM_VOLUME)   // L    (litre)
     unit_register_h(88033087196,    DIM_VOLUME)   // mL
     unit_register_h(61190898900,    DIM_VOLUME)   // uL   hash_2(u,L)=2000006+117*31+76*62=2008345
+    unit_register_h(63544890426,    DIM_VOLUME)   // cm3  (volume = length^3)
+    unit_register_h(38360331839,    DIM_ENERGY)   // cal  (thermochemical calorie)
 
     // ── CGS ───────────────────────────────────────────────────────────────────
     unit_register_h(109414156195,   DIM_ENERGY)   // erg  (CGS energy = J in dimension)
@@ -6104,7 +6106,10 @@ fn scan_unit_type_expr(p0: i64, close_tk: i64) with IO, Panic, Mut, Div {
     var saw_unit: i64 = 0
     var expect_unit: i64 = 1
     var op: i64 = 19
-    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0 {
+    while p < TC && TK[p as usize] != close_tk && TK[p as usize] != 39 && TK[p as usize] != 0
+        && TK[p as usize] != 16 && TK[p as usize] != 28 && TK[p as usize] != 7
+        && TK[p as usize] != 8 && TK[p as usize] != 27 && TK[p as usize] != 24
+        && TK[p as usize] != 42 {
         if expect_unit != 0 {
             if TK[p as usize] != 3 {
                 tc_error_hard(p, "malformed f64<UnitExpr> annotation")
@@ -6905,6 +6910,9 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                                             // already worked, because it resolves the raw name hash through
                                                             // unit_lookup_dim; only the storage type was wrong. Setting ty=2 (f64)
                                                             // and keeping the name hash leaves every existing check untouched.
+                                                            // Only USER-declared units become types — preloaded SI symbols like
+                                                            // `K` must remain usable as generic type parameters (`Map<K, V>`).
+                                                            // Bare `mol/cm3` annotations still chain via unit_is_registered_h below.
                                                             if unit_is_user_declared_h(h) {
                                                                 SCAN_TY = 2
                                                                 SCAN_TY_HASH = h
@@ -7227,6 +7235,22 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             return
         }
         p = p + 1
+        // KL-13b: bare derived unit annotations `mol/cm3`, `cal/mol/K` —
+        // same algebra as f64<UnitExpr>, without the angle brackets.
+        // Only when the scanned name is a registered unit — never after the
+        // primitive `f64`/`f32` keywords, or casts like `x as f64 / 100.0`
+        // steal the slash into a fake UnitExpr (pkg/lock.sio self-parse).
+        if unit_is_registered_h(SCAN_TY_HASH)
+            && (TK[p as usize] == 19 || TK[p as usize] == 20) {
+            scan_unit_type_expr(p - 1, 16)
+            if SCAN_UNIT_EXPR_NEXT >= 0 {
+                SCAN_TY = 2
+                SCAN_TY_HASH = unit_type_hash_make(SCAN_UNIT_EXPR_DIM)
+                p = SCAN_UNIT_EXPR_NEXT
+                SCAN_TY_NEXT = p
+                return
+            }
+        }
         if TK[p as usize] == 23 {
             saw_generic = 1
             var gd: i64 = 1
@@ -17916,7 +17940,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let tp = EP
             let src_ty = EXPR_TY
             let src_hash = EXPR_TY_HASH
-            let src_is_f64 = EXPR_IS_F64
+            var src_is_f64 = EXPR_IS_F64
+            // A builtin unit spelled in a signature or a field (`-> mg`, `amount: mg`)
+            // scans as type 0 carrying the unit hash -- only a `unit NAME;` declaration
+            // scans as 2 -- so its call result and field read arrive with EXPR_IS_F64 = 0
+            // while the value is f64 bits, and `g() as f64` converted those bits as an
+            // integer. The call-argument check already reads type 0 as unit-bearing.
+            if src_ty == 0 && unit_is_registered_h(src_hash) { src_is_f64 = 1 }
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
@@ -20993,7 +21023,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
             let right_unit_a = EXPR_UNIT
             let right_unit_dim_a = EXPR_UNIT_DIM
             if left_unit != 0 && right_unit_a != 0 && left_unit != right_unit_a {
-                tc_linear_violation(op_tok, "unit mismatch")
+                tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
             }
             if left_unit_dim != 0 && right_unit_dim_a != 0 && left_unit_dim != right_unit_dim_a {
                 tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -21047,7 +21077,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_ha_77 = EXPR_HSHADOW_77
         // Gen 19: named units must match exactly for additive arithmetic.
         if left_unit != 0 && right_unit != 0 && left_unit != right_unit {
-            tc_linear_violation(op_tok, "unit mismatch")
+            tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
         }
         // Gen 19: unit dimension mismatch — compare packed dim vectors, not name hashes
         // This allows g + kg (both mass^1) while catching m + kg (length vs mass)
@@ -21098,7 +21128,9 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
                     }
                     if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
-                        if left_ty == 2 && right_ty == 2 { tc_error(op_tok, "unit mismatch") }
+                        // The words the checker uses for E041, so one test pins both engines. A
+                        // warning here said "unit mismatch" and let the hard error below speak.
+                        if left_ty == 2 && right_ty == 2 { tc_linear_violation(op_tok, "unit mismatch in arithmetic operation") }
                         tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
                     }
                 }
@@ -26221,7 +26253,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
         // molar value. The same helper the call site uses works unchanged here,
         // with the declared return hash in place of the parameter hash.
-        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+        // Only an f64-kind return type is unit-checked, the guard the call site puts
+        // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+        // `struct K`) resolved its name hash to that unit's dimension, and its
+        // unit-free value was refused.
+        if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
             tc_linear_violation(EP - 1, "unit mismatch in return value")
         }
         // PR-5: enforce refinement predicate on return value (literal/let-literal)
@@ -32266,6 +32302,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         }
                     }
                 }
+                // The unit check of the `return` statement, for the tail value. A
+                // body's last expression is its return value as much as `return`
+                // is, and `fn bare() -> molal { 5.0 }` compiled while the
+                // `return 5.0` spelling was refused. EXPR_UNIT is still the tail's:
+                // nothing is compiled between the last statement and here.
+                // Only an f64-kind return type is unit-checked, the guard the call site puts
+                // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+                // `struct K`) resolved its name hash to that unit's dimension, and its
+                // unit-free value was refused.
+                if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+                    tc_linear_violation(EP - 1, "unit mismatch in return value")
+                }
                 // SRET fix: stabilize whenever SRET was set up, regardless of type-eq result.
                 // Without this, functions returning tuples with a mismatched LAST_STMT_TY
                 // (e.g. last stmt typed as Item while return is (Parser,Item)) skip stabilization
@@ -37923,7 +37971,13 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             let tp = EP
             let src_ty = EXPR_TY
             let src_hash = EXPR_TY_HASH
-            let src_is_f64 = EXPR_IS_F64
+            var src_is_f64 = EXPR_IS_F64
+            // A builtin unit spelled in a signature or a field (`-> mg`, `amount: mg`)
+            // scans as type 0 carrying the unit hash -- only a `unit NAME;` declaration
+            // scans as 2 -- so its call result and field read arrive with EXPR_IS_F64 = 0
+            // while the value is f64 bits, and `g() as f64` converted those bits as an
+            // integer. The call-argument check already reads type 0 as unit-bearing.
+            if src_ty == 0 && unit_is_registered_h(src_hash) { src_is_f64 = 1 }
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
@@ -39590,7 +39644,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // Mirror of compile_additive; the a64 pass captured neither operand's
         // unit and ran neither check.
         if left_unit_a != 0 && right_unit_a != 0 && left_unit_a != right_unit_a {
-            tc_linear_violation(op_tok, "unit mismatch")
+            tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
         }
         if left_unit_dim_a != 0 && right_unit_dim_a != 0 && left_unit_dim_a != right_unit_dim_a {
             tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -39624,6 +39678,19 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             compile_knowledge_addsub_a64(op_tok, op, left_ty, left_hash, right_ty, right_hash)
             B7_TOP = b7_prev_a
             continue
+        }
+        // Mirror of compile_additive's plain-operand check. The a64 pass had the
+        // Knowledge twin of this check but not this one, so two f64 operands with
+        // different type hashes (mol_L + kJ) compiled for aarch64-linux while x86
+        // refused them. Same words and severities as the x86 site.
+        if left_ty != 0 && right_ty != 0 {
+            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false {
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+            if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                if left_ty == 2 && right_ty == 2 { tc_linear_violation(op_tok, "unit mismatch in arithmetic operation") }
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
         }
         emit_pop_x1_a64()
         if left_f64 == 1 {
@@ -41027,7 +41094,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
         // molar value. The same helper the call site uses works unchanged here,
         // with the declared return hash in place of the parameter hash.
-        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+        // Only an f64-kind return type is unit-checked, the guard the call site puts
+        // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+        // `struct K`) resolved its name hash to that unit's dimension, and its
+        // unit-free value was refused.
+        if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
             tc_linear_violation(EP - 1, "unit mismatch in return value")
         }
         // PR-5: enforce refinement predicate on return value (a64 mirror)
@@ -42237,6 +42308,14 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                             }
                         }
                     }
+                }
+                // Unit check of the tail value (mirror of the x86 epilogue).
+                // Only an f64-kind return type is unit-checked, the guard the call site puts
+                // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+                // `struct K`) resolved its name hash to that unit's dimension, and its
+                // unit-free value was refused.
+                if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+                    tc_linear_violation(EP - 1, "unit mismatch in return value")
                 }
                 if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                     stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)

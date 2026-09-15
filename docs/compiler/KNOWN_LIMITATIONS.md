@@ -37,8 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call-boundary closed) | both |
-| KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
+| KL-14 | FFI: dynamic linking (aggregate-ref CLOSED as KL-14a) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 | KL-17 | generic `impl` blocks: associated-call and literal `T` inference, raw-word `HeapVec<T>` | madaros |
@@ -89,36 +88,56 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   FO across arbitrary user `fn` bodies, remain open.
 
 
-### KL-13 — derived units and unit loss (#2388)
+### KL-13 — derived units and unit loss (#2388) — CLOSED
 
-- **Call-boundary loss — CLOSED (KL-13 partial).** A unit-typed value
-  (`t_k: K`) no longer enters a bare `f64` parameter unchecked.
-  lean_single: `unit_call_arg_mismatch` refuses when `param_dim == 0` and
-  `expr_dim != 0`. Madaros: `check_call_arg_unit_boundary` refuses
-  `provided.unit_id >= 0 && expected.unit_id < 0`, and the primitive
-  kind-match fast path still runs the unit boundary. Explicit `as f64`
-  remains the escape hatch. Pins:
+- **Call-boundary loss — CLOSED.** Unit-typed args no longer enter bare
+  `f64` parameters unchecked. Pins:
   `tests/compile-fail/unit_lost_at_call_boundary.sio`,
-  `tests/run-pass/unit_call_cast_strips_brand.sio`,
+  `tests/run-pass/unit_call_cast_strips_brand.sio`.
+- **Derived declarations — CLOSED.** `unit velocity = m / s` registers the
+  composed dimension on Madaros (`collect_unit_decl` honours
+  `type_alias_ty`; ItemUnit is collected on the `*mut` spine). lean_single
+  already had the Pass-0a path.
+- **Derived annotations — CLOSED (KL-13b).** Bare `mol/cm3` / `cal/mol`
+  parse as unit type expressions (TypeReference=/ TypeRefMut=* encoding,
+  same as `parse_unit_item`). `f64<m/s>` accepts the same chain inside
+  generics. Pins:
+  `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+  `tests/compile-fail/unit_derived_annotation_refuse_add.sio`,
   `scripts/ci/language_gap_ratchet_gate.sh`.
-- **Still open:** `mol/cm3` does not parse on either engine
-  (`parser/items.sio:4117-4172` `parse_unit_item` has no unit-expression
-  grammar); `unit velocity = m / s` declares a dimensionless unit
-  (`check.sio:20169` `collect_unit_decl` ignores the expression). Direct
-  `mol + K` is rejected on both (E041). Quotient dimension retention is
-  already closed (2026-09-05).
-- Repro (open): `tests/known-gaps/units/derived_unit_annotation_unparsed.sio`.
+- **Return-boundary loss — CLOSED (KL-13 partial).** A returned value is
+  checked against the unit the signature declares, for an explicit `return`
+  and for the body's tail expression alike. lean_single: the `return` branch
+  of `compile_stmt` and the implicit-return epilogue of `compile_all` /
+  `compile_all_arm64` both call
+  `unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM)` and
+  report `unit mismatch in return value`, on x86-64 and `--target
+  aarch64-linux`. The helper and its f64-kind guard are the call-boundary
+  ones, so the same three
+  shapes are refused: a bare number into `-> molal`, `molar` into `-> molal`,
+  and a unit-typed value into `-> f64`. Explicit `as f64` remains the escape
+  hatch. Madaros refuses the same shapes with E008 (return value does not
+  match the declared return type). Pins:
+  `tests/compile-fail/unit_return_bare_number.sio`,
+  `tests/compile-fail/unit_return_bare_number_tail.sio`,
+  `tests/compile-fail/unit_return_wrong_unit.sio`,
+  `tests/run-pass/unit_return_same_unit_tail.sio`.
+- **Engine divergence, open (measured 2026-09-15 on the merged tree, after
+  KL-13b).** Madaros accepts a bare number returned as a built-in unit
+  (`fn f() -> mg { 250.0 }`, with or without `return`), which lean_single
+  refuses; a declared unit (`-> molal`) is refused on both.
 - Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
 
 ### KL-14 — FFI
 
-- **Aggregate-reference arguments through the signatureless `ffi_` path.**
-  Engine: `madaros`. `extern "C"` names are rewritten to `ffi_<name>`
-  builtins (`parser/items.sio:1072-1124`, allowlist
-  `extern_name_has_ffi_intrinsic`); a `&[i8; N]` argument forwards an empty
-  pointer. Repro: `tests/run-pass/ffi_system_array_arg.sio`
-  (`//@ known-failure`). Non-allowlisted externs fail closed with E250
-  (`check.sio:9478`). Doc:
+- **Aggregate-reference arguments through the signatureless `ffi_` path —
+  CLOSED (KL-14a).** Engine: `madaros`. `extern "C"` names are rewritten to
+  `ffi_<name>` builtins (`parser/items.sio`, allowlist
+  `extern_name_has_ffi_intrinsic`). A `&[i8; N]` argument used to forward a
+  GC-handle / empty pointer; the call site now packs via `str_from_bytes`
+  (Madaros arrays are 8-byte boxed slots, not contiguous C bytes) and passes
+  the resulting `char*` to `ffi_system`. The `string` binding is unchanged.
+  Pin: `tests/run-pass/ffi_system_array_arg.sio`. Doc:
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
 - **No dynamic linking.** Engine: `madaros`. The ELF writer emits static
   executables; `native/reloc.sio:271-291` records `R_X86_64_PLT32` for
