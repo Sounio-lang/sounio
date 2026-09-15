@@ -245,6 +245,26 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > `(41.0 / 100.0) / 10.0`. Evaluated for all 85 input literals, that computation misses the
 > correctly rounded value for `0.041` only, which matches the single input difference the probe
 > found.
+> **Bit agreement after `10ac3eb3b3` (2026-09-15).** `10ac3eb3b3` makes lean_single lower each
+> float literal to its correctly rounded binary64 bits, computed at compile time from the literal's
+> text. It also refreshes the lean_single seed `bin/souc-lean-single-x86_64`, from sha256
+> `e1d4eeb64d7d1f3ad22aba7f9d994111f4701fb79f7d3f391aa01a64657a8cb4` to
+> `01c397f318f02a0c39d671bdca4db819f07f9200be3a90bf867f80f880aa4f76`. With the refreshed seed,
+> `0.041` lowers to `4586069543746904523`, the bits Madaros produces. A third probe was made from
+> the test like the first: it prints `f64_to_bits` beside every `print_f64`, but not the got and
+> expected bits or the three constants, so it prints 20 bit patterns. It was run at HEAD
+> `eb292c3674`, with `self-hosted/compiler/lean_single.sio` already holding the source committed in
+> `10ac3eb3b3`, through three compilers: the previous seed, the refreshed seed built from that
+> source, and the Madaros prebuilt (sha256 `a1307ca6…`). None of the five stdlib modules the test
+> imports had uncommitted edits. The refreshed seed and Madaros gave identical bits for all 20
+> values. The previous seed differed from Madaros in the same 10 values as above and in no others.
+> For example, refreshing the seed moves `var_1st` from `4589554478734755281` to
+> `4589554478734771891` and `u_total` from `4600493197977982340` to `4600493197982566279`. All three
+> runs printed `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS` and `PASS`. The ten Output values print
+> the same to six decimals, so the table is unchanged. The command above uses
+> `bin/souc-linux-x86_64`, a separate binary that `10ac3eb3b3` did not replace. Run at HEAD
+> `10ac3eb3b3`, it gave the same 20 bit patterns as the previous seed. To reproduce the agreement,
+> run that command with `bin/souc-lean-single-x86_64` in place of `bin/souc-linux-x86_64`.
 >
 > The unmodified test at `2a8e7ad145`, run through the previous prebuilt, sha256
 > `5cd3fdc228323b1f1baba9abd568d806af98461e5c97d33755daec553535dc24` (extracted from commit
