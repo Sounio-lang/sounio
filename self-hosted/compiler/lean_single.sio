@@ -2185,9 +2185,14 @@ var A64_FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
 var A64_FRAME_PATCH_RD: [i64; 65536] = [0; 65536]
 var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
-// Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
-var FL_SCI_SCRATCH: i64 = 0
-var FL_SCI_NEG: i64 = 0
+// Scratch state for f64_literal_bits: two base-2^32 big integers of 128 limbs
+// each (region 0 at FLB[0..128], region 1 at FLB[128..256]) with their limb
+// counts, a capacity-overflow flag, and the result for the last literal.
+var FLB: [i64; 256] = [0; 256]
+var FLB_LEN: [i64; 2] = [0; 2]
+var FLB_OVF: i64 = 0
+var FL_BITS: i64 = 0
+var FL_EXACT: i64 = 0
 var FL_FRAC_DIGITS: i64 = 0
 var LAST_STMT_HAS_VALUE: i64 = 0
 
@@ -7533,10 +7538,11 @@ fn lex_all() with IO, Mut, Panic, Div {
             }
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
-                // for large exponents like 1.0e30). The signed exponent is stored in TX
-                // and applied at codegen time via SSE2 multiply/divide. Leading zeros
-                // absorbed during fractional-digit accumulation are folded into TX so
-                // tiny literals like 1e-24 written as 0.000…001 don't truncate.
+                // for large exponents like 1.0e30). The signed exponent is stored in TX.
+                // Leading zeros absorbed during fractional-digit accumulation are folded
+                // into TX so tiny literals like 1e-24 written as 0.000…001 don't truncate.
+                // These parts feed compile-time predicate checks; codegen lowers the
+                // literal from its source bytes through f64_literal_bits.
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
                 TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
                 TX[TC as usize] = exp_sign * exp_val - lit_leading_zeros
@@ -9080,50 +9086,249 @@ fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
     patch32(already, CL)
 }
 
-// A float literal lowers through binary64 (cvtsi2sd/divsd/mulsd). Widening that
-// to binary128 is only the literal's value when the decimal is a binary64 value
-// the lowering reproduces exactly: |int| < 2^53, fraction dyadic, and an exponent
-// that keeps an integer below 2^53. Anything else (0.1, 1e-3, 1e23) would be an
-// f64 approximation under a binary128 type -- refuse it, as Madaros V0-E.5.9 does.
-fn f64_literal_is_exact_binary64(tok: i64) -> bool with Panic, Mut, Div {
-    let two53: i64 = 9007199254740992
-    let iv = TV[tok as usize]
-    let fv = TF[tok as usize]
-    let dv = TD[tok as usize]
-    let xv = TX[tok as usize]
-    if iv < 0 || iv >= two53 { return false }
-    if fv > 0 {
-        if xv != 0 { return false }
-        // denominator must be 10^d; the fraction fv/10^d is dyadic iff 5^d | fv
-        var d: i64 = 0
-        var den = dv
-        while den > 1 {
-            if den % 10 != 0 { return false }
-            den = den / 10
-            d = d + 1
-        }
-        if den != 1 || d > 52 { return false }
-        var f2 = fv
-        var k: i64 = 0
-        while k < d {
-            if f2 % 5 != 0 { return false }
-            f2 = f2 / 5
-            k = k + 1
-        }
-        // int + f2/2^d exact iff (int << d) + f2 < 2^53
-        if iv > (two53 >> d) { return false }
-        if (iv << d) + f2 >= two53 { return false }
-        return true
+// Correctly rounded float literals. A float literal's binary64 value is
+// computed here, at compile time, from the literal's source bytes (TS..TE), and
+// every lowering site emits it as a 64-bit immediate. The text gives digits D
+// and a decimal exponent E; N = D * 10^max(E,0) and P = 10^max(-E,0) are exact
+// big integers, one exact division gives a 56- or 57-bit quotient and a sticky
+// remainder, and IEEE 754 round-half-to-even is applied to that (fewer bits
+// below 2^-1022, +inf past the largest finite value).
+//
+// The lowering this replaces computed (int + frac/denom) * 10^exp at run time
+// with cvtsi2sd/divsd/mulsd, rounding at every step: 0.041 became
+// (41.0/100.0)/10.0, one ULP below the correctly rounded value, and 1.0e-12 one
+// ULP above it. The lexer's TV/TF/TD/TX (at most 18 fraction digits) still feed
+// the compile-time predicate checks; codegen no longer reads them.
+
+fn flb_set(r: i64, v: i64) with Mut, Panic {
+    FLB[(r * 128) as usize] = v
+    FLB_LEN[r as usize] = 1
+}
+
+fn flb_norm(r: i64) with Mut, Panic {
+    let base = r * 128
+    var n = FLB_LEN[r as usize]
+    while n > 1 && FLB[(base + n - 1) as usize] == 0 { n = n - 1 }
+    FLB_LEN[r as usize] = n
+}
+
+// region r = r * m + a, for 0 <= m, a < 2^31
+fn flb_mul_add(r: i64, m: i64, a: i64) with Mut, Panic {
+    let base = r * 128
+    let n = FLB_LEN[r as usize]
+    var c = a
+    var i: i64 = 0
+    while i < n {
+        let v = FLB[(base + i) as usize] * m + c
+        FLB[(base + i) as usize] = v & 0xFFFFFFFF
+        c = v >> 32
+        i = i + 1
     }
-    if xv < 0 { return iv == 0 }
-    var v = iv
-    var e: i64 = 0
-    while e < xv {
-        if v > two53 / 10 { return false }
-        v = v * 10
-        e = e + 1
+    var len = n
+    while c > 0 {
+        if len >= 128 { FLB_OVF = 1; return }
+        FLB[(base + len) as usize] = c & 0xFFFFFFFF
+        c = c >> 32
+        len = len + 1
     }
-    return v < two53
+    FLB_LEN[r as usize] = len
+}
+
+// region r = r << s; limbs are written top-down so the shift can be in place
+fn flb_shl(r: i64, s: i64) with Mut, Panic, Div {
+    let base = r * 128
+    let w = s / 32
+    let b = s % 32
+    let n = FLB_LEN[r as usize]
+    if n + w + 1 > 128 { FLB_OVF = 1; return }
+    FLB[(base + n + w) as usize] = FLB[(base + n - 1) as usize] >> (32 - b)
+    var i = n - 1
+    while i >= 1 {
+        let hi = (FLB[(base + i) as usize] << b) & 0xFFFFFFFF
+        let lo = FLB[(base + i - 1) as usize] >> (32 - b)
+        FLB[(base + i + w) as usize] = hi | lo
+        i = i - 1
+    }
+    FLB[(base + w) as usize] = (FLB[base as usize] << b) & 0xFFFFFFFF
+    var z: i64 = 0
+    while z < w { FLB[(base + z) as usize] = 0; z = z + 1 }
+    FLB_LEN[r as usize] = n + w + 1
+    flb_norm(r)
+}
+
+fn flb_shr1(r: i64) with Mut, Panic {
+    let base = r * 128
+    let n = FLB_LEN[r as usize]
+    var i: i64 = 0
+    while i < n {
+        var hi: i64 = 0
+        if i + 1 < n { hi = (FLB[(base + i + 1) as usize] & 1) << 31 }
+        FLB[(base + i) as usize] = (FLB[(base + i) as usize] >> 1) | hi
+        i = i + 1
+    }
+    flb_norm(r)
+}
+
+fn flb_bitlen(r: i64) -> i64 with Mut, Panic {
+    let n = FLB_LEN[r as usize]
+    var t = FLB[(r * 128 + n - 1) as usize]
+    var b: i64 = 0
+    while t > 0 { b = b + 1; t = t >> 1 }
+    return (n - 1) * 32 + b
+}
+
+// region 0 >= region 1
+fn flb_ge01() -> bool with Mut, Panic {
+    let n0 = FLB_LEN[0 as usize]
+    let n1 = FLB_LEN[1 as usize]
+    if n0 > n1 { return true }
+    if n0 < n1 { return false }
+    var i = n0 - 1
+    while i >= 0 {
+        let x = FLB[i as usize]
+        let y = FLB[(128 + i) as usize]
+        if x > y { return true }
+        if x < y { return false }
+        i = i - 1
+    }
+    return true
+}
+
+// region 0 = region 0 - region 1, for region 0 >= region 1
+fn flb_sub01() with Mut, Panic {
+    let n0 = FLB_LEN[0 as usize]
+    let n1 = FLB_LEN[1 as usize]
+    var br: i64 = 0
+    var i: i64 = 0
+    while i < n0 {
+        var y: i64 = 0
+        if i < n1 { y = FLB[(128 + i) as usize] }
+        var v = FLB[i as usize] - y - br
+        if v < 0 { v = v + 4294967296; br = 1 } else { br = 0 }
+        FLB[i as usize] = v
+        i = i + 1
+    }
+    flb_norm(0)
+}
+
+fn f64_literal_too_long(tok: i64) with IO, Mut, Panic {
+    tc_error_hard(tok, "float literal has more significant digits than lean_single lowers exactly (1536 bits)")
+    FL_BITS = 0
+    FL_EXACT = 0
+}
+
+// Sets FL_BITS to the correctly rounded binary64 bits of float literal token
+// `tok`, and FL_EXACT to 1 when that is the literal's exact value.
+fn f64_literal_bits(tok: i64) with IO, Mut, Panic, Div {
+    var p = TS[tok as usize]
+    let pe = TE[tok as usize]
+    FLB_OVF = 0
+    flb_set(0, 0)
+    flb_set(1, 1)
+    var e10: i64 = 0
+    // Same digit grammar as the lexer: decimal or 0x-hex integer part, then
+    // optional .digits, then optional e[+-]digits; a unit suffix ends it.
+    if sb(p) == 48 && (sb(p + 1) == 120 || sb(p + 1) == 88) {
+        p = p + 2
+        var hx: i64 = 1
+        while p < pe && hx == 1 {
+            let h = sb(p)
+            if h >= 48 && h <= 57 { flb_mul_add(0, 16, h - 48); p = p + 1 }
+            else if h >= 97 && h <= 102 { flb_mul_add(0, 16, h - 87); p = p + 1 }
+            else if h >= 65 && h <= 70 { flb_mul_add(0, 16, h - 55); p = p + 1 }
+            else { hx = 0 }
+        }
+    } else {
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 { flb_mul_add(0, 10, sb(p) - 48); p = p + 1 }
+    }
+    if p < pe && sb(p) == 46 {
+        p = p + 1
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 {
+            flb_mul_add(0, 10, sb(p) - 48)
+            e10 = e10 - 1
+            p = p + 1
+        }
+    }
+    if p < pe && (sb(p) == 101 || sb(p) == 69) {
+        p = p + 1
+        var esign: i64 = 1
+        if p < pe && sb(p) == 43 { p = p + 1 }
+        else if p < pe && sb(p) == 45 { esign = 0 - 1; p = p + 1 }
+        var ev: i64 = 0
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 {
+            if ev < 100000 { ev = ev * 10 + sb(p) - 48 }
+            p = p + 1
+        }
+        e10 = e10 + esign * ev
+    }
+    if FLB_OVF != 0 || FLB_LEN[0 as usize] > 48 { f64_literal_too_long(tok); return }
+    let a = flb_bitlen(0)
+    if a == 0 { FL_BITS = 0; FL_EXACT = 1; return }
+    // 10^k >= 2^(3k): values at or above 2^1024 overflow, and values below
+    // 2^-1076 (under half the smallest subnormal) round to zero.
+    if e10 >= 0 && a - 1 + 3 * e10 >= 1024 { FL_BITS = 0x7FF0000000000000; FL_EXACT = 0; return }
+    if e10 < 0 && a + 3 * e10 <= 0 - 1076 { FL_BITS = 0; FL_EXACT = 0; return }
+    var i: i64 = 0
+    if e10 >= 0 {
+        while i < e10 { flb_mul_add(0, 10, 0); i = i + 1 }
+    } else {
+        while i < 0 - e10 { flb_mul_add(1, 10, 0); i = i + 1 }
+    }
+    // Scale so floor(region0 / region1) has 56 or 57 bits: value = q * 2^-s.
+    let s = 56 - (flb_bitlen(0) - flb_bitlen(1))
+    if s >= 0 { flb_shl(0, s) } else { flb_shl(1, 0 - s) }
+    flb_shl(1, 57)
+    if FLB_OVF != 0 { f64_literal_too_long(tok); return }
+    var q: i64 = 0
+    var j: i64 = 57
+    while j >= 0 {
+        if flb_ge01() { flb_sub01(); q = q | (1 << j) }
+        flb_shr1(1)
+        j = j - 1
+    }
+    var rest: i64 = 0
+    if FLB_LEN[0 as usize] > 1 || FLB[0 as usize] != 0 { rest = 1 }
+    var bl: i64 = 0
+    var t = q
+    while t > 0 { bl = bl + 1; t = t >> 1 }
+    // Keep 53 bits, or fewer where the result is subnormal (the lowest kept
+    // bit weighs 2^-1074); the dropped bits and the remainder decide rounding.
+    var drop = bl - 53
+    if s - 1074 > drop { drop = s - 1074 }
+    var m: i64 = 0
+    var guard: i64 = 0
+    if drop > 60 {
+        if q != 0 { rest = 1 }
+    } else {
+        m = q >> drop
+        guard = (q >> (drop - 1)) & 1
+        if (q & ((1 << (drop - 1)) - 1)) != 0 { rest = 1 }
+    }
+    FL_EXACT = 1
+    if guard != 0 || rest != 0 { FL_EXACT = 0 }
+    if guard != 0 && (rest != 0 || (m & 1) != 0) { m = m + 1 }
+    var te = drop - s
+    if m == 9007199254740992 { m = 4503599627370496; te = te + 1 }
+    if m == 0 { FL_BITS = 0; return }
+    if m >= 4503599627370496 {
+        let be = te + 52 + 1023
+        if be >= 2047 { FL_BITS = 0x7FF0000000000000; FL_EXACT = 0; return }
+        FL_BITS = (be << 52) | (m - 4503599627370496)
+        return
+    }
+    FL_BITS = m
+}
+
+// lean_single widens a float literal to binary128 from its binary64 value, so
+// the widening is the literal's value only when the literal is exactly a
+// binary64 value: 0.5, 0.0625 and 1.5e1 widen; 0.1, 1e-3 and 1e23 would put an
+// f64 approximation under a binary128 type -- refuse them, as Madaros V0-E.5.9
+// refuses what binary128 cannot represent. Exactness is the same computation
+// that produced the lowered bits, so the two cannot disagree.
+fn f64_literal_is_exact_binary64(tok: i64) -> bool with IO, Panic, Mut, Div {
+    f64_literal_bits(tok)
+    if FL_EXACT == 1 { return true }
+    return false
 }
 
 // aarch64 lean_single has no binary128 lowering: refuse at each site where an
@@ -13042,48 +13247,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // true=35, false=36
     if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
     if k == 36 { em(0x31); em(0xc0); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
-    // Float literal (53): runtime conversion via SSE2
+    // Float literal (53): correctly rounded binary64 bits, computed at compile time
     if k == 53 {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
         // Gen 19: _suffix unit annotation (e.g. 9.8_m)
         let flit_uh = TU[EP as usize]
-        // Store exponent info in globals to avoid extra locals shifting compile_primary's frame
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        f64_literal_bits(EP)
         EP = EP + 1
-        // mov rax, int_part; cvtsi2sd xmm0, rax
-        em(0x48); em(0xb8); em64(fl_int)
-        em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
-        // If fractional part: frac/denom added to xmm0
-        if fl_frac > 0 {
-            em(0x48); em(0xb8); em64(fl_frac)
-            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)  // cvtsi2sd xmm1, rax
-            em(0x48); em(0xb8); em64(fl_denom)
-            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)  // cvtsi2sd xmm2, rax
-            em(0xf2); em(0x0f); em(0x5e); em(0xca)            // divsd xmm1, xmm2
-            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
-        }
-        // Apply scientific exponent: multiply or divide xmm0 by 10.0 FL_SCI_SCRATCH times
-        if FL_SCI_SCRATCH != 0 {
-            // Load 10.0 into xmm1: movabs rax, 0x4024000000000000; movq xmm1, rax
-            em(0x48); em(0xb8); em64(0x4024000000000000)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
-            if FL_SCI_NEG == 0 {
-                while FL_SCI_SCRATCH > 0 {
-                    em(0xf2); em(0x0f); em(0x59); em(0xc1)  // mulsd xmm0, xmm1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            } else {
-                while FL_SCI_SCRATCH > 0 {
-                    em(0xf2); em(0x0f); em(0x5e); em(0xc1)  // divsd xmm0, xmm1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            }
-        }
-        // movq rax, xmm0 — store f64 bits in rax
-        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        em(0x48); em(0xb8); em64(FL_BITS)                  // movabs rax, bits
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)   // movq xmm0, rax
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track f64 literal for compile-time predicate checking
@@ -17684,44 +17858,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if const_find_val(ns, ne) != 0 {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
-                            let fl_int = TV[CONST_TOK_IDX[ci as usize] as usize]
-                            let fl_frac = TF[CONST_TOK_IDX[ci as usize] as usize]
-                            let fl_denom = TD[CONST_TOK_IDX[ci as usize] as usize]
-                            var fl_sci: i64 = 0
-                            var fl_sci_neg: i64 = 0
-                            if TX[CONST_TOK_IDX[ci as usize] as usize] >= 0 {
-                                fl_sci = TX[CONST_TOK_IDX[ci as usize] as usize]
-                                fl_sci_neg = 0
-                            } else {
-                                fl_sci = 0 - TX[CONST_TOK_IDX[ci as usize] as usize]
-                                fl_sci_neg = 1
-                            }
-                            em(0x48); em(0xb8); em64(fl_int)
-                            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
-                            if fl_frac > 0 {
-                                em(0x48); em(0xb8); em64(fl_frac)
-                                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)
-                                em(0x48); em(0xb8); em64(fl_denom)
-                                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)
-                                em(0xf2); em(0x0f); em(0x5e); em(0xca)
-                                em(0xf2); em(0x0f); em(0x58); em(0xc1)
-                            }
-                            if fl_sci != 0 {
-                                em(0x48); em(0xb8); em64(0x4024000000000000)
-                                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
-                                if fl_sci_neg == 0 {
-                                    while fl_sci > 0 {
-                                        em(0xf2); em(0x0f); em(0x59); em(0xc1)
-                                        fl_sci = fl_sci - 1
-                                    }
-                                } else {
-                                    while fl_sci > 0 {
-                                        em(0xf2); em(0x0f); em(0x5e); em(0xc1)
-                                        fl_sci = fl_sci - 1
-                                    }
-                                }
-                            }
-                            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                            // Correctly rounded bits of the const's literal (see f64_literal_bits)
+                            f64_literal_bits(CONST_TOK_IDX[ci as usize])
+                            em(0x48); em(0xb8); em64(FL_BITS)                  // movabs rax, bits
+                            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)   // movq xmm0, rax
                             // The sign the literal token could not carry. Same
                             // instruction the unary-minus path uses on f64.
                             if CONST_NEG[ci as usize] != 0 {
@@ -34272,36 +34412,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        // Correctly rounded binary64 bits, computed at compile time (x86 twin above)
+        f64_literal_bits(EP)
         EP = EP + 1
-        emit_imm64_a64(fl_int)
-        em32(0x9E620000)  // scvtf d0, x0
-        if fl_frac > 0 {
-            emit_imm64_a64(fl_frac)
-            em32(0x9E620001)  // scvtf d1, x0
-            emit_imm64_a64(fl_denom)
-            em32(0x9E620002)  // scvtf d2, x0
-            em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
-            em32(0x1E612800)  // fadd d0, d0, d1
-        }
-        // Apply scientific exponent: mul/div d0 by 10.0 FL_SCI_SCRATCH times
-        if FL_SCI_SCRATCH != 0 {
-            emit_imm64_a64(0x4024000000000000)  // x0 = bits of 10.0
-            em32(0x9E670001)  // fmov d1, x0
-            if FL_SCI_NEG == 0 {
-                while FL_SCI_SCRATCH > 0 {
-                    em32(0x1E610800)  // fmul d0, d0, d1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            } else {
-                while FL_SCI_SCRATCH > 0 {
-                    em32(0x1E611800)  // fdiv d0, d0, d1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            }
-        }
-        em32(0x9E660000)  // fmov x0, d0
+        emit_imm64_a64(FL_BITS)  // x0 = bits
+        em32(0x9E670000)  // fmov d0, x0
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track the f64 literal for compile-time predicate checking.
@@ -37767,27 +37882,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
                             let ct = CONST_TOK_IDX[ci as usize]
-                            emit_imm64_a64(TV[ct as usize])
-                            em32(0x9E620000)  // scvtf d0, x0
-                            if TF[ct as usize] > 0 {
-                                emit_imm64_a64(TF[ct as usize])
-                                em32(0x9E620001)  // scvtf d1, x0
-                                emit_imm64_a64(TD[ct as usize])
-                                em32(0x9E620002)  // scvtf d2, x0
-                                em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
-                                em32(0x1E612800)  // fadd d0, d0, d1
-                            }
-                            if TX[ct as usize] >= 0 { FL_SCI_SCRATCH = TX[ct as usize]; FL_SCI_NEG = 0 }
-                            else { FL_SCI_SCRATCH = 0 - TX[ct as usize]; FL_SCI_NEG = 1 }
-                            if FL_SCI_SCRATCH != 0 {
-                                emit_imm64_a64(0x4024000000000000)  // bits of 10.0
-                                em32(0x9E670001)  // fmov d1, x0
-                                if FL_SCI_NEG == 0 {
-                                    while FL_SCI_SCRATCH > 0 { em32(0x1E610800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fmul d0, d0, d1
-                                } else {
-                                    while FL_SCI_SCRATCH > 0 { em32(0x1E611800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fdiv d0, d0, d1
-                                }
-                            }
+                            f64_literal_bits(ct)
+                            emit_imm64_a64(FL_BITS)  // x0 = correctly rounded bits
+                            em32(0x9E670000)  // fmov d0, x0
                             // Same sign fix as the x86 site, in the FP register
                             // where a64 already has the value: fneg d0, d0 is
                             // what the a64 unary-minus path emits.
