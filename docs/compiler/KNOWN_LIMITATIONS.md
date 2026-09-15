@@ -119,8 +119,10 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
 - **Dynamic linking MVP — CLOSED (KL-14b).** Engine: `madaros`. One
   non-builtin extern (`kl14b_add`) resolves via `PT_INTERP` + `PT_DYNAMIC` +
-  `DT_NEEDED` (`libkl14b_probe.so`) + GOT/`R_X86_64_GLOB_DAT`. Empty-stub
-  body is `call [rip+got]; ret`. Pin:
+  `DT_NEEDED` (`libkl14b_probe.so`) + GOT/`R_X86_64_GLOB_DAT`, plus a
+  `PT_LOAD` (R) of the ELF header page at `base_addr` so `ld.so` can see
+  phdrs. Empty-stub body is `call [rip+got]; ret`. Dyn metadata is appended
+  after the runtime-context data payload. Pin:
   `tests/run-pass/kl14b_dynlink_one_symbol.sio`,
   `scripts/ci/madaros_kl14b_dynlink_gate.sh`. Residual (KL-14c): arbitrary
   `-lfoo` / N symbols, real libzstd e2e, `dlopen` surface.
