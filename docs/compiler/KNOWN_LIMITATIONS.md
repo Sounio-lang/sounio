@@ -37,7 +37,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call-boundary closed) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
@@ -88,25 +87,23 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   FO across arbitrary user `fn` bodies, remain open.
 
 
-### KL-13 — derived units and unit loss (#2388)
+### KL-13 — derived units and unit loss (#2388) — CLOSED
 
-- **Call-boundary loss — CLOSED (KL-13 partial).** A unit-typed value
-  (`t_k: K`) no longer enters a bare `f64` parameter unchecked.
-  lean_single: `unit_call_arg_mismatch` refuses when `param_dim == 0` and
-  `expr_dim != 0`. Madaros: `check_call_arg_unit_boundary` refuses
-  `provided.unit_id >= 0 && expected.unit_id < 0`, and the primitive
-  kind-match fast path still runs the unit boundary. Explicit `as f64`
-  remains the escape hatch. Pins:
+- **Call-boundary loss — CLOSED.** Unit-typed args no longer enter bare
+  `f64` parameters unchecked. Pins:
   `tests/compile-fail/unit_lost_at_call_boundary.sio`,
-  `tests/run-pass/unit_call_cast_strips_brand.sio`,
+  `tests/run-pass/unit_call_cast_strips_brand.sio`.
+- **Derived declarations — CLOSED.** `unit velocity = m / s` registers the
+  composed dimension on Madaros (`collect_unit_decl` honours
+  `type_alias_ty`; ItemUnit is collected on the `*mut` spine). lean_single
+  already had the Pass-0a path.
+- **Derived annotations — CLOSED (KL-13b).** Bare `mol/cm3` / `cal/mol`
+  parse as unit type expressions (TypeReference=/ TypeRefMut=* encoding,
+  same as `parse_unit_item`). `f64<m/s>` accepts the same chain inside
+  generics. Pins:
+  `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+  `tests/compile-fail/unit_derived_annotation_refuse_add.sio`,
   `scripts/ci/language_gap_ratchet_gate.sh`.
-- **Still open:** `mol/cm3` does not parse on either engine
-  (`parser/items.sio:4117-4172` `parse_unit_item` has no unit-expression
-  grammar); `unit velocity = m / s` declares a dimensionless unit
-  (`check.sio:20169` `collect_unit_decl` ignores the expression). Direct
-  `mol + K` is rejected on both (E041). Quotient dimension retention is
-  already closed (2026-09-05).
-- Repro (open): `tests/known-gaps/units/derived_unit_annotation_unparsed.sio`.
 - Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
 
 ### KL-14 — FFI
