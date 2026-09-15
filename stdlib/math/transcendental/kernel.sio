@@ -1,0 +1,63 @@
+// Shared arctangent kernel for math::transcendental::{atan, asin, acos} (#2507).
+//
+// The native backend has builtin kernels for sin, cos, exp, log and sqrt but not
+// for tan, atan, tanh, asin or acos. Madaros used to compile a bare call to one
+// of those five into `ud2` (SIGILL at run time), and #2172 turned that into an
+// E221 refusal. The compiler now imports math::transcendental::<name>
+// implicitly when a program calls one of the five without defining it, and
+// each of those modules is built on the two builtins sqrt/exp or sin/cos plus
+// this kernel.
+//
+// The kernel lives under its own name, never `atan`, so importing asin does not
+// also drop a second `atan` body into a program that defines its own.
+//
+// Method, chosen so every step is well-conditioned:
+//   1. NaN in, NaN out; strip the sign (atan is odd, so -0.0 stays -0.0).
+//   2. |x| > 1: atan(x) = pi/2 - atan(1/x). Infinity lands on 1/x = 0.
+//   3. Two half-angle steps, atan(t) = 2 atan(t / (1 + sqrt(1 + t^2))), take
+//      t <= 1 down to t <= tan(pi/16) ~= 0.1989. No cancellation: every
+//      quantity is positive, and t^2 <= 1 cannot overflow.
+//   4. The alternating series to t^35, summed by Horner from the smallest term.
+//      At t = 0.1989 the first omitted term is t^37/37 ~= 3e-28, far below one
+//      ulp, so the error is rounding in steps 3-4 rather than truncation.
+//
+// math::pure::atan is NOT used: it runs the series directly on |t| <= 1, whose
+// tail at t = 1 is about 1/81, i.e. atan(1.0) off in the third decimal.
+//
+// No effect row, on purpose, and the same for every function in this directory.
+// These stand in for backend builtins, which carry no effects, so existing
+// callers -- `fn f() -> f64 with IO, Epistemic { hessian_of(atan(x), 0, 0) }` --
+// must keep checking. Declaring `with Mut, Div, Panic` here made every such caller
+// fail with E035 (measured). Madaros accepts the local `var`s, loop and float
+// division in an effect-free body.
+pub fn transcendental_atan_core(x: f64) -> f64 {
+    if x != x {
+        return x
+    }
+    let half_pi = 1.5707963267948966
+    var t = x
+    var sign: f64 = 1.0
+    if t < 0.0 {
+        t = 0.0 - t
+        sign = 0.0 - 1.0
+    }
+    var recip = false
+    if t > 1.0 {
+        t = 1.0 / t
+        recip = true
+    }
+    t = t / (1.0 + sqrt(1.0 + t * t))
+    t = t / (1.0 + sqrt(1.0 + t * t))
+    let t2 = t * t
+    var s: f64 = 0.0
+    var k: i64 = 17
+    while k >= 0 {
+        s = 1.0 / ((2 * k + 1) as f64) - t2 * s
+        k = k - 1
+    }
+    var a = 4.0 * (t * s)
+    if recip {
+        a = half_pi - a
+    }
+    sign * a
+}
