@@ -21,26 +21,32 @@
 // test_turnover_bookkeeping, the `&![f64;16]` caller, included -- runs and
 // passes. Nothing in catalysis.sio was changed to achieve this.
 //
-// What DOES bound this file is a different, measured limit, and it is why the
-// suite is split across two drivers rather than one. Madaros's generated
-// runtime is a bump allocator over a 2 GiB arena that never reclaims
-// (self-hosted/native/codegen_x86_linux.sio:4177, "Its arena never refills").
-// MatNM carries `data: [f64; 4096]` -- 32 KiB per value -- and
-// catalysis.sio's mechanistic_dc allocates about twenty of them per call
-// (matnm_new + 16 matnm_set + matnm_mul + the by-value `nu`), four calls per
-// RK4 step. Measured cost: ~2.7 MiB per RK4 step, so ~800 steps of
-// simulate_mechanistic_crn per process. Bisected: 750 steps run, 850 exhaust
-// the arena; the eight tests below fit, and adding the two turnover tests
-// does not. Those two live in test_catalysis_turnover_stdlib.sio.
+// What bounded this file was a different, measured limit, and it split the
+// suite across two drivers. Madaros's generated runtime is a bump allocator
+// over a 2 GiB arena that never reclaims (self-hosted/native/
+// codegen_x86_linux.sio, "Its arena never refills"). MatNM carries
+// `data: [f64; 4096]` -- 32 KiB per value -- and catalysis.sio's derivative
+// allocated about twenty of them per call (matnm_new + 16 matnm_set +
+// matnm_mul + the by-value `nu`), four calls per RK4 step: ~2.7 MiB per step,
+// ~800 steps of simulate_mechanistic_crn per process. Bisected: 750 steps
+// ran, 850 exhausted the arena; eight tests fit in one binary, ten did not.
 //
-// That budget is a real property of this stack and is recorded rather than
-// hidden. It is a stdlib-efficiency finding as much as a compiler one: a
-// 32 KiB fixed-capacity matrix copied twenty times per derivative evaluation
-// is the cost driver, not the integrator.
+// Measured 2026-09-15, same committed ELF (sha256 31a15e31, receipt
+// source_commit 70fa39522f): with the stoichiometry read once into a stack
+// [f64; 256] and nothing allocated inside the step loop, all ten tests below
+// run in this one binary, while the unmodified tree still fails the same ten
+// with `madaros: arena full`. test_catalysis_turnover_stdlib.sio, which held
+// the two turnover tests, is removed. The cost driver was the 32 KiB matrix
+// in the derivative, not the integrator.
 //
 // Independent, executed, non-Sounio cross-checks live in
 // stdlib/chemistry/oracles/ (C++23, Koka) and formal/lean4/ -- see
 // catalysis.sio's own header for what each one covers.
+//
+// test_turnover_bookkeeping is the specific test the lean_single engine could
+// not link at all -- the `&![f64;16]` caller that catalysis.sio's own header
+// records as a standing limitation. On Madaros v0.80.0 it links, runs, and
+// passes.
 
 use chemistry::catalysis::*
 
@@ -54,6 +60,8 @@ fn assert_all() -> i32 with IO, Mut, Div, Panic {
     if !test_enzyme_conservation() { fail = fail + 1; println("FAIL enzyme_conservation") }
     if !test_catalyst_conserved_cycle() { fail = fail + 1; println("FAIL catalyst_conserved_cycle") }
     if !test_qssa_checkpoint() { fail = fail + 1; println("FAIL qssa_checkpoint") }
+    if !test_turnover_bookkeeping() { fail = fail + 1; println("FAIL turnover_bookkeeping") }
+    if !test_turnover_carbonic_anhydrase() { fail = fail + 1; println("FAIL turnover_carbonic_anhydrase") }
     fail
 }
 

@@ -278,11 +278,12 @@ Both are properties of the generated runtime and both were found by
 running out of memory, not by reading documentation:
 
 - **A 2 GiB arena that never reclaims.** `MatNM` carries `data: [f64; 4096]`
-  — 32 KiB per value regardless of the declared rows/cols — and
-  `catalysis.sio` allocates about twenty per derivative evaluation, four
-  evaluations per RK4 step. Measured ~2.7 MiB per step, ~800 steps per
-  process; bisected at 750 running and 850 exhausting. `surface.sio` uses a
-  flat `[f64; 256]` instead and does not have this cost.
+  — 32 KiB per value regardless of the declared rows/cols. `catalysis.sio`
+  used to allocate about twenty per derivative evaluation, four evaluations
+  per RK4 step: ~2.7 MiB per step, bisected at 750 steps running and 850
+  exhausting. It now reads the stoichiometry once into a flat `[f64; 256]`,
+  as `surface.sio` always did, and runs 1,000,000 steps in one process. Keep
+  `MatNM` out of any step loop.
 - **A handle table.** A returned `[f64; 16]` is a heap handle, not a stack
   copy, so a by-value derivative function allocates eight handles per RK4
   step. Measured `madaros: handles full` after roughly 2.5 integrations of
@@ -342,9 +343,8 @@ bin/souc run tests/stdlib/chemistry/test_surface_stdlib.sio   # SURFACE_STDLIB_O
 # the hydrogen reaction-order result
 bin/souc run examples/chemistry/h2_surface_reaction_order.sio
 
-# the catalysis suite, no longer check-only
+# the catalysis suite, no longer check-only, all ten tests in one binary
 bin/souc run tests/stdlib/chemistry/test_catalysis_stdlib.sio          # CATALYSIS_STDLIB_OK
-bin/souc run tests/stdlib/chemistry/test_catalysis_turnover_stdlib.sio # CATALYSIS_TURNOVER_OK
 
 # the independent C++23 oracle (Newton, no time integration)
 g++ -std=c++23 -O2 -o /tmp/surface_oracle stdlib/chemistry/oracles/surface_oracle.cpp

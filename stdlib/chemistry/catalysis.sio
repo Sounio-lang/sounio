@@ -93,15 +93,21 @@
 // achieve it. tests/stdlib/chemistry/test_catalysis_stdlib.sio is no longer
 // `//@ check-only` as a result.
 //
-// What DOES bound this file on Madaros is an allocation budget, and it is
-// worth knowing before adding to this module: the generated runtime
-// bump-allocates a 2 GiB arena that never reclaims, MatNM carries
-// `data: [f64; 4096]` (32 KiB per value regardless of rows/cols), and
-// mechanistic_dc allocates ~20 of them per call, 4 calls per RK4 step. That
-// is ~2.7 MiB per step and ~800 steps per process -- bisected: 750 steps run,
-// 850 exhaust the arena. It is why the test suite is split across two
-// drivers. A new module in this directory should avoid inheriting that cost
-// rather than repeat it.
+// What bounded this file on Madaros was an allocation budget: the generated
+// runtime bump-allocates a 2 GiB arena that never reclaims, MatNM carries
+// `data: [f64; 4096]` (32 KiB per value regardless of rows/cols), and the
+// derivative used to allocate ~20 of them per call, 4 calls per RK4 step --
+// ~2.7 MiB per step and ~800 steps per process (bisected: 750 steps run, 850
+// exhaust the arena). It split the test suite across two drivers.
+//
+// REMOVED, 2026-09-15. simulate_mechanistic_crn now reads `nu` once into a
+// stack [f64; 256] and allocates nothing per step (see the comment above
+// compute_rates_mechanistic_into). Same committed ELF (sha256 31a15e31,
+// receipt source_commit 70fa39522f), same enzyme-cycle probe: 750 steps give
+// P*1e12 = 388037114983 before and after; 850 and 1,000,000 steps now run
+// (P -> S0 = 2.0, E+ES = E0 throughout); all ten tests pass in one binary,
+// where the unmodified tree still stops at `madaros: arena full`. A new
+// module in this directory should still keep MatNM out of its step loop.
 //
 // Full measurement, with the provenance of every number and a stdlib
 // visibility defect it also surfaced:
@@ -329,41 +335,81 @@ pub fn compute_rates_mechanistic(c: &[f64; 16], laws: &[RateLaw; 16], nrxn: i64)
     rates
 }
 
-fn mechanistic_dc(nu: MatNM, rates: &[f64; 16], nsp: i64) -> [f64; 16] with Mut, Div, Panic {
-    var rmat = matnm_new(16 as i64, 1 as i64)
-    var j: i64 = 0
-    while j < 16 { rmat = matnm_set(rmat, j, 0 as i64, rates[j]); j = j + 1 }
-    let dcm = matnm_mul(nu, rmat)
-    var dc: [f64; 16] = [0.0; 16]
-    var i: i64 = 0
-    while i < nsp { dc[i] = matnm_get(dcm, i, 0 as i64); i = i + 1 }
-    dc
+// ALLOCATION-FREE STEP LOOP. The derivative used to go through MatNM:
+// matnm_new + 16 matnm_set + matnm_mul + the by-value `nu`, about twenty
+// copies of a 32 KiB value per evaluation and four evaluations per RK4 step.
+// On Madaros's non-reclaiming 2 GiB arena that was ~2.7 MiB per step and a
+// hard wall between 750 and 850 steps (`madaros: arena full`, exit 181).
+//
+// simulate_mechanistic_crn now reads `nu` ONCE per call into a stack
+// `[f64; 256]` indexed nu[r * 16 + s] -- surface.sio's layout -- and hoists
+// every RK4 buffer out of the step loop, writing through `&![f64; 16]` (a
+// returned `[f64; 16]` is a heap handle on Madaros, see surface.sio). Its
+// public signature, `nu: MatNM` included, is unchanged.
+fn compute_rates_mechanistic_into(c: &[f64; 16], laws: &[RateLaw; 16], nrxn: i64,
+                                  out: &![f64; 16]) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < nrxn {
+        out[r] = rate_law_eval(laws[r as usize], c)
+        r = r + 1
+    }
+}
+
+// dc[s] = sum over r of nu[r*16+s] * rates[r], accumulated from 0.0 in
+// ascending r: the same operation order matnm_mul used.
+fn mechanistic_dc_into(nuf: &[f64; 256], rates: &[f64; 16], nsp: i64, ncol: i64,
+                       out: &![f64; 16]) with Mut, Div, Panic {
+    var s: i64 = 0
+    while s < nsp {
+        var acc = 0.0
+        var r: i64 = 0
+        while r < ncol {
+            acc = acc + nuf[r * 16 + s] * rates[r]
+            r = r + 1
+        }
+        out[s] = acc
+        s = s + 1
+    }
 }
 
 pub fn simulate_mechanistic_crn(init: &[f64; 16], laws: &[RateLaw; 16], nu: MatNM,
                                  nsp: i64, nrxn: i64, dt: f64, steps: i64) -> [f64; 16] with Mut, Div, Panic {
+    // matnm_mul summed over nu.cols; rates past column 16 were always zero.
+    var ncol = nu.cols
+    if ncol > 16 { ncol = 16 }
+    var nuf: [f64; 256] = [0.0; 256]
+    var fr: i64 = 0
+    while fr < ncol {
+        var fs: i64 = 0
+        while fs < nsp { nuf[fr * 16 + fs] = matnm_get(nu, fs, fr); fs = fs + 1 }
+        fr = fr + 1
+    }
+
     var y: [f64; 16] = [0.0; 16]
+    var y2: [f64; 16] = [0.0; 16]
+    var rs: [f64; 16] = [0.0; 16]
+    var k1: [f64; 16] = [0.0; 16]
+    var k2: [f64; 16] = [0.0; 16]
+    var k3: [f64; 16] = [0.0; 16]
+    var k4: [f64; 16] = [0.0; 16]
     var i: i64 = 0
     while i < nsp { y[i] = init[i]; i = i + 1 }
     var s: i64 = 0
     while s < steps {
-        let r1 = compute_rates_mechanistic(&y, laws, nrxn)
-        let k1 = mechanistic_dc(nu, &r1, nsp)
-        var y2: [f64; 16] = [0.0; 16]
+        compute_rates_mechanistic_into(&y, laws, nrxn, &! rs)
+        mechanistic_dc_into(&nuf, &rs, nsp, ncol, &! k1)
         var ii: i64 = 0
         while ii < nsp { y2[ii] = y[ii] + 0.5 * dt * k1[ii]; ii = ii + 1 }
-        let r2 = compute_rates_mechanistic(&y2, laws, nrxn)
-        let k2 = mechanistic_dc(nu, &r2, nsp)
-        var y3: [f64; 16] = [0.0; 16]
+        compute_rates_mechanistic_into(&y2, laws, nrxn, &! rs)
+        mechanistic_dc_into(&nuf, &rs, nsp, ncol, &! k2)
         ii = 0
-        while ii < nsp { y3[ii] = y[ii] + 0.5 * dt * k2[ii]; ii = ii + 1 }
-        let r3 = compute_rates_mechanistic(&y3, laws, nrxn)
-        let k3 = mechanistic_dc(nu, &r3, nsp)
-        var y4: [f64; 16] = [0.0; 16]
+        while ii < nsp { y2[ii] = y[ii] + 0.5 * dt * k2[ii]; ii = ii + 1 }
+        compute_rates_mechanistic_into(&y2, laws, nrxn, &! rs)
+        mechanistic_dc_into(&nuf, &rs, nsp, ncol, &! k3)
         ii = 0
-        while ii < nsp { y4[ii] = y[ii] + dt * k3[ii]; ii = ii + 1 }
-        let r4 = compute_rates_mechanistic(&y4, laws, nrxn)
-        let k4 = mechanistic_dc(nu, &r4, nsp)
+        while ii < nsp { y2[ii] = y[ii] + dt * k3[ii]; ii = ii + 1 }
+        compute_rates_mechanistic_into(&y2, laws, nrxn, &! rs)
+        mechanistic_dc_into(&nuf, &rs, nsp, ncol, &! k4)
         ii = 0
         while ii < nsp {
             y[ii] = y[ii] + (dt / 6.0) * (k1[ii] + 2.0 * k2[ii] + 2.0 * k3[ii] + k4[ii])

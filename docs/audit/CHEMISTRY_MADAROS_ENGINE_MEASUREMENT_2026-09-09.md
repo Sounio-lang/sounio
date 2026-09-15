@@ -103,15 +103,43 @@ eight tests fit in one binary and the ninth does not:
 | 2, 4, 6, 8 | pass |
 | 9, 10 | `madaros: arena full` |
 
-The suite is therefore split across two drivers —
+The suite was therefore split across two drivers —
 `test_catalysis_stdlib.sio` (rate laws and invariants) and
-`test_catalysis_turnover_stdlib.sio` (turnover) — and both run green. The split
-is recorded in both headers with this measurement, not presented as a stylistic
-choice.
+`test_catalysis_turnover_stdlib.sio` (turnover) — and both ran green. The split
+was recorded in both headers with this measurement, not presented as a
+stylistic choice.
 
 **This is a stdlib-efficiency finding as much as a compiler one.** A 32 KiB
 fixed-capacity matrix copied twenty times per derivative evaluation is a design
 cost that any new chemistry module should avoid rather than inherit.
+
+### 2a. Addendum, 2026-09-15: the budget belonged to the stdlib, and it is gone
+
+`simulate_mechanistic_crn` now reads `nu` once per call into a stack
+`[f64; 256]` indexed `nu[r * 16 + s]`, the layout `surface.sio` already used,
+and hoists every RK4 buffer out of the step loop, writing through
+`&![f64; 16]`. Its public signature, `nu: MatNM` included, is unchanged.
+Nothing in the compiler changed.
+
+Both columns use the same engine: the committed ELF on the PR #2514 tree
+(`8e0c63714c`), sha256 `31a15e31847cf06a…`, receipt
+`source_commit=70fa39522f`. Only `catalysis.sio` differs.
+
+| probe (enzyme cycle, dt = 0.02) | before | after |
+|---|---|---|
+| 750 steps, `P × 10¹²` as i64 | `388037114983` | `388037114983` |
+| 850 steps | `madaros: arena full` (181) | `P=0.438469` |
+| 40 000 steps | not reached | `P=2.000000`, `E+ES=0.050000` |
+| 1 000 000 steps | not reached | `P=2.000000`, `E+ES=0.050000`, 26.8 s wall |
+| all ten tests, one binary | `madaros: arena full` (181) | pass |
+
+At 750 steps the product agrees to the twelfth decimal. At long times all of
+S0 = 2.0 ends up as P and total enzyme stays at E0 = 0.05. The two drivers are
+one again: `test_catalysis_turnover_stdlib.sio` is removed, and its two tests
+are back in `test_catalysis_stdlib.sio`.
+
+`kinetics.sio`'s `general_dc` has the same MatNM-in-the-derivative shape. Its
+driver cannot run on Madaros yet (§3), so it is not measured here.
 
 ## 3. A real stdlib visibility defect that only Madaros surfaces
 
