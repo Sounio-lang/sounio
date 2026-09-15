@@ -2307,7 +2307,7 @@ else
     sha256sum "$stage/policy/sovereign-execution/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" | awk '{print $1}'
   )"
   loom_sovereign_product_evidence_sha256="$(
-    sha256sum "$stage/policy/sovereign-execution/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" | awk '{print $1}'
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt" | awk '{print $1}'
   )"
   loom_message_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-message-runtime" | awk '{print $1}'
@@ -2497,7 +2497,7 @@ else
     printf 'loom_sovereign_operational_kernel=OCaml\n'
     printf 'loom_sovereign_action=9042\n'
     printf 'loom_sovereign_semantic_manifest_sha256=f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6\n'
-    printf 'loom_sovereign_material_manifest_sha256=1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92\n'
+    printf 'loom_sovereign_material_manifest_sha256=4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37\n'
     printf 'loom_sovereign_runtime_sha256=%s\n' \
       "$loom_sovereign_runtime_sha256"
     printf 'loom_sovereign_product_manifest_sha256=%s\n' \

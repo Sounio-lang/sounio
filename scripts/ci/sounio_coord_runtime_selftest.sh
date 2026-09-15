@@ -255,6 +255,7 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v3-20260901.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v4-20260901.txt" \
