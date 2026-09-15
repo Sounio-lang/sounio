@@ -49,7 +49,7 @@ fn estate_new(n: i64) -> EState {
     EState { values: [0.0; 64], variances: [0.0; 64], n: n }
 }
 
-fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) {
+fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 { s.values[idx] = val; s.variances[idx] = var_ }
 }
 
@@ -98,7 +98,7 @@ fn ode_params_new() -> ODEParams {
     ODEParams { params: [0.0; 64], param_variances: [0.0; 64], n_params: 0 }
 }
 
-fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) {
+fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         p.params[idx] = val
         p.param_variances[idx] = var_
@@ -148,13 +148,17 @@ fn solver_opts_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> S
 }
 
 // ============================================================================
-// ODE Solution: trajectory storage (max 1024 time points, 64 dimensions)
+// ODE Solution: trajectory storage
+// values/variances hold 4096 slots, strided by n_dims: capacity is
+// min(1024, 4096 / n_dims) time points. Once full, the last slot keeps being
+// overwritten, so step n_steps - 1 is always the final state. (A fixed stride
+// of 64 used to overrun both arrays from the 64th recorded point on.)
 // ============================================================================
 
 struct ODESolution {
     times: [f64; 1024],
-    values: [f64; 4096],      // values[step * 64 + dim]
-    variances: [f64; 4096],   // variances[step * 64 + dim]
+    values: [f64; 4096],      // values[step * n_dims + dim]
+    variances: [f64; 4096],   // variances[step * n_dims + dim]
     n_steps: i64,
     n_dims: i64,
     n_rhs_evals: i64,
@@ -169,30 +173,30 @@ fn solution_new(n_dims: i64) -> ODESolution {
 }
 
 fn solution_record(sol: &!ODESolution, t: f64, state: &EState) with Mut {
-    if sol.n_steps >= 1024 { return }
-    let step = sol.n_steps
+    var step = sol.n_steps
+    if step >= 1024 || (step + 1) * sol.n_dims > 4096 { step = step - 1 }
     sol.times[step] = t
     var i = 0
     while i < sol.n_dims {
         if i < 64 {
-            sol.values[step * 64 + i] = state.values[i]
-            sol.variances[step * 64 + i] = state.variances[i]
+            sol.values[step * sol.n_dims + i] = state.values[i]
+            sol.variances[step * sol.n_dims + i] = state.variances[i]
         }
         i = i + 1
     }
-    sol.n_steps = sol.n_steps + 1
+    sol.n_steps = step + 1
 }
 
 fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.values[step * 64 + dim]
+    sol.values[step * sol.n_dims + dim]
 }
 
 fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.variances[step * 64 + dim]
+    sol.variances[step * sol.n_dims + dim]
 }
 
 fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut {
-    og_sqrt(sol.variances[step * 64 + dim])
+    og_sqrt(sol.variances[step * sol.n_dims + dim])
 }
 
 // ============================================================================
