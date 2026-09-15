@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call-boundary closed) | both |
+| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call and return boundaries closed) | both |
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
@@ -100,12 +100,32 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `tests/compile-fail/unit_lost_at_call_boundary.sio`,
   `tests/run-pass/unit_call_cast_strips_brand.sio`,
   `scripts/ci/language_gap_ratchet_gate.sh`.
+- **Return-boundary loss — CLOSED (KL-13 partial).** A returned value is
+  checked against the unit the signature declares, for an explicit `return`
+  and for the body's tail expression alike. lean_single: the `return` branch
+  of `compile_stmt` and the implicit-return epilogue of `compile_all` /
+  `compile_all_arm64` both call
+  `unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM)` and
+  report `unit mismatch in return value`, on x86-64 and `--target
+  aarch64-linux`. The helper and its f64-kind guard are the call-boundary
+  ones, so the same three
+  shapes are refused: a bare number into `-> molal`, `molar` into `-> molal`,
+  and a unit-typed value into `-> f64`. Explicit `as f64` remains the escape
+  hatch. Madaros refuses the same shapes with E008 (return value does not
+  match the declared return type). Pins:
+  `tests/compile-fail/unit_return_bare_number.sio`,
+  `tests/compile-fail/unit_return_bare_number_tail.sio`,
+  `tests/compile-fail/unit_return_wrong_unit.sio`,
+  `tests/run-pass/unit_return_same_unit_tail.sio`.
 - **Still open:** `mol/cm3` does not parse on either engine
   (`parser/items.sio:4117-4172` `parse_unit_item` has no unit-expression
   grammar); `unit velocity = m / s` declares a dimensionless unit
   (`check.sio:20169` `collect_unit_decl` ignores the expression). Direct
   `mol + K` is rejected on both (E041). Quotient dimension retention is
-  already closed (2026-09-05).
+  already closed (2026-09-05). Madaros accepts a bare number returned as a
+  built-in unit (`fn f() -> mg { 250.0 }`, with or without `return`), which
+  lean_single refuses; a declared unit (`-> molal`) is refused on both
+  (measured 2026-09-14).
 - Repro (open): `tests/known-gaps/units/derived_unit_annotation_unparsed.sio`.
 - Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
 
