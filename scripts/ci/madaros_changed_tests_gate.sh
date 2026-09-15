@@ -176,6 +176,14 @@ for path in "${selected[@]}"; do
     export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14c_probe.so"
   fi
+  if [[ "$path" == "tests/run-pass/kl14d_multi_needed.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_a.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_a.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_b.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_b.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probes=$work_dir/libkl14d_{a,b}.so"
+  fi
 done
 
 SOUNIO_MADAROS_AVAILABLE=1 \

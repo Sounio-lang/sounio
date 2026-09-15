@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: 14a/14b CLOSED; N-symbol dynlink (KL-14c) | madaros |
+| KL-14 | FFI: 14a–14c CLOSED; multi-DT_NEEDED (KL-14d1) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
@@ -129,8 +129,13 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   from `extern_relocs` (cap 8) each get a dynsym + GOT slot +
   `R_X86_64_GLOB_DAT`; SysV hash chains them under `nbucket=1`. Pin:
   `tests/run-pass/kl14c_dynlink_n_symbols.sio` (`kl14c_add`/`mul`/`neg` via
-  `libkl14c_probe.so`), `scripts/ci/madaros_kl14c_dynlink_gate.sh`. Residual
-  (KL-14d): arbitrary `-lfoo` / multi-`DT_NEEDED`, real libzstd e2e, `dlopen`.
+  `libkl14c_probe.so`), `scripts/ci/madaros_kl14c_dynlink_gate.sh`.
+- **Multi-`DT_NEEDED` — CLOSED (KL-14d1).** Engine: `madaros`. Symbol→soname
+  allowlist emits one `DT_NEEDED` per unique library (cap 4). Pin:
+  `tests/run-pass/kl14d_multi_needed.sio` (`kl14d_a`/`kl14d_b` via
+  `libkl14d_a.so` + `libkl14d_b.so`),
+  `scripts/ci/madaros_kl14d_multi_needed_gate.sh`. Residual (KL-14d2/d3):
+  real libzstd e2e, `dlopen` surface.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
