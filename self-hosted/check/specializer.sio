@@ -1,35 +1,26 @@
 // AST-level generic-fn specializer (monomorphizer).
 //
-// Runs AFTER parsing, BEFORE type checking. The parser currently discards a
-// fn's `<T, U>` type-param header (parse_type_param_header consumes the
-// tokens without storing them on FnDef — FnDef has no type_params field).
-// So "is this fn generic" is recovered structurally: any single-segment,
-// single-UPPERCASE-letter TypeNamed in a fn's params/return type that is not
-// a locally declared struct/enum name is treated as a free type variable
-// (a conservative variant of check.sio's
-// type_is_unresolved_type_param_in_tables/collect_fn_generic_names_*).
-// The pass is only hooked into the single-module (no imports) pipeline
-// lanes, so imported type names can never be misread as type variables.
+// Runs AFTER parsing, BEFORE type checking. A fn is generic when it declares
+// type parameters (`fn f<T, U>`, FnDef.type_params); up to 4 are specialized.
 //
-// Algorithm (SAME-NAME single-instantiation scheme):
-//   1. Collect every top-level ItemFn with >=1 free type var into a table;
-//      collect generic struct templates (StructDef has real type_params).
-//   2. READ-ONLY scan of all non-generic fn bodies for Call exprs carrying
-//      turbofish type_args whose callee matches a collected generic fn AND
-//      whose arg count matches the fn's free-var count. Count mismatches
-//      leave the call site untouched and pin the template so the checker's
-//      own E010 still fires.
-//   3. First matching instantiation of a template: clone + substitute the
-//      FnDef, KEEPING THE TEMPLATE'S OWN NAME, and scan the clone's body
-//      (transitive turbofish calls, incl. self-recursion; the per-slot
-//      instantiation hash guarantees termination). A SECOND instantiation
-//      with different type args POISONS the template back to baseline
-//      behavior. Call sites are NEVER rewritten: the checker ignores
-//      turbofish on non-generic signatures (generic_names comes out empty
-//      at its call-check), and the lowering has no generics concept.
-//   4. Finalize: replace each single-instantiation template item with its
-//      concrete same-name clone; keep poisoned/still-referenced templates
-//      verbatim; drop never-referenced templates. Generic-struct instances
+// Algorithm:
+//   1. Collect every top-level ItemFn that declares type parameters into a
+//      table; collect generic struct templates (StructDef.type_params).
+//   2. READ-ONLY scan of all non-generic fn and impl-method bodies for Call
+//      exprs carrying turbofish type_args whose callee matches a collected
+//      generic fn AND whose arg count matches its parameter count. Count
+//      mismatches leave the call site untouched and pin the template so the
+//      checker's own E010 still fires; so does a call without type args.
+//   3. Every distinct instantiation: clone + substitute the FnDef and scan the
+//      clone's body (transitive turbofish calls, incl. self-recursion; the
+//      instance is reserved first, so this terminates).
+//   4. Naming (spec_assign_instance_names): a template with exactly one
+//      instantiation and no call that still needs it keeps the same-name
+//      scheme -- its clone replaces it and no call site changes. Otherwise
+//      every instantiation is emitted under an injective instance name
+//      (`identity__f64`) and the calls it serves are rewritten to that name.
+//   5. Finalize: replace each same-name template item with its clone; keep
+//      still-referenced templates verbatim; drop the rest. Generic-struct instances
 //      (CDExact<i64> -> struct CDExact__i64 items) referenced from clone
 //      signatures/bodies are appended, with type annotations and struct
 //      literals inside clones rewritten to the mangled concrete names
@@ -56,7 +47,7 @@
 module check::specializer
 
 use parser::ast::*
-use parser::parser::{dummy_type_expr}
+use parser::parser::{dummy_type_expr, mk_expr}
 use io::env::{read_env}
 
 // ============================================================
@@ -120,6 +111,9 @@ struct SpecStmtStage { s: Stmt }
 struct SpecFnDefStage { fd: FnDef }
 struct SpecStructDefStage { sd: StructDef }
 struct SpecImplDefStage { id: ImplDef }
+struct SpecNameStage { n: Name }
+struct SpecTypeStage { t: TypeExpr }
+struct SpecBindStage { slots: [i64; 4] }
 
 // Mutable driver state. Reset unconditionally at the top of every
 // specialize_generics() call — this pass may run more than once per
@@ -128,16 +122,47 @@ struct SpecImplDefStage { id: ImplDef }
 var SPEC_GF_COUNT: i64 = 0
 var SPEC_GF_PTRS: [i64; 256] = [0; 256]
 var SPEC_GF_NEEDED: [bool; 256] = [false; 256]
-var SPEC_GF_INST_HASH: [i64; 256] = [0; 256]
-var SPEC_GF_POISONED: [bool; 256] = [false; 256]
-var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
-// Did any recorded instantiation of this template use a type argument that is
-// not a primitive scalar? Poisoning such a template is unsound: the
-// unspecialized body reaches lowering, which has no generics concept, and
-// struct-typed arguments come back as zero. Measured on Madaros v0.80.0 —
-// see docs/handoff/BLK-20260903-specializer-nested-targ-collision.md.
-var SPEC_GF_NONSCALAR: [bool; 256] = [false; 256]
-// Set when a template is poisoned in a way lowering cannot represent.
+// How many distinct instantiations each template slot has (SPEC_FI_* entries).
+var SPEC_GF_INST_COUNT: [i64; 256] = [0; 256]
+// Slots registered from impl methods (`fn pick<T>(self: &S, ...)`): their clones are
+// emitted inside the impl (spec_finalize_method_items), never as top-level fns.
+var SPEC_GF_IS_METHOD: [bool; 256] = [false; 256]
+// Every distinct instantiation, in creation order: its template slot, the hash of
+// its injective instance name (spec_fn_instance_name), the *mut SpecFnDefStage
+// holding the substituted clone, the *mut SpecNameStage holding the instance name,
+// and whether it is emitted under that name -- decided only after the whole scan
+// (spec_assign_instance_names).
+var SPEC_FI_COUNT: i64 = 0
+var SPEC_FI_GT: [i64; 1024] = [0; 1024]
+var SPEC_FI_KEY: [i64; 1024] = [0; 1024]
+var SPEC_FI_STAGE: [i64; 1024] = [0; 1024]
+var SPEC_FI_NAME: [i64; 1024] = [0; 1024]
+var SPEC_FI_MANGLED: [bool; 1024] = [false; 1024]
+var SPEC_ANY_MANGLED: i64 = 0
+// Type-argument inference state (spec_infer_call_targs). Local-type scope: name
+// hash -> *mut SpecTypeStage, searched from the top. Declared return types of
+// non-generic fns. Inferred call sites: (span, the instance whose clone body the call
+// sits in or -1, the instance it was specialized to), so the renaming pass can find a
+// call that carries no type arguments of its own.
+var SPEC_SC_TOP: i64 = 0
+var SPEC_SC_HASH: [i64; 4096] = [0; 4096]
+var SPEC_SC_TYPE: [i64; 4096] = [0; 4096]
+var SPEC_RT_COUNT: i64 = 0
+var SPEC_RT_HASH: [i64; 4096] = [0; 4096]
+var SPEC_RT_TYPE: [i64; 4096] = [0; 4096]
+var SPEC_CS_COUNT: i64 = 0
+var SPEC_CS_FILE: [i64; 4096] = [0; 4096]
+var SPEC_CS_START: [i64; 4096] = [0; 4096]
+var SPEC_CS_END: [i64; 4096] = [0; 4096]
+var SPEC_CS_CTX: [i64; 4096] = [0; 4096]
+var SPEC_CS_FI: [i64; 4096] = [0; 4096]
+var SPEC_SCAN_CTX: i64 = 0
+var SPEC_RENAME_CTX: i64 = 0
+// Set when a template is poisoned in a way lowering cannot represent. Every
+// distinct instantiation now gets its own clone (spec_ensure_instance), so no
+// template is poisoned back to its unspecialized body and this stays false; it
+// is kept so spec_report_unsound_poison keeps its callers.
+// See docs/handoff/BLK-20260903-specializer-nested-targ-collision.md.
 var SPEC_UNSOUND_POISON: bool = false
 // Fail-closed state for formerly silent fixed-capacity truncation.
 // Codes: 1=>4 type params, 2=>256 generic fns, 3=>256 generic structs,
@@ -149,7 +174,23 @@ var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 var SPEC_METHOD_TARG_UNSUPPORTED: bool = false
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
-var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
+var SPEC_EMITTED_HASHES: [i64; 1024] = [0; 1024]
+// Generic impls (`impl S<T, U>` over struct template S's own parameters): the
+// template slot and a *mut SpecImplDefStage with the impl. Per struct template: how
+// many instances were emitted, and whether some use still needs the generic impl
+// itself (a `S::f` path or an `S` type without arguments, or a struct literal whose
+// arguments could not be inferred), in which case the template impl is kept.
+var SPEC_GI_COUNT: i64 = 0
+var SPEC_GI_ST: [i64; 256] = [0; 256]
+var SPEC_GI_STAGE: [i64; 256] = [0; 256]
+var SPEC_ST_INST_COUNT: [i64; 256] = [0; 256]
+var SPEC_ST_IMPL_NEEDED: [bool; 256] = [false; 256]
+// Emitted impl instances: the *mut SpecItemNode holding each and the scan/rename
+// context its method bodies were recorded under. Instances of one generic impl share
+// the template's call spans, so each needs its own context (100000 + index; generic
+// fn clones use their instance index, ordinary code -1).
+var SPEC_II_COUNT: i64 = 0
+var SPEC_II_NODE: [i64; 1024] = [0; 1024]
 var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
 
@@ -160,13 +201,33 @@ fn spec_reset_state() with Mut {
     while i < 256 {
         SPEC_GF_PTRS[i as usize] = 0
         SPEC_GF_NEEDED[i as usize] = false
-        SPEC_GF_INST_HASH[i as usize] = 0
-        SPEC_GF_POISONED[i as usize] = false
-        SPEC_GF_CLONE_PTR[i as usize] = 0
-        SPEC_GF_NONSCALAR[i as usize] = false
+        SPEC_GF_INST_COUNT[i as usize] = 0
+        SPEC_GF_IS_METHOD[i as usize] = false
         SPEC_ST_PTRS[i as usize] = 0
+        SPEC_GI_ST[i as usize] = 0
+        SPEC_GI_STAGE[i as usize] = 0
+        SPEC_ST_INST_COUNT[i as usize] = 0
+        SPEC_ST_IMPL_NEEDED[i as usize] = false
         i = i + 1
     }
+    SPEC_GI_COUNT = 0
+    SPEC_II_COUNT = 0
+    var f: i64 = 0
+    while f < 1024 {
+        SPEC_FI_GT[f as usize] = 0
+        SPEC_FI_KEY[f as usize] = 0
+        SPEC_FI_STAGE[f as usize] = 0
+        SPEC_FI_NAME[f as usize] = 0
+        SPEC_FI_MANGLED[f as usize] = false
+        f = f + 1
+    }
+    SPEC_FI_COUNT = 0
+    SPEC_ANY_MANGLED = 0
+    SPEC_SC_TOP = 0
+    SPEC_RT_COUNT = 0
+    SPEC_CS_COUNT = 0
+    SPEC_SCAN_CTX = 0 - 1
+    SPEC_RENAME_CTX = 0 - 1
     SPEC_GF_COUNT = 0
     SPEC_ST_COUNT = 0
     SPEC_UNSOUND_POISON = false
@@ -210,7 +271,9 @@ pub fn spec_report_cap_overflow() -> bool with IO {
     } else if SPEC_CAP_OVERFLOW_CODE == 3 {
         print("a compilation unit supports at most 256 generic structs")
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
-        print("a compilation unit supports at most 64 emitted generic struct specializations")
+        print("a compilation unit supports at most 1024 emitted generic struct specializations")
+    } else if SPEC_CAP_OVERFLOW_CODE == 5 {
+        print("a compilation unit supports at most 1024 distinct generic function instantiations")
     } else {
         print("an internal fixed-capacity specializer table was exhausted")
     }
@@ -357,11 +420,29 @@ fn spec_collect_free_vars_from_params(opt: Option<Box<ParamList>>, known: SpecKn
     }
 }
 
+// A fn's type parameters are the ones it DECLARES (`fn f<T, U>`). The parser
+// used to drop that list, so this guessed them from the signature instead: any
+// single uppercase letter that is not a struct or enum name. That registered
+// `fn warm(t: K) -> K` (K the kelvin unit) as a generic template, and could
+// never see a declared multi-letter parameter. More than 4 declared parameters
+// does not fit the substitution context: the program is refused (capacity code
+// 1) rather than compiled with the fn left unspecialized.
 fn spec_collect_free_vars_from_fndef(fd: FnDef, known: SpecKnownNames) -> SpecNameBuf with Mut, Panic, Div {
-    var buf = spec_collect_free_vars_from_params(fd.params, known, SpecNameBuf { names: [empty_name(); 4], count: 0 })
-    match fd.return_type {
-        Some(rt) => buf = spec_collect_free_vars_from_type(*rt, known, buf)
-        None => {}
+    var buf = SpecNameBuf { names: [empty_name(); 4], count: 0 }
+    if spec_struct_tp_count_of(fd.type_params) > 4 {
+        spec_mark_cap_overflow(1)
+        return buf
+    }
+    var cur = fd.type_params
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(node) => {
+                buf = spec_name_buf_push(buf, (*node).head.name)
+                cur = (*node).tail
+            }
+        }
     }
     buf
 }
@@ -535,6 +616,63 @@ fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, D
     }
 }
 
+// The struct template slot when `impl S<A1..An>` is over S's own declared
+// parameters, in order (the checker's generic_impl_template_index rule); -1 otherwise.
+fn spec_generic_impl_template(target: TypeExpr) -> i64 with Mut, Panic, Div {
+    if target.kind != TypeExprKind::TypeNamed || target.path.seg_count != 1 { return 0 - 1 }
+    let st_idx = spec_struct_table_find(spec_path_single_name(target.path))
+    if st_idx < 0 { return 0 - 1 }
+    var k: i64 = 0
+    var cur = target.type_args
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(node) => {
+                let arg = (*node).head
+                if arg.kind != TypeExprKind::TypeNamed || arg.path.seg_count != 1 { return 0 - 1 }
+                match arg.type_args {
+                    Some(_nested) => { return 0 - 1 }
+                    None => {}
+                }
+                if ast_name_hash(spec_path_single_name(arg.path)) != spec_struct_table_tp_hash(st_idx, k) { return 0 - 1 }
+                k = k + 1
+                cur = (*node).tail
+            }
+        }
+    }
+    if k != spec_struct_table_tp_count(st_idx) { return 0 - 1 }
+    st_idx
+}
+
+fn spec_collect_generic_impls(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id_box) => {
+                        let st_idx = spec_generic_impl_template((*id_box).target_type)
+                        if st_idx >= 0 && SPEC_GI_COUNT >= 256 {
+                            spec_mark_cap_overflow(0)
+                        } else if st_idx >= 0 {
+                            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                            let id_tmp = *id_box
+                            (*ip).id = id_tmp
+                            SPEC_GI_ST[SPEC_GI_COUNT as usize] = st_idx
+                            SPEC_GI_STAGE[SPEC_GI_COUNT as usize] = ip as i64
+                            SPEC_GI_COUNT = SPEC_GI_COUNT + 1
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_collect_generic_impls((*list).tail)
+        }
+    }
+}
+
 fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
     match items {
         None => {}
@@ -609,6 +747,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).fd = it.fn_def
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_NEEDED[slot as usize] = false
+                                SPEC_GF_IS_METHOD[slot as usize] = true
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
                             }
                         }
@@ -621,6 +760,31 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
     }
 }
 
+// Does any method in this list declare its own type parameters?
+fn spec_methods_declare_type_params(methods: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    var cur = methods
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                match (*list).head.fn_def {
+                    Some(fd_box) => {
+                        match (*fd_box).type_params {
+                            Some(_tps) => { return true }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+// Needs the struct table: spec_collect_generic_structs runs first.
 fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
     match items {
         None => {}
@@ -628,7 +792,19 @@ fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNa
             let it = (*list).head
             if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_collect_generic_method_items((*id).methods, known)
+                    Some(id) => {
+                        if spec_generic_impl_template((*id).target_type) >= 0 {
+                            // An impl over a generic struct's own parameters is emitted
+                            // once per struct instance (spec_emit_impl_instances). A
+                            // method in it that also declares type parameters would need
+                            // both substitutions, so it is refused rather than half done.
+                            if spec_methods_declare_type_params((*id).methods) {
+                                SPEC_METHOD_TARG_UNSUPPORTED = true
+                            }
+                        } else {
+                            spec_collect_generic_method_items((*id).methods, known)
+                        }
+                    }
                     None => {}
                 }
             }
@@ -871,6 +1047,18 @@ fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> 
     out.inner = spec_subst_type_opt(te.inner, ctx, targs)
     out.type_args = spec_subst_type_list_opt(te.type_args, ctx, targs)
 
+    // A generic struct template named without arguments still needs its generic
+    // impl (see SPEC_ST_IMPL_NEEDED).
+    if out.kind == TypeExprKind::TypeNamed && out.path.seg_count == 1 {
+        match out.type_args {
+            None => {
+                let bare_st = spec_struct_table_find(spec_path_single_name(out.path))
+                if bare_st >= 0 { SPEC_ST_IMPL_NEEDED[bare_st as usize] = true }
+            }
+            Some(_al) => {}
+        }
+    }
+
     // Local generic struct with (now concrete) args -> mangled instance name.
     if out.kind == TypeExprKind::TypeNamed && out.path.seg_count == 1 {
         match out.type_args {
@@ -968,7 +1156,157 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
                 if !spec_name_is_empty(mangled2) {
                     (*p).e.path = spec_name_to_path(mangled2)
                 }
+            } else if st_count > 0 {
+                // Outside a context that names the struct's parameters: infer the
+                // arguments from the field initializers, as for a generic fn call.
+                match spec_infer_struct_lit_targs(st_idx, (*p).e.fields) {
+                    Some(inferred) => {
+                        spec_get_or_create_struct_instance(st_idx, base, Some(inferred))
+                        let base3 = spec_path_single_name((*p).e.path)
+                        (*p).e.path = spec_name_to_path(spec_mangle_name(base3, Some(inferred)))
+                    }
+                    None => { SPEC_ST_IMPL_NEEDED[st_idx as usize] = true }
+                }
             }
+        }
+    }
+
+    // `S::<Args>::name`: the associated fn of instance `S__Args`. A path through the
+    // bare template (`S::name`) keeps needing the generic impl.
+    if (*p).e.kind == ExprKind::ExprPath && (*p).e.path.seg_count >= 2 {
+        let path_base = spec_path_head_name((*p).e.path)
+        let path_st = spec_struct_table_find(path_base)
+        if path_st >= 0 {
+            match (*p).e.type_args {
+                Some(tal) => {
+                    if spec_type_args_count(Some(tal)) == spec_struct_table_tp_count(path_st) {
+                        spec_get_or_create_struct_instance(path_st, path_base, Some(tal))
+                        let base_again = spec_path_head_name((*p).e.path)
+                        let inst = spec_mangle_name(base_again, (*p).e.type_args)
+                        (*p).e.path = AstPath {
+                            segments: StringList { head_buf: inst.buf, head_len: inst.len, tail: (*p).e.path.segments.tail },
+                            seg_count: (*p).e.path.seg_count,
+                        }
+                        (*p).e.type_args = None
+                    }
+                }
+                None => { SPEC_ST_IMPL_NEEDED[path_st as usize] = true }
+            }
+        }
+    }
+
+    // into_word::<A>(v) / from_word::<A>(w): an 8-byte value carried as an i64 word.
+    // Resolved here, where A is concrete: f64/f32 go through their bit patterns, and
+    // every other 8-byte type already is its word.
+    if (*p).e.kind == ExprKind::ExprCall {
+        let word_op = spec_word_intrinsic_kind((*p).e)
+        if word_op > 0 {
+            match spec_call_expr_type_args((*p).e) {
+                Some(tal) => {
+                    let ta = (*tal).head
+                    var concrete = true
+                    if ta.kind == TypeExprKind::TypeNamed && ta.path.seg_count == 1 {
+                        if spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name(ta.path))) >= 0 { concrete = false }
+                    }
+                    if concrete {
+                        if spec_type_is_float(ta) {
+                            let target_name = if word_op == 1 { make_name("f64_to_bits") } else { make_name("bits_to_f64") }
+                            match (*p).e.left {
+                                Some(callee_box) => {
+                                    let cq = heap_alloc(32768) as *mut SpecExprStage
+                                    let callee_tmp = *callee_box
+                                    (*cq).e = callee_tmp
+                                    (*cq).e.name = target_name
+                                    (*cq).e.path = spec_name_to_path(target_name)
+                                    (*cq).e.type_args = None
+                                    (*p).e.left = Some(Box::new((*cq).e))
+                                }
+                                None => {}
+                            }
+                            (*p).e.type_args = None
+                        } else {
+                            match (*p).e.args {
+                                Some(al) => {
+                                    let arg_tmp = (*al).head
+                                    (*p).e = arg_tmp
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+// 1 for `into_word`, 2 for `from_word`, 0 for any other call.
+fn spec_word_intrinsic_kind(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    let callee = spec_call_expr_callee_name(e)
+    if name_is_empty(callee) { return 0 }
+    if name_eq(callee, make_name("into_word")) { return 1 }
+    if name_eq(callee, make_name("from_word")) { return 2 }
+    0
+}
+
+fn spec_type_is_float(te: TypeExpr) -> bool with Mut, Panic, Div, Alloc {
+    if te.kind != TypeExprKind::TypeNamed || te.path.seg_count != 1 { return false }
+    let n = spec_path_single_name(te.path)
+    name_eq(n, make_name("f64")) || name_eq(n, make_name("f32"))
+}
+
+fn spec_struct_field_type_stage(opt: Option<Box<FieldDefList>>, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match cur {
+            None => { return 0 }
+            Some(list) => {
+                if name_eq((*list).head.name, name) { return spec_stage_type((*list).head.ty) }
+                cur = (*list).tail
+            }
+        }
+    }
+    0
+}
+
+// The type arguments of a generic struct literal, from its field initializers; None
+// when a parameter is left unbound.
+fn spec_infer_struct_lit_targs(st_idx: i64, fields: Option<Box<StructFieldList>>) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    let tp_count = spec_struct_table_tp_count(st_idx)
+    if tp_count <= 0 || tp_count > 4 { return None }
+    match spec_struct_table_sd(st_idx) {
+        None => None
+        Some(sd_box) => {
+            let ctx = spec_ctx_from_struct_slot(st_idx)
+            let binds = heap_alloc(64) as *mut SpecBindStage
+            (*binds).slots = [0; 4]
+            var fcur = fields
+            var going = true
+            while going {
+                match fcur {
+                    None => { going = false }
+                    Some(fl) => {
+                        let decl_ptr = spec_struct_field_type_stage((*sd_box).fields, (*fl).head.name)
+                        if decl_ptr != 0 {
+                            let arg_ptr = spec_infer_expr_type((*fl).head.value)
+                            let decl = decl_ptr as *mut SpecTypeStage
+                            spec_unify_param((*decl).t, arg_ptr, ctx, binds)
+                        }
+                        fcur = (*fl).tail
+                    }
+                }
+            }
+            var out: Option<Box<TypeExprList>> = None
+            var k: i64 = tp_count - 1
+            while k >= 0 {
+                let slot = (*binds).slots[k as usize]
+                if slot == 0 { return None }
+                let st = slot as *mut SpecTypeStage
+                out = Some(Box::new(TypeExprList { head: (*st).t, tail: out }))
+                k = k - 1
+            }
+            out
         }
     }
 }
@@ -1144,9 +1482,318 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             let st_ctx = spec_ctx_from_struct_slot(st_idx)
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
             spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
+            SPEC_ST_INST_COUNT[st_idx as usize] = SPEC_ST_INST_COUNT[st_idx as usize] + 1
+            spec_emit_impl_instances(st_idx, targs, sp)
         }
     }
     mangled
+}
+
+fn spec_make_impl_item(name: Name, id: ImplDef) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemImpl, span: id.span, visibility: visibility_private(), name: name, fn_def: None,
+        struct_def: None, enum_def: None, impl_def: Some(Box::new(id)), type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+
+// Methods with the substitution applied to their signatures and bodies.
+fn spec_subst_method_items(opt: Option<Box<ItemList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let rest = spec_subst_method_items((*list).tail, ctx, targs)
+            let node = heap_alloc(16384) as *mut SpecItemNode
+            let it_tmp = (*list).head
+            (*node).it = it_tmp
+            (*node).next = 0
+            match (*node).it.fn_def {
+                Some(fd_box) => {
+                    let fp = heap_alloc(32768) as *mut SpecFnDefStage
+                    let fd_tmp = *fd_box
+                    (*fp).fd = fd_tmp
+                    (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, ctx, targs)
+                    (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, ctx, targs)
+                    (*fp).fd.body = spec_subst_block((*fp).fd.body, ctx, targs)
+                    (*node).it.fn_def = Some(Box::new((*fp).fd))
+                }
+                None => {}
+            }
+            Some(Box::new(ItemList { head: (*node).it, tail: rest }))
+        }
+    }
+}
+
+// `impl S__Args { ... }` for every generic impl of template `st_idx`: each method's
+// signature and body with S's parameters replaced by the instance's arguments, so a
+// method taking or returning f64 is compiled as an f64 method rather than lowered
+// once with its parameters erased.
+fn spec_emit_impl_instances(st_idx: i64, targs: Option<Box<TypeExprList>>, inst: *mut SpecStructDefStage) with Mut, Panic, Div, Alloc {
+    var g: i64 = 0
+    while g < SPEC_GI_COUNT {
+        if SPEC_GI_ST[g as usize] == st_idx {
+            let src = SPEC_GI_STAGE[g as usize] as *mut SpecImplDefStage
+            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+            let id_tmp = (*src).id
+            (*ip).id = id_tmp
+            let st_ctx = spec_ctx_from_struct_slot(st_idx)
+            var target = dummy_type_expr()
+            target.kind = TypeExprKind::TypeNamed
+            target.path = spec_name_to_path((*inst).sd.name)
+            target.type_args = None
+            (*ip).id.target_type = target
+            (*ip).id.methods = spec_subst_method_items((*ip).id.methods, st_ctx, targs)
+            let np = heap_alloc(16384) as *mut SpecItemNode
+            (*np).it = spec_make_impl_item((*inst).sd.name, (*ip).id)
+            (*np).next = SPEC_EXTRA_HEAD
+            SPEC_EXTRA_HEAD = np as i64
+            if SPEC_II_COUNT < 1024 {
+                let ii = SPEC_II_COUNT
+                SPEC_II_NODE[ii as usize] = np as i64
+                SPEC_II_COUNT = ii + 1
+                // The instance's methods are ordinary code now: scan them for generic
+                // calls under this instance's own context.
+                let saved_ctx = SPEC_SCAN_CTX
+                SPEC_SCAN_CTX = 100000 + ii
+                spec_scan_impl_methods((*ip).id.methods)
+                SPEC_SCAN_CTX = saved_ctx
+            } else {
+                // Emitted but not recorded: its calls would never be renamed.
+                spec_mark_cap_overflow(0)
+            }
+        }
+        g = g + 1
+    }
+}
+
+fn spec_scan_impl_methods(opt: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            match (*list).head.fn_def {
+                Some(fd_box) => {
+                    let saved_top = SPEC_SC_TOP
+                    spec_scope_push_params((*fd_box).params)
+                    spec_scan_block((*fd_box).body)
+                    SPEC_SC_TOP = saved_top
+                }
+                None => {}
+            }
+            spec_scan_impl_methods((*list).tail)
+        }
+    }
+}
+
+// Rename the call sites inside emitted impl instances, each under its own context.
+fn spec_rename_impl_instances() with Mut, Panic, Div, Alloc {
+    var ii: i64 = 0
+    while ii < SPEC_II_COUNT {
+        let np = SPEC_II_NODE[ii as usize] as *mut SpecItemNode
+        match (*np).it.impl_def {
+            Some(id_box) => {
+                let saved_ctx = SPEC_RENAME_CTX
+                SPEC_RENAME_CTX = 100000 + ii
+                let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                let id_tmp = *id_box
+                (*ip).id = id_tmp
+                (*ip).id.methods = spec_rename_items((*ip).id.methods)
+                (*np).it.impl_def = Some(Box::new((*ip).id))
+                SPEC_RENAME_CTX = saved_ctx
+            }
+            None => {}
+        }
+        ii = ii + 1
+    }
+}
+
+// Does a type mention a generic struct template (with or without arguments)?
+fn spec_type_mentions_generic_struct(te: TypeExpr) -> bool with Mut, Panic, Div {
+    if te.kind == TypeExprKind::TypeNamed && te.path.seg_count >= 1 {
+        if spec_struct_table_find(spec_path_single_name(te.path)) >= 0 { return true }
+    }
+    match te.inner {
+        Some(inner) => { if spec_type_mentions_generic_struct(*inner) { return true } }
+        None => {}
+    }
+    var cur = te.type_args
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_type_mentions_generic_struct((*list).head) { return true }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_type_opt_mentions_generic_struct(opt: Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(t) => spec_type_mentions_generic_struct(*t)
+    }
+}
+
+fn spec_expr_opt_mentions_generic_struct(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(b) => spec_expr_mentions_generic_struct(*b)
+    }
+}
+
+// The first segment of a path of any length: `Cell` in `Cell::make`.
+// spec_path_single_name is empty for every path but a one-segment one, so the
+// `S::<Args>::name` checks below never matched `Cell::<i64>::make` through it.
+fn spec_path_head_name(path: AstPath) -> Name {
+    if path.seg_count < 1 { return empty_name() }
+    Name { buf: path.segments.head_buf, len: path.segments.head_len }
+}
+
+// Read-only pre-check for spec_mono_items: only a fn that mentions a generic struct
+// is rebuilt, since rebuilding stages every expression node on the heap.
+fn spec_expr_mentions_generic_struct(e: Expr) -> bool with Mut, Panic, Div {
+    if (e.kind == ExprKind::ExprPath || e.kind == ExprKind::ExprStructLit) && e.path.seg_count >= 1 {
+        if spec_struct_table_find(spec_path_head_name(e.path)) >= 0 { return true }
+    }
+    if spec_type_opt_mentions_generic_struct(e.cast_type) { return true }
+    if spec_expr_opt_mentions_generic_struct(e.left) { return true }
+    if spec_expr_opt_mentions_generic_struct(e.right) { return true }
+    if spec_block_opt_mentions_generic_struct(e.block) { return true }
+    if spec_expr_opt_mentions_generic_struct(e.else_expr) { return true }
+    if spec_block_opt_mentions_generic_struct(e.handler_block) { return true }
+    if spec_expr_opt_mentions_generic_struct(e.closure_body) { return true }
+    var args = e.args
+    var going = true
+    while going {
+        match args {
+            None => { going = false }
+            Some(list) => {
+                if spec_expr_mentions_generic_struct((*list).head) { return true }
+                args = (*list).tail
+            }
+        }
+    }
+    var arms = e.arms
+    var arms_going = true
+    while arms_going {
+        match arms {
+            None => { arms_going = false }
+            Some(list) => {
+                if spec_expr_opt_mentions_generic_struct((*list).head.guard) { return true }
+                if spec_expr_mentions_generic_struct((*list).head.body) { return true }
+                arms = (*list).tail
+            }
+        }
+    }
+    var fields = e.fields
+    var fields_going = true
+    while fields_going {
+        match fields {
+            None => { fields_going = false }
+            Some(list) => {
+                if spec_expr_mentions_generic_struct((*list).head.value) { return true }
+                fields = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_block_opt_mentions_generic_struct(opt: Option<Box<Block>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(b) => spec_stmts_mention_generic_struct((*b).stmts)
+    }
+}
+
+fn spec_stmts_mention_generic_struct(opt: Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_type_opt_mentions_generic_struct((*list).head.ty) { return true }
+                if spec_expr_opt_mentions_generic_struct((*list).head.expr) { return true }
+                if spec_expr_opt_mentions_generic_struct((*list).head.target) { return true }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_fn_mentions_generic_struct(fd: FnDef) -> bool with Mut, Panic, Div {
+    if spec_type_opt_mentions_generic_struct(fd.return_type) { return true }
+    var params = fd.params
+    var going = true
+    while going {
+        match params {
+            None => { going = false }
+            Some(list) => {
+                if spec_type_mentions_generic_struct((*list).head.ty) { return true }
+                params = (*list).tail
+            }
+        }
+    }
+    spec_stmts_mention_generic_struct(fd.body.stmts)
+}
+
+// Rewrite ordinary code -- non-generic fns and the methods of non-generic impls --
+// through the substitution visitor with an empty context, so generic struct types,
+// `S::<Args>::name` paths and inferable struct literals name their instances. Only
+// run when the program has a generic impl (specialize_generics).
+fn spec_mono_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match items {
+        None => None
+        Some(list) => {
+            let rest = spec_mono_items((*list).tail)
+            let node = heap_alloc(16384) as *mut SpecItemNode
+            let it_tmp = (*list).head
+            (*node).it = it_tmp
+            (*node).next = 0
+            if (*node).it.kind == ItemKind::ItemFn {
+                match (*node).it.fn_def {
+                    Some(fd_box) => {
+                        let is_template = match (*fd_box).type_params {
+                            Some(_tps) => true
+                            None => false
+                        }
+                        if !is_template && spec_fn_mentions_generic_struct(*fd_box) {
+                            let fp = heap_alloc(32768) as *mut SpecFnDefStage
+                            let fd_tmp = *fd_box
+                            (*fp).fd = fd_tmp
+                            (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, 0, None)
+                            (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, 0, None)
+                            (*fp).fd.body = spec_subst_block((*fp).fd.body, 0, None)
+                            (*node).it.fn_def = Some(Box::new((*fp).fd))
+                        }
+                    }
+                    None => {}
+                }
+            } else if (*node).it.kind == ItemKind::ItemImpl {
+                match (*node).it.impl_def {
+                    Some(id_box) => {
+                        if spec_generic_impl_template((*id_box).target_type) < 0 {
+                            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                            let id_tmp = *id_box
+                            (*ip).id = id_tmp
+                            (*ip).id.methods = spec_subst_method_items((*ip).id.methods, 0, None)
+                            (*node).it.impl_def = Some(Box::new((*ip).id))
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Some(Box::new(ItemList { head: (*node).it, tail: rest }))
+        }
+    }
 }
 
 // ============================================================
@@ -1164,7 +1811,7 @@ fn spec_emitted_has(n: Name) -> bool with Mut, Panic, Div {
 }
 
 fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div {
-    if SPEC_EMITTED_COUNT < 64 {
+    if SPEC_EMITTED_COUNT < 1024 {
         SPEC_EMITTED_HASHES[SPEC_EMITTED_COUNT as usize] = ast_name_hash(n)
         SPEC_EMITTED_COUNT = SPEC_EMITTED_COUNT + 1
         return true
@@ -1185,54 +1832,572 @@ fn spec_make_fn_item(name: Name, fd: FnDef) -> Item with Mut, Panic, Div, Alloc 
     }
 }
 
+fn spec_int_key(v: i64) -> string with Mut, Panic, Div {
+    var digits: [i8; 32] = [0; 32]
+    var count: i64 = 0
+    var n = v
+    var negative = false
+    if n < 0 {
+        negative = true
+        n = 0 - n
+    }
+    if n == 0 {
+        digits[0] = 48 as i8
+        count = 1
+    }
+    while n > 0 && count < 32 {
+        digits[count as usize] = (48 + n % 10) as i8
+        n = n / 10
+        count = count + 1
+    }
+    var buf: [i8; 384] = [0; 384]
+    var len: i64 = 0
+    if negative {
+        buf[0] = 109 as i8   // 'm'
+        len = 1
+    }
+    var k = count - 1
+    while k >= 0 {
+        buf[len as usize] = digits[k as usize]
+        len = len + 1
+        k = k - 1
+    }
+    str_from_bytes(buf, len)
+}
+
+fn spec_path_key(path: AstPath) -> string with Mut, Panic, Div {
+    var head_buf: [i8; 384] = path.segments.head_buf
+    var s = str_from_bytes(head_buf, path.segments.head_len)
+    var cur = path.segments.tail
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(seg) => {
+                var seg_buf: [i8; 384] = (*seg).head_buf
+                s = str_concat(str_concat(s, "_"), str_from_bytes(seg_buf, (*seg).head_len))
+                cur = (*seg).tail
+            }
+        }
+    }
+    s
+}
+
+fn spec_array_size_key(opt: Option<Box<Expr>>) -> string with Mut, Panic, Div {
+    match opt {
+        None => "N"
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprIntLit {
+                spec_int_key((*e).int_val)
+            } else if (*e).kind == ExprKind::ExprIdent {
+                spec_name_to_string((*e).name)
+            } else {
+                "N"
+            }
+        }
+    }
+}
+
+fn spec_type_list_key(opt: Option<Box<TypeExprList>>) -> string with Mut, Panic, Div, Alloc {
+    match opt {
+        None => ""
+        Some(list) => {
+            let head = spec_type_key((*list).head)
+            match (*list).tail {
+                None => head
+                Some(rest) => str_concat(str_concat(head, "_"), spec_type_list_key(Some(rest)))
+            }
+        }
+    }
+}
+
+// A rendering of a type argument that keeps distinct types distinct: `i64`,
+// `ref_i64`, `mut_f64`, `arr4_f64`, `Pair_L_i64_f64_R`. spec_render_type_name, used
+// for struct instance names, renders everything but a plain name as `T` (and the
+// checker's mangling mirrors that), which is harmless there but would let two
+// different fn instantiations share one body.
+fn spec_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
+    if te.kind == TypeExprKind::TypeNamed {
+        var named = spec_path_key(te.path)
+        match te.type_args {
+            Some(al) => { named = str_concat(str_concat(str_concat(named, "_L_"), spec_type_list_key(Some(al))), "_R") }
+            None => {}
+        }
+        return named
+    }
+    if te.kind == TypeExprKind::TypeUnit { return "unit" }
+    var s = "k"
+    if te.kind == TypeExprKind::TypeReference {
+        s = "ref"
+    } else if te.kind == TypeExprKind::TypeRefMut {
+        s = "mut"
+    } else if te.kind == TypeExprKind::TypeRawPtr {
+        s = "ptr"
+    } else if te.kind == TypeExprKind::TypeArray {
+        s = str_concat("arr", spec_array_size_key(te.array_size))
+    } else if te.kind == TypeExprKind::TypeTuple {
+        s = "tup"
+    } else {
+        s = str_concat("k", spec_int_key(te.kind as i64))
+    }
+    match te.inner {
+        Some(inner) => { s = str_concat(str_concat(s, "_"), spec_type_key(*inner)) }
+        None => {}
+    }
+    match te.type_args {
+        Some(al) => { s = str_concat(str_concat(str_concat(s, "_L_"), spec_type_list_key(Some(al))), "_R") }
+        None => {}
+    }
+    s
+}
+
+// The name an instantiation is emitted under when it cannot keep the template's:
+// `identity__i64`, `identity__f64`, `pick__ref_i64`. For plain-name arguments this
+// is exactly spec_mangle_name's spelling.
+fn spec_fn_instance_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
+    var s = spec_name_to_string(base)
+    var cur = targs
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                s = str_concat(str_concat(s, "__"), spec_type_key((*list).head))
+                cur = (*list).tail
+            }
+        }
+    }
+    make_name(s)
+}
+
+fn spec_fn_instance_find(gt_idx: i64, key: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_FI_COUNT {
+        if SPEC_FI_GT[i as usize] == gt_idx && SPEC_FI_KEY[i as usize] == key { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Type-argument inference for calls without a turbofish
+// ============================================================
+//
+// The specializer runs before the checker, so it infers from syntax: a literal's
+// type, a parameter's declared type, a local's annotation or inferable initializer,
+// `&e` / `&!e`, an array literal, a cast, a non-generic struct literal, and the return
+// type of a non-generic fn or of a generic call specialized the same way. The call's
+// arguments are matched against the template's parameter types; when every declared
+// parameter is bound, the call is specialized exactly like its turbofish form. When
+// one is not, the call is left for the checker, which refuses it (E257) rather than
+// letting it be lowered against the erased template.
+
+fn spec_stage_type(te: TypeExpr) -> i64 with Mut, Alloc {
+    let s = heap_alloc(4096) as *mut SpecTypeStage
+    (*s).t = te
+    s as i64
+}
+
+// The synthesized types are built as one struct literal, the way the parser builds
+// them, and staged through spec_stage_type. Built from dummy_type_expr() and then
+// patched field by field, a literal argument's type reached the checker as a
+// TypeNamed with an empty name (`identity(42)`: "expected , found i64") while the
+// same call with `42 as i64` -- a parser-built type -- checked.
+fn spec_named_type_stage(text: string, sp: Span) -> i64 with Mut, Panic, Div, Alloc {
+    let nm = make_name(text)
+    let path = spec_name_to_path(nm)
+    let te = TypeExpr {
+        kind: TypeExprKind::TypeNamed,
+        span: sp,
+        path: path,
+        type_args: None,
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+    spec_stage_type(te)
+}
+
+fn spec_wrap_type_stage(kind: TypeExprKind, inner_ptr: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if inner_ptr == 0 { return 0 }
+    let inner_stage = inner_ptr as *mut SpecTypeStage
+    let inner_te = (*inner_stage).t
+    let te = TypeExpr {
+        kind: kind,
+        span: inner_te.span,
+        path: empty_path(),
+        type_args: None,
+        inner: Some(Box::new(inner_te)),
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+    spec_stage_type(te)
+}
+
+fn spec_array_type_stage(elem_ptr: i64, count: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if elem_ptr == 0 { return 0 }
+    let elem = elem_ptr as *mut SpecTypeStage
+    let elem_te = (*elem).t
+    let q = heap_alloc(32768) as *mut SpecExprStage
+    (*q).e = mk_expr(ExprKind::ExprIntLit, elem_te.span)
+    (*q).e.int_val = count
+    let te = TypeExpr {
+        kind: TypeExprKind::TypeArray,
+        span: elem_te.span,
+        path: empty_path(),
+        type_args: None,
+        inner: Some(Box::new(elem_te)),
+        array_size: Some(Box::new((*q).e)),
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+    spec_stage_type(te)
+}
+
+fn spec_scope_bind(name: Name, type_ptr: i64) with Mut, Panic, Div {
+    if type_ptr == 0 || SPEC_SC_TOP >= 4096 { return }
+    SPEC_SC_HASH[SPEC_SC_TOP as usize] = ast_name_hash(name)
+    SPEC_SC_TYPE[SPEC_SC_TOP as usize] = type_ptr
+    SPEC_SC_TOP = SPEC_SC_TOP + 1
+}
+
+fn spec_scope_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var i: i64 = SPEC_SC_TOP - 1
+    while i >= 0 {
+        if SPEC_SC_HASH[i as usize] == h { return SPEC_SC_TYPE[i as usize] }
+        i = i - 1
+    }
+    0
+}
+
+fn spec_scope_push_params(opt: Option<Box<ParamList>>) with Mut, Panic, Div, Alloc {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if !(*list).head.is_self {
+                    let ty_ptr = spec_stage_type((*list).head.ty)
+                    spec_scope_bind((*list).head.name, ty_ptr)
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// A `let`/`var` binding: its annotation, else what its initializer infers to.
+fn spec_scope_bind_stmt(s: Stmt) with IO, Mut, Panic, Div, Alloc {
+    // Staged first: inferring the initializer can instantiate a clone (a deep call),
+    // and Name values held across deep calls arrive corrupted.
+    let ns = heap_alloc(1024) as *mut SpecNameStage
+    (*ns).n = s.name
+    var ty_ptr: i64 = 0
+    match s.ty {
+        Some(te) => { ty_ptr = spec_stage_type(*te) }
+        None => {
+            match s.expr {
+                Some(init) => { ty_ptr = spec_infer_expr_type(*init) }
+                None => {}
+            }
+        }
+    }
+    spec_scope_bind((*ns).n, ty_ptr)
+}
+
+fn spec_collect_return_types(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn && SPEC_RT_COUNT < 4096 {
+                match it.fn_def {
+                    Some(fd_box) => {
+                        match (*fd_box).type_params {
+                            Some(_tps) => {}
+                            None => {
+                                match (*fd_box).return_type {
+                                    Some(rt) => {
+                                        SPEC_RT_HASH[SPEC_RT_COUNT as usize] = ast_name_hash(it.name)
+                                        SPEC_RT_TYPE[SPEC_RT_COUNT as usize] = spec_stage_type(*rt)
+                                        SPEC_RT_COUNT = SPEC_RT_COUNT + 1
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_collect_return_types((*list).tail)
+        }
+    }
+}
+
+fn spec_return_type_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < SPEC_RT_COUNT {
+        if SPEC_RT_HASH[i as usize] == h { return SPEC_RT_TYPE[i as usize] }
+        i = i + 1
+    }
+    0
+}
+
+fn spec_record_inferred_call(span: Span, callee: Name, targs: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    if SPEC_CS_COUNT >= 4096 {
+        // An inferred call left unrecorded is never renamed to its instance.
+        spec_mark_cap_overflow(0)
+        return
+    }
+    let gt_idx = spec_generic_table_find(callee)
+    if gt_idx < 0 { return }
+    let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee, targs)))
+    if fi < 0 { return }
+    let i = SPEC_CS_COUNT
+    SPEC_CS_FILE[i as usize] = span.file_id as i64
+    SPEC_CS_START[i as usize] = span.start
+    SPEC_CS_END[i as usize] = span.end
+    SPEC_CS_CTX[i as usize] = SPEC_SCAN_CTX
+    SPEC_CS_FI[i as usize] = fi
+    SPEC_CS_COUNT = i + 1
+}
+
+fn spec_inferred_call_lookup(span: Span, ctx: i64) -> i64 with Mut, Panic, Div {
+    let fid = span.file_id as i64
+    var i: i64 = 0
+    while i < SPEC_CS_COUNT {
+        if SPEC_CS_START[i as usize] == span.start && SPEC_CS_END[i as usize] == span.end
+            && SPEC_CS_FILE[i as usize] == fid && SPEC_CS_CTX[i as usize] == ctx {
+            return SPEC_CS_FI[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_expr_list_count(opt: Option<Box<ExprList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                n = n + 1
+                cur = (*list).tail
+            }
+        }
+    }
+    n
+}
+
+fn spec_infer_expr_opt_type(opt: Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        None => 0
+        Some(b) => spec_infer_expr_type(*b)
+    }
+}
+
+// The syntactic type of an argument expression, as a *mut SpecTypeStage; 0 = unknown.
+fn spec_infer_expr_type(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprIntLit { return spec_named_type_stage("i64", e.span) }
+    if e.kind == ExprKind::ExprFloatLit { return spec_named_type_stage("f64", e.span) }
+    if e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse { return spec_named_type_stage("bool", e.span) }
+    if e.kind == ExprKind::ExprStringLit { return spec_named_type_stage("string", e.span) }
+    if e.kind == ExprKind::ExprCharLit { return spec_named_type_stage("char", e.span) }
+    if e.kind == ExprKind::ExprIdent { return spec_scope_lookup(e.name) }
+    if e.kind == ExprKind::ExprPath && e.path.seg_count == 1 { return spec_scope_lookup(spec_path_single_name(e.path)) }
+    if e.kind == ExprKind::ExprUnary {
+        if e.un_op == UnaryOp::OpRef { return spec_wrap_type_stage(TypeExprKind::TypeReference, spec_infer_expr_opt_type(e.left)) }
+        if e.un_op == UnaryOp::OpRefMut { return spec_wrap_type_stage(TypeExprKind::TypeRefMut, spec_infer_expr_opt_type(e.left)) }
+        return 0
+    }
+    if e.kind == ExprKind::ExprCast {
+        match e.cast_type {
+            Some(ct) => { return spec_stage_type(*ct) }
+            None => { return 0 }
+        }
+    }
+    if e.kind == ExprKind::ExprArrayLit {
+        match e.args {
+            Some(list) => {
+                let count = spec_expr_list_count(e.args)
+                let elem_ptr = spec_infer_expr_type((*list).head)
+                return spec_array_type_stage(elem_ptr, count)
+            }
+            None => { return 0 }
+        }
+    }
+    if e.kind == ExprKind::ExprStructLit && e.path.seg_count == 1 {
+        // A generic struct literal's arguments are the checker's to infer.
+        if spec_struct_table_find(spec_path_single_name(e.path)) >= 0 { return 0 }
+        return spec_named_type_stage(spec_name_to_string(spec_path_single_name(e.path)), e.span)
+    }
+    if e.kind == ExprKind::ExprCall {
+        let callee = spec_call_expr_callee_name(e)
+        if name_is_empty(callee) { return 0 }
+        let gt_idx = spec_generic_table_find(callee)
+        if gt_idx < 0 { return spec_return_type_lookup(callee) }
+        // A generic call as an argument was scanned (and specialized) first: its
+        // instance's substituted return type.
+        var fi: i64 = 0 - 1
+        match spec_call_expr_type_args(e) {
+            Some(targs) => { fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee, Some(targs)))) }
+            None => { fi = spec_inferred_call_lookup(e.span, SPEC_SCAN_CTX) }
+        }
+        if fi < 0 || SPEC_FI_STAGE[fi as usize] == 0 { return 0 }
+        let fp = SPEC_FI_STAGE[fi as usize] as *mut SpecFnDefStage
+        match (*fp).fd.return_type {
+            Some(rt) => { return spec_stage_type(*rt) }
+            None => { return 0 }
+        }
+    }
+    0
+}
+
+fn spec_unify_type_lists(p: Option<Box<TypeExprList>>, a: Option<Box<TypeExprList>>, ctx: i64, binds: *mut SpecBindStage) with Mut, Panic, Div, Alloc {
+    match p {
+        None => {}
+        Some(pl) => {
+            match a {
+                None => {}
+                Some(al) => {
+                    let head_ptr = spec_stage_type((*al).head)
+                    spec_unify_param((*pl).head, head_ptr, ctx, binds)
+                    spec_unify_type_lists((*pl).tail, (*al).tail, ctx, binds)
+                }
+            }
+        }
+    }
+}
+
+// Bind the template's type parameters that `param` mentions from the argument type.
+// The first binding wins; a conflicting later one is left for the checker to report.
+fn spec_unify_param(param: TypeExpr, arg_ptr: i64, ctx: i64, binds: *mut SpecBindStage) with Mut, Panic, Div, Alloc {
+    if arg_ptr == 0 { return }
+    let arg = arg_ptr as *mut SpecTypeStage
+    if param.kind == TypeExprKind::TypeNamed && param.path.seg_count == 1 {
+        match param.type_args {
+            None => {
+                let idx = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name(param.path)))
+                if idx >= 0 && idx < 4 && (*binds).slots[idx as usize] == 0 {
+                    (*binds).slots[idx as usize] = arg_ptr
+                }
+            }
+            Some(pargs) => {
+                if (*arg).t.kind == TypeExprKind::TypeNamed {
+                    spec_unify_type_lists(Some(pargs), (*arg).t.type_args, ctx, binds)
+                }
+            }
+        }
+        return
+    }
+    if param.kind == (*arg).t.kind {
+        match param.inner {
+            Some(pin) => {
+                match (*arg).t.inner {
+                    Some(ain) => {
+                        let inner_ptr = spec_stage_type(*ain)
+                        spec_unify_param(*pin, inner_ptr, ctx, binds)
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+// The type arguments of a turbofish-less call to template slot `gt_idx`, or None.
+fn spec_infer_call_targs(gt_idx: i64, args: Option<Box<ExprList>>) -> Option<Box<TypeExprList>> with IO, Mut, Panic, Div, Alloc {
+    let tp_count = spec_generic_table_tp_count(gt_idx)
+    if tp_count <= 0 || tp_count > 4 { return None }
+    match spec_generic_table_fd(gt_idx) {
+        None => None
+        Some(fd_box) => {
+            let ctx = spec_ctx_from_fn_slot(gt_idx)
+            let binds = heap_alloc(64) as *mut SpecBindStage
+            (*binds).slots = [0; 4]
+            var pcur = (*fd_box).params
+            var acur = args
+            var going = true
+            while going {
+                match pcur {
+                    None => { going = false }
+                    Some(pl) => {
+                        match acur {
+                            None => { going = false }
+                            Some(al) => {
+                                let arg_ptr = spec_infer_expr_type((*al).head)
+                                spec_unify_param((*pl).head.ty, arg_ptr, ctx, binds)
+                                pcur = (*pl).tail
+                                acur = (*al).tail
+                            }
+                        }
+                    }
+                }
+            }
+            var out: Option<Box<TypeExprList>> = None
+            var k: i64 = tp_count - 1
+            while k >= 0 {
+                let slot = (*binds).slots[k as usize]
+                if slot == 0 { return None }
+                let st = slot as *mut SpecTypeStage
+                out = Some(Box::new(TypeExprList { head: (*st).t, tail: out }))
+                k = k - 1
+            }
+            out
+        }
+    }
+}
+
 // Ensure a monomorphized clone of template `base_name` for `targs` exists.
 //
-// SAME-NAME SCHEME: the clone keeps the TEMPLATE\'S OWN NAME and at finalize
-// time REPLACES the template item, so call sites need no rewriting at all
-// (the checker ignores turbofish on non-generic signatures — generic_names
-// comes out empty at check.sio:6323 — and the lowering has no generics
-// concept). This sidesteps the callee-rename Expr-field write that the
-// bundle backend silently drops. A template instantiated with TWO OR MORE
-// distinct type-arg lists is POISONED back to baseline behavior (template
-// kept verbatim, calls untouched).
+// Every distinct type-argument list gets its own clone. Until this recorded
+// instances per argument list, a template's SECOND distinct instantiation
+// POISONED it: the template was kept verbatim and lowered with its parameters
+// erased, which is right for word-sized arguments and silently wrong for f64 --
+// `identity::<i64>(5)` beside `identity::<f64>(2.5)` compiled, and the f64 call
+// returned garbage. Whether a clone keeps the template's name or is emitted under
+// its instance name is decided after the whole scan (spec_assign_instance_names).
 //
-// Reserves the instantiation hash BEFORE processing the clone\'s own body so
-// a self-recursive generic fn terminates.
+// The instance is reserved BEFORE the clone's own body is processed, so a
+// self-recursive generic fn terminates.
 fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
     let gt_idx = spec_generic_table_find(base_name)
     if gt_idx < 0 { return }
     if spec_type_args_count(targs) != spec_generic_table_tp_count(gt_idx) { return }
 
-    // An instantiation we cannot name injectively must not be specialized:
-    // two different arg lists would otherwise share one hash and one clone.
-    // Poison the template so it keeps its unspecialized (baseline) behaviour.
-    let args_scalar = spec_type_args_all_scalar(targs)
-
-    let mangled_inst = spec_mangle_name(base_name, targs)
-    if spec_name_is_empty(mangled_inst) {
-        SPEC_GF_POISONED[gt_idx as usize] = true
-        if !args_scalar { SPEC_UNSOUND_POISON = true }
-        if spec_trace_enabled() { print("specializer: poisoned (unrenderable type argument)\n") }
+    let key = ast_name_hash(spec_fn_instance_name(base_name, targs))
+    if spec_fn_instance_find(gt_idx, key) >= 0 { return }
+    if SPEC_FI_COUNT >= 1024 {
+        // Out of instance slots: refuse the program (capacity code 5) rather than
+        // hand this call its erased template.
+        SPEC_GF_NEEDED[gt_idx as usize] = true
+        spec_mark_cap_overflow(5)
         return
     }
-
-    let inst_hash = ast_name_hash(mangled_inst)
-    if SPEC_GF_INST_HASH[gt_idx as usize] != 0 {
-        if SPEC_GF_INST_HASH[gt_idx as usize] != inst_hash {
-            SPEC_GF_POISONED[gt_idx as usize] = true
-            // A poisoned template keeps its unspecialized body, and lowering
-            // has no generics concept. That is survivable for scalars and
-            // silently returns zeros for everything else, so refuse rather
-            // than emit code we know is wrong.
-            if !args_scalar || SPEC_GF_NONSCALAR[gt_idx as usize] {
-                SPEC_UNSOUND_POISON = true
-            }
-            if spec_trace_enabled() { print("specializer: poisoned (second distinct instantiation)\n") }
-        }
-        return
-    }
-    SPEC_GF_INST_HASH[gt_idx as usize] = inst_hash
-    if !args_scalar { SPEC_GF_NONSCALAR[gt_idx as usize] = true }
+    let fi = SPEC_FI_COUNT
+    SPEC_FI_GT[fi as usize] = gt_idx
+    SPEC_FI_KEY[fi as usize] = key
+    SPEC_FI_STAGE[fi as usize] = 0
+    SPEC_FI_MANGLED[fi as usize] = false
+    SPEC_FI_COUNT = fi + 1
+    SPEC_GF_INST_COUNT[gt_idx as usize] = SPEC_GF_INST_COUNT[gt_idx as usize] + 1
+    // Stored before any deep call: Name values held across deep calls arrive
+    // corrupted (see spec_subst_expr_mut).
+    let ns = heap_alloc(1024) as *mut SpecNameStage
+    (*ns).n = spec_fn_instance_name(base_name, targs)
+    SPEC_FI_NAME[fi as usize] = ns as i64
 
     match spec_generic_table_fd(gt_idx) {
         None => {}
@@ -1244,16 +2409,23 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, fn_ctx, targs)
             (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, fn_ctx, targs)
             (*fp).fd.body = spec_subst_block((*fp).fd.body, fn_ctx, targs)
-            // Scan the clone body for transitive turbofish instantiations
-            // (read-only walk; no tree mutation).
+            // Every declared parameter is substituted above, so the clone is a
+            // concrete fn: later stages must not scope the old names.
+            (*fp).fd.type_params = None
+            SPEC_FI_STAGE[fi as usize] = fp as i64
+            // Scan the clone body for transitive instantiations (read-only walk; no
+            // tree mutation), with the clone's now-concrete parameters in scope and its
+            // inferred call sites recorded against this instance.
+            let saved_top = SPEC_SC_TOP
+            let saved_ctx = SPEC_SCAN_CTX
+            spec_scope_push_params((*fp).fd.params)
+            SPEC_SCAN_CTX = fi
             spec_scan_block((*fp).fd.body)
-            let np = heap_alloc(16384) as *mut SpecItemNode
-            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
-            (*np).next = 0
-            SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
+            SPEC_SCAN_CTX = saved_ctx
+            SPEC_SC_TOP = saved_top
             if spec_trace_enabled() {
                 print("specializer: clone_ready=")
-                print(spec_name_to_string((*fp).fd.name))
+                print(spec_name_to_string((*ns).n))
                 print("\n")
             }
         }
@@ -1324,15 +2496,12 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
     spec_scan_block_opt(e.handler_block)
     spec_scan_expr_opt(e.closure_body)
 
-    if e.kind == ExprKind::ExprCall || e.kind == ExprKind::ExprMethodCall {
-        let callee_name = if e.kind == ExprKind::ExprMethodCall {
-            e.name
-        } else {
-            spec_call_expr_callee_name(e)
-        }
+    // A generic method's slot is never the target of a free call.
+    if e.kind == ExprKind::ExprCall {
+        let callee_name = spec_call_expr_callee_name(e)
         if !name_is_empty(callee_name) {
             let gt_idx = spec_generic_table_find(callee_name)
-            if gt_idx >= 0 {
+            if gt_idx >= 0 && !SPEC_GF_IS_METHOD[gt_idx as usize] {
                 var specialized = false
                 match spec_call_expr_type_args(e) {
                     Some(targs) => {
@@ -1353,28 +2522,52 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
                             specialized = true
                         }
                     }
-                    None => {}
+                    None => {
+                        // No turbofish: determine the type arguments from the arguments.
+                        match spec_infer_call_targs(gt_idx, e.args) {
+                            Some(inferred) => {
+                                spec_ensure_instance(callee_name, Some(inferred))
+                                // Recomputed after the deep instantiation call (Name
+                                // values held across deep calls arrive corrupted).
+                                spec_record_inferred_call(e.span, spec_call_expr_callee_name(e), Some(inferred))
+                                specialized = true
+                            }
+                            None => {}
+                        }
+                    }
                 }
                 if !specialized {
                     SPEC_GF_NEEDED[gt_idx as usize] = true
-                    if e.kind == ExprKind::ExprMethodCall {
-                        // Generic method inference is not represented in the
-                        // AST-only specializer. Keeping the generic method body
-                        // would silently hand free type variables to lowering.
-                        SPEC_METHOD_TARG_UNSUPPORTED = true
+                }
+            }
+        }
+    }
+
+    // `recv.method::<A>(...)`: a generic method is instantiated from its own
+    // turbofish only. Its arguments are not inferred here, so a call without one is
+    // refused; a turbofish on a method that declares no type parameters is refused
+    // too, so type arguments are never silently discarded.
+    if e.kind == ExprKind::ExprMethodCall {
+        let gt_m = spec_generic_table_find(e.name)
+        if gt_m >= 0 && SPEC_GF_IS_METHOD[gt_m as usize] {
+            var method_specialized = false
+            match spec_call_expr_type_args(e) {
+                Some(mtargs) => {
+                    if spec_type_args_count(Some(mtargs)) == spec_generic_table_tp_count(gt_m) {
+                        spec_ensure_instance(e.name, Some(mtargs))
+                        method_specialized = true
                     }
                 }
-            } else if e.kind == ExprKind::ExprMethodCall {
-                match spec_call_expr_type_args(e) {
-                    Some(_) => {
-                        // The checker may see a concrete signature after this
-                        // pass replaces a generic method with its same-name
-                        // clone. Reject every other method turbofish here so a
-                        // non-generic method can never discard type arguments.
-                        SPEC_METHOD_TARG_UNSUPPORTED = true
-                    }
-                    None => {}
-                }
+                None => {}
+            }
+            if !method_specialized {
+                SPEC_GF_NEEDED[gt_m as usize] = true
+                SPEC_METHOD_TARG_UNSUPPORTED = true
+            }
+        } else {
+            match spec_call_expr_type_args(e) {
+                Some(_mt) => { SPEC_METHOD_TARG_UNSUPPORTED = true }
+                None => {}
             }
         }
     }
@@ -1397,6 +2590,9 @@ fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div,
         Some(list) => {
             spec_scan_expr_opt((*list).head.expr)
             spec_scan_expr_opt((*list).head.target)
+            if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                spec_scope_bind_stmt((*list).head)
+            }
             spec_scan_stmt_list_opt((*list).tail)
         }
     }
@@ -1433,22 +2629,6 @@ fn spec_scan_struct_field_list_opt(opt: Option<Box<StructFieldList>>) with IO, M
     }
 }
 
-fn spec_scan_method_items(methods: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
-    match methods {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
-                match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
-                    None => {}
-                }
-            }
-            spec_scan_method_items((*list).tail)
-        }
-    }
-}
-
 fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
     match items {
         None => {}
@@ -1456,18 +2636,378 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
             let it = (*list).head
             if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
                 match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
+                    Some(fd_box) => {
+                        let saved_top = SPEC_SC_TOP
+                        spec_scope_push_params((*fd_box).params)
+                        spec_scan_block((*fd_box).body)
+                        SPEC_SC_TOP = saved_top
+                    }
                     None => {}
                 }
             } else if it.kind == ItemKind::ItemImpl {
+                // Method bodies call generic fns too; unscanned, such a call never
+                // instantiated its template, which could then be dropped outright. A
+                // generic impl's own bodies still name its parameters: its instances
+                // are scanned when emitted (spec_emit_impl_instances).
                 match it.impl_def {
-                    Some(id) => spec_scan_method_items((*id).methods)
+                    Some(id_box) => {
+                        if spec_generic_impl_template((*id_box).target_type) < 0 {
+                            spec_scan_items((*id_box).methods)
+                        }
+                    }
                     None => {}
                 }
             }
             spec_scan_items((*list).tail)
         }
     }
+}
+
+// ============================================================
+// Instance naming and call-site renaming
+// ============================================================
+//
+// A template with exactly one instantiation and no call that still needs it
+// keeps the same-name scheme: its clone replaces it and no call site changes, so
+// such programs lower byte-identically. Otherwise every instantiation is emitted
+// under its instance name, and each call `f::<A>(...)` it serves is rewritten to
+// call that name without type arguments. The rename writes go through
+// heap-staged *mut nodes, the pattern spec_subst_expr_mut documents, and a body
+// is rebuilt only when a read-only pass finds something in it to rename.
+
+fn spec_assign_instance_names() with Mut, Panic, Div {
+    var any: i64 = 0
+    var i: i64 = 0
+    while i < SPEC_FI_COUNT {
+        let gt = SPEC_FI_GT[i as usize]
+        if SPEC_GF_NEEDED[gt as usize] || SPEC_GF_INST_COUNT[gt as usize] > 1 {
+            SPEC_FI_MANGLED[i as usize] = true
+            any = any + 1
+        }
+        i = i + 1
+    }
+    SPEC_ANY_MANGLED = any
+}
+
+// The instance a call is rewritten to, or -1.
+fn spec_rename_call_target(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprCall { return 0 - 1 }
+    let callee_name = spec_call_expr_callee_name(e)
+    if name_is_empty(callee_name) { return 0 - 1 }
+    let gt_idx = spec_generic_table_find(callee_name)
+    if gt_idx < 0 || SPEC_GF_IS_METHOD[gt_idx as usize] { return 0 - 1 }
+    match spec_call_expr_type_args(e) {
+        None => {
+            // An inferred call carries no type args; the scan recorded its instance.
+            let fi_inferred = spec_inferred_call_lookup(e.span, SPEC_RENAME_CTX)
+            if fi_inferred >= 0 && SPEC_FI_MANGLED[fi_inferred as usize] { fi_inferred } else { 0 - 1 }
+        }
+        Some(targs) => {
+            if spec_type_args_count(Some(targs)) != spec_generic_table_tp_count(gt_idx) {
+                return 0 - 1
+            }
+            let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee_name, Some(targs))))
+            if fi >= 0 && SPEC_FI_MANGLED[fi as usize] { fi } else { 0 - 1 }
+        }
+    }
+}
+
+// The mangled instance a `recv.method::<A>(...)` call is rewritten to, or -1. A
+// generic method used with one argument list keeps its name and its clone replaces
+// it inside the impl, so its calls stay as written.
+fn spec_rename_method_target(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprMethodCall { return 0 - 1 }
+    let gt_idx = spec_generic_table_find(e.name)
+    if gt_idx < 0 || !SPEC_GF_IS_METHOD[gt_idx as usize] { return 0 - 1 }
+    match spec_call_expr_type_args(e) {
+        None => 0 - 1
+        Some(targs) => {
+            if spec_type_args_count(Some(targs)) != spec_generic_table_tp_count(gt_idx) {
+                return 0 - 1
+            }
+            let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(e.name, Some(targs))))
+            if fi >= 0 && SPEC_FI_MANGLED[fi as usize] { fi } else { 0 - 1 }
+        }
+    }
+}
+
+fn spec_expr_opt_has_rename(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(b) => spec_expr_has_rename(*b)
+    }
+}
+
+fn spec_expr_has_rename(e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if spec_rename_call_target(e) >= 0 { return true }
+    if spec_rename_method_target(e) >= 0 { return true }
+    if spec_expr_opt_has_rename(e.left) { return true }
+    if spec_expr_opt_has_rename(e.right) { return true }
+    if spec_block_opt_has_rename(e.block) { return true }
+    if spec_expr_opt_has_rename(e.else_expr) { return true }
+    if spec_expr_list_opt_has_rename(e.args) { return true }
+    if spec_arm_list_opt_has_rename(e.arms) { return true }
+    if spec_field_list_opt_has_rename(e.fields) { return true }
+    if spec_block_opt_has_rename(e.handler_block) { return true }
+    spec_expr_opt_has_rename(e.closure_body)
+}
+
+fn spec_block_has_rename(b: Block) -> bool with Mut, Panic, Div, Alloc {
+    spec_stmt_list_opt_has_rename(b.stmts)
+}
+
+fn spec_block_opt_has_rename(opt: Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(b) => spec_stmt_list_opt_has_rename((*b).stmts)
+    }
+}
+
+fn spec_stmt_list_opt_has_rename(opt: Option<Box<StmtList>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_expr_opt_has_rename((*list).head.expr) { return true }
+            if spec_expr_opt_has_rename((*list).head.target) { return true }
+            spec_stmt_list_opt_has_rename((*list).tail)
+        }
+    }
+}
+
+fn spec_expr_list_opt_has_rename(opt: Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_expr_has_rename((*list).head) { return true }
+            spec_expr_list_opt_has_rename((*list).tail)
+        }
+    }
+}
+
+fn spec_arm_list_opt_has_rename(opt: Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_expr_opt_has_rename((*list).head.guard) { return true }
+            if spec_expr_has_rename((*list).head.body) { return true }
+            spec_arm_list_opt_has_rename((*list).tail)
+        }
+    }
+}
+
+fn spec_field_list_opt_has_rename(opt: Option<Box<StructFieldList>>) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_expr_has_rename((*list).head.value) { return true }
+            spec_field_list_opt_has_rename((*list).tail)
+        }
+    }
+}
+
+fn spec_rename_expr_mut(p: *mut SpecExprStage) with Mut, Panic, Div, Alloc {
+    (*p).e.left = spec_rename_expr_opt((*p).e.left)
+    (*p).e.right = spec_rename_expr_opt((*p).e.right)
+    (*p).e.block = spec_rename_block_opt((*p).e.block)
+    (*p).e.else_expr = spec_rename_expr_opt((*p).e.else_expr)
+    (*p).e.args = spec_rename_expr_list_opt((*p).e.args)
+    (*p).e.arms = spec_rename_match_arm_list_opt((*p).e.arms)
+    (*p).e.fields = spec_rename_struct_field_list_opt((*p).e.fields)
+    (*p).e.handler_block = spec_rename_block_opt((*p).e.handler_block)
+    (*p).e.closure_body = spec_rename_expr_opt((*p).e.closure_body)
+    let fi = spec_rename_call_target((*p).e)
+    if fi >= 0 {
+        match (*p).e.left {
+            Some(callee_box) => {
+                let cq = heap_alloc(32768) as *mut SpecExprStage
+                let callee_tmp = *callee_box
+                (*cq).e = callee_tmp
+                let ns = SPEC_FI_NAME[fi as usize] as *mut SpecNameStage
+                (*cq).e.name = (*ns).n
+                (*cq).e.path = spec_name_to_path((*ns).n)
+                (*cq).e.type_args = None
+                (*p).e.left = Some(Box::new((*cq).e))
+            }
+            None => {}
+        }
+        // The parser stamps turbofish args on the call node as well as the callee.
+        (*p).e.type_args = None
+    }
+    // `recv.method::<A>(...)` with a mangled instance: call it by that name. Its
+    // clone is emitted inside the impl (spec_finalize_method_items).
+    let mfi = spec_rename_method_target((*p).e)
+    if mfi >= 0 {
+        let mns = SPEC_FI_NAME[mfi as usize] as *mut SpecNameStage
+        (*p).e.name = (*mns).n
+        (*p).e.type_args = None
+    }
+}
+
+fn spec_rename_expr_opt(opt: Option<Box<Expr>>) -> Option<Box<Expr>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(b) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = *b
+            (*q).e = tmp
+            spec_rename_expr_mut(q)
+            Some(Box::new((*q).e))
+        }
+    }
+}
+
+fn spec_rename_block(b: Block) -> Block with Mut, Panic, Div, Alloc {
+    Block { stmts: spec_rename_stmt_list_opt(b.stmts), span: b.span }
+}
+
+fn spec_rename_block_opt(opt: Option<Box<Block>>) -> Option<Box<Block>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(b) => Some(Box::new(spec_rename_block(*b)))
+    }
+}
+
+fn spec_rename_stmt_list_opt(opt: Option<Box<StmtList>>) -> Option<Box<StmtList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let sp = heap_alloc(16384) as *mut SpecStmtStage
+            let tmp = (*list).head
+            (*sp).s = tmp
+            (*sp).s.expr = spec_rename_expr_opt((*sp).s.expr)
+            (*sp).s.target = spec_rename_expr_opt((*sp).s.target)
+            Some(Box::new(StmtList { head: (*sp).s, tail: spec_rename_stmt_list_opt((*list).tail) }))
+        }
+    }
+}
+
+fn spec_rename_expr_list_opt(opt: Option<Box<ExprList>>) -> Option<Box<ExprList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head
+            (*q).e = tmp
+            spec_rename_expr_mut(q)
+            Some(Box::new(ExprList { label: (*list).label, head: (*q).e, tail: spec_rename_expr_list_opt((*list).tail) }))
+        }
+    }
+}
+
+fn spec_rename_match_arm_list_opt(opt: Option<Box<MatchArmList>>) -> Option<Box<MatchArmList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head.body
+            (*q).e = tmp
+            spec_rename_expr_mut(q)
+            let new_arm = MatchArm {
+                pattern: (*list).head.pattern,
+                guard: spec_rename_expr_opt((*list).head.guard),
+                body: (*q).e,
+                span: (*list).head.span,
+            }
+            Some(Box::new(MatchArmList { head: new_arm, tail: spec_rename_match_arm_list_opt((*list).tail) }))
+        }
+    }
+}
+
+fn spec_rename_struct_field_list_opt(opt: Option<Box<StructFieldList>>) -> Option<Box<StructFieldList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = (*list).head.value
+            (*q).e = tmp
+            spec_rename_expr_mut(q)
+            let new_init = StructFieldInit { name: (*list).head.name, value: (*q).e }
+            Some(Box::new(StructFieldList { head: new_init, tail: spec_rename_struct_field_list_opt((*list).tail) }))
+        }
+    }
+}
+
+// Rewrite call sites in every fn and impl-method body that has one to rewrite.
+fn spec_rename_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match items {
+        None => None
+        Some(list) => {
+            let rest = spec_rename_items((*list).tail)
+            let node = heap_alloc(16384) as *mut SpecItemNode
+            let it_tmp = (*list).head
+            (*node).it = it_tmp
+            (*node).next = 0
+            if (*node).it.kind == ItemKind::ItemFn {
+                match (*node).it.fn_def {
+                    Some(fd_box) => {
+                        if spec_block_has_rename((*fd_box).body) {
+                            let fp = heap_alloc(32768) as *mut SpecFnDefStage
+                            let fd_tmp = *fd_box
+                            (*fp).fd = fd_tmp
+                            (*fp).fd.body = spec_rename_block((*fp).fd.body)
+                            (*node).it.fn_def = Some(Box::new((*fp).fd))
+                        }
+                    }
+                    None => {}
+                }
+            } else if (*node).it.kind == ItemKind::ItemImpl {
+                match (*node).it.impl_def {
+                    Some(id_box) => {
+                        let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                        let id_tmp = *id_box
+                        (*ip).id = id_tmp
+                        (*ip).id.methods = spec_rename_items((*ip).id.methods)
+                        (*node).it.impl_def = Some(Box::new((*ip).id))
+                    }
+                    None => {}
+                }
+            }
+            Some(Box::new(ItemList { head: (*node).it, tail: rest }))
+        }
+    }
+}
+
+// The item for instance `fi`: its clone under the template's name or, when mangled,
+// under its instance name, with its own call sites renamed.
+fn spec_instance_item(fi: i64) -> Item with Mut, Panic, Div, Alloc {
+    let fp = SPEC_FI_STAGE[fi as usize] as *mut SpecFnDefStage
+    if SPEC_FI_MANGLED[fi as usize] {
+        let ns = SPEC_FI_NAME[fi as usize] as *mut SpecNameStage
+        (*fp).fd.name = (*ns).n
+    }
+    // Calls inside this clone were recorded against it (spec_record_inferred_call).
+    let saved_rename_ctx = SPEC_RENAME_CTX
+    SPEC_RENAME_CTX = fi
+    if SPEC_ANY_MANGLED > 0 && spec_block_has_rename((*fp).fd.body) {
+        (*fp).fd.body = spec_rename_block((*fp).fd.body)
+    }
+    SPEC_RENAME_CTX = saved_rename_ctx
+    spec_make_fn_item((*fp).fd.name, (*fp).fd)
+}
+
+// The one instance of a template that keeps the template's name, or -1.
+fn spec_same_name_instance(gt_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_FI_COUNT {
+        if SPEC_FI_GT[i as usize] == gt_idx && !SPEC_FI_MANGLED[i as usize] && SPEC_FI_STAGE[i as usize] != 0 {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_mangled_instance_items() -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out: Option<Box<ItemList>> = None
+    var i: i64 = SPEC_FI_COUNT - 1
+    while i >= 0 {
+        // A generic method's instances are emitted inside its impl instead.
+        if SPEC_FI_MANGLED[i as usize] && SPEC_FI_STAGE[i as usize] != 0 && !SPEC_GF_IS_METHOD[SPEC_FI_GT[i as usize] as usize] {
+            out = Some(Box::new(ItemList { head: spec_instance_item(i), tail: out }))
+        }
+        i = i - 1
+    }
+    out
 }
 
 // ============================================================
@@ -1494,6 +3034,47 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
     out
 }
 
+// The emitted extras of one kind, in creation order: the impl instances
+// (want_impl) or everything else (the struct instances).
+fn spec_extra_items_of_kind(want_impl: bool) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out: Option<Box<ItemList>> = None
+    var cur = SPEC_EXTRA_HEAD
+    while cur != 0 {
+        let p = cur as *mut SpecItemNode
+        var is_impl = false
+        if (*p).it.kind == ItemKind::ItemImpl { is_impl = true }
+        if is_impl == want_impl {
+            out = Some(Box::new(ItemList { head: (*p).it, tail: out }))
+        }
+        cur = (*p).next
+    }
+    out
+}
+
+// `ins` spliced in before the first fn of `items`. Order matters for impls: a
+// method call lowered before the method itself reads an empty signature -- the
+// receiver is passed by value instead of by reference and an f64 result is read as
+// an integer. Measured with an ordinary impl written after `main` in the same
+// lane: `self.v` SIGSEGVs and an f64 method returns garbage, while the same program
+// with the impl first passes. Emitted impl instances used to be appended after
+// every fn, `main` included.
+fn spec_insert_before_first_fn(items: Option<Box<ItemList>>, ins: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    match ins {
+        None => { return items }
+        Some(_i) => {}
+    }
+    match items {
+        None => ins
+        Some(list) => {
+            if (*list).head.kind == ItemKind::ItemFn {
+                spec_append_items(ins, items)
+            } else {
+                Some(Box::new(ItemList { head: (*list).head, tail: spec_insert_before_first_fn((*list).tail, ins) }))
+            }
+        }
+    }
+}
+
 // Finalize phase (runs after ALL bodies have been scanned, so every call
 // site has voted): for each generic template item —
 //   - poisoned (2+ distinct instantiations) or still referenced by a
@@ -1503,28 +3084,104 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
 //     same-name clone;
 //   - never referenced: drop it so the checker never sees a body with free
 //     type vars.
+// The method item for instance `fi` of a generic method: its clone under the
+// method's name or, when mangled, its instance name, with its own call sites
+// renamed. The template's kind, span and visibility are kept, so a `pub fn pick<T>`
+// clone stays pub. The template is staged first: values carrying Names that are
+// held across the deep rename call arrive corrupted.
+fn spec_method_instance_item(fi: i64, tmpl: Item) -> Item with Mut, Panic, Div, Alloc {
+    let tn = heap_alloc(16384) as *mut SpecItemNode
+    (*tn).it = tmpl
+    (*tn).next = 0
+    let fp = SPEC_FI_STAGE[fi as usize] as *mut SpecFnDefStage
+    if SPEC_FI_MANGLED[fi as usize] {
+        let ns = SPEC_FI_NAME[fi as usize] as *mut SpecNameStage
+        (*fp).fd.name = (*ns).n
+    }
+    let saved_rename_ctx = SPEC_RENAME_CTX
+    SPEC_RENAME_CTX = fi
+    if SPEC_ANY_MANGLED > 0 && spec_block_has_rename((*fp).fd.body) {
+        (*fp).fd.body = spec_rename_block((*fp).fd.body)
+    }
+    SPEC_RENAME_CTX = saved_rename_ctx
+    Item {
+        kind: (*tn).it.kind, span: (*tn).it.span, visibility: (*tn).it.visibility, name: (*fp).fd.name, fn_def: Some(Box::new((*fp).fd)),
+        struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+
+// The mangled instances of generic method slot `gt_idx`, in creation order, ahead of
+// `tail`.
+fn spec_method_mangled_instances(gt_idx: i64, tmpl: Item, tail: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    let tn = heap_alloc(16384) as *mut SpecItemNode
+    (*tn).it = tmpl
+    (*tn).next = 0
+    var out = tail
+    var i: i64 = SPEC_FI_COUNT - 1
+    while i >= 0 {
+        if SPEC_FI_GT[i as usize] == gt_idx && SPEC_FI_MANGLED[i as usize] && SPEC_FI_STAGE[i as usize] != 0 {
+            out = Some(Box::new(ItemList { head: spec_method_instance_item(i, (*tn).it), tail: out }))
+        }
+        i = i - 1
+    }
+    out
+}
+
+// An impl's methods with its generic methods resolved: a method used with one
+// type-argument list is replaced by its same-name clone; one used with several gets a
+// clone per list under each instance name, beside it (its calls were renamed to
+// match); one still called without a turbofish is kept as written, and the program
+// is refused (spec_report_unsupported_method_generic); one never called is dropped.
 fn spec_finalize_method_items(methods: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
     match methods {
         None => None
         Some(list) => {
-            let it = (*list).head
             let rest = spec_finalize_method_items((*list).tail)
-            if it.kind == ItemKind::ItemFn {
-                let gt_idx = spec_generic_table_find(it.name)
-                if gt_idx >= 0 {
-                    if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
-                        return Some(Box::new(ItemList { head: it, tail: rest }))
+            let tn = heap_alloc(16384) as *mut SpecItemNode
+            let it_tmp = (*list).head
+            (*tn).it = it_tmp
+            (*tn).next = 0
+            if (*tn).it.kind == ItemKind::ItemFn {
+                let gt_idx = spec_generic_table_find((*tn).it.name)
+                if gt_idx >= 0 && SPEC_GF_IS_METHOD[gt_idx as usize] {
+                    let with_mangled = spec_method_mangled_instances(gt_idx, (*tn).it, rest)
+                    if SPEC_GF_NEEDED[gt_idx as usize] {
+                        return Some(Box::new(ItemList { head: (*tn).it, tail: with_mangled }))
                     }
-                    if SPEC_GF_CLONE_PTR[gt_idx as usize] != 0 {
-                        let np = SPEC_GF_CLONE_PTR[gt_idx as usize] as *mut SpecItemNode
-                        return Some(Box::new(ItemList { head: (*np).it, tail: rest }))
+                    let fi = spec_same_name_instance(gt_idx)
+                    if fi >= 0 {
+                        return Some(Box::new(ItemList { head: spec_method_instance_item(fi, (*tn).it), tail: with_mangled }))
                     }
-                    return rest
+                    return with_mangled
                 }
             }
-            Some(Box::new(ItemList { head: it, tail: rest }))
+            Some(Box::new(ItemList { head: (*tn).it, tail: rest }))
         }
     }
+}
+
+// Does this impl hold a generic method slot (one spec_finalize_method_items rewrites)?
+fn spec_methods_have_generic_slot(methods: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    var cur = methods
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemFn {
+                    let g = spec_generic_table_find((*list).head.name)
+                    if g >= 0 && SPEC_GF_IS_METHOD[g as usize] { return true }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
 }
 
 fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
@@ -1536,25 +3193,37 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
             if it.kind == ItemKind::ItemFn {
                 let gt_idx = spec_generic_table_find(it.name)
                 if gt_idx >= 0 {
-                    if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
+                    // Still called without type arguments (or out of instance slots):
+                    // keep the template; its instances are emitted under their own
+                    // names (spec_mangled_instance_items).
+                    if SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
                     }
-                    if SPEC_GF_CLONE_PTR[gt_idx as usize] != 0 {
-                        let np = SPEC_GF_CLONE_PTR[gt_idx as usize] as *mut SpecItemNode
-                        return Some(Box::new(ItemList { head: (*np).it, tail: rest }))
+                    let fi = spec_same_name_instance(gt_idx)
+                    if fi >= 0 {
+                        return Some(Box::new(ItemList { head: spec_instance_item(fi), tail: rest }))
                     }
                     return rest
                 }
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => {
-                        let ip = heap_alloc(16384) as *mut SpecImplDefStage
-                        let tmp_id = (*id)
-                        (*ip).id = tmp_id
-                        (*ip).id.methods = spec_finalize_method_items((*ip).id.methods)
-                        var out_it = it
-                        out_it.impl_def = Some(Box::new((*ip).id))
-                        return Some(Box::new(ItemList { head: out_it, tail: rest }))
+                    Some(id_box) => {
+                        // A generic impl whose every use named an instance was emitted once
+                        // per instance (spec_emit_impl_instances); the erased template goes.
+                        let gi_st = spec_generic_impl_template((*id_box).target_type)
+                        if gi_st >= 0 && SPEC_ST_INST_COUNT[gi_st as usize] > 0 && !SPEC_ST_IMPL_NEEDED[gi_st as usize] {
+                            return rest
+                        }
+                        // An impl holding a generic method: its methods are resolved in place.
+                        if spec_methods_have_generic_slot((*id_box).methods) {
+                            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                            let tmp_id = (*id_box)
+                            (*ip).id = tmp_id
+                            (*ip).id.methods = spec_finalize_method_items((*ip).id.methods)
+                            var out_it = it
+                            out_it.impl_def = Some(Box::new((*ip).id))
+                            return Some(Box::new(ItemList { head: out_it, tail: rest }))
+                        }
                     }
                     None => {}
                 }
@@ -1580,6 +3249,69 @@ fn spec_trace_enabled() -> bool with IO, Mut, Panic, Div {
     SPEC_TRACE_ENABLED_ON == 1
 }
 
+// `&Box1__f64` / `T` / `f64`: the head name of a type, through references.
+fn spec_trace_type_head(te: TypeExpr) with IO, Mut, Panic, Div {
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        print("&")
+        match te.inner {
+            Some(inner) => { spec_trace_type_head(*inner) }
+            None => { print("?") }
+        }
+        return
+    }
+    if te.kind == TypeExprKind::TypeNamed {
+        print(spec_name_to_string(spec_path_head_name(te.path)))
+        match te.type_args {
+            Some(_ta) => { print("<..>") }
+            None => {}
+        }
+        return
+    }
+    print("_")
+}
+
+fn spec_trace_out_method_names(opt: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                print(" ")
+                print(spec_name_to_string((*list).head.name))
+                // Parameter and return type heads, so the trace shows whether an
+                // instance's methods were substituted (`x:f64`) or kept erased (`x:T`).
+                match (*list).head.fn_def {
+                    Some(fd_box) => {
+                        print("(")
+                        var pc = (*fd_box).params
+                        var pgoing = true
+                        while pgoing {
+                            match pc {
+                                None => { pgoing = false }
+                                Some(pl) => {
+                                    print(spec_name_to_string((*pl).head.name))
+                                    print(":")
+                                    spec_trace_type_head((*pl).head.ty)
+                                    print(",")
+                                    pc = (*pl).tail
+                                }
+                            }
+                        }
+                        print(")->")
+                        match (*fd_box).return_type {
+                            Some(rt) => { spec_trace_type_head(*rt) }
+                            None => { print("()") }
+                        }
+                    }
+                    None => {}
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
 fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
     match items {
         None => {}
@@ -1593,6 +3325,21 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
                 print("specializer: out_struct ")
                 print(spec_name_to_string(it.name))
                 print("\n")
+            } else if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id_box) => {
+                        print("specializer: out_impl ")
+                        print(spec_name_to_string(spec_path_head_name((*id_box).target_type.path)))
+                        match (*id_box).target_type.type_args {
+                            Some(_ta) => { print("<..>") }
+                            None => {}
+                        }
+                        print(" methods:")
+                        spec_trace_out_method_names((*id_box).methods)
+                        print("\n")
+                    }
+                    None => {}
+                }
             }
             spec_trace_out_items((*list).tail)
         }
@@ -1603,19 +3350,36 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     spec_reset_state()
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
     spec_collect_generic_fns(items, known)
-    spec_collect_generic_methods(items, known)
     spec_collect_generic_structs(items)
+    // After the structs: a method of a generic impl is recognised through them.
+    spec_collect_generic_methods(items, known)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
         print_int(SPEC_GF_COUNT)
         print("\n")
     }
-    if SPEC_GF_COUNT == 0 {
+    spec_collect_generic_impls(items)
+    if SPEC_GF_COUNT == 0 && SPEC_GI_COUNT == 0 {
         return items
     }
-    spec_scan_items(items)
-    let finalized = spec_finalize_items(items)
-    let out = spec_append_items(finalized, spec_extra_items_to_list())
+    spec_collect_return_types(items)
+    var work_items = items
+    if SPEC_GI_COUNT > 0 {
+        work_items = spec_mono_items(items)
+    }
+    spec_scan_items(work_items)
+    spec_assign_instance_names()
+    var source_items = work_items
+    if SPEC_ANY_MANGLED > 0 {
+        source_items = spec_rename_items(work_items)
+        spec_rename_impl_instances()
+    }
+    let finalized = spec_finalize_items(source_items)
+    // Impl instances go before the first fn (see spec_insert_before_first_fn);
+    // struct instances stay at the end, where they have always been emitted.
+    let with_impls = spec_insert_before_first_fn(finalized, spec_extra_items_of_kind(true))
+    let with_structs = spec_append_items(with_impls, spec_extra_items_of_kind(false))
+    let out = spec_append_items(with_structs, spec_mangled_instance_items())
     if spec_trace_enabled() {
         print("specializer: instances=")
         print_int(SPEC_EMITTED_COUNT)
@@ -1656,8 +3420,8 @@ pub fn spec_last_instantiated() -> bool with Mut, Panic, Div {
 pub fn spec_mono_marker_count() -> i64 with Mut, Panic, Div {
     var n: i64 = SPEC_EMITTED_COUNT
     var i: i64 = 0
-    while i < SPEC_GF_COUNT {
-        if SPEC_GF_CLONE_PTR[i as usize] != 0 {
+    while i < SPEC_FI_COUNT {
+        if SPEC_FI_STAGE[i as usize] != 0 {
             n = n + 1
         }
         i = i + 1
