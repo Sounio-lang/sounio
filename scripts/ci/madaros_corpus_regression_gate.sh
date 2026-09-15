@@ -43,20 +43,14 @@ MADAROS="${SOUNIO_MADAROS_CORPUS_BIN:-}"
 REFRESH="${SOUNIO_MADAROS_CORPUS_REFRESH:-0}"
 JOBS="${SOUNIO_TEST_JOBS:-4}"
 
-# The same resource reservation bin/madaros applies before every raw exec, with
-# the same variables and defaults (MADAROS_STACK_KB=0 means unlimited). This gate
-# execs the raw ELF directly, so without it every compile ran under the caller's
-# shell limits. Madaros has multi-MB stack frames; under the default 8 MiB stack,
-# measured 2026-09-14, a hello-world compile exits 139, and the gate reported
-# 1792 of 1915 programs as having SEGFAULTED the compiler -- stack overflows the
-# harness caused, and a verdict that depended on `ulimit -s` of whoever ran it.
-MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+# This gate execs the raw Madaros ELF directly, not through bin/madaros, so it
+# applies the limits bin/madaros would. The stack is raised once for the whole
+# gate below (SOUNIO_MADAROS_CORPUS_STACK_KB): under the default 8 MiB stack,
+# measured 2026-09-14, a hello-world compile exits 139 and the gate reported 1792
+# of 1915 programs as having SEGFAULTED the compiler. The virtual-memory cap is
+# bin/madaros's, with the same variable and default, and is scoped to each
+# compile.
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
-if [[ "$MADAROS_STACK_KB" == "0" ]]; then
-  MADAROS_STACK_ULIMIT="unlimited"
-else
-  MADAROS_STACK_ULIMIT="$MADAROS_STACK_KB"
-fi
 
 fail() {
   echo "[madaros-corpus] FAIL: $*" >&2
@@ -66,13 +60,31 @@ fail() {
 [[ -n "$MADAROS" ]] || fail "SOUNIO_MADAROS_CORPUS_BIN must name a current-source Madaros ELF"
 [[ -x "$MADAROS" ]] || fail "not executable: $MADAROS"
 
-# bin/madaros ignores a ulimit the hard limit refuses. A gate cannot: the run
-# would silently fall back to the caller's limits, which is the defect above.
-# Probe in a subshell and refuse if either limit did not take effect.
-got_stack="$(ulimit -s "$MADAROS_STACK_ULIMIT" 2>/dev/null; ulimit -s)"
+# The raw Madaros ELF needs far more stack than the default 8 MiB. This gate
+# execs it directly (bin/souc and bin/madaros raise the stack; this does not go
+# through them), so it raises the limit here, in its own shell, before anything
+# spawns: xargs and every run_one.sh inherit it.
+#
+# Measured 2026-09-15 on the workspace pod: under `ulimit -s 8192`, 47 of the 56
+# programs on the #2507 regression list SIGSEGVed inside
+# `run_check_mode: about to check N modules`; under 1048576 the same binaries
+# gave ordinary diagnostics (e.g. dissertation_pbpk14_model_form_uc.sio ->
+# error[E259]). Exit 139 is reported below as "the compiler CRASHED", and a
+# refresh writes it into the baseline, so a small stack does not produce a
+# weaker verdict -- it produces false crashes. If the limit cannot be raised,
+# refuse to measure.
+CORPUS_STACK_KB="${SOUNIO_MADAROS_CORPUS_STACK_KB:-1048576}"
+[[ "$CORPUS_STACK_KB" =~ ^([1-9][0-9]*|unlimited)$ ]] \
+  || fail "SOUNIO_MADAROS_CORPUS_STACK_KB must be a positive KiB count or 'unlimited', got '$CORPUS_STACK_KB'"
+ulimit -s "$CORPUS_STACK_KB" 2>/dev/null \
+  || fail "cannot raise the stack to $CORPUS_STACK_KB KiB (soft $(ulimit -s), hard $(ulimit -Hs)) -- compiles would SIGSEGV and read as compiler crashes; no verdict"
+[[ "$(ulimit -s)" == "$CORPUS_STACK_KB" ]] \
+  || fail "stack is $(ulimit -s) KiB after requesting $CORPUS_STACK_KB -- no verdict"
+
+# bin/madaros ignores a vmem ulimit the hard limit refuses. A gate cannot: the
+# run would silently fall back to the caller's limit. Probe in a subshell and
+# refuse if the cap did not take effect.
 got_vmem="$(ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null; ulimit -v)"
-[[ "$got_stack" == "$MADAROS_STACK_ULIMIT" ]] \
-  || fail "cannot set stack limit $MADAROS_STACK_ULIMIT KiB (got $got_stack; hard limit $(ulimit -Hs)) -- compiles would overflow, no verdict"
 [[ "$got_vmem" == "$MADAROS_VMEM_LIMIT_KB" ]] \
   || fail "cannot set vmem limit $MADAROS_VMEM_LIMIT_KB KiB (got $got_vmem; hard limit $(ulimit -Hv)) -- no verdict"
 
@@ -81,7 +93,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 echo "[madaros-corpus] compiler: $MADAROS"
 "$MADAROS" --version 2>&1 | head -1 | sed 's/^/[madaros-corpus] /'
-echo "[madaros-corpus] compiler limits: stack $MADAROS_STACK_ULIMIT KiB, vmem $MADAROS_VMEM_LIMIT_KB KiB"
+echo "[madaros-corpus] stack: ulimit -s $(ulimit -s) KiB (SOUNIO_MADAROS_CORPUS_STACK_KB); compiler vmem: $MADAROS_VMEM_LIMIT_KB KiB (MADAROS_VMEM_LIMIT_KB)"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
@@ -131,11 +143,11 @@ if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 # The status is captured BEFORE any test, because inside `if ! cmd; then` the
 # value of $? is the negation's status and always 0 -- which would classify
 # every kill as an ordinary compile failure, the exact reading this guards.
-# Limits are scoped to the compiler exec, as bin/madaros scopes them; the test
-# ELF below runs under the caller's limits. `exec` keeps the subshell's status
-# the compiler's own, so 137 and 139 still arrive as signals.
-( ulimit -s "$MADAROS_STACK_ULIMIT" 2>/dev/null || true
-  ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true
+# The vmem cap is scoped to the compiler exec, as bin/madaros scopes it; the test
+# ELF below runs under the caller's vmem. The stack was raised for the whole gate
+# and is inherited here. `exec` keeps the subshell's status the compiler's own,
+# so 137 and 139 still arrive as signals.
+( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true
   exec "$MADAROS" compile "$src" -o "$elf" ) >/dev/null 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
@@ -191,7 +203,7 @@ cat > "$WORK/timeout_run.sh" <<'TR'
 timeout 30 "$1" 2>/dev/null
 TR
 chmod +x "$WORK/timeout_run.sh"
-export MADAROS WORK MADAROS_STACK_ULIMIT MADAROS_VMEM_LIMIT_KB
+export MADAROS WORK MADAROS_VMEM_LIMIT_KB
 
 : > "$WORK/ran.txt"
 : > "$WORK/killed.txt"
@@ -255,6 +267,12 @@ if [[ "$REFRESH" == "1" ]]; then
     echo "# Regenerate:"
     echo "#   SOUNIO_MADAROS_CORPUS_BIN=<madaros> SOUNIO_MADAROS_CORPUS_REFRESH=1 \\"
     echo "#     bash scripts/ci/madaros_corpus_regression_gate.sh"
+    echo "#"
+    echo "# Stack: Madaros needs far more than the default 8 MiB. The gate raises"
+    echo "# ulimit -s to SOUNIO_MADAROS_CORPUS_STACK_KB (default 1048576) and refuses"
+    echo "# to run if it cannot; do not regenerate by bypassing that. On a small stack"
+    echo "# compiles SIGSEGV (exit 139) and land here as false compile/run/stdout entries."
+    echo "# This file was generated under ulimit -s $(ulimit -s) KiB."
     echo "#"
     echo "# One entry per failing program:
 #   '<name>.sio compile'  -- did not compile
