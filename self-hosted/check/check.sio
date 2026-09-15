@@ -1899,6 +1899,24 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
 
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // KL-13b: `f64<m/s>` / `f64<mol/cm3>` — UnitExpr in the single type argument.
+    if name_is_f64(name) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    None => {
+                        let dim = checker_unit_dim_from_type_expr((*c).units, (*args).head)
+                        return checker_ty_from_unit_dim(c, dim)
+                    }
+                    Some(_) => {
+                        checker_note_type_error_mut(c)
+                        return ty_error()
+                    }
+                }
+            }
+            None => return ty_f64()
+        }
+    }
     // ZD surgical family. The *mut match on TypeExprKind maps every
     // discriminant onto TypeNamed, so ExactlyPrivate<T> arrives here as a
     // name + type_args, the same way Seq and Hyper already do. Interrogate
@@ -2960,8 +2978,8 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeFn => checker_lower_fn_type_expr_mut(c, te)
         TypeExprKind::TypeArray => checker_lower_array_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeTuple => checker_lower_tuple_type_mut(c, te.type_args)
-        TypeExprKind::TypeReference => checker_lower_ref_type_mut(c, te.inner)
-        TypeExprKind::TypeRefMut => checker_lower_ref_mut_type_mut(c, te.inner)
+        TypeExprKind::TypeReference => checker_lower_unit_or_ref_type_mut(c, te, false)
+        TypeExprKind::TypeRefMut => checker_lower_unit_or_ref_type_mut(c, te, true)
         TypeExprKind::TypeRawPtr => checker_lower_raw_ptr_type_mut(c, te.inner, te.array_size)
         TypeExprKind::TypeRefinement => checker_lower_refinement_type_mut(c, te.refinement_info, te.span)
         _ => {
@@ -2972,6 +2990,75 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
 
     checker_exit_type_expr_mut(c)
     lowered
+}
+
+fn checker_unit_path_first_name(path: AstPath) -> Name {
+    Name {
+        buf: path.segments.head_buf,
+        len: path.segments.head_len,
+    }
+}
+
+// Lower a derived-unit TypeExpr (`m / s`, `mol/cm3`) as encoded by parse_unit_item /
+// parse_named_type: TypeReference = divide, TypeRefMut = multiply, with the left
+// factor in type_args.head and the right in inner.
+fn checker_unit_dim_from_type_expr(reg: UnitRegistry, ty: TypeExpr) -> UnitDim with Mut, Panic, Div, Alloc {
+    let base_name = checker_unit_path_first_name(ty.path)
+    let base_idx = reg.find(base_name)
+    var base_dim = unit_dim_dimensionless()
+    if base_idx >= 0 {
+        base_dim = reg.get_dim(base_idx)
+    }
+    match ty.type_args {
+        Some(args) => {
+            base_dim = checker_unit_dim_from_type_expr(reg, (*args).head)
+        }
+        None => {}
+    }
+    if ty.kind == TypeExprKind::TypeReference {
+        match ty.inner {
+            Some(inner) => unit_dim_div(base_dim, checker_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else if ty.kind == TypeExprKind::TypeRefMut {
+        match ty.inner {
+            Some(inner) => unit_dim_mul(base_dim, checker_unit_dim_from_type_expr(reg, *inner)),
+            None => base_dim
+        }
+    } else {
+        base_dim
+    }
+}
+
+fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if unit_dim_is_dimensionless(dim) {
+        return ty_f64()
+    }
+    let found = (*c).units.find_by_dim(dim)
+    if found >= 0 {
+        return ty_with_unit(ty_f64(), found)
+    }
+    let anon = Name { buf: [0; 384], len: 0 }
+    (*c).units = (*c).units.register(anon, dim)
+    ty_with_unit(ty_f64(), (*c).units.count - 1)
+}
+
+fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // KL-13b: TypeReference/TypeRefMut with type_args encode unit ÷/× (see parse_unit_item).
+    // Without type_args they remain &T / &!T.
+    match te.type_args {
+        Some(_) => {
+            let dim = checker_unit_dim_from_type_expr((*c).units, te)
+            checker_ty_from_unit_dim(c, dim)
+        }
+        None => {
+            if is_mut_ref {
+                checker_lower_ref_mut_type_mut(c, te.inner)
+            } else {
+                checker_lower_ref_type_mut(c, te.inner)
+            }
+        }
+    }
 }
 
 pub fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -5046,10 +5133,20 @@ fn unit_dim_from_type_expr(reg: UnitRegistry, te: TypeExpr, depth: i64) -> UnitD
     unit_dim_dimensionless()
 }
 
-fn unit_dim_for_decl(reg: UnitRegistry, conv: Option<Box<TypeExpr> >) -> UnitDim with Mut, Panic, Div, Alloc {
+// A bare `unit K;` that re-declares a name already in the registry (a
+// builtin such as `mol`, or a Madaros unit alias) keeps that entry's
+// dimension instead of resetting it to the zero vector.
+fn unit_dim_for_decl(reg: UnitRegistry, name: Name, conv: Option<Box<TypeExpr> >) -> UnitDim with Mut, Panic, Div, Alloc {
     match conv {
         Some(te) => unit_dim_from_type_expr(reg, *te, 0)
-        None => unit_dim_dimensionless()
+        None => {
+            let existing = reg.find(name)
+            if existing >= 0 {
+                reg.get_dim(existing)
+            } else {
+                unit_dim_dimensionless()
+            }
+        }
     }
 }
 
@@ -5607,7 +5704,7 @@ fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<B
     // lowers to ty_with_unit(ty_f64(), idx) instead of an opaque ty_named --
     // and now with the REAL dimension decoded from the `= mol / s` tail the
     // parser has always stored, instead of the zero vector.
-    let dim = unit_dim_for_decl((*c).units, conv)
+    let dim = unit_dim_for_decl((*c).units, name, conv)
     (*c).units = (*c).units.register(name, dim)
 }
 
@@ -20178,8 +20275,46 @@ impl Checker {
             TypeExprKind::TypeNever => (c, ty_never())
             TypeExprKind::TypeInfer => (c, ty_unknown())
             TypeExprKind::TypeSelfUpper => (c, c.current_impl_type)
-            TypeExprKind::TypeReference => c.lower_ref_type(te.inner)
-            TypeExprKind::TypeRefMut => c.lower_ref_mut_type(te.inner)
+            TypeExprKind::TypeReference => {
+                match te.type_args {
+                    Some(_) => {
+                        let dim = checker_unit_dim_from_type_expr(c.units, te)
+                        var c2 = c
+                        let found = c2.units.find_by_dim(dim)
+                        if found >= 0 {
+                            (c2, ty_with_unit(ty_f64(), found))
+                        } else if unit_dim_is_dimensionless(dim) {
+                            (c2, ty_f64())
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c2.units = c2.units.register(anon, dim)
+                            let uid = c2.units.count - 1
+                            (c2, ty_with_unit(ty_f64(), uid))
+                        }
+                    }
+                    None => c.lower_ref_type(te.inner)
+                }
+            }
+            TypeExprKind::TypeRefMut => {
+                match te.type_args {
+                    Some(_) => {
+                        let dim = checker_unit_dim_from_type_expr(c.units, te)
+                        var c2 = c
+                        let found = c2.units.find_by_dim(dim)
+                        if found >= 0 {
+                            (c2, ty_with_unit(ty_f64(), found))
+                        } else if unit_dim_is_dimensionless(dim) {
+                            (c2, ty_f64())
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c2.units = c2.units.register(anon, dim)
+                            let uid = c2.units.count - 1
+                            (c2, ty_with_unit(ty_f64(), uid))
+                        }
+                    }
+                    None => c.lower_ref_mut_type(te.inner)
+                }
+            }
             TypeExprKind::TypeRawPtr => c.lower_raw_ptr_type(te.inner, te.array_size)
             TypeExprKind::TypeArray => c.lower_array_type(te.inner, te.array_size)
             TypeExprKind::TypeTuple => c.lower_tuple_type(te.type_args)
@@ -21616,7 +21751,7 @@ impl Checker {
         // a generic dimension" -- which made every user unit the zero
         // vector, so mol/s and mol/m differed only by name and unit_dim_mul
         // and unit_dim_div could never fire on anything a user wrote.
-        let dim = unit_dim_for_decl(c.units, conv)
+        let dim = unit_dim_for_decl(c.units, name, conv)
         c.units = c.units.register(name, dim)
         c
     }
@@ -24959,15 +25094,22 @@ impl Checker {
             // Multiplication: combine unit dimensions
             BinaryOp::OpMul => {
                 if lu >= 0 && ru >= 0 {
-                    // Both have units — product gets combined dimensions
                     let ld = c.units.get_dim(lu)
                     let rd = c.units.get_dim(ru)
                     let prod = unit_dim_mul(ld, rd)
-                    // For now, result is f64 with no named unit (product unit)
-                    // A future pass could register the product unit
-                    (c, result)
+                    let uid = c.units.find_by_dim(prod)
+                    if uid >= 0 {
+                        (c, ty_with_unit(result, uid))
+                    } else if unit_dim_is_dimensionless(prod) {
+                        // binary_result_type returns the LEFT operand's type,
+                        // brand included; a product that cancels must drop it.
+                        (c, ty_with_unit(result, 0 - 1))
+                    } else {
+                        let anon = Name { buf: [0; 384], len: 0 }
+                        c.units = c.units.register(anon, prod)
+                        (c, ty_with_unit(result, c.units.count - 1))
+                    }
                 } else {
-                    // One side has units, other is scalar — keep the unit
                     let uid = if lu >= 0 { lu } else { ru }
                     (c, ty_with_unit(result, uid))
                 }
@@ -24979,17 +25121,22 @@ impl Checker {
                     let rd = c.units.get_dim(ru)
                     let quot = unit_dim_div(ld, rd)
                     if unit_dim_is_dimensionless(quot) {
-                        // Units cancel out — result is dimensionless
-                        (c, result)
+                        // Units cancel: drop the brand binary_result_type
+                        // inherited from the left operand.
+                        (c, ty_with_unit(result, 0 - 1))
                     } else {
-                        // Quotient has dimensions — result is f64 (unnamed unit)
-                        (c, result)
+                        let uid = c.units.find_by_dim(quot)
+                        if uid >= 0 {
+                            (c, ty_with_unit(result, uid))
+                        } else {
+                            let anon = Name { buf: [0; 384], len: 0 }
+                            c.units = c.units.register(anon, quot)
+                            (c, ty_with_unit(result, c.units.count - 1))
+                        }
                     }
                 } else if lu >= 0 {
-                    // numerator has units, denominator is scalar — keep unit
                     (c, ty_with_unit(result, lu))
                 } else {
-                    // numerator is scalar, denominator has units — inverse unit
                     (c, result)
                 }
             }
@@ -28243,7 +28390,14 @@ impl Checker {
         if provided_ty.unit_id >= 0 && expected_ty.unit_id < 0 {
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
+        // KL-13b: distinct unit_ids with the same dimension vector are compatible
+        // (e.g. `m/s` quotient flowing into `velocity`).
         if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+            let ed = self.units.get_dim(expected_ty.unit_id)
+            let pd = self.units.get_dim(provided_ty.unit_id)
+            if unit_dim_compatible(ed, pd) {
+                return self
+            }
             return self.report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
         }
         self

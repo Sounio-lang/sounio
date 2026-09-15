@@ -9,9 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.dimensio
 
 # Dispatch: the dimensional type system cannot express the GRI-Mech constants (2026-09-02)
 
-**Status:** measured; Repro 2 CLOSED 2026-09-05 (see the correction at the end), Repros 1 and 3 still open. Issue [#2388](https://github.com/Sounio-lang/sounio/issues/2388); related [#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed under the forensic dispatch protocol
-(`CLAUDE.md` §8): evidence and minimal reproductions first, no ad-hoc patch to
-`self-hosted/`.
+**Status:** CLOSED 2026-09-14 (KL-13 + KL-13b). Repro 2 closed 2026-09-05;
+Repro 3 closed 2026-09-13; Repro 1 closed 2026-09-14. Issue
+[#2388](https://github.com/Sounio-lang/sounio/issues/2388); related
+[#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed
+under the forensic dispatch protocol (`CLAUDE.md` §8): evidence and minimal
+reproductions first, no ad-hoc patch to `self-hosted/`.
 
 **Why it matters.** `benchmarks/chemistry/RESULTS.md` §6.3 (6) records a
 convention constant — `R_cal = 1.9872041` against `8.31446261815324/4.184` —
@@ -112,7 +115,16 @@ lean_single: `unit_call_arg_mismatch` treats `param_dim == 0 && expr_dim != 0`
 as a mismatch. Madaros: `check_call_arg_unit_boundary` refuses
 `provided.unit_id >= 0 && expected.unit_id < 0`.
 
-Repro 1 (derived unit annotations) remains open.
+---
+
+## Correction, 2026-09-14 — Repro 1 is closed (KL-13b)
+
+Bare derived unit annotations (`mol/cm3`, `cal/mol`) parse on both engines.
+`unit velocity = m / s` registers the composed dimension on Madaros (ItemUnit
+collect on the `*mut` spine + `collect_unit_decl` honours `type_alias_ty`).
+Witnesses: `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+`tests/compile-fail/unit_derived_annotation_refuse_add.sio`. The known-gap
+fixture is deleted; the language-gap ratchet expects accept + additive refuse.
 
 ---
 
