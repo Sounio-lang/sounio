@@ -1812,9 +1812,93 @@ fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic
     nc_emit_byte(nc, 0x0b)
 }
 
-// KL-14b: names resolved via DT_NEEDED + GOT (not ffi_* builtins).
+// KL-14b/c: names resolved via DT_NEEDED + GOT (not ffi_* builtins).
+// Cap is the dyn ELF emitter's unique-symbol table (see native_v2_dynlink_*).
 fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
-    name_eq(n, make_name("kl14b_add"))
+    if name_eq(n, make_name("kl14b_add")) { return true }
+    if name_eq(n, make_name("kl14c_add")) { return true }
+    if name_eq(n, make_name("kl14c_mul")) { return true }
+    if name_eq(n, make_name("kl14c_neg")) { return true }
+    false
+}
+
+fn native_v2_align8(x: i64) -> i64 {
+    (x + 7) / 8 * 8
+}
+
+fn native_v2_name_buf_eq(a_buf: [i8; 384], a_len: i64, b_buf: [i8; 384], b_len: i64) -> bool {
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if a_buf[i as usize] != b_buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn native_v2_dynlink_max_symbols() -> i64 { 8 }
+
+// Unique dynlink symbol count from GOT stub relocs (order = first appearance).
+fn native_v2_dynlink_unique_count(nc: &NativeCompiler) -> i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < i {
+            let prev = (*nc).extern_relocs.entries[j as usize]
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// 1-based dynsym index for this reloc name; 0 if missing.
+fn native_v2_dynlink_sym_index(nc: &NativeCompiler, sym_buf: [i8; 384], sym_len: i64) -> i64 {
+    var uniq: i64 = 0
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < i {
+            let prev = (*nc).extern_relocs.entries[j as usize]
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen {
+            uniq = uniq + 1
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, sym_buf, sym_len) {
+                return uniq
+            }
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn native_v2_dynlink_needs_kl14c(nc: &NativeCompiler) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        if er.sym_len >= 5 {
+            if er.sym_buf[0 as usize] == (107 as i8) && er.sym_buf[1 as usize] == (108 as i8) && er.sym_buf[2 as usize] == (49 as i8) && er.sym_buf[3 as usize] == (52 as i8) && er.sym_buf[4 as usize] == (99 as i8) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn nc_emit_call_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
@@ -12446,25 +12530,29 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     // Dyn metadata is APPENDED after the runtime-context data payload.
     // Putting it at offset 0 overwrote the context and SIGSEGV'd the trampoline.
     let dyn_base: i64 = data_len
+    let n_syms = native_v2_dynlink_unique_count(nc)
+    if needs_dyn && (n_syms <= 0 || n_syms > native_v2_dynlink_max_symbols()) { return 22 }
     let dynstr_rel: i64 = dyn_base + 0
-    let dynstr_len: i64 = 32
-    let dynsym_rel: i64 = dyn_base + 40
+    // Cap covers soname + up to 8 symbol names (KL-14c).
+    let dynstr_len: i64 = 256
+    let dynsym_rel: i64 = native_v2_align8(dynstr_rel + dynstr_len)
     let dynsym_entsize: i64 = 24
-    let dynsym_count: i64 = 2
+    let dynsym_count: i64 = if needs_dyn { n_syms + 1 } else { 0 }
     let dynsym_size: i64 = dynsym_entsize * dynsym_count
-    let hash_rel: i64 = dyn_base + 88
-    let hash_size: i64 = 20
-    let rela_rel: i64 = dyn_base + 112
+    let hash_rel: i64 = native_v2_align8(dynsym_rel + dynsym_size)
+    // SysV hash: nbucket(1) + nchain(dynsym_count) + buckets[1] + chains[nchain]
+    let hash_size: i64 = if needs_dyn { 8 + 4 + 4 * dynsym_count } else { 0 }
+    let rela_rel: i64 = native_v2_align8(hash_rel + hash_size)
     let rela_entsize: i64 = 24
-    let rela_count: i64 = 1
+    let rela_count: i64 = if needs_dyn { n_syms } else { 0 }
     let rela_size: i64 = rela_entsize * rela_count
-    let got_rel: i64 = dyn_base + 144
-    let got_size: i64 = 8
-    let dynamic_rel: i64 = dyn_base + 160
+    let got_rel: i64 = native_v2_align8(rela_rel + rela_size)
+    let got_size: i64 = 8 * rela_count
+    let dynamic_rel: i64 = native_v2_align8(got_rel + got_size)
     let dynamic_entsize: i64 = 16
     let dynamic_count: i64 = 10
     let dynamic_size: i64 = dynamic_entsize * dynamic_count
-    let dyn_meta_size: i64 = if needs_dyn { 160 + dynamic_size } else { 0 }
+    let dyn_meta_size: i64 = if needs_dyn { (dynamic_rel - dyn_base) + dynamic_size } else { 0 }
     let data_payload = data_len + dyn_meta_size
     let rodata_offset = align_page(text_offset + code_len)
     let data_offset = if data_payload > 0 { align_page(rodata_offset + rodata_len) } else { 0 }
@@ -12623,30 +12711,76 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
     if needs_dyn {
         let dynstr_off = data_offset + dynstr_rel
         NC_BIG_ELF[dynstr_off as usize] = 0 as i8
-        // "libkl14b_probe.so" is 17 bytes; NUL at +18; symbol name starts at +19
-        native_v2_elf_write_cstr(dynstr_off + 1, "libkl14b_probe.so")
-        native_v2_elf_write_cstr(dynstr_off + 19, "kl14b_add")
+        let use_kl14c = native_v2_dynlink_needs_kl14c(nc)
+        var soname = "libkl14b_probe.so"
+        if use_kl14c {
+            soname = "libkl14c_probe.so"
+        }
+        native_v2_elf_write_cstr(dynstr_off + 1, soname)
+        let soname_len = str_len(soname)
+        // First symbol name starts after: NUL + soname + NUL
+        var str_cursor: i64 = 1 + soname_len + 1
 
         let dynsym_off = data_offset + dynsym_rel
-        // symbol 0 = NULL; symbol 1 = kl14b_add (STB_GLOBAL|STT_FUNC, undefined)
-        native_v2_file_put_u32(dynsym_off + 24, 19)
-        native_v2_file_put_u8(dynsym_off + 28, 0x12)
-        native_v2_file_put_u16(dynsym_off + 30, 0)
+        // symbol 0 = NULL; symbols 1..N from unique extern_relocs (STB_GLOBAL|STT_FUNC)
+        var uniq_i: i64 = 0
+        var ri0: i64 = 0
+        while ri0 < (*nc).extern_relocs.count {
+            let er = (*nc).extern_relocs.entries[ri0 as usize]
+            var seen = false
+            var j: i64 = 0
+            while j < ri0 {
+                let prev = (*nc).extern_relocs.entries[j as usize]
+                if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                    seen = true
+                }
+                j = j + 1
+            }
+            if !seen {
+                uniq_i = uniq_i + 1
+                let name_off = str_cursor
+                var bi: i64 = 0
+                while bi < er.sym_len {
+                    if (dynstr_off + str_cursor + bi) < nc_elf_capacity_bytes() {
+                        NC_BIG_ELF[(dynstr_off + str_cursor + bi) as usize] = er.sym_buf[bi as usize]
+                    }
+                    bi = bi + 1
+                }
+                if (dynstr_off + str_cursor + er.sym_len) < nc_elf_capacity_bytes() {
+                    NC_BIG_ELF[(dynstr_off + str_cursor + er.sym_len) as usize] = 0 as i8
+                }
+                str_cursor = str_cursor + er.sym_len + 1
+                let sym_ent = dynsym_off + uniq_i * dynsym_entsize
+                native_v2_file_put_u32(sym_ent + 0, name_off)
+                native_v2_file_put_u8(sym_ent + 4, 0x12)
+                native_v2_file_put_u16(sym_ent + 6, 0)
+            }
+            ri0 = ri0 + 1
+        }
 
         let hash_off = data_offset + hash_rel
-        // SysV hash: nbucket, nchain, buckets[nbucket], chains[nchain]
+        // SysV hash with nbucket=1: every symbol is reachable from bucket 0.
         native_v2_file_put_u32(hash_off + 0, 1)
         native_v2_file_put_u32(hash_off + 4, dynsym_count)
         native_v2_file_put_u32(hash_off + 8, 1)
         native_v2_file_put_u32(hash_off + 12, 0)
-        native_v2_file_put_u32(hash_off + 16, 0)
+        var hi: i64 = 1
+        while hi < dynsym_count {
+            let next = if hi + 1 < dynsym_count { hi + 1 } else { 0 }
+            native_v2_file_put_u32(hash_off + 12 + hi * 4, next)
+            hi = hi + 1
+        }
 
         let got_va = data_vaddr + got_rel
         let rela_off = data_offset + rela_rel
-        native_v2_file_put_u64(rela_off + 0, got_va)
-        // R_X86_64_GLOB_DAT = 6; symbol index 1 in high 32 bits
-        native_v2_file_put_u64(rela_off + 8, (1 << 32) | 6)
-        native_v2_file_put_u64(rela_off + 16, 0)
+        var si: i64 = 0
+        while si < rela_count {
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 0, got_va + si * 8)
+            // R_X86_64_GLOB_DAT = 6; symbol index (si+1) in high 32 bits
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 8, ((si + 1) << 32) | 6)
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 16, 0)
+            si = si + 1
+        }
 
         let dynamic_off = data_offset + dynamic_rel
         native_v2_file_put_u64(dynamic_off + 0, 1)
@@ -12670,13 +12804,17 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         native_v2_file_put_u64(dynamic_off + 144, 0)
         native_v2_file_put_u64(dynamic_off + 152, 0)
 
-        // Patch call [rip+disp] sites recorded in extern_relocs.
+        // Patch call [rip+disp] sites: each reloc targets its symbol's GOT slot.
         var ri: i64 = 0
         while ri < (*nc).extern_relocs.count {
             let er = (*nc).extern_relocs.entries[ri as usize]
-            let rip_next = text_vaddr + er.offset + 4
-            let disp = got_va - rip_next
-            native_v2_file_put_u32(text_offset + er.offset, disp)
+            let sym_idx = native_v2_dynlink_sym_index(nc, er.sym_buf, er.sym_len)
+            if sym_idx > 0 {
+                let slot_va = got_va + (sym_idx - 1) * 8
+                let rip_next = text_vaddr + er.offset + 4
+                let disp = slot_va - rip_next
+                native_v2_file_put_u32(text_offset + er.offset, disp)
+            }
             ri = ri + 1
         }
     }
