@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
 PRODUCT_GATE="$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
 
 fail() {
@@ -35,7 +35,7 @@ verify_file() {
 
 [[ -f "$MANIFEST" && -f "$EVIDENCE" && -x "$PRODUCT_GATE" ]] || \
   fail 'product freeze inputs are incomplete'
-expect schema loom-sovereign-execution-kernel-product-runtime-v1
+expect schema loom-sovereign-execution-kernel-product-runtime-v2
 expect stage PRODUCT_EXECUTION_FROZEN
 expect semantic_authority Sounio
 expect semantic_action 9042
@@ -51,9 +51,9 @@ expect write_attached false
 expect commit_attached false
 expect ci_attached false
 expect claim_ready false
-expect semantic_manifest_sha256 966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176
-expect material_manifest_sha256 1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92
-expect sounio_runtime_sha256 688ff9ce08e42e20f9a681f8388e4bde9d81867922f2084136f697c61d3db715
+expect semantic_manifest_sha256 f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6
+expect material_manifest_sha256 4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37
+expect sounio_runtime_sha256 290d5cce5366d36d31949886b02658687b87f28884fb417a17e0edde17626c9e
 
 for pair in \
   contract_path:contract_sha256 \

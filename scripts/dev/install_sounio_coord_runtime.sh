@@ -453,7 +453,12 @@ activate_runtime() {
   fi
   if grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' "$manifest"; then
     local sovereign_capsule="$version_dir/policy/sovereign-execution"
-    local sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+    local sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v2"
+    local sovereign_evidence="$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
+    if [[ ! -f "$sovereign_product" ]]; then
+      sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+      sovereign_evidence="$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+    fi
     grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
       grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
       [[ -x "$version_dir/bin/sounio-loom-runtime" &&
@@ -466,7 +471,7 @@ activate_runtime() {
       "$sovereign_capsule/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
     verify_manifest_binary_sha256 "$manifest" \
       loom_sovereign_product_evidence_sha256 \
-      "$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+      "$sovereign_evidence"
     verify_manifest_binary_sha256 "$manifest" \
       loom_sovereign_runtime_sha256 \
       "$version_dir/bin/sounio-loom-sovereign-execution-kernel"
@@ -480,10 +485,8 @@ activate_runtime() {
       "$(manifest_value "$sovereign_product" same_uid_peer_isolation)" == true &&
       "$(manifest_value "$sovereign_product" production_activation)" == true &&
       "$(manifest_value "$sovereign_product" exec_attached)" == true &&
-      "$(manifest_value "$sovereign_product" semantic_manifest_sha256)" == \
-        966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176 &&
-      "$(manifest_value "$sovereign_product" material_manifest_sha256)" == \
-        1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92 &&
+      "$(manifest_value "$sovereign_product" semantic_manifest_sha256):$(manifest_value "$sovereign_product" material_manifest_sha256)" =~ \
+        ^(966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176:1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92|f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6:4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37)$ &&
       "$(manifest_value "$sovereign_product" sounio_runtime_sha256)" == \
         "$(manifest_value "$manifest" loom_sovereign_runtime_sha256)" ]] ||
       die "installed sovereign execution product is not bound to frozen Sounio action 9042: $runtime_id"
@@ -1213,11 +1216,11 @@ loom_product_exec_ingress_sources=(
 loom_sovereign_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_execution_kernel.sh"
 loom_sovereign_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_execution_kernel_authority.sio"
 loom_sovereign_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_authority_main.sio"
-loom_sovereign_semantic_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel.freeze.v1"
-loom_sovereign_material_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_material.runtime.v1"
-loom_sovereign_product_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+loom_sovereign_semantic_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel.freeze.v2"
+loom_sovereign_material_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_material.runtime.v2"
+loom_sovereign_product_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_product.runtime.v2"
 loom_sovereign_product_contract="$SOURCE_ROOT/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
-loom_sovereign_product_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+loom_sovereign_product_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
 loom_sovereign_product_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
 loom_sovereign_product_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
 loom_sovereign_sources=(
@@ -2298,7 +2301,7 @@ else
     sha256sum "$stage/policy/sovereign-change/${loom_material_change_product#"$SOURCE_ROOT/"}" | awk '{print $1}'
   )"
   loom_sovereign_product_manifest_sha256="$(
-    sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v1" | awk '{print $1}'
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v2" | awk '{print $1}'
   )"
   loom_sovereign_product_contract_sha256="$(
     sha256sum "$stage/policy/sovereign-execution/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" | awk '{print $1}'
@@ -2493,7 +2496,7 @@ else
     printf 'loom_sovereign_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_sovereign_operational_kernel=OCaml\n'
     printf 'loom_sovereign_action=9042\n'
-    printf 'loom_sovereign_semantic_manifest_sha256=966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176\n'
+    printf 'loom_sovereign_semantic_manifest_sha256=f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6\n'
     printf 'loom_sovereign_material_manifest_sha256=1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92\n'
     printf 'loom_sovereign_runtime_sha256=%s\n' \
       "$loom_sovereign_runtime_sha256"

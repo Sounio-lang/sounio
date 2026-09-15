@@ -3,10 +3,10 @@ open Unix
 exception Error of string
 
 let semantic_manifest_sha256 =
-  "966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176"
+  "f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6"
 
 let material_manifest_sha256 =
-  "1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92"
+  "4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37"
 
 let max_payload_bytes = 1024 * 1024
 let max_output_bytes = 8 * 1024 * 1024
@@ -86,11 +86,11 @@ type gate = {
 
 let load_gate root environment =
   let semantic_path =
-    Filename.concat root "tools/loom/sovereign_execution_kernel.freeze.v1"
+    Filename.concat root "tools/loom/sovereign_execution_kernel.freeze.v2"
   in
   let material_path =
     Filename.concat root
-      "tools/loom/sovereign_execution_kernel_material.runtime.v1"
+      "tools/loom/sovereign_execution_kernel_material.runtime.v2"
   in
   if sha256_file semantic_path <> semantic_manifest_sha256 then
     failf "sovereign-semantic-manifest-hash-mismatch";
@@ -98,7 +98,7 @@ let load_gate root environment =
     failf "sovereign-material-manifest-hash-mismatch";
   let semantic = Loom_exec.parse_manifest semantic_path in
   let material = Loom_exec.parse_manifest material_path in
-  exact semantic "schema" "loom-sovereign-execution-kernel-freeze-v1";
+  exact semantic "schema" "loom-sovereign-execution-kernel-freeze-v2";
   exact semantic "stage" "SEMANTICS_FROZEN";
   exact semantic "semantic_authority" "Sounio";
   exact semantic "action" "9042";
@@ -106,7 +106,7 @@ let load_gate root environment =
   exact semantic "exported_token" "false";
   exact semantic "exported_handle" "false";
   exact semantic "release_authority" "HostGuardian-only";
-  exact material "schema" "loom-sovereign-execution-kernel-material-runtime-v1";
+  exact material "schema" "loom-sovereign-execution-kernel-material-runtime-v2";
   exact material "stage" "MATERIAL_EXECUTION_FROZEN";
   exact material "action" "9042";
   exact material "grant_is_bearer" "false";

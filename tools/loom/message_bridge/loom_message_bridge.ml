@@ -1223,13 +1223,13 @@ let verify_execution_product cwd =
     let installed = installed_policy_root "sovereign-execution" in
     let installed_product =
       Filename.concat installed
-        "tools/loom/sovereign_execution_kernel_product.runtime.v1"
+        "tools/loom/sovereign_execution_kernel_product.runtime.v2"
     in
     if Sys.file_exists installed_product then (installed, installed_product)
     else
       (cwd,
        Filename.concat cwd
-         "tools/loom/sovereign_execution_kernel_product.runtime.v1")
+         "tools/loom/sovereign_execution_kernel_product.runtime.v2")
   in
   let fields = manifest_fields product_path in
   let semantic_manifest =
