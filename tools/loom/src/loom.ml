@@ -11039,13 +11039,13 @@ let fleet_run_loom root spec action =
   run_captured ~environment:(fleet_provider_environment spec) runtime arguments
 
 let custody_transfer_semantics_sha256 =
-  "5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c"
+  "4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727"
 
 let custody_transfer_manifest_sha256 =
-  "ee4e5d128bf5b0fd7166e74c9815a17506a5b9844730c1be2155ac68c370be66"
+  "d1815a7be8734e2c64b3acbbe9e607b0e0dd86290a598146dacccc47b79f9bab"
 
 let custody_transfer_executable_sha256 =
-  "958398e61763d6118c5bd8b86292533dd1b5cc73449df1ede5fb117e37b54ce4"
+  "5bd2be0833eefbd84c40771ea2f0ae85a21f666ed4ab6413e2695ffb3ae9aa87"
 
 let custody_transfer_policy_command () =
   let candidate =

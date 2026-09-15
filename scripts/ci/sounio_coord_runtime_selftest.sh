@@ -153,7 +153,7 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v2" \
   "$ROOT_DIR/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md" \
   "$ROOT_DIR/tools/loom/routing_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/routing_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/routing_authority.freeze.v2" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
   "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md" \
@@ -172,14 +172,14 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/activation_epoch_authority_main.sio" \
   "$ROOT_DIR/tools/loom/activation_epoch.freeze.v1" \
   "$ROOT_DIR/tools/loom/activation_epoch.first.v1" \
-  "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
+  "$ROOT_DIR/tools/loom/execution_authority.freeze.v3" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
-  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
+  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
-  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$REPO/tools/loom/"
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
-  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v2" \
   "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
@@ -629,7 +629,7 @@ grep -qx "loom_routing_authority_runtime_sha256=$loom_routing_authority_sha" \
   fail 'runtime manifest did not pin frozen Sounio routing action 9032'
 grep -q '^capability=loom-routing-authority-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted routing authority'
-[[ -f "$RUNTIME_ROOT/versions/$first_id/policy/routing-authority/tools/loom/routing_authority.freeze.v1" ]] || \
+[[ -f "$RUNTIME_ROOT/versions/$first_id/policy/routing-authority/tools/loom/routing_authority.freeze.v2" ]] || \
   fail 'installed runtime omitted the routing authority policy capsule'
 outbox_output="$(SOUNIO_COORD_DIR="$STATE" \
   "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" \
@@ -832,21 +832,21 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted frozen Sounio action 9047'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio custody-transfer authority'
-grep -q '^loom_custody_transfer_semantics_sha256=5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c$' \
+grep -q '^loom_custody_transfer_semantics_sha256=4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727$' \
   "$first_manifest" || \
   fail 'installed runtime omitted frozen custody-transfer semantics'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio execution-outcome authority'
-grep -q '^loom_execution_outcome_semantics_sha256=c98c13d30d66ba2fb3d0fb34d75bd21b14b353bc88fd80acf7dbb385cb9fa914$' \
+grep -q '^loom_execution_outcome_semantics_sha256=9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59$' \
   "$first_manifest" || \
   fail 'installed runtime omitted frozen execution-outcome semantics'
-grep -q '^loom_execution_outcome_manifest_sha256=f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e$' \
+grep -q '^loom_execution_outcome_manifest_sha256=e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1$' \
   "$first_manifest" || \
   fail 'installed runtime omitted the execution-outcome freeze identity'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-runtime" && \
   -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-parity-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio lane-health executables'
-grep -q '^loom_lane_health_semantics_sha256=5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f$' \
+grep -q '^loom_lane_health_semantics_sha256=8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74$' \
   "$first_manifest" || fail 'installed runtime omitted frozen lane-health semantics'
 grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
   fail 'installed runtime omitted the native-agent-hook capability'
@@ -1637,12 +1637,12 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v2" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
-  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$BAD/tools/loom/"
+  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v2" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
-  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$BAD/tools/loom/"
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v2" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
-  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v2" \
   "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"

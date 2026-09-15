@@ -248,7 +248,7 @@ unset SOUNIO_LOOM_EXECUTION_AUTHORITY_MANIFEST
 [[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'execution-authority-policy-missing'* ]] ||
   fail "missing policy did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
 
-cp "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$TEST_ROOT/unreadable.freeze"
+cp "$ROOT_DIR/tools/loom/execution_authority.freeze.v3" "$TEST_ROOT/unreadable.freeze"
 chmod 000 "$TEST_ROOT/unreadable.freeze"
 export SOUNIO_LOOM_EXECUTION_AUTHORITY_MANIFEST="$TEST_ROOT/unreadable.freeze"
 run_hook "$(execution_event '/usr/bin/true')"
@@ -259,7 +259,7 @@ chmod 0600 "$TEST_ROOT/unreadable.freeze"
 grep -Eq $'phase=ISSUE\tdecision=DENY\treason=.*unreadable\.freeze' "$EXECUTION_LOG" ||
   fail "unreadable policy refusal was not recorded in the execution journal"
 
-cp "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$TEST_ROOT/tampered.freeze"
+cp "$ROOT_DIR/tools/loom/execution_authority.freeze.v3" "$TEST_ROOT/tampered.freeze"
 printf '\n' >>"$TEST_ROOT/tampered.freeze"
 export SOUNIO_LOOM_EXECUTION_AUTHORITY_MANIFEST="$TEST_ROOT/tampered.freeze"
 run_hook "$(execution_event '/usr/bin/true')"

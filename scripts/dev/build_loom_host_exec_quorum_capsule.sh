@@ -183,8 +183,8 @@ AUTHORITY_FILES=(
   stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio
   tools/loom/kernel_exec_grant_cell_authority_main.sio
   tools/loom/kernel_invocation_cell_authority.freeze.v1
-  tools/loom/execution_authority.freeze.v2
-  tools/loom/execution_outcome.freeze.v1
+  tools/loom/execution_authority.freeze.v3
+  tools/loom/execution_outcome.freeze.v2
   tools/loom/resident_membrane.runtime.v4
   tools/loom/subprocess_membrane.freeze.v1
   tools/loom/resident_authority.freeze.v1
