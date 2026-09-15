@@ -36,6 +36,14 @@
 //      (the checker's signature lowering erases generic struct args, and
 //      its literal inference is TyNamed-only, so only concrete names
 //      survive both).
+//   5. Generic IMPL blocks (`impl S<T>` / `impl<T> S<T>` on a generic struct
+//      template) are not same-name generic methods: the receiver binds T.
+//      Each emitted struct instance S__args gets a clone `impl S__args` with
+//      every method substituted, placed at the FRONT of the item list so it
+//      precedes every caller (the template is dropped). Non-generic bodies that name S<args> in a
+//      type or a `S::<args>::f(..)` path are rewritten to S__args, so the
+//      checker's `Type::method` lookup and lowering's `Type_method` mangle
+//      both land on the clone, and S<i64> and S<f64> coexist in one unit.
 //
 // Backend-safety notes (this file runs inside the lean_single-compiled
 // Madaros binary, so it must stay inside the proven-safe subset):
@@ -120,6 +128,28 @@ struct SpecStmtStage { s: Stmt }
 struct SpecFnDefStage { fd: FnDef }
 struct SpecStructDefStage { sd: StructDef }
 struct SpecImplDefStage { id: ImplDef }
+struct SpecNameStage { n: Name }
+
+// Generic IMPL template node: `impl S<A, ..>` whose header args are all type
+// params of struct template slot st_idx, hashed in header order (= the
+// struct's param order, which is also the instance's type-arg order).
+struct SpecGiNode {
+    st_idx: i64,
+    tp_count: i64,
+    h0: i64,
+    h1: i64,
+    h2: i64,
+    h3: i64,
+    id: Option<Box<ImplDef>>,
+}
+
+// Chain node for one `impl S__args` clone; `scanned` marks clones whose method
+// bodies were already walked for transitive turbofish instantiations.
+struct SpecGiCloneNode {
+    it: Item,
+    next: i64,
+    scanned: bool,
+}
 
 // Mutable driver state. Reset unconditionally at the top of every
 // specialize_generics() call — this pass may run more than once per
@@ -141,7 +171,7 @@ var SPEC_GF_NONSCALAR: [bool; 256] = [false; 256]
 var SPEC_UNSOUND_POISON: bool = false
 // Fail-closed state for formerly silent fixed-capacity truncation.
 // Codes: 1=>4 type params, 2=>256 generic fns, 3=>256 generic structs,
-// 4=>64 emitted specialization hashes.
+// 4=>64 emitted specialization hashes, 5=>64 generic impl blocks.
 var SPEC_CAP_OVERFLOW: bool = false
 var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 // Generic methods require an explicit, unambiguous turbofish so the
@@ -152,10 +182,30 @@ var SPEC_ST_PTRS: [i64; 256] = [0; 256]
 var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
 var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
+// Generic impl templates and, per slot, the chain of their instance clones.
+var SPEC_GI_COUNT: i64 = 0
+var SPEC_GI_PTRS: [i64; 64] = [0; 64]
+var SPEC_GI_CLONE_HEAD: [i64; 64] = [0; 64]
+// Set by the read-only scan when a body names a generic-impl struct with
+// type arguments, i.e. needs the rewrite pass.
+var SPEC_RW_HIT: bool = false
+// `S::f(..)` on a generic-impl struct with no type arguments: no clone can be
+// named, and the template impl is dropped, so the call would reach lowering
+// as a body-less `S_f` (measured: compiled, then SIGILL on the ud2 stub).
+var SPEC_GI_STATIC_TARG_MISSING: bool = false
 
 fn spec_reset_state() with Mut {
     SPEC_EMITTED_COUNT = 0
     SPEC_EXTRA_HEAD = 0
+    SPEC_GI_COUNT = 0
+    SPEC_RW_HIT = false
+    SPEC_GI_STATIC_TARG_MISSING = false
+    var g: i64 = 0
+    while g < 64 {
+        SPEC_GI_PTRS[g as usize] = 0
+        SPEC_GI_CLONE_HEAD[g as usize] = 0
+        g = g + 1
+    }
     var i: i64 = 0
     while i < 256 {
         SPEC_GF_PTRS[i as usize] = 0
@@ -211,6 +261,8 @@ pub fn spec_report_cap_overflow() -> bool with IO {
         print("a compilation unit supports at most 256 generic structs")
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
         print("a compilation unit supports at most 64 emitted generic struct specializations")
+    } else if SPEC_CAP_OVERFLOW_CODE == 5 {
+        print("a compilation unit supports at most 64 generic impl blocks")
     } else {
         print("an internal fixed-capacity specializer table was exhausted")
     }
@@ -226,10 +278,17 @@ pub fn spec_report_unsupported_method_generic() -> bool with IO {
     true
 }
 
+pub fn spec_report_generic_impl_static_targs() -> bool with IO {
+    if !SPEC_GI_STATIC_TARG_MISSING { return false }
+    print("error: an associated function of a generic struct must be called with explicit type arguments\n")
+    print("  help: write Type::<T>::function(...); the impl is specialized per instance and a call without type arguments names none of them\n")
+    true
+}
+
 // Report every specializer-side refusal. Call this before folding a typecheck
 // verdict so short-circuit `||` on the checker result cannot hide these errors.
 pub fn spec_report_any_specializer_failure() -> bool with IO {
-    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic()
+    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic() || spec_report_generic_impl_static_targs()
 }
 
 // ============================================================
@@ -628,7 +687,13 @@ fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNa
             let it = (*list).head
             if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_collect_generic_method_items((*id).methods, known)
+                    Some(id) => {
+                        // Methods of a generic impl are bound by the receiver's
+                        // type args and cloned per struct instance instead.
+                        if spec_impl_generic_struct_slot((*id)) < 0 {
+                            spec_collect_generic_method_items((*id).methods, known)
+                        }
+                    }
                     None => {}
                 }
             }
@@ -971,6 +1036,9 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
             }
         }
     }
+    if (*p).e.kind == ExprKind::ExprCall {
+        spec_subst_static_generic_path(p)
+    }
 }
 
 fn spec_subst_expr_opt(opt: Option<Box<Expr>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<Expr>> with Mut, Panic, Div, Alloc {
@@ -1116,6 +1184,266 @@ fn spec_extra_push_item(it: Item) with Mut, Panic, Div, Alloc {
     SPEC_EXTRA_HEAD = np as i64
 }
 
+// ============================================================
+// Generic impl blocks: one `impl S__args` clone per struct instance
+// ============================================================
+
+// A bare single-uppercase-letter named type that is not a generic struct:
+// the type-param shape of an impl header argument.
+fn spec_type_is_param_letter(te: TypeExpr) -> bool with Mut, Panic, Div {
+    if te.kind != TypeExprKind::TypeNamed { return false }
+    if te.path.seg_count != 1 { return false }
+    match te.type_args {
+        Some(_a) => { return false }
+        None => {}
+    }
+    let seg = spec_path_single_name(te.path)
+    if seg.len != 1 { return false }
+    let c0 = seg.buf[0] as i64
+    c0 >= 65 && c0 <= 90 && spec_struct_table_find(seg) < 0
+}
+
+// Struct-template slot for a generic impl header `S<A, ..>` whose arguments are
+// all type params and match the struct's arity; -1 for any other impl.
+fn spec_impl_generic_struct_slot(id: ImplDef) -> i64 with Mut, Panic, Div {
+    let te = id.target_type
+    if te.kind != TypeExprKind::TypeNamed || te.path.seg_count != 1 { return 0 - 1 }
+    let st_idx = spec_struct_table_find(spec_path_single_name(te.path))
+    if st_idx < 0 { return 0 - 1 }
+    if spec_type_args_count(te.type_args) != spec_struct_table_tp_count(st_idx) { return 0 - 1 }
+    var cur = te.type_args
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if !spec_type_is_param_letter((*list).head) { return 0 - 1 }
+                cur = (*list).tail
+            }
+        }
+    }
+    st_idx
+}
+
+fn spec_type_args_letter_hash(opt: Option<Box<TypeExprList>>, n: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if n >= spec_type_args_count(opt) { return 0 - 1 }
+    ast_name_hash(spec_path_single_name(spec_type_args_nth(opt, n).path))
+}
+
+fn spec_collect_generic_impls(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        let st_idx = spec_impl_generic_struct_slot((*id))
+                        if st_idx >= 0 {
+                            if SPEC_GI_COUNT >= 64 {
+                                spec_mark_cap_overflow(5)
+                            } else {
+                                let hdr = (*id).target_type.type_args
+                                let gp = heap_alloc(4096) as *mut SpecGiNode
+                                (*gp).st_idx = st_idx
+                                (*gp).tp_count = spec_type_args_count(hdr)
+                                (*gp).h0 = spec_type_args_letter_hash(hdr, 0)
+                                (*gp).h1 = spec_type_args_letter_hash(hdr, 1)
+                                (*gp).h2 = spec_type_args_letter_hash(hdr, 2)
+                                (*gp).h3 = spec_type_args_letter_hash(hdr, 3)
+                                (*gp).id = it.impl_def
+                                SPEC_GI_PTRS[SPEC_GI_COUNT as usize] = gp as i64
+                                SPEC_GI_CLONE_HEAD[SPEC_GI_COUNT as usize] = 0
+                                SPEC_GI_COUNT = SPEC_GI_COUNT + 1
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_collect_generic_impls((*list).tail)
+        }
+    }
+}
+
+fn spec_gi_has_struct(st_idx: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_GI_COUNT {
+        let gp = SPEC_GI_PTRS[i as usize] as *mut SpecGiNode
+        if (*gp).st_idx == st_idx { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Does this type name a generic-impl struct with type arguments anywhere?
+fn spec_type_mentions_gi_struct(te: TypeExpr) -> bool with Mut, Panic, Div {
+    if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
+        match te.type_args {
+            Some(_a) => {
+                let st_idx = spec_struct_table_find(spec_path_single_name(te.path))
+                if st_idx >= 0 && spec_gi_has_struct(st_idx) { return true }
+            }
+            None => {}
+        }
+    }
+    match te.inner {
+        Some(b) => {
+            if spec_type_mentions_gi_struct(*b) { return true }
+        }
+        None => {}
+    }
+    spec_type_list_mentions_gi_struct(te.type_args)
+}
+
+fn spec_type_list_mentions_gi_struct(opt: Option<Box<TypeExprList>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_type_mentions_gi_struct((*list).head) { return true }
+            spec_type_list_mentions_gi_struct((*list).tail)
+        }
+    }
+}
+
+fn spec_params_mention_gi_struct(opt: Option<Box<ParamList>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => false
+        Some(list) => {
+            if spec_type_mentions_gi_struct((*list).head.ty) { return true }
+            spec_params_mention_gi_struct((*list).tail)
+        }
+    }
+}
+
+fn spec_type_args_no_param_letter(opt: Option<Box<TypeExprList>>) -> bool with Mut, Panic, Div {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_type_is_param_letter((*list).head) { return false }
+                cur = (*list).tail
+            }
+        }
+    }
+    true
+}
+
+// `S::<A>::f(..)` on a generic-impl struct -> `S__A::f(..)`, emitting the
+// instance (struct + impl clone). The checker resolves `Type::method` by the
+// path's first segment and lowering names the call `Type_method`, so only the
+// concrete instance name lines both up with the cloned impl.
+fn spec_subst_static_generic_path(p: *mut SpecExprStage) with Mut, Panic, Div, Alloc {
+    match (*p).e.left {
+        None => {}
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprPath || (*callee).path.seg_count != 2 { return }
+            var targs: Option<Box<TypeExprList>> = (*callee).type_args
+            match (*p).e.type_args {
+                Some(ta) => { targs = Some(ta) }
+                None => {}
+            }
+            let base = Name { buf: (*callee).path.segments.head_buf, len: (*callee).path.segments.head_len }
+            let st_idx = spec_struct_table_find(base)
+            if st_idx < 0 || !spec_gi_has_struct(st_idx) { return }
+            if spec_type_args_count(targs) != spec_struct_table_tp_count(st_idx) { return }
+            if !spec_type_args_no_param_letter(targs) { return }
+            spec_get_or_create_struct_instance(st_idx, base, targs)
+            // Recompute the name after the deep instantiation call (Name
+            // locals held across deep calls arrive corrupted).
+            let base2 = Name { buf: (*callee).path.segments.head_buf, len: (*callee).path.segments.head_len }
+            let mangled = spec_mangle_name(base2, targs)
+            if spec_name_is_empty(mangled) { return }
+            let cq = heap_alloc(32768) as *mut SpecExprStage
+            let ctmp = *callee
+            (*cq).e = ctmp
+            let seg_tail = (*cq).e.path.segments.tail
+            (*cq).e.path = AstPath { segments: StringList { head_buf: mangled.buf, head_len: mangled.len, tail: seg_tail }, seg_count: 2 }
+            (*cq).e.type_args = None
+            (*p).e.left = Some(Box::new((*cq).e))
+            (*p).e.type_args = None
+        }
+    }
+}
+
+fn spec_impl_instance_target(te: TypeExpr, inst: Name) -> TypeExpr with Mut, Panic, Div {
+    var out = te
+    out.path = spec_name_to_path(inst)
+    out.type_args = None
+    out
+}
+
+fn spec_make_impl_item(name: Name, id: ImplDef) -> Item with Mut, Panic, Div, Alloc {
+    Item {
+        kind: ItemKind::ItemImpl, span: id.span, visibility: visibility_private(), name: name, fn_def: None,
+        struct_def: None, enum_def: None, impl_def: Some(Box::new(id)), type_alias_ty: None, policy_def: None,
+        acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
+        transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
+        alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(),
+        use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None,
+        study_def: None, ontology_def: None,
+    }
+}
+
+// Substitute every method's signature and body under the impl's context.
+fn spec_subst_method_items(methods: Option<Box<ItemList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match methods {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_subst_method_items((*list).tail, ctx, targs)
+            if it.kind == ItemKind::ItemFn {
+                match it.fn_def {
+                    Some(fd_box) => {
+                        let fp = heap_alloc(32768) as *mut SpecFnDefStage
+                        let tmp_fd = (*fd_box)
+                        (*fp).fd = tmp_fd
+                        (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, ctx, targs)
+                        (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, ctx, targs)
+                        (*fp).fd.body = spec_subst_block((*fp).fd.body, ctx, targs)
+                        var out_it = it
+                        out_it.fn_def = Some(Box::new((*fp).fd))
+                        return Some(Box::new(ItemList { head: out_it, tail: rest }))
+                    }
+                    None => {}
+                }
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
+
+// Clone every generic impl of struct slot st_idx as `impl <inst_name>`.
+fn spec_emit_generic_impl_instances(st_idx: i64, inst_name: Name, targs: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    let ns = heap_alloc(1024) as *mut SpecNameStage
+    (*ns).n = inst_name
+    var i: i64 = 0
+    while i < SPEC_GI_COUNT {
+        let gp = SPEC_GI_PTRS[i as usize] as *mut SpecGiNode
+        if (*gp).st_idx == st_idx {
+            match (*gp).id {
+                None => {}
+                Some(id_box) => {
+                    let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                    let tmp_id = (*id_box)
+                    (*ip).id = tmp_id
+                    (*ip).id.target_type = spec_impl_instance_target((*ip).id.target_type, (*ns).n)
+                    let impl_ctx = spec_ctx_new((*gp).tp_count, (*gp).h0, (*gp).h1, (*gp).h2, (*gp).h3)
+                    (*ip).id.methods = spec_subst_method_items((*ip).id.methods, impl_ctx, targs)
+                    let np = heap_alloc(16384) as *mut SpecGiCloneNode
+                    (*np).it = spec_make_impl_item((*ns).n, (*ip).id)
+                    (*np).scanned = false
+                    (*np).next = SPEC_GI_CLONE_HEAD[i as usize]
+                    SPEC_GI_CLONE_HEAD[i as usize] = np as i64
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 // Get-or-create a monomorphized struct instance `S__Args` for struct
 // template slot st_idx. Dedup shares the emitted-hash cache; nested
 // generic-struct fields recurse through spec_subst_type (terminating via
@@ -1144,6 +1472,8 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             let st_ctx = spec_ctx_from_struct_slot(st_idx)
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
             spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
+            spec_emit_generic_impl_instances(st_idx, (*sp).sd.name, targs)
+            return (*sp).sd.name
         }
     }
     mangled
@@ -1324,6 +1654,40 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
     spec_scan_block_opt(e.handler_block)
     spec_scan_expr_opt(e.closure_body)
 
+    if SPEC_GI_COUNT > 0 {
+        if e.kind == ExprKind::ExprCall {
+            match e.left {
+                Some(callee) => {
+                    if (*callee).kind == ExprKind::ExprPath && (*callee).path.seg_count == 2 {
+                        let head = Name { buf: (*callee).path.segments.head_buf, len: (*callee).path.segments.head_len }
+                        let head_st = spec_struct_table_find(head)
+                        if head_st >= 0 && spec_gi_has_struct(head_st) {
+                            SPEC_RW_HIT = true
+                            let call_targs_missing = match e.type_args {
+                                Some(_a) => false,
+                                None => true,
+                            }
+                            let callee_targs_missing = match (*callee).type_args {
+                                Some(_b) => false,
+                                None => true,
+                            }
+                            if call_targs_missing && callee_targs_missing {
+                                SPEC_GI_STATIC_TARG_MISSING = true
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        match e.cast_type {
+            Some(ct) => {
+                if spec_type_mentions_gi_struct(*ct) { SPEC_RW_HIT = true }
+            }
+            None => {}
+        }
+    }
+
     if e.kind == ExprKind::ExprCall || e.kind == ExprKind::ExprMethodCall {
         let callee_name = if e.kind == ExprKind::ExprMethodCall {
             e.name
@@ -1395,6 +1759,14 @@ fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div,
     match opt {
         None => {}
         Some(list) => {
+            if SPEC_GI_COUNT > 0 {
+                match (*list).head.ty {
+                    Some(t) => {
+                        if spec_type_mentions_gi_struct(*t) { SPEC_RW_HIT = true }
+                    }
+                    None => {}
+                }
+            }
             spec_scan_expr_opt((*list).head.expr)
             spec_scan_expr_opt((*list).head.target)
             spec_scan_stmt_list_opt((*list).tail)
@@ -1461,7 +1833,12 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
                 }
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_scan_method_items((*id).methods)
+                    Some(id) => {
+                        // Generic impl templates are scanned per instance clone.
+                        if spec_impl_generic_struct_slot((*id)) < 0 {
+                            spec_scan_method_items((*id).methods)
+                        }
+                    }
                     None => {}
                 }
             }
@@ -1473,6 +1850,127 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
 // ============================================================
 // Top-level driver
 // ============================================================
+
+// Walk every impl clone's methods for transitive turbofish instantiations.
+// Scanning can emit further instances (and clones), so repeat to a fixed
+// point; the emitted-hash cap bounds it.
+fn spec_scan_generic_impl_clones() with IO, Mut, Panic, Div, Alloc {
+    var changed = true
+    while changed {
+        changed = false
+        var i: i64 = 0
+        while i < SPEC_GI_COUNT {
+            var cur = SPEC_GI_CLONE_HEAD[i as usize]
+            while cur != 0 {
+                let np = cur as *mut SpecGiCloneNode
+                if !(*np).scanned {
+                    (*np).scanned = true
+                    match (*np).it.impl_def {
+                        Some(id) => spec_scan_method_items((*id).methods)
+                        None => {}
+                    }
+                    changed = true
+                }
+                cur = (*np).next
+            }
+            i = i + 1
+        }
+    }
+}
+
+// Prepend every impl clone. They must precede their callers: lowering binds a
+// local's struct type from a static call's return only once the method is
+// lowered, and a collapsed multi-module list starts with main's module, so at
+// the template's position `var v = S__i64::new()` left v untyped and every
+// `v.push(..)` became a call to a body-less bare `push` (measured: SIGILL).
+fn spec_gi_clones_prepend_all(rest: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out = rest
+    var slot: i64 = 0
+    while slot < SPEC_GI_COUNT {
+        var cur = SPEC_GI_CLONE_HEAD[slot as usize]
+        while cur != 0 {
+            let np = cur as *mut SpecGiCloneNode
+            out = Some(Box::new(ItemList { head: (*np).it, tail: out }))
+            cur = (*np).next
+        }
+        slot = slot + 1
+    }
+    out
+}
+
+// Rewrite one non-generic fn whose signature or body names a generic-impl
+// struct with type args: `S<A>` types and `S::<A>::f` paths become `S__A`.
+// Bodies that never name one are returned untouched (no staging cost).
+fn spec_rewrite_fn_item(it: Item) -> Item with IO, Mut, Panic, Div, Alloc {
+    match it.fn_def {
+        None => it
+        Some(fd_box) => {
+            SPEC_RW_HIT = false
+            if spec_params_mention_gi_struct((*fd_box).params) { SPEC_RW_HIT = true }
+            match (*fd_box).return_type {
+                Some(rt) => {
+                    if spec_type_mentions_gi_struct(*rt) { SPEC_RW_HIT = true }
+                }
+                None => {}
+            }
+            spec_scan_block((*fd_box).body)
+            if !SPEC_RW_HIT { return it }
+            let fp = heap_alloc(32768) as *mut SpecFnDefStage
+            let tmp_fd = (*fd_box)
+            (*fp).fd = tmp_fd
+            (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, 0, None)
+            (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, 0, None)
+            (*fp).fd.body = spec_subst_block((*fp).fd.body, 0, None)
+            var out_it = it
+            out_it.fn_def = Some(Box::new((*fp).fd))
+            out_it
+        }
+    }
+}
+
+fn spec_rewrite_method_items(methods: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    match methods {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_rewrite_method_items((*list).tail)
+            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+                return Some(Box::new(ItemList { head: spec_rewrite_fn_item(it), tail: rest }))
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
+
+fn spec_rewrite_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    match items {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_rewrite_items((*list).tail)
+            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+                return Some(Box::new(ItemList { head: spec_rewrite_fn_item(it), tail: rest }))
+            }
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        if spec_impl_generic_struct_slot((*id)) < 0 {
+                            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                            let tmp_id = (*id)
+                            (*ip).id = tmp_id
+                            (*ip).id.methods = spec_rewrite_method_items((*ip).id.methods)
+                            var out_it = it
+                            out_it.impl_def = Some(Box::new((*ip).id))
+                            return Some(Box::new(ItemList { head: out_it, tail: rest }))
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
 
 fn spec_append_items(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
     match a {
@@ -1548,6 +2046,11 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
                     Some(id) => {
+                        if spec_impl_generic_struct_slot((*id)) >= 0 {
+                            // Generic impl template: dropped. Its instance
+                            // clones go to the front of the list.
+                            return rest
+                        }
                         let ip = heap_alloc(16384) as *mut SpecImplDefStage
                         let tmp_id = (*id)
                         (*ip).id = tmp_id
@@ -1602,20 +2105,31 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
 pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    // Structs first: generic impl detection and method collection consult
+    // the struct template table.
+    spec_collect_generic_structs(items)
+    spec_collect_generic_impls(items)
     spec_collect_generic_fns(items, known)
     spec_collect_generic_methods(items, known)
-    spec_collect_generic_structs(items)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
         print_int(SPEC_GF_COUNT)
+        print(" generic_impls=")
+        print_int(SPEC_GI_COUNT)
         print("\n")
     }
-    if SPEC_GF_COUNT == 0 {
+    if SPEC_GF_COUNT == 0 && SPEC_GI_COUNT == 0 {
         return items
     }
     spec_scan_items(items)
-    let finalized = spec_finalize_items(items)
-    let out = spec_append_items(finalized, spec_extra_items_to_list())
+    var work = items
+    if SPEC_GI_COUNT > 0 {
+        work = spec_rewrite_items(items)
+        spec_scan_generic_impl_clones()
+    }
+    let finalized = spec_finalize_items(work)
+    let with_extras = spec_append_items(finalized, spec_extra_items_to_list())
+    let out = spec_gi_clones_prepend_all(with_extras)
     if spec_trace_enabled() {
         print("specializer: instances=")
         print_int(SPEC_EMITTED_COUNT)

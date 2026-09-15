@@ -62,20 +62,31 @@ fractional PINN operating range.
 
 ## Focused Results
 
-> **Engine dependency (verified 2026-08-17).** `SOUNIO_SOUC_BIN=<elf>` is documented in
-> `bin/souc`'s own header comment as "exec that ELF directly (**raw, lean_single CLI**)" — the
-> command below is silently pinned to the lean_single-family binary, undisclosed. Worse, as of
-> today that exact command **fails**: `error: no main` (the raw lean_single CLI misparses this
-> invocation shape). The plain, undocumented `bin/souc run tests/stdlib/special/test_mittag_leffler_d8_grid.sio`
-> (no override, default Madaros) **succeeds** and prints the same `ML_NEGATIVE_Z_FIX_PASS`
-> marker. The prescribed reproduction path below is both wrongly attributed and currently broken;
-> use the plain default-engine command instead until this is corrected.
+> **Reproduction commands corrected (2026-09-13).** This replaces an engine-dependency note
+> dated 2026-08-17, which found the recorded command
+> `SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run <test>` failing with
+> `error: no main`. The cause: `bin/souc` execs that override with its arguments unchanged
+> (it already did at the merge that added this file, `bebd78d74c`), so lean_single never
+> reached a real source (a current-source lean_single shows why: it opens `run`, which does not
+> exist, as a 0-byte source). The same `error: no main` was measured again on 2026-09-13 with
+> `bin/souc-linux-x86_64`, before `bin/souc` began refusing the form. How the recorded values were
+> originally produced cannot be established from this repository's history. `bin/souc` now refuses the
+> form (exit 64). The commands below use the
+> lean_single ELF's raw `<source.sio> <output>` interface. Run them from the repository root:
+> lean_single resolves stdlib imports relative to the working directory. The pinned binary
+> (sha256 `3cbea2b4…`) is no longer in the repository; the re-run used `bin/souc-linux-x86_64`,
+> sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`.
+> Re-run 2026-09-13: lean_single printed `ML_NEGATIVE_Z_FIX_PASS`, `D5_CAPUTO_SCALAR_PASS` and
+> `D5_CAPUTO_TENSOR_PASS`. Only those markers were re-checked; the values in the table below are
+> the original record. The default Madaros engine (`bin/souc run <test>` with no `SOUNIO_SOUC_BIN`
+> set; `bin/madaros-linux-x86_64` sha256
+> `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) also printed the first
+> two, and rejected `test_caputo_l1_tape.sio` with `error[E037]` in `stdlib/tensor/ops.sio`.
 
-Command:
+Command (from the repository root):
 
 ```bash
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
-  bin/souc run tests/stdlib/special/test_mittag_leffler_d8_grid.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/special/test_mittag_leffler_d8_grid.sio /tmp/ml_d8_grid.elf && /tmp/ml_d8_grid.elf
 ```
 
 Result:
@@ -102,12 +113,10 @@ The test also covers `alpha in {0.5, 0.7, 0.8, 0.9}` and
 Available consolidated-main regressions:
 
 ```bash
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
-  bin/souc run tests/stdlib/special/test_caputo_scalar.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/special/test_caputo_scalar.sio /tmp/caputo_scalar.elf && /tmp/caputo_scalar.elf
 # D5_CAPUTO_SCALAR_PASS
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
-  bin/souc run tests/stdlib/tensor/test_caputo_l1_tape.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
 # D5_CAPUTO_TENSOR_PASS
 ```
 

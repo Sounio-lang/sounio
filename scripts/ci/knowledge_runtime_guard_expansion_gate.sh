@@ -106,14 +106,72 @@ else
   exit 1
 fi
 
+if bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio "$CURRENT_SOUC" >"$BUILD_LOG" 2>&1; then
+  chmod +x "$CURRENT_SOUC"
+  printf 'PASS  built current-source lean_single compiler for the obligation probe and internal-label runtime guard gate\n'
+else
+  printf 'FAIL  could not build current-source lean_single compiler for the obligation probe and internal-label runtime guard gate\n' >&2
+  cat "$BUILD_LOG" >&2
+  exit 1
+fi
+
+# The current-source lean_single has the raw CLI `souc SRC OUT` and no verbs.
+# bin/souc's SOUNIO_SOUC_BIN override execs that ELF with its arguments
+# unchanged, so `SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run f.sio` compiled a
+# source literally named `run` and failed with error[E221]: no main, never
+# compiling f.sio. The reject step below then PASSED on that E221. Measured
+# 2026-09-13: both internal-label steps exited 1 with E221 through the wrapper.
+# Call the raw ABI, and keep compile and execution separate so the reject step
+# can only pass on the runtime guard trap (a failed lean_single assert exits 1
+# with no output), not on a compile error.
+lean_compile() {  # lean_compile <src> <out>
+  rm -f "$2"
+  "$CURRENT_SOUC" "$1" "$2" || return $?
+  chmod +x "$2"
+}
+
+# Every `bin/souc run|compile` step below uses Madaros built from current source,
+# through MADAROS_RAW_BIN. The committed prebuilt bin/madaros-linux-x86_64 lags
+# self-hosted/: measured 2026-09-13, it rejected the unit-suffixed witnesses
+# (E001/E004/E008) that current source accepts, so this gate could only report on
+# the prebuilt, never on the source it is meant to cover. The current-source
+# lean_single built above is the seed (build_modular_madaros.sh uses a provided
+# SOUC_BIN directly), so no second seed is derived.
+CURRENT_MADAROS="$TMP_DIR/madaros-current-source"
+MADAROS_BUILD_LOG="$TMP_DIR/build-madaros-current-source.log"
+if SOUC_BIN="$CURRENT_SOUC" bash scripts/ci/build_modular_madaros.sh "$CURRENT_MADAROS" >"$MADAROS_BUILD_LOG" 2>&1; then
+  export MADAROS_RAW_BIN="$CURRENT_MADAROS"
+  printf 'PASS  built current-source Madaros for the native runtime guard steps\n'
+else
+  printf 'FAIL  could not build current-source Madaros for the native runtime guard steps\n' >&2
+  tail -n 40 "$MADAROS_BUILD_LOG" >&2
+  exit 1
+fi
+
+# The obligation probe is compiled once, by the current-source lean_single, and
+# run directly. Through `bin/souc run` it was compiled by the committed prebuilt
+# bin/madaros-linux-x86_64, which left 13 parser methods it imports (peek,
+# advance, expect, parse_type, parse_type_args, parse_indep_knowledge_args, ...)
+# without lowered bodies and emitted them as ud2 stubs (NATIVE_REFUSAL
+# kind=empty_stub_ud2 reason=missing_lowered_body). The probe then died with
+# SIGILL (rc=132, no output) on the first Knowledge<T where {...}> type, so
+# return-positive failed before any obligation was counted. Measured 2026-09-13.
+PROBE_BIN="$TMP_DIR/knowledge-runtime-obligation-probe.lean"
+PROBE_BUILD_LOG="$TMP_DIR/knowledge-runtime-obligation-probe-build.log"
+if ! lean_compile "$OBLIGATION_PROBE" "$PROBE_BIN" >"$PROBE_BUILD_LOG" 2>&1; then
+  printf 'FAIL  could not compile the Knowledge runtime obligation probe with current-source lean_single\n' >&2
+  cat "$PROBE_BUILD_LOG" >&2
+  exit 1
+fi
+
 assert_obligation_drained() {
   local label="$1"
   local source_file="$2"
   local expanded_file="$3"
   local source_log="$TMP_DIR/${label}-source-obligations.log"
   local expanded_log="$TMP_DIR/${label}-expanded-obligations.log"
-  if bin/souc run "$OBLIGATION_PROBE" -- "$source_file" >"$source_log" 2>&1 &&
-     bin/souc run "$OBLIGATION_PROBE" -- "$expanded_file" >"$expanded_log" 2>&1 &&
+  if "$PROBE_BIN" "$source_file" >"$source_log" 2>&1 &&
+     "$PROBE_BIN" "$expanded_file" >"$expanded_log" 2>&1 &&
      grep -q 'knowledge_runtime_obligation_verdict=0' "$source_log" &&
      grep -Eq 'knowledge_runtime_obligation_count=[1-9][0-9]*' "$source_log" &&
      grep -q 'knowledge_runtime_obligation_verdict=0' "$expanded_log" &&
@@ -572,17 +630,10 @@ else
   exit 1
 fi
 
-if bin/souc-linux-x86_64 self-hosted/compiler/lean_single.sio "$CURRENT_SOUC" >"$BUILD_LOG" 2>&1; then
-  chmod +x "$CURRENT_SOUC"
-  printf 'PASS  built current-source lean_single compiler for internal-label runtime guard gate\n'
-else
-  printf 'FAIL  could not build current-source lean_single compiler for internal-label runtime guard gate\n' >&2
-  cat "$BUILD_LOG" >&2
-  exit 1
-fi
-
 INTERNAL_LABEL_POSITIVE_LOG="$TMP_DIR/internal-label-positive.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$INTERNAL_LABEL_POSITIVE_EXPANDED" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1; then
+INTERNAL_LABEL_POSITIVE_BIN="$TMP_DIR/internal-label-positive.lean"
+if lean_compile "$INTERNAL_LABEL_POSITIVE_EXPANDED" "$INTERNAL_LABEL_POSITIVE_BIN" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1 &&
+   "$INTERNAL_LABEL_POSITIVE_BIN" >>"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1; then
   printf 'PASS  %s accepted dynamic internal-label unit value satisfying generated runtime guard\n' "$INTERNAL_LABEL_POSITIVE"
 else
   printf 'FAIL  %s should pass the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_POSITIVE" >&2
@@ -591,12 +642,22 @@ else
 fi
 
 INTERNAL_LABEL_NEGATIVE_LOG="$TMP_DIR/internal-label-negative.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$INTERNAL_LABEL_NEGATIVE_EXPANDED" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1; then
-  printf 'FAIL  %s should fail the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE" >&2
+INTERNAL_LABEL_NEGATIVE_BIN="$TMP_DIR/internal-label-negative.lean"
+if ! lean_compile "$INTERNAL_LABEL_NEGATIVE_EXPANDED" "$INTERNAL_LABEL_NEGATIVE_BIN" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1; then
+  printf 'FAIL  %s did not compile, so it never reached the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE" >&2
   cat "$INTERNAL_LABEL_NEGATIVE_LOG" >&2
   exit 1
-else
+fi
+set +e
+"$INTERNAL_LABEL_NEGATIVE_BIN" >>"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1
+INTERNAL_LABEL_NEGATIVE_RC=$?
+set -e
+if [[ "$INTERNAL_LABEL_NEGATIVE_RC" -eq 1 ]]; then
   printf 'PASS  %s failed the generated internal-label unit Knowledge<T> runtime guard\n' "$INTERNAL_LABEL_NEGATIVE"
+else
+  printf 'FAIL  %s should fail the generated internal-label unit Knowledge<T> runtime guard with exit code 1, got %s\n' "$INTERNAL_LABEL_NEGATIVE" "$INTERNAL_LABEL_NEGATIVE_RC" >&2
+  cat "$INTERNAL_LABEL_NEGATIVE_LOG" >&2
+  exit 1
 fi
 assert_native_guard_pair "internal-label-unit" "$INTERNAL_LABEL_POSITIVE" "$INTERNAL_LABEL_POSITIVE_EXPANDED" "$INTERNAL_LABEL_NEGATIVE" "$INTERNAL_LABEL_NEGATIVE_EXPANDED"
 

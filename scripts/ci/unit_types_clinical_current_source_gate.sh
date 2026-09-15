@@ -22,7 +22,15 @@ else
 fi
 
 POSITIVE_LOG="$TMP_DIR/unit-literal-clinical.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$POSITIVE" >"$POSITIVE_LOG" 2>&1 &&
+# bin/souc translates its verbs only for the engine binaries. With
+# SOUNIO_SOUC_BIN set it execs that ELF with the arguments verbatim --
+# documented at the top of bin/souc as "raw, lean_single CLI" -- so
+# `bin/souc run FILE` reached the compiler as `run FILE`, and it took
+# the verb as the source filename and reported E221 no main. The gate
+# was reporting the feature missing when it had never invoked it.
+if "$CURRENT_SOUC" "$POSITIVE" "$TMP_DIR/positive.elf" >"$POSITIVE_LOG" 2>&1 &&
+   chmod +x "$TMP_DIR/positive.elf" &&
+   "$TMP_DIR/positive.elf" >>"$POSITIVE_LOG" 2>&1 &&
    grep -q 'unit literal clinical: PASS' "$POSITIVE_LOG"; then
   printf 'PASS  %s accepted clinical numeric literal unit suffixes\n' "$POSITIVE"
 else
@@ -32,7 +40,7 @@ else
 fi
 
 NEGATIVE_LOG="$TMP_DIR/unit-literal-clinical-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1; then
+if "$CURRENT_SOUC" "$NEGATIVE" "$TMP_DIR/negative.elf" >"$NEGATIVE_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted mass concentration where amount concentration was required\n' "$NEGATIVE" >&2
   cat "$NEGATIVE_LOG" >&2
   exit 1
