@@ -14,6 +14,18 @@ let sounio_source_sha256 =
 let sounio_executable_sha256 =
   "68d3f8efd22454dc3a66242f2beafad804cfae8550fee94716c718614d1ead90"
 
+(* Action 9048 is re-frozen append-only: v2 changes only the entrypoint read, not
+   the semantic module. Pins and activation heads sealed under either generation
+   stay valid, as an exact pair; new records carry the constants above. *)
+let accepted_generations =
+  [ ("9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549",
+     "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d");
+    ("a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff",
+     "0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4") ]
+
+let accepted_generation semantics freeze =
+  List.mem (semantics, freeze) accepted_generations
+
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 let test_mode () = Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1"
 let process_timeout_seconds = 30.0
@@ -348,8 +360,10 @@ let validate_pin state runtime_root identity =
   exact "pid_namespace" identity.pid_namespace; exact "pid" identity.pid;
   exact "pid_start" identity.pid_start; exact "identity_sha256" (identity_digest identity);
   exact "presence_sha256" (identity_digest identity);
-  exact "action" "9048"; exact "semantics_sha256" semantics_sha256;
-  exact "freeze_sha256" freeze_sha256;
+  exact "action" "9048";
+  if not (accepted_generation (required "generation-pin" fields "semantics_sha256")
+            (required "generation-pin" fields "freeze_sha256"))
+  then failf "pin-identity-drift:semantics_sha256";
   let runtime = validate_runtime runtime_root (required "generation-pin" fields "runtime_id") in
   exact "runtime_manifest_sha256" runtime.manifest_sha256;
   exact "loom_runtime_sha256" runtime.loom_sha256;
@@ -454,20 +468,23 @@ let seal ~source_root ~git_common ~old_runtime_id ~candidate_runtime_id =
              else
                classified := (name ^ ":NOT_LIVE:" ^ presence_sha) :: !classified);
       let inventory = !classified |> List.sort String.compare |> String.concat "\n" |> sha256 in
-      let receipt = String.concat "\n"
+      let receipt_for (semantics, freeze) = String.concat "\n"
           [ "schema=loom-generation-pin-set-v1"; "state=SEALED";
             "old_runtime_id=" ^ old_runtime.id; "candidate_runtime_id=" ^ candidate.id;
             "inventory_sha256=" ^ inventory;
             "pin_count=" ^ string_of_int (List.length !live);
             "semantic_authority=Sounio"; "action=9048";
-            "semantics_sha256=" ^ semantics_sha256; "freeze_sha256=" ^ freeze_sha256; "" ] in
+            "semantics_sha256=" ^ semantics; "freeze_sha256=" ^ freeze; "" ] in
+      let receipt = receipt_for (semantics_sha256, freeze_sha256) in
       let transaction = sha256 receipt in
       authority_decide state authority ~command:"hook-generation-pin-cutover-ready" 6 33554431 inventory candidate.manifest_sha256
         transaction
         "SOUNIO_GENERATION_PINNED_CUTOVER CUTOVER_READY semantic_authority=Sounio action=9048";
       let activation = Filename.concat (pin_directory state) "activation.v1" in
       if Sys.file_exists activation then (
-        if read_governed_file activation <> receipt then failf "activation-receipt-overwrite-refused")
+        let existing = read_governed_file activation in
+        if not (List.exists (fun generation -> existing = receipt_for generation) accepted_generations)
+        then failf "activation-receipt-overwrite-refused")
       else atomic_write activation receipt;
       Printf.printf "LOOM_GENERATION_PIN_SEALED pins=%d inventory_sha256=%s old_runtime=%s candidate_runtime=%s\n%!"
         (List.length !live) inventory old_runtime.id candidate.id;
@@ -497,8 +514,10 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     activation_exact "state" "SEALED";
     activation_exact "semantic_authority" "Sounio";
     activation_exact "action" "9048";
-    activation_exact "semantics_sha256" semantics_sha256;
-    activation_exact "freeze_sha256" freeze_sha256;
+    if not (accepted_generation
+              (required "generation-pin-activation" activation_fields "semantics_sha256")
+              (required "generation-pin-activation" activation_fields "freeze_sha256"))
+    then failf "generation-pin-activation-drift:semantics_sha256";
     let old_runtime_id = required "generation-pin-activation" activation_fields "old_runtime_id" in
     let candidate_runtime_id =
       required "generation-pin-activation" activation_fields "candidate_runtime_id"

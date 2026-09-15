@@ -144,6 +144,31 @@ ensure_obligation_activation() {
   flock -u 8
 }
 
+# Frozen authorities are re-frozen append-only. An installed bundle may carry any
+# accepted generation, so activating (or rolling back to) a bundle sealed before
+# a re-freeze stays possible; each check below still fails closed on unknown values.
+manifest_value_in() {
+  local manifest="$1" key="$2" value accepted
+  value="$(manifest_value "$manifest" "$key")"
+  shift 2
+  for accepted in "$@"; do [[ "$value" == "$accepted" ]] && return 0; done
+  return 1
+}
+
+# Semantics and freeze manifest must belong to the same frozen generation.
+manifest_pair_in() {
+  local manifest="$1" first="$2" second="$3" pair accepted
+  pair="$(manifest_value "$manifest" "$first"):$(manifest_value "$manifest" "$second")"
+  shift 3
+  for accepted in "$@"; do [[ "$pair" == "$accepted" ]] && return 0; done
+  return 1
+}
+
+# The newest frozen generation shipped in a policy capsule (…freeze.v2, else …freeze.v1).
+frozen_capsule_file() {
+  if [[ -f "$1.v2" ]]; then printf '%s\n' "$1.v2"; else printf '%s\n' "$1.v1"; fi
+}
+
 activate_runtime() {
   local runtime_id="$1" version_dir manifest protocol link_tmp
   local previous_target='' previous_bundle='' previous_runtime=''
@@ -172,17 +197,19 @@ activate_runtime() {
   fi
   if grep -q '^capability=loom-routing-authority-v1$' "$manifest"; then
     local routing_capsule="$version_dir/policy/routing-authority"
-    local routing_freeze="$routing_capsule/tools/loom/routing_authority.freeze.v2"
+    local routing_freeze
+    routing_freeze="$(frozen_capsule_file "$routing_capsule/tools/loom/routing_authority.freeze")"
     local routing_source="$routing_capsule/stdlib/coordination/loom_routing_authority.sio"
     local routing_entrypoint="$routing_capsule/tools/loom/routing_authority_main.sio"
     [[ -x "$version_dir/bin/sounio-loom-routing-authority-runtime" && \
-      -f "$routing_capsule/tools/loom/routing_authority.freeze.v2" && \
+      -f "$routing_freeze" && \
       -f "$routing_capsule/stdlib/coordination/loom_routing_authority.sio" && \
       -f "$routing_capsule/tools/loom/routing_authority_main.sio" ]] || \
       die "installed runtime declares routing authority but omits frozen Sounio action 9032: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_routing_authority_action)" == 9032 && \
-      "$(manifest_value "$manifest" loom_routing_authority_semantics_sha256)" == \
-        cf625edcbc8c21a6c05e6ccb18adb254af3ffb1cec54bea3ce4fc14df739a8ea ]] || \
+    [[ "$(manifest_value "$manifest" loom_routing_authority_action)" == 9032 ]] && \
+      manifest_value_in "$manifest" loom_routing_authority_semantics_sha256 \
+        cf625edcbc8c21a6c05e6ccb18adb254af3ffb1cec54bea3ce4fc14df739a8ea \
+        edd7944d759a398589e2c4a5f0798f1d3df79e68c514d3b0e4081a94c9c32fb1 || \
       die "installed routing authority is not bound to frozen Sounio semantics: $runtime_id"
     [[ "$(sha256sum "$routing_freeze" | awk '{print $1}')" == \
       "$(manifest_value "$manifest" loom_routing_authority_manifest_sha256)" && \
@@ -198,8 +225,9 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-custody-transfer-runtime" ]] || \
       die "installed runtime declares transactional custody transfer but omits Loom or frozen Sounio frame 9040: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_custody_transfer_semantics_sha256)" == \
-      4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727 ]] || \
+    manifest_value_in "$manifest" loom_custody_transfer_semantics_sha256 \
+      4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727 \
+      5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c || \
       die "installed custody transfer is not bound to frozen Sounio semantics: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" loom_custody_transfer_runtime_sha256 \
       "$version_dir/bin/sounio-loom-custody-transfer-runtime"
@@ -209,11 +237,13 @@ activate_runtime() {
       [[ -x "$version_dir/bin/sounio-loom-runtime" && \
         -x "$version_dir/bin/sounio-loom-execution-outcome-runtime" ]] || \
       die "installed runtime declares durable execution outcomes without transactional custody, Loom, or frozen Sounio frame 9022: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_execution_outcome_semantics_sha256)" == \
-      9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59 ]] || \
+    manifest_value_in "$manifest" loom_execution_outcome_semantics_sha256 \
+      9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59 \
+      c98c13d30d66ba2fb3d0fb34d75bd21b14b353bc88fd80acf7dbb385cb9fa914 || \
       die "installed execution outcome is not bound to frozen Sounio semantics: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_execution_outcome_manifest_sha256)" == \
-      e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1 ]] || \
+    manifest_value_in "$manifest" loom_execution_outcome_manifest_sha256 \
+      e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1 \
+      f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e || \
       die "installed execution outcome has an unknown freeze manifest: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" loom_execution_outcome_runtime_sha256 \
       "$version_dir/bin/sounio-loom-execution-outcome-runtime"
@@ -222,8 +252,9 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-language-authority-runtime" ]] || \
       die "installed runtime declares the native agent hook but omits its OCaml kernel or frozen Sounio authority: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_language_authority_semantics_sha256)" == \
-      16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
+    manifest_value_in "$manifest" loom_language_authority_semantics_sha256 \
+      16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff \
+      7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6 || \
       die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
   fi
   if grep -q '^capability=loom-native-hook-cutover-v1$' "$manifest"; then
@@ -236,15 +267,15 @@ activate_runtime() {
     [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
       ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] || \
       die "installed native hook cutover still contains a Python hook bridge: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_native_hook_cutover_semantics_sha256)" == \
-      27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882 && \
-      "$(manifest_value "$manifest" loom_native_hook_cutover_manifest_sha256)" == \
-      16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a ]] || \
+    manifest_pair_in "$manifest" loom_native_hook_cutover_semantics_sha256 \
+      loom_native_hook_cutover_manifest_sha256 \
+      27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882:16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a \
+      842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998:4ce46da965e6e19390dcfde8119bf8e9dcb1dab2c1722f5c27cc5e330532932a || \
       die "installed native hook cutover is not bound to frozen Sounio action 9045: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_runtime_sha256 \
       "$version_dir/bin/sounio-loom-native-hook-cutover"
     verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_manifest_sha256 \
-      "$cutover_capsule/tools/loom/native_hook_cutover.freeze.v1"
+      "$(frozen_capsule_file "$cutover_capsule/tools/loom/native_hook_cutover.freeze")"
     verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_source_sha256 \
       "$cutover_capsule/stdlib/coordination/loom_native_hook_cutover_authority.sio"
     verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_entrypoint_sha256 \
@@ -264,27 +295,27 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
       die "installed runtime declares generation reconciliation without Loom or frozen Sounio action 9047: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_native_hook_generation_reconcile_semantics_sha256)" == \
-      63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff && \
-      "$(manifest_value "$manifest" loom_native_hook_generation_reconcile_manifest_sha256)" == \
-      a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7 ]] || \
+    manifest_pair_in "$manifest" loom_native_hook_generation_reconcile_semantics_sha256 \
+      loom_native_hook_generation_reconcile_manifest_sha256 \
+      63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff:a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7 \
+      9741264b94d06e7063673063c9c328f91f9ae25e1211f4a083522b05a513c5f7:35b6dc397a250eb2dfe9e57384a96bf07a37199bc28fe66daad1fd4ee6ffd39b || \
       die "installed generation reconciliation is not bound to frozen Sounio action 9047: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_reconcile_runtime_sha256 \
       "$version_dir/bin/sounio-loom-native-hook-generation-reconcile"
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_reconcile_manifest_sha256 \
-      "$reconcile_capsule/tools/loom/native_hook_generation_reconcile.freeze.v1"
+      "$(frozen_capsule_file "$reconcile_capsule/tools/loom/native_hook_generation_reconcile.freeze")"
   fi
   if grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest"; then
     local pin_capsule="$version_dir/policy/generation-pinned-cutover"
     [[ -x "$version_dir/bin/sounio-loom-generation-pinned-cutover" && \
-      -f "$pin_capsule/tools/loom/generation_pinned_cutover.freeze.v1" ]] || \
+      -f "$(frozen_capsule_file "$pin_capsule/tools/loom/generation_pinned_cutover.freeze")" ]] || \
       die "installed runtime declares generation pinning without frozen Sounio action 9048: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_generation_pinned_cutover_semantics_sha256)" == \
-      "9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549" && \
-      "$(manifest_value "$manifest" loom_generation_pinned_cutover_manifest_sha256)" == \
-      "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d" ]] || \
+    manifest_pair_in "$manifest" loom_generation_pinned_cutover_semantics_sha256 \
+      loom_generation_pinned_cutover_manifest_sha256 \
+      9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549:0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d \
+      a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff:0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4 || \
       die "installed generation pinning is not bound to frozen Sounio action 9048: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_generation_pinned_cutover_runtime_sha256 \
@@ -297,24 +328,24 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" loom_activation_epoch_runtime_sha256 \
       "$version_dir/bin/sounio-loom-activation-epoch"
     verify_manifest_binary_sha256 "$manifest" loom_activation_epoch_manifest_sha256 \
-      "$epoch_capsule/tools/loom/activation_epoch.freeze.v1"
+      "$(frozen_capsule_file "$epoch_capsule/tools/loom/activation_epoch.freeze")"
   fi
   if grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest"; then
     local drain_capsule="$version_dir/policy/native-hook-generation-drain"
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-native-hook-generation-drain" ]] || \
       die "installed runtime declares generation drain without Loom or frozen Sounio action 9046: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_native_hook_generation_drain_semantics_sha256)" == \
-      00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3 && \
-      "$(manifest_value "$manifest" loom_native_hook_generation_drain_manifest_sha256)" == \
-      9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1 ]] || \
+    manifest_pair_in "$manifest" loom_native_hook_generation_drain_semantics_sha256 \
+      loom_native_hook_generation_drain_manifest_sha256 \
+      00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3:9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1 \
+      c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb:ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61 || \
       die "installed generation drain is not bound to frozen Sounio action 9046: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_drain_runtime_sha256 \
       "$version_dir/bin/sounio-loom-native-hook-generation-drain"
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_drain_manifest_sha256 \
-      "$drain_capsule/tools/loom/native_hook_generation_drain.freeze.v1"
+      "$(frozen_capsule_file "$drain_capsule/tools/loom/native_hook_generation_drain.freeze")"
   fi
   if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
     local authority_capsule="$version_dir/policy/language-authority"
@@ -322,7 +353,7 @@ activate_runtime() {
       die "installed runtime declares an authority capsule without the native hook: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_language_authority_policy_manifest_sha256 \
-      "$authority_capsule/tools/loom/language_authority.freeze.v2"
+      "$(frozen_capsule_file "$authority_capsule/tools/loom/language_authority.freeze")"
     verify_manifest_binary_sha256 "$manifest" \
       loom_language_authority_policy_source_sha256 \
       "$authority_capsule/stdlib/coordination/loom_language_authority.sio"
@@ -591,8 +622,9 @@ activate_runtime() {
       -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
       -x "$version_dir/bin/sounio-loom-lane-health-parity-runtime" ]] || \
       die "installed runtime declares truthful lane health but omits its OCaml realization or frozen Sounio executables: $runtime_id"
-    [[ "$(manifest_value "$manifest" loom_lane_health_semantics_sha256)" == \
-      8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74 ]] || \
+    manifest_value_in "$manifest" loom_lane_health_semantics_sha256 \
+      8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74 \
+      5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f || \
       die "installed truthful lane health is not bound to the frozen Sounio semantics: $runtime_id"
   fi
   if grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest"; then
@@ -2326,7 +2358,7 @@ else
     printf 'loom_language_authority_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_language_authority_stage=SEMANTICS_FROZEN\n'
     printf 'loom_language_authority_frame=9020\n'
-    printf 'loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\n'
+    printf 'loom_language_authority_semantics_sha256=7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6\n'
     printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
     printf 'loom_language_authority_policy_manifest_sha256=%s\n' \
       "$loom_language_authority_policy_manifest_sha256"

@@ -125,6 +125,23 @@ run_seal "$STATE" >/dev/null
 [[ "$ACTIVATION_SHA" == "$(sha256sum "$ACTIVATION" | awk '{print $1}')" ]] ||
   fail 'idempotent retry rewrote activation receipt'
 
+# Pins and activation heads sealed under the append-only action 9048 v2 freeze stay
+# valid; a record mixing the v1 and v2 generations is refused.
+V2_SEMANTICS=a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff
+V2_FREEZE=0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4
+V2_STATE="$(new_state freeze-v2-records)"
+run_seal "$V2_STATE" >/dev/null
+for record in "$V2_STATE/generation-runtime-pins/test--generation-pin.pin" \
+  "$V2_STATE/generation-runtime-pins/activation.v1"; do
+  sed -i -e "s/^semantics_sha256=.*/semantics_sha256=$V2_SEMANTICS/" \
+    -e "s/^freeze_sha256=.*/freeze_sha256=$V2_FREEZE/" "$record"
+  chmod 600 "$record"
+done
+run_seal "$V2_STATE" >/dev/null || fail 'records sealed under action 9048 v2 were refused'
+sed -i 's/^freeze_sha256=.*/freeze_sha256=0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d/' \
+  "$V2_STATE/generation-runtime-pins/test--generation-pin.pin"
+expect_denied mixed-generation-pin run_seal "$V2_STATE"
+
 PYTHON_STATE="$(new_state python-oracle)"
 expect_denied python-oracle-attempt env SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_GENERATION_PIN_POLICY_ROOT="$POLICY_ROOT" \
@@ -179,4 +196,4 @@ grep -q 'generation-pin-recursive-forward' \
 ! grep -q 'generation-pin-current-selector-drift' \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
   fail 'sealed first-cutover pair incorrectly blocks later immutable current generations'
-printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=12 python_oracle_executed=false semantic_authority=Sounio action=9048\n'
+printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=14 python_oracle_executed=false semantic_authority=Sounio action=9048\n'

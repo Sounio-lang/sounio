@@ -850,7 +850,7 @@ grep -q '^loom_lane_health_semantics_sha256=8d4b03d3cf327bafa476c7e8bae309a6e160
   "$first_manifest" || fail 'installed runtime omitted frozen lane-health semantics'
 grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
   fail 'installed runtime omitted the native-agent-hook capability'
-grep -q '^loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff$' \
+grep -q '^loom_language_authority_semantics_sha256=7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6$' \
   "$first_manifest" || fail 'installed native hook is not bound to frozen Sounio semantics'
 authority_capsule="$RUNTIME_ROOT/versions/$first_id/policy/language-authority"
 [[ -f "$authority_capsule/tools/loom/language_authority.freeze.v2" && \
