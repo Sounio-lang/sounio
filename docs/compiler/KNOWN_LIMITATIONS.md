@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: dynamic linking (aggregate-ref CLOSED as KL-14a) | madaros |
+| KL-14 | FFI: aggregate-ref CLOSED; dynlink MVP (KL-14b) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 | KL-17 | generic `impl` blocks: associated-call and literal `T` inference, raw-word `HeapVec<T>` | madaros |
@@ -139,12 +139,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   the resulting `char*` to `ffi_system`. The `string` binding is unchanged.
   Pin: `tests/run-pass/ffi_system_array_arg.sio`. Doc:
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
-- **No dynamic linking.** Engine: `madaros`. The ELF writer emits static
-  executables; `native/reloc.sio:271-291` records `R_X86_64_PLT32` for
-  ET_REL only; there is no `PT_INTERP`/`PT_DYNAMIC`/`.dynsym`/`.rela.plt`/
-  `DT_NEEDED` anywhere. `-lfoo`-style shared-library calls are not possible;
-  `tests/stdlib/compress/test_zstd_e2e.sio` is a constants-only stub because
-  no libzstd call can be linked. Pin: none.
+- **Dynamic linking MVP — CLOSED (KL-14b).** Engine: `madaros`. One
+  non-builtin extern (`kl14b_add`) resolves via `PT_INTERP` + `PT_DYNAMIC` +
+  `DT_NEEDED` (`libkl14b_probe.so`) + GOT/`R_X86_64_GLOB_DAT`, plus a
+  `PT_LOAD` (R) of the ELF header page at `base_addr` so `ld.so` can see
+  phdrs. Empty-stub body is `call [rip+got]; ret`. Dyn metadata is appended
+  after the runtime-context data payload. Pin:
+  `tests/run-pass/kl14b_dynlink_one_symbol.sio`,
+  `scripts/ci/madaros_kl14b_dynlink_gate.sh`. Residual (KL-14c): arbitrary
+  `-lfoo` / N symbols, real libzstd e2e, `dlopen` surface.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
