@@ -15,16 +15,18 @@ trap 'rm -rf "$WORKDIR"' EXIT
 SO="$WORKDIR/libkl14b_probe.so"
 OUT="$WORKDIR/kl14b_dynlink_one_symbol.elf"
 
-MADAROS="${MADAROS_RAW_BIN:-${SOUNIO_MADAROS_BIN:-${SOUNIO_TEST_SOUC_BIN:-}}}"
-if [[ -z "$MADAROS" || ! -x "$MADAROS" ]]; then
+SOUC="${SOUC:-$ROOT/bin/souc}"
+RAW="${MADAROS_RAW_BIN:-${SOUNIO_MADAROS_BIN:-${MADAROS_BIN:-}}}"
+[[ -x "$SOUC" ]] || { echo "madaros_kl14b_dynlink_gate: souc not executable: $SOUC" >&2; exit 2; }
+[[ -n "$RAW" && -x "$RAW" ]] || {
   echo "madaros_kl14b_dynlink_gate: set MADAROS_RAW_BIN to a Madaros ELF" >&2
   exit 2
-fi
+}
 
 gcc -shared -fPIC -O0 -o "$SO" "$PROBE_C"
 
-# Madaros raw ELF: positional `source.sio out.elf` (same as lean_single).
-if ! "$MADAROS" "$SRC" "$OUT" 2>"$WORKDIR/compile.err"; then
+# bin/souc + MADAROS_RAW_BIN is the Witness Gate shape (see KL-4 gate).
+if ! MADAROS_RAW_BIN="$RAW" "$SOUC" build "$SRC" -o "$OUT" 2>"$WORKDIR/compile.err"; then
   echo "madaros_kl14b_dynlink_gate: FAIL compile" >&2
   cat "$WORKDIR/compile.err" >&2
   exit 1
