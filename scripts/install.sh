@@ -93,6 +93,11 @@ case "$TARGET" in
     ;;
   *) echo "error: unrecognised --target $TARGET" >&2; exit 2;;
 esac
+# The committed prebuilt is stored compressed; generate the ELF from it
+# (verified against the tracked sha256) before choosing what to install.
+if [[ "$TARGET" == "x86_64" && -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+  bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || exit $?
+fi
 MADAROS_ART_BIN="$ROOT_DIR/artifacts/self-hosted/madaros"
 MADAROS_PREBUILT_BIN="$ROOT_DIR/bin/madaros-linux-x86_64"
 MADAROS_SHIP_BIN=""

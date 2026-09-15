@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# scripts/lib/materialize_madaros_prebuilt.sh
+#
+# The committed Madaros prebuilt is stored compressed:
+#
+#   bin/madaros-linux-x86_64.gz       gzip -n -9 of the ELF            (tracked)
+#   bin/madaros-linux-x86_64.sha256   sha256 of the uncompressed ELF   (tracked)
+#   bin/madaros-linux-x86_64          the ELF itself        (gitignored, made here)
+#
+# WHY. The ELF is ~95 MB, a few MB under GitHub's 100 MB per-file limit, and it
+# grows with the compiler. Compressed it is ~11.6 MB. Git LFS was considered and
+# not used: CI checks the repository out hundreds of times a week, and LFS would
+# download, store and bill every weekly refresh of the full 95 MB, where git
+# stores each refresh of the .gz as a ~3.3 MB delta (measured 2026-09-15 on
+# aaecebd878 -> 9e8e673414).
+#
+# This script turns the tracked .gz into the ELF that bin/madaros, bin/souc and
+# ~80 scripts execute. It refuses loudly (exit 78) when the bytes do not match
+# the tracked sha256: a prebuilt that is not the committed one must never run as
+# if it were.
+#
+# Fast path: a stamp beside the ELF records the sha256 and size it was verified
+# at. While the tracked sha256 and the ELF's size still match the stamp, the ELF
+# is not re-hashed (bin/souc runs hundreds of times per test suite). Pass
+# --verify, or set SOUNIO_REQUIRE_COMMITTED_MADAROS=1, to re-hash every time.
+#
+# A bin/madaros-linux-x86_64 that does not match the tracked sha256 is replaced
+# from the .gz, with a notice on stderr. That path is a generated file; to run a
+# different build, name it with MADAROS_RAW_BIN instead of copying it there.
+#
+# Usage:  bash scripts/lib/materialize_madaros_prebuilt.sh [--verify]
+#         or: source it, then sounio_materialize_madaros_prebuilt [--verify]
+# Exit:   0   the ELF is present and matches, or this tree has no compressed
+#             prebuilt (nothing to do)
+#         78  the compressed prebuilt, its sha256, or the decompressed bytes are
+#             missing, unreadable or do not match
+
+_sounio_madaros_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+sounio_materialize_madaros_prebuilt() {
+  local root verify=0
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  if [[ "${1:-}" == "--verify" || "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" ]]; then
+    verify=1
+  fi
+
+  local gz="$root/bin/madaros-linux-x86_64.gz"
+  local sum="$root/bin/madaros-linux-x86_64.sha256"
+  local elf="$root/bin/madaros-linux-x86_64"
+  local stamp="$root/bin/.madaros-linux-x86_64.verified"
+
+  # A tree from before the prebuilt was compressed (or a sparse checkout without
+  # bin/): nothing to materialize, and resolution reports what it cannot find.
+  if [[ ! -e "$gz" ]]; then
+    return 0
+  fi
+
+  if [[ ! -s "$sum" ]]; then
+    echo "error: madaros prebuilt: bin/madaros-linux-x86_64.gz is present but bin/madaros-linux-x86_64.sha256 is missing or empty" >&2
+    return 78
+  fi
+  local want
+  want="$(awk 'NR == 1 {print $1}' "$sum")"
+  if [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: madaros prebuilt: bin/madaros-linux-x86_64.sha256 does not start with a sha256" >&2
+    return 78
+  fi
+
+  local size=""
+  if [[ -f "$elf" ]]; then
+    size="$(wc -c < "$elf" | tr -d ' ')"
+  fi
+
+  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" ]] \
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
+    chmod 755 "$elf" 2>/dev/null || true
+    printf '%s %s\n' "$want" "$size" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+    return 0
+  fi
+
+  if [[ -f "$elf" ]]; then
+    echo "madaros prebuilt: bin/madaros-linux-x86_64 does not match bin/madaros-linux-x86_64.sha256; replacing it with the committed prebuilt" >&2
+  fi
+
+  local tmp="$elf.tmp.$$"
+  if ! gzip -dc "$gz" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "error: madaros prebuilt: cannot decompress bin/madaros-linux-x86_64.gz" >&2
+    return 78
+  fi
+  local got
+  got="$(_sounio_madaros_sha256 "$tmp")"
+  if [[ "$got" != "$want" ]]; then
+    rm -f "$tmp"
+    echo "error: madaros prebuilt: bin/madaros-linux-x86_64.gz decompresses to sha256 $got" >&2
+    echo "  but bin/madaros-linux-x86_64.sha256 records $want" >&2
+    echo "  refusing to install a prebuilt that is not the committed one" >&2
+    return 78
+  fi
+  if ! { chmod 755 "$tmp" && mv -f "$tmp" "$elf"; }; then
+    rm -f "$tmp"
+    echo "error: madaros prebuilt: could not install bin/madaros-linux-x86_64" >&2
+    return 78
+  fi
+  size="$(wc -c < "$elf" | tr -d ' ')"
+  printf '%s %s\n' "$want" "$size" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+  echo "madaros prebuilt: materialized bin/madaros-linux-x86_64 from bin/madaros-linux-x86_64.gz (sha256 ${want:0:12}, $size bytes)" >&2
+  return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  set -uo pipefail
+  sounio_materialize_madaros_prebuilt "$@"
+  exit $?
+fi
