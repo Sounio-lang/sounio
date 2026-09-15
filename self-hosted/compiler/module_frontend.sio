@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128, spec_program_calls_bare_name, spec_program_defines_fn_named}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -1914,6 +1914,77 @@ fn module_frontend_bodyless_f128_targets(module: &IrModule) -> bool with IO, Mut
                         print("` has no body, called from `")
                         print(str_from_bytes(f.name.buf, f.name.len))
                         print("` -- the implicit import did not resolve stdlib/math/softfloat_f128.sio (check SOUNIO_STDLIB_PATH) and no `use math::softfloat_f128::...` supplied it\n")
+                        found = true
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    found
+}
+
+// #2507: the five names the native backend has no kernel for. Madaros imports
+// stdlib math/transcendental/<name>.sio implicitly for each one a program calls
+// bare without defining (see the BFS in module_frontend_compile_imported_to_file).
+fn module_frontend_transcendental_name(i: i64) -> string with Mut, Panic {
+    if i == 0 { return "tan" }
+    if i == 1 { return "atan" }
+    if i == 2 { return "tanh" }
+    if i == 3 { return "asin" }
+    "acos"
+}
+
+fn module_frontend_name_is_implicit_transcendental(n: Name) -> bool with IO, Mut, Div, Panic {
+    if n.len < 3 || n.len > 4 { return false }
+    let s = str_from_bytes(n.buf, n.len)
+    if str_eq(s, "tan") { return true }
+    if str_eq(s, "atan") { return true }
+    if str_eq(s, "tanh") { return true }
+    if str_eq(s, "asin") { return true }
+    str_eq(s, "acos")
+}
+
+// #2507 fail-closed net under the implicit math::transcendental import, the same
+// shape as the f128 net above. A call to tan/atan/tanh/asin/acos that still binds
+// to a body-less slot means the import did not resolve -- no stdlib on
+// SOUNIO_STDLIB_PATH, or a compile path that skips the BFS -- and the backend
+// would emit `ud2` for it, which is the SIGILL of #2148. Returns true if such a
+// call exists; the caller refuses to write the binary.
+fn module_frontend_bodyless_transcendental_targets(module: &IrModule) -> bool with IO, Mut, Div, Panic {
+    var found = false
+    var fi: i64 = 0
+    while fi < (*module).fn_count && !found {
+        let f = ir_fn_get(module, fi as usize)
+        var ii: i64 = 0
+        while ii < f.instr_count && !found {
+            let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                let callee_id = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
+                var callee_nm = ir_arena_name(ir_region_slot_r(f.region, (ii)))
+                if callee_nm.len == 0 && callee_id >= 0 && callee_id < (*module).fn_count {
+                    callee_nm = ir_function_name_at(module, callee_id)
+                }
+                if module_frontend_name_is_implicit_transcendental(callee_nm) {
+                    var has_body = false
+                    if callee_id >= 0 && callee_id < (*module).fn_count && ir_fn_instr_count(module, callee_id) > 0 {
+                        has_body = true
+                    }
+                    if !has_body {
+                        let by_name = ir_merge_find_function_name_index(module, callee_nm)
+                        if by_name >= 0 && ir_fn_instr_count(module, by_name) > 0 {
+                            has_body = true
+                        }
+                    }
+                    if !has_body {
+                        print("error: `")
+                        print(str_from_bytes(callee_nm.buf, callee_nm.len))
+                        print("` has no body, called from `")
+                        print(str_from_bytes(f.name.buf, f.name.len))
+                        print("` -- the native backend has no kernel for tan/atan/tanh/asin/acos, and the implicit import of stdlib/math/transcendental/")
+                        print(str_from_bytes(callee_nm.buf, callee_nm.len))
+                        print(".sio did not resolve (check SOUNIO_STDLIB_PATH) (#2507)\n")
                         found = true
                     }
                 }
@@ -6675,6 +6746,71 @@ pub fn module_frontend_compile_imported_to_file(
                 }
             }
         }
+        // #2507: the second implicit import. The native backend has no kernel
+        // for tan/atan/tanh/asin/acos, so a bare call bound to a body-less stub
+        // and the ELF trapped with SIGILL (#2148), later refused with E221
+        // (#2172). For each name that some loaded module calls bare and none
+        // defines, add stdlib math/transcendental/<name>.sio. Per name, not one
+        // module: a program that defines `atan` but calls `tan` must not receive
+        // a second `atan` body, since calls bind by name and a body beats a stub.
+        //
+        // Runs only on a pass that loaded nothing new, so the scan sees the whole
+        // graph, softfloat's own deps included. If it loads a module, the loop
+        // runs again for that module's deps and this scan repeats; visited_paths
+        // makes the repeat a no-op, so no flag is needed. Announced on stdout like
+        // the f128 import; module_frontend_bodyless_transcendental_targets refuses
+        // the binary if a call still has no body.
+        if !bfs_again {
+            var tr_called: [i64; 5] = [0; 5]
+            var tr_defined: [i64; 5] = [0; 5]
+            var tmi: i64 = 0
+            while tmi < loaded && tmi < 256 {
+                // Whole-Program by-value copy then &prog, as in the f128 scan.
+                var tprog = programs[tmi as usize]
+                var tn: i64 = 0
+                while tn < 5 {
+                    let tname = make_name(module_frontend_transcendental_name(tn))
+                    if spec_program_calls_bare_name(&tprog, tname) {
+                        tr_called[tn as usize] = 1
+                    }
+                    if spec_program_defines_fn_named(&tprog, tname) {
+                        tr_defined[tn as usize] = 1
+                    }
+                    tn = tn + 1
+                }
+                tmi = tmi + 1
+            }
+            var tk: i64 = 0
+            while tk < 5 && loaded < 256 {
+                if tr_called[tk as usize] == 1 && tr_defined[tk as usize] == 0 {
+                    let tr_rel = str_concat(str_concat("math/transcendental/", module_frontend_transcendental_name(tk)), ".sio")
+                    let tr_path = module_frontend_resolve_import_relpath(tr_rel, module_frontend_path_directory_slice(main_path))
+                    if !visited_contains(visited_paths, visited_count, tr_path) {
+                        visited_paths[visited_count] = tr_path
+                        visited_count = visited_count + 1
+                        if file_exists(tr_path) {
+                            programs[loaded] = load_module_file(tr_path)
+                            file_paths[loaded] = tr_path
+                            loaded = loaded + 1
+                            trace.loaded_modules = loaded
+                            trace.last_stage = "load_implicit_transcendental"
+                            trace.last_module_index = loaded - 1
+                            print("imported_compile: implicit_import ")
+                            print(tr_rel)
+                            print(" reason=bare_call path=")
+                            print(tr_path)
+                            print("\n")
+                            bfs_again = true
+                        } else {
+                            print("imported_compile: implicit_import ")
+                            print(tr_rel)
+                            print(" reason=bare_call unresolved (SOUNIO_STDLIB_PATH?)\n")
+                        }
+                    }
+                }
+                tk = tk + 1
+            }
+        }
     }
 
     if loaded <= 0 {
@@ -6816,6 +6952,11 @@ pub fn module_frontend_compile_imported_to_file(
             module_frontend_global_init_compile_end()
             return 1
         }
+        if module_frontend_bodyless_transcendental_targets(&(*module_box)) {
+            print("Error: refusing to write a binary -- a tan/atan/tanh/asin/acos call has no body (#2507; the ELF would trap with SIGILL)\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
         module_frontend_print_float_bits_probe("single", &(*module_box))
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
@@ -6917,6 +7058,11 @@ pub fn module_frontend_compile_imported_to_file(
     }
     if module_frontend_bodyless_f128_targets(&(*module_box)) {
         print("Error: refusing to write a binary -- an f128 desugar target has no body (V0-E.5.10; the ELF would trap with SIGILL)\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
+    if module_frontend_bodyless_transcendental_targets(&(*module_box)) {
+        print("Error: refusing to write a binary -- a tan/atan/tanh/asin/acos call has no body (#2507; the ELF would trap with SIGILL)\n")
         module_frontend_global_init_compile_end()
         return 1
     }

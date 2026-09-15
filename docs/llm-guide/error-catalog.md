@@ -449,7 +449,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 > fail — update the theorem, do not silence the gate." So the catalogue and that
 > gate disagree about who owns E219. Tagging the seat forced the disagreement
 > into the open; resolving it is a decision about the theorem, not an edit.
-| E221 | no main | this math function is bound for typechecking but the native backend cannot emit it |
+| E221 | no main | not emitted since #2507 (from #2172 until then: a bare tan/atan/tanh/asin/acos the native backend could not emit; Madaros now imports `math::transcendental::<name>` implicitly) |
 
 | Code | Component | Severity | Gloss | Explanation |
 |------|-----------|----------|-------|-------------|

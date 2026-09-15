@@ -2109,6 +2109,160 @@ fn spec_mentions_f128_item(it: Item) -> bool with Mut, Panic, Div {
     false
 }
 
+// ── #2507: "does this program call `n` by its bare name?" ────────────────────
+//
+// The native backend has no kernel for tan, atan, tanh, asin or acos. The
+// driver asks these two questions for each of those names across every loaded
+// module; when some body calls the name and no module defines a fn of that
+// name, it adds stdlib math/transcendental/<name>.sio as an implicit import.
+// "Defines" is checked so a user's own `fn atan`, or `use math::pure::{atan}`,
+// is never joined by a second body under the same name. Walk shape mirrors
+// spec_mentions_f128_*: every Expr child, blocks, handlers, match arms, and
+// impl methods.
+fn spec_calls_bare_name_opt_expr(opt: Option<Box<Expr>>, n: Name) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_calls_bare_name_expr(*b, n),
+        None => false,
+    }
+}
+
+fn spec_calls_bare_name_opt_block(opt: Option<Box<Block>>, n: Name) -> bool with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_calls_bare_name_block(*b, n),
+        None => false,
+    }
+}
+
+fn spec_expr_is_bare_call_to(e: Expr, n: Name) -> bool with Mut, Panic, Div {
+    if e.kind != ExprKind::ExprCall { return false }
+    match e.left {
+        Some(callee) => {
+            if (*callee).kind == ExprKind::ExprIdent {
+                if name_eq((*callee).name, n) { return true }
+            }
+        }
+        None => {}
+    }
+    false
+}
+
+fn spec_calls_bare_name_expr(e: Expr, n: Name) -> bool with Mut, Panic, Div {
+    if spec_expr_is_bare_call_to(e, n) { return true }
+    if spec_calls_bare_name_opt_expr(e.left, n) { return true }
+    if spec_calls_bare_name_opt_expr(e.right, n) { return true }
+    if spec_calls_bare_name_opt_expr(e.else_expr, n) { return true }
+    if spec_calls_bare_name_opt_expr(e.closure_body, n) { return true }
+    if spec_calls_bare_name_opt_block(e.block, n) { return true }
+    if spec_calls_bare_name_opt_block(e.handler_block, n) { return true }
+    var acur = e.args
+    var agoing = true
+    while agoing {
+        match acur {
+            Some(list) => {
+                if spec_calls_bare_name_expr((*list).head, n) { return true }
+                acur = (*list).tail
+            }
+            None => { agoing = false }
+        }
+    }
+    var mcur = e.arms
+    var mgoing = true
+    while mgoing {
+        match mcur {
+            Some(list) => {
+                if spec_calls_bare_name_opt_expr((*list).head.guard, n) { return true }
+                if spec_calls_bare_name_expr((*list).head.body, n) { return true }
+                mcur = (*list).tail
+            }
+            None => { mgoing = false }
+        }
+    }
+    false
+}
+
+fn spec_calls_bare_name_block(b: Block, n: Name) -> bool with Mut, Panic, Div {
+    var cur = b.stmts
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_calls_bare_name_opt_expr((*list).head.expr, n) { return true }
+                if spec_calls_bare_name_opt_expr((*list).head.target, n) { return true }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_calls_bare_name_item(it: Item, n: Name) -> bool with Mut, Panic, Div {
+    if it.kind == ItemKind::ItemFn {
+        match it.fn_def {
+            Some(fd) => { return spec_calls_bare_name_block((*fd).body, n) }
+            None => { return false }
+        }
+    }
+    if it.kind == ItemKind::ItemImpl {
+        match it.impl_def {
+            Some(id) => {
+                var mcur = (*id).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        Some(ml) => {
+                            if spec_calls_bare_name_item((*ml).head, n) { return true }
+                            mcur = (*ml).tail
+                        }
+                        None => { mgoing = false }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+pub fn spec_program_calls_bare_name(prog: &Program, n: Name) -> bool with Mut, Panic, Div {
+    var cur = (*prog).items
+    var going = true
+    while going {
+        match cur {
+            Some(list) => {
+                if spec_calls_bare_name_item((*list).head, n) { return true }
+                cur = (*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    false
+}
+
+// Top-level `fn n` only. Methods are not bare-callable, so they neither satisfy
+// a bare call nor collide with the implicit module's free function.
+pub fn spec_program_defines_fn_named(prog: &Program, n: Name) -> bool with Mut, Panic, Div {
+    var cur = (*prog).items
+    var going = true
+    while going {
+        match cur {
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemFn {
+                    match (*list).head.fn_def {
+                        Some(fd) => {
+                            if name_eq((*fd).name, n) { return true }
+                        }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    false
+}
+
 pub fn spec_program_mentions_f128(prog: &Program) -> bool with Mut, Panic, Div {
     var cur = (*prog).items
     var going = true

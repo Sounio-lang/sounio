@@ -1,0 +1,84 @@
+// Implicit import target for a bare `tan(x)` under Madaros (#2507).
+//
+// NOT sin(x) / cos(x) through the backend builtins. Those kernels drift away
+// from 0 -- measured against C libm, relative error of cos is ~7.6e-16 at 0.5,
+// 2e-11 at 1.0, 4.7e-8 at 1.5, 4.4e-7 at 2.0 and 7.2e-6 at 10.0 -- and a tan
+// built on them inherited all of it. tan is computed here without them:
+//
+//   1. NaN and +-inf give NaN (x - x is NaN exactly for those).
+//   2. |x| <= pi/4: y = x, quadrant 0.
+//      otherwise: k = nearest integer to x * 2/pi, and
+//      y = (x - k*pio2_1) - k*pio2_1t, with fdlibm's split of pi/2 (e_rem_pio2.c):
+//      pio2_1 holds its first 33 bits, pio2_1t the next 53. While |k| < 2^20 the
+//      product k*pio2_1 is exact and the subtraction loses nothing, so y is
+//      accurate to far below one ulp.
+//   3. sin(y) and cos(y) from their Taylor series, |y| <= pi/4, eleven levels
+//      each: the truncated tail is below (pi/4)^23 / 23! ~= 1e-25.
+//   4. tan = sin/cos for even k, -cos/sin for odd k.
+//
+// Past |x| = 2^20 * pi/2 ~= 1.647e6 step 2 is no longer exact and the reduced
+// angle degrades by roughly one ulp of x per step; by 1e10 it is off in the
+// sixth digit. Rather than return a number that looks like tan and is not, the
+// result there is NaN. Widening the range needs the three-part fdlibm reduction.
+//
+// No effect row: see kernel.sio.
+fn transcendental_tan_sin_series(y: f64) -> f64 {
+    // sin(y)/y = 1 - y^2/(2*3) (1 - y^2/(4*5) (1 - ...))
+    let y2 = y * y
+    var s: f64 = 0.0
+    var k: i64 = 11
+    while k >= 1 {
+        s = y2 / (((2 * k) * (2 * k + 1)) as f64) * (1.0 - s)
+        k = k - 1
+    }
+    y * (1.0 - s)
+}
+
+fn transcendental_tan_cos_series(y: f64) -> f64 {
+    // cos(y) = 1 - y^2/(1*2) (1 - y^2/(3*4) (1 - ...))
+    let y2 = y * y
+    var s: f64 = 0.0
+    var k: i64 = 11
+    while k >= 1 {
+        s = y2 / (((2 * k - 1) * (2 * k)) as f64) * (1.0 - s)
+        k = k - 1
+    }
+    1.0 - s
+}
+
+pub fn tan(x: f64) -> f64 {
+    let nan_probe = x - x
+    if nan_probe != nan_probe {
+        return nan_probe
+    }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    if ax > 1647099.3291652855 {
+        return (x - x) / (x - x)
+    }
+    var y = x
+    var odd = false
+    if ax > 0.7853981633974483 {
+        let pio2_1 = 1.57079632673412561417
+        let pio2_1t = 0.0000000000607710050650619224932
+        let invpio2 = 0.636619772367581382433
+        var q = x * invpio2
+        if q < 0.0 {
+            q = q - 0.5
+        } else {
+            q = q + 0.5
+        }
+        let kf = (q as i64) as f64
+        y = (x - kf * pio2_1) - kf * pio2_1t
+        // Parity without integer `%`: k is odd exactly when k/2 has a fraction.
+        let half = kf * 0.5
+        if half != ((half as i64) as f64) {
+            odd = true
+        }
+    }
+    let s = transcendental_tan_sin_series(y)
+    let c = transcendental_tan_cos_series(y)
+    if odd {
+        return 0.0 - c / s
+    }
+    s / c
+}
