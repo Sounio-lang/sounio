@@ -25,10 +25,9 @@ RAW="${MADAROS_RAW_BIN:-${SOUNIO_MADAROS_BIN:-${MADAROS_BIN:-}}}"
 
 gcc -shared -fPIC -O0 -o "$SO" "$PROBE_C"
 
-# bin/souc + MADAROS_RAW_BIN is the Witness Gate shape (see KL-4 gate).
-if ! MADAROS_RAW_BIN="$RAW" "$SOUC" build "$SRC" -o "$OUT" 2>"$WORKDIR/compile.err"; then
+if ! MADAROS_RAW_BIN="$RAW" "$SOUC" build "$SRC" -o "$OUT" >"$WORKDIR/compile.out" 2>"$WORKDIR/compile.err"; then
   echo "madaros_kl14b_dynlink_gate: FAIL compile" >&2
-  cat "$WORKDIR/compile.err" >&2
+  cat "$WORKDIR/compile.out" "$WORKDIR/compile.err" >&2
   exit 1
 fi
 
@@ -41,6 +40,7 @@ dyn="$(readelf -d "$OUT" 2>/dev/null || true)"
 echo "$dyn" | grep -q 'Shared library: \[libkl14b_probe.so\]' || {
   echo "madaros_kl14b_dynlink_gate: FAIL missing DT_NEEDED libkl14b_probe.so" >&2
   echo "$dyn" >&2
+  readelf -l "$OUT" >&2 || true
   exit 1
 }
 readelf -l "$OUT" | grep -q 'INTERP' || {
@@ -54,10 +54,19 @@ readelf -l "$OUT" | grep -q 'DYNAMIC' || {
 
 chmod +x "$OUT"
 export LD_LIBRARY_PATH="$WORKDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-got="$("$OUT" || true)"
-echo "$got" | grep -q 'kl14b_dynlink_one_symbol: PASS' || {
-  echo "madaros_kl14b_dynlink_gate: FAIL run output: $got" >&2
+set +e
+got="$("$OUT" 2>"$WORKDIR/run.err")"
+rc=$?
+set -e
+if [[ $rc -ne 0 ]] || ! echo "$got" | grep -q 'kl14b_dynlink_one_symbol: PASS'; then
+  echo "madaros_kl14b_dynlink_gate: FAIL run rc=$rc stdout=[$got]" >&2
+  echo "--- stderr ---" >&2
+  cat "$WORKDIR/run.err" >&2 || true
+  echo "--- readelf -d ---" >&2
+  readelf -d "$OUT" >&2 || true
+  echo "--- readelf -l ---" >&2
+  readelf -l "$OUT" >&2 || true
   exit 1
-}
+fi
 
 echo "MADAROS_KL14B_DYNLINK_GATE_OK"
