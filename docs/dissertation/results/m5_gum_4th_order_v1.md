@@ -173,16 +173,23 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > refusing the form: called that way, lean_single stopped at `error: no main` (a current-source lean_single shows
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
-> **Current state (2026-09-14, re-measured at HEAD `2a8e7ad145`).** Since `36f9b34cc7`, `main` declares `Epistemic`, the
-> known-failure tag is gone, and the test carries `//@ timeout: 90`. The command below needs its
-> `chmod +x` step: this lean_single build (sha256 below) wrote the ELF with mode `-rw-r--r--` under
-> umask 0022, and without that step, as in the command this note gave before, running the ELF
-> stopped at `Permission denied` (exit 126). Run through lean_single's raw interface, from the
-> repository root because it resolves stdlib imports relative to the working directory,
-> `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf && chmod +x /tmp/m5_gum_4th_order.elf && /tmp/m5_gum_4th_order.elf`
-> (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
+> **Current state (lean_single command re-measured 2026-09-15 at HEAD `e0ec05a4a9`; the Madaros
+> figures below were measured 2026-09-14 at HEAD `2a8e7ad145`).** Since `36f9b34cc7`, `main` declares
+> `Epistemic`, the known-failure tag is gone, and the test carries `//@ timeout: 90`. The command
+> below needs its `chmod +x` step: at HEAD `e0ec05a4a9` the lean_single seed wrote the ELF with mode
+> `-rw-r--r--` under umask 0022, and without the `chmod +x` step running the ELF stopped at
+> `Permission denied` (exit 126), as it had with `bin/souc-linux-x86_64`. Run through lean_single's
+> raw interface, from the repository root because it resolves stdlib imports relative to the working
+> directory,
+> `cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/run-pass/pbpk28_m5_gum_4th_order.sio /tmp/m5_gum_4th_order.elf && chmod +x /tmp/m5_gum_4th_order.elf && /tmp/m5_gum_4th_order.elf`
+> (`bin/souc-lean-single-x86_64` sha256 `9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`,
+> run verbatim at HEAD `e0ec05a4a9`)
 > printed `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS` and `PASS`, and all ten numeric values in the
-> Output table below equal its output. The `(CL_hep)` label on dominant correction index 0 is not
+> Output table below equal its output. Its 30 lines of stdout are byte-identical to the stdout
+> recorded at `2a8e7ad145` for the command this note gave until 2026-09-15, which ran
+> `bin/souc-linux-x86_64` (sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
+> in place of the seed; only the two outputs were compared. The `(CL_hep)` label on dominant
+> correction index 0 is not
 > printed; the program prints `dominant_correction_idx: 0.000000`. The table cells are the original
 > record and were not edited on 2026-09-14; the re-run matches their numbers with the current tree
 > and does not establish how they were first produced. The test suite runs the test through
@@ -261,10 +268,12 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 \
 > For example, refreshing the seed moves `var_1st` from `4589554478734755281` to
 > `4589554478734771891` and `u_total` from `4600493197977982340` to `4600493197982566279`. All three
 > runs printed `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS` and `PASS`. The ten Output values print
-> the same to six decimals, so the table is unchanged. The command above uses
-> `bin/souc-linux-x86_64`, a separate binary that `10ac3eb3b3` did not replace. Run at HEAD
-> `10ac3eb3b3`, it gave the same 20 bit patterns as the previous seed. To reproduce the agreement,
-> run that command with `bin/souc-lean-single-x86_64` in place of `bin/souc-linux-x86_64`.
+> the same to six decimals, so the table is unchanged. In the note revision that added this
+> paragraph (`eddd7ac6a3`), the command above ran `bin/souc-linux-x86_64`, a separate binary that
+> `10ac3eb3b3` did not replace. Run at HEAD `10ac3eb3b3`, `bin/souc-linux-x86_64` gave the same 20
+> bit patterns as the previous seed, and the paragraph advised substituting
+> `bin/souc-lean-single-x86_64` to get the refreshed seed's bits. Since 2026-09-15 the command above
+> runs `bin/souc-lean-single-x86_64`; the current-state paragraph names the seed it was measured with.
 > **Current binaries (2026-09-15, measured at HEAD `b9bc73fdf6`).** Two of the three binaries named
 > above have been replaced since the 20-pattern probe. Merge commit `09aedffafa` installed
 > `bin/souc-lean-single-x86_64` with sha256 `9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, re-derived from the merged
