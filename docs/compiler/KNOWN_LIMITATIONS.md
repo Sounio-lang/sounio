@@ -191,13 +191,6 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   (`generic method specialization requires one unambiguous explicit
   turbofish`): the impl clone substitutes `T` only, and the method no longer
   enters the generic-fn table. Pin: none.
-- **Clone-to-clone static calls crash.** Clones precede all other items but not
-  each other. When `impl B<T>` does `let a = A::<T>::mk(..)` and `A`'s clone
-  sits later in the list, lowering leaves `a` untyped and `a.get()` calls a
-  body-less bare `get`: the program compiles and dies with SIGILL. This is the
-  same single-list order rule that makes a plain `main` placed above
-  `impl PC { fn new() -> PC }` crash. Pin: none; this is open wrong code, not a
-  refusal.
 - **Header shape.** Header arguments must be single uppercase letters, one per
   struct parameter. Struct literals inside the impl are rewritten only when the
   header reuses the struct's own parameter names (`impl G<U>` on `struct G<T>`
