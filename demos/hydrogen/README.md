@@ -36,7 +36,17 @@ The seven-stage paper he co-authored (Gkanas, Christodoulou, Tzamalis,
 **Stamatakis**, Chroneos, Deligiannis, Karagiorgis & Stubos, *Renewable
 Energy* 147 (2020) 164–178, DOI 10.1016/j.renene.2019.08.104) chains seven
 MH stages on 80 °C heat to reach **374 bar** from a 20 bar supply — and
-offers itself explicitly as a model and tool for sensitivity analysis. This
+offers itself explicitly as a model and tool for sensitivity analysis.
+
+> **Correction, 2026-09-15.** 374 bar is the paper's **simulated** delivery:
+> its Table 4 reports COMSOL output ("Bed Avg Pressure"), not a measurement
+> of a seven-stage system. The paper's experimental validation is of one
+> alloy (0.85 g of the S2 material in a Sieverts apparatus, temperature and
+> hydrogenation curves). Nothing on this page is a comparison with an
+> experiment on the compressor; every "oracle" below is a number from that
+> simulation.
+
+This
 demo takes the offer literally: the whole chain, plus the batch-to-batch
 alloy scatter no nominal-point run can see, as one deterministic receipt on
 both engines.
@@ -61,9 +71,15 @@ header, with a swap slot for the real values**.
 > *decreases* along the cascade — 25.24, 21.47, 20.35, 19.99, 18.20, 16.23,
 > 14.70 kJ/mol — because van 't Hoff (`ln P = ΔS/R − ΔH/(R·T)`) requires the
 > high-pressure stage to have the *lowest* ΔH. The ladder used here
-> increases. The paper also measures hysteresis per stage, as the
-> absorption/desorption enthalpy gap (3.0 kJ/mol at S1 widening to
-> 4.2 at S7), rather than as one lumped efficiency.
+> increases. The paper also reports absorption and desorption thermodynamics
+> separately for every stage, rather than one lumped efficiency.
+>
+> *Correction, 2026-09-15.* This paragraph said the absorption/desorption
+> enthalpy gap "widens from 3.0 kJ/mol at S1 to 4.2 at S7". Table 3 does not
+> say that: ΔH(des) − ΔH(abs) is 2.95, 4.67, 4.47, 0.26, 1.66, 2.89 and
+> 4.21 kJ/mol for S1–S7, not monotonic. An enthalpy difference alone is also
+> not the hysteresis: the pressure hysteresis at a given temperature depends
+> on the entropy difference as well.
 >
 > **And the oracle table below is a fit, not a derivation.** The chain
 > carries three free quantities tuned to land on the published ratios — a
@@ -121,6 +137,22 @@ exactly why the deliverable is a p-box, not a point reliability. The
 sensitivity analysis his paper offered itself as the tool for, run as one
 reproducible receipt: `bin/souc run demos/hydrogen/mh7_reliability.sio` →
 `MH7_RELIABILITY_OK`.
+
+> **What these reliability numbers are, 2026-09-15.** 67.3 %, 65.3 %,
+> 59.0 %, the 6.2 pp dependence cost, the [1.3 %, 99.9 %] p-box and the
+> Sobol shares are properties of the **fitted surrogate** described above:
+> its ΔH ladder runs the wrong way and its ratios are tuned to the
+> simulated Table 4. They show what the UQ machinery does. They are **not**
+> reliability figures for the Gkanas et al. compressor, and the measurement
+> priorities ("characterize stages 6–7 first") inherit the same caveat.
+> The replacement built on the measured Table 3 lives in
+> `examples/hydrogen/mhhc_cascade.sio` and `mhhc_corner_pbox.sio`. Its
+> delivered pressure at σ = 0 is exactly S7's free van 't Hoff desorption
+> plateau (561.5 bar at 80 °C). That number is an upper bound, not a
+> prediction, and the "Table 3 bounds Table 4" check is the same arithmetic,
+> not an independent result. Its p-box is over intervals **we declared** for
+> parameters the paper does not publish (plateau slope, hysteresis, kinetics,
+> heat transfer, interconnector volume). It is an analysis, not a validation.
 
 ## The valley chain (`trieres_chain.sio`) — TRIERES wellhead-to-dispensed cost as a p-box
 
@@ -200,7 +232,11 @@ harsher — post-coupling, **only compressor R can flip the gate alone**
 (the eight economic intervals and the subsurface loss each move 0.00
 points); Sobol agrees (R carries ~94 % of Var(D) under the conventional
 measure, Jansen). *The euro is not in the rock at 1-yr residence — it is
-in the reliability data.* Reference engine: lean_single →
+in the reliability data.* (That R is the fitted surrogate's reliability,
+see the 2026-09-15 note under the flagship. The structural finding, that
+once coupled a single uncertain availability factor dominates the gate,
+holds for any R. The numbers do not transfer to the real compressor.)
+Reference engine: lean_single →
 `VALLEY_CHAIN_OK`. On Madaros the receipt is byte-identical through
 Section H, then hits the same pre-existing Saltelli-machinery SIGSEGV
 (#1570 family) as both component demos. Suite coverage:
@@ -755,12 +791,15 @@ KMF lower edge above 100× the falsified lab anchor)
 - *Renewable Energy 147 (2020) 164–178*, DOI 10.1016/j.renene.2019.08.104
   (seven-stage MH compression for HRS) and *IJHE 46 (2021) 29272–29287*
   (dual-stage MH2C under thermal management): the stage
-  and cascade files are the per-stage core of those system models,
-  `mh7_reliability.sio` reproduces the seven-stage paper's published
-  system-level oracles exactly and computes the batch-uncertainty
-  reliability it does not report, and
-  their thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of
-  the decisive interval in `hub_chain.sio`.
+  and cascade files are the per-stage core of those system models.
+  `mh7_reliability.sio` *fits* two of the seven-stage paper's simulated
+  compression ratios with a surrogate and runs batch-uncertainty analysis
+  on that surrogate. It does not reproduce the paper's physics (corrected
+  2026-09-15; it used to say "reproduces … exactly").
+  `examples/hydrogen/mhhc_cascade.sio` couples the stages on the measured
+  Table 3 and bounds the delivery by S7's desorption plateau. Their
+  thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of the
+  decisive interval in `hub_chain.sio`.
 - *Hydrogen* 6(4):91 (2025) (caprock integrity for UHS): the p-box demo
   quantifies the exact measurement gap the review identifies.
 - *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
@@ -786,12 +825,22 @@ KMF lower edge above 100× the falsified lab anchor)
 
 ## Honest boundaries
 
-- One stage, flat plateau, no hysteresis/slope, constant C_eff — the
-  extension path (multi-stage cascade, plateau slope, heat-recovery) is
-  straightforward.
+- `mh_stage_uq.sio`: one stage, flat plateau, no hysteresis or slope,
+  constant C_eff. The coupled seven-stage cascade, a three-region PCT
+  isotherm and a cyclic steady state now exist in `examples/hydrogen/`.
+  They are driven by the paper's measured Table 3, but every parameter the
+  paper does not publish is an interval we declared. None of it has been
+  compared with an experiment on a multistage compressor, because no such
+  data is public for this system.
+- `mh7_reliability.sio` is a fitted surrogate with an inverted ΔH ladder;
+  its reliability numbers describe the surrogate, not the compressor (see
+  the flagship section).
 - The MC uses a CLT normal (sum-of-12 uniforms), not an exact Gaussian;
   agreement with a SciPy oracle is within ~2 % on σ_P.
-- Units are encoded by naming/comment discipline in this file; Sounio's
-  compile-time units binding (`stdlib/units`, QUDT) is landing separately —
-  when it does, every equation here becomes dimension-checked by the
-  compiler.
+- Units in these demo files are still encoded by naming and comment
+  discipline. Compile-time units now reach the default engine
+  (`docs/chemistry/SOUNIO_FOR_SURFACE_MICROKINETICS.md` §5), and
+  `examples/hydrogen/h2_verified_surface_rate.sio` shows the refusals.
+  Porting these files to declared units is not done yet, and in that
+  example the dimension and the species are checked on different values,
+  not on one.
