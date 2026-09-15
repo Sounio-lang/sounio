@@ -41,6 +41,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
+| KL-17 | generic `impl` blocks: associated-call and literal `T` inference, raw-word `HeapVec<T>` | madaros |
 
 ## Ledger
 
@@ -147,6 +148,48 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Pin: none beyond the positive witnesses. Channel-at-`.value` semantics
   (`MEAS_KNOW_IDX`, `formal/ChannelAssignmentSemantics.lean`) are a model,
   not a defect — see the history snapshot for the KAS-1 rationale.
+
+### KL-17 — generic `impl` blocks: residuals
+
+- Engine: `madaros`. `impl S<T>` / `impl<T> S<T>` on a generic struct is
+  monomorphized per struct instance: the specializer clones the block as
+  `impl S__args` with every method substituted, rewrites `S<A>` types and
+  `S::<A>::f(..)` paths in concrete code to `S__A`, and places the clones
+  ahead of every other item (`check/specializer.sio`,
+  `spec_emit_generic_impl_instances`). Witnesses:
+  `tests/run-pass/madaros_generic_impl_instances.sio` (`Cell<i64>` and
+  `Cell<f64>` in one unit), `tests/stdlib/collections/test_heap_vec_generic.sio`.
+- **Associated calls need the turbofish.** `G::new()` with no type arguments
+  is refused (`an associated function of a generic struct must be called with
+  explicit type arguments`); the `let` annotation does not select the
+  instance. Pin: `tests/compile-fail/madaros_generic_impl_static_no_targs.sio`.
+- **Literals that cannot infer `T`.** `var g: G<i64> = G { n: 0 }`, where no
+  field mentions `T`, is typed `G__T` by the checker and rejected with E001:
+  the annotation is rewritten, the literal is not. Use `G::<i64>::new(..)` or
+  a field that fixes `T`. Pin: none.
+- **Method type params inside a generic impl.** `fn pair_with<U>(self: &G<T>,
+  u: U) -> U` is refused even when called as `g.pair_with::<f64>(1.5)`
+  (`generic method specialization requires one unambiguous explicit
+  turbofish`): the impl clone substitutes `T` only, and the method no longer
+  enters the generic-fn table. Pin: none.
+- **Clone-to-clone static calls crash.** Clones precede all other items but not
+  each other. When `impl B<T>` does `let a = A::<T>::mk(..)` and `A`'s clone
+  sits later in the list, lowering leaves `a` untyped and `a.get()` calls a
+  body-less bare `get`: the program compiles and dies with SIGILL. This is the
+  same single-list order rule that makes a plain `main` placed above
+  `impl PC { fn new() -> PC }` crash. Pin: none; this is open wrong code, not a
+  refusal.
+- **Header shape.** Header arguments must be single uppercase letters, one per
+  struct parameter. Struct literals inside the impl are rewritten only when the
+  header reuses the struct's own parameter names (`impl G<U>` on `struct G<T>`
+  leaves `G { .. }` to the checker's inference).
+- **Raw-word storage in `collections::heap_vec::HeapVec<T>`.** Slots hold the
+  64-bit pattern of `T` via `write_i64`/`read_i64`, which is sound only for
+  8-byte scalars. Reads must not cast: `read_i64(..) as T` converts the number
+  (2.5 read back as 4612811918334230528.0). `sum` returns the i64 sum of the
+  patterns.
+- Caps: 64 generic impl blocks (specializer code 5); instances share the 64
+  emitted-specialization cap (code 4).
 
 ## Registry-governed, not rungs
 
