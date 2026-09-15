@@ -160,16 +160,21 @@ compiler_sha256="$(sha256sum "$MADAROS_BIN" | cut -d' ' -f1)"
 echo "MADAROS_CHANGED_TESTS_START count=${#selected[@]} event=$EVENT_NAME compiler=$MADAROS_BIN compiler_sha256=$compiler_sha256"
 printf 'test=%s\n' "${selected[@]}"
 
-# KL-14b pin is a dynlinked ELF (DT_NEEDED libkl14b_probe.so). The Witness
-# gate builds the probe itself; the generic harness only does `souc run`, so
-# stage the .so here whenever that pin is in the changed set.
+# KL-14b/c pins are dynlinked ELFs. The Witness gates build their probes;
+# the generic harness only does `souc run`, so stage the .so here whenever
+# those pins are in the changed set.
 for path in "${selected[@]}"; do
   if [[ "$path" == "tests/run-pass/kl14b_dynlink_one_symbol.sio" ]]; then
     gcc -shared -fPIC -O0 -o "$work_dir/libkl14b_probe.so" \
       "$ROOT_DIR/tests/fixtures/kl14b/kl14b_probe.c"
     export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14b_probe.so"
-    break
+  fi
+  if [[ "$path" == "tests/run-pass/kl14c_dynlink_n_symbols.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14c_probe.so" \
+      "$ROOT_DIR/tests/fixtures/kl14c/kl14c_probe.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14c_probe.so"
   fi
 done
 
