@@ -129,7 +129,18 @@ else
         exit 1
     fi
     TMP_SEED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-seed.XXXXXX")"
-    SEED="$TMP_SEED_DIR/gen_seed.elf"
+    # The seed must NOT be named *.elf. The workspace pod runs a root-owned
+    # watchdog (/workspace/.watchdog/souc-watchdog.sh) that SIGKILLs any process
+    # whose executable matches /tmp/*.elf, /tmp/*run.out or /tmp/*check.out once
+    # it is older than 600 s -- it is meant for hung test binaries. The seed below
+    # compiles main.sio, which takes more than 10 min on the shared container, so
+    # with the default TMPDIR a `gen_seed.elf` was killed mid-build: exit 137,
+    # oom_kill 0, three times on 2026-09-15 (e.g. /tmp/madaros-seed.WnK3ur/gen_seed.elf
+    # at 09:18:49Z). A name outside those patterns works under every TMPDIR,
+    # including callers whose output dir is itself under /tmp, and changes nothing
+    # on GitHub runners, which have no watchdog. The compiler does not care about
+    # the extension of its own binary or of its output path.
+    SEED="$TMP_SEED_DIR/gen_seed.bin"
     echo "→ deriving source-tracking seed from lean_single.sio (committed seed lags; see #725)"
     echo "  bootstrap ELF: $BOOTSTRAP_ELF"
     echo "  lean src:      $LEAN_SRC"
