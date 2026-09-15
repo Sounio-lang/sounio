@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_material.runtime.v1"
+MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_material.runtime.v2"
 
 fail() {
   printf 'sounio-loom-sovereign-execution-kernel-material-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -44,7 +44,7 @@ expect_commit_hash() {
 }
 
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'material manifest is absent or linked'
-expect schema loom-sovereign-execution-kernel-material-runtime-v1
+expect schema loom-sovereign-execution-kernel-material-runtime-v2
 expect stage MATERIAL_EXECUTION_FROZEN
 expect semantic_authority Sounio
 expect action 9042
@@ -83,6 +83,11 @@ expect commit_attached false
 expect ci_attached false
 expect parity_open false
 expect claim_ready false
+
+expect change_class SEMANTIC_PARENT_REFREEZE
+expect_hash "$(value predecessor_manifest_path)" "$(value predecessor_manifest_sha256)"
+[[ "$(value semantic_manifest_sha256)" != "$(sed -n 's/^semantic_manifest_sha256=//p' "$ROOT_DIR/$(value predecessor_manifest_path)")" ]] ||
+  fail 'material runtime v2 is not bound to a new semantic manifest'
 
 for key in contract source build_script host_probe selftest verification_gate \
   semantic_manifest peer_judgment evidence; do
