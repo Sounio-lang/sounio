@@ -6515,6 +6515,34 @@ fn lower_lookup_box_inner_layout(locals: Box<LowerLocalStack>, scope_depth: i64,
     0 - 1
 }
 
+// Element type name of an array-shaped param: `[T; N]`, `&[T]`, `&[T; N]`,
+// `&![T]`. Kept separate from lower_param_struct_type_name, whose result is also
+// compared against scalar names (lower_kernel_extent_param_index looks for
+// "i64"); the caller only uses this one when the name has a struct layout.
+fn lower_param_array_elem_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        match (*ty).inner {
+            Some(inner_ty) => return lower_param_array_elem_type_name(&(*inner_ty)),
+            None => return ir_empty_name(),
+        }
+    }
+    if (*ty).kind != TypeExprKind::TypeArray {
+        return ir_empty_name()
+    }
+    match (*ty).inner {
+        Some(el) => {
+            if (*el).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
+            if (*el).kind == TypeExprKind::TypeNamed {
+                return ir_path_first_name((*el).path)
+            }
+            ir_empty_name()
+        }
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*ty).kind == TypeExprKind::TypeNamed {
         return ir_path_first_name((*ty).path)
@@ -14084,11 +14112,11 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprFieldAccess {
             match (*e).left {
                 Some(base_expr) => {
-                    if (*base_expr).kind == ExprKind::ExprIdent {
-                        let base_type = self.lookup_local_struct_type((*base_expr).name)
-                        if lower_name_is_string_type(self.struct_layout_field_named_type(base_type, (*e).name)) {
-                            return true
-                        }
+                    // Any base the receiver resolver can type: an ident, and also
+                    // `entries[i].label`, `(*p).name`, `a.b.label`.
+                    let base_type = self.expr_receiver_struct_type_ref(&(*base_expr))
+                    if base_type.len > 0 && lower_name_is_string_type(self.struct_layout_field_named_type(base_type, (*e).name)) {
+                        return true
                     }
                     // `pair.K.field`: the base is itself a TUPLE SLOT access, so
                     // the ident case above cannot fire -- the slot's struct type is
@@ -15991,7 +16019,22 @@ impl Lowerer {
                         (*(*locals).names).values[idx as usize] = (*list).head.name
                         (*(*locals).regs).values[idx as usize] = param_value_reg
                         (*(*locals).depths).values[idx as usize] = lo.scope_depth
-                        (*(*locals).struct_types).values[idx as usize] = lower_param_struct_type_name(&(*list).head.ty)
+                        // `entries: &[Entry]` records its ELEMENT type, as a let-bound
+                        // `[Entry; N]` already does, so `entries[i].label` and
+                        // `let e = entries[i]` can resolve the element's fields. Without
+                        // it a string field of the element had no string evidence:
+                        // print refused ("unresolved scalar kind") and `.len()` lowered
+                        // to a body-less free fn `len`.
+                        var param_struct_type = lower_param_struct_type_name(&(*list).head.ty)
+                        if param_struct_type.len <= 0 {
+                            let param_elem_type = lower_param_array_elem_type_name(&(*list).head.ty)
+                            if param_elem_type.len > 0 {
+                                if ir_name_eq(param_elem_type, make_name("Knowledge")) || lower_struct_layout_index_of(&(*lo.struct_layouts), param_elem_type) >= 0 {
+                                    param_struct_type = param_elem_type
+                                }
+                            }
+                        }
+                        (*(*locals).struct_types).values[idx as usize] = param_struct_type
                         (*(*locals).array_elem_float).values[idx as usize] = if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         // V0-E.5.7: `[f128; N]` / `&[f128; N]` param slots hold F128Bits
                         // handles (128); a `[f256; N]` param records 256 so its elements
@@ -17451,8 +17494,32 @@ impl Lowerer {
                         _ => {}
                     }
                 }
+                // `let e: Entry = ...`: a named annotation IS the struct type. Only
+                // names with a struct layout, so `let x: f64` / `let s: string`
+                // keep their scalar handling.
+                if (*arr_ty).kind == TypeExprKind::TypeNamed {
+                    let ann_name = ir_path_first_name((*arr_ty).path)
+                    if ann_name.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), ann_name) >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, ann_name)
+                    }
+                }
             }
             _ => {}
+        }
+        // `let e = entries[i]`: the element's struct type, from the same resolver
+        // the method-receiver path trusts (indexed ident, Seq element, field array).
+        if lo.lookup_local_struct_type(s.name).len <= 0 {
+            match s.expr {
+                Some(idx_box) => {
+                    if (*idx_box).kind == ExprKind::ExprIndex {
+                        let elem_type = lo.expr_receiver_struct_type_ref(&(*idx_box))
+                        if elem_type.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_type) >= 0 {
+                            lo = lo.bind_local_struct_type(s.name, elem_type)
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         match s.expr {
             Some(expr_box) => {
