@@ -172,7 +172,25 @@ reproducible receipt: `bin/souc run demos/hydrogen/mh7_reliability.sio` →
 > | one stage off-batch, others at Table 3 | **S7 tolerates ±0.331 kJ/mol** (2.2 % of its ΔH), S6 ±0.412, S3 ±1.100; S1 ±2.677 |
 > | every stage off-batch independently, equal ±w | the first coupling (S6 → S7) can close at **±0.183 kJ/mol**; at ±1.5, 6 of 8 can |
 > | one shared shift on the AB2 stages S2–S7 | ±1.193 kJ/mol, limited by S7 against the 374 bar line — **6.5× the independent tolerance**, because neighbours shifting together move a coupling 0.084 per kJ/mol instead of 0.765 |
-> | desorption at 90 / 100 / 120 °C | independent tolerance ±0.423 / ±0.655 / ±0.865 kJ/mol |
+> | desorption at 90 / 100 / 120 °C, each against its own Table 4 delivered pressure | independent tolerance ±0.423 (S6 → S7) / ±0.655 (S6 → S7) / ±0.865 kJ/mol (**S7 against 830 bar**, not S6 → S7) |
+>
+> *Two readings of that table, 2026-09-15.* **The delivery line is the
+> paper's simulated result, not a requirement.** 374 bar is what the COMSOL
+> model delivered in Case 1; the file uses it as the pressure S7 must clear.
+> The S6/S7 ranking and the ±0.183 independent tolerance do not depend on
+> that choice, but the shared-shift row does: against a 350 bar dispensing
+> line the shared tolerance is ±1.388 kJ/mol (still limited by S7), and with
+> no delivery line at all it is ±1.668, limited by S6 → S7. **And the binding
+> coupling changes with temperature.** With each case's own delivered
+> pressure as the line, S6 → S7 closes first at 80, 90 and 100 °C; from
+> 105 °C on (682, 742 and 830 bar) it is S7 against the delivery line:
+> Table 4's delivered pressure climbs almost in step with S7's plateau, so
+> that ln margin narrows to 0.23–0.27 while S6 → S7 widens from 0.14 to
+> 0.80. Without a delivery line S6 → S7 is the first to close at every
+> temperature (±0.769, ±0.881 and ±1.099 kJ/mol at 105, 110 and 120 °C).
+> These alternative-line figures come from the same arithmetic on Table 3,
+> run outside the file; the file itself prints only the 374 bar and per-case
+> lines.
 >
 > On the measured ladder the stages to characterise first are **S6 and
 > S7**, and that ranking involves no width we assigned: every stage has the
