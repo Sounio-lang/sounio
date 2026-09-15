@@ -37,8 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-13 | derived unit annotations (`mol/cm3`); `unit = m/s` (call-boundary closed) | both |
-| KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
+| KL-14 | FFI: aggregate-ref CLOSED; dynlink MVP (KL-14b) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
@@ -88,43 +87,45 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   FO across arbitrary user `fn` bodies, remain open.
 
 
-### KL-13 — derived units and unit loss (#2388)
+### KL-13 — derived units and unit loss (#2388) — CLOSED
 
-- **Call-boundary loss — CLOSED (KL-13 partial).** A unit-typed value
-  (`t_k: K`) no longer enters a bare `f64` parameter unchecked.
-  lean_single: `unit_call_arg_mismatch` refuses when `param_dim == 0` and
-  `expr_dim != 0`. Madaros: `check_call_arg_unit_boundary` refuses
-  `provided.unit_id >= 0 && expected.unit_id < 0`, and the primitive
-  kind-match fast path still runs the unit boundary. Explicit `as f64`
-  remains the escape hatch. Pins:
+- **Call-boundary loss — CLOSED.** Unit-typed args no longer enter bare
+  `f64` parameters unchecked. Pins:
   `tests/compile-fail/unit_lost_at_call_boundary.sio`,
-  `tests/run-pass/unit_call_cast_strips_brand.sio`,
+  `tests/run-pass/unit_call_cast_strips_brand.sio`.
+- **Derived declarations — CLOSED.** `unit velocity = m / s` registers the
+  composed dimension on Madaros (`collect_unit_decl` honours
+  `type_alias_ty`; ItemUnit is collected on the `*mut` spine). lean_single
+  already had the Pass-0a path.
+- **Derived annotations — CLOSED (KL-13b).** Bare `mol/cm3` / `cal/mol`
+  parse as unit type expressions (TypeReference=/ TypeRefMut=* encoding,
+  same as `parse_unit_item`). `f64<m/s>` accepts the same chain inside
+  generics. Pins:
+  `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+  `tests/compile-fail/unit_derived_annotation_refuse_add.sio`,
   `scripts/ci/language_gap_ratchet_gate.sh`.
-- **Still open:** `mol/cm3` does not parse on either engine
-  (`parser/items.sio:4117-4172` `parse_unit_item` has no unit-expression
-  grammar); `unit velocity = m / s` declares a dimensionless unit
-  (`check.sio:20169` `collect_unit_decl` ignores the expression). Direct
-  `mol + K` is rejected on both (E041). Quotient dimension retention is
-  already closed (2026-09-05).
-- Repro (open): `tests/known-gaps/units/derived_unit_annotation_unparsed.sio`.
 - Audit: `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md`.
 
 ### KL-14 — FFI
 
-- **Aggregate-reference arguments through the signatureless `ffi_` path.**
-  Engine: `madaros`. `extern "C"` names are rewritten to `ffi_<name>`
-  builtins (`parser/items.sio:1072-1124`, allowlist
-  `extern_name_has_ffi_intrinsic`); a `&[i8; N]` argument forwards an empty
-  pointer. Repro: `tests/run-pass/ffi_system_array_arg.sio`
-  (`//@ known-failure`). Non-allowlisted externs fail closed with E250
-  (`check.sio:9478`). Doc:
+- **Aggregate-reference arguments through the signatureless `ffi_` path —
+  CLOSED (KL-14a).** Engine: `madaros`. `extern "C"` names are rewritten to
+  `ffi_<name>` builtins (`parser/items.sio`, allowlist
+  `extern_name_has_ffi_intrinsic`). A `&[i8; N]` argument used to forward a
+  GC-handle / empty pointer; the call site now packs via `str_from_bytes`
+  (Madaros arrays are 8-byte boxed slots, not contiguous C bytes) and passes
+  the resulting `char*` to `ffi_system`. The `string` binding is unchanged.
+  Pin: `tests/run-pass/ffi_system_array_arg.sio`. Doc:
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
-- **No dynamic linking.** Engine: `madaros`. The ELF writer emits static
-  executables; `native/reloc.sio:271-291` records `R_X86_64_PLT32` for
-  ET_REL only; there is no `PT_INTERP`/`PT_DYNAMIC`/`.dynsym`/`.rela.plt`/
-  `DT_NEEDED` anywhere. `-lfoo`-style shared-library calls are not possible;
-  `tests/stdlib/compress/test_zstd_e2e.sio` is a constants-only stub because
-  no libzstd call can be linked. Pin: none.
+- **Dynamic linking MVP — CLOSED (KL-14b).** Engine: `madaros`. One
+  non-builtin extern (`kl14b_add`) resolves via `PT_INTERP` + `PT_DYNAMIC` +
+  `DT_NEEDED` (`libkl14b_probe.so`) + GOT/`R_X86_64_GLOB_DAT`, plus a
+  `PT_LOAD` (R) of the ELF header page at `base_addr` so `ld.so` can see
+  phdrs. Empty-stub body is `call [rip+got]; ret`. Dyn metadata is appended
+  after the runtime-context data payload. Pin:
+  `tests/run-pass/kl14b_dynlink_one_symbol.sio`,
+  `scripts/ci/madaros_kl14b_dynlink_gate.sh`. Residual (KL-14c): arbitrary
+  `-lfoo` / N symbols, real libzstd e2e, `dlopen` surface.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
