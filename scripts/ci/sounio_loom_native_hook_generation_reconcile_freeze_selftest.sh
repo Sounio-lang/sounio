@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v2"
 
 fail() {
   printf 'sounio-loom-native-hook-generation-reconcile-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -38,7 +38,7 @@ expect_commit_hash() {
     fail "$path is not bound to commit $commit"
 }
 
-expect_value schema loom-native-hook-generation-reconcile-freeze-v1
+expect_value schema loom-native-hook-generation-reconcile-freeze-v2
 expect_value stage SEMANTICS_FROZEN
 expect_value semantic_authority Sounio
 expect_value action 9047
@@ -60,6 +60,12 @@ expect_value native_entry_open false
 expect_value quarantine_committed false
 expect_value cutover_ready false
 expect_value bridge_free_current false
+
+expect_value change_class ENTRYPOINT_INPUT_ROBUSTNESS
+expect_value semantics_module_changed false
+expect_hash "$(manifest_value predecessor_manifest_path)" "$(manifest_value predecessor_manifest_sha256)"
+[[ "$(manifest_value source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$(manifest_value predecessor_manifest_path)" | cut -d= -f2)" ]] ||
+  fail 'semantic module differs from predecessor'
 
 for key in garden source entrypoint build_script selftest freeze_selftest \
   first_manifest first_evidence parent_9046_freeze toolchain_wrapper \
