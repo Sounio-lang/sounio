@@ -231,8 +231,10 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v1" \
   "$ROOT_DIR/tools/loom/sovereign_change_kernel_authority_main.sio" \
   "$ROOT_DIR/tools/loom/sovereign_change_kernel.freeze.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel.freeze.v2" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_authority_main.sio" \
   "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v3" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v2" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v3" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v4" \

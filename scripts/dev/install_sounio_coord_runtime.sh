@@ -164,9 +164,13 @@ manifest_pair_in() {
   return 1
 }
 
-# The newest frozen generation shipped in a policy capsule (…freeze.v2, else …freeze.v1).
+# The newest frozen generation shipped in a policy capsule (…freeze.v3, …v2, else …v1).
 frozen_capsule_file() {
-  if [[ -f "$1.v2" ]]; then printf '%s\n' "$1.v2"; else printf '%s\n' "$1.v1"; fi
+  local generation
+  for generation in v3 v2; do
+    [[ -f "$1.$generation" ]] && { printf '%s\n' "$1.$generation"; return 0; }
+  done
+  printf '%s\n' "$1.v1"
 }
 
 activate_runtime() {
@@ -533,9 +537,9 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" loom_material_change_runtime_sha256 \
       "$version_dir/bin/sounio-loom-sovereign-material-change"
     verify_manifest_binary_sha256 "$manifest" loom_change_manifest_sha256 \
-      "$change_capsule/tools/loom/sovereign_change_kernel.freeze.v1"
+      "$(frozen_capsule_file "$change_capsule/tools/loom/sovereign_change_kernel.freeze")"
     verify_manifest_binary_sha256 "$manifest" loom_material_change_manifest_sha256 \
-      "$change_capsule/tools/loom/sovereign_material_change.freeze.v2"
+      "$(frozen_capsule_file "$change_capsule/tools/loom/sovereign_material_change.freeze")"
     verify_manifest_binary_sha256 "$manifest" loom_material_change_product_sha256 \
       "$change_product"
     [[ "$(manifest_value "$change_product" semantic_authority)" == Sounio &&
@@ -1234,10 +1238,10 @@ loom_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_c
 loom_material_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_material_change.sh"
 loom_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_change_kernel_authority.sio"
 loom_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_change_kernel_authority_main.sio"
-loom_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v1"
+loom_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v2"
 loom_material_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_material_change_authority.sio"
 loom_material_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_material_change_authority_main.sio"
-loom_material_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v2"
+loom_material_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v3"
 loom_material_change_product="$(
   find "$SOURCE_ROOT/tools/loom" -maxdepth 1 -type f \
     -name 'sovereign_material_change_product.runtime.v*' -print | sort -V | tail -1
@@ -2254,6 +2258,7 @@ else
     "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"
     "$loom_material_change_source" "$loom_material_change_entrypoint"
     "$loom_material_change_freeze" "$loom_material_change_product"
+    "$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v1" "$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v2"
     "$loom_material_change_evidence" "$loom_change_operational_gate"
     "$loom_change_ci_admit" "${loom_change_sources[@]}"
   )
@@ -2284,10 +2289,10 @@ else
     sha256sum "$stage/bin/sounio-loom-sovereign-material-change" | awk '{print $1}'
   )"
   loom_change_manifest_sha256="$(
-    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_change_kernel.freeze.v1" | awk '{print $1}'
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_change_kernel.freeze.v2" | awk '{print $1}'
   )"
   loom_material_change_manifest_sha256="$(
-    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change.freeze.v2" | awk '{print $1}'
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change.freeze.v3" | awk '{print $1}'
   )"
   loom_material_change_product_sha256="$(
     sha256sum "$stage/policy/sovereign-change/${loom_material_change_product#"$SOURCE_ROOT/"}" | awk '{print $1}'
