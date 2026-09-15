@@ -33,9 +33,9 @@ Structure:
 
 References:
 - Walley (1996), JRSS-B 58:3 (Imprecise Dirichlet Model)
-- Stamatakis et al., Energies 16:6257 (2023) — Crete case parameters
+- Chalkiadakis, Stamatakis et al., Energies 16:6257 (2023) — Crete case parameters
 - Gkanas, Christodoulou, Tzamalis, Stamatakis et al., Renewable Energy 147:164 (2020)
-- Stamatakis et al., IJHE 46:29272 (2021)
+- Gkanas, Stamatakis et al., IJHE 46:29272 (2021)
 
 No sorry. No Mathlib.
 -/
