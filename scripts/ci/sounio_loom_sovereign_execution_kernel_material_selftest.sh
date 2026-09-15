@@ -23,7 +23,7 @@ done
 cmp "$TEST_ROOT/material-one" "$TEST_ROOT/material-two" ||
   fail 'two material builds differ'
 
-MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v2"
 PEER="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1"
 material_one="$($TEST_ROOT/material-one --selftest "$RUNTIME" "$MANIFEST" "$PEER")"
 material_two="$($TEST_ROOT/material-two --selftest "$RUNTIME" "$MANIFEST" "$PEER")"
