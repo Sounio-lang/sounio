@@ -24,6 +24,10 @@ trap 'rm -rf "$W"' EXIT
 printf 'fn main() -> i64 with IO {\n    println("x")\n    0\n}\n' > "$W/t.sio"
 
 REAL="$ROOT_DIR/bin/madaros-linux-x86_64"
+# The prebuilt is committed compressed. Generate the ELF first, so a checkout
+# that never ran bin/souc or bin/madaros does not turn this gate into a SKIP.
+bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" \
+  || { echo "GATE FAIL: the committed madaros prebuilt does not materialize"; exit 1; }
 [[ -f "$REAL" ]] || { echo "GATE SKIP: no committed madaros ELF to derive fixtures from"; exit 0; }
 cp "$REAL" "$W/noexec.elf"; chmod 600 "$W/noexec.elf"
 cp "$REAL" "$W/ok.elf";     chmod 700 "$W/ok.elf"
