@@ -5890,6 +5890,18 @@ fn lower_name_is_handle_buf_builtin(n: Name) -> bool with Div {
     false
 }
 
+// KL-14a: ffi_system's cmd argument is a C `char*`. The string binding already
+// passes a raw pointer; a `&[i8;N]` / ref-typed slot passes a GC handle cell.
+// Detect the callee so the call site can unwrap the ref to a handle (same
+// shape as str_from_bytes) and the emitter can resolve handle → payload.
+fn lower_name_is_ffi_system(n: Name) -> bool with Div {
+    if n.len != 10 { return false }
+    n.buf[0] == 102 as i8 && n.buf[1] == 102 as i8 && n.buf[2] == 105 as i8
+        && n.buf[3] == 95 as i8 && n.buf[4] == 115 as i8 && n.buf[5] == 121 as i8
+        && n.buf[6] == 115 as i8 && n.buf[7] == 116 as i8 && n.buf[8] == 101 as i8
+        && n.buf[9] == 109 as i8
+}
+
 // Buffer argument index for handle-buf builtins: str_from_bytes(buf,n) → 0,
 // write_file(path,buf,n) → 1. -1 when not a handle-buf builtin.
 fn lower_handle_buf_arg_index(n: Name) -> i64 with Div {
@@ -18328,6 +18340,25 @@ impl Lowerer {
         }
     }
 
+    // True when the first call argument is `&x` / `&!x` or a ref-typed local —
+    // the shape that must be unwrapped before a C `char*` builtin (KL-14a).
+    fn lower_first_arg_is_ref_like_ref(self, opt: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind == ExprKind::ExprUnary {
+                    if (*list).head.un_op == UnaryOp::OpRef || (*list).head.un_op == UnaryOp::OpRefMut {
+                        return true
+                    }
+                }
+                if (*list).head.kind == ExprKind::ExprIdent {
+                    return self.lookup_local_is_ref((*list).head.name)
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn lower_expr_args(self, opt: Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
         self.lower_expr_args_ref(&opt)
     }
@@ -20565,7 +20596,11 @@ impl Lowerer {
         // D2 residual (#933 after #1247): str_from_bytes / write_file expect a GC
         // handle by value. Auto-unwrap &buf / &!buf / ref-typed slots so both
         // shapes share the handle unpack path (no builtin-body always-deref).
+        // KL-14a: ffi_system(cmd: &[i8;N]) uses the same unwrap so the emitter
+        // can resolve the handle to a C char* without breaking the string path.
         let handle_buf_idx = lower_handle_buf_arg_index(callee_name)
+        let ffi_system_ref_cmd = lower_name_is_ffi_system(callee_name)
+            && lo1.lower_first_arg_is_ref_like_ref(&e.args)
         // V0-E.5.4: tell lower_expr_args_ref which positions are f128 params so a
         // bare literal argument lowers as binary128 (consumed+cleared on entry).
         // V0-E.5.4: which argument positions are f128 params, read off the
@@ -20577,6 +20612,8 @@ impl Lowerer {
         }
         let pair_args: LowerExprArgsResult = if handle_buf_idx >= 0 {
             lo1.lower_expr_args_handle_buf_ref(&e.args, handle_buf_idx)
+        } else if ffi_system_ref_cmd {
+            lo1.lower_expr_args_handle_buf_ref(&e.args, 0)
         } else {
             lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask)
         }

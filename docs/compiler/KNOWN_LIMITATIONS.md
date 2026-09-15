@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: aggregate-ref args, dynamic linking | madaros |
+| KL-14 | FFI: dynamic linking (aggregate-ref CLOSED as KL-14a) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
@@ -108,13 +108,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-14 — FFI
 
-- **Aggregate-reference arguments through the signatureless `ffi_` path.**
-  Engine: `madaros`. `extern "C"` names are rewritten to `ffi_<name>`
-  builtins (`parser/items.sio:1072-1124`, allowlist
-  `extern_name_has_ffi_intrinsic`); a `&[i8; N]` argument forwards an empty
-  pointer. Repro: `tests/run-pass/ffi_system_array_arg.sio`
-  (`//@ known-failure`). Non-allowlisted externs fail closed with E250
-  (`check.sio:9478`). Doc:
+- **Aggregate-reference arguments through the signatureless `ffi_` path —
+  CLOSED (KL-14a).** Engine: `madaros`. `extern "C"` names are rewritten to
+  `ffi_<name>` builtins (`parser/items.sio`, allowlist
+  `extern_name_has_ffi_intrinsic`). A `&[i8; N]` argument used to forward an
+  empty/handle pointer; the call site now unwraps the ref to a GC handle
+  (same path as `str_from_bytes`) and `emit_ffi_system_normalize_cmd_rdi`
+  resolves handles below the raw-ptr threshold to the i8 payload, leaving
+  raw `string`/`char*` values alone. Pin:
+  `tests/run-pass/ffi_system_array_arg.sio`. Doc:
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
 - **No dynamic linking.** Engine: `madaros`. The ELF writer emits static
   executables; `native/reloc.sio:271-291` records `R_X86_64_PLT32` for
