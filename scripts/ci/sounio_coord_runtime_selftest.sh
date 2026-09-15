@@ -156,21 +156,26 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/routing_authority.freeze.v2" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v2" \
   "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v2" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain.first.v1" \
   "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v2" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.first.v1" \
   "$ROOT_DIR/tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V1.md" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v2" \
   "$ROOT_DIR/tools/loom/generation_pinned_cutover.first.v1" \
   "$ROOT_DIR/tools/loom/GARDEN_ACTIVATION_EPOCH_V1.md" \
   "$ROOT_DIR/tools/loom/activation_epoch_authority_main.sio" \
   "$ROOT_DIR/tools/loom/activation_epoch.freeze.v1" \
+  "$ROOT_DIR/tools/loom/activation_epoch.freeze.v2" \
   "$ROOT_DIR/tools/loom/activation_epoch.first.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v3" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
@@ -374,7 +379,7 @@ git -C "$REPO" commit -qm seed
 subprocess_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
   "$REPO/tools/loom/subprocess_membrane.freeze.v1")"
 native_hook_cutover_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
-  "$REPO/tools/loom/native_hook_cutover.freeze.v1")"
+  "$REPO/tools/loom/native_hook_cutover.freeze.v2")"
 [[ "$subprocess_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
   fail 'subprocess membrane fixture has no frozen toolchain commit'
 [[ "$native_hook_cutover_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
@@ -457,7 +462,7 @@ mkdir -p "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin" \
   "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/hooks" \
   "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin" \
   "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom"
-cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
+cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v2" \
   "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom/"
 printf 'runtime_id=%s\nprotocol_version=3\n' "$CUTOVER_PREVIOUS_ID" \
   > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/manifest"
@@ -495,8 +500,8 @@ cutover_authority_sha="$(sha256sum \
 cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/manifest" <<EOF
 runtime_id=$CUTOVER_TARGET_ID
 protocol_version=3
-loom_native_hook_generation_drain_semantics_sha256=00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3
-loom_native_hook_generation_drain_manifest_sha256=9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1
+loom_native_hook_generation_drain_semantics_sha256=c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb
+loom_native_hook_generation_drain_manifest_sha256=ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61
 loom_native_hook_generation_drain_runtime_sha256=$cutover_authority_sha
 capability=loom-native-hook-generation-drain-v1
 EOF

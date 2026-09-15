@@ -5,13 +5,13 @@ exception Error of string
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let semantics_9045_sha256 =
-  "27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882"
+  "842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998"
 
 (* Action 9045 v2 is an append-only re-freeze with the same semantic module; hook
-   receipts admitted under either generation are accepted. *)
+   receipts admitted under the v1 predecessor stay accepted. *)
 let accepted_semantics_9045_sha256 =
   [ semantics_9045_sha256;
-    "842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998" ]
+    "27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882" ]
 
 let provider_bit = function
   | "codex" -> 1

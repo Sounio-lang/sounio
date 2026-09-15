@@ -3,10 +3,10 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7"
+  "35b6dc397a250eb2dfe9e57384a96bf07a37199bc28fe66daad1fd4ee6ffd39b"
 
 let semantics_sha256 =
-  "63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff"
+  "9741264b94d06e7063673063c9c328f91f9ae25e1211f4a083522b05a513c5f7"
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
@@ -103,7 +103,7 @@ let load_policy root =
   in
   let installed_manifest =
     Filename.concat installed_policy_root
-      "tools/loom/native_hook_generation_reconcile.freeze.v1"
+      "tools/loom/native_hook_generation_reconcile.freeze.v2"
   in
   let path, policy_root =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_GENERATION_RECONCILE_MANIFEST" with
@@ -114,13 +114,13 @@ let load_policy root =
     | _ when Sys.file_exists installed_manifest ->
         (installed_manifest, installed_policy_root)
     | _ ->
-        (Filename.concat root "tools/loom/native_hook_generation_reconcile.freeze.v1", root)
+        (Filename.concat root "tools/loom/native_hook_generation_reconcile.freeze.v2", root)
   in
   if sha256_file "freeze-manifest" path <> pinned_manifest_sha256 then
     failf "freeze-manifest-hash-mismatch";
   let manifest = parse_fields "freeze-manifest" (read_file "freeze-manifest" path) in
   exact "freeze-manifest" manifest "schema"
-    "loom-native-hook-generation-reconcile-freeze-v1";
+    "loom-native-hook-generation-reconcile-freeze-v2";
   exact "freeze-manifest" manifest "stage" "SEMANTICS_FROZEN";
   exact "freeze-manifest" manifest "semantic_authority" "Sounio";
   exact "freeze-manifest" manifest "producing_language" "Sounio";

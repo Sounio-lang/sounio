@@ -64,7 +64,7 @@ done
 [[ ! -e "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" &&
    ! -e "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" ]] ||
   fail 'legacy Python compatibility boundary remains present'
-[[ -f "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" &&
+[[ -f "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v2" &&
    -f "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" ]] ||
   fail 'frozen Sounio native-hook cutover authority is missing'
 

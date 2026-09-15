@@ -3,20 +3,20 @@ open Unix
 exception Error of string
 
 let freeze_sha256 =
-  "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d"
+  "0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4"
 
 let semantics_sha256 =
-  "9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549"
+  "a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff"
 
 let sounio_source_sha256 =
   "2016d7f46e112c88d7b59b77beff4277fb5c4f023c7a2fc64b9c6282ab1d4a16"
 
 let sounio_executable_sha256 =
-  "68d3f8efd22454dc3a66242f2beafad804cfae8550fee94716c718614d1ead90"
+  "dcb31dcd1c8a11dd995286487d96cd00cd96d8d0f0808c6166c48213f49c4cc1"
 
 (* Action 9048 is re-frozen append-only: v2 changes only the entrypoint read, not
-   the semantic module. Pins and activation heads sealed under either generation
-   stay valid, as an exact pair; new records carry the constants above. *)
+   the semantic module. New records carry the v2 constants above; pins and
+   activation heads sealed under v1 stay valid, as an exact pair. *)
 let accepted_generations =
   [ ("9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549",
      "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d");
@@ -225,7 +225,7 @@ let policy_root source_root =
 
 let load_authority source_root =
   let root = policy_root source_root in
-  let manifest_path = Filename.concat root "tools/loom/generation_pinned_cutover.freeze.v1" in
+  let manifest_path = Filename.concat root "tools/loom/generation_pinned_cutover.freeze.v2" in
   if sha256_file manifest_path <> freeze_sha256 then failf "action-9048-freeze-drift";
   let manifest = parse_fields "action-9048-freeze" (read_governed_file manifest_path) in
   if required "action-9048-freeze" manifest "stage" <> "SEMANTICS_FROZEN"

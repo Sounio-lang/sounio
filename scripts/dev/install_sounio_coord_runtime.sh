@@ -1042,7 +1042,7 @@ loom_routing_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_selftes
 loom_routing_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_freeze_selftest.sh"
 loom_native_hook_cutover_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_cutover_authority_main.sio"
 loom_native_hook_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_cutover_authority.sio"
-loom_native_hook_cutover_freeze="$SOURCE_ROOT/tools/loom/native_hook_cutover.freeze.v1"
+loom_native_hook_cutover_freeze="$SOURCE_ROOT/tools/loom/native_hook_cutover.freeze.v2"
 loom_native_hook_cutover_codex_config="$SOURCE_ROOT/.codex/hooks.json"
 loom_native_hook_cutover_claude_config="$SOURCE_ROOT/.claude/settings.json"
 loom_native_hook_cutover_cursor_config="$SOURCE_ROOT/.cursor/hooks.json"
@@ -1050,7 +1050,7 @@ loom_native_hook_cutover_grok_config="$SOURCE_ROOT/.grok/hooks/loom-native.json"
 loom_native_hook_generation_drain_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh"
 loom_native_hook_generation_drain_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_drain_authority_main.sio"
 loom_native_hook_generation_drain_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
-loom_native_hook_generation_drain_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_drain.freeze.v1"
+loom_native_hook_generation_drain_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_drain.freeze.v2"
 loom_native_hook_generation_drain_capsule_relpaths=(
   "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md"
   "stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
@@ -1062,13 +1062,19 @@ loom_native_hook_generation_drain_capsule_relpaths=(
   "tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt"
   "tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt"
   "tools/loom/native_hook_cutover.freeze.v1"
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V2.md"
+  "tools/loom/native_hook_generation_drain.first.v2"
+  "tools/loom/evidence/loom-native-hook-generation-drain-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-native-hook-generation-drain-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_cutover.freeze.v2"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
   "bin/souc"
   "bin/souc-lean-single-x86_64"
 )
 loom_native_hook_generation_reconcile_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
 loom_native_hook_generation_reconcile_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile_authority_main.sio"
 loom_native_hook_generation_reconcile_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
-loom_native_hook_generation_reconcile_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile.freeze.v1"
+loom_native_hook_generation_reconcile_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile.freeze.v2"
 loom_native_hook_generation_reconcile_capsule_relpaths=(
   "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md"
   "stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
@@ -1080,13 +1086,19 @@ loom_native_hook_generation_reconcile_capsule_relpaths=(
   "tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt"
   "tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v1-20260901.txt"
   "tools/loom/native_hook_generation_drain.freeze.v1"
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V2.md"
+  "tools/loom/native_hook_generation_reconcile.first.v2"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v2"
+  "tools/loom/native_hook_generation_reconcile.freeze.v1"
   "bin/souc"
   "bin/souc-lean-single-x86_64"
 )
 loom_generation_pinned_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh"
 loom_generation_pinned_cutover_entrypoint="$SOURCE_ROOT/tools/loom/generation_pinned_cutover_authority_main.sio"
 loom_generation_pinned_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
-loom_generation_pinned_cutover_freeze="$SOURCE_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
+loom_generation_pinned_cutover_freeze="$SOURCE_ROOT/tools/loom/generation_pinned_cutover.freeze.v2"
 loom_generation_pinned_cutover_capsule_relpaths=(
   "tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V1.md"
   "stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
@@ -1099,13 +1111,20 @@ loom_generation_pinned_cutover_capsule_relpaths=(
   "tools/loom/evidence/loom-generation-pinned-cutover-frozen-v1-20260904.txt"
   "tools/loom/native_hook_generation_drain.freeze.v1"
   "tools/loom/native_hook_generation_reconcile.freeze.v1"
+  "tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V2.md"
+  "tools/loom/generation_pinned_cutover.first.v2"
+  "tools/loom/evidence/loom-generation-pinned-cutover-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-generation-pinned-cutover-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v2"
+  "tools/loom/native_hook_generation_reconcile.freeze.v2"
+  "tools/loom/generation_pinned_cutover.freeze.v1"
   "bin/souc"
   "bin/souc-lean-single-x86_64"
 )
 loom_activation_epoch_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_activation_epoch.sh"
 loom_activation_epoch_entrypoint="$SOURCE_ROOT/tools/loom/activation_epoch_authority_main.sio"
 loom_activation_epoch_module="$SOURCE_ROOT/stdlib/coordination/loom_activation_epoch_authority.sio"
-loom_activation_epoch_freeze="$SOURCE_ROOT/tools/loom/activation_epoch.freeze.v1"
+loom_activation_epoch_freeze="$SOURCE_ROOT/tools/loom/activation_epoch.freeze.v2"
 loom_activation_epoch_capsule_relpaths=(
   "tools/loom/GARDEN_ACTIVATION_EPOCH_V1.md"
   "stdlib/coordination/loom_activation_epoch_authority.sio"
@@ -1117,6 +1136,11 @@ loom_activation_epoch_capsule_relpaths=(
   "tools/loom/evidence/loom-activation-epoch-first-v1-20260904.txt"
   "tools/loom/evidence/loom-activation-epoch-frozen-v1-20260904.txt"
   "tools/loom/generation_pinned_cutover.freeze.v1"
+  "tools/loom/generation_pinned_cutover.freeze.v2"
+  "tools/loom/GARDEN_ACTIVATION_EPOCH_V2.md"
+  "tools/loom/activation_epoch.first.v2"
+  "tools/loom/evidence/loom-activation-epoch-first-v2-20260915.txt"
+  "tools/loom/activation_epoch.freeze.v1"
   "bin/souc"
   "bin/souc-lean-single-x86_64"
 )
@@ -2010,7 +2034,7 @@ else
   done
   mkdir -p "$stage/policy/native-hook-generation-drain/tools/loom"
   install -m 0444 "$loom_native_hook_generation_drain_freeze" \
-    "$stage/policy/native-hook-generation-drain/tools/loom/native_hook_generation_drain.freeze.v1"
+    "$stage/policy/native-hook-generation-drain/tools/loom/native_hook_generation_drain.freeze.v2"
   install -m 0555 "$loom_native_hook_generation_reconcile_binary" \
     "$stage/bin/sounio-loom-native-hook-generation-reconcile"
   for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@]}"; do
@@ -2020,7 +2044,7 @@ else
   done
   mkdir -p "$stage/policy/native-hook-generation-reconcile/tools/loom"
   install -m 0444 "$loom_native_hook_generation_reconcile_freeze" \
-    "$stage/policy/native-hook-generation-reconcile/tools/loom/native_hook_generation_reconcile.freeze.v1"
+    "$stage/policy/native-hook-generation-reconcile/tools/loom/native_hook_generation_reconcile.freeze.v2"
   install -m 0555 "$loom_generation_pinned_cutover_binary" \
     "$stage/bin/sounio-loom-generation-pinned-cutover"
   for relative_path in "${loom_generation_pinned_cutover_capsule_relpaths[@]}"; do
@@ -2030,7 +2054,7 @@ else
   done
   mkdir -p "$stage/policy/generation-pinned-cutover/tools/loom"
   install -m 0444 "$loom_generation_pinned_cutover_freeze" \
-    "$stage/policy/generation-pinned-cutover/tools/loom/generation_pinned_cutover.freeze.v1"
+    "$stage/policy/generation-pinned-cutover/tools/loom/generation_pinned_cutover.freeze.v2"
   install -m 0555 "$loom_activation_epoch_binary" "$stage/bin/sounio-loom-activation-epoch"
   for relative_path in "${loom_activation_epoch_capsule_relpaths[@]}"; do
     mkdir -p "$(dirname "$stage/policy/activation-epoch/$relative_path")"
@@ -2038,9 +2062,9 @@ else
   done
   mkdir -p "$stage/policy/activation-epoch/tools/loom"
   install -m 0444 "$loom_activation_epoch_freeze" \
-    "$stage/policy/activation-epoch/tools/loom/activation_epoch.freeze.v1"
+    "$stage/policy/activation-epoch/tools/loom/activation_epoch.freeze.v2"
   install -m 0444 "$loom_native_hook_cutover_freeze" \
-    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1"
+    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v2"
   install -m 0444 "$loom_native_hook_cutover_entrypoint" \
     "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover_authority_main.sio"
   install -m 0444 "$loom_native_hook_cutover_module" \
@@ -2299,7 +2323,7 @@ else
     sha256sum "$stage/bin/sounio-loom-native-hook-cutover" | awk '{print $1}'
   )"
   loom_native_hook_cutover_manifest_sha256="$(
-    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1" | awk '{print $1}'
+    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v2" | awk '{print $1}'
   )"
   loom_native_hook_cutover_source_sha256="$(
     sha256sum "$stage/policy/native-hook-cutover/stdlib/coordination/loom_native_hook_cutover_authority.sio" | awk '{print $1}'
@@ -2380,7 +2404,7 @@ else
     printf 'loom_native_hook_cutover_operational_attachment=OCaml\n'
     printf 'loom_native_hook_cutover_stage=SEMANTICS_FROZEN\n'
     printf 'loom_native_hook_cutover_frame=9045\n'
-    printf 'loom_native_hook_cutover_semantics_sha256=27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882\n'
+    printf 'loom_native_hook_cutover_semantics_sha256=842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998\n'
     printf 'loom_native_hook_cutover_runtime_sha256=%s\n' \
       "$loom_native_hook_cutover_runtime_sha256"
     printf 'loom_native_hook_cutover_manifest_sha256=%s\n' \
@@ -2399,23 +2423,23 @@ else
       "$loom_native_hook_cutover_grok_config_sha256"
     printf 'loom_native_hook_cutover_python_bridge_absent=true\n'
     printf 'loom_native_hook_generation_drain_action=9046\n'
-    printf 'loom_native_hook_generation_drain_semantics_sha256=00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3\n'
-    printf 'loom_native_hook_generation_drain_manifest_sha256=9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1\n'
+    printf 'loom_native_hook_generation_drain_semantics_sha256=c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb\n'
+    printf 'loom_native_hook_generation_drain_manifest_sha256=ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61\n'
     printf 'loom_native_hook_generation_drain_runtime_sha256=%s\n' \
       "$loom_native_hook_generation_drain_runtime_sha256"
     printf 'loom_native_hook_generation_reconcile_action=9047\n'
-    printf 'loom_native_hook_generation_reconcile_semantics_sha256=63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff\n'
-    printf 'loom_native_hook_generation_reconcile_manifest_sha256=a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7\n'
+    printf 'loom_native_hook_generation_reconcile_semantics_sha256=9741264b94d06e7063673063c9c328f91f9ae25e1211f4a083522b05a513c5f7\n'
+    printf 'loom_native_hook_generation_reconcile_manifest_sha256=35b6dc397a250eb2dfe9e57384a96bf07a37199bc28fe66daad1fd4ee6ffd39b\n'
     printf 'loom_native_hook_generation_reconcile_runtime_sha256=%s\n' \
       "$loom_native_hook_generation_reconcile_runtime_sha256"
     printf 'loom_generation_pinned_cutover_action=9048\n'
-    printf 'loom_generation_pinned_cutover_semantics_sha256=9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549\n'
-    printf 'loom_generation_pinned_cutover_manifest_sha256=0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d\n'
+    printf 'loom_generation_pinned_cutover_semantics_sha256=a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff\n'
+    printf 'loom_generation_pinned_cutover_manifest_sha256=0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4\n'
     printf 'loom_generation_pinned_cutover_runtime_sha256=%s\n' \
       "$loom_generation_pinned_cutover_runtime_sha256"
     printf 'loom_activation_epoch_action=9049\n'
-    printf 'loom_activation_epoch_semantics_sha256=c2b117b11f58e90410b5222bf6fddfac7280d0d3c6af0b71f94e75efc001a017\n'
-    printf 'loom_activation_epoch_manifest_sha256=b485768773da28e0b42b2a8f9d629167c9513ceacdd6df9d2df30f9f4ac82000\n'
+    printf 'loom_activation_epoch_semantics_sha256=a63f34dfbdd56621b3af502a2c4f46bb87fc6d6e528efd62c241b5ace31052ec\n'
+    printf 'loom_activation_epoch_manifest_sha256=133d3e10ceb06e88b82c017e1110bedc726fb4e083b00e0598f2393a837d4c6a\n'
     printf 'loom_activation_epoch_runtime_sha256=%s\n' "$loom_activation_epoch_runtime_sha256"
     printf 'loom_custody_transfer_language=Sounio\n'
     printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'

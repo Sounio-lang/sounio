@@ -7,7 +7,7 @@ let pinned_manifest_sha256 =
   "7019af35cddccddd2c34e7dca0f40300bc446f5e7add52c37b0325b6ae9c1037"
 
 let pinned_native_hook_cutover_manifest_sha256 =
-  "16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a"
+  "4ce46da965e6e19390dcfde8119bf8e9dcb1dab2c1722f5c27cc5e330532932a"
 
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
@@ -1076,7 +1076,7 @@ let runtime_native_hook_cutover_root () =
 
 let native_hook_cutover_policy_root worktree_root =
   let local_manifest =
-    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v1"
+    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v2"
   in
   let selected =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT" with
@@ -1159,7 +1159,7 @@ let authorize_native_hook_cutover root profile event _raw_event base_receipt =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then
     failf "Sounio-native-hook-cutover-policy-missing";
