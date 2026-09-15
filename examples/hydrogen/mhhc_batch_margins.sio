@@ -1,0 +1,309 @@
+// examples/hydrogen/mhhc_batch_margins.sio
+//
+// HOW MUCH ALLOY BATCH-TO-BATCH SCATTER CAN THE SEVEN-STAGE CASCADE ABSORB,
+// AND WHICH STAGE RUNS OUT FIRST -- ON THE MEASURED TABLE 3.
+//
+// demos/hydrogen/mh7_reliability.sio asked this question of a fitted
+// surrogate whose enthalpy ladder runs the wrong way, and named "stages 6-7"
+// from batch half-widths it had assigned itself. This file asks it of the
+// Gkanas et al. 2020 compressor as measured (Renewable Energy 147:164-178,
+// DOI 10.1016/j.renene.2019.08.104; Table 3 transcribed in
+// demos/hydrogen/data/gkanas2020_seven_stage.md and in stdlib/hydride/mhhc.sio).
+//
+// WHY NOT SWEEP THE DELIVERY PRESSURE. examples/hydrogen/mhhc_corner_pbox.sio
+// records the trap: at the plateau the delivered pressure is S7's desorption
+// plateau and nothing else, so a batch sweep over it would report that S7 owns
+// 100 % of the uncertainty -- true, and vacuous. The quantity every stage
+// touches is the DRIVING FORCE of each coupling: the log ratio of the upstream
+// stage's desorption plateau at T_hot to the downstream stage's absorption
+// plateau at T_cold,
+//     m_k = ln P_des,k(T_hot) - ln P_abs,k+1(T_cold),
+// plus the feed into S1 (20 bar against S1's absorption plateau) and S7's
+// desorption plateau against the 374 bar the paper delivers.
+//
+// WHAT m_k IS AND IS NOT. It is evaluated at mid-plateau, where the slope term
+// of p_eq_pct is exactly neutral (stdlib/hydride/mhhc.sio test 6.3), from
+// Table 3 alone. It is therefore invariant under all seven unmeasured inputs
+// of mhhc_corner_pbox.sio -- kinetics, UA, V_ic and sigma -- and nothing those
+// inputs do can create a driving force where m_k <= 0. It is a NECESSARY
+// condition for a coupling to move the mid-plateau inventory, not a sufficient
+// one: m_k > 0 says nothing about how fast, or how much, and a sloped plateau
+// can still transfer the low-loading end of a coupling whose m_k is negative.
+//
+// THE BATCH MODEL, DECLARED. A production batch shifts a stage's enthalpy by
+// delta kJ/mol, the same delta on its absorption and desorption branch, with
+// dS held at Table 3. Nobody publishes batch-to-batch distributions for these
+// alloys, so delta is an INTERVAL [-w, +w] and every result below is a worst
+// case over that interval -- exact, because m_k is linear in each delta. Holding
+// dS fixed is the conservative choice: enthalpy-entropy compensation, where
+// real batches shift dS with dH, would cancel part of each shift and widen
+// every tolerance printed here by 1/(1 - c) for a compensated fraction c.
+//
+// THE PHYSICS THAT DECIDES THE ANSWER. d ln P / d dH = -1/(R T) is the SAME
+// for every stage at a given temperature, so no stage has more leverage than
+// another: which stage runs out first is set by the Table 3 margins alone. And
+// a stage's shift acts on BOTH of its couplings with opposite sign -- lower dH
+// raises its absorption plateau (the coupling feeding it loses) and raises its
+// desorption plateau (the coupling it feeds gains) -- so whether neighbouring
+// batches shift together or independently is not a detail.
+//
+// Run:  bin/souc run examples/hydrogen/mhhc_batch_margins.sio
+// Ends with MHHC_BATCH_MARGINS_OK, or refuses if Table 3 leaves any coupling
+// without a nominal driving force.
+
+use hydride::mhhc::*
+use math::pure::{exp, ln}
+
+fn print_fix3(x: f64) with IO, Mut, Div, Panic {
+    let neg = x < 0.0
+    var v = if neg { 0.0 - x } else { x }
+    let scaled = v * 1000.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 1000
+    let milli = n - whole * 1000
+    if neg { print("-") }
+    print(whole) print(".")
+    if milli < 100 { print("0") }
+    if milli < 10 { print("0") }
+    print(milli)
+}
+
+// ln of the flat van 't Hoff plateau, P in bar -- p_eq_flat without the exp
+fn ln_plateau(dh: f64, ds: f64, t_k: f64) -> f64 with Div {
+    ds / r_gas() - dh / (r_gas() * t_k)
+}
+
+// coupling j: 0 = feed -> S1, 1..6 = S_j -> S_(j+1), 7 = S7 -> delivery line
+fn print_coupling(j: i64) with IO {
+    if j == 0 { print("feed -> S1") }
+    else if j == 7 { print("S7 -> line") }
+    else { print("S") print(j) print(" -> S") print(j + 1) }
+}
+
+fn upstream_ln(j: i64, t_hot: f64, p_feed: f64) -> f64 with Mut, Div, Panic {
+    if j == 0 { return ln(p_feed) }
+    let s = j - 1
+    ln_plateau(gkanas_dh_des(s), gkanas_ds_des(s), t_hot)
+}
+
+fn downstream_ln(j: i64, t_cold: f64, p_line: f64) -> f64 with Mut, Div, Panic {
+    if j == 7 { return ln(p_line) }
+    ln_plateau(gkanas_dh_abs(j), gkanas_ds_abs(j), t_cold)
+}
+
+fn fill_margins(t_hot: f64, t_cold: f64, p_feed: f64, p_line: f64,
+                m: &![f64; 8]) with Mut, Div, Panic {
+    var j: i64 = 0
+    while j < 8 {
+        let up = upstream_ln(j, t_hot, p_feed)
+        let down = downstream_ln(j, t_cold, p_line)
+        m[j] = up - down
+        j = j + 1
+    }
+}
+
+// d m_j / d delta when every stage carries its own independent worst-case
+// shift of half-width w: the feed only sees S1's absorption, the line only
+// S7's desorption, every inter-stage coupling sees both neighbours adversely.
+fn coef_indep(j: i64, a_h: f64, a_c: f64) -> f64 {
+    if j == 0 { a_c } else if j == 7 { a_h } else { a_h + a_c }
+}
+
+// d m_j / d delta when ONE shift delta is shared by S2..S7, the six AB2
+// (Zr-Ti-Mn-Co-Cr-Fe-V) stages. S1 is the AB5 alloy -- a different material,
+// so a different batch by construction -- and stays at Table 3.
+fn coef_ab2(j: i64, a_h: f64, a_c: f64) -> f64 {
+    if j == 0 { 0.0 } else if j == 1 { a_c } else if j == 7 { 0.0 - a_h } else { a_c - a_h }
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// smallest |delta| that drives some m_j to zero under a shared AB2 shift;
+// returns the tolerance, writes the closing coupling into arg[0]
+fn ab2_tolerance(m: &[f64; 8], a_h: f64, a_c: f64, arg: &![i64; 2]) -> f64 with Mut, Div {
+    var best = 1.0e30
+    arg[0] = 0 - 1
+    var j: i64 = 0
+    while j < 8 {
+        let g = coef_ab2(j, a_h, a_c)
+        if abs_f(g) > 1.0e-12 {
+            let d = m[j] / abs_f(g)
+            if d < best { best = d  arg[0] = j }
+        }
+        j = j + 1
+    }
+    best
+}
+
+// smallest equal half-width w, all stages independent, that closes a coupling
+fn indep_tolerance(m: &[f64; 8], a_h: f64, a_c: f64, arg: &![i64; 2]) -> f64 with Mut, Div {
+    var best = 1.0e30
+    arg[0] = 0 - 1
+    var j: i64 = 0
+    while j < 8 {
+        let d = m[j] / coef_indep(j, a_h, a_c)
+        if d < best { best = d  arg[0] = j }
+        j = j + 1
+    }
+    best
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let t_cold = 283.15      // 10 C absorption, every case in Table 4
+    let t_hot = 353.15       // 80 C desorption, Case 1
+    let p_feed = 20.0        // bar, every case in Table 4
+    let p_line = 374.0       // bar, delivered in Case 1
+    let a_h = 1000.0 / (r_gas() * t_hot)    // |d ln P / d dH| per kJ/mol at 80 C
+    let a_c = 1000.0 / (r_gas() * t_cold)   // same at 10 C
+
+    println("SEVEN-STAGE MH COMPRESSOR: BATCH TOLERANCE OF EACH COUPLING, TABLE 3")
+    println("Gkanas et al. 2020, Case 1: 20 bar feed, 10 C absorption, 80 C")
+    println("desorption, 374 bar delivered. Mid-plateau equilibrium, Table 3 only.")
+    println("")
+
+    var m: [f64; 8] = [0.0; 8]
+    fill_margins(t_hot, t_cold, p_feed, p_line, &! m)
+
+    // ── A ──
+    println("-- A. driving force of each coupling at nominal Table 3 --")
+    println("   coupling      P_up bar    P_down bar   ratio    ln margin")
+    var j: i64 = 0
+    var nominal_ok = true
+    while j < 8 {
+        let up = upstream_ln(j, t_hot, p_feed)
+        let down = downstream_ln(j, t_cold, p_line)
+        print("   ") print_coupling(j)
+        print("   ") print_fix3(exp(up))
+        print("   ") print_fix3(exp(down))
+        print("   ") print_fix3(exp(m[j]))
+        print("   ") print_fix3(m[j])
+        println("")
+        if m[j] <= 0.0 { nominal_ok = false }
+        j = j + 1
+    }
+    println("")
+    if !nominal_ok {
+        println("REFUSED: a coupling has no driving force at nominal Table 3, so the")
+        println("measured thermodynamics cannot run Case 1 at mid-plateau and a batch")
+        println("tolerance around that point is meaningless.")
+        return 1
+    }
+
+    // ── B ──
+    println("-- B. leverage of a batch shift, identical for all seven stages --")
+    print("   |d ln P / d dH| at 80 C desorption : ") print_fix3(a_h) println(" per kJ/mol")
+    print("   |d ln P / d dH| at 10 C absorption : ") print_fix3(a_c) println(" per kJ/mol")
+    print("   neighbours shifting against a coupling : ") print_fix3(a_h + a_c) println("")
+    print("   neighbours shifting together            : ") print_fix3(a_c - a_h) println("")
+    print("   ratio, against / together               : ") print_fix3((a_h + a_c) / (a_c - a_h)) println("")
+    println("")
+
+    // ── C ──
+    println("-- C. one stage off-batch, the other six at Table 3 --")
+    println("   stage  closes feeding coupling  closes fed coupling   tolerance  % of dH_abs")
+    println("          at delta <= -             at delta >= +          +/- kJ/mol")
+    var tight_stage: i64 = 0 - 1
+    var tight_tol = 1.0e30
+    var s: i64 = 0
+    while s < 7 {
+        let tol_minus = m[s] / a_c
+        let tol_plus = m[s + 1] / a_h
+        var tol = tol_minus
+        if tol_plus < tol { tol = tol_plus }
+        if tol < tight_tol { tight_tol = tol  tight_stage = s }
+        print("   S") print(s + 1)
+        print("     ") print_fix3(tol_minus)
+        print("                     ") print_fix3(tol_plus)
+        print("                ") print_fix3(tol)
+        print("      ") print_fix3(100.0 * tol / (gkanas_dh_abs(s) / 1000.0))
+        println("")
+        s = s + 1
+    }
+    print("   tightest: S") print(tight_stage + 1) print(", +/- ") print_fix3(tight_tol) println(" kJ/mol")
+    println("")
+
+    // ── D ──
+    var arg: [i64; 2] = [0; 2]
+    let w_ind = indep_tolerance(&m, a_h, a_c, &! arg)
+    let j_ind = arg[0]
+    println("-- D. every stage off-batch independently, same half-width w --")
+    print("   smallest w that closes a coupling: +/- ") print_fix3(w_ind)
+    print(" kJ/mol, at ") print_coupling(j_ind) println("")
+    println("   w kJ/mol   couplings that can close (of 8)   worst-case ln margin at the tightest")
+    var i: i64 = 0
+    while i < 7 {
+        var w = 0.10
+        if i == 1 { w = 0.25 }
+        if i == 2 { w = 0.50 }
+        if i == 3 { w = 1.00 }
+        if i == 4 { w = 1.50 }
+        if i == 5 { w = 2.00 }
+        if i == 6 { w = 2.50 }
+        var closable: i64 = 0
+        j = 0
+        while j < 8 {
+            if m[j] - w * coef_indep(j, a_h, a_c) <= 0.0 { closable = closable + 1 }
+            j = j + 1
+        }
+        print("   ") print_fix3(w)
+        print("      ") print(closable)
+        print("                                   ") print_fix3(m[j_ind] - w * coef_indep(j_ind, a_h, a_c))
+        println("")
+        i = i + 1
+    }
+    println("")
+
+    // ── E ──
+    let w_ab2 = ab2_tolerance(&m, a_h, a_c, &! arg)
+    let j_ab2 = arg[0]
+    println("-- E. one shared shift on the six AB2 stages S2..S7 (S1 at Table 3) --")
+    print("   tolerance: +/- ") print_fix3(w_ab2) print(" kJ/mol, limited by ") print_coupling(j_ab2) println("")
+    print("   against independent batches (D): ") print_fix3(w_ab2 / w_ind) println("x wider")
+    println("")
+
+    // ── F ──
+    println("-- F. the six desorption temperatures of Table 4 (10 C absorption, 20 bar feed) --")
+    println("   T_des C  delivered bar  tightest coupling  ln margin  indep w  shared-AB2 w")
+    var c: i64 = 0
+    while c < 6 {
+        var t_case = 353.15
+        var p_case = 374.0
+        if c == 1 { t_case = 363.15  p_case = 483.2 }
+        if c == 2 { t_case = 373.15  p_case = 606.4 }
+        if c == 3 { t_case = 378.15  p_case = 682.0 }
+        if c == 4 { t_case = 383.15  p_case = 742.0 }
+        if c == 5 { t_case = 393.15  p_case = 830.0 }
+        let ah_case = 1000.0 / (r_gas() * t_case)
+        var mc: [f64; 8] = [0.0; 8]
+        fill_margins(t_case, t_cold, p_feed, p_case, &! mc)
+        let wi = indep_tolerance(&mc, ah_case, a_c, &! arg)
+        let ji = arg[0]
+        let ws = ab2_tolerance(&mc, ah_case, a_c, &! arg)
+        print("   ") print_fix3(t_case - 273.15)
+        print("  ") print_fix3(p_case)
+        print("        ") print_coupling(ji)
+        print("        ") print_fix3(mc[ji])
+        print("    ") print_fix3(wi)
+        print("    ") print_fix3(ws)
+        println("")
+        c = c + 1
+    }
+    println("")
+
+    println("-- reading --")
+    print("   The tightest coupling is ") print_coupling(j_ind) print(", and the stage that")
+    println("")
+    print("   runs out of batch tolerance first is S") print(tight_stage + 1)
+    print(" (+/- ") print_fix3(tight_tol) println(" kJ/mol alone).")
+    println("   Every stage has the same leverage per kJ/mol, so this ranking comes")
+    println("   from the measured Table 3 margins, not from any width we assigned.")
+    println("   A batch interval wider than a tolerance above can remove the mid-")
+    println("   plateau driving force of that coupling; whether the cascade then")
+    println("   stalls depends on plateau slope and kinetics, which this file does")
+    println("   not vary and mhhc_corner_pbox.sio carries as declared intervals.")
+    println("")
+    println("MHHC_BATCH_MARGINS_OK")
+    0
+}
