@@ -480,14 +480,6 @@ var LOWER_UNIT_NAME_BUF: [i8; 16384]
 var LOWER_UNIT_NAME_LEN: [i64; 256]
 var LOWER_UNIT_COUNT: i64 = 0
 var LOWER_UNIT_BUILTINS_SEEDED: i64 = 0
-// Type parameters of the struct whose fields are being registered. The checker
-// resolves such a name as the parameter before consulting the unit registry
-// (checker_name_is_type_param_in_scope), so `struct Map<K, V> { key: K }` must not
-// classify `key` as a float here either. Set and cleared around each struct-field
-// registration; struct definitions do not nest. Same 64-byte slots as the unit table.
-var LOWER_TYPE_PARAM_BUF: [i8; 4096]
-var LOWER_TYPE_PARAM_LEN: [i64; 64]
-var LOWER_TYPE_PARAM_COUNT: i64 = 0
 // 0=unspecified, 1=instruction capacity, 2=unresolved print ABI.
 var IR_LOWER_HARD_ERROR_REASON: i64 = 0
 // Same flat-array treatment, same reason.
@@ -2282,9 +2274,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                     let struct_def_opt_ref: &Option<Box<StructDef>> = &head.struct_def
                     match *struct_def_opt_ref {
                         Some(sd) => {
-                            lower_type_params_scope_set(&(*sd).type_params)
                             lowerer_register_struct_fields_direct_mut(lo, name, &(*sd).fields)
-                            lower_type_params_scope_clear()
                         }
                         _ => {}
                     }
@@ -2849,7 +2839,6 @@ fn lowerer_preseed_external_struct_items_mut(
                             // silently no-ops from this call site (suspected
                             // lean_single handling of &(*box).field through
                             // FieldDefList head). Build the layout entry directly.
-                            lower_type_params_scope_set(&(*sd).type_params)
                             var sl_box = (*lo).struct_layouts
                             let pre_count = (*sl_box).count
                             if pre_count < 1024 {
@@ -2886,7 +2875,6 @@ fn lowerer_preseed_external_struct_items_mut(
                                 (*sl_box).count = pre_count + 1
                                 (*lo).struct_layouts = sl_box
                             }
-                            lower_type_params_scope_clear()
                         }
                         _ => {}
                     }
@@ -3034,7 +3022,6 @@ fn lowerer_preseed_external_items_into_acc_mut(
                 if head_owned.kind == ItemKind::ItemStruct {
                     match head_owned.struct_def {
                         Some(sd) => {
-                            lower_type_params_scope_set(&(*sd).type_params)
                             var sl_box = (*lo).struct_layouts
                             // Skip duplicate type_name entries in this lowerer's table.
                             var already: bool = false
@@ -3076,7 +3063,6 @@ fn lowerer_preseed_external_items_into_acc_mut(
                             } else {
                                 (*lo).struct_layouts = sl_box
                             }
-                            lower_type_params_scope_clear()
                         }
                         _ => {}
                     }
@@ -3625,9 +3611,7 @@ fn lowerer_preseed_program_metadata_owned_mut(
             if item.kind == ItemKind::ItemStruct {
                 let sd = item_struct_def_ptr(item)
                 if sd != (0 as *mut StructDef) {
-                    lower_type_params_scope_set(&(*sd).type_params)
                     lowerer_register_struct_fields_direct_mut(lo, item.name, &(*sd).fields)
-                    lower_type_params_scope_clear()
                 }
             } else if item.kind == ItemKind::ItemEnum {
                 let ed = item_enum_def_ptr(item)
@@ -3796,9 +3780,7 @@ fn lowerer_preseed_program_items_mut(
                 if ik == ItemKind::ItemStruct {
                     match (*list).head.struct_def {
                         Some(sd) => {
-                            lower_type_params_scope_set(&(*sd).type_params)
                             lowerer_register_struct_fields_direct_mut(lo, (*list).head.name, &(*sd).fields)
-                            lower_type_params_scope_clear()
                         }
                         None => {}
                     }
@@ -4248,9 +4230,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                     } else if kind == ItemKind::ItemStruct {
                 match item.struct_def {
                     Some(sd) => {
-                        lower_type_params_scope_set(&(*sd).type_params)
                         seed_value.struct_layouts = ir_fast_summary_register_struct_fields_owned(seed_value.struct_layouts, name, (*sd).fields, 0)
-                        lower_type_params_scope_clear()
                     }
                     _ => {}
                 }
@@ -4370,9 +4350,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                 } else if kind == ItemKind::ItemStruct {
                     match item.struct_def {
                         Some(sd) => {
-                            lower_type_params_scope_set(&(*sd).type_params)
                             struct_layouts = ir_fast_summary_register_struct_fields_owned(struct_layouts, name, (*sd).fields, 0)
-                            lower_type_params_scope_clear()
                         }
                         _ => {}
                     }
@@ -5571,9 +5549,7 @@ fn lowerer_lower_program_items_mut(
                 } else if kind == ItemKind::ItemStruct {
                     match item.struct_def {
                         Some(sd) => {
-                            lower_type_params_scope_set(&(*sd).type_params)
                             lowerer_register_struct_fields_mut(lo, name, &(*sd).fields, 0)
-                            lower_type_params_scope_clear()
                         }
                         _ => {}
                     }
@@ -5614,51 +5590,6 @@ fn lower_unit_names_index(buf: [i8; 384], len: i64) -> i64 with Mut, Panic, Div 
         i = i + 1
     }
     0 - 1
-}
-
-fn lower_type_params_scope_set(tps: &Option<Box<TypeParamDefList>>) with Mut, Panic, Div {
-    LOWER_TYPE_PARAM_COUNT = 0
-    var current = tps
-    while true {
-        match *current {
-            Some(node) => {
-                let n = (*node).head.name
-                // A name over 64 bytes is not a unit either, so dropping it is exact.
-                if LOWER_TYPE_PARAM_COUNT < 64 && n.len > 0 && n.len <= 64 {
-                    let base = LOWER_TYPE_PARAM_COUNT * 64
-                    var j: i64 = 0
-                    while j < n.len {
-                        LOWER_TYPE_PARAM_BUF[(base + j) as usize] = n.buf[j as usize]
-                        j = j + 1
-                    }
-                    LOWER_TYPE_PARAM_LEN[LOWER_TYPE_PARAM_COUNT as usize] = n.len
-                    LOWER_TYPE_PARAM_COUNT = LOWER_TYPE_PARAM_COUNT + 1
-                }
-                current = &(*node).tail
-            }
-            _ => break
-        }
-    }
-}
-
-fn lower_type_params_scope_clear() with Mut {
-    LOWER_TYPE_PARAM_COUNT = 0
-}
-
-fn lower_type_params_scope_has(buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < LOWER_TYPE_PARAM_COUNT {
-        if LOWER_TYPE_PARAM_LEN[i as usize] == len {
-            let base = i * 64
-            var j: i64 = 0
-            while j < len && LOWER_TYPE_PARAM_BUF[(base + j) as usize] == buf[j as usize] {
-                j = j + 1
-            }
-            if j == len { return true }
-        }
-        i = i + 1
-    }
-    false
 }
 
 fn lower_unit_names_add(buf: [i8; 384], len: i64) with Mut, Panic, Div {
@@ -5758,10 +5689,11 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     // A registered measurement unit is f64 too: the checker types `mg`, `mg_dL`, or a
     // `unit X;` name as f64 carrying that unit before any other lookup
     // (checker_lower_named_type_mut), so this classification follows it exactly.
-    // That includes the one name that outranks a unit there: a type parameter of the
-    // struct whose fields are being lowered (`K` in `struct Map<K, V>` is the
-    // parameter, not kelvin). Diverging here would lower a program the checker
-    // accepted under different types than it was checked with.
+    // That includes the one name that outranks a unit there: a type parameter
+    // declared by the enclosing struct, fn or impl (`K` in `struct Map<K, V>`,
+    // `fn id<K>` or `impl Map<K, V>` is the parameter, not kelvin). Diverging here
+    // would lower a program the checker accepted under different types than it was
+    // checked with.
     match (*te).type_args {
         Some(_args) => { return false }
         None => {}
@@ -5769,9 +5701,12 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     match seg.tail {
         Some(_rest) => false,
         None => {
-            if lower_type_params_scope_has(seg.head_buf, seg.head_len) { return false }
             lower_unit_names_seed_builtins()
-            lower_unit_names_index(seg.head_buf, seg.head_len) >= 0
+            if lower_unit_names_index(seg.head_buf, seg.head_len) < 0 { return false }
+            // A unit name that the enclosing struct, fn or impl declares as a type
+            // parameter is that parameter. The registry is asked by this node's own
+            // span, so no call site has to know which declaration it is inside.
+            !ast_type_param_declared_at((*te).span, seg.head_buf, seg.head_len)
         }
     }
 }
@@ -15769,9 +15704,7 @@ impl Lowerer {
                         let struct_def_opt: Option<Box<StructDef>> = head.struct_def
                         match struct_def_opt {
                             Some(sd) => {
-                                lower_type_params_scope_set(&(*sd).type_params)
                                 lo = lo.register_struct_fields_ref(name, &(*sd).fields, 0)
-                                lower_type_params_scope_clear()
                             }
                             _ => {}
                         }
@@ -15856,9 +15789,7 @@ impl Lowerer {
                         let struct_def_opt: Option<Box<StructDef>> = head.struct_def
                         match struct_def_opt {
                             Some(sd) => {
-                                lower_type_params_scope_set(&(*sd).type_params)
                                 lo = lo.register_struct_fields_ref(name, &(*sd).fields, 0)
-                                lower_type_params_scope_clear()
                             }
                             _ => {}
                         }
@@ -16112,9 +16043,7 @@ impl Lowerer {
                         let struct_def_opt: Option<Box<StructDef>> = head.struct_def
                         match struct_def_opt {
                             Some(sd) => {
-                                lower_type_params_scope_set(&(*sd).type_params)
                                 lo = lo.register_struct_fields_ref(name, &(*sd).fields, 0)
-                                lower_type_params_scope_clear()
                             }
                             _ => {}
                         }
@@ -16190,12 +16119,7 @@ impl Lowerer {
         } else if k == ItemKind::ItemStruct {
             // Phase 3.2: Register struct field layout
             match item.struct_def {
-                Some(sd) => {
-                    lower_type_params_scope_set(&(*sd).type_params)
-                    let registered = self.register_struct_fields(name, (*sd).fields, 0)
-                    lower_type_params_scope_clear()
-                    registered
-                }
+                Some(sd) => self.register_struct_fields(name, (*sd).fields, 0),
                 _ => self,
             }
         } else if k == ItemKind::ItemEnum {
@@ -16243,12 +16167,7 @@ impl Lowerer {
             }
         } else if k == ItemKind::ItemStruct {
             match item.struct_def {
-                Some(sd) => {
-                    lower_type_params_scope_set(&(*sd).type_params)
-                    let registered = self.register_struct_fields(name, (*sd).fields, 0)
-                    lower_type_params_scope_clear()
-                    registered
-                }
+                Some(sd) => self.register_struct_fields(name, (*sd).fields, 0),
                 _ => self,
             }
         } else if k == ItemKind::ItemEnum {

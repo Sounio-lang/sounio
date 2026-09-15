@@ -1135,6 +1135,11 @@ pub struct FnDef {
     // instr_count == 0 stub so builtin dispatch applies). Distinct from
     // is_kernel, which the checker treats as a GPU kernel (E070/E253).
     pub is_extern: bool,
+    // Declared type parameters: the `<T, U>` of `fn f<T, U>(...)`, or None.
+    // Until this field existed the parser consumed that list and dropped it,
+    // so every later stage had to guess which names were parameters. Last
+    // field, so existing offsets are unchanged.
+    pub type_params: Option<Box<TypeParamDefList> >,
 }
 
 pub struct Param {
@@ -1759,6 +1764,126 @@ pub fn ast_indep_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     }
     if h < 0 { h = 0 - h }
     h
+}
+
+// ============================================================
+// Declared type parameters, by declaration span
+// ============================================================
+//
+// Each `<T, U>` a struct, fn, trait method or generic impl declares, recorded
+// with the span of the declaration that introduces it. The checker scopes these
+// names while it walks the declaration (checker_name_is_type_param_in_scope). The
+// IR lowering cannot: it classifies types node by node, from dozens of call sites,
+// with no notion of the enclosing declaration -- so lower_type_expr_is_f64 asks
+// this registry by the type expression's own span instead.
+//
+// A span is only byte offsets, so every parsed token stream gets its own file id
+// (ast_next_parse_file_id, stamped into spans by Parser::current_span): a
+// declaration in one module can never cover a type expression in another. The
+// registry is append-only for the process -- re-parsing a module gets a fresh id --
+// and keeps names as hash + length. An impl records the bare single-segment
+// arguments of its target (`impl Map<K, V>` declares K and V); a concrete argument
+// like `i64` recorded the same way changes nothing, because downstream only a
+// name that is also a unit is affected.
+pub var PARSE_FILE_ID: i64 = 0
+pub var TPD_COUNT: i64 = 0
+pub var TPD_FILE: [i64; 16384]
+pub var TPD_START: [i64; 16384]
+pub var TPD_END: [i64; 16384]
+pub var TPD_NAME_FIRST: [i64; 16384]
+pub var TPD_NAME_COUNT: [i64; 16384]
+pub var TPD_NAMES_USED: i64 = 0
+pub var TPD_NAME_HASH: [i64; 65536]
+pub var TPD_NAME_LEN: [i64; 65536]
+pub var TPD_OVERFLOW: i64 = 0
+
+pub fn ast_next_parse_file_id() with Mut {
+    PARSE_FILE_ID = PARSE_FILE_ID + 1
+}
+
+fn ast_tpd_commit(span: Span, first: i64, count: i64) with Mut, Panic {
+    if count <= 0 { return }
+    let i = TPD_COUNT
+    TPD_FILE[i as usize] = span.file_id as i64
+    TPD_START[i as usize] = span.start
+    TPD_END[i as usize] = span.end
+    TPD_NAME_FIRST[i as usize] = first
+    TPD_NAME_COUNT[i as usize] = count
+    TPD_COUNT = TPD_COUNT + 1
+}
+
+pub fn ast_record_type_param_decl(span: Span, list: &Option<Box<TypeParamDefList>>) with Mut, Panic, Div {
+    if TPD_COUNT >= 16384 { TPD_OVERFLOW = 1; return }
+    let first = TPD_NAMES_USED
+    var count: i64 = 0
+    var current = list
+    while true {
+        match *current {
+            Some(node) => {
+                if TPD_NAMES_USED >= 65536 { TPD_OVERFLOW = 1; return }
+                let n = (*node).head.name
+                TPD_NAME_HASH[TPD_NAMES_USED as usize] = ast_name_hash(n)
+                TPD_NAME_LEN[TPD_NAMES_USED as usize] = n.len
+                TPD_NAMES_USED = TPD_NAMES_USED + 1
+                count = count + 1
+                current = &(*node).tail
+            }
+            _ => break
+        }
+    }
+    ast_tpd_commit(span, first, count)
+}
+
+pub fn ast_record_impl_type_param_decl(span: Span, target: &TypeExpr) with Mut, Panic, Div {
+    if TPD_COUNT >= 16384 { TPD_OVERFLOW = 1; return }
+    let first = TPD_NAMES_USED
+    var count: i64 = 0
+    var current = &(*target).type_args
+    while true {
+        match *current {
+            Some(node) => {
+                let arg = &(*node).head
+                if (*arg).kind == TypeExprKind::TypeNamed && (*arg).path.seg_count == 1 {
+                    match (*arg).type_args {
+                        Some(_nested) => {}
+                        None => {
+                            if TPD_NAMES_USED >= 65536 { TPD_OVERFLOW = 1; return }
+                            let seg = (*arg).path.segments
+                            TPD_NAME_HASH[TPD_NAMES_USED as usize] = ast_name_hash(Name { buf: seg.head_buf, len: seg.head_len })
+                            TPD_NAME_LEN[TPD_NAMES_USED as usize] = seg.head_len
+                            TPD_NAMES_USED = TPD_NAMES_USED + 1
+                            count = count + 1
+                        }
+                    }
+                }
+                current = &(*node).tail
+            }
+            _ => break
+        }
+    }
+    ast_tpd_commit(span, first, count)
+}
+
+// Is `name` a type parameter declared by a declaration whose span contains `span`?
+// An empty span (a synthesized node) is never covered.
+pub fn ast_type_param_declared_at(span: Span, buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if span.end <= span.start || TPD_COUNT == 0 { return false }
+    let h = ast_name_hash(Name { buf: buf, len: len })
+    let fid = span.file_id as i64
+    var i: i64 = 0
+    while i < TPD_COUNT {
+        if TPD_FILE[i as usize] == fid && TPD_START[i as usize] <= span.start && span.end <= TPD_END[i as usize] {
+            let first = TPD_NAME_FIRST[i as usize]
+            var k: i64 = 0
+            while k < TPD_NAME_COUNT[i as usize] {
+                let j = first + k
+                if TPD_NAME_HASH[j as usize] == h && TPD_NAME_LEN[j as usize] == len { return true }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    false
 }
 
 // ============================================================
