@@ -1,0 +1,478 @@
+// examples/kmc/cme_lateral_crt.sio
+//
+// M3d: DISSOCIATIVE ADSORPTION WITH LATERAL REPULSION, N=4..10, BY TWO-PRIME
+// MODULAR ARITHMETIC RATHER THAN PER-STATE RATIONAL RECONSTRUCTION.
+//
+// THE BUG THIS FILE FIXES, measured rather than argued.
+//
+// cme_lateral.sio reconstructed each state's stationary probability
+// individually from a single-prime modular solve, then summed pi(s)*occ(s)
+// over the class using i64 rational accumulation. Two things broke past N=6:
+//
+//   1. The reconstruction bound was 4^n squared -- a property of the PROBLEM,
+//      not of the modulus. The real requirement is 2*bound^2 < p ~ 2.1e9. At
+//      N=6 that bound was 1.7e7, five orders of magnitude too large, and
+//      N=4/N=5 were ALSO over the true limit and happened to reconstruct
+//      correctly anyway, by luck.
+//
+//   2. The independent closed-form cross-check computed the partition
+//      function Z = sum_s weight(s) with DIRECT i64 rational arithmetic,
+//      multiplying denominators across up to 256 terms. Per-step gcd
+//      reduction does not stop that from overflowing -- nothing forces the
+//      running denominator to stay small when the terms are close to
+//      pairwise coprime, which they generically are. N=8 produced a coverage
+//      literal of -35.4, N=9 of 11.0, N=10 of -27.6, for a quantity that is a
+//      probability-weighted average and cannot leave [0,1]. Both routes were
+//      wrong at once, which is the only reason this was caught rather than
+//      reported as a result.
+//
+// THE FIX moves every accumulation into modular arithmetic and reconstructs
+// exactly ONE number per route per N -- the mean occupancy -- instead of one
+// number per lattice state. sum_s pi(s)*occ(s) is folded mod p while the
+// linear solve's answer is still sitting in the matrix (an ordinary bounded
+// sum, nothing to overflow); the closed form is computed the same way, via
+// modular exponentiation and a single modular inverse of Z. Each of the two
+// resulting residues is reconstructed to an exact fraction and the two
+// fractions are compared. No per-state fraction is ever built, so nothing
+// grows with the class size.
+//
+// TWO PRIMES rather than one: the single-prime bound was already too tight
+// at N=6 without lateral interactions, and lateral interactions add more
+// distinct prime-power factors (2 and 3, to higher and more varied
+// exponents) to the true denominators. p1 = 1e9+7 and p2 = 998244353 are two
+// of the most scrutinised primes in computational number theory; CRT
+// combining them gives a modulus of ~9.98e17 and a reconstruction bound of
+// order 1e8 -- about 3000 times the old one. Both are ALSO verified prime at
+// run time by trial division rather than trusted from a table.
+//
+// THE MODEL. H2 + 2* <-> 2H* on adjacent bonds of an N-site ring. Adsorption
+// runs at rate 1 regardless of environment: a gas-phase molecule does not see
+// the lattice before it lands. Desorbing a pair with `delta` occupied outer
+// neighbours (delta in {0,1,2}) runs at 3 * 2^(1+delta) -- chosen so that
+// pi(s) is proportional to (1/3)^(occ(s)/2) * (1/2)^(n_pairs(s)), the
+// Boltzmann weight of a lattice gas with nearest-neighbour repulsion
+// epsilon = ln(2). That specific rate is what a Metropolis-consistent choice
+// has to produce for detailed balance to hold on every bond; it is not a
+// free parameter re-derived per state.
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn gcd_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 {
+        let t = x - (x / y) * y
+        x = y
+        y = t
+    }
+    if x == 0 { 1 } else { x }
+}
+
+fn is_prime(n: i64) -> bool with Mut, Div, Panic {
+    if n < 2 { return false }
+    if n - (n / 2) * 2 == 0 { return n == 2 }
+    var d: i64 = 3
+    while d * d <= n {
+        if n - (n / d) * d == 0 { return false }
+        d = d + 2
+    }
+    true
+}
+
+fn mod_norm(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var x = a - (a / p) * p
+    if x < 0 { x = x + p }
+    x
+}
+fn mod_add(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a + b, p) }
+fn mod_sub(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a - b, p) }
+fn mod_mul(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a * b, p) }
+
+fn mod_inv(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r0 = mod_norm(a, p)
+    var r1 = p
+    var s0: i64 = 1
+    var s1: i64 = 0
+    while r1 != 0 {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let s2 = s0 - q * s1
+        r0 = r1
+        r1 = r2
+        s0 = s1
+        s1 = s2
+    }
+    mod_norm(s0, p)
+}
+
+fn ipow_mod(base: i64, e: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var b = mod_norm(base, p)
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = mod_mul(acc, b, p)  i = i + 1 }
+    acc
+}
+
+// CRT: find r with r == r1 (mod p1) and r == r2 (mod p2), 0 <= r < p1*p2.
+fn crt_combine(r1: i64, p1: i64, r2: i64, p2: i64, inv_p1_mod_p2: i64) -> i64 with Mut, Div, Panic {
+    let diff = mod_sub(r2, mod_norm(r1, p2), p2)
+    let t = mod_mul(diff, inv_p1_mod_p2, p2)
+    r1 + p1 * t
+}
+
+// Recover a/b from r == a * b^-1 (mod m), given |a| <= bound, 0 < b <= bound.
+// Sets out[1] = 0 (an impossible denominator) when no such pair exists.
+fn rat_reconstruct(r: i64, m: i64, bound: i64, out: &![i64; 2]) with Mut, Div, Panic {
+    var r0 = m
+    var r1 = mod_norm(r, m)
+    var t0: i64 = 0
+    var t1: i64 = 1
+    while r1 > bound {
+        if r1 == 0 {
+            out[0] = 0
+            out[1] = 0
+            return
+        }
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1
+        r1 = r2
+        t0 = t1
+        t1 = t2
+    }
+    let den = abs_i(t1)
+    if den == 0 || den > bound {
+        out[0] = 0
+        out[1] = 0
+        return
+    }
+    var num = r1
+    if t1 < 0 { num = 0 - num }
+    out[0] = num
+    out[1] = den
+}
+
+// --- lattice ---------------------------------------------------------------
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+fn popcount_n(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { if is_occ(s, i) { c = c + 1 }  i = i + 1 }
+    c
+}
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+fn next_site(i: i64, n: i64) -> i64 { if i + 1 == n { 0 } else { i + 1 } }
+fn prev_site(i: i64, n: i64) -> i64 { if i == 0 { n - 1 } else { i - 1 } }
+
+fn n_pairs(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if is_occ(s, i) && is_occ(s, next_site(i, n)) { c = c + 1 }
+        i = i + 1
+    }
+    c
+}
+
+// Bonds present at (k, k+1) counting the internal bond plus any outer
+// neighbour already occupied -- 1, 2 or 3. Evaluated on the state BEFORE the
+// dimer under consideration is placed or removed.
+fn delta_pairs(s: i64, k: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var d: i64 = 1
+    let before = prev_site(k, n)
+    let after = next_site(next_site(k, n), n)
+    if is_occ(s, before) { d = d + 1 }
+    if is_occ(s, after) { d = d + 1 }
+    d
+}
+
+// idx[s] = compact index of state s within the class reachable from the
+// empty lattice, or -1. states[j] = the state at compact index j. Returns
+// the class size.
+fn build_class(n_sites: i64, idx: &![i64; 1024], states: &![i64; 1024]) -> i64 with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    var mark: [i64; 1024] = [0; 1024]
+    var i: i64 = 0
+    while i < ns { mark[i as usize] = 0  idx[i as usize] = 0 - 1  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                var k: i64 = 0
+                while k < n_sites {
+                    let j = next_site(k, n_sites)
+                    let bk = site_bit(k)
+                    let bj = site_bit(j)
+                    if !is_occ(s, k) && !is_occ(s, j) {
+                        let t = s + bk + bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    if is_occ(s, k) && is_occ(s, j) {
+                        let t = s - bk - bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  changed = true }
+                    }
+                    k = k + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    var m: i64 = 0
+    var s2: i64 = 0
+    while s2 < ns {
+        if mark[s2 as usize] == 1 {
+            idx[s2 as usize] = m
+            states[m as usize] = s2
+            m = m + 1
+        }
+        s2 = s2 + 1
+    }
+    m
+}
+
+// --- route 1: the linear solve, folded to one residue -----------------------
+//
+// Gauss-Jordan to full reduced row echelon (every other row eliminated, not
+// only rows below the pivot), so the last column holds pi(k) mod p directly
+// with no back-substitution step -- and sum_k pi(k)*occ(k) is folded right
+// there, so no per-state value is ever pulled out on its own.
+//
+// Returns -1 (never a valid residue in [0, p)) if no pivot is found, which a
+// communicating class should never trigger; the caller checks rather than
+// assumes.
+fn mean_occ_solve_mod(n_sites: i64, p: i64, csize: i64, states: &[i64; 1024], idx: &[i64; 1024]) -> i64 with Mut, Div, Panic {
+    let w = csize + 1
+    var a: [i64; 66049] = [0; 66049]
+
+    var jj: i64 = 0
+    while jj < csize {
+        let s = states[jj as usize]
+        var k: i64 = 0
+        while k < n_sites {
+            let j2 = next_site(k, n_sites)
+            let bk = site_bit(k)
+            let bj = site_bit(j2)
+            if !is_occ(s, k) && !is_occ(s, j2) {
+                let t = s + bk + bj
+                let ti = idx[t as usize]
+                a[(ti * w + jj) as usize] = mod_add(a[(ti * w + jj) as usize], 1, p)
+                a[(jj * w + jj) as usize] = mod_sub(a[(jj * w + jj) as usize], 1, p)
+            }
+            if is_occ(s, k) && is_occ(s, j2) {
+                let t = s - bk - bj
+                let ti2 = idx[t as usize]
+                let dl = delta_pairs(t, k, n_sites)
+                let kd = 3 * ipow_mod(2, dl, p)
+                a[(ti2 * w + jj) as usize] = mod_add(a[(ti2 * w + jj) as usize], kd, p)
+                a[(jj * w + jj) as usize] = mod_sub(a[(jj * w + jj) as usize], kd, p)
+            }
+            k = k + 1
+        }
+        jj = jj + 1
+    }
+
+    var c0: i64 = 0
+    while c0 < csize { a[((csize - 1) * w + c0) as usize] = 1  c0 = c0 + 1 }
+    a[((csize - 1) * w + csize) as usize] = 1
+
+    var col: i64 = 0
+    while col < csize {
+        var piv: i64 = 0 - 1
+        var r1x = col
+        while r1x < csize {
+            if piv < 0 { if a[(r1x * w + col) as usize] != 0 { piv = r1x } }
+            r1x = r1x + 1
+        }
+        if piv < 0 { return 0 - 1 }
+        if piv != col {
+            var sc: i64 = 0
+            while sc < w {
+                let tmp = a[(col * w + sc) as usize]
+                a[(col * w + sc) as usize] = a[(piv * w + sc) as usize]
+                a[(piv * w + sc) as usize] = tmp
+                sc = sc + 1
+            }
+        }
+        let inv = mod_inv(a[(col * w + col) as usize], p)
+        var sc2 = col
+        while sc2 < w { a[(col * w + sc2) as usize] = mod_mul(a[(col * w + sc2) as usize], inv, p)  sc2 = sc2 + 1 }
+        var r2x: i64 = 0
+        while r2x < csize {
+            if r2x != col {
+                let f = a[(r2x * w + col) as usize]
+                if f != 0 {
+                    var c3 = col
+                    while c3 < w {
+                        let sub = mod_mul(f, a[(col * w + c3) as usize], p)
+                        a[(r2x * w + c3) as usize] = mod_sub(a[(r2x * w + c3) as usize], sub, p)
+                        c3 = c3 + 1
+                    }
+                }
+            }
+            r2x = r2x + 1
+        }
+        col = col + 1
+    }
+
+    var acc: i64 = 0
+    var kk: i64 = 0
+    while kk < csize {
+        let occ = popcount_n(states[kk as usize], n_sites)
+        acc = mod_add(acc, mod_mul(a[(kk * w + csize) as usize], occ, p), p)
+        kk = kk + 1
+    }
+    acc
+}
+
+// --- route 2: the closed form, folded to one residue ------------------------
+//
+// Z = sum_s weight(s), M = sum_s weight(s)*occ(s), mean_occ = M/Z -- each sum
+// an ordinary bounded modular accumulation over at most 256 terms, and only
+// the single ratio M * Z^-1 is ever formed.
+fn closed_form_mean_occ_mod(n_sites: i64, p: i64, csize: i64, states: &[i64; 1024]) -> i64 with Mut, Div, Panic {
+    var zn: i64 = 0
+    var mn: i64 = 0
+    var si: i64 = 0
+    while si < csize {
+        let s = states[si as usize]
+        let occ = popcount_n(s, n_sites)
+        let d3 = ipow_mod(3, occ / 2, p)
+        let d2 = ipow_mod(2, n_pairs(s, n_sites), p)
+        let denom = mod_mul(d3, d2, p)
+        let w_s = mod_inv(denom, p)
+        zn = mod_add(zn, w_s, p)
+        mn = mod_add(mn, mod_mul(w_s, occ, p), p)
+        si = si + 1
+    }
+    mod_mul(mn, mod_inv(zn, p), p)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSOCIATIVE ADSORPTION WITH LATERAL REPULSION: N=4..10, EXACT vs MEAN FIELD")
+    println("H2 + 2* <-> 2H* on a ring, k_ads=1, k_des=3*2^delta, nn repulsion w=1/2")
+    println("")
+
+    let p1: i64 = 1000000007
+    let p2: i64 = 998244353
+    print("p1=") print(p1) print(" verified prime: ")
+    let ok1 = is_prime(p1)
+    if ok1 { println("yes") } else { println("NO -- refusing") }
+    print("p2=") print(p2) print(" verified prime: ")
+    let ok2 = is_prime(p2)
+    if ok2 { println("yes") } else { println("NO -- refusing") }
+    if !ok1 || !ok2 { return 1 }
+
+    let modulus = p1 * p2
+    let bound: i64 = 500000000
+    let fits = 2 * bound * bound < modulus
+    print("combined modulus=") print(modulus) print("  bound=") print(bound)
+    print("  2*bound^2 < modulus: ")
+    if fits { println("yes") } else { println("NO -- refusing") }
+    if !fits { return 1 }
+    println("")
+
+    let inv_p1_mod_p2 = mod_inv(mod_norm(p1, p2), p2)
+
+    println("  N  class  exact theta            decimal      mean-field   over-estimate   check")
+
+    var idx: [i64; 1024] = [0; 1024]
+    var states: [i64; 1024] = [0; 1024]
+    var all_ok = true
+
+    var n: i64 = 4
+    while n <= 10 {
+        let csize = build_class(n, &! idx, &! states)
+
+        let r1_solve = mean_occ_solve_mod(n, p1, csize, &states, &idx)
+        let r2_solve = mean_occ_solve_mod(n, p2, csize, &states, &idx)
+        let solve_ok = r1_solve >= 0 && r2_solve >= 0
+
+        print("  ") print(n)
+        print("  ") print(csize)
+        if csize < 10 { print("     ") } else { print("    ") }
+
+        if !solve_ok {
+            println("SOLVE FAILED -- no pivot found mod one of the primes")
+            all_ok = false
+            n = n + 1
+        } else {
+            let combined_solve = crt_combine(r1_solve, p1, r2_solve, p2, inv_p1_mod_p2)
+            var pair_solve: [i64; 2] = [0; 2]
+            rat_reconstruct(combined_solve, modulus, bound, &! pair_solve)
+
+            let r1_cf = closed_form_mean_occ_mod(n, p1, csize, &states)
+            let r2_cf = closed_form_mean_occ_mod(n, p2, csize, &states)
+            let combined_cf = crt_combine(r1_cf, p1, r2_cf, p2, inv_p1_mod_p2)
+            var pair_cf: [i64; 2] = [0; 2]
+            rat_reconstruct(combined_cf, modulus, bound, &! pair_cf)
+
+            let rec_ok = pair_solve[1] != 0 && pair_cf[1] != 0
+            let agree = rec_ok && pair_solve[0] * pair_cf[1] == pair_cf[0] * pair_solve[1]
+            if !rec_ok || !agree { all_ok = false }
+
+            var theta_n = pair_solve[0]
+            var theta_d = pair_solve[1] * n
+            if pair_solve[1] != 0 {
+                let g = gcd_pos(theta_n, theta_d)
+                if g != 0 { theta_n = theta_n / g  theta_d = theta_d / g }
+            }
+            let theta = (theta_n as f64) / (theta_d as f64)
+
+            // Mean field, Bragg-Williams: adsorption flux per bond (1-th)^2
+            // equals desorption flux per bond th^2 * E[k_des_local], and
+            // E[2^(left+right occupied)] over two independent Bernoulli(th)
+            // neighbours is (1+th)^2, giving (1-th)^2 = 6*th^2*(1+th)^2.
+            // Solved here by bisection rather than substituted from a hand
+            // calculation, so an arithmetic slip cannot survive into a
+            // published comparison.
+            var lo: f64 = 0.0
+            var hi: f64 = 1.0
+            var bi: i64 = 0
+            while bi < 200 {
+                let mid = 0.5 * (lo + hi)
+                let lhs = (1.0 - mid) * (1.0 - mid)
+                let rhs = 6.0 * mid * mid * (1.0 + mid) * (1.0 + mid)
+                if lhs > rhs { lo = mid } else { hi = mid }
+                bi = bi + 1
+            }
+            let mf = 0.5 * (lo + hi)
+
+            if rec_ok {
+                print(theta_n) print("/") print(theta_d)
+            } else {
+                print("RECONSTRUCTION FAILED")
+            }
+            print("   ")
+            print_f64(theta)
+            print("   ") print_f64(mf)
+            print("   ") print_f64((mf - theta) / theta * 100.0) print("%")
+            print("   ")
+            if agree { println("closed form agrees") } else { println("CLOSED FORM DISAGREES") }
+
+            n = n + 1
+        }
+    }
+
+    println("")
+    if all_ok { println("M3D_LATERAL_CRT_OK") } else { println("M3D_LATERAL_CRT_FAILED") }
+    0
+}
