@@ -521,4 +521,6 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E258 | parser | error | string literal(s) exceed Name capacity (384 bytes incl. quotes); refuses rather than silently truncating | [E258.md](explanations/E258.md) |
 | E259 | type-checker/visibility | error | struct field is private in its defining module | — |
 | E260 | lexer (lean_single) | error | compound assignment (`+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=`) is not supported by lean_single; write `x = x op (e)` | — |
-| E261 | type-checker/generics | error | cannot infer the type arguments of a generic function call; name them with a turbofish, `f::<...>(...)` | — |
+| E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
+| E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
+| E263 | type-checker/generics | error | cannot infer the type arguments of a generic function call; name them with a turbofish, `f::<...>(...)` | — |

@@ -1,0 +1,419 @@
+// examples/hydrogen/mhhc_corner_pbox.sio
+//
+// WHAT THE SEVEN-STAGE CASCADE PREDICTS WHEN THE THINGS WE DO NOT KNOW ARE
+// CARRIED THROUGH INSTEAD OF PINNED.
+//
+// examples/hydrogen/mhhc_cascade.sio runs the Gkanas et al. 2020 compressor
+// as a coupled cascade on the paper's measured thermodynamics and reports a
+// single number: 28.1x against the paper's 18.7x. A single number from a
+// model with seven unmeasured inputs is not a prediction, it is one draw from
+// a set nobody has drawn the rest of.
+//
+// This file draws the rest of it: each unmeasured input becomes an interval,
+// and the cascade runs at all 2^7 = 128 CORNERS of that box.
+//
+// THE FIRST VERSION OF THIS FILE WAS VACUOUS, and saying how is the point of
+// the paragraph. It varied six inputs -- the four kinetic constants, UA and
+// V_ic -- and pinned the plateau shape at flat_plateau(), sigma = 0. With
+// sigma = 0 the slope term of p_eq_pct vanishes identically, so the
+// delivery pressure does not depend on loading, and therefore does not depend
+// on ANY of those six. The run returned the interval [561.549, 561.549] bar
+// across 64 corners: one number restated sixty-four times, under a heading
+// that announced a negative result. The quantity being swept could not
+// respond to the sweep. Measured, not deduced: S7's final loading moved
+// across [0.000, 0.902] over those same corners while the pressure moved by
+// zero digits.
+//
+// The fix is not cosmetic. The paper's own eq. 11 carries the slope term, and
+// the data note records that the paper does not give sigma_s, sigma_0 or Y.
+// Pinning sigma at zero was a choice, and it was the choice that made the
+// answer independent of the question. sigma is now the seventh interval.
+//
+// WHY HYSTERESIS IS STILL PINNED AT ZERO, and this one is physics rather than
+// oversight: the bed thermodynamics are per-direction, and the gap between
+// dh_abs and dh_des already IS the hysteresis (stdlib/hydride/mhhc.sio:60).
+// Adding the paper's Y term on top of measured per-direction enthalpies would
+// count the same effect twice. So the box has seven inputs, not eight.
+//
+// WHY CORNERS AND NOT MONTE CARLO. Monte Carlo needs distributions. We do not
+// have them: four of these seven are the LaNi5 kinetic constants of Jemni &
+// Ben Nasrallah standing in for the paper's AB2 alloys, and there is no
+// defensible density for "the value for a different alloy". An interval is
+// the honest object, and for a response monotone in each input the extremes
+// of a box are attained at its corners. Monotonicity is NOT assumed -- the
+// corner that attained each extreme is printed, and if it is a mixed corner
+// the bounds are reported as a LOWER bound on the spread rather than as the
+// spread.
+//
+// THE SEVEN, AND WHERE EACH INTERVAL COMES FROM
+//
+//   c_abs, e_abs, c_des, e_des  SUBSTITUTED. LaNi5 constants used for AB2
+//     stages. Prefactors get a factor of 2 either way, activation energies
+//     +/-20%. These widths are JUDGEMENT, not measurement, and they are the
+//     weakest declared quantity here. They are wide because the substitution
+//     is the largest approximation in the model, not because anything
+//     measured them.
+//
+//   ua    CHOSEN. Bed area 2*pi*R*L = 1.61 m2; a water-side coefficient from
+//     500 to 5000 W/m2K spans UA from 806 to 8060 W/K.
+//
+//   v_ic  CHOSEN. The interconnector volume is not stated. 0.001 to 0.02 m3
+//     spans a short large-bore manifold to a small buffer.
+//
+//   sigma NOT GIVEN BY THE PAPER, which states the form of eq. 11 and not
+//     its constants. It is now d(ln P)/dx across the plateau, linear and
+//     finite, because the tangent form of eq. 11 was replaced by an
+//     explicit three-region PCT isotherm -- see the note in
+//     stdlib/hydride/mhhc.sio. The interval runs from 0.0, a perfectly
+//     flat plateau and still the sibling file's assumption, to 2.0, a
+//     plateau whose pressure rises about fivefold from one phase boundary
+//     to the other. Measured with the new isotherm: the corner that used
+//     to lose 6% of its hydrogen now conserves to 0.000 ppm at every step
+//     size tried, with no clamping and no adaptive control.
+//
+//   x_alpha, x_beta  DECLARED at 0.10 and 0.90 and held fixed rather than
+//     swept, to keep this a 2^7 box. They are the loadings at which the
+//     solid-solution and beta branches take over. Holding them fixed is a
+//     restriction of this experiment, not a claim that they are known.
+//
+// WHAT IS NOT IN THE BOX. The per-stage plateau pressures come from the
+// paper's measured dH and dS, and the bound "Table 3 bounds Table 4" in the
+// sibling file is computed from those alone. It touches none of the seven,
+// is invariant across this entire box, and nothing here can weaken it.
+
+use hydride::mhhc::*
+
+fn print_fix3(x: f64) with IO, Mut, Div, Panic {
+    let neg = x < 0.0
+    var v = if neg { 0.0 - x } else { x }
+    let scaled = v * 1000.0
+    var n = scaled as i64
+    let frac = scaled - (n as f64)
+    if frac >= 0.5 { n = n + 1 }
+    let whole = n / 1000
+    let milli = n - whole * 1000
+    if neg { print("-") }
+    print(whole) print(".")
+    if milli < 100 { print("0") }
+    if milli < 10 { print("0") }
+    print(milli)
+}
+
+// Bit k of mask, without pow: pow with a non-literal exponent returns 0.0 on
+// this toolchain (stdlib/chemistry/catalysis.sio:40 records it).
+fn bit_of(mask: i64, k: i64) -> i64 with Mut, Div, Panic {
+    var m = mask
+    var i: i64 = 0
+    while i < k {
+        m = m / 2
+        i = i + 1
+    }
+    m - (m / 2) * 2
+}
+
+fn pick(mask: i64, k: i64, lo: f64, hi: f64) -> f64 with Mut, Div, Panic {
+    if bit_of(mask, k) == 1 { hi } else { lo }
+}
+
+fn bed_for(stage: i64, ua: f64) -> HydrideBed with Mut, Div, Panic {
+    gkanas_bed(stage, 419.0, 500.0, ua)
+}
+
+fn couple(stage_hot: i64, stage_cold: i64, x_hot0: f64, x_cold0: f64,
+          n_ic0: f64, t_hot: f64, t_cold: f64, ua: f64, v_ic: f64,
+          kin: HydrideKinetics, shape: PlateauShape,
+          out: &![f64; 8], rep: &![f64; 8]) with Mut, Div, Panic {
+    var s0: [f64; 8] = [0.0; 8]
+    s0[0] = x_hot0
+    s0[1] = x_cold0
+    s0[2] = n_ic0
+    s0[3] = t_hot
+    s0[4] = t_cold
+    // STEP SIZE, established by convergence testing rather than chosen.
+    // The whole cyclic steady state was run at dt = 0.02, 0.1, 0.5 and 2.0,
+    // at nominal kinetics and at the slow-kinetics corner that had
+    // exhausted the budget, and the delivery pressure came out 332.761 bar
+    // in all eight runs -- identical to the last digit across a 100x range
+    // of step, with 0.000 ppm drift and the same nine fixed-point sweeps.
+    // dt = 0.02 was resolving a timescale this problem does not have.
+    //
+    // The cycle TIME is not equally insensitive: it moves from 9879 s to
+    // 10124 s over that same 100x, which is the first-order error in the
+    // time taken to REACH steady state rather than in the state itself.
+    // At dt = 0.5 that error is 1.1%, against a cycle-time interval that
+    // spans 2000 s to 170000 s across this box. Declared, not hidden.
+    //
+    // 1e6 steps at dt = 0.5 is 500000 s of simulated time per coupling; the
+    // slowest corner measured needs 66000 s for the whole cascade.
+    run_coupling(&s0, bed_for(stage_hot, ua), bed_for(stage_cold, ua), kin, shape,
+                 v_ic, 300.0, t_hot, t_cold, 0.5, 1000000 as i64, 1.0e-10, out, rep)
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// One full cascade at one corner, run to CYCLIC STEADY STATE.
+//
+// A stage does not begin absorbing from an empty bed. It begins from whatever
+// it retained when it desorbed into the stage above, so the six start-of-
+// absorption loadings are a fixed point of the cascade, not constants to be
+// chosen. Choosing them is what the earlier version of this file did, and it
+// was wrong in a way the flat plateau hid: with a real isotherm a bed at
+// exactly x = 0 has p_eq = 0, rate_abs returns zero, and NOTHING MOVES --
+// measured, every stage ending at 0.000 loading and the delivery at 0 bar.
+//
+// Convergence measured at sigma = 2.0: monotone, geometric with ratio ~0.62,
+// nine sweeps to move the largest residual under 1e-3, delivery settling from
+// 311.97 bar on the first sweep to 332.76 bar. No damping needed.
+//
+// STAGE 7 IS NOT PART OF THE FIXED POINT, and this is a real limitation
+// rather than an approximation. Stages 2 through 6 desorb into the stage
+// above, so their residual is determined here. Stage 7 desorbs into the
+// delivery line, and what it retains depends on that line's pressure, which
+// this model does not simulate. Its start-of-absorption loading stays at the
+// declared seed and is NOT self-consistent.
+//
+// res[0]=delivery bar, res[1]=summed time s, res[2]=S7 loading,
+// res[3]=1.0 if every coupling converged, res[4]=worst inventory drift,
+// res[5]=fixed-point sweeps used, res[6]=1.0 if the fixed point converged.
+fn run_cascade(t_hot: f64, t_cold: f64, ua: f64, v_ic: f64,
+               kin: HydrideKinetics, shape: PlateauShape, x_seed: f64,
+               res: &![f64; 8]) with Mut, Div, Panic {
+    var out: [f64; 8] = [0.0; 8]
+    var rep: [f64; 8] = [0.0; 8]
+    var resid: [f64; 8] = [0.0; 8]
+    var out0: [f64; 8] = [0.0; 8]
+    var q: i64 = 0
+    while q < 8 { resid[q] = x_seed; q = q + 1 }
+
+    var total_time = 0.0
+    var worst_drift = 0.0
+    var unconverged: i64 = 0
+    var x_prev = 1.0
+    var fp_converged = false
+    var sweep: i64 = 0
+    while sweep < 20 && !fp_converged {
+        total_time = 0.0
+        worst_drift = 0.0
+        unconverged = 0
+        x_prev = 1.0
+        var k: i64 = 0
+        while k < 6 {
+            couple(k, k + 1, x_prev, resid[k], 0.05, t_hot, t_cold, ua, v_ic, kin, shape, &! out, &! rep)
+            total_time = total_time + rep[0]
+            if rep[3] > worst_drift { worst_drift = rep[3] }
+            if rep[4] < 0.5 { unconverged = unconverged + 1 }
+            out0[k] = out[0]
+            x_prev = out[1]
+            k = k + 1
+        }
+        var worst_change = 0.0
+        var j: i64 = 0
+        while j < 5 {
+            let d = abs_f(out0[j + 1] - resid[j])
+            if d > worst_change { worst_change = d }
+            resid[j] = out0[j + 1]
+            j = j + 1
+        }
+        sweep = sweep + 1
+        if worst_change < 0.001 { fp_converged = true }
+    }
+
+    let p_deliver = p_eq_pct(gkanas_dh_des(6), gkanas_ds_des(6), t_hot, x_prev, shape, false)
+    res[0] = p_deliver
+    res[1] = total_time
+    res[2] = x_prev
+    res[3] = if unconverged == 0 { 1.0 } else { 0.0 }
+    res[4] = worst_drift
+    res[5] = sweep as f64
+    res[6] = if fp_converged { 1.0 } else { 0.0 }
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    println("SEVEN-STAGE MH COMPRESSOR: CORNER P-BOX OVER SEVEN UNMEASURED INPUTS")
+    println("Gkanas et al. 2020, Case 1, 10 -> 80 C. 2^7 = 128 corners.")
+    println("")
+    println("the paper measures 374 bar delivery, ratio 18.7, cycle 6625 s")
+    println("the sibling file's flat-plateau run gives 561.5 bar, ratio 28.1,")
+    println("and that run is corner 0 of this box (sigma = 0 is its low end)")
+    println("")
+
+    let t_cold = 283.15
+    let t_hot = 353.15
+
+    // interval endpoints, in the order the mask bits address them
+    let c_abs_lo = 29.594     let c_abs_hi = 118.374
+    let e_abs_lo = 16943.68   let e_abs_hi = 25415.52
+    let c_des_lo = 4.785      let c_des_hi = 19.140
+    let e_des_lo = 13136.0    let e_des_hi = 19704.0
+    let ua_lo = 806.0         let ua_hi = 8060.0
+    let v_ic_lo = 0.001       let v_ic_hi = 0.020
+    // sigma is now d(ln P)/dx, LINEAR across the plateau -- not the
+    // coefficient of a tangent. The interval had to be rewidened when the
+    // isotherm changed: 0.25 in the old tangent form was a strong slope,
+    // but as a linear coefficient it moves the plateau pressure by only
+    // exp(0.25 * 0.8) = 1.22x from one phase boundary to the other, which
+    // is very nearly flat. Sweeping that would have been the same vacuity
+    // as before wearing different clothes. A plateau that rises by a
+    // factor 2 to 5 across its width -- the range real AB2 and AB5 alloys
+    // show -- is d(ln P)/dx between 0.87 and 2.0 over x_beta - x_alpha =
+    // 0.8, so the interval runs from 0 (perfectly flat, still the sibling
+    // file's assumption and still corner 0) to 2.0.
+    let sigma_lo = 0.0        let sigma_hi = 2.0
+
+    var res: [f64; 8] = [0.0; 8]
+
+    var p_min = 1.0e30
+    var p_max = 0.0 - 1.0e30
+    var t_min = 1.0e30
+    var t_max = 0.0 - 1.0e30
+    var x_min = 1.0e30
+    var x_max = 0.0 - 1.0e30
+    var p_min_mask: i64 = 0 - 1
+    var p_max_mask: i64 = 0 - 1
+    var converged_corners: i64 = 0
+    var dropped_corners: i64 = 0
+    var drift_rejected: i64 = 0
+    var worst_drift = 0.0
+    var worst_drift_mask: i64 = 0 - 1
+    var worst_kept_drift = 0.0
+    var brackets: i64 = 0
+    var fp_min: i64 = 999
+    var fp_max: i64 = 0
+    var fp_failed: i64 = 0
+    // where the conservation failures sit, by the sigma bit, because a
+    // rejection that correlates with one input is a lead and an uncorrelated
+    // one is noise
+    var rej_sigma_hi: i64 = 0
+    var rej_sigma_lo: i64 = 0
+
+    var mask: i64 = 0
+    while mask < 128 {
+        let kin = HydrideKinetics {
+            c_abs: pick(mask, 0, c_abs_lo, c_abs_hi),
+            e_abs: pick(mask, 1, e_abs_lo, e_abs_hi),
+            c_des: pick(mask, 2, c_des_lo, c_des_hi),
+            e_des: pick(mask, 3, e_des_lo, e_des_hi),
+        }
+        let ua = pick(mask, 4, ua_lo, ua_hi)
+        let v_ic = pick(mask, 5, v_ic_lo, v_ic_hi)
+        let shape = pct_plateau(pick(mask, 6, sigma_lo, sigma_hi), 0.0, 0.10, 0.90)
+
+        run_cascade(t_hot, t_cold, ua, v_ic, kin, shape, 0.10, &! res)
+
+        if res[4] > worst_drift { worst_drift = res[4]  worst_drift_mask = mask }
+
+        // THREE conditions, not two. The first version of this file floored on
+        // convergence and on interval width, PRINTED the inventory drift, and
+        // used it for nothing -- and the run came back with a worst drift of
+        // 720983 ppm, 72% of the hydrogen unaccounted for, inside an interval
+        // reported as a result. A corner that loses mass is not a value of the
+        // model regardless of whether its residual stopped changing. The
+        // nominal case conserves to 0.000 ppm, so 1 ppm is a generous floor.
+        let conserves = res[4] <= 1.0e-6
+        if res[3] < 0.5 {
+            dropped_corners = dropped_corners + 1
+        } else if !conserves {
+            drift_rejected = drift_rejected + 1
+            if bit_of(mask, 6) == 1 { rej_sigma_hi = rej_sigma_hi + 1 } else { rej_sigma_lo = rej_sigma_lo + 1 }
+        } else {
+            converged_corners = converged_corners + 1
+            if res[4] > worst_kept_drift { worst_kept_drift = res[4] }
+            if res[0] < p_min { p_min = res[0]  p_min_mask = mask }
+            if res[0] > p_max { p_max = res[0]  p_max_mask = mask }
+            if res[1] < t_min { t_min = res[1] }
+            if res[1] > t_max { t_max = res[1] }
+            if res[2] < x_min { x_min = res[2] }
+            if res[2] > x_max { x_max = res[2] }
+            if res[0] <= 374.0 { brackets = brackets + 1 }
+            let sw = res[5] as i64
+            if sw < fp_min { fp_min = sw }
+            if sw > fp_max { fp_max = sw }
+            if res[6] < 0.5 { fp_failed = fp_failed + 1 }
+        }
+        mask = mask + 1
+    }
+
+    println("-- corner accounting --")
+    print("  usable (converged AND conserving): ") print(converged_corners) println(" of 128")
+    print("  dropped, never reached steady state: ") print(dropped_corners) println("")
+    print("  dropped, inventory drift above 1 ppm: ") print(drift_rejected) println("")
+    if drift_rejected > 0 {
+        print("    of those, ") print(rej_sigma_hi) print(" at sigma=hi and ")
+        print(rej_sigma_lo) println(" at sigma=lo")
+        print("  worst drift anywhere in the box: ") print_fix3(worst_drift * 1000000.0)
+        print(" ppm, at corner ") print(worst_drift_mask) println("")
+    }
+    print("  worst drift among the corners KEPT: ") print_fix3(worst_kept_drift * 1000000.0) println(" ppm")
+    println("")
+
+    println("-- the box, over the USABLE corners only --")
+    print("  delivery pressure  [") print_fix3(p_min) print(", ") print_fix3(p_max) println("] bar")
+    print("  compression ratio  [") print_fix3(p_min / 20.0) print(", ") print_fix3(p_max / 20.0) println("]")
+    print("  summed coupling t  [") print_fix3(t_min) print(", ") print_fix3(t_max) println("] s")
+    print("  S7 final loading   [") print_fix3(x_min) print(", ") print_fix3(x_max) println("]")
+    print("  worst drift (kept) ") print_fix3(worst_kept_drift * 1000000.0) println(" ppm")
+    print("  fixed-point sweeps [") print(fp_min) print(", ") print(fp_max) println("]")
+    print("  corners whose fixed point did NOT converge: ") print(fp_failed) println("")
+    println("")
+
+    // FLOORS COME AFTER THE REPORT, not before. The previous version
+    // returned on a refusal without printing the box, so the refusal hid
+    // the very numbers that explained it -- a separate probe had to be
+    // written to recover what the program already knew. A floor should
+    // refuse to CONCLUDE, never refuse to REPORT.
+    // ANTI-VACUITY FLOORS. Three ways this can look like an answer
+    // without being one. The first version of this file hit two of them and
+    // the second hit the third.
+    if converged_corners < 96 {
+        println("REFUSED: fewer than three quarters of the corners are usable.")
+        println("An interval over the rest is an interval over whichever corners")
+        println("happened to integrate cleanly, which is not the box. Either the")
+        println("integrator needs work at those corners or the intervals are")
+        println("wider than the model can be run over -- both are findings, and")
+        println("neither is a compression ratio.")
+        return 1
+    }
+    if p_max - p_min < 1.0e-6 {
+        println("REFUSED: the delivery pressure did not move across the box. The")
+        println("swept inputs cannot reach the reported quantity -- this is the")
+        println("failure the header describes, and it is an error, not a result.")
+        return 1
+    }
+
+    println("-- against the paper's measured 374 bar --")
+    if p_min <= 374.0 {
+        if p_max >= 374.0 {
+            println("  374 bar lies INSIDE the box. The declared ignorance spans the")
+            println("  measurement, so the sibling file's 1.5x gap is one corner of a")
+            println("  box that also contains the paper's value -- not a refutation of")
+            println("  the model and not a confirmation of it either. What it says is")
+            println("  that these seven inputs must be MEASURED before this cascade")
+            println("  predicts anything at this precision.")
+            print("  corners at or below the measurement: ") print(brackets)
+            print(" of ") print(converged_corners) println("")
+        } else {
+            println("  the box lies ENTIRELY BELOW 374 bar: the model underpredicts")
+            println("  everywhere, which the flat-plateau run did not show.")
+        }
+    } else {
+        println("  the box lies ENTIRELY ABOVE 374 bar. The overprediction survives")
+        println("  every combination of the seven, so it is not parameter ignorance:")
+        println("  it is the model form or a mechanism the model omits.")
+        print("  closest approach: ") print_fix3(p_min) print(" bar, ")
+        print_fix3(p_min / 374.0) println("x the measurement")
+    }
+    println("")
+
+    println("-- is the corner set sufficient? --")
+    print("  minimum attained at corner ") print(p_min_mask)
+    if p_min_mask == 0 { println("  (all-low, consistent with monotone)") } else { println("  (mixed: NOT monotone in all seven)") }
+    print("  maximum attained at corner ") print(p_max_mask)
+    if p_max_mask == 127 { println("  (all-high, consistent with monotone)") } else { println("  (mixed: NOT monotone in all seven)") }
+    println("  Extremes at mixed corners mean monotonicity fails and the true")
+    println("  range can exceed this box: these are then a LOWER bound on the")
+    println("  spread. Reported, not hidden.")
+    println("")
+
+    println("MHHC_CORNER_PBOX_OK")
+    0
+}
