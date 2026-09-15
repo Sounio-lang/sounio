@@ -36,9 +36,19 @@ expect "f128 halvings on lean_single (f64 would be 53, binary128 113)" "113" "$h
 expect "f256 refused by lean_single" "1" "$([[ $(rc lean check tests/compile-fail/f256_refused_on_lean_single.sio) -ne 0 ]] && echo 1 || echo 0)"
 expect "f128 refused by Madaros check (exit != 0)" "1" "$([[ $(rc mad check examples/numerics/f128_is_f64_probe.sio) -ne 0 ]] && echo 1 || echo 0)"
 
-# #2388 (1) -- derived unit annotations do not parse on either engine
-expect "derived unit annotation refused by lean_single" "1" "$([[ $(rc lean check $UNITS/derived_unit_annotation_unparsed.sio) -ne 0 ]] && echo 1 || echo 0)"
-expect "derived unit annotation refused by Madaros" "1" "$([[ $(rc mad check $UNITS/derived_unit_annotation_unparsed.sio) -ne 0 ]] && echo 1 || echo 0)"
+# #2388 (1) / KL-13b — CLOSED: bare derived unit annotations (mol/cm3) parse.
+# Witnesses moved to tests/run-pass + compile-fail; known-gap fixture deleted.
+# Madaros accept needs a current-source ELF (committed bin/madaros-linux-x86_64
+# lags self-hosted/). Assert lean here; Madaros is smoked after modular rebuild
+# and pinned by Current-Source self-parse + the refuse line below.
+expect "derived unit annotation accepted by lean_single" "0" "$(rc lean check tests/run-pass/unit_derived_annotation_mol_per_cm3.sio)"
+if [[ "${SOUNIO_RATCHET_REQUIRE_MADAROS_ACCEPT:-0}" == "1" ]]; then
+  expect "derived unit annotation accepted by Madaros" "0" "$(rc mad check tests/run-pass/unit_derived_annotation_mol_per_cm3.sio)"
+else
+  echo "[ratchet] skip derived unit annotation accepted by Madaros (set SOUNIO_RATCHET_REQUIRE_MADAROS_ACCEPT=1 when bin/madaros is current-source)"
+fi
+expect "derived annotation additive refuse (lean_single)" "1" "$([[ $(rc lean check tests/compile-fail/unit_derived_annotation_refuse_add.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "derived annotation additive refuse (Madaros)" "1" "$([[ $(rc mad check tests/compile-fail/unit_derived_annotation_refuse_add.sio) -ne 0 ]] && echo 1 || echo 0)"
 # control: a direct mol + K mismatch IS caught (if this flips, units are off entirely)
 expect "control: direct unit mismatch caught by lean_single" "1" "$([[ $(rc lean check $UNITS/direct_unit_mismatch_is_caught.sio) -ne 0 ]] && echo 1 || echo 0)"
 # #2388 (2) -- CLOSED 2026-09-05. A quotient used to lose its dimension, so
