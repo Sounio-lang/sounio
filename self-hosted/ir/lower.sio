@@ -3259,6 +3259,13 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div, Mut
 }
 
 fn lower_type_expr_fixed_array_len_ref(ty: &TypeExpr) -> i64 {
+    // Peel one & / &! so `&[i8; N]` params get a known extent (KL-14a).
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        match (*ty).inner {
+            Some(inner) => return lower_type_expr_fixed_array_len_ref(&(*inner)),
+            None => return -1,
+        }
+    }
     if (*ty).kind != TypeExprKind::TypeArray { return -1 }
     match (*ty).array_size {
         Some(sz) => {
@@ -18341,7 +18348,7 @@ impl Lowerer {
     }
 
     // True when the first call argument is `&x` / `&!x` or a ref-typed local —
-    // the shape that must be unwrapped before a C `char*` builtin (KL-14a).
+    // the shape that must be packed before a C `char*` builtin (KL-14a).
     fn lower_first_arg_is_ref_like_ref(self, opt: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
         match *opt {
             Some(list) => {
@@ -18357,6 +18364,73 @@ impl Lowerer {
             }
             _ => false,
         }
+    }
+
+    // Extent of the array behind a ref-array first arg (`&buf` or ref-typed local).
+    fn lower_first_arg_ref_array_len_ref(self, opt: &Option<Box<ExprList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                if (*list).head.kind == ExprKind::ExprUnary {
+                    if (*list).head.un_op == UnaryOp::OpRef || (*list).head.un_op == UnaryOp::OpRefMut {
+                        match (*list).head.left {
+                            Some(inner) => {
+                                if (*inner).kind == ExprKind::ExprIdent {
+                                    return self.lookup_local_fixed_array_len((*inner).name)
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                if (*list).head.kind == ExprKind::ExprIdent {
+                    return self.lookup_local_fixed_array_len((*list).head.name)
+                }
+                -1
+            }
+            _ => -1,
+        }
+    }
+
+    // KL-14a: Madaros [i8;N] uses 8-byte boxed slots. A raw object-base pointer
+    // is not a C string — pack via str_from_bytes (same as lean_single's path)
+    // then hand the packed char* to ffi_system.
+    fn lower_ffi_system_ref_array_call_ref(self, e: &Expr, ffi_fn_id: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let arr_len = lo.lower_first_arg_ref_array_len_ref(&e.args)
+        match e.args {
+            Some(list) => {
+                let pair_h = lo.lower_expr_as_array_handle_ref(&(*list).head)
+                lo = pair_h.0
+                let handle_reg = pair_h.1
+                let pair_len = lo.fresh_reg()
+                lo = pair_len.0
+                let len_reg = pair_len.1
+                let packed_len = if arr_len >= 0 { arr_len } else { 0 }
+                lo = lo.emit(ir_load_imm(len_reg, packed_len))
+                let sfb_name = make_name("str_from_bytes")
+                let sfb_id = lowerer_find_or_add_fn_id_mut(&! lo, sfb_name)
+                let pair_s = lo.fresh_reg()
+                lo = pair_s.0
+                let str_reg = pair_s.1
+                let sfb_args = IrRegList {
+                    head: handle_reg,
+                    tail: Some(Box::new(IrRegList { head: len_reg, tail: None })),
+                }
+                lo = lo.emit(ir_call(str_reg, sfb_id, sfb_name, Some(Box::new(sfb_args)), 2))
+                let pair_d = lo.fresh_reg()
+                lo = pair_d.0
+                let dst = pair_d.1
+                let sys_args = IrRegList { head: str_reg, tail: None }
+                lo = lo.emit(ir_call(dst, ffi_fn_id, make_name("ffi_system"), Some(Box::new(sys_args)), 1))
+                return (lo, dst)
+            }
+            None => {}
+        }
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let dst = pair_d.1
+        lo = lo.emit(ir_load_imm(dst, 0))
+        (lo, dst)
     }
 
     fn lower_expr_args(self, opt: Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
@@ -20596,11 +20670,12 @@ impl Lowerer {
         // D2 residual (#933 after #1247): str_from_bytes / write_file expect a GC
         // handle by value. Auto-unwrap &buf / &!buf / ref-typed slots so both
         // shapes share the handle unpack path (no builtin-body always-deref).
-        // KL-14a: ffi_system(cmd: &[i8;N]) uses the same unwrap so the emitter
-        // can resolve the handle to a C char* without breaking the string path.
+        // KL-14a: ffi_system(&[i8;N]) packs via str_from_bytes first — Madaros
+        // arrays are 8-byte boxed slots, not a contiguous C string.
         let handle_buf_idx = lower_handle_buf_arg_index(callee_name)
-        let ffi_system_ref_cmd = lower_name_is_ffi_system(callee_name)
-            && lo1.lower_first_arg_is_ref_like_ref(&e.args)
+        if lower_name_is_ffi_system(callee_name) && lo1.lower_first_arg_is_ref_like_ref(&e.args) {
+            return lo1.lower_ffi_system_ref_array_call_ref(e, fn_id)
+        }
         // V0-E.5.4: tell lower_expr_args_ref which positions are f128 params so a
         // bare literal argument lowers as binary128 (consumed+cleared on entry).
         // V0-E.5.4: which argument positions are f128 params, read off the
@@ -20612,8 +20687,6 @@ impl Lowerer {
         }
         let pair_args: LowerExprArgsResult = if handle_buf_idx >= 0 {
             lo1.lower_expr_args_handle_buf_ref(&e.args, handle_buf_idx)
-        } else if ffi_system_ref_cmd {
-            lo1.lower_expr_args_handle_buf_ref(&e.args, 0)
         } else {
             lo1.lower_expr_args_masked_ref(&e.args, f128_arg_mask)
         }

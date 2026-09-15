@@ -111,12 +111,11 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - **Aggregate-reference arguments through the signatureless `ffi_` path —
   CLOSED (KL-14a).** Engine: `madaros`. `extern "C"` names are rewritten to
   `ffi_<name>` builtins (`parser/items.sio`, allowlist
-  `extern_name_has_ffi_intrinsic`). A `&[i8; N]` argument used to forward an
-  empty/handle pointer; the call site now unwraps the ref to a GC handle
-  (same path as `str_from_bytes`) and `emit_ffi_system_normalize_cmd_rdi`
-  resolves handles below the raw-ptr threshold to the i8 payload, leaving
-  raw `string`/`char*` values alone. Pin:
-  `tests/run-pass/ffi_system_array_arg.sio`. Doc:
+  `extern_name_has_ffi_intrinsic`). A `&[i8; N]` argument used to forward a
+  GC-handle / empty pointer; the call site now packs via `str_from_bytes`
+  (Madaros arrays are 8-byte boxed slots, not contiguous C bytes) and passes
+  the resulting `char*` to `ffi_system`. The `string` binding is unchanged.
+  Pin: `tests/run-pass/ffi_system_array_arg.sio`. Doc:
   `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
 - **No dynamic linking.** Engine: `madaros`. The ELF writer emits static
   executables; `native/reloc.sio:271-291` records `R_X86_64_PLT32` for
