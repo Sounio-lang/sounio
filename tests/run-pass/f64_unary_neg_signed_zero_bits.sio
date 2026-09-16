@@ -1,0 +1,83 @@
+//@ run-pass
+//@ expect-stdout: PASS
+//
+// Regression: unary `-x` on f64 is an IEEE 754 sign flip (negate), not the
+// subtraction `0.0 - x`. The two differ exactly at x = +0.0: -(+0.0) is -0.0,
+// while 0.0 - (+0.0) is +0.0. Every comparison below is on the bit pattern,
+// because -0.0 == +0.0 under f64 equality and a value comparison cannot see it.
+//
+// Bug (Madaros native core_ir codegen): IrUnaryOp(OpNeg) on a float register
+// emitted `xmm0 = 0.0; subsd xmm0, x`, so -(+0.0) came out +0.0. lean_single
+// was already right. The opt_cleanup constant folds computed the i64 `0 - bits`
+// on float constants, and Block CD rewrote float `0.0 - x` into neg(x), which
+// only agreed with IEEE while neg was itself a subtraction.
+// See docs/audit/MADAROS_F64_UNARY_NEG_SIGNED_ZERO_DISPATCH_2026-09-14.md.
+
+fn neg(x: f64) -> f64 { -x }
+fn sub_from_zero(x: f64) -> f64 { 0.0 - x }
+fn div(a: f64, b: f64) -> f64 { a / b }
+
+fn chk(tag: i64, got: i64, want: i64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let neg_zero_bits = (0 - 9223372036854775807) - 1
+    let pos_inf_bits = 9218868437227405312
+    let neg_inf_bits = 0 - 4503599627370496
+    let bits_1_5 = 4609434218613702656
+    let bits_neg_1_5 = 0 - 4613937818241073152
+    let bits_2_25 = 4612248968380809216
+    let bits_neg_2_25 = 0 - 4611123068473966592
+
+    // Inputs, built without unary minus, and checked before use.
+    let pz = 0.0
+    let nz = 0.0 * (0.0 - 1.0)
+    let pinf = div(1.0, 0.0)
+    let ninf = div(0.0 - 1.0, 0.0)
+    var bad = 0
+    bad = bad + chk(1, f64_to_bits(pz), 0)
+    bad = bad + chk(2, f64_to_bits(nz), neg_zero_bits)
+    bad = bad + chk(3, f64_to_bits(pinf), pos_inf_bits)
+    bad = bad + chk(4, f64_to_bits(ninf), neg_inf_bits)
+
+    // Runtime path: negation of a parameter.
+    bad = bad + chk(10, f64_to_bits(neg(pz)), neg_zero_bits)
+    bad = bad + chk(11, f64_to_bits(neg(nz)), 0)
+    bad = bad + chk(12, f64_to_bits(neg(pinf)), neg_inf_bits)
+    bad = bad + chk(13, f64_to_bits(neg(ninf)), pos_inf_bits)
+    bad = bad + chk(14, f64_to_bits(neg(1.5)), bits_neg_1_5)
+    bad = bad + chk(15, f64_to_bits(neg(0.0 - 2.25)), bits_2_25)
+    bad = bad + chk(16, f64_to_bits(neg(neg(nz))), neg_zero_bits)
+
+    // Constant path: negation of a local bound to a literal (opt_cleanup folds).
+    let c0 = 0.0
+    let c15 = 1.5
+    let c225 = 2.25
+    bad = bad + chk(20, f64_to_bits(-c0), neg_zero_bits)
+    bad = bad + chk(21, f64_to_bits(-c15), bits_neg_1_5)
+    bad = bad + chk(22, f64_to_bits(-c225), bits_neg_2_25)
+    bad = bad + chk(23, f64_to_bits(-(-c225)), bits_2_25)
+    bad = bad + chk(24, f64_to_bits(-nz), 0)
+    bad = bad + chk(25, f64_to_bits(-pinf), neg_inf_bits)
+    bad = bad + chk(26, f64_to_bits(-(0.0)), neg_zero_bits)
+    bad = bad + chk(27, f64_to_bits(-(1.5)), bits_neg_1_5)
+    bad = bad + chk(28, f64_to_bits(-0.0), neg_zero_bits)
+
+    // Subtraction from zero is NOT negation and must stay +0.0 at +0.0.
+    bad = bad + chk(30, f64_to_bits(sub_from_zero(pz)), 0)
+    bad = bad + chk(31, f64_to_bits(sub_from_zero(nz)), 0)
+    bad = bad + chk(32, f64_to_bits(c0 - c0), 0)
+    bad = bad + chk(33, f64_to_bits(0.0 - c15), bits_neg_1_5)
+
+    if bad == 0 {
+        print("PASS\n")
+    }
+    0
+}

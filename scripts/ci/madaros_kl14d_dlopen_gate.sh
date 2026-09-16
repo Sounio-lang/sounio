@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# KL-14d3: Madaros dlopen/dlsym/dlclose via libdl.so.2 (open+sym+close MVP).
+# KL-14d3: Madaros dlopen/dlsym/invoke/dlclose via libdl.so.2 (f(35)==42).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
