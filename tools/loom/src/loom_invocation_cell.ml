@@ -96,9 +96,8 @@ let load root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "invocation-cell-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if (let schema = required manifest "schema" in
-      schema <> "loom-kernel-invocation-cell-authority-freeze-v1"
-      && schema <> "loom-kernel-invocation-cell-authority-freeze-v2")
+  if required manifest "schema"
+       <> "loom-kernel-invocation-cell-authority-freeze-v1"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
