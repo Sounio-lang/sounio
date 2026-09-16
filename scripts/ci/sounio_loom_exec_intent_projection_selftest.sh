@@ -9,7 +9,7 @@ mkdir -p "$TEST_PARENT"
 TEST_ROOT="$(mktemp -d "$TEST_PARENT/exec-intent-projection.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 MANIFEST="$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v2"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-intent-projection-v1-20260830.txt"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-intent-projection-v2-20260916.txt"
 
 fail() {
   printf 'sounio-loom-exec-intent-projection-selftest: FAIL: %s test_root=%s\n' \
