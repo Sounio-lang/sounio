@@ -171,16 +171,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `epistemic_hessian_8inputs.sio`,
   `epistemic_hessian_two_arg.sio`. Wired in Madaros Witness Gate. This
   rung does **not** edit `self-hosted/compiler/lean_single.sio`.
+  (`epistemic_hessian_8inputs` keeps unused measure values live with
+  `* 0.0` anchors so DCE cannot collapse channel indices.)
 - **KL-16b — OPEN (residual).** Channels 4–7 in transcendentals and
   two-arg builtins; inter-procedural SSHADOW across user fn calls
   (`tests/run-pass/gtt_interprocedural_topology.sio` still expects
   `0.0` for the cross term — topology accepts, shadow does not
-  propagate). Arithmetic 8-input is mostly green, but
-  `epistemic_hessian_8inputs` H[4,5](e*f) still prints `7.000000` on
-  the seed (analytic target `1.0`; H[0,4] and H[7,7] already match) —
-  the 16a gate pins that observed value until 16b lands `1.0`. Also
-  still open: loop accumulation (state resets per iteration) and
-  `if/else` merge of shadow slots.
+  propagate). Also still open: loop accumulation (state resets per
+  iteration) and `if/else` merge of shadow slots.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
