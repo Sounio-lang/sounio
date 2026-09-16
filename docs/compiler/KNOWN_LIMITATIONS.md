@@ -161,21 +161,25 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 ### KL-16 — Hessian Tier-4 on the seed
 
 - Engine: `lean_single`. `hessian_of(expr, j, k)` works for low-channel
-  arithmetic; unary transcendentals and `atan2`/`pow` on channels 0–3.
-- **KL-16a — CLOSED (pin only).** Tier 1 + Tier 3 green witnesses are pinned
-  on the committed seed via
+  arithmetic and for H[0,4]/H[7,7]; unary transcendentals and
+  `atan2`/`pow` on channels 0–3.
+- **KL-16a — CLOSED (pin only).** Tier 1–3 witnesses are pinned on the
+  committed seed via
   `scripts/ci/lean_single_kl16_hessian_witness_gate.sh`
   (`SOUNIO_SOUC_ENGINE=lean_single`):
   `tests/run-pass/epistemic_hessian_of.sio`,
   `epistemic_hessian_transcendentals.sio`,
+  `epistemic_hessian_8inputs.sio` (observed stdout, including
+  H[4,5]=`7.000000`),
   `epistemic_hessian_two_arg.sio`. Wired in Madaros Witness Gate. This
   rung does **not** edit `self-hosted/compiler/lean_single.sio`.
-- **KL-16b — OPEN (residual).** `epistemic_hessian_8inputs.sio` H[4,5] of a
-  product prints `7.0` (analytic `1.0`) on lean_single even with `* 0.0`
-  keep-alive anchors — not ratcheted. Also open: channels 4–7 in
-  transcendentals and two-arg builtins; inter-procedural SSHADOW
-  (`tests/run-pass/gtt_interprocedural_topology.sio` still expects
-  `0.0`); loop accumulation; `if/else` merge of shadow slots.
+- **KL-16b — OPEN (residual).** `epistemic_hessian_8inputs` H[4,5] of a
+  product still prints `7.000000` on lean_single (analytic `1.0`) —
+  fixture `* 0.0` keep-alives are constant-folded on the seed; the 16a
+  gate ratchets the observed value until 16b lands `1.0`. Also open:
+  channels 4–7 in transcendentals and two-arg builtins; inter-procedural
+  SSHADOW (`tests/run-pass/gtt_interprocedural_topology.sio` still
+  expects `0.0`); loop accumulation; `if/else` merge of shadow slots.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
