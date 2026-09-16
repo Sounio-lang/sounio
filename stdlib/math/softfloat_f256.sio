@@ -1,0 +1,489 @@
+//! stdlib/math/softfloat_f256.sio — IEEE binary256 add/sub in sio (V0-F.5 / KL-15a)
+//!
+//! Semantic-Lane-ID: WS-G-V0E-STDLIB-GUM-SURFACE
+//! Claim clock: ADR-008 / ADR-009 — callers must judge with sounio_native_expected
+//! hex wires, never Python/Rust as authority.
+//!
+//! General finite-domain IEEE-754 binary256 add/sub (RNE) over `F256Bits`
+//! (4×i64 LSW-first limbs). Language `f256` Madaros-run arithmetic stays
+//! V0-E.4.1 fail-closed — this module is the limb softfloat surface only.
+//!
+//! Working store: eight unsigned 32-bit words in i64 containers (256-bit
+//! significand + GRS). Host f64 is never used on the payload path.
+
+use math::wide_float::{F256Bits}
+
+struct SfU256 {
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    w3: i64,
+    w4: i64,
+    w5: i64,
+    w6: i64,
+    w7: i64,
+}
+
+struct SfShift {
+    val: SfU256,
+    sticky: i64,
+}
+
+struct SfGrs {
+    body: SfU256,
+    grs: i64,
+}
+
+fn sf_u32(x: i64) -> i64 {
+    x & 4294967295
+}
+
+fn sf_join_u32(lo32: i64, hi32: i64) -> i64 {
+    sf_u32(lo32) | (sf_u32(hi32) << 32)
+}
+
+fn sf_u32_lo(x: i64) -> i64 {
+    x & 4294967295
+}
+
+fn sf_u32_hi(x: i64) -> i64 {
+    (x >> 32) & 4294967295
+}
+
+fn sf_u256_zero() -> SfU256 {
+    SfU256 { w0: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, w6: 0, w7: 0 }
+}
+
+fn sf_u256_is_zero(a: SfU256) -> bool {
+    a.w0 == 0 && a.w1 == 0 && a.w2 == 0 && a.w3 == 0 && a.w4 == 0 && a.w5 == 0 && a.w6 == 0 && a.w7 == 0
+}
+
+fn sf_u256_one() -> SfU256 {
+    SfU256 { w0: 1, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, w6: 0, w7: 0 }
+}
+
+fn sf_u256_cmp(a: SfU256, b: SfU256) -> i64 {
+    if a.w7 > b.w7 { return 1 }
+    if a.w7 < b.w7 { return 0 - 1 }
+    if a.w6 > b.w6 { return 1 }
+    if a.w6 < b.w6 { return 0 - 1 }
+    if a.w5 > b.w5 { return 1 }
+    if a.w5 < b.w5 { return 0 - 1 }
+    if a.w4 > b.w4 { return 1 }
+    if a.w4 < b.w4 { return 0 - 1 }
+    if a.w3 > b.w3 { return 1 }
+    if a.w3 < b.w3 { return 0 - 1 }
+    if a.w2 > b.w2 { return 1 }
+    if a.w2 < b.w2 { return 0 - 1 }
+    if a.w1 > b.w1 { return 1 }
+    if a.w1 < b.w1 { return 0 - 1 }
+    if a.w0 > b.w0 { return 1 }
+    if a.w0 < b.w0 { return 0 - 1 }
+    0
+}
+
+fn sf_u256_add(a: SfU256, b: SfU256) -> SfU256 {
+    let s0 = a.w0 + b.w0
+    let c0 = s0 >> 32
+    let w0 = s0 & 4294967295
+    let s1 = a.w1 + b.w1 + c0
+    let c1 = s1 >> 32
+    let w1 = s1 & 4294967295
+    let s2 = a.w2 + b.w2 + c1
+    let c2 = s2 >> 32
+    let w2 = s2 & 4294967295
+    let s3 = a.w3 + b.w3 + c2
+    let c3 = s3 >> 32
+    let w3 = s3 & 4294967295
+    let s4 = a.w4 + b.w4 + c3
+    let c4 = s4 >> 32
+    let w4 = s4 & 4294967295
+    let s5 = a.w5 + b.w5 + c4
+    let c5 = s5 >> 32
+    let w5 = s5 & 4294967295
+    let s6 = a.w6 + b.w6 + c5
+    let c6 = s6 >> 32
+    let w6 = s6 & 4294967295
+    let s7 = a.w7 + b.w7 + c6
+    let w7 = s7 & 4294967295
+    SfU256 { w0: w0, w1: w1, w2: w2, w3: w3, w4: w4, w5: w5, w6: w6, w7: w7 }
+}
+
+fn sf_u256_sub(a: SfU256, b: SfU256) -> SfU256 {
+    var br: i64 = 0
+    var v0 = a.w0 - b.w0
+    if v0 < 0 {
+        v0 = v0 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v1 = a.w1 - b.w1 - br
+    if v1 < 0 {
+        v1 = v1 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v2 = a.w2 - b.w2 - br
+    if v2 < 0 {
+        v2 = v2 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v3 = a.w3 - b.w3 - br
+    if v3 < 0 {
+        v3 = v3 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v4 = a.w4 - b.w4 - br
+    if v4 < 0 {
+        v4 = v4 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v5 = a.w5 - b.w5 - br
+    if v5 < 0 {
+        v5 = v5 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v6 = a.w6 - b.w6 - br
+    if v6 < 0 {
+        v6 = v6 + 4294967296
+        br = 1
+    } else {
+        br = 0
+    }
+    var v7 = a.w7 - b.w7 - br
+    if v7 < 0 {
+        v7 = v7 + 4294967296
+    }
+    SfU256 { w0: v0, w1: v1, w2: v2, w3: v3, w4: v4, w5: v5, w6: v6, w7: v7 }
+}
+
+fn sf_u256_shl1(a: SfU256) -> SfU256 {
+    SfU256 {
+        w0: (a.w0 << 1) & 4294967295,
+        w1: ((a.w1 << 1) & 4294967295) | ((a.w0 >> 31) & 1),
+        w2: ((a.w2 << 1) & 4294967295) | ((a.w1 >> 31) & 1),
+        w3: ((a.w3 << 1) & 4294967295) | ((a.w2 >> 31) & 1),
+        w4: ((a.w4 << 1) & 4294967295) | ((a.w3 >> 31) & 1),
+        w5: ((a.w5 << 1) & 4294967295) | ((a.w4 >> 31) & 1),
+        w6: ((a.w6 << 1) & 4294967295) | ((a.w5 >> 31) & 1),
+        w7: ((a.w7 << 1) & 4294967295) | ((a.w6 >> 31) & 1),
+    }
+}
+
+fn sf_u256_shr1(a: SfU256) -> SfShift {
+    SfShift {
+        val: SfU256 {
+            w0: ((a.w0 >> 1) | ((a.w1 & 1) << 31)) & 4294967295,
+            w1: ((a.w1 >> 1) | ((a.w2 & 1) << 31)) & 4294967295,
+            w2: ((a.w2 >> 1) | ((a.w3 & 1) << 31)) & 4294967295,
+            w3: ((a.w3 >> 1) | ((a.w4 & 1) << 31)) & 4294967295,
+            w4: ((a.w4 >> 1) | ((a.w5 & 1) << 31)) & 4294967295,
+            w5: ((a.w5 >> 1) | ((a.w6 & 1) << 31)) & 4294967295,
+            w6: ((a.w6 >> 1) | ((a.w7 & 1) << 31)) & 4294967295,
+            w7: (a.w7 >> 1) & 4294967295,
+        },
+        sticky: a.w0 & 1,
+    }
+}
+
+fn sf_u256_shl_n(a: SfU256, n: i64) -> SfU256 with Mut {
+    var out = a
+    var i: i64 = 0
+    var cap = n
+    if cap > 256 { cap = 256 }
+    while i < cap {
+        out = sf_u256_shl1(out)
+        i = i + 1
+    }
+    out
+}
+
+fn sf_u256_shr_n_sticky(a: SfU256, n: i64) -> SfU256 with Mut {
+    var out = a
+    var sticky: i64 = 0
+    var i: i64 = 0
+    var cap = n
+    if cap > 280 { cap = 280 }
+    while i < cap {
+        let sh = sf_u256_shr1(out)
+        out = sh.val
+        sticky = sticky | sh.sticky
+        i = i + 1
+    }
+    if sticky != 0 {
+        out = SfU256 {
+            w0: out.w0 | 1, w1: out.w1, w2: out.w2, w3: out.w3,
+            w4: out.w4, w5: out.w5, w6: out.w6, w7: out.w7,
+        }
+    }
+    out
+}
+
+fn sf_u256_bit(a: SfU256, bit: i64) -> i64 {
+    if bit < 32 { return (a.w0 >> bit) & 1 }
+    if bit < 64 { return (a.w1 >> (bit - 32)) & 1 }
+    if bit < 96 { return (a.w2 >> (bit - 64)) & 1 }
+    if bit < 128 { return (a.w3 >> (bit - 96)) & 1 }
+    if bit < 160 { return (a.w4 >> (bit - 128)) & 1 }
+    if bit < 192 { return (a.w5 >> (bit - 160)) & 1 }
+    if bit < 224 { return (a.w6 >> (bit - 192)) & 1 }
+    (a.w7 >> (bit - 224)) & 1
+}
+
+fn sf_unpack_sign(l3: i64) -> i64 {
+    if l3 < 0 { 1 } else { 0 }
+}
+
+fn sf_unpack_exp(l3: i64) -> i64 {
+    // l3 hi32: frac[11:0] | exp[18:0] | sign — exp at bits 12..30
+    (sf_u32_hi(l3) >> 12) & 524287
+}
+
+fn sf_unpack_frac(l0: i64, l1: i64, l2: i64, l3: i64) -> SfU256 {
+    // 236-bit trailing significand across eight u32 words (top 12 bits in w7)
+    SfU256 {
+        w0: sf_u32_lo(l0),
+        w1: sf_u32_hi(l0),
+        w2: sf_u32_lo(l1),
+        w3: sf_u32_hi(l1),
+        w4: sf_u32_lo(l2),
+        w5: sf_u32_hi(l2),
+        w6: sf_u32_lo(l3),
+        w7: sf_u32_hi(l3) & 4095,
+    }
+}
+
+fn sf_pack(sign: i64, exp: i64, frac: SfU256) -> F256Bits {
+    let l0 = sf_join_u32(frac.w0, frac.w1)
+    let l1 = sf_join_u32(frac.w2, frac.w3)
+    let l2 = sf_join_u32(frac.w4, frac.w5)
+    var hi_top = (frac.w7 & 4095) | ((exp & 524287) << 12)
+    if sign != 0 {
+        hi_top = hi_top | 2147483648
+    }
+    let l3 = sf_join_u32(frac.w6, hi_top)
+    F256Bits { l0: l0, l1: l1, l2: l2, l3: l3 }
+}
+
+fn sf_qnan_frac() -> SfU256 {
+    // quiet bit at mant_bits-1 = 235 → bit 11 of w7
+    SfU256 { w0: 0, w1: 0, w2: 0, w3: 0, w4: 0, w5: 0, w6: 0, w7: 2048 }
+}
+
+fn sf_sig_from(exp: i64, frac: SfU256) -> (i64, SfU256) with Mut {
+    if exp == 0 {
+        if sf_u256_is_zero(frac) {
+            return (0, sf_u256_zero())
+        }
+        var sig = frac
+        var exp_u: i64 = 0 - 262142
+        while sf_u256_bit(sig, 236) == 0 {
+            sig = sf_u256_shl1(sig)
+            exp_u = exp_u - 1
+        }
+        return (exp_u, sig)
+    }
+    var sig2 = frac
+    // hidden bit 236 → bit 12 of w7
+    sig2 = SfU256 {
+        w0: sig2.w0, w1: sig2.w1, w2: sig2.w2, w3: sig2.w3,
+        w4: sig2.w4, w5: sig2.w5, w6: sig2.w6, w7: sig2.w7 | 4096,
+    }
+    (exp - 262143, sig2)
+}
+
+fn sf_rne_up(body: SfU256, grs: i64) -> bool {
+    let g = (grs >> 2) & 1
+    let r = (grs >> 1) & 1
+    let s = grs & 1
+    if g == 0 { return false }
+    if r != 0 || s != 0 { return true }
+    (body.w0 & 1) == 1
+}
+
+fn sf_take_grs(sig: SfU256) -> SfGrs {
+    let grs = sig.w0 & 7
+    let s0 = sf_u256_shr1(sig)
+    let s1 = sf_u256_shr1(s0.val)
+    let s2 = sf_u256_shr1(s1.val)
+    SfGrs { body: s2.val, grs: grs }
+}
+
+fn sf_is_pow2_236(body: SfU256) -> bool {
+    body.w0 == 0 && body.w1 == 0 && body.w2 == 0 && body.w3 == 0
+        && body.w4 == 0 && body.w5 == 0 && body.w6 == 0 && body.w7 == 4096
+}
+
+fn sf_pack_wide(sign: i64, exp_u0: i64, sig0: SfU256) -> F256Bits with Mut {
+    var exp_u = exp_u0
+    var sig_wide = sig0
+    let total: i64 = 240
+    if sf_u256_is_zero(sig_wide) {
+        return sf_pack(sign, 0, sf_u256_zero())
+    }
+    while sf_u256_bit(sig_wide, 240) == 1 {
+        sig_wide = sf_u256_shr_n_sticky(sig_wide, 1)
+        exp_u = exp_u + 1
+    }
+    while !sf_u256_is_zero(sig_wide) && sf_u256_bit(sig_wide, 239) == 0 {
+        sig_wide = sf_u256_shl1(sig_wide)
+        exp_u = exp_u - 1
+    }
+    let emin: i64 = 0 - 262142
+    let emax: i64 = 262143
+    if exp_u < emin {
+        let shift = emin - exp_u
+        if shift >= total + 8 {
+            return sf_pack(sign, 0, sf_u256_zero())
+        }
+        sig_wide = sf_u256_shr_n_sticky(sig_wide, shift)
+        let g = sf_take_grs(sig_wide)
+        var body = g.body
+        if sf_rne_up(body, g.grs) {
+            body = sf_u256_add(body, sf_u256_one())
+            if sf_is_pow2_236(body) {
+                return sf_pack(sign, 1, sf_u256_zero())
+            }
+        }
+        if sf_u256_is_zero(body) {
+            return sf_pack(sign, 0, sf_u256_zero())
+        }
+        body = SfU256 {
+            w0: body.w0, w1: body.w1, w2: body.w2, w3: body.w3,
+            w4: body.w4, w5: body.w5, w6: body.w6, w7: body.w7 & 4095,
+        }
+        return sf_pack(sign, 0, body)
+    }
+    if exp_u > emax {
+        return sf_pack(sign, 524287, sf_u256_zero())
+    }
+    let g2 = sf_take_grs(sig_wide)
+    var body2 = g2.body
+    if sf_rne_up(body2, g2.grs) {
+        body2 = sf_u256_add(body2, sf_u256_one())
+        if sf_u256_bit(body2, 237) == 1 {
+            let sh = sf_u256_shr1(body2)
+            body2 = sh.val
+            exp_u = exp_u + 1
+            if exp_u > emax {
+                return sf_pack(sign, 524287, sf_u256_zero())
+            }
+        }
+    }
+    let frac = SfU256 {
+        w0: body2.w0, w1: body2.w1, w2: body2.w2, w3: body2.w3,
+        w4: body2.w4, w5: body2.w5, w6: body2.w6, w7: body2.w7 & 4095,
+    }
+    let biased = exp_u + 262143
+    if biased <= 0 { return sf_pack(sign, 0, sf_u256_zero()) }
+    if biased >= 524287 { return sf_pack(sign, 524287, sf_u256_zero()) }
+    sf_pack(sign, biased, frac)
+}
+
+fn sf_is_nan(exp: i64, frac: SfU256) -> bool {
+    exp == 524287 && !sf_u256_is_zero(frac)
+}
+
+fn sf_is_inf(exp: i64, frac: SfU256) -> bool {
+    exp == 524287 && sf_u256_is_zero(frac)
+}
+
+fn sf_is_zero(exp: i64, frac: SfU256) -> bool {
+    exp == 0 && sf_u256_is_zero(frac)
+}
+
+/// IEEE binary256 addition, round-to-nearest-even.
+pub fn f256_bits_soft_add(a: F256Bits, b: F256Bits) -> F256Bits with Mut, Panic, Div {
+    let sa = sf_unpack_sign(a.l3)
+    let ea = sf_unpack_exp(a.l3)
+    let fa = sf_unpack_frac(a.l0, a.l1, a.l2, a.l3)
+    let sb = sf_unpack_sign(b.l3)
+    let eb = sf_unpack_exp(b.l3)
+    let fb = sf_unpack_frac(b.l0, b.l1, b.l2, b.l3)
+    let exp_ones: i64 = 524287
+    if sf_is_nan(ea, fa) {
+        var f = fa
+        if sf_u256_is_zero(f) { f = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f)
+    }
+    if sf_is_nan(eb, fb) {
+        var f2 = fb
+        if sf_u256_is_zero(f2) { f2 = sf_qnan_frac() }
+        return sf_pack(0, exp_ones, f2)
+    }
+    if sf_is_inf(ea, fa) && sf_is_inf(eb, fb) && sa != sb {
+        return sf_pack(0, exp_ones, sf_qnan_frac())
+    }
+    if sf_is_inf(ea, fa) { return sf_pack(sa, exp_ones, sf_u256_zero()) }
+    if sf_is_inf(eb, fb) { return sf_pack(sb, exp_ones, sf_u256_zero()) }
+    if sf_is_zero(ea, fa) && sf_is_zero(eb, fb) {
+        let zsign = if sa == 1 && sb == 1 { 1 } else { 0 }
+        return sf_pack(zsign, 0, sf_u256_zero())
+    }
+    if sf_is_zero(ea, fa) { return b }
+    if sf_is_zero(eb, fb) { return a }
+
+    let pair_a = sf_sig_from(ea, fa)
+    let pair_b = sf_sig_from(eb, fb)
+    var ea_u = pair_a.0
+    var eb_u = pair_b.0
+    var sa3 = sf_u256_shl_n(pair_a.1, 3)
+    var sb3 = sf_u256_shl_n(pair_b.1, 3)
+    var sign_a = sa
+    var sign_b = sb
+    if ea_u < eb_u {
+        let tmp_e = ea_u
+        ea_u = eb_u
+        eb_u = tmp_e
+        let tmp_s = sa3
+        sa3 = sb3
+        sb3 = tmp_s
+        let tmp_sign = sign_a
+        sign_a = sign_b
+        sign_b = tmp_sign
+    }
+    let shift = ea_u - eb_u
+    if shift > 0 {
+        sb3 = sf_u256_shr_n_sticky(sb3, shift)
+    }
+    var sum3 = sf_u256_zero()
+    var sign: i64 = sign_a
+    if sign_a == sign_b {
+        sum3 = sf_u256_add(sa3, sb3)
+        sign = sign_a
+    } else {
+        if sf_u256_cmp(sa3, sb3) >= 0 {
+            sum3 = sf_u256_sub(sa3, sb3)
+            sign = sign_a
+        } else {
+            sum3 = sf_u256_sub(sb3, sa3)
+            sign = sign_b
+        }
+        if sf_u256_is_zero(sum3) {
+            return sf_pack(0, 0, sf_u256_zero())
+        }
+    }
+    sf_pack_wide(sign, ea_u, sum3)
+}
+
+/// IEEE binary256 subtraction, round-to-nearest-even.
+pub fn f256_bits_soft_sub(a: F256Bits, b: F256Bits) -> F256Bits with Mut, Panic, Div {
+    let sb = sf_unpack_sign(b.l3)
+    let eb = sf_unpack_exp(b.l3)
+    let fb = sf_unpack_frac(b.l0, b.l1, b.l2, b.l3)
+    if eb == 524287 && !sf_u256_is_zero(fb) {
+        return f256_bits_soft_add(a, b)
+    }
+    let bneg = sf_pack(1 - sb, eb, fb)
+    f256_bits_soft_add(a, bneg)
+}
