@@ -26,12 +26,12 @@ MISSING_CAPSULE_JOURNAL="$TEST_ROOT/missing-capsule-serve-must-not-exist.v1"
 MISSING_INVOCATION_JOURNAL="$TEST_ROOT/missing-invocation-serve-must-not-exist.v1"
 MISSING_RESIDENT_JOURNAL="$TEST_ROOT/missing-resident-serve-must-not-exist.v1"
 SUDO_JOURNAL="$TEST_ROOT/sudo-serve-must-not-exist.v1"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
-MANIFEST_SHA256='7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5'
-CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
-CAPSULE_MANIFEST_SHA256='76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f'
-INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-INVOCATION_MANIFEST_SHA256='61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e'
+MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v2"
+MANIFEST_SHA256='5581f29a5f48f3cfa26ea46c906ee73ef1b375ec0d58efcdad123d2e2e3601be'
+CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v2"
+CAPSULE_MANIFEST_SHA256='2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674'
+INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v2"
+INVOCATION_MANIFEST_SHA256='44efcfb63563b642d2a2d5e213effa92e5f41c7cb2739a6a4958253d1a4a8cce'
 EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
 EXEC_GRANT_MANIFEST_SHA256='8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051'
 RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
@@ -304,11 +304,11 @@ grep -Fq 'ExecStart=/usr/libexec/sounio/loom-kernel-principal-broker --serve ' "
 if grep -Eq 'ExecStart=.*/(sh|bash|zsh|python|node|ruby)( |$)' "$SERVICE_UNIT"; then
   fail 'service uses a disposable-language launcher'
 fi
-grep -Fqx 'LOOM_PRINCIPAL_MANIFEST=/usr/lib/sounio/loom/kernel_principal_lease_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_MANIFEST=/usr/lib/sounio/loom/kernel_principal_lease_authority.freeze.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen manifest path'
-grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal_capsule_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal_capsule_authority.freeze.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen capsule manifest path'
-grep -Fqx 'LOOM_PRINCIPAL_INVOCATION_MANIFEST=/usr/lib/sounio/loom/kernel_invocation_cell_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_INVOCATION_MANIFEST=/usr/lib/sounio/loom/kernel_invocation_cell_authority.freeze.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen InvocationCell manifest path'
 grep -Fqx 'LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST=/usr/lib/sounio/loom/kernel_exec_grant_cell_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen ExecGrantCell manifest path'

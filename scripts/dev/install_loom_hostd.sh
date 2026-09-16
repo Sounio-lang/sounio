@@ -35,7 +35,7 @@ POLICY_FILES=(
   tools/loom/subprocess_membrane.freeze.v1
   tools/loom/resident_authority.freeze.v1
   tools/loom/effect_closure_authority.freeze.v1
-  tools/loom/kernel_invocation_cell_authority.freeze.v1
+  tools/loom/kernel_invocation_cell_authority.freeze.v2
   tools/loom/resident_membrane.runtime.v4
   tools/loom/resident_membrane_v5_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v5.sh
@@ -341,7 +341,7 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
      "$(manifest_value "$exec_cell_result_manifest" language_role)" == SEMANTIC_AUTHORITY &&
      "$(manifest_value "$exec_cell_result_manifest" action)" == 9033 &&
      "$(sha256_file "$exec_cell_result_manifest")" == \
-       7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55 &&
+       f5caa269066ea0441ebbe4be982b9302ec2338d751b4b459e3552a3358b146a4 &&
      "$(manifest_value "$exec_cell_result_manifest" executable_sha256)" == \
        "$(sha256_file "$exec_cell_result_runtime")" &&
      "$(manifest_value "$exec_cell_result_manifest" python_executable_invoked)" == false &&
@@ -354,7 +354,7 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
      "$(manifest_value "$exec_cell_intent_manifest" language_role)" == SEMANTIC_AUTHORITY &&
      "$(manifest_value "$exec_cell_intent_manifest" action)" == 9034 &&
      "$(sha256_file "$exec_cell_intent_manifest")" == \
-       8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e &&
+       30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33 &&
      "$(manifest_value "$exec_cell_intent_manifest" executable_sha256)" == \
        "$(sha256_file "$exec_cell_intent_runtime")" &&
      "$(manifest_value "$exec_cell_intent_manifest" raw_event_is_semantic_identity)" == false &&

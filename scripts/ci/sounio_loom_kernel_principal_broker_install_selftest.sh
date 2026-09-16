@@ -112,11 +112,11 @@ RESIDENT_RUNTIME_SHA256="$(field "$FIRST" resident_runtime_sha256)"
 BROKER_SHA256="$(field "$FIRST" broker_sha256)"
 BUNDLE_SHA256="$(field "$FIRST" bundle_sha256)"
 RELEASE="$STAGE/usr/lib/sounio/loom/releases/$RELEASE_ID"
-MANIFEST="$RELEASE/kernel_principal_lease_authority.freeze.v1"
+MANIFEST="$RELEASE/kernel_principal_lease_authority.freeze.v2"
 AUTHORITY="$RELEASE/sounio-loom-kernel-principal-lease-authority-runtime"
-CAPSULE_MANIFEST="$RELEASE/kernel_principal_capsule_authority.freeze.v1"
+CAPSULE_MANIFEST="$RELEASE/kernel_principal_capsule_authority.freeze.v2"
 CAPSULE_AUTHORITY="$RELEASE/sounio-loom-kernel-principal-capsule-authority-runtime"
-INVOCATION_MANIFEST="$RELEASE/kernel_invocation_cell_authority.freeze.v1"
+INVOCATION_MANIFEST="$RELEASE/kernel_invocation_cell_authority.freeze.v2"
 INVOCATION_AUTHORITY="$RELEASE/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST="$RELEASE/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST="$RELEASE/resident_membrane.runtime.v4"
@@ -219,7 +219,7 @@ SECOND="$($INSTALLER --staging-root "$STAGE")"
 
 TAMPER_BYTES="$WORK/tamper-bytes"
 cp -a "$STAGE" "$TAMPER_BYTES"
-TAMPER_MANIFEST="$TAMPER_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_lease_authority.freeze.v1"
+TAMPER_MANIFEST="$TAMPER_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_lease_authority.freeze.v2"
 chmod 0644 "$TAMPER_MANIFEST"
 printf X | dd of="$TAMPER_MANIFEST" bs=1 seek=0 conv=notrunc status=none
 bytes_refusal="$(run_refusal release-byte-tamper "$INSTALLER" --staging-root "$TAMPER_BYTES")"
@@ -235,7 +235,7 @@ mode_refusal="$(run_refusal release-mode-tamper "$INSTALLER" --staging-root "$TA
 
 TAMPER_CAPSULE_BYTES="$WORK/tamper-capsule-bytes"
 cp -a "$STAGE" "$TAMPER_CAPSULE_BYTES"
-TAMPER_CAPSULE_MANIFEST="$TAMPER_CAPSULE_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_capsule_authority.freeze.v1"
+TAMPER_CAPSULE_MANIFEST="$TAMPER_CAPSULE_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_capsule_authority.freeze.v2"
 chmod 0644 "$TAMPER_CAPSULE_MANIFEST"
 printf X | dd of="$TAMPER_CAPSULE_MANIFEST" bs=1 seek=0 conv=notrunc status=none
 capsule_bytes_refusal="$(run_refusal capsule-release-byte-tamper "$INSTALLER" --staging-root "$TAMPER_CAPSULE_BYTES")"
@@ -251,7 +251,7 @@ capsule_mode_refusal="$(run_refusal capsule-release-mode-tamper "$INSTALLER" --s
 
 TAMPER_INVOCATION_BYTES="$WORK/tamper-invocation-bytes"
 cp -a "$STAGE" "$TAMPER_INVOCATION_BYTES"
-TAMPER_INVOCATION_MANIFEST="$TAMPER_INVOCATION_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_invocation_cell_authority.freeze.v1"
+TAMPER_INVOCATION_MANIFEST="$TAMPER_INVOCATION_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_invocation_cell_authority.freeze.v2"
 chmod 0644 "$TAMPER_INVOCATION_MANIFEST"
 printf X | dd of="$TAMPER_INVOCATION_MANIFEST" bs=1 seek=0 conv=notrunc status=none
 invocation_bytes_refusal="$(run_refusal invocation-release-byte-tamper "$INSTALLER" --staging-root "$TAMPER_INVOCATION_BYTES")"

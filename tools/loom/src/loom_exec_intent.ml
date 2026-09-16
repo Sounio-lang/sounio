@@ -3,7 +3,7 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e"
+  "30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33"
 
 let max_file_bytes = 8 * 1024 * 1024
 let authority_timeout_seconds = 5.0
@@ -103,6 +103,9 @@ let exact manifest key expected =
   if actual <> expected then
     failf "exec-intent-manifest-field-invalid:%s:%s" key actual
 
+let exact_frozen_schema table key base =
+  try exact table key (base ^ "-v2") with Error _ -> exact table key (base ^ "-v1")
+
 let decimal label value =
   if value = ""
      || not (String.for_all (function '0' .. '9' -> true | _ -> false) value)
@@ -124,7 +127,7 @@ let configured_path ~name ~default =
 
 let manifest_path root =
   configured_path ~name:"SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_MANIFEST"
-    ~default:(Filename.concat root "tools/loom/exec_intent_envelope.freeze.v1")
+    ~default:(Filename.concat root "tools/loom/exec_intent_envelope.freeze.v2")
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -161,7 +164,7 @@ let load ~root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "exec-intent-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  exact manifest "schema" "loom-exec-intent-envelope-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-exec-intent-envelope-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_AUTHORITY";

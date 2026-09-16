@@ -151,8 +151,8 @@ exec_cell_release="$prefix/exec-cell/releases/$exec_cell_release_id"
    -x "$exec_cell_release/bin/sounio-loom-exec-result-handle" &&
    -x "$exec_cell_release/bin/sounio-loom-exec-intent-envelope" &&
    -x "$exec_cell_release/bin/sounio-loom-provider-hook-fixture" &&
-   -f "$exec_cell_release/authority-root/tools/loom/exec_result_handle.freeze.v1" &&
-   -f "$exec_cell_release/authority-root/tools/loom/exec_intent_envelope.freeze.v1" &&
+   -f "$exec_cell_release/authority-root/tools/loom/exec_result_handle.freeze.v2" &&
+   -f "$exec_cell_release/authority-root/tools/loom/exec_intent_envelope.freeze.v2" &&
    -f "$exec_cell_release/data/product-exec-cell-fixtures.v1" ]] ||
   fail 'installed ExecCell release omitted a bound runtime'
 grep -Fxq 'semantic_action=9030' "$exec_cell_release/release.manifest.v1" ||

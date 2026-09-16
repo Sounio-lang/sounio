@@ -18,7 +18,7 @@ bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_operation_catalog_fixture.sh"
 
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-exec-operation-catalog"
-MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v2"
 SOURCE="tests/verify-ir/call_b.sio"
 SOURCE_SHA256="$(sha256sum "$ROOT_DIR/$SOURCE" | cut -d ' ' -f 1)"
 

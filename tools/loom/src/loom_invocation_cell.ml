@@ -1,7 +1,7 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e"
+  "44efcfb63563b642d2a2d5e213effa92e5f41c7cb2739a6a4958253d1a4a8cce"
 
 let max_file_bytes = 8 * 1024 * 1024
 
@@ -81,7 +81,7 @@ let manifest_path root =
       failf
         "SOUNIO_LOOM_KERNEL_INVOCATION_CELL_MANIFEST-override-requires-test-mode"
   | _ ->
-      Filename.concat root "tools/loom/kernel_invocation_cell_authority.freeze.v1"
+      Filename.concat root "tools/loom/kernel_invocation_cell_authority.freeze.v2"
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -96,8 +96,9 @@ let load root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "invocation-cell-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema"
-       <> "loom-kernel-invocation-cell-authority-freeze-v1"
+  if (let schema = required manifest "schema" in
+      schema <> "loom-kernel-invocation-cell-authority-freeze-v1"
+      && schema <> "loom-kernel-invocation-cell-authority-freeze-v2")
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"

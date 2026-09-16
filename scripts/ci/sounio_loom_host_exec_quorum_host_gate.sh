@@ -199,7 +199,7 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(record_value "$PRODUCT_EXEC_RESULT_MANIFEST" language_role)" == SEMANTIC_AUTHORITY && \
    "$(record_value "$PRODUCT_EXEC_RESULT_MANIFEST" action)" == 9033 && \
    "$(sha256_file "$PRODUCT_EXEC_RESULT_MANIFEST")" == \
-     7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55 && \
+     f5caa269066ea0441ebbe4be982b9302ec2338d751b4b459e3552a3358b146a4 && \
    "$(record_value "$PRODUCT_EXEC_RESULT_MANIFEST" executable_sha256)" == \
      "$(sha256_file "$PRODUCT_EXEC_RESULT_RUNTIME")" && \
    "$(record_value "$PRODUCT_EXEC_INTENT_MANIFEST" stage)" == SEMANTICS_FROZEN && \
@@ -209,7 +209,7 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(record_value "$PRODUCT_EXEC_INTENT_MANIFEST" raw_event_is_semantic_identity)" == false && \
    "$(record_value "$PRODUCT_EXEC_INTENT_MANIFEST" raw_event_separate)" == true && \
    "$(sha256_file "$PRODUCT_EXEC_INTENT_MANIFEST")" == \
-     8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e && \
+     30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33 && \
    "$(record_value "$PRODUCT_EXEC_INTENT_MANIFEST" executable_sha256)" == \
      "$(sha256_file "$PRODUCT_EXEC_INTENT_RUNTIME")" && \
    "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" stage)" == SEMANTICS_FROZEN && \
@@ -220,19 +220,19 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" bundle_sha256)" == \
      "$(sha256_file "$PRODUCT_OPERATION_FIXTURE_BUNDLE")" && \
    "$(sha256_file "$PRODUCT_OPERATION_FIXTURE_MANIFEST")" == \
-     4abfbc8a0fa9cdd1c2164f9f72ea4d408939b3d53497fa7fcaf008d71b1ea1e4 && \
+     b015107cbc6104306613035017f1ef916b81bf6465dd59745198e1991c68c78b && \
    "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" action)" == 9035 && \
    "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" producing_language)" == Sounio && \
    "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" executable_sha256)" == \
      "$(sha256_file "$PRODUCT_OPERATION_CATALOG_RUNTIME")" && \
    "$(sha256_file "$PRODUCT_OPERATION_CATALOG_MANIFEST")" == \
-     25c58880cfe568a3b55b479df4515b63589c2e4dca703c97917e5cbdef0f1561 && \
+     c0e96a89777ce8846f55fb2d55924bff1c3eb327fb71f0131a1effc04850ed45 && \
    "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" action)" == 9036 && \
    "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" producing_language)" == Sounio && \
    "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" executable_sha256)" == \
      "$(sha256_file "$PRODUCT_OPERATION_RESULT_RUNTIME")" && \
    "$(sha256_file "$PRODUCT_OPERATION_RESULT_MANIFEST")" == \
-     58d4a49c5b2462261ee53cd06f3ca8e29d363c1a38bf47274fa98a67b79cc569 ]] ||
+     e346c4d5a9263da32ad3111846158d4beb0132ad4c5919ebe6922d451ac9129d ]] ||
   fail 'product ExecIngress proof capsule is incomplete'
 
 SYSTEMD_RUN="$(readlink -f "$(command -v systemd-run)")"

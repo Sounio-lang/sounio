@@ -24,7 +24,7 @@ bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_result_record_fixture.sh" >/d
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 CATALOG_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-exec-operation-catalog"
 RECORD_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-exec-result-record"
-MANIFEST="$ROOT_DIR/tools/loom/exec_result_record.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/exec_result_record.freeze.v2"
 SOURCE="tests/verify-ir/call_b.sio"
 SOURCE_SHA256="$(sha256sum "$ROOT_DIR/$SOURCE" | cut -d ' ' -f 1)"
 OUTPUT="$TEST_ROOT/loom-sounio-check-${SOURCE_SHA256:0:16}.elf"

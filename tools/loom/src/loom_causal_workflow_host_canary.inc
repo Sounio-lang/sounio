@@ -1,11 +1,11 @@
 constexpr std::string_view kFrozenCausalRunGrantManifestSha256 =
     "24db7036ae2b01141dcb43e325ace6f11e5e5fa1e94ba8a931d5ce9194f93a80";
 constexpr std::string_view kFrozenCausalAttestGrantManifestSha256 =
-    "60050ea0310dd3b48dfe83d0d9d16d11adaf017a36a5efcfe6647fbe8e201bbd";
+    "e1a7522b9553f00d88ea3607cced18279df81fd3081100e82e34b8ad68040910";
 constexpr std::string_view kFrozenCausalWorkflowManifestSha256 =
-    "ef8dc0fadeb1cb33b1ba31d77551b8ca962bc97d1204998057b071b9b7921437";
+    "5520c1bc2a29e6d72b5eb2862e9ea4efa3111551f672f3c9cd30b7c1e68e7bcc";
 constexpr std::string_view kFrozenCausalMidExecManifestSha256 =
-    "7dfe285941220f7c3ef62948ec97f87584e7f8cb473da0203a76f5b23cdeca3e";
+    "497aeea1de9c86481f49a5ad3a46849319c5373379131ef149b3de530cfde7ed";
 constexpr auto kCausalMaterialDeadline = std::chrono::seconds(30);
 
 class CausalEphemeralSecret {
@@ -1034,7 +1034,7 @@ struct CausalMidExecPolicy {
 
 CausalMidExecPolicy load_causal_mid_exec_policy(const std::string& root) {
   const std::string manifest_path =
-      root + "/tools/loom/causal_workflow_mid_exec.freeze.v1";
+      root + "/tools/loom/causal_workflow_mid_exec.freeze.v2";
   const Manifest manifest = parse_frozen_manifest(
       manifest_path, kFrozenCausalMidExecManifestSha256,
       "causal workflow mid-exec action 9037");

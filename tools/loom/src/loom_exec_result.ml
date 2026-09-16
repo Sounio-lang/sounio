@@ -3,7 +3,7 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55"
+  "f5caa269066ea0441ebbe4be982b9302ec2338d751b4b459e3552a3358b146a4"
 
 let max_file_bytes = 8 * 1024 * 1024
 let max_receipt_bytes = 1024 * 1024
@@ -132,6 +132,9 @@ let exact table key expected =
   if actual <> expected then
     failf "exec-result-manifest-field-invalid:%s:%s" key actual
 
+let exact_frozen_schema table key base =
+  try exact table key (base ^ "-v2") with Error _ -> exact table key (base ^ "-v1")
+
 let decimal label value =
   if value = "" || not (String.for_all (function '0' .. '9' -> true | _ -> false) value)
   then failf "%s-not-decimal" label;
@@ -152,7 +155,7 @@ let configured_path ~name ~default =
 
 let manifest_path root =
   configured_path ~name:"SOUNIO_LOOM_EXEC_RESULT_HANDLE_MANIFEST"
-    ~default:(Filename.concat root "tools/loom/exec_result_handle.freeze.v1")
+    ~default:(Filename.concat root "tools/loom/exec_result_handle.freeze.v2")
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required "exec-result-manifest" manifest path_key) in
@@ -189,7 +192,7 @@ let load ~root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "exec-result-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  exact manifest "schema" "loom-exec-result-handle-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-exec-result-handle-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_AUTHORITY";

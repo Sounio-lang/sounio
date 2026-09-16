@@ -18,7 +18,7 @@ bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_operation_catalog_fixture.sh"
 
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-exec-operation-catalog"
-MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v2"
 SOURCE="tests/verify-ir/call_b.sio"
 SOURCE_SHA256="$(sha256sum "$ROOT_DIR/$SOURCE" | cut -d ' ' -f 1)"
 OUTPUT_NAME="loom-sounio-check-${SOURCE_SHA256:0:16}.elf"
@@ -81,7 +81,7 @@ set -e
 
 TAMPER_ROOT="$TEST_ROOT/tamper-root"
 mkdir -p "$TAMPER_ROOT/tools/loom"
-cp "$MANIFEST" "$TAMPER_ROOT/tools/loom/exec_operation_catalog.freeze.v1"
+cp "$MANIFEST" "$TAMPER_ROOT/tools/loom/exec_operation_catalog.freeze.v2"
 while IFS='=' read -r _ relative; do
   [[ "$relative" == 'bin/souc-lean-single-x86_64' ]] && continue
   mkdir -p "$TAMPER_ROOT/$(dirname "$relative")"

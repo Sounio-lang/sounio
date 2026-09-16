@@ -5,8 +5,8 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-invocation-material.XXXXXX")"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-MANIFEST_SHA256='61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e'
+MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v2"
+MANIFEST_SHA256='44efcfb63563b642d2a2d5e213effa92e5f41c7cb2739a6a4958253d1a4a8cce'
 AUTHORITY="$TEST_ROOT/invocation-authority"
 BROKER_ONE="$TEST_ROOT/principal-broker-one"
 BROKER_TWO="$TEST_ROOT/principal-broker-two"
