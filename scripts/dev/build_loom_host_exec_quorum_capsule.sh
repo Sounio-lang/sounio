@@ -182,7 +182,7 @@ AUTHORITY_FILES=(
   tools/loom/GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md
   stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio
   tools/loom/kernel_exec_grant_cell_authority_main.sio
-  tools/loom/kernel_invocation_cell_authority.freeze.v2
+  tools/loom/kernel_invocation_cell_authority.freeze.v1
   tools/loom/execution_authority.freeze.v3
   tools/loom/execution_outcome.freeze.v2
   tools/loom/resident_membrane.runtime.v4

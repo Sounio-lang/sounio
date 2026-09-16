@@ -48,7 +48,7 @@ constexpr std::string_view kFrozenManifestSha256 =
 constexpr std::string_view kFrozenCapsuleManifestSha256 =
     "2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674";
 constexpr std::string_view kFrozenInvocationCellManifestSha256 =
-    "44efcfb63563b642d2a2d5e213effa92e5f41c7cb2739a6a4958253d1a4a8cce";
+    "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e";
 constexpr std::string_view kFrozenExecGrantCellManifestSha256 =
     "8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051";
 constexpr std::string_view kFrozenResidentV4ManifestSha256 =

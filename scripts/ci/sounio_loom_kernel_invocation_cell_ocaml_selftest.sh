@@ -110,7 +110,7 @@ grep -Fq $'\tresident_manifest_sha256=6d5e8d1fd0d6b3badf707ed438804a9e1b46dc7486
   "$RECEIPTS" || fail 'receipt omitted frozen resident v3 manifest'
 
 tampered_manifest="$TEST_ROOT/kernel-invocation-cell.freeze.v1"
-cp "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v2" \
+cp "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
   "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e

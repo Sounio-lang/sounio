@@ -35,7 +35,7 @@ POLICY_FILES=(
   tools/loom/subprocess_membrane.freeze.v1
   tools/loom/resident_authority.freeze.v1
   tools/loom/effect_closure_authority.freeze.v1
-  tools/loom/kernel_invocation_cell_authority.freeze.v2
+  tools/loom/kernel_invocation_cell_authority.freeze.v1
   tools/loom/resident_membrane.runtime.v4
   tools/loom/resident_membrane_v5_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v5.sh
