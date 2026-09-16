@@ -38,7 +38,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
-| KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
+| KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 | KL-17 | generic `impl` blocks: associated-call and literal `T` inference, raw-word `HeapVec<T>` | madaros |
 
@@ -171,14 +171,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
-- Engine: `madaros`. `f256` has type spellings, exact literals (V0-B/V0-E.5.9)
-  and the V0-E.4.1 fail-closed refusal for arithmetic; fields, params,
-  arrays, printing and any `softfloat_f256` are not implemented.
-  `Knowledge<f128>`, GUM over `f128` and `MeasuredF256` are out of scope of
-  the V0-E ladder. Consequence: `benchmarks/chemistry/RESULTS.md` §7.7 stays
-  blocked on a genuine reference integration path.
-- Pin: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e57` pins the
-  `[f256; N]` refusal; `--stage v0e41` pins the no-greenwash rule.
+- Engine: `madaros`. **KL-15a partial CLOSED**: IEEE binary256 add/sub over
+  `F256Bits` in `stdlib/math/softfloat_f256.sio` (ladder `--stage v0f5`).
+  Residual: language `f256` arithmetic stays V0-E.4.1 fail-closed; fields,
+  params, arrays, printing, `Knowledge<f128>`, GUM over `f128`, and
+  `MeasuredF256` are not implemented. Consequence:
+  `benchmarks/chemistry/RESULTS.md` §7.7 stays blocked on a genuine reference
+  integration path.
+- Pin: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5` (add/sub);
+  `--stage v0e57` pins the `[f256; N]` refusal; `--stage v0e41` pins the
+  no-greenwash rule.
 
 ### KL-16 — Hessian Tier-4 on the seed
 
