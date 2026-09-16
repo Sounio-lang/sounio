@@ -39,7 +39,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
-| KL-16 | Hessian Tier-4 on the seed | lean_single |
+| KL-16 | Hessian Tier-4 on the seed (16a pin; 16b residual) | lean_single |
 
 ## Ledger
 
@@ -160,14 +160,26 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-16 — Hessian Tier-4 on the seed
 
-- Engine: `lean_single`. `hessian_of(expr, j, k)` works for 8 channels,
-  arithmetic, unary transcendentals and `atan2`/`pow` on channels 0–3.
-  Not implemented: inter-procedural shadows across user fn calls, loop
-  accumulation (state resets per iteration), `if/else` merge of shadow
-  slots, channels 4–7 in transcendentals and two-arg builtins.
-- Pin: none beyond the positive witnesses. Channel-at-`.value` semantics
-  (`MEAS_KNOW_IDX`, `formal/ChannelAssignmentSemantics.lean`) are a model,
-  not a defect — see the history snapshot for the KAS-1 rationale.
+- Engine: `lean_single`. `hessian_of(expr, j, k)` works for 8-channel
+  arithmetic; unary transcendentals and `atan2`/`pow` on channels 0–3.
+- **KL-16a — CLOSED (pin only).** Tier 1–3 green witnesses are pinned on
+  the committed seed via
+  `scripts/ci/lean_single_kl16_hessian_witness_gate.sh`
+  (`SOUNIO_SOUC_ENGINE=lean_single`):
+  `tests/run-pass/epistemic_hessian_of.sio`,
+  `epistemic_hessian_transcendentals.sio`,
+  `epistemic_hessian_8inputs.sio`,
+  `epistemic_hessian_two_arg.sio`. Wired in Madaros Witness Gate. This
+  rung does **not** edit `self-hosted/compiler/lean_single.sio`.
+- **KL-16b — OPEN (residual).** Channels 4–7 in transcendentals and
+  two-arg builtins; inter-procedural SSHADOW across user fn calls
+  (`tests/run-pass/gtt_interprocedural_topology.sio` still expects
+  `0.0` for the cross term — topology accepts, shadow does not
+  propagate). Also still open: loop accumulation (state resets per
+  iteration) and `if/else` merge of shadow slots.
+- Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
+  `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
+  see the history snapshot for the KAS-1 rationale.
 
 ## Registry-governed, not rungs
 
