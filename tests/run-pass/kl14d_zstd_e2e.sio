@@ -3,21 +3,22 @@
 //@ expect-stdout: kl14d_zstd_e2e: PASS
 // KL-14d2: round-trip via libzstd.so.1 (DT_NEEDED + GOT).
 // Gate: scripts/ci/madaros_kl14d_zstd_gate.sh
+//
+// Uses heap i64 write/read builtins (no &! array borrows) to feed *mut u8.
 
 use compress::zstd::{zstd_compress, zstd_decompress, zstd_is_ok, zstd_result_size}
 
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
-    var src: [u8; 16] = [0; 16]
-    var dst: [u8; 128] = [0; 128]
-    var out: [u8; 64] = [0; 64]
     let n: i64 = 16
-    var i: i64 = 0
-    while i < n {
-        // 'A' + (i % 4)
-        src[i] = (65 + (i - (i / 4) * 4)) as u8
-        i = i + 1
-    }
-    let cr = zstd_compress((&!src) as *mut u8, n, (&!dst) as *mut u8, 128, 3 as i32)
+    let src_i = heap_alloc(n) as *mut i64
+    let dst_i = heap_alloc(128) as *mut i64
+    let out_i = heap_alloc(64) as *mut i64
+    write_i64(src_i, 0, 0x4142434445464748)
+    write_i64(src_i, 1, 0x5152535455565758)
+    let src = src_i as *mut u8
+    let dst = dst_i as *mut u8
+    let out = out_i as *mut u8
+    let cr = zstd_compress(src, n, dst, 128, 3 as i32)
     if !zstd_is_ok(cr) {
         println("kl14d_zstd_e2e: FAIL compress")
         return 1
@@ -27,7 +28,7 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("kl14d_zstd_e2e: FAIL empty")
         return 1
     }
-    let dr = zstd_decompress((&!dst) as *mut u8, csize, (&!out) as *mut u8, 64)
+    let dr = zstd_decompress(dst, csize, out, 64)
     if !zstd_is_ok(dr) {
         println("kl14d_zstd_e2e: FAIL decompress")
         return 1
@@ -36,13 +37,13 @@ fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("kl14d_zstd_e2e: FAIL size")
         return 1
     }
-    i = 0
-    while i < n {
-        if out[i] != src[i] {
-            println("kl14d_zstd_e2e: FAIL mismatch")
-            return 1
-        }
-        i = i + 1
+    if read_i64(out_i, 0) != 0x4142434445464748 {
+        println("kl14d_zstd_e2e: FAIL mismatch0")
+        return 1
+    }
+    if read_i64(out_i, 1) != 0x5152535455565758 {
+        println("kl14d_zstd_e2e: FAIL mismatch1")
+        return 1
     }
     println("kl14d_zstd_e2e: PASS")
     0
