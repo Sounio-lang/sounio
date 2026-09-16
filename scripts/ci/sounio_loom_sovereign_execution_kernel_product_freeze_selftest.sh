@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v2"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
+MANIFEST="$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v3"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v3-20260916.txt"
 PRODUCT_GATE="$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
 
 fail() {
@@ -35,7 +35,7 @@ verify_file() {
 
 [[ -f "$MANIFEST" && -f "$EVIDENCE" && -x "$PRODUCT_GATE" ]] || \
   fail 'product freeze inputs are incomplete'
-expect schema loom-sovereign-execution-kernel-product-runtime-v2
+expect schema loom-sovereign-execution-kernel-product-runtime-v3
 expect stage PRODUCT_EXECUTION_FROZEN
 expect semantic_authority Sounio
 expect semantic_action 9042
