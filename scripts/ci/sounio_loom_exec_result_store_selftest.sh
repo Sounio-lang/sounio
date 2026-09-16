@@ -22,9 +22,9 @@ manifest_value() {
 
 evidence_value() {
   local key="$1" line count
-  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v1-20260830.txt" || true)"
+  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v2-20260916.txt" || true)"
   [[ "$count" == 1 ]] || fail "evidence field $key occurs $count times"
-  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v1-20260830.txt")"
+  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v2-20260916.txt")"
   printf '%s' "${line#*=}"
 }
 

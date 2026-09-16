@@ -16,7 +16,7 @@ PRINCIPAL="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 DESCRIPTOR="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 GRANT="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 RECORD_MANIFEST_SHA256="e346c4d5a9263da32ad3111846158d4beb0132ad4c5919ebe6922d451ac9129d"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-operation-ingress-v1-20260830.txt"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-operation-ingress-v2-20260916.txt"
 
 fail() {
   printf 'sounio-loom-exec-operation-ingress-selftest: FAIL: %s test_root=%s\n' \

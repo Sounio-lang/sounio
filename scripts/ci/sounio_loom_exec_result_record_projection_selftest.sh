@@ -129,6 +129,6 @@ RESULT="$(printf 'sounio-loom-exec-result-record-projection-selftest: PASS seman
   "$SOURCE_SHA256" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_result_record.ml" | cut -d ' ' -f 1)" \
   "$(sha256sum "$LOOM" | cut -d ' ' -f 1)")"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-result-record-projection-v1-20260830.txt"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-result-record-projection-v2-20260916.txt"
 [[ "$(cat "$EVIDENCE")" == "$RESULT" ]] || fail 'checked-in evidence drifted'
 printf '%s\n' "$RESULT"
