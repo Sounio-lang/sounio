@@ -19,6 +19,9 @@ RAW="${MADAROS_RAW_BIN:-${SOUNIO_MADAROS_BIN:-${MADAROS_BIN:-}}}"
   exit 2
 }
 
+# Prefer this checkout's stdlib so wrappers actually call ZSTD_* (emit DT_NEEDED).
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
+
 # Resolve libzstd on the runner.
 if ! ldconfig -p 2>/dev/null | grep -q 'libzstd\.so\.1'; then
   if [[ ! -e /usr/lib/x86_64-linux-gnu/libzstd.so.1 && ! -e /lib/x86_64-linux-gnu/libzstd.so.1 ]]; then
