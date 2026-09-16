@@ -29,7 +29,7 @@ expect_hash() {
 
 [[ -x "$SOUC" ]] || fail "Sounio compiler is missing: $SOUC"
 expect_hash "$SOURCE" \
-  48f49e4da369bc2704523692db99966d8647c64f5449b993236288d411aa2017
+  dbb14bbfb60c6357a5a61d02f92bb1d6e198ec481b451b3336ae3d3baab2257d
 expect_hash "$POLICY_MANIFEST" \
   adbc7151da91bd12928cf059a4fce01de59b38096bb7bebe55be0402fab9972c
 expect_hash "$MATERIAL_EVIDENCE" \
