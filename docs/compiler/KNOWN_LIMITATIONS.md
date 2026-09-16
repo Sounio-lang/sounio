@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: 14a–14d1 CLOSED; libzstd e2e (KL-14d2) | madaros |
+| KL-14 | FFI: 14a–14d2 CLOSED; dlopen (KL-14d3) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 | KL-17 | generic `impl` blocks: associated-call and literal `T` inference, raw-word `HeapVec<T>` | madaros |
@@ -161,7 +161,12 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `ZSTD_decompress` / `ZSTD_isError` resolve via `DT_NEEDED libzstd.so.1`.
   `stdlib/compress/zstd.sio` wrappers fill `ZstdResult`. Pin:
   `tests/run-pass/kl14d_zstd_e2e.sio`,
-  `scripts/ci/madaros_kl14d_zstd_gate.sh`. Residual (KL-14d3): `dlopen`.
+  `scripts/ci/madaros_kl14d_zstd_gate.sh`. Dynlink GOT stubs tail-`jmp` (not
+  `call; ret`) so SysV stack alignment holds for SIMD callees.
+- **dlopen surface — CLOSED (KL-14d3).** Engine: `madaros`. `dlopen` /
+  `dlsym` / `dlclose` / `dlerror` via `DT_NEEDED libdl.so.2`. Pin MVP:
+  open + non-null `dlsym` + close (no call-through-fn-ptr). Residual:
+  invoke via `dlsym` pointer.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
