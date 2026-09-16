@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v2"
 
 fail() {
   printf 'sounio-loom-exec-operation-grant-fixture-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -36,7 +36,7 @@ expect_hash() {
 
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] ||
   fail 'freeze manifest is absent or linked'
-expect_value schema loom-exec-operation-grant-fixture-freeze-v1
+expect_value schema loom-exec-operation-grant-fixture-freeze-v2
 expect_value stage SEMANTICS_FROZEN
 expect_value producing_language Sounio
 expect_value language_role SEMANTIC_FIXTURE_PRODUCER
