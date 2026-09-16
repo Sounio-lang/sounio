@@ -184,6 +184,22 @@ for path in "${selected[@]}"; do
     export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     echo "MADAROS_CHANGED_TESTS_DYNLINK probes=$work_dir/libkl14d_{a,b}.so"
   fi
+  # kl14d_zstd_e2e.sio needs system libzstd.so.1 (DT_NEEDED); no probe staging.
+  if [[ "$path" == "tests/run-pass/kl14d_zstd_e2e.sio" ]]; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libzstd\.so\.1' \
+      && [[ ! -e /usr/lib/x86_64-linux-gnu/libzstd.so.1 ]] \
+      && [[ ! -e /lib/x86_64-linux-gnu/libzstd.so.1 ]]; then
+      echo "MADAROS_CHANGED_TESTS_DYNLINK: libzstd.so.1 missing for kl14d_zstd_e2e" >&2
+      exit 2
+    fi
+    echo "MADAROS_CHANGED_TESTS_DYNLINK system=libzstd.so.1"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14d_dlopen.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_dl.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_dl.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14d_dl.so"
+  fi
 done
 
 SOUNIO_MADAROS_AVAILABLE=1 \
