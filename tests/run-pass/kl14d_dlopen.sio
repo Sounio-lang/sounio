@@ -1,0 +1,44 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: kl14d_dlopen: PASS
+// KL-14d3: dlopen + dlsym non-null + dlclose via GOT / libdl.so.2.
+// Does not invoke the resolved function pointer (call-through-fn-ptr residual).
+// Needs libkl14d_dl.so on LD_LIBRARY_PATH.
+// Gate: scripts/ci/madaros_kl14d_dlopen_gate.sh
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    // "libkl14d_dl.so\0\0" — two little-endian i64 words
+    let path_i = heap_alloc(16) as *mut i64
+    write_i64(path_i, 0, 0x6434316c6b62696c)
+    write_i64(path_i, 1, 0x00006f732e6c645f)
+    // "kl14d_dl_add\0\0\0\0"
+    let sym_i = heap_alloc(16) as *mut i64
+    write_i64(sym_i, 0, 0x6c645f6434316c6b)
+    write_i64(sym_i, 1, 0x000000006464615f)
+
+    let RTLD_LAZY: i32 = 1
+    let h = dlopen(path_i as *mut u8, RTLD_LAZY)
+    if (h as i64) == 0 {
+        println("kl14d_dlopen: FAIL open")
+        return 1
+    }
+    let f = dlsym(h, sym_i as *mut u8)
+    if (f as i64) == 0 {
+        println("kl14d_dlopen: FAIL sym")
+        let _c = dlclose(h)
+        return 1
+    }
+    let rc = dlclose(h)
+    if rc != 0 {
+        println("kl14d_dlopen: FAIL close")
+        return 1
+    }
+    println("kl14d_dlopen: PASS")
+    0
+}
