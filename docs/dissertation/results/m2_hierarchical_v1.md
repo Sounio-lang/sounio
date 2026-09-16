@@ -91,8 +91,9 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 ./bin/souc run tests/run
 > refusing the form: called that way, lean_single stopped at `error: no main` (a current-source lean_single shows
 > why: it opens `run`, which does not exist, as a 0-byte source). `bin/souc` now refuses the form (exit 64). The pinned binary (sha256
 > `3cbea2b4…`) is no longer in the repository.
-> **Current state (2026-09-14, measured at HEAD `5f9ef80877`).** The worktree also had two
-> uncommitted paths, `self-hosted/ir/lower.sio` (modified) and
+> **Current state (lean_single: 2026-09-15, HEAD `0a786dea7d`, seed `bin/souc-lean-single-x86_64`;
+> all other current-state measurements: 2026-09-14, HEAD `5f9ef80877`).** When HEAD was `5f9ef80877`
+> (2026-09-14), the worktree had two uncommitted paths, `self-hosted/ir/lower.sio` (modified) and
 > `tests/run-pass/madaros_struct_len_method.sio` (untracked), neither in this test's import closure.
 > `main` declares `Epistemic` since `2c4b0e7739`. `2952a88fa2` changed the PBPK28 Crank-Nicolson
 > step to write into caller-owned work storage, so the Monte Carlo samples no longer exhaust the
@@ -104,18 +105,30 @@ SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 ./bin/souc run tests/run
 > `error[E259]`.
 > - lean_single, through its raw interface, from the repository root because it resolves stdlib
 >   imports relative to the working directory:
->   `cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/pbpk28_m2_hierarchical_prior.sio /tmp/m2_hierarchical.elf && chmod +x /tmp/m2_hierarchical.elf && /tmp/m2_hierarchical.elf`
->   (`bin/souc-linux-x86_64` sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`)
+>   `cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/run-pass/pbpk28_m2_hierarchical_prior.sio /tmp/m2_hierarchical.elf && chmod +x /tmp/m2_hierarchical.elf && /tmp/m2_hierarchical.elf`
+>   (the lean_single seed `bin/souc-lean-single-x86_64`, sha256
+>   `9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, run verbatim at HEAD `0a786dea7d`)
 >   printed `M2_HIERARCHICAL_PRIOR_OUTPUT` and `PASS`, and all twelve numeric entries in the table
->   below equal its output. The `chmod +x` step is needed because this lean_single build wrote the
->   ELF with mode `-rw-r--r--` under umask 0022; without it, running the ELF stopped at
->   `Permission denied` (exit 126, measured at `2952a88fa2`). Earlier versions of this note omitted
->   that step.
-> - Madaros, the engine the test suite uses, also from the repository root:
+>   below equal its output. Merge `09aedffafa` installed that seed, and its history includes
+>   `10ac3eb3b3`, which changed how lean_single lowers float literals. `git status` at `0a786dea7d`,
+>   taken alongside the run, listed one modified file, `self-hosted/ir/lower.sio`, and two untracked
+>   tests, none in this test's import closure; between `5f9ef80877` and `0a786dea7d` that closure
+>   differs only in `stdlib/numerical/linalg.sio`, where `min_pivot` became `pub`. Until 2026-09-15
+>   this note gave the command with `bin/souc-linux-x86_64` (sha256
+>   `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) in place of the seed. The seed
+>   run's 33 lines of stdout are byte-identical to the stdout recorded for the
+>   `bin/souc-linux-x86_64` command at `5f9ef80877` and at `5a054a21a4`; only stdout was compared, not
+>   the ELFs. The `chmod +x` step is needed: at `0a786dea7d`, under umask 0022 (which the command does
+>   not set), the seed wrote the ELF with mode `-rw-r--r--`, and without the step the run stopped at
+>   `Permission denied` (shell exit status 126); `bin/souc-linux-x86_64` did the same at `2952a88fa2`.
+>   Earlier versions of this note omitted that step.
+> - Madaros, the engine the test suite uses (measured 2026-09-14 with HEAD at `5f9ef80877`), also from
+>   the repository root:
 >   `cd "$(git rev-parse --show-toplevel)" && bin/souc run tests/run-pass/pbpk28_m2_hierarchical_prior.sio`
 >   (`bin/madaros-linux-x86_64` sha256 `a1307ca6297963f89a12eec23f282b4bcff691be5c2cc6d1a00dbce4a30d8dd0`)
 >   exited 0 in 40 s. Its stdout begins with 52 lines of compiler progress log; the remaining 33
->   lines, the test program's own output, are byte-identical to the lean_single output.
+>   lines, the test program's own output, are byte-identical to the lean_single output of that date,
+>   from `bin/souc-linux-x86_64`, which the seed run above also matches.
 > - The test suite, also from the repository root:
 >   `cd "$(git rev-parse --show-toplevel)" && bash scripts/run_sio_test_suite.sh --filter-exact pbpk28_m2_hierarchical_prior.sio --jobs 1`
 >   reported `engine=madaros` and Pass: 1, Fail: 0, Total: 1.
