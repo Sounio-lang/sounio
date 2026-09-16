@@ -1840,6 +1840,9 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
     if name_eq(n, make_name("kl14c_neg")) { return true }
     if name_eq(n, make_name("kl14d_a")) { return true }
     if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("ZSTD_compress")) { return true }
+    if name_eq(n, make_name("ZSTD_decompress")) { return true }
+    if name_eq(n, make_name("ZSTD_isError")) { return true }
     false
 }
 
@@ -1874,6 +1877,12 @@ fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 wi
     if native_v2_name_buf_eq(sym_buf, sym_len, n_da.buf, n_da.len) { return 3 }
     let n_db = make_name("kl14d_b")
     if native_v2_name_buf_eq(sym_buf, sym_len, n_db.buf, n_db.len) { return 4 }
+    let n_zc = make_name("ZSTD_compress")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zc.buf, n_zc.len) { return 5 }
+    let n_zd = make_name("ZSTD_decompress")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zd.buf, n_zd.len) { return 5 }
+    let n_zi = make_name("ZSTD_isError")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zi.buf, n_zi.len) { return 5 }
     0
 }
 
@@ -1882,6 +1891,7 @@ fn native_v2_dynlink_soname_for_lib_id(lib_id: i64) -> string {
     if lib_id == 2 { return "libkl14c_probe.so" }
     if lib_id == 3 { return "libkl14d_a.so" }
     if lib_id == 4 { return "libkl14d_b.so" }
+    if lib_id == 5 { return "libzstd.so.1" }
     "libkl14b_probe.so"
 }
 
@@ -1966,13 +1976,21 @@ fn nc_emit_call_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, 
     nc_emit_u32_le(nc, disp)
 }
 
-// Empty-stub body for a dynlink extern: args already in SysV regs from the
-// caller's `call rel32` into this stub; forward through the GOT and ret.
+fn nc_emit_jmp_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    // ff 25 <disp32> — jmp qword [rip+disp32]
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0x25)
+    nc_emit_u32_le(nc, disp)
+}
+
+// Dynlink extern stub: args already in SysV regs from the caller's `call
+// rel32` into this stub. Tail-jmp through the GOT — must NOT `call [got]; ret`,
+// which would push a second return address and leave the dynlib callee with
+// rsp%16==0 (SIMD libs like libzstd SEGV; simple integer probes still pass).
 fn emit_dynlink_got_stub_into(nc: &! NativeCompiler, name: Name) with Mut, Panic, Div, Alloc {
     let disp_off = (*nc).code.len + 2
-    nc_emit_call_mem_rip_disp32_into(nc, 0)
+    nc_emit_jmp_mem_rip_disp32_into(nc, 0)
     add_extern_reloc(&! (*nc).extern_relocs, disp_off, name.buf, name.len)
-    nc_emit_ret(nc)
 }
 
 fn native_v2_try_emit_dynlink_stub_into(nc: &! NativeCompiler, name: Name) -> bool with Mut, Panic, Div, Alloc {
