@@ -37,7 +37,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: 14a–14c CLOSED; multi-DT_NEEDED (KL-14d1) | madaros |
+| KL-14 | FFI: 14a–14d1 CLOSED; libzstd e2e (KL-14d2) | madaros |
 | KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 on the seed | lean_single |
 
@@ -134,8 +134,12 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   allowlist emits one `DT_NEEDED` per unique library (cap 4). Pin:
   `tests/run-pass/kl14d_multi_needed.sio` (`kl14d_a`/`kl14d_b` via
   `libkl14d_a.so` + `libkl14d_b.so`),
-  `scripts/ci/madaros_kl14d_multi_needed_gate.sh`. Residual (KL-14d2/d3):
-  real libzstd e2e, `dlopen` surface.
+  `scripts/ci/madaros_kl14d_multi_needed_gate.sh`.
+- **libzstd e2e — CLOSED (KL-14d2).** Engine: `madaros`. `ZSTD_compress` /
+  `ZSTD_decompress` / `ZSTD_isError` resolve via `DT_NEEDED libzstd.so.1`.
+  `stdlib/compress/zstd.sio` wrappers fill `ZstdResult`. Pin:
+  `tests/run-pass/kl14d_zstd_e2e.sio`,
+  `scripts/ci/madaros_kl14d_zstd_gate.sh`. Residual (KL-14d3): `dlopen`.
 
 ### KL-15 — `f256` surface and epistemic `f128`
 

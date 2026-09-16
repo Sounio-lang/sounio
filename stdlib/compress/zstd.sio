@@ -1,12 +1,7 @@
-// stdlib/compress/zstd.sio — Zstandard Compression (pure-Sounio stub)
+// stdlib/compress/zstd.sio — Zstandard Compression
 //
-// Provides the zstd compress/decompress API surface. The actual Zstandard
-// algorithm requires PLT-based dynamic linking to libzstd, which the current
-// native x86-64 backend does not yet support (statically-linked ELF, no GOT/PLT).
-// compress() and decompress() return error codes until PLT support lands.
-//
-// Level constants, compress_bound, clamp_level, and struct predicates are
-// implemented in pure Sounio and are fully functional.
+// Level constants / clamp / pure compress_bound stay pure-Sounio. compress and
+// decompress resolve ZSTD_* via Madaros dynlink (DT_NEEDED libzstd.so.1).
 //
 // NOTE: All pointer parameters use *mut u8 — *const u8 in function-call
 // position causes arity mismatch in the current compiler.
@@ -14,6 +9,12 @@
 // References:
 //   RFC 8478 — Zstandard Compression and the 'application/zstd' Media Type
 //   Collet, Y. (2016) — Zstandard: Real-Time Data Compression Algorithm
+
+extern "C" {
+    fn ZSTD_compress(dst: *mut u8, dst_cap: i64, src: *mut u8, src_len: i64, level: i32) -> i64
+    fn ZSTD_decompress(dst: *mut u8, dst_cap: i64, src: *mut u8, src_len: i64) -> i64
+    fn ZSTD_isError(code: i64) -> i32
+}
 
 // ============================================================================
 // Types
@@ -61,18 +62,18 @@ pub fn zstd_compress_bound(src_size: i64) -> i64 with Div {
     src_size + src_size / 8 + 128
 }
 
-/// Returns the zstd library version number.
-/// NOTE: Returns the system-installed version (1.5.5 = 10505) as a constant.
+/// Returns a documented stub version number (pure; does not call libzstd).
 pub fn zstd_version() -> i32 {
     10505 as i32
 }
 
 // ============================================================================
-// Error helpers (pure)
+// Error helpers
 // ============================================================================
 
 /// Returns true if code represents a ZSTD error (large values near i64::MAX).
-/// Convention: error codes are > (UINT64_MAX/2), approximated as > 2^62.
+/// Pure heuristic so lean_single tests stay free of libzstd; compress/decompress
+/// use ZSTD_isError at the FFI boundary.
 pub fn zstd_is_error(code: i64) -> bool {
     let threshold: i64 = 4611686018427387904  // 2^62
     code > threshold
@@ -84,31 +85,29 @@ pub fn zstd_is_ok(r: ZstdResult) -> bool {
 }
 
 // ============================================================================
-// Compress (stub — requires PLT)
+// Compress / decompress (libzstd via GOT)
 // ============================================================================
 
 /// Compress src into dst at the given compression level.
-/// NOTE: Returns error until PLT dynamic-link support is available.
 pub fn zstd_compress(src: *mut u8, src_len: i64, dst: *mut u8, dst_cap: i64, level: i32) -> ZstdResult with Mut {
-    ZstdResult { ok: false, size: 0, error: ZstdError { code: 0 - 1 } }
+    let lvl = zstd_clamp_level(level)
+    let code = ZSTD_compress(dst, dst_cap, src, src_len, lvl)
+    if ZSTD_isError(code) != 0 {
+        return ZstdResult { ok: false, size: 0, error: ZstdError { code: code } }
+    }
+    ZstdResult { ok: true, size: code, error: ZstdError { code: 0 } }
 }
-
-// ============================================================================
-// Decompress (stub — requires PLT)
-// ============================================================================
 
 /// Decompress src into dst.
-/// NOTE: Returns error until PLT dynamic-link support is available.
 pub fn zstd_decompress(src: *mut u8, src_len: i64, dst: *mut u8, dst_cap: i64) -> ZstdResult with Mut {
-    ZstdResult { ok: false, size: 0, error: ZstdError { code: 0 - 1 } }
+    let code = ZSTD_decompress(dst, dst_cap, src, src_len)
+    if ZSTD_isError(code) != 0 {
+        return ZstdResult { ok: false, size: 0, error: ZstdError { code: code } }
+    }
+    ZstdResult { ok: true, size: code, error: ZstdError { code: 0 } }
 }
 
-// ============================================================================
-// Frame metadata (stub — requires PLT)
-// ============================================================================
-
-/// Get decompressed size from a zstd frame.
-/// NOTE: Returns 0 - 1 (ZSTD_CONTENTSIZE_UNKNOWN) until PLT support lands.
+/// Frame content size — not wired in KL-14d2 (would need ZSTD_getFrameContentSize).
 pub fn zstd_frame_content_size(src: *mut u8, src_len: i64) -> i64 with Mut {
     0 - 1
 }
