@@ -143,3 +143,33 @@ updating should estimate or constrain the joint prior structure, not merely
 shrink one marginal CV: moderate correlation can move PBPK28 across the
 Hessian/MC adequacy threshold, while stronger or mis-signed dependence changes
 which approximation fails.
+
+## Reproduction commands (2026-09-16)
+
+The command in the 2026-09-13 note above is left unchanged: it invokes
+`bin/souc-linux-x86_64` (sha256 `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and
+contains no `chmod +x` step. How that run was actually invoked is not recorded. The current
+form runs the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and adds the `chmod +x` step:
+
+```bash
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio /tmp/mc28.elf && chmod +x /tmp/mc28.elf && /tmp/mc28.elf
+```
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio` (ELF `/tmp/mc28.elf`): stdout contained `M1_COPULA_CHOLESKY_PASS`, `M1_COPULA_SWEEP_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.

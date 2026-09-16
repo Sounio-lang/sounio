@@ -86,7 +86,7 @@ fractional PINN operating range.
 Command (from the repository root):
 
 ```bash
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/special/test_mittag_leffler_d8_grid.sio /tmp/ml_d8_grid.elf && /tmp/ml_d8_grid.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/special/test_mittag_leffler_d8_grid.sio /tmp/ml_d8_grid.elf && chmod +x /tmp/ml_d8_grid.elf && /tmp/ml_d8_grid.elf
 ```
 
 Result:
@@ -113,10 +113,10 @@ The test also covers `alpha in {0.5, 0.7, 0.8, 0.9}` and
 Available consolidated-main regressions:
 
 ```bash
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/special/test_caputo_scalar.sio /tmp/caputo_scalar.elf && /tmp/caputo_scalar.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/special/test_caputo_scalar.sio /tmp/caputo_scalar.elf && chmod +x /tmp/caputo_scalar.elf && /tmp/caputo_scalar.elf
 # D5_CAPUTO_SCALAR_PASS
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && chmod +x /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
 # D5_CAPUTO_TENSOR_PASS
 ```
 
@@ -133,3 +133,30 @@ large-negative values and still emitted `D8_SOUNIO_CROSSVAL_EMIT_PASS`.  The
 D.8 Python comparison script may still need a precision-output cleanup because
 its current CSV parser receives Sounio values through six-decimal `print_f64`
 formatting.
+
+## Reproduction commands (2026-09-16)
+
+The 3 `bin/souc-lean-single-x86_64` lines above run the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and include a `chmod +x` step. Until 2026-09-16 those lines invoked
+`bin/souc-linux-x86_64` (sha256
+`a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and contained no `chmod +x` step.
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `tests/stdlib/special/test_mittag_leffler_d8_grid.sio` (ELF `/tmp/ml_d8_grid.elf`): stdout contained `ML_NEGATIVE_Z_FIX_PASS`
+- `tests/stdlib/special/test_caputo_scalar.sio` (ELF `/tmp/caputo_scalar.elf`): stdout contained `D5_CAPUTO_SCALAR_PASS`
+- `tests/stdlib/tensor/test_caputo_l1_tape.sio` (ELF `/tmp/caputo_l1_tape.elf`): stdout contained `D5_CAPUTO_TENSOR_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.

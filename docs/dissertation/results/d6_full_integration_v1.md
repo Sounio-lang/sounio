@@ -175,19 +175,19 @@ Compiler pin:
 Commands (from the repository root):
 
 ```bash
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_pinn_full_integration_d6.sio /tmp/d6_pinn.elf && /tmp/d6_pinn.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/nn/test_pinn_full_integration_d6.sio /tmp/d6_pinn.elf && chmod +x /tmp/d6_pinn.elf && /tmp/d6_pinn.elf
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio /tmp/d2_hardening.elf && /tmp/d2_hardening.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio /tmp/d2_hardening.elf && chmod +x /tmp/d2_hardening.elf && /tmp/d2_hardening.elf
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && chmod +x /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/d4_optimizer_integration.sio /tmp/d4_optimizer.elf && /tmp/d4_optimizer.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/run-pass/d4_optimizer_integration.sio /tmp/d4_optimizer.elf && chmod +x /tmp/d4_optimizer.elf && /tmp/d4_optimizer.elf
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && chmod +x /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
 
 bash scripts/ci/dissertation_pbpk_suite_gate.sh
 
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio /tmp/mc28.elf && /tmp/mc28.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio /tmp/mc28.elf && chmod +x /tmp/mc28.elf && /tmp/mc28.elf
 ```
 
 Results:
@@ -204,3 +204,33 @@ Results:
 ## Gate
 
 `D6_FULL_INTEGRATION_PASS`
+
+## Reproduction commands (2026-09-16)
+
+The 6 `bin/souc-lean-single-x86_64` lines above run the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and include a `chmod +x` step. Until 2026-09-16 those lines invoked
+`bin/souc-linux-x86_64` (sha256
+`a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and contained no `chmod +x` step.
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `tests/stdlib/nn/test_pinn_full_integration_d6.sio` (ELF `/tmp/d6_pinn.elf`): stdout contained `D6_FULL_INTEGRATION_PASS`
+- `tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio` (ELF `/tmp/d2_hardening.elf`): stdout contained `D2_HARDENED_GENERAL_SHAPES_PASS`
+- `tests/stdlib/nn/test_nn_primitives_d3.sio` (ELF `/tmp/d3_nn_primitives.elf`): stdout contained `D3_NN_PRIMITIVES_PASS`
+- `tests/run-pass/d4_optimizer_integration.sio` (ELF `/tmp/d4_optimizer.elf`): stdout contained `D4_OPTIMIZER_INTEGRATION_PASS`
+- `tests/stdlib/tensor/test_caputo_l1_tape.sio` (ELF `/tmp/caputo_l1_tape.elf`): stdout contained `D5_CAPUTO_TENSOR_PASS`
+- `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio` (ELF `/tmp/mc28.elf`): stdout contained `M1_COPULA_CHOLESKY_PASS`, `M1_COPULA_SWEEP_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.

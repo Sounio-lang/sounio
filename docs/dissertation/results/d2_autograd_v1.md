@@ -63,7 +63,7 @@ sha256=3cbea2b475e79737046f8ccf463c07d22cd5fb678fd479a032ee04bd8e19da93
 Focused run (from the repository root):
 
 ```text
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2.sio /tmp/d2_autograd.elf && /tmp/d2_autograd.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2.sio /tmp/d2_autograd.elf && chmod +x /tmp/d2_autograd.elf && /tmp/d2_autograd.elf
 D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS
 ```
 
@@ -90,3 +90,28 @@ autograd library. The op tags and backward functions are present, but the
 compiler/runtime still shows fragile behavior around stored shape metadata for
 deep intermediate tensors. D.3/D.5 tensor work should keep the same flat,
 explicit-gradient style until a broader shape-metadata regression suite lands.
+
+## Reproduction commands (2026-09-16)
+
+The `bin/souc-lean-single-x86_64` line above runs the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and includes a `chmod +x` step. Until 2026-09-16 that line invoked
+`bin/souc-linux-x86_64` (sha256
+`a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and contained no `chmod +x` step.
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `tests/stdlib/tensor/test_tensor_autograd_d2.sio` (ELF `/tmp/d2_autograd.elf`): stdout contained `D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.

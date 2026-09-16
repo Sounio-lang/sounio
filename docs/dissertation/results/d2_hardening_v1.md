@@ -80,7 +80,7 @@ sha256=3cbea2b475e79737046f8ccf463c07d22cd5fb678fd479a032ee04bd8e19da93
 Focused hardening test (from the repository root):
 
 ```text
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio /tmp/d2_hardening.elf && /tmp/d2_hardening.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio /tmp/d2_hardening.elf && chmod +x /tmp/d2_hardening.elf && /tmp/d2_hardening.elf
 
 D2_HARDENED_GENERAL_SHAPES_PASS
 ```
@@ -102,7 +102,7 @@ It also checks finite-difference gradients within `1e-6` absolute tolerance for:
 Original D.2 bootstrap regression:
 
 ```text
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2.sio /tmp/d2_autograd.elf && /tmp/d2_autograd.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2.sio /tmp/d2_autograd.elf && chmod +x /tmp/d2_autograd.elf && /tmp/d2_autograd.elf
 
 D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS
 ```
@@ -113,3 +113,29 @@ This branch intentionally does not merge or edit the D.3 worktree. The D.3 XOR
 integration rerun is therefore left to the D.3 branch after it incorporates this
 D.2 hardening commit. This preserves the user constraint that this lane only
 touch D.2-owned files.
+
+## Reproduction commands (2026-09-16)
+
+The 2 `bin/souc-lean-single-x86_64` lines above run the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and include a `chmod +x` step. Until 2026-09-16 those lines invoked
+`bin/souc-linux-x86_64` (sha256
+`a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and contained no `chmod +x` step.
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio` (ELF `/tmp/d2_hardening.elf`): stdout contained `D2_HARDENED_GENERAL_SHAPES_PASS`
+- `tests/stdlib/tensor/test_tensor_autograd_d2.sio` (ELF `/tmp/d2_autograd.elf`): stdout contained `D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.

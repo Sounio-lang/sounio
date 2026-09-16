@@ -64,7 +64,7 @@ path. The final D.3 rerun commit keeps all work scoped to
 Focused test (from the repository root):
 
 ```text
-cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
+cd "$(git rev-parse --show-toplevel)" && bin/souc-lean-single-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && chmod +x /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
 
 D3_NN_PRIMITIVES_PASS
 ```
@@ -107,3 +107,28 @@ D.3 now closes the requested rerun gate on the hardened D.2 tape. The remaining
 engineering caution is not a D.3 gate blocker: constructor-time tape mutation
 inside a struct-returning Dense constructor remains fragile in this compiler
 lane, so Dense binding is performed explicitly in the active caller tape.
+
+## Reproduction commands (2026-09-16)
+
+The `bin/souc-lean-single-x86_64` line above runs the lean_single seed (sha256
+`9d7892132aa0a9cf839df4560bf968628dc30fda4af978a4efc4a99b4e8f89f5`, most recently changed by merge
+commit `09aedffafa`) and includes a `chmod +x` step. Until 2026-09-16 that line invoked
+`bin/souc-linux-x86_64` (sha256
+`a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`) and contained no `chmod +x` step.
+
+Run as written today, a line without `chmod +x` exits 126, with `Permission denied` reported
+by the launcher: both binaries write the ELF with mode `-rw-r--r--` under umask 0022. How the
+earlier runs recorded in this note were invoked is not recorded here, and earlier paragraphs
+naming `bin/souc-linux-x86_64` describe those runs.
+
+Measured 2026-09-16 at HEAD `169ac84463`, from the repository root, at the documented `/tmp`
+ELF paths (none existed beforehand; each was removed afterwards). Each source below was
+compiled and run with the seed and with `bin/souc-linux-x86_64`; every build exited 0, every
+run exited 0 after `chmod +x`, and for each source the two binaries' stdout was byte-identical
+(stdout only, not the ELF bytes):
+
+- `tests/stdlib/nn/test_nn_primitives_d3.sio` (ELF `/tmp/d3_nn_primitives.elf`): stdout contained `D3_NN_PRIMITIVES_PASS`
+
+Any other line in the blocks above — expected-output markers, `rg` searches, gate scripts —
+was not run and is not part of this comparison. The values recorded elsewhere in this note
+were not re-derived.
