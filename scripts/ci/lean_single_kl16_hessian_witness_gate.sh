@@ -14,9 +14,8 @@
 #   - transcendental / two-arg builtins on channels 4–7
 #   - inter-procedural SSHADOW across user calls
 #     (tests/run-pass/gtt_interprocedural_topology.sio still expects 0.0)
-#   - epistemic_hessian_8inputs H[4,5](e*f): seed currently prints 7.000000
-#     (analytic target is 1.0; H[0,4] and H[7,7] already match). Pin the
-#     observed seed output so 16b must update the gate when it lands 1.0.
+# Note: H[4,5]=7.0 under the old 8-input fixture was DCE dropping unused
+# measure slots (fixed in the witness with * 0.0 anchors), not a seed miss.
 #
 # println(f64) is __native_print_f64_n(_, 6); expected lines use that format.
 set -euo pipefail
@@ -76,10 +75,9 @@ run_witness transcendentals \
   tests/run-pass/epistemic_hessian_transcendentals.sio \
   $'-0.500000\n0.000000\n0.500000\n0.000000\n1.000000\n0.000000'
 
-# Observed lean_single seed output (H[4,5] still 7.0 — see header residual).
 run_witness eight_inputs \
   tests/run-pass/epistemic_hessian_8inputs.sio \
-  $'1.000000\n7.000000\n1.000000\n2.000000'
+  $'1.000000\n1.000000\n1.000000\n2.000000'
 
 run_witness two_arg \
   tests/run-pass/epistemic_hessian_two_arg.sio \
