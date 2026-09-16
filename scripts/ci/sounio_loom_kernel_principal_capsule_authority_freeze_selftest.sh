@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-kernel-principal-capsule-authority-v1-20260828.txt"
+MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-kernel-principal-capsule-authority-v2-20260916.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-kernel-principal-capsule-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/kernel-principal-capsule-one"
 RUNTIME_TWO="$TEST_ROOT/kernel-principal-capsule-two"
@@ -61,7 +61,7 @@ hash_u32_csv() {
 
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-kernel-principal-capsule-authority-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-kernel-principal-capsule-authority-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'
@@ -74,6 +74,12 @@ hash_u32_csv() {
 for surface in exec_attached commit_attached ci_attached; do
   [[ "$(field "$surface")" == false ]] || fail "$surface was promoted during freeze"
 done
+
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS ]] || fail 'unexpected change class'
+[[ "$(field semantics_module_changed)" == false ]] || fail 'semantic module changed'
+predecessor="$ROOT_DIR/$(field predecessor_manifest_path)"
+[[ "$(file_hash "$predecessor")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor manifest drifted'
+[[ "$(record_field "$predecessor" source_sha256)" == "$(field source_sha256)" ]] || fail 'semantic module differs from predecessor'
 
 garden_commit="$(field garden_commit)"
 executable_commit="$(field sounio_executable_commit)"
