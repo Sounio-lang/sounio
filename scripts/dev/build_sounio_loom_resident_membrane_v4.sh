@@ -66,11 +66,11 @@ adapt_entrypoint() {
   local entrypoint="$1" replacement="$2" output="$3"
   grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$entrypoint" ||
     fail "main signature changed: $entrypoint"
-  [[ "$(grep -Fxc '    let raw = read_line()' "$entrypoint")" == 1 ]] ||
+  [[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$entrypoint")" == 1 ]] ||
     fail "input boundary changed: $entrypoint"
   sed \
     -e "s/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn $replacement() -> i64 with IO, Mut, Div, Panic {/" \
-    -e 's/^    let raw = read_line()$/    let raw = resident_membrane_v4_read_line()/' \
+    -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_v4_read_line()/' \
     "$entrypoint" > "$output"
 }
 

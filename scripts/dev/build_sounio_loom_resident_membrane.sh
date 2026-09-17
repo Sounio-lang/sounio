@@ -69,20 +69,20 @@ compiled="$work/sounio-loom-resident-membrane-runtime"
 
 grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$MEMBRANE_ENTRYPOINT" ||
   fail 'subprocess-membrane main signature changed'
-[[ "$(grep -Fxc '    let raw = read_line()' "$MEMBRANE_ENTRYPOINT")" == 1 ]] ||
+[[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$MEMBRANE_ENTRYPOINT")" == 1 ]] ||
   fail 'subprocess-membrane input boundary changed'
 sed \
   -e 's/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn subprocess_membrane_decide_one() -> i64 with IO, Mut, Div, Panic {/' \
-  -e 's/^    let raw = read_line()$/    let raw = resident_membrane_read_line()/' \
+  -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_read_line()/' \
   "$MEMBRANE_ENTRYPOINT" > "$membrane_adapter"
 
 grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$RESIDENT_ENTRYPOINT" ||
   fail 'resident-authority main signature changed'
-[[ "$(grep -Fxc '    let raw = read_line()' "$RESIDENT_ENTRYPOINT")" == 1 ]] ||
+[[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$RESIDENT_ENTRYPOINT")" == 1 ]] ||
   fail 'resident-authority input boundary changed'
 sed \
   -e 's/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn resident_authority_decide_one() -> i64 with IO, Mut, Div, Panic {/' \
-  -e 's/^    let raw = read_line()$/    let raw = resident_membrane_read_line()/' \
+  -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_read_line()/' \
   "$RESIDENT_ENTRYPOINT" > "$resident_adapter"
 
 # Source assembly and adapter derivation are mechanical. Both decisions remain
