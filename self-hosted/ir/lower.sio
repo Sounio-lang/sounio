@@ -745,6 +745,91 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     h + n.len
 }
 
+// Module names that appear in a `use` declaration of any loaded module.
+//
+// `use chemistry::equilibrium;` then `equilibrium::solve_ab_c_equil(..)` is a
+// call to the free fn `solve_ab_c_equil`: the function namespace is flat
+// (lean_single flattens `a::b::f` to `f` for the same reason). Without this
+// set expr_to_callee_name_ref could not tell a module prefix from a type, so it
+// mangled the call as `equilibrium_solve_ab_c_equil` -- a name with no body --
+// and native codegen emitted a ud2 stub (NATIVE_REFUSAL empty_stub_ud2, SIGILL
+// at run time) while `check` stayed green.
+//
+// POSITIVE evidence only: a segment counts as a module when a `use` names it,
+// it starts lowercase, and at the call site it is not a known struct or enum.
+// Everything else keeps the Type::method mangling.
+var LOWER_USE_MODULE_COUNT: i64 = 0
+var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+
+fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_USE_MODULE_COUNT {
+        if LOWER_USE_MODULE_HASH[i as usize] == h {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_use_module_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 {
+        return
+    }
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if lower_use_module_known(n) {
+        return
+    }
+    if LOWER_USE_MODULE_COUNT >= 1024 {
+        return
+    }
+    LOWER_USE_MODULE_HASH[LOWER_USE_MODULE_COUNT as usize] = fo_name_hash(n)
+    LOWER_USE_MODULE_COUNT = LOWER_USE_MODULE_COUNT + 1
+}
+
+// Segment k of a path, by recursion like ir_string_list_last (no by-value
+// self-reassignment of the StringList).
+fn lower_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => lower_string_list_nth_name(*rest, k - 1),
+        _ => ir_empty_name(),
+    }
+}
+
+// Record every segment of every `use` path. For `use a::b::*` and
+// `use a::b::{x}` the path is `a::b`, all modules. `use a::f;` may name an
+// item; noting `f` is harmless because a call spelled `f::g` still has to pass
+// the call-site type checks.
+pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemUse {
+                    var k: i64 = 0
+                    while k < item_ref.use_path.seg_count {
+                        lower_use_module_note(lower_string_list_nth_name(item_ref.use_path.segments, k))
+                        k = k + 1
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
     acc * 33 + name_hash
 }
@@ -5437,6 +5522,9 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 pub fn fo_preregister_program_items_multipass(
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // Same every-module-before-body-lowering timing that module-qualified
+    // calls need: see LOWER_USE_MODULE_HASH.
+    lower_use_modules_collect(items)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5446,6 +5534,7 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_use_modules_collect(&items)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -18729,10 +18818,62 @@ impl Lowerer {
         (lo, dst)
     }
 
+    fn callee_segment_names_type(self, seg: Name) -> bool with Mut, Panic, Div {
+        if lower_struct_layout_index_of(&(*self.struct_layouts), seg) >= 0 {
+            return true
+        }
+        var i: i64 = 0
+        while i < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, seg) {
+                return true
+            }
+            i = i + 1
+        }
+        false
+    }
+
+    // `mod::f`, `a::mod::f`, `mod::Type::method`: drop the leading segments that
+    // name a module (LOWER_USE_MODULE_HASH) and are not a struct/enum known here.
+    // Empty when nothing was dropped, so the caller keeps Type::method mangling.
+    fn callee_path_module_stripped_name(self, p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+        if p.seg_count < 2 || LOWER_USE_MODULE_COUNT <= 0 {
+            return ir_empty_name()
+        }
+        var k: i64 = 0
+        while k < p.seg_count - 1 {
+            let seg = lower_string_list_nth_name(p.segments, k)
+            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) {
+                break
+            }
+            k = k + 1
+        }
+        if k == 0 {
+            return ir_empty_name()
+        }
+        let last = ir_path_last_name(p)
+        let remaining = p.seg_count - k
+        if remaining == 1 {
+            // An impl method whose lowercase type is spelled like a module keeps
+            // the mangled name that already has a body.
+            if k == 1 && lowerer_lookup_fn_id_by_name_ref(&self, ir_mangle_method_name(lower_string_list_nth_name(p.segments, 0), last)) >= 0 {
+                return ir_empty_name()
+            }
+            return last
+        }
+        if remaining == 2 {
+            return ir_mangle_method_name(lower_string_list_nth_name(p.segments, k), last)
+        }
+        ir_empty_name()
+    }
+
     fn expr_to_callee_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if e.kind == ExprKind::ExprIdent {
             e.name
         } else if e.kind == ExprKind::ExprPath {
+            let module_stripped = self.callee_path_module_stripped_name(e.path)
+            if module_stripped.len > 0 {
+                return module_stripped
+            }
             // Type::method → Type_method (matches ir_mangle_method_name for impl methods).
             // Using only the first path segment mis-resolves E::of as bare "E" (body-less).
             let first = ir_path_first_name(e.path)
