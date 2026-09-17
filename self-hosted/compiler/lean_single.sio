@@ -642,6 +642,14 @@ var VAR_CH_SET:  [i64; 2048] = [0; 2048]
 var B5_VSHADOW: [i64; 16] = [-1; 16]
 var B5_ARG_VCOUNT:  i64 = 0
 
+// KL-16c inter-procedural FO ch0 + H[0,0]: mirror β⁵ variance path.
+// Caller captures per-arg EXPR_SSHADOW / EXPR_HSHADOW_00 before the next
+// arg overwrites them; stores into BSS; callee prologue seeds VAR_*;
+// return writes RET BSS; caller reloads into EXPR_* and clears other
+// channel EXPR shadows so last-arg leak dies.
+var B16_SSHADOW:     [i64; 16] = [-1; 16]
+var B16_HSHADOW_00:  [i64; 16] = [-1; 16]
+
 // β⁹ GTT inter-procedural topology: at user-fn call sites, union argument
 // channel sets into the return value's EXPR_CH_SET. Conservative upper
 // bound — the return is assumed to depend on every argument. Body-level
@@ -1021,6 +1029,11 @@ var B5_RET_VSHADOW_BSS_OFF: i64 = 0
 // Caller stores argument variance values here before a direct call;
 // callee prologue reads them into parameter VAR_VSHADOW slots.
 var B5_ARG_VSHADOW_BSS_OFF: i64 = 0
+// KL-16c: FO ch0 + H[0,0] interproc BSS (mirror β⁵ layout).
+var B16_RET_SSHADOW_BSS_OFF: i64 = 0
+var B16_RET_HSHADOW_00_BSS_OFF: i64 = 0
+var B16_ARG_SSHADOW_BSS_OFF: i64 = 0
+var B16_ARG_HSHADOW_00_BSS_OFF: i64 = 0
 
 // Box::new bump-arena state (emitted-binary runtime). Replaces the per-Box mmap(4096)
 // allocator (no-free, page-rounded -> 42GB RSS during self-host bodies lowering, job 2478).
@@ -15081,16 +15094,26 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     b4s_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
                 }
                 compile_or()                          // first arg (expr)
+                // KL-16c: save FO shadows before k clobbers them (mirror hessian_of).
+                // Without this, sensitivity_of(call(...), 0) always saw 0.
+                let b4s_saved_s0 = EXPR_SSHADOW
+                let b4s_saved_s1 = EXPR_SSHADOW_1
+                let b4s_saved_s2 = EXPR_SSHADOW_2
+                let b4s_saved_s3 = EXPR_SSHADOW_3
+                let b4s_saved_s4 = EXPR_SSHADOW_4
+                let b4s_saved_s5 = EXPR_SSHADOW_5
+                let b4s_saved_s6 = EXPR_SSHADOW_6
+                let b4s_saved_s7 = EXPR_SSHADOW_7
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 // Read channel index k before compile_or advances EP
                 var b4s_k: i64 = 0
                 if TK[EP as usize] == 4 { b4s_k = TV[EP as usize] }
                 compile_or()                          // second arg (k)
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                var b4s_sshadow: i64 = EXPR_SSHADOW
-                var b4s_sshadow_1: i64 = EXPR_SSHADOW_1
-                var b4s_sshadow_2: i64 = EXPR_SSHADOW_2
-                var b4s_sshadow_3: i64 = EXPR_SSHADOW_3
+                var b4s_sshadow: i64 = b4s_saved_s0
+                var b4s_sshadow_1: i64 = b4s_saved_s1
+                var b4s_sshadow_2: i64 = b4s_saved_s2
+                var b4s_sshadow_3: i64 = b4s_saved_s3
                 if b4s_arg_vi >= 0 && VAR_SSHADOW[b4s_arg_vi as usize] >= 0 {
                     b4s_sshadow = VAR_SSHADOW[b4s_arg_vi as usize]
                 }
@@ -15109,6 +15132,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if b4s_sshadow_2 >= 0 { emit_load_var(b4s_sshadow_2) } else { emit_imm64(0) }
                 } else if b4s_k == 3 {
                     if b4s_sshadow_3 >= 0 { emit_load_var(b4s_sshadow_3) } else { emit_imm64(0) }
+                } else if b4s_k == 4 {
+                    if b4s_saved_s4 >= 0 { emit_load_var(b4s_saved_s4) } else { emit_imm64(0) }
+                } else if b4s_k == 5 {
+                    if b4s_saved_s5 >= 0 { emit_load_var(b4s_saved_s5) } else { emit_imm64(0) }
+                } else if b4s_k == 6 {
+                    if b4s_saved_s6 >= 0 { emit_load_var(b4s_saved_s6) } else { emit_imm64(0) }
+                } else if b4s_k == 7 {
+                    if b4s_saved_s7 >= 0 { emit_load_var(b4s_saved_s7) } else { emit_imm64(0) }
                 } else {
                     if b4s_sshadow >= 0 { emit_load_var(b4s_sshadow) } else { emit_imm64(0) }
                 }
@@ -18220,6 +18251,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
+                // KL-16c: capture FO ch0 + H[0,0] for this argument
+                if argc < 16 {
+                    B16_SSHADOW[argc as usize] = EXPR_SSHADOW
+                    B16_HSHADOW_00[argc as usize] = EXPR_HSHADOW_00
+                }
                 // β⁹ GTT: capture this argument's channel topology before the
                 // next arg's compile_or() overwrites EXPR_CH_SET.
                 if argc < 16 { B9_ARG_CH_SET[argc as usize] = EXPR_CH_SET }
@@ -18414,6 +18450,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + b5_pvi * 8)
                         b5_pvi = b5_pvi + 1
                     }
+                    // KL-16c: store arg FO ch0 + H[0,0] into BSS (same rcx-save window)
+                    var b16_pvi: i64 = 0
+                    while b16_pvi < B5_ARG_VCOUNT && b16_pvi < 16 {
+                        let b16_ss = B16_SSHADOW[b16_pvi as usize]
+                        if b16_ss >= 0 { emit_load_var(b16_ss) } else { emit_imm64(0) }
+                        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16_pvi * 8)
+                        let b16_hs = B16_HSHADOW_00[b16_pvi as usize]
+                        if b16_hs >= 0 { emit_load_var(b16_hs) } else { emit_imm64(0) }
+                        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16_pvi * 8)
+                        b16_pvi = b16_pvi + 1
+                    }
                     em(0x59)
                     emit_direct_fn_call_x86(fi, abi_argc)
                 }
@@ -18532,6 +18579,28 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else if b5_exact_slot >= 0 {
                         EXPR_VSHADOW = b5_exact_slot
                     }
+                    // KL-16c: load callee FO ch0 + H[0,0] from BSS; clear other
+                    // channel EXPR_* so last-arg leak cannot survive the call.
+                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                    let b16_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(b16_sret)
+                    EXPR_SSHADOW = b16_sret
+                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                    let b16_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(b16_hret)
+                    EXPR_HSHADOW_00 = b16_hret
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
                     // Restore f64 result
                     emit_load_var(b5_res)
                 }
@@ -20957,8 +21026,14 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_SSHADOW_7 = b4s7_res
         }
         // β¹¹: rebuild Var from FO sensitivities after product sens is complete.
+        // KL-16c: do NOT overwrite when GUM product variance already ran.
+        // Interproc FO prologue always seeds VAR_SSHADOW (slot ≥ 0 even when
+        // the BSS value is 0.0). That makes left_sshadow live inside callees
+        // that only carry measure variance — β¹¹ would then replace
+        // var(a*b)=a²·var(b)+b²·var(a) with Σ s_k² (e.g. scale(a,2) → 4
+        // instead of 16). Keep FO-rebuild only when no GUM vshadow was live.
         if left_f64 == 1 && op == 19 {
-            if EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 || EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0 {
+            if (EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 || EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0) && (left_vshadow < 0 && right_vshadow < 0) {
                 EXPR_VSHADOW = emit_fo_var_from_sens_x86(
                     EXPR_SSHADOW, EXPR_SSHADOW_1, EXPR_SSHADOW_2, EXPR_SSHADOW_3,
                     EXPR_SSHADOW_4, EXPR_SSHADOW_5, EXPR_SSHADOW_6, EXPR_SSHADOW_7
@@ -27476,6 +27551,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 emit_imm64(0)
             }
             emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
+            // KL-16c: store FO ch0 + H[0,0] alongside variance
+            if EXPR_SSHADOW >= 0 { emit_load_var(EXPR_SSHADOW) } else { emit_imm64(0) }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+            if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
+            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
             em(0x58)  // pop rax (restore return value)
         }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
@@ -32313,6 +32393,10 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     GPU_RT_CULAUNCHKERNEL_PTR_BSS_OFF = bss_alloc_aligned(8)
     B5_RET_VSHADOW_BSS_OFF = bss_alloc_aligned(8)
     B5_ARG_VSHADOW_BSS_OFF = bss_alloc_aligned(128)
+    B16_RET_SSHADOW_BSS_OFF = bss_alloc_aligned(8)
+    B16_RET_HSHADOW_00_BSS_OFF = bss_alloc_aligned(8)
+    B16_ARG_SSHADOW_BSS_OFF = bss_alloc_aligned(128)
+    B16_ARG_HSHADOW_00_BSS_OFF = bss_alloc_aligned(128)
     AST_ARENA_BASE_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_CURSOR_BSS_OFF = bss_alloc_aligned(8)
     AST_ARENA_LIMIT_BSS_OFF = bss_alloc_aligned(8)
@@ -33347,6 +33431,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + param_vi * 8)
                 emit_store_var(pvs)
                 VAR_VSHADOW[param_vi as usize] = pvs
+                // KL-16c: seed FO ch0 + H[0,0] from caller BSS
+                let pss = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi * 8)
+                emit_store_var(pss)
+                VAR_SSHADOW[param_vi as usize] = pss
+                let phs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi * 8)
+                emit_store_var(phs)
+                VAR_HSHADOW_00[param_vi as usize] = phs
             }
             param_vi = param_vi + 1
         }
@@ -33515,6 +33608,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             // Observation boundary: implicit tail return of Unobserved<T> as non-Unobserved
             if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                 tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
+            }
+            // KL-16c: expression-bodied f64 returns (`{ x }`) never hit the
+            // explicit `return` store; write FO ch0 + H[0,0] here while
+            // EXPR_* still hold the tail expression's shadows.
+            if LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
+                em(0x50)
+                if EXPR_SSHADOW >= 0 { emit_load_var(EXPR_SSHADOW) } else { emit_imm64(0) }
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                em(0x58)
             }
             em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
             if CURRENT_SRET_SLOT > 0 {
@@ -37177,15 +37281,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     b4as_arg_vi = var_find_idx(TS[EP as usize], TE[EP as usize])
                 }
                 compile_or_a64()
+                // KL-16c a64: save FO shadows before k clobbers them
+                let b4as_saved_s0 = EXPR_SSHADOW
+                let b4as_saved_s1 = EXPR_SSHADOW_1
+                let b4as_saved_s2 = EXPR_SSHADOW_2
+                let b4as_saved_s3 = EXPR_SSHADOW_3
+                let b4as_saved_s4 = EXPR_SSHADOW_4
+                let b4as_saved_s5 = EXPR_SSHADOW_5
+                let b4as_saved_s6 = EXPR_SSHADOW_6
+                let b4as_saved_s7 = EXPR_SSHADOW_7
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 var b4as_k: i64 = 0
                 if TK[EP as usize] == 4 { b4as_k = TV[EP as usize] }
                 compile_or_a64()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                var b4as_sshadow: i64 = EXPR_SSHADOW
-                var b4as_sshadow_1: i64 = EXPR_SSHADOW_1
-                var b4as_sshadow_2: i64 = EXPR_SSHADOW_2
-                var b4as_sshadow_3: i64 = EXPR_SSHADOW_3
+                var b4as_sshadow: i64 = b4as_saved_s0
+                var b4as_sshadow_1: i64 = b4as_saved_s1
+                var b4as_sshadow_2: i64 = b4as_saved_s2
+                var b4as_sshadow_3: i64 = b4as_saved_s3
                 if b4as_arg_vi >= 0 && VAR_SSHADOW[b4as_arg_vi as usize] >= 0 {
                     b4as_sshadow = VAR_SSHADOW[b4as_arg_vi as usize]
                 }
@@ -37204,6 +37317,14 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     if b4as_sshadow_2 >= 0 { emit_load_var_a64(b4as_sshadow_2) } else { emit_imm64_a64(0) }
                 } else if b4as_k == 3 {
                     if b4as_sshadow_3 >= 0 { emit_load_var_a64(b4as_sshadow_3) } else { emit_imm64_a64(0) }
+                } else if b4as_k == 4 {
+                    if b4as_saved_s4 >= 0 { emit_load_var_a64(b4as_saved_s4) } else { emit_imm64_a64(0) }
+                } else if b4as_k == 5 {
+                    if b4as_saved_s5 >= 0 { emit_load_var_a64(b4as_saved_s5) } else { emit_imm64_a64(0) }
+                } else if b4as_k == 6 {
+                    if b4as_saved_s6 >= 0 { emit_load_var_a64(b4as_saved_s6) } else { emit_imm64_a64(0) }
+                } else if b4as_k == 7 {
+                    if b4as_saved_s7 >= 0 { emit_load_var_a64(b4as_saved_s7) } else { emit_imm64_a64(0) }
                 } else {
                     if b4as_sshadow >= 0 { emit_load_var_a64(b4as_sshadow) } else { emit_imm64_a64(0) }
                 }
@@ -38429,6 +38550,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
+                // KL-16c a64: capture FO ch0 + H[0,0] for this argument
+                if argc < 16 {
+                    B16_SSHADOW[argc as usize] = EXPR_SSHADOW
+                    B16_HSHADOW_00[argc as usize] = EXPR_HSHADOW_00
+                }
                 // β⁹ GTT: capture this argument's channel topology before the
                 // next arg's compile_or_a64() overwrites EXPR_CH_SET (a64 mirror
                 // of x86 path at ~10205).
@@ -38541,6 +38667,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_image_addr_reg_a64(11, GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + b5a_pvi * 8)
                     em32(0xF900016A)  // str x10, [x11]
                     b5a_pvi = b5a_pvi + 1
+                }
+                // KL-16c a64: store arg FO ch0 + H[0,0] into BSS
+                var b16a_pvi: i64 = 0
+                while b16a_pvi < B5_ARG_VCOUNT && b16a_pvi < 16 {
+                    let b16a_ss = B16_SSHADOW[b16a_pvi as usize]
+                    if b16a_ss >= 0 { emit_load_var_a64(b16a_ss) } else { emit_imm64_a64(0) }
+                    em32(0xAA0003EA)
+                    emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16a_pvi * 8)
+                    em32(0xF900016A)
+                    let b16a_hs = B16_HSHADOW_00[b16a_pvi as usize]
+                    if b16a_hs >= 0 { emit_load_var_a64(b16a_hs) } else { emit_imm64_a64(0) }
+                    em32(0xAA0003EA)
+                    emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16a_pvi * 8)
+                    em32(0xF900016A)
+                    b16a_pvi = b16a_pvi + 1
                 }
                 let a64_dargs_drop = emit_setup_call_args_a64(abi_argc)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -38660,6 +38801,29 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     } else if b5a_exact_slot >= 0 {
                         EXPR_VSHADOW = b5a_exact_slot
                     }
+                    // KL-16c a64: load FO ch0 + H[0,0]; clear other EXPR channels
+                    emit_image_addr_a64(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                    em32(0xF9400000)  // ldr x0, [x0]
+                    let b16a_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b16a_sret)
+                    EXPR_SSHADOW = b16a_sret
+                    emit_image_addr_a64(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                    em32(0xF9400000)
+                    let b16a_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b16a_hret)
+                    EXPR_HSHADOW_00 = b16a_hret
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
                     // Restore return value
                     emit_load_var_a64(b5a_res)
                 }
@@ -42335,6 +42499,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             em32(0xAA0003EA)  // mov x10, x0
             emit_image_addr_reg_a64(11, GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
             em32(0xF900016A)  // str x10, [x11]
+            // KL-16c a64: store FO ch0 + H[0,0] alongside variance
+            if EXPR_SSHADOW >= 0 { emit_load_var_a64(EXPR_SSHADOW) } else { emit_imm64_a64(0) }
+            em32(0xAA0003EA)
+            emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+            em32(0xF900016A)
+            if EXPR_HSHADOW_00 >= 0 { emit_load_var_a64(EXPR_HSHADOW_00) } else { emit_imm64_a64(0) }
+            em32(0xAA0003EA)
+            emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+            em32(0xF900016A)
             emit_pop_x0_a64()  // ldr x0, [sp], #16 (restore return value)
         }
         // Restore sp from the frame pointer so any transient expression-stack
@@ -43424,6 +43597,17 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 em32(0xF9400000)  // ldr x0, [x0]
                 emit_store_var_a64(pvs_a)
                 VAR_VSHADOW[param_vi_a as usize] = pvs_a
+                // KL-16c a64: seed FO ch0 + H[0,0]
+                let pss_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_image_addr_a64(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi_a * 8)
+                em32(0xF9400000)
+                emit_store_var_a64(pss_a)
+                VAR_SSHADOW[param_vi_a as usize] = pss_a
+                let phs_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_image_addr_a64(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi_a * 8)
+                em32(0xF9400000)
+                emit_store_var_a64(phs_a)
+                VAR_HSHADOW_00[param_vi_a as usize] = phs_a
             }
             param_vi_a = param_vi_a + 1
         }
@@ -43529,6 +43713,19 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
             if ty_is_unobserved(LAST_STMT_TY) && !ty_is_unobserved(CURRENT_RET_TY) && CURRENT_RET_TY != 5 && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                 tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
             }
+            }
+            // KL-16c a64: expression-bodied f64 fallthrough FO/H00 store
+            if LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
+                emit_push_a64()
+                if EXPR_SSHADOW >= 0 { emit_load_var_a64(EXPR_SSHADOW) } else { emit_imm64_a64(0) }
+                em32(0xAA0003EA)
+                emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                em32(0xF900016A)
+                if EXPR_HSHADOW_00 >= 0 { emit_load_var_a64(EXPR_HSHADOW_00) } else { emit_imm64_a64(0) }
+                em32(0xAA0003EA)
+                emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                em32(0xF900016A)
+                emit_pop_x0_a64()
             }
             // Restore sp from the frame pointer so any transient expression-stack
             // imbalance cannot make the epilogue pop x29/x30 from the wrong address.
