@@ -13,10 +13,10 @@
 #   KL-16b  tests/run-pass/epistemic_hessian_ch47.sio      (unary+two-arg ch 4–7)
 #
 # Residual (still OPEN — not asserted here):
-#   - inter-procedural SSHADOW across user calls
-#     (tests/run-pass/gtt_interprocedural_topology.sio still expects 0.0)
+#   - multi-channel interproc (KL-16c closed FO ch0 + H[0,0] only)
 #   - loop accumulation; if/else merge of shadow slots
 #   - a64 atan2/pow AD (value-only today)
+# See also: scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh
 #
 # println(f64) is __native_print_f64_n(_, 6); expected lines use that format.
 set -euo pipefail
