@@ -16,11 +16,11 @@ CLOSURE_ENTRYPOINT="$ROOT_DIR/tools/loom/effect_closure_authority_main.sio"
 CELL_MODULE="$ROOT_DIR/stdlib/coordination/loom_kernel_invocation_cell_authority.sio"
 CELL_ENTRYPOINT="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority_main.sio"
 DISPATCH_MAIN="$ROOT_DIR/tools/loom/resident_membrane_v3_main.sio"
-MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
-CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
-CELL_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-RESIDENT_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2"
+MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
+CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+CELL_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+RESIDENT_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2"
 OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3}"
 
 fail() {
@@ -77,10 +77,10 @@ for source_path in "$MEMBRANE_MODULE" "$MEMBRANE_ENTRYPOINT" "$RESIDENT_MODULE" 
   "$CELL_MODULE" "$CELL_ENTRYPOINT" "$DISPATCH_MAIN"; do
   [[ -f "$source_path" ]] || fail "resident v3 source is missing: $source_path"
 done
-verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v1 9023
-verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v1 9024
-verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v1 9025
-verify_parent "$CELL_MANIFEST" loom-kernel-invocation-cell-authority-freeze-v1 9029
+verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v2 9023
+verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v2 9024
+verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v2 9025
+verify_parent "$CELL_MANIFEST" loom-kernel-invocation-cell-authority-freeze-v3 9029
 [[ "$(manifest_value "$CELL_MANIFEST" parent_9023_manifest_sha256)" == "$(file_hash "$MEMBRANE_MANIFEST")" ]] ||
   fail 'action 9029 does not bind the current action 9023 manifest'
 [[ "$(manifest_value "$CELL_MANIFEST" parent_9025_manifest_sha256)" == "$(file_hash "$CLOSURE_MANIFEST")" ]] ||
