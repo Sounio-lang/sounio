@@ -6578,8 +6578,11 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         if instr.op == IrOpcode::IrUnaryOp {
             let us = instr.src1
             let us_ok = us >= 0 && us < 256
-            // Fold: -(const) → IrLoadImm(-const)
-            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNeg {
+            // Fold: -(const) → IrLoadImm(-const). Integers only: a float constant
+            // is an IrLoadImm of its bit pattern, and `0 - bits` is not f64
+            // negation (at bits 0 it yields +0.0 where -0.0 is right).
+            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNeg
+                    && !ocp_rebracket_has_float_marker_before(&result, us, i) {
                 let neg_val = 0 - const_val[us as usize]
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, neg_val))
                 if instr.dst >= 0 && instr.dst < 256 {
@@ -7252,10 +7255,16 @@ fn ocp_const_fold_pass_b(
             let cd_instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let cd_s1 = cd_instr.src1; let cd_s2 = cd_instr.src2
             let cd_s1_ok = cd_s1 >= 0 && cd_s1 < 256; let cd_s2_ok = cd_s2 >= 0 && cd_s2 < 256
+            // Integers only. For f64, `0.0 - x` and `-x` differ at x = +0.0
+            // (+0.0 vs -0.0), so the rewrite is not an identity.
             if cd_instr.bin_op == BinaryOp::OpSub
                     && cd_s1_ok && is_const[cd_s1 as usize]
                     && const_val[cd_s1 as usize] == 0
-                    && cd_s2_ok {
+                    && cd_s2_ok
+                    && (cd_instr.imm_flags & 6) == 0
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_s1, i)
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_s2, i)
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_instr.dst, i + 2) {
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cd_instr.dst, UnaryOp::OpNeg, cd_s2))
                 if cd_instr.dst >= 0 && cd_instr.dst < 256 {
                     is_neg[cd_instr.dst as usize]  = true
@@ -9881,7 +9890,9 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             let un = (IR_A_UN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as UnaryOp)
             let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if un == UnaryOp::OpNeg && s1 >= 0 && s1 < 256 && is_const[s1 as usize] {
-                if dst >= 0 && dst < 256 {
+                // Integers only: `0 - bits` is not f64 negation (see pass_a2).
+                let mfi_fn = ir_fn_get(&(*module), fi as usize)
+                if dst >= 0 && dst < 256 && !ocp_rebracket_has_float_marker_before(&mfi_fn, s1, i) {
                     let v = 0 - const_val[s1 as usize]
                     ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, v))
                     is_const[dst as usize] = true
