@@ -20,13 +20,13 @@ GRANT_ENTRYPOINT="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority_main.sio
 ACTIVATION_MODULE="$ROOT_DIR/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio"
 ACTIVATION_ENTRYPOINT="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority_main.sio"
 DISPATCH_MAIN="$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio"
-MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
-CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
-INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
-ACTIVATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
-RESIDENT_V4_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
+CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+ACTIVATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
+RESIDENT_V4_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
 OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5}"
 
 fail() {
@@ -85,12 +85,12 @@ for source_path in "$MEMBRANE_MODULE" "$MEMBRANE_ENTRYPOINT" "$RESIDENT_MODULE" 
   "$DISPATCH_MAIN"; do
   [[ -f "$source_path" ]] || fail "resident v5 source is missing: $source_path"
 done
-verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v1 9023
-verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v1 9024
-verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v1 9025
-verify_parent "$INVOCATION_MANIFEST" loom-kernel-invocation-cell-authority-freeze-v1 9029
-verify_parent "$GRANT_MANIFEST" loom-kernel-exec-grant-cell-authority-freeze-v1 9030
-verify_parent "$ACTIVATION_MANIFEST" loom-kernel-peer-activation-capsule-authority-freeze-v1 9031
+verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v2 9023
+verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v2 9024
+verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v2 9025
+verify_parent "$INVOCATION_MANIFEST" loom-kernel-invocation-cell-authority-freeze-v3 9029
+verify_parent "$GRANT_MANIFEST" loom-kernel-exec-grant-cell-authority-freeze-v2 9030
+verify_parent "$ACTIVATION_MANIFEST" loom-kernel-peer-activation-capsule-authority-freeze-v2 9031
 [[ "$(manifest_value "$GRANT_MANIFEST" parent_9029_manifest_sha256)" == "$(file_hash "$INVOCATION_MANIFEST")" ]] ||
   fail 'action 9030 does not bind the current action 9029 manifest'
 [[ "$(manifest_value "$ACTIVATION_MANIFEST" parent_9030_manifest_sha256)" == "$(file_hash "$GRANT_MANIFEST")" ]] ||
