@@ -39,7 +39,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
-| KL-16 | Hessian Tier-4 on the seed (16a pin; 16b ch4–7 CLOSED) | lean_single |
+| KL-16 | Hessian Tier-4 (16a–16c CLOSED; residual loops/if-merge/multi-ch/a64) | lean_single |
 
 ## Ledger
 
@@ -172,9 +172,13 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   x86 unary/`atan2`/`pow` FO+Hessian to channels 4–7; pins
   `epistemic_hessian_8inputs.sio` at analytic `1.0` and
   `epistemic_hessian_ch47.sio`. Seed refresh + SeedReceipt required.
-- **Residual (OPEN).** Inter-procedural SSHADOW
-  (`gtt_interprocedural_topology.sio` still expects `0.0`); loop
-  accumulation; `if/else` merge of shadow slots; a64 `atan2`/`pow` AD.
+- **KL-16c — CLOSED (seed).** Inter-procedural FO ch0 (`EXPR_SSHADOW`)
+  + `H[0,0]` (`EXPR_HSHADOW_00`) across user `f64 → f64` fns via BSS
+  ARG/RET slots mirroring β⁵ variance. Pin:
+  `tests/run-pass/kl16c_fo_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh`.
+- **Residual (OPEN).** Loop accumulation; `if/else` merge of shadow
+  slots; multi-channel interproc; a64 `atan2`/`pow` AD.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
