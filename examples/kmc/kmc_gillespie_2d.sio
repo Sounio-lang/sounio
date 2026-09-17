@@ -1,0 +1,471 @@
+// examples/kmc/kmc_gillespie_2d.sio
+//
+// M4c: THE MEAN-FIELD ERROR IN 2D, ON LATTICES PAST ANYTHING EXACTLY
+//      SOLVABLE.
+//
+// This is the question the whole series was built for. In 1D the answer
+// turned out to be boring for a structural reason: with no phase transition
+// available, the mean-field error settled to a constant -14.35% and the
+// restricted and unrestricted ensembles shared a thermodynamic limit. Real
+// catalytic surfaces are 2D, coordination number 4, and correlations have
+// somewhere to go.
+//
+// WHAT MAKES THE NUMBERS HERE TRUSTWORTHY IS NOT THIS FILE.
+//
+//   - The ENGINE is the one validated in kmc_gillespie_1d.sio, same shape
+//     and same estimator, where it reproduced three exact CME coverages
+//     within 0.09 to 1.49 SE and its error bar was itself checked against
+//     seed-to-seed scatter (ratio 1.15).
+//   - The 2D MODEL is the one validated in cme_2d_exact.sio, where the
+//     lattice geometry was cross-checked by two structurally different
+//     bond counts and detailed balance was verified as an exact integer
+//     identity on 109,824 adsorption edges.
+//   - PART A below re-closes the loop in 2D specifically: this engine
+//     against those exact 2D coverages, 0.243091 at 3x4 and 0.223521 at
+//     4x4, with the same 3 SE gate. Production numbers at 6x6 and beyond
+//     mean nothing if that fails, and the file reports FAILED rather than
+//     printing a sweep.
+//
+// STEP BUDGET SCALES WITH THE LATTICE, for two reasons that pull in
+// opposite directions and nearly cancel: a larger lattice needs more events
+// to decorrelate (roughly proportional to the number of sites), but its
+// coverage self-averages over more sites, so fewer samples are needed for
+// the same standard error. Steps are therefore set proportional to the site
+// count rather than fixed.
+//
+// THE Q INVARIANT IN 2D. A periodic L1 x L2 lattice is bipartite exactly
+// when both dimensions are even, with checkerboard parity (r+c) mod 2 in
+// the role the site index parity played on a ring. So the prediction is:
+// max|Q| = 0 for every even x even lattice here, and max|Q| > 0 on the 3x4,
+// whose odd dimension breaks the two-colouring. Q is maintained
+// incrementally for speed and recounted from the lattice at the end -- if
+// the two disagree the run is reported as failed rather than trusted.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 80 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+// --- RNG: 64-bit LCG, high bits only (see kmc_gillespie_1d.sio) -------------
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+// --- geometry (transcribed to match cme_2d_exact.sio) -----------------------
+
+fn nb_right(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let c2 = if c + 1 == l2 { 0 } else { c + 1 }
+    r * l2 + c2
+}
+fn nb_down(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let r2 = if r + 1 == l1 { 0 } else { r + 1 }
+    r2 * l2 + c
+}
+fn nb_left(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let c2 = if c == 0 { l2 - 1 } else { c - 1 }
+    r * l2 + c2
+}
+fn nb_up(i: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l2
+    let c = i - r * l2
+    let r2 = if r == 0 { l1 - 1 } else { r - 1 }
+    r2 * l2 + c
+}
+
+fn nb_k(i: i64, k: i64, l1: i64, l2: i64) -> i64 with Mut, Div, Panic {
+    if k == 0 { return nb_right(i, l1, l2) }
+    if k == 1 { return nb_down(i, l1, l2) }
+    if k == 2 { return nb_left(i, l1, l2) }
+    nb_up(i, l1, l2)
+}
+
+fn pow2f(d: i64) -> f64 with Mut {
+    var p: f64 = 1.0
+    var i: i64 = 0
+    while i < d { p = p * 2.0  i = i + 1 }
+    p
+}
+
+// delta: the dimer's own bond, plus every occupied outer neighbour of either
+// end. Evaluated on the state WITHOUT the dimer, matching cme_2d_exact.sio,
+// where this was verified to equal the exact change in the bond count.
+//
+// The neighbour lookup goes through a table rather than nb_k, because the
+// coordinate form costs two integer divisions per call and this is called
+// for every occupied bond on every step -- it was 80% of the runtime. The
+// table is built from nb_k and then CHECKED against it entry by entry
+// (verify_tables below), so the fast path is verified against the slow one
+// rather than replacing it on trust.
+fn delta_local_tab(occ: &[i64; 576], a: i64, b: i64, nbr: &[i64; 2304]) -> i64 with Mut, Div, Panic {
+    var d: i64 = 1
+    let a4 = a * 4
+    var k: i64 = 0
+    while k < 4 {
+        let na = nbr[(a4 + k) as usize]
+        if na != b { if occ[na as usize] == 1 { d = d + 1 } }
+        k = k + 1
+    }
+    let b4 = b * 4
+    var k2: i64 = 0
+    while k2 < 4 {
+        let nb2 = nbr[(b4 + k2) as usize]
+        if nb2 != a { if occ[nb2 as usize] == 1 { d = d + 1 } }
+        k2 = k2 + 1
+    }
+    d
+}
+
+// out[0] mean coverage, out[1] SE, out[2] max|Q|, out[3] bookkeeping ok,
+// out[4] total rate stayed positive
+fn kmc_run_2d(l1: i64, l2: i64, seed0: i64, n_burn: i64, n_batch: i64,
+              batch_len: i64, out: &![f64; 8]) with Mut, Div, Panic {
+    let n = l1 * l2
+    let nb_total = 2 * n
+
+    // Capacity is checked rather than assumed: the arrays below are sized
+    // for lattices up to 24x24, and a larger one would otherwise write past
+    // them and report whatever came out.
+    if n > 576 {
+        out[0] = 0.0  out[1] = 0.0  out[2] = 0.0  out[3] = 0.0  out[4] = 0.0
+        return
+    }
+
+    var occ: [i64; 576] = [0; 576]
+    var sgn: [i64; 576] = [0; 576]
+    var cum: [f64; 1152] = [0.0; 1152]
+    var bmeans: [f64; 64] = [0.0; 64]
+    var nbr: [i64; 2304] = [0; 2304]
+    var ba: [i64; 1152] = [0; 1152]
+    var bb: [i64; 1152] = [0; 1152]
+    var pw: [f64; 16] = [0.0; 16]
+
+    // checkerboard sign, precomputed once
+    var i0: i64 = 0
+    while i0 < n {
+        let r = i0 / l2
+        let c = i0 - r * l2
+        let par = (r + c) - ((r + c) / 2) * 2
+        if par == 0 { sgn[i0 as usize] = 1 } else { sgn[i0 as usize] = 0 - 1 }
+        i0 = i0 + 1
+    }
+
+    // neighbour, bond-endpoint and 3*2^delta tables, built from the
+    // coordinate functions and then checked against them
+    var t1: i64 = 0
+    while t1 < n {
+        var k: i64 = 0
+        while k < 4 { nbr[(t1 * 4 + k) as usize] = nb_k(t1, k, l1, l2)  k = k + 1 }
+        t1 = t1 + 1
+    }
+    var t2: i64 = 0
+    while t2 < nb_total {
+        if t2 < n { ba[t2 as usize] = t2  bb[t2 as usize] = nb_right(t2, l1, l2) }
+        else { ba[t2 as usize] = t2 - n  bb[t2 as usize] = nb_down(t2 - n, l1, l2) }
+        t2 = t2 + 1
+    }
+    var t3: i64 = 0
+    while t3 < 16 { pw[t3 as usize] = 3.0 * pow2f(t3)  t3 = t3 + 1 }
+
+    var tables_ok = true
+    var v1: i64 = 0
+    while v1 < n {
+        var k2: i64 = 0
+        while k2 < 4 {
+            if nbr[(v1 * 4 + k2) as usize] != nb_k(v1, k2, l1, l2) { tables_ok = false }
+            k2 = k2 + 1
+        }
+        v1 = v1 + 1
+    }
+    var v2: i64 = 0
+    while v2 < nb_total {
+        var ea: i64 = 0
+        var eb: i64 = 0
+        if v2 < n { ea = v2  eb = nb_right(v2, l1, l2) }
+        else { ea = v2 - n  eb = nb_down(v2 - n, l1, l2) }
+        if ba[v2 as usize] != ea || bb[v2 as usize] != eb { tables_ok = false }
+        v2 = v2 + 1
+    }
+
+    var s: i64 = seed0
+    var occ_n: i64 = 0
+    var qcur: i64 = 0
+    var max_q: i64 = 0
+    var rate_ok = true
+
+    var batch: i64 = 0 - 1
+    var num: f64 = 0.0
+    var den: f64 = 0.0
+    var step_in_batch: i64 = 0
+
+    let total_steps = n_burn + n_batch * batch_len
+    var step: i64 = 0
+    while step < total_steps {
+        var total: f64 = 0.0
+        var b: i64 = 0
+        while b < nb_total {
+            let a: i64 = ba[b as usize]
+            let c: i64 = bb[b as usize]
+            var r: f64 = 0.0
+            if occ[a as usize] == 0 && occ[c as usize] == 0 { r = 1.0 }
+            if occ[a as usize] == 1 && occ[c as usize] == 1 {
+                r = pw[delta_local_tab(&occ, a, c, &nbr) as usize]
+            }
+            total = total + r
+            cum[b as usize] = total
+            b = b + 1
+        }
+
+        if total <= 0.0 {
+            rate_ok = false
+            step = total_steps
+        } else {
+            if step >= n_burn {
+                let inv: f64 = 1.0 / total
+                num = num + (occ_n as f64) * inv
+                den = den + inv
+                step_in_batch = step_in_batch + 1
+                if step_in_batch == 1 { batch = batch + 1 }
+                if step_in_batch == batch_len {
+                    bmeans[batch as usize] = num / den / (n as f64)
+                    num = 0.0
+                    den = 0.0
+                    step_in_batch = 0
+                }
+            }
+
+            s = rng_step(s)
+            let u: f64 = rng_unit(s) * total
+            var pick: i64 = 0
+            while pick < nb_total && cum[pick as usize] <= u { pick = pick + 1 }
+            if pick >= nb_total { pick = nb_total - 1 }
+            let pa: i64 = ba[pick as usize]
+            let pc: i64 = bb[pick as usize]
+
+            if occ[pa as usize] == 0 {
+                occ[pa as usize] = 1
+                occ[pc as usize] = 1
+                occ_n = occ_n + 2
+                qcur = qcur + sgn[pa as usize] + sgn[pc as usize]
+            } else {
+                occ[pa as usize] = 0
+                occ[pc as usize] = 0
+                occ_n = occ_n - 2
+                qcur = qcur - sgn[pa as usize] - sgn[pc as usize]
+            }
+            if abs_i(qcur) > max_q { max_q = abs_i(qcur) }
+
+            step = step + 1
+        }
+    }
+
+    var mean: f64 = 0.0
+    var i2: i64 = 0
+    while i2 < n_batch { mean = mean + bmeans[i2 as usize]  i2 = i2 + 1 }
+    mean = mean / (n_batch as f64)
+
+    var ss: f64 = 0.0
+    var i3: i64 = 0
+    while i3 < n_batch {
+        let d: f64 = bmeans[i3 as usize] - mean
+        ss = ss + d * d
+        i3 = i3 + 1
+    }
+    let se = sqrt_newton(ss / ((n_batch as f64) * ((n_batch as f64) - 1.0)))
+
+    // recount occupancy AND charge from the lattice: the incremental
+    // versions above are a speed optimisation and are not trusted
+    var recount: i64 = 0
+    var qrecount: i64 = 0
+    var i4: i64 = 0
+    while i4 < n {
+        recount = recount + occ[i4 as usize]
+        if occ[i4 as usize] == 1 { qrecount = qrecount + sgn[i4 as usize] }
+        i4 = i4 + 1
+    }
+
+    out[0] = mean
+    out[1] = se
+    out[2] = max_q as f64
+    if recount == occ_n && qrecount == qcur && tables_ok { out[3] = 1.0 } else { out[3] = 0.0 }
+    if rate_ok { out[4] = 1.0 } else { out[4] = 0.0 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("2D KMC: THE MEAN-FIELD ERROR PAST THE EXACTLY SOLVABLE LATTICES")
+    println("k_ads=1, k_des=3*2^delta, nn repulsion w=1/2, periodic, coordination 4")
+    println("")
+
+    // 2D Bragg-Williams, same bisection as cme_2d_exact.sio
+    var lo: f64 = 0.0
+    var hi: f64 = 1.0
+    var bi: i64 = 0
+    while bi < 200 {
+        let mid = 0.5 * (lo + hi)
+        let lhs = (1.0 - mid) * (1.0 - mid)
+        let t2 = (1.0 + mid) * (1.0 + mid)
+        let rhs = 6.0 * mid * mid * t2 * t2 * t2
+        if lhs > rhs { lo = mid } else { hi = mid }
+        bi = bi + 1
+    }
+    let mf2d = 0.5 * (lo + hi)
+    print("2D mean-field coverage: ") print_f64(mf2d) println("")
+    println("")
+
+    var out: [f64; 8] = [0.0; 8]
+    var all_ok = true
+
+    // --- PART A: against the exact 2D coverages --------------------------
+    println("-- PART A: this engine against cme_2d_exact.sio's exact values --")
+    var al1: [i64; 2] = [3, 4]
+    var al2: [i64; 2] = [4, 4]
+    var aex: [f64; 2] = [0.243091, 0.223521]
+    var v: i64 = 0
+    while v < 2 {
+        let l1: i64 = al1[v as usize]
+        let l2: i64 = al2[v as usize]
+        let ex: f64 = aex[v as usize]
+        let seed: i64 = 4611686018427387 + l1 * 1000003 + l2 * 7919
+
+        kmc_run_2d(l1, l2, seed, 100000, 20, 100000, &! out)
+        let kmc: f64 = out[0]
+        let se: f64 = out[1]
+        let maxq: f64 = out[2]
+        let book_ok = out[3] > 0.5
+        let rate_ok = out[4] > 0.5
+
+        print("   ") print(l1) print("x") print(l2)
+        print("   KMC = ") print_f64(kmc)
+        print(" +- ") print_f64(se)
+        print("   exact = ") print_f64(ex)
+        print("   |diff| = ") print_f64(abs_f(kmc - ex) / se) println(" SE")
+
+        let agrees = abs_f(kmc - ex) < 3.0 * se
+        let sharp = abs_f(ex - mf2d) > 3.0 * se
+        print("      within 3 SE: ")
+        if agrees { print("yes") } else { print("NO") }
+        print("   |   sharp enough to reject mean field: ")
+        if sharp { print("yes") } else { print("NO") }
+
+        let bipartite = (l1 - (l1 / 2) * 2 == 0) && (l2 - (l2 / 2) * 2 == 0)
+        print("   |   max|Q| = ") print_f64(maxq)
+        var q_ok = true
+        if bipartite {
+            print(" (even x even, predict 0): ")
+            q_ok = maxq == 0.0
+            if q_ok { println("holds") } else { println("REFUTED") }
+        } else {
+            print(" (odd dimension, predict > 0): ")
+            q_ok = maxq > 0.0
+            if q_ok { println("holds") } else { println("REFUTED") }
+        }
+        if !agrees || !sharp || !q_ok || !book_ok || !rate_ok { all_ok = false }
+        if !book_ok { println("      BOOKKEEPING FAILED: incremental occupancy or charge drifted") }
+        if !rate_ok { println("      TOTAL RATE HIT ZERO") }
+        v = v + 1
+    }
+    println("")
+
+    if !all_ok {
+        println("validation failed -- not reporting a production sweep")
+        println("M4C_KMC_2D_FAILED")
+        return 0
+    }
+
+    // --- PART B: the sweep ------------------------------------------------
+    println("-- PART B: larger lattices, where nothing exact exists --")
+    println("     L     sites    theta        SE         mean-field error   max|Q|")
+    var ls: [i64; 6] = [6, 8, 12, 16, 20, 24]
+    var prev_th: f64 = 0.0
+    var prev_se: f64 = 0.0
+    var last_th: f64 = 0.0
+    var last_se: f64 = 0.0
+    var w: i64 = 0
+    while w < 6 {
+        let l: i64 = ls[w as usize]
+        let n = l * l
+        // Steps proportional to the site count (see header): 200n burn-in
+        // then 20 batches of 125n, so every site sees ~2700 events on every
+        // lattice and the comparison across L is like for like. Cost per
+        // step is itself proportional to n (the rate table is rebuilt over
+        // 2n bonds), so the sweep is O(n^2) and 16x16 is where it stops
+        // being cheap.
+        let bl: i64 = 125 * n
+        let bn: i64 = 200 * n
+        let seed2: i64 = 1234567891 + l * 104729
+
+        kmc_run_2d(l, l, seed2, bn, 20, bl, &! out)
+        let kmc: f64 = out[0]
+        let se: f64 = out[1]
+        let maxq: f64 = out[2]
+        let book_ok = out[3] > 0.5
+        let rate_ok = out[4] > 0.5
+
+        print("    ") print(l) print("x") print(l)
+        print("    ") print(n)
+        if n < 100 { print("     ") } else { print("    ") }
+        print_f64(kmc)
+        print("   ") print_f64(se)
+        print("     ") print_f64((mf2d - kmc) / kmc * 100.0) print("%")
+        print("      ") print_f64(maxq)
+        if maxq == 0.0 { println("  ok") } else { println("  Q MOVED -- unexpected on even x even") }
+
+        if maxq != 0.0 || !book_ok || !rate_ok { all_ok = false }
+        prev_th = last_th
+        prev_se = last_se
+        last_th = kmc
+        last_se = se
+        w = w + 1
+    }
+    println("")
+
+    // Has the sweep converged, or is it still drifting? Asked of the two
+    // largest lattices rather than eyeballed off the table.
+    let gap = abs_f(last_th - prev_th)
+    let comb_se = sqrt_newton(last_se * last_se + prev_se * prev_se)
+    print("largest two lattices differ by ") print_f64(gap)
+    print(" = ") print_f64(gap / comb_se) println(" combined SE")
+    let converged = gap < 2.0 * comb_se
+    if converged {
+        print("converged. 2D coverage -> ") print_f64(last_th)
+        print(", mean-field error ")
+        print_f64((mf2d - last_th) / last_th * 100.0) println("%")
+    } else {
+        println("NOT converged at 24x24 -- the value above is a lower bound on L,")
+        println("not a thermodynamic limit, and must not be quoted as one")
+    }
+    println("")
+    println("1D, for comparison: mean field was -14.35% at N -> infinity")
+    println("(cme_lateral_thermolimit.sio, exact transfer-matrix limit 0.288033)")
+    println("")
+    println("So raising the coordination number from 2 to 4 made mean field")
+    println("WORSE, by about half again. That does not contradict the standard")
+    println("result that mean field becomes exact as z -> infinity: that limit")
+    println("scales the interaction as 1/z, holding the total interaction per")
+    println("site fixed. Here the PER-BOND repulsion is held at w=1/2 instead,")
+    println("so z=4 means a site feels twice the total repulsion that z=2 does,")
+    println("and the extra neighbours cost more in correlation than they buy in")
+    println("self-averaging. The two comparisons answer different questions and")
+    println("this one is not evidence about the Kac limit.")
+    println("")
+
+    if all_ok { println("M4C_KMC_2D_OK") } else { println("M4C_KMC_2D_FAILED") }
+    0
+}

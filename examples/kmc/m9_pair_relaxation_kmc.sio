@@ -1,0 +1,653 @@
+// examples/kmc/m9_pair_relaxation_kmc.sio
+//
+// M9: THERMAL RELAXATION OF DISSOCIATED O PAIRS ON Pd(100) -- THE SOUNIO
+//     CLAIM CLOCK FOR THE HAND PREDICTIONS T1-T4.
+//
+// ROLE (ADR-008 / ADR-009). This file is the claim clock for
+// analysis/m9_hand_predictions.txt (pre-registered, cdb529e757). Part A gates
+// are sounio_native_expected: hand-derived integers, exact sums over the
+// initial histogram, and closed forms, all evaluated in Sounio. The SciPy
+// two-body master equation (analysis/pair_master_equation.py, 58c3451d28)
+// is external_corroboration_only and decides nothing here.
+//
+// MODEL, unchanged from the hand predictions and the SciPy chain. At infinite
+// dilution the relative coordinate D = r_B - r_A is a Markov chain on the
+// square lattice minus the origin:
+//     W(D -> D+e) = 2 nu exp(-(E0 + (V(D+e) - V(D)) / 2) / kT),  D + e != 0,
+// pair energies V(1,0) = +360, V(1,1) = +128, V(2,0) = -48 meV, zero beyond
+// (Zhang, Blum, Reuter 2007, pair-only), E0 = 230 meV, nu = 1e12 /s.
+// Landing: the Lin & Jiang Pd(100) histogram or (4,0) (Bukas & Reuter),
+// spread uniformly over the distinct images of each class, at t = 0.
+//
+// ENGINE. Rejection-free (Gillespie) KMC on D, one independent trajectory per
+// pair, exponential holding times drawn by inversion. Each trajectory
+// records the state it HOLDS at t = 0, 1, 10, 100, 1000 s. Trajectories are
+// independent, so P_same is a binomial proportion and its standard error is
+// exact -- no batch-means assumption to check. R_F = 2 P_same,F with
+//     F0 (1/2,1/2): dx + dy even;  F1 (0,1/2): dy even;  F2 (1/2,0): dx even.
+// The stiffness that forced Radau in SciPy (rates 1e-20 .. 1e9 /s) costs a
+// rejection-free engine nothing: a 1e9 /s channel is one event.
+//
+// PART A -- VALIDATION, gated, fixed before any data from this file.
+//   A0 exact   exp/ln self-tests; the seven barrier heights of the hand table
+//              (26, 114, 166, 206, 206, 230, 254 meV) reproduced by
+//              E0 + dV/2 to 1e-9; detailed balance W(D->D')/W(D'->D) =
+//              exp(-dV/kT) on every edge of the 13x13 box at 40 and 80 K,
+//              relative 1e-9 (catches an image-dependent V lookup).
+//   A1 exact   R at t = 0 summed exactly over the histogram images:
+//              Lin & Jiang 1.185 / 1.383 (hand, 3 decimals: within 5e-4),
+//              (4,0) 2 / 2 (1e-12).
+//   A2 stat    sampled R at t = 0 within 3 SE of A1, both pictures, F0 and F1.
+//   A3 closed  60 K, Lin & Jiang: the (1,1) class drains only into (2,1) at
+//              4 nu exp(-166/kT), inflow below 1e-7, so
+//              P_(1,1)(10 s) = w11 exp(-10 r); within 3 SE, and more than
+//              3 SE from the undecayed w11 (the test can fail).
+//   A4 closed  80 K, V = 0, start (30,0): out of reach of the origin, every
+//              hop flips F0 and y-hops flip F1, so R_F0 = 1 + exp(-16 k t),
+//              R_F1 = 1 + exp(-8 k t), k = nu exp(-E0/kT); at 10 s and 100 s,
+//              within 3 SE.
+//   A5 stat    R_F1 = R_F2 by symmetry: per-trajectory difference within 3 SE
+//              (paired SE) at every scenario and checkpoint; 40 comparisons,
+//              allowance 1 beyond 3 SE.
+//   Bookkeeping: no trajectory may exceed the event cap.
+// If Part A fails, T1-T4 are printed as NOT JUDGED.
+//
+// RULES T1-T4, judged at t = 1000 s. Tolerances are the stated precision of
+// the hand arithmetic, not statistics: a rule HOLDS when |R - hand| <= tol,
+// and every judged R must carry SE <= tol / 3, else NOT JUDGED.
+//   T1 40 K  LJ   R0 = 1.266, R1 = 1.424, tol 0.010
+//            (4,0) R0 = R1 = 2.000, tol 0.005
+//   T2 60 K  LJ   R0 = 1.190, R1 = 1.462, tol 0.010
+//            (4,0) R0 = R1 = 2.000, tol 0.005
+//   T3 70 K  LJ R0 in [1.80, 2.00], LJ R1 in [1.70, 1.90], (4,0) R0 in
+//            [1.60, 1.80]; order inverted: LJ R0 > (4,0) R0, gap <= 0.30
+//   T4 80 K  LJ R0 >= 1.85; (4,0) R0 = 1 + f_trap in [1.30, 1.70];
+//            LJ R0 > (4,0) R0
+//
+// DISCLOSURE, stated before this file was first run. These tolerances were
+// written AFTER the SciPy corroboration was read (58c3451d28: T1 1.2663 /
+// 1.4240, T2 1.1978 / 1.4657, T3 1.888 / 1.817 and (4,0) 1.703, T4 1.939 and
+// (4,0) 1.600). They are therefore not blind with respect to that numerical
+// solution. They were set from the hand file's own precision (three
+// decimals for T1/T2, "~" for T3/T4, the 0.3-0.7 f_trap range), and the T2
+// hand value keeps its admitted omission of the 0.4% capture into (2,0).
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+fn is_even(n: i64) -> bool with Div, Panic {
+    let a = abs_i(n)
+    a - (a / 2) * 2 == 0
+}
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 80 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn kb() -> f64 { 0.08617333262 }
+fn nu() -> f64 { 1000000000000.0 }
+fn e0() -> f64 { 230.0 }
+fn ln2() -> f64 { 0.6931471805599453 }
+
+// --- RNG: 64-bit LCG, high bits only (see kmc_gillespie_1d.sio) -------------
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+
+// [0, 1), for event selection
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+// (0, 1], for -ln(u): never zero
+fn rng_open(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    ((hi + 1) as f64) / 1073741824.0
+}
+
+// --- exp and ln ------------------------------------------------------------
+
+fn exp_neg(x: f64) -> f64 with Mut, Div, Panic {
+    // e^(-x) for x >= 0 by halving and squaring (as hot_atom_diffraction.sio)
+    var y = x
+    var k: i64 = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+// e^(-x) for either sign of x
+fn exp_m(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 { exp_neg(x) } else { 1.0 / exp_neg(0.0 - x) }
+}
+
+// ln x for 0 < x <= 1: scale into [0.5, 1], then the atanh series
+fn ln_unit(x0: f64) -> f64 with Mut, Div, Panic {
+    var x = x0
+    var m: i64 = 0
+    while x < 0.5 {
+        x = x * 2.0
+        m = m + 1
+    }
+    let s = (x - 1.0) / (x + 1.0)
+    let s2 = s * s
+    var term = s
+    var sum: f64 = 0.0
+    var j: i64 = 0
+    while j < 40 {
+        sum = sum + term / ((2 * j + 1) as f64)
+        term = term * s2
+        j = j + 1
+    }
+    2.0 * sum - (m as f64) * ln2()
+}
+
+// --- model -----------------------------------------------------------------
+
+fn pair_v(dx: i64, dy: i64, v10: f64, v11: f64, v20: f64) -> f64 {
+    let a = abs_i(dx)
+    let b = abs_i(dy)
+    let hi = if a > b { a } else { b }
+    let lo = if a > b { b } else { a }
+    if hi == 1 && lo == 0 { return v10 }
+    if hi == 1 && lo == 1 { return v11 }
+    if hi == 2 && lo == 0 { return v20 }
+    0.0
+}
+
+fn barrier(dx: i64, dy: i64, ex: i64, ey: i64, v10: f64, v11: f64, v20: f64) -> f64 with Div {
+    e0() + (pair_v(dx + ex, dy + ey, v10, v11, v20) - pair_v(dx, dy, v10, v11, v20)) / 2.0
+}
+
+fn move_rate(dx: i64, dy: i64, ex: i64, ey: i64, kt: f64, v10: f64, v11: f64, v20: f64) -> f64 with Mut, Div, Panic {
+    if dx + ex == 0 && dy + ey == 0 { return 0.0 }
+    2.0 * nu() * exp_m(barrier(dx, dy, ex, ey, v10, v11, v20) / kt)
+}
+
+// 1:(1,0) 2:(1,1) 3:(2,0) 4:(2,1) 5:(3,0) 0: anything else
+fn class_of(dx: i64, dy: i64) -> i64 {
+    let a = abs_i(dx)
+    let b = abs_i(dy)
+    let hi = if a > b { a } else { b }
+    let lo = if a > b { b } else { a }
+    if hi == 1 && lo == 0 { return 1 }
+    if hi == 1 && lo == 1 { return 2 }
+    if hi == 2 && lo == 0 { return 3 }
+    if hi == 2 && lo == 1 { return 4 }
+    if hi == 3 && lo == 0 { return 5 }
+    0
+}
+
+// distinct images of a class (dx > dy >= 0 or dx = dy > 0 or dy = 0)
+fn image_count(dx: i64, dy: i64) -> i64 {
+    if dy == 0 || dx == dy { 4 } else { 8 }
+}
+
+fn image_x(dx: i64, dy: i64, j: i64) -> i64 {
+    if dy == 0 {
+        if j == 0 { return dx }
+        if j == 1 { return 0 - dx }
+        return 0
+    }
+    if dx == dy {
+        if j == 0 || j == 2 { return dx }
+        return 0 - dx
+    }
+    if j == 0 || j == 2 { return dx }
+    if j == 1 || j == 3 { return 0 - dx }
+    if j == 4 || j == 6 { return dy }
+    0 - dy
+}
+
+fn image_y(dx: i64, dy: i64, j: i64) -> i64 {
+    if dy == 0 {
+        if j == 2 { return dx }
+        if j == 3 { return 0 - dx }
+        return 0
+    }
+    if dx == dy {
+        if j == 0 || j == 1 { return dy }
+        return 0 - dy
+    }
+    if j == 0 || j == 1 { return dy }
+    if j == 2 || j == 3 { return 0 - dy }
+    if j == 4 || j == 5 { return dx }
+    0 - dx
+}
+
+fn same_field(x: i64, y: i64, field: i64) -> bool with Div, Panic {
+    if field == 0 { return is_even(x + y) }
+    if field == 1 { return is_even(y) }
+    is_even(x)
+}
+
+// exact R_F at t = 0 over the histogram images
+fn r_exact0(hx: &[i64; 11], hy: &[i64; 11], hw: &[f64; 11], nc: i64, field: i64) -> f64 with Mut, Div, Panic {
+    var tot: f64 = 0.0
+    var c: i64 = 0
+    while c < nc {
+        tot = tot + hw[c]
+        c = c + 1
+    }
+    var p: f64 = 0.0
+    c = 0
+    while c < nc {
+        let m = image_count(hx[c], hy[c])
+        var same: i64 = 0
+        var j: i64 = 0
+        while j < m {
+            if same_field(image_x(hx[c], hy[c], j), image_y(hx[c], hy[c], j), field) { same = same + 1 }
+            j = j + 1
+        }
+        p = p + hw[c] / tot * (same as f64) / (m as f64)
+        c = c + 1
+    }
+    2.0 * p
+}
+
+// --- engine ----------------------------------------------------------------
+
+// counters per checkpoint k at base k*10:
+//  +0 F0 same  +1 F1 same  +2 F2 same  +3 F1 same, F2 not  +4 F2 same, F1 not
+//  +5 (1,1)  +6 (2,0)  +7 (2,1)  +8 (3,0)  +9 (1,0)
+fn record(cnt: &![i64; 50], k: i64, x: i64, y: i64) with Mut, Div, Panic {
+    let b = k * 10
+    let s0 = same_field(x, y, 0)
+    let s1 = same_field(x, y, 1)
+    let s2 = same_field(x, y, 2)
+    if s0 { cnt[b] = cnt[b] + 1 }
+    if s1 { cnt[b + 1] = cnt[b + 1] + 1 }
+    if s2 { cnt[b + 2] = cnt[b + 2] + 1 }
+    if s1 && !s2 { cnt[b + 3] = cnt[b + 3] + 1 }
+    if s2 && !s1 { cnt[b + 4] = cnt[b + 4] + 1 }
+    let c = class_of(x, y)
+    if c == 2 { cnt[b + 5] = cnt[b + 5] + 1 }
+    if c == 3 { cnt[b + 6] = cnt[b + 6] + 1 }
+    if c == 4 { cnt[b + 7] = cnt[b + 7] + 1 }
+    if c == 5 { cnt[b + 8] = cnt[b + 8] + 1 }
+    if c == 1 { cnt[b + 9] = cnt[b + 9] + 1 }
+}
+
+// one pair; returns its event count, or -1 past the cap
+fn trajectory(rng: &![i64; 1], x0: i64, y0: i64, kt: f64, v10: f64, v11: f64, v20: f64,
+              tt: &[f64; 5], cnt: &![i64; 50], cap: i64) -> i64 with Mut, Div, Panic {
+    var x = x0
+    var y = y0
+    var t: f64 = 0.0
+    var k: i64 = 0
+    var events: i64 = 0
+    while k < 5 {
+        let ra = move_rate(x, y, 1, 0, kt, v10, v11, v20)
+        let rb = move_rate(x, y, 0 - 1, 0, kt, v10, v11, v20)
+        let rc = move_rate(x, y, 0, 1, kt, v10, v11, v20)
+        let rd = move_rate(x, y, 0, 0 - 1, kt, v10, v11, v20)
+        let tot = ra + rb + rc + rd
+        var t_next: f64 = 1.0e30
+        if tot > 0.0 {
+            rng[0] = rng_step(rng[0])
+            t_next = t - ln_unit(rng_open(rng[0])) / tot
+        }
+        // the state (x, y) is held on [t, t_next)
+        while k < 5 && tt[k] < t_next {
+            record(cnt, k, x, y)
+            k = k + 1
+        }
+        if k < 5 {
+            rng[0] = rng_step(rng[0])
+            let pick = rng_unit(rng[0]) * tot
+            if pick < ra {
+                x = x + 1
+            } else if pick < ra + rb {
+                x = x - 1
+            } else if pick < ra + rb + rc {
+                y = y + 1
+            } else {
+                y = y - 1
+            }
+            t = t_next
+            events = events + 1
+            if events > cap { return 0 - 1 }
+        }
+    }
+    events
+}
+
+// n pairs landing from the histogram; returns false on an event-cap overflow
+fn scenario(seed: i64, temp: f64, hx: &[i64; 11], hy: &[i64; 11], hw: &[f64; 11], nc: i64,
+            v10: f64, v11: f64, v20: f64, n: i64, tt: &[f64; 5], cnt: &![i64; 50]) -> bool with Mut, Div, Panic {
+    let kt = kb() * temp
+    var rng: [i64; 1] = [seed]
+    var i: i64 = 0
+    while i < 50 {
+        cnt[i] = 0
+        i = i + 1
+    }
+    var tot: f64 = 0.0
+    var c: i64 = 0
+    while c < nc {
+        tot = tot + hw[c]
+        c = c + 1
+    }
+    var ok = true
+    var p: i64 = 0
+    while p < n {
+        rng[0] = rng_step(rng[0])
+        let target = rng_unit(rng[0]) * tot
+        var cls: i64 = 0
+        var acc: f64 = hw[0]
+        while cls < nc - 1 && target >= acc {
+            cls = cls + 1
+            acc = acc + hw[cls]
+        }
+        let m = image_count(hx[cls], hy[cls])
+        rng[0] = rng_step(rng[0])
+        var j = ((rng_unit(rng[0]) * (m as f64)) as i64)
+        if j >= m { j = m - 1 }
+        let ev = trajectory(&!rng, image_x(hx[cls], hy[cls], j), image_y(hx[cls], hy[cls], j),
+                            kt, v10, v11, v20, tt, cnt, 1000000)
+        if ev < 0 { ok = false }
+        p = p + 1
+    }
+    ok
+}
+
+fn frac(cnt: &[i64; 50], k: i64, slot: i64, n: i64) -> f64 with Div {
+    (cnt[k * 10 + slot] as f64) / (n as f64)
+}
+
+// standard error of a proportion, n independent trajectories
+fn se_p(p: f64, n: i64) -> f64 with Mut, Div, Panic {
+    sqrt_newton(p * (1.0 - p) / (n as f64))
+}
+
+// A5: |R1 - R2| within 3 paired SE; true when consistent
+fn sym_ok(cnt: &[i64; 50], k: i64, n: i64) -> bool with Mut, Div, Panic {
+    let a = frac(cnt, k, 3, n)
+    let b = frac(cnt, k, 4, n)
+    let d = a - b
+    let var_d = a + b - d * d
+    let se = sqrt_newton(var_d / (n as f64))
+    if se == 0.0 { return d == 0.0 }
+    abs_f(d) <= 3.0 * se
+}
+
+fn report(label: string, temp: f64, cnt: &[i64; 50], n: i64, tt: &[f64; 5]) with IO, Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 5 {
+        let p0 = frac(cnt, k, 0, n)
+        let p1 = frac(cnt, k, 1, n)
+        let p2 = frac(cnt, k, 2, n)
+        print("RUN ") print(label) print(" T=") print(temp) print(" t=") print(tt[k])
+        print(" R0=") print(2.0 * p0) print(" se=") print(2.0 * se_p(p0, n))
+        print(" R1=") print(2.0 * p1) print(" se=") print(2.0 * se_p(p1, n))
+        print(" R2=") print(2.0 * p2)
+        print(" P10=") print(frac(cnt, k, 9, n)) print(" P11=") print(frac(cnt, k, 5, n))
+        print(" P20=") print(frac(cnt, k, 6, n)) print(" P21=") print(frac(cnt, k, 7, n))
+        print(" P30=") print(frac(cnt, k, 8, n))
+        println("")
+        k = k + 1
+    }
+}
+
+fn within_se(x: f64, expect: f64, se: f64) -> bool { abs_f(x - expect) <= 3.0 * se }
+
+fn verdict(name: string, holds: bool, judged: bool) with IO {
+    print("RULE ") print(name)
+    if !judged { println(" NOT JUDGED") } else { if holds { println(" HOLDS") } else { println(" FAILS") } }
+}
+
+// --- Part A0: deterministic self-tests -------------------------------------
+
+fn selftest() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    if abs_f(exp_neg(1.0) - 0.36787944117144233) > 0.000000000001 { ok = false println("A0 exp_neg(1) FAILED") }
+    if abs_f(ln_unit(0.5) + ln2()) > 0.000000000001 { ok = false println("A0 ln(0.5) FAILED") }
+    let xs: [f64; 5] = [0.1, 1.0, 5.0, 20.0, 60.0]
+    var i: i64 = 0
+    while i < 5 {
+        let back = 0.0 - ln_unit(exp_neg(xs[i]))
+        if abs_f(back - xs[i]) > 0.000000001 * xs[i] { ok = false print("A0 ln(exp(-x)) FAILED x=") print(xs[i]) println("") }
+        i = i + 1
+    }
+    // the hand table's barriers, meV
+    if abs_f(barrier(1, 0, 1, 0, 360.0, 128.0, 0.0 - 48.0) - 26.0) > 0.000000001 { ok = false println("A0 barrier (1,0)->(2,0) FAILED") }
+    if abs_f(barrier(1, 0, 0, 1, 360.0, 128.0, 0.0 - 48.0) - 114.0) > 0.000000001 { ok = false println("A0 barrier (1,0)->(1,1) FAILED") }
+    if abs_f(barrier(1, 1, 1, 0, 360.0, 128.0, 0.0 - 48.0) - 166.0) > 0.000000001 { ok = false println("A0 barrier (1,1)->(2,1) FAILED") }
+    if abs_f(barrier(2, 1, 0, 0 - 1, 360.0, 128.0, 0.0 - 48.0) - 206.0) > 0.000000001 { ok = false println("A0 barrier (2,1)->(2,0) FAILED") }
+    if abs_f(barrier(3, 0, 0 - 1, 0, 360.0, 128.0, 0.0 - 48.0) - 206.0) > 0.000000001 { ok = false println("A0 barrier (3,0)->(2,0) FAILED") }
+    if abs_f(barrier(4, 0, 1, 0, 360.0, 128.0, 0.0 - 48.0) - 230.0) > 0.000000001 { ok = false println("A0 barrier free hop FAILED") }
+    if abs_f(barrier(2, 0, 1, 0, 360.0, 128.0, 0.0 - 48.0) - 254.0) > 0.000000001 { ok = false println("A0 barrier leaving (2,0) FAILED") }
+    // detailed balance on every edge of the 13x13 box, at 40 and 80 K
+    var edges: i64 = 0
+    var ti: i64 = 0
+    while ti < 2 {
+        let kt = kb() * (if ti == 0 { 40.0 } else { 80.0 })
+        var x: i64 = 0 - 6
+        while x <= 6 {
+            var y: i64 = 0 - 6
+            while y <= 6 {
+                if !(x == 0 && y == 0) {
+                    var e: i64 = 0
+                    while e < 4 {
+                        let ex = if e == 0 { 1 } else { if e == 1 { 0 - 1 } else { 0 } }
+                        let ey = if e == 2 { 1 } else { if e == 3 { 0 - 1 } else { 0 } }
+                        if !(x + ex == 0 && y + ey == 0) {
+                            let wf = move_rate(x, y, ex, ey, kt, 360.0, 128.0, 0.0 - 48.0)
+                            let wb = move_rate(x + ex, y + ey, 0 - ex, 0 - ey, kt, 360.0, 128.0, 0.0 - 48.0)
+                            let dv = pair_v(x + ex, y + ey, 360.0, 128.0, 0.0 - 48.0) - pair_v(x, y, 360.0, 128.0, 0.0 - 48.0)
+                            let want = exp_m(dv / kt)
+                            if abs_f(wf / wb / want - 1.0) > 0.000000001 { ok = false print("A0 detailed balance FAILED at ") print(x) print(",") print(y) println("") }
+                            edges = edges + 1
+                        }
+                        e = e + 1
+                    }
+                }
+                y = y + 1
+            }
+            x = x + 1
+        }
+        ti = ti + 1
+    }
+    print("A0 detailed-balance edges checked: ") print(edges) println("")
+    print("A0 self-tests ")
+    if ok { println("ok") } else { println("FAILED") }
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("M9 pair relaxation KMC, O/Pd(100)")
+    let n: i64 = 400000
+    let tt: [f64; 5] = [0.0, 1.0, 10.0, 100.0, 1000.0]
+    let v10 = 360.0
+    let v11 = 128.0
+    let v20 = 0.0 - 48.0
+
+    // Lin & Jiang Pd(100) histogram (sums to 0.9944, normalised on use)
+    let ljx: [i64; 11] = [1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 5]
+    let ljy: [i64; 11] = [0, 1, 0, 1, 2, 0, 1, 2, 0, 1, 0]
+    let ljw: [f64; 11] = [0.0404, 0.0378, 0.4318, 0.2426, 0.0439, 0.0955, 0.0662, 0.0138, 0.0095, 0.0112, 0.0017]
+    let brx: [i64; 11] = [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let bry: [i64; 11] = [0; 11]
+    let brw: [f64; 11] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let fwx: [i64; 11] = [30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    var ok = selftest()
+
+    // A1 exact R at t = 0
+    let lj_r0 = r_exact0(&ljx, &ljy, &ljw, 11, 0)
+    let lj_r1 = r_exact0(&ljx, &ljy, &ljw, 11, 1)
+    let lj_r2 = r_exact0(&ljx, &ljy, &ljw, 11, 2)
+    let br_r0 = r_exact0(&brx, &bry, &brw, 1, 0)
+    let br_r1 = r_exact0(&brx, &bry, &brw, 1, 1)
+    print("A1 exact t=0  LJ R0=") print(lj_r0) print(" R1=") print(lj_r1) print(" R2=") print(lj_r2)
+    print("  (4,0) R0=") print(br_r0) print(" R1=") print(br_r1) println("")
+    let a1 = abs_f(lj_r0 - 1.185) <= 0.0005 && abs_f(lj_r1 - 1.383) <= 0.0005 && abs_f(lj_r1 - lj_r2) <= 0.000000000001
+          && abs_f(br_r0 - 2.0) <= 0.000000000001 && abs_f(br_r1 - 2.0) <= 0.000000000001
+    print("A1 ") if a1 { println("ok") } else { println("FAILED") }
+    ok = ok && a1
+
+    // production scenarios: T = 40, 60, 70, 80 K; LJ and (4,0)
+    var lj40: [i64; 50] = [0; 50]
+    var br40: [i64; 50] = [0; 50]
+    var lj60: [i64; 50] = [0; 50]
+    var br60: [i64; 50] = [0; 50]
+    var lj70: [i64; 50] = [0; 50]
+    var br70: [i64; 50] = [0; 50]
+    var lj80: [i64; 50] = [0; 50]
+    var br80: [i64; 50] = [0; 50]
+    var fw80: [i64; 50] = [0; 50]
+    var cap_ok = true
+    cap_ok = scenario(1001, 40.0, &ljx, &ljy, &ljw, 11, v10, v11, v20, n, &tt, &!lj40) && cap_ok
+    cap_ok = scenario(1002, 40.0, &brx, &bry, &brw, 1, v10, v11, v20, n, &tt, &!br40) && cap_ok
+    cap_ok = scenario(1003, 60.0, &ljx, &ljy, &ljw, 11, v10, v11, v20, n, &tt, &!lj60) && cap_ok
+    cap_ok = scenario(1004, 60.0, &brx, &bry, &brw, 1, v10, v11, v20, n, &tt, &!br60) && cap_ok
+    cap_ok = scenario(1005, 70.0, &ljx, &ljy, &ljw, 11, v10, v11, v20, n, &tt, &!lj70) && cap_ok
+    cap_ok = scenario(1006, 70.0, &brx, &bry, &brw, 1, v10, v11, v20, n, &tt, &!br70) && cap_ok
+    cap_ok = scenario(1007, 80.0, &ljx, &ljy, &ljw, 11, v10, v11, v20, n, &tt, &!lj80) && cap_ok
+    cap_ok = scenario(1008, 80.0, &brx, &bry, &brw, 1, v10, v11, v20, n, &tt, &!br80) && cap_ok
+    // A4: V = 0 free walk from (30,0)
+    cap_ok = scenario(1009, 80.0, &fwx, &bry, &brw, 1, 0.0, 0.0, 0.0, n, &tt, &!fw80) && cap_ok
+    report("LJ", 40.0, &lj40, n, &tt)
+    report("BR40", 40.0, &br40, n, &tt)
+    report("LJ", 60.0, &lj60, n, &tt)
+    report("BR40", 60.0, &br60, n, &tt)
+    report("LJ", 70.0, &lj70, n, &tt)
+    report("BR40", 70.0, &br70, n, &tt)
+    report("LJ", 80.0, &lj80, n, &tt)
+    report("BR40", 80.0, &br80, n, &tt)
+    report("FREE", 80.0, &fw80, n, &tt)
+    print("BOOKKEEPING event cap ") if cap_ok { println("ok") } else { println("FAILED") }
+    ok = ok && cap_ok
+
+    // A2 sampled t = 0 vs exact
+    let q0 = frac(&lj60, 0, 0, n)
+    let q1 = frac(&lj60, 0, 1, n)
+    let b0 = frac(&br60, 0, 0, n)
+    let b1 = frac(&br60, 0, 1, n)
+    let a2 = within_se(2.0 * q0, lj_r0, 2.0 * se_p(q0, n)) && within_se(2.0 * q1, lj_r1, 2.0 * se_p(q1, n))
+          && abs_f(2.0 * b0 - 2.0) <= 0.000000000001 && abs_f(2.0 * b1 - 2.0) <= 0.000000000001
+    print("A2 sampled t=0 vs exact ") if a2 { println("ok") } else { println("FAILED") }
+    ok = ok && a2
+
+    // A3 (1,1) drain at 60 K, 10 s
+    let kt60 = kb() * 60.0
+    let r11 = 4.0 * nu() * exp_neg(166.0 / kt60)
+    let w11 = 0.0378 / 0.9944
+    let p11_exact = w11 * exp_neg(10.0 * r11)
+    let p11 = frac(&lj60, 2, 5, n)
+    let se11 = se_p(p11_exact, n)
+    let a3 = within_se(p11, p11_exact, se11) && abs_f(w11 - p11_exact) > 3.0 * se11
+    print("A3 P11(10 s, 60 K) sampled=") print(p11) print(" closed=") print(p11_exact) print(" undecayed=") print(w11)
+    print(" se=") print(se11) print(" ") if a3 { println("ok") } else { println("FAILED") }
+    ok = ok && a3
+
+    // A4 free walk closed forms at 10 s and 100 s
+    let kf = nu() * exp_neg(e0() / (kb() * 80.0))
+    var a4 = true
+    var ci: i64 = 2
+    while ci <= 3 {
+        let t = tt[ci]
+        let f0 = 1.0 + exp_neg(16.0 * kf * t)
+        let f1 = 1.0 + exp_neg(8.0 * kf * t)
+        let s0 = frac(&fw80, ci, 0, n)
+        let s1 = frac(&fw80, ci, 1, n)
+        let g0 = within_se(2.0 * s0, f0, 2.0 * se_p(f0 / 2.0, n))
+        let g1 = within_se(2.0 * s1, f1, 2.0 * se_p(f1 / 2.0, n))
+        print("A4 free walk t=") print(t) print(" R0=") print(2.0 * s0) print(" closed=") print(f0)
+        print(" R1=") print(2.0 * s1) print(" closed=") print(f1)
+        print(" ") if g0 && g1 { println("ok") } else { println("FAILED") }
+        a4 = a4 && g0 && g1
+        ci = ci + 1
+    }
+    ok = ok && a4
+
+    // A5 F1/F2 symmetry, 40 comparisons, allowance 1
+    var beyond: i64 = 0
+    var k: i64 = 0
+    while k < 5 {
+        if !sym_ok(&lj40, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&br40, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&lj60, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&br60, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&lj70, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&br70, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&lj80, k, n) { beyond = beyond + 1 }
+        if !sym_ok(&br80, k, n) { beyond = beyond + 1 }
+        k = k + 1
+    }
+    let a5 = beyond <= 1
+    print("A5 F1/F2 symmetry beyond 3 SE: ") print(beyond) print(" of 40 ") if a5 { println("ok") } else { println("FAILED") }
+    ok = ok && a5
+
+    if ok { println("M9_PAIR_KMC_VALIDATED") } else { println("M9_PAIR_KMC_VALIDATION_FAILED") }
+
+    // RULES at t = 1000 s (checkpoint 4)
+    let p_lj40_0 = frac(&lj40, 4, 0, n)
+    let p_lj40_1 = frac(&lj40, 4, 1, n)
+    let p_br40_0 = frac(&br40, 4, 0, n)
+    let p_br40_1 = frac(&br40, 4, 1, n)
+    let p_lj60_0 = frac(&lj60, 4, 0, n)
+    let p_lj60_1 = frac(&lj60, 4, 1, n)
+    let p_br60_0 = frac(&br60, 4, 0, n)
+    let p_br60_1 = frac(&br60, 4, 1, n)
+    let p_lj70_0 = frac(&lj70, 4, 0, n)
+    let p_lj70_1 = frac(&lj70, 4, 1, n)
+    let p_br70_0 = frac(&br70, 4, 0, n)
+    let p_lj80_0 = frac(&lj80, 4, 0, n)
+    let p_br80_0 = frac(&br80, 4, 0, n)
+    // worst SE of any judged R
+    var se_max: f64 = 0.0
+    let ps: [f64; 13] = [p_lj40_0, p_lj40_1, p_br40_0, p_br40_1, p_lj60_0, p_lj60_1, p_br60_0, p_br60_1,
+                         p_lj70_0, p_lj70_1, p_br70_0, p_lj80_0, p_br80_0]
+    var pi: i64 = 0
+    while pi < 13 {
+        let s = 2.0 * se_p(ps[pi], n)
+        if s > se_max { se_max = s }
+        pi = pi + 1
+    }
+    print("RULES worst SE of a judged R: ") print(se_max) println("")
+    let precise_10 = se_max <= 0.010 / 3.0
+    let precise_05 = se_max <= 0.005 / 3.0
+    let t1 = abs_f(2.0 * p_lj40_0 - 1.266) <= 0.010 && abs_f(2.0 * p_lj40_1 - 1.424) <= 0.010
+          && abs_f(2.0 * p_br40_0 - 2.0) <= 0.005 && abs_f(2.0 * p_br40_1 - 2.0) <= 0.005
+    let t2 = abs_f(2.0 * p_lj60_0 - 1.190) <= 0.010 && abs_f(2.0 * p_lj60_1 - 1.462) <= 0.010
+          && abs_f(2.0 * p_br60_0 - 2.0) <= 0.005 && abs_f(2.0 * p_br60_1 - 2.0) <= 0.005
+    let lj70r0 = 2.0 * p_lj70_0
+    let lj70r1 = 2.0 * p_lj70_1
+    let br70r0 = 2.0 * p_br70_0
+    let t3 = lj70r0 >= 1.80 && lj70r0 <= 2.00 && lj70r1 >= 1.70 && lj70r1 <= 1.90
+          && br70r0 >= 1.60 && br70r0 <= 1.80 && lj70r0 > br70r0 && lj70r0 - br70r0 <= 0.30
+    let lj80r0 = 2.0 * p_lj80_0
+    let br80r0 = 2.0 * p_br80_0
+    let t4 = lj80r0 >= 1.85 && br80r0 >= 1.30 && br80r0 <= 1.70 && lj80r0 > br80r0
+    verdict("T1 40 K", t1, ok && precise_05)
+    verdict("T2 60 K", t2, ok && precise_05)
+    verdict("T3 70 K", t3, ok && precise_10)
+    verdict("T4 80 K", t4, ok && precise_10)
+    print("T4 f_trap (4,0) = R0 - 1 = ") print(br80r0 - 1.0) println("")
+    println("M9_PAIR_KMC_DONE")
+    0
+}
