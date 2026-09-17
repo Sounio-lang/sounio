@@ -745,6 +745,85 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     h + n.len
 }
 
+// Tuple-return slots that are f64 ARRAYS, per fn name: bit k set when slot k of
+// the declared return type is `[f64; N]`.
+//
+// `let (ov, ou) = f()` desugars to `let __tupN = f()` + `let ov = __tupN.0`. The
+// #1502 tuple mask only records SCALAR f64 slots and returns_float is 0 for
+// `([f64; 8], [f64; 8])`, so `ov` was never marked as an f64-element array and
+// `p * ov[j]` converted the element's f64 BITS as an i64 (kinetics
+// structural_ensemble under Madaros). Kept out of returns_float on purpose: that
+// code is read by codegen, the optimizer and the IR serializer, where a new
+// nonzero value for these tuples would change behaviour.
+var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
+var LOWER_FN_TUPLE_ARR_HASH: [i64; 4096] = [0; 4096]
+var LOWER_FN_TUPLE_ARR_MASK: [i64; 4096] = [0; 4096]
+
+fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 31 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_f64_array_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 {
+        return 0
+    }
+    let h = fo_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_FN_TUPLE_ARR_COUNT {
+        if LOWER_FN_TUPLE_ARR_HASH[i as usize] == h {
+            return LOWER_FN_TUPLE_ARR_MASK[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemFn {
+                    let fd_opt_ref: &Option<Box<FnDef>> = &item_ref.fn_def
+                    match *fd_opt_ref {
+                        Some(fd) => {
+                            let rt_opt_ref: &Option<Box<TypeExpr>> = &(*fd).return_type
+                            match *rt_opt_ref {
+                                Some(rt) => {
+                                    if (*rt).kind == TypeExprKind::TypeTuple {
+                                        let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
+                                        if mask != 0 && LOWER_FN_TUPLE_ARR_COUNT < 4096 && lower_fn_tuple_f64_array_mask(item_ref.name) == 0 {
+                                            LOWER_FN_TUPLE_ARR_HASH[LOWER_FN_TUPLE_ARR_COUNT as usize] = fo_name_hash(item_ref.name)
+                                            LOWER_FN_TUPLE_ARR_MASK[LOWER_FN_TUPLE_ARR_COUNT as usize] = mask
+                                            LOWER_FN_TUPLE_ARR_COUNT = LOWER_FN_TUPLE_ARR_COUNT + 1
+                                        }
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
     acc * 33 + name_hash
 }
@@ -5437,6 +5516,7 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 pub fn fo_preregister_program_items_multipass(
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    lower_fn_tuple_f64_arrays_collect(items)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5446,6 +5526,7 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_fn_tuple_f64_arrays_collect(&items)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -14356,7 +14437,8 @@ impl Lowerer {
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
             let tuple_idx = lower_name_tuple_index((*e).name)
             if tuple_idx >= 0 {
-                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left)
+                // Low 32 bits only: bits 32+ flag f64-ARRAY slots (handles, not floats).
+                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left) & 4294967295
                 if tuple_mask != 0 {
                     return (tuple_mask >> (tuple_idx as i32)) % 2 == 1
                 }
@@ -16817,15 +16899,38 @@ impl Lowerer {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                var scalar_mask: i64 = 0
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
                     if code >= 1024 {
-                        return code - 1024
+                        scalar_mask = code - 1024
                     }
                 }
-                0
+                scalar_mask + lower_fn_tuple_f64_array_mask(callee_name) * 4294967296
             }
             _ => 0,
+        }
+    }
+
+    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit
+    // 32+K of its mask, recorded from the callee's declared return type).
+    fn expr_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess {
+            return false
+        }
+        let slot = lower_name_tuple_index((*e).name)
+        if slot < 0 || slot >= 31 {
+            return false
+        }
+        match (*e).left {
+            Some(base_expr) => {
+                if (*base_expr).kind != ExprKind::ExprIdent {
+                    return false
+                }
+                let arr_bits = self.lookup_local_tuple_float_mask((*base_expr).name) / 4294967296
+                (arr_bits >> (slot as i32)) % 2 == 1
+            }
+            None => false,
         }
     }
 
@@ -17205,6 +17310,32 @@ impl Lowerer {
         lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
     }
 
+    // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
+    // classifier positively reports as f64). lower_expr_is_f64_array_literal_ref is
+    // a free fn that only sees float literals, casts and binary subtrees of them, so
+    // an array built from computed f64 locals was an integer array and every
+    // `rates[k]` used in arithmetic converted the f64 BITS as an i64: kinetics
+    // test_stoich_matrix read dc[0] = -9.18e18 instead of -0.2 under Madaros.
+    // f64 array literals are homogeneous after typecheck, so the first element is
+    // representative, as in the free fn.
+    fn array_literal_elems_are_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if lower_expr_is_f64_array_literal_ref(e) {
+            return true
+        }
+        if (*e).kind != ExprKind::ExprArrayLit {
+            return false
+        }
+        match (*e).left {
+            Some(repeat_expr) => self.expr_result_is_float_ref(&(*repeat_expr)),
+            None => {
+                match (*e).args {
+                    Some(args) => self.expr_result_is_float_ref(&(*args).head),
+                    None => false,
+                }
+            }
+        }
+    }
+
     fn lower_let_stmt_type_metadata_ref(
         self,
         s: &Stmt,
@@ -17225,9 +17356,11 @@ impl Lowerer {
         } else {
             match s.expr {
                 Some(expr_box_arr) => {
-                    if lower_expr_is_f64_array_literal_ref(&(*expr_box_arr)) {
+                    if lo.array_literal_elems_are_float_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
+                        lo = lo.bind_local_array_elem_float(s.name)
+                    } else if lo.expr_is_tuple_slot_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
@@ -22062,7 +22195,7 @@ impl Lowerer {
         match e.left {
             Some(_) => self.lower_array_repeat_literal_ref(e),
             None => {
-                let elem_is_float = lower_expr_is_f64_array_literal_ref(e)
+                let elem_is_float = self.array_literal_elems_are_float_ref(e)
                 let pair_dst = self.fresh_reg()
                 var lo = pair_dst.0
                 let dst = pair_dst.1
