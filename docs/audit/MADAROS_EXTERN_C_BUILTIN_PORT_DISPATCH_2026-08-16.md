@@ -124,18 +124,20 @@ inherited WIP (`9498c533a8`) was verified, corrected, and completed. Landed on
   builtin. Verified by disassembly (capstone) and by the side-effect file plus
   a `/bin/true`(0)+`/bin/false`(nonzero) anti-fabrication pair.
 
-### Residual: reference-to-aggregate extern args (documented known-failure)
+### Residual: reference-to-aggregate extern args — CLOSED (KL-14a, 2026-09-15)
 
-The idiomatic C binding `fn system(cmd: string)` works end-to-end. The
-historical `fn system(cmd: &[i8; 1024])` binding does **not**: the aggregate
-reference forwards an empty pointer through the *signatureless* `ffi_` builtin
-call. This is **not** a general ABI bug — a `&[i8;1024]` param forwards
-correctly both to a plain callee and through a wrapper to a *typed* callee
-(controls in `docs/audit/p0f_repros/`). It is specific to the untyped builtin
-call site, which cannot lower an aggregate-reference argument without callee
-parameter types. Captured as `tests/run-pass/ffi_system_array_arg.sio`
-(`//@ known-failure`). A proper fix (giving `ffi_` builtins real parameter
-types) is a separate dispatch, out of P0-F scope.
+The idiomatic C binding `fn system(cmd: string)` worked end-to-end; the
+historical `fn system(cmd: &[i8; 1024])` binding did not: the aggregate
+reference forwarded a GC handle / empty pointer through the signatureless
+`ffi_` builtin call. Madaros `[i8;N]` is 8-byte boxed slots after a 32-byte
+header — not a contiguous C string. KL-14a packs at the call site via
+`str_from_bytes(handle, N)` then calls `ffi_system` with the packed `char*`;
+the `string` binding is unchanged. Pin:
+`tests/run-pass/ffi_system_array_arg.sio` (no longer `//@ known-failure`).
+Dynamic linking residual is KL-14d for arbitrary `-l` / multi-`DT_NEEDED` /
+libzstd / `dlopen`. KL-14b (2026-09-15) closes a one-symbol MVP:
+`kl14b_add` via `PT_INTERP`+`PT_DYNAMIC`+`DT_NEEDED`+GOT. KL-14c generalises
+to N unique GOT/`GLOB_DAT` symbols from one controlled `.so`.
 
 ## Impact if unaddressed
 
