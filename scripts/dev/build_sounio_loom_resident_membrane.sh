@@ -57,8 +57,8 @@ for path in "$MEMBRANE_MODULE" "$MEMBRANE_ENTRYPOINT" "$RESIDENT_MODULE" \
   "$RESIDENT_ENTRYPOINT" "$DISPATCH_MAIN"; do
   [[ -f "$path" ]] || fail "resident source is missing: $path"
 done
-verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v1 9023
-verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v1 9024
+verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v2 9023
+verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v2 9024
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-membrane-build.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
