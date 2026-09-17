@@ -371,11 +371,11 @@ activate_runtime() {
       -x "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5.v2" ]] || \
       die "installed runtime declares product launch observation without Loom or resident Sounio v5: $runtime_id"
     [[ "$(manifest_value "$manifest" loom_product_activation_action_manifest_sha256)" == \
-      61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2 && \
+      5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2 && \
       "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" == \
       d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793 && \
       "$(manifest_value "$manifest" loom_product_activation_resident_manifest_sha256)" == \
-      19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e && \
+      09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472 && \
       "$(manifest_value "$manifest" loom_product_activation_projection_sha256)" == \
       8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014 ]] || \
       die "installed product launch observation is not bound to frozen Sounio action 9031: $runtime_id"
@@ -2472,9 +2472,9 @@ else
     printf 'loom_product_activation_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_product_activation_operational_attachment=OCaml\n'
     printf 'loom_product_activation_action=9031\n'
-    printf 'loom_product_activation_action_manifest_sha256=61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2\n'
+    printf 'loom_product_activation_action_manifest_sha256=5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2\n'
     printf 'loom_product_activation_operational_manifest_sha256=d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793\n'
-    printf 'loom_product_activation_resident_manifest_sha256=19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e\n'
+    printf 'loom_product_activation_resident_manifest_sha256=09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472\n'
     printf 'loom_product_activation_projection_sha256=8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014\n'
     printf 'loom_product_activation_resident_runtime_sha256=%s\n' \
       "$loom_product_activation_resident_runtime_sha256"

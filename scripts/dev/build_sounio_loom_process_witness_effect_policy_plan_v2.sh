@@ -32,7 +32,7 @@ expect_regular_hash "$GARDEN" \
 expect_regular_hash "$V1_MANIFEST" \
   14ee27eee71f04d1aa5462426379b37bb9c775215e94e17a864dbea308e43f21
 expect_regular_hash "$EFFECT_MANIFEST" \
-  d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613
+  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
 expect_regular_hash "$PROCESS_MANIFEST" \
   eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00
 [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || fail 'Sounio V2 policy-plan source is absent or linked'

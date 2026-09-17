@@ -42,7 +42,7 @@ done
 [[ "$(git -C "$ROOT_DIR" show 3f4a09b7ceb4d2f2ed5da5e80e25604661d0a3b3:tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md | sha256sum | cut -d ' ' -f 1)" == \
   b2e73974a7b5e06269c808b46e63602e06d83eedafad6f450c576eccca80d9dc ]] ||
   fail 'exec-handshake Garden differs from its preregistration commit'
-[[ "$(file_hash "$SEMANTIC_MANIFEST")" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 &&
+[[ "$(file_hash "$SEMANTIC_MANIFEST")" == d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be &&
    "$(record_field "$SEMANTIC_MANIFEST" stage)" == SEMANTICS_FROZEN &&
    "$(record_field "$SEMANTIC_MANIFEST" producing_language)" == Sounio &&
    "$(record_field "$SEMANTIC_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&

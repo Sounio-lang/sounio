@@ -41,7 +41,7 @@ done
 [[ "$(git -C "$ROOT_DIR" show cb1dacd2244e04571786d67a18870d29759d5559:tools/loom/GARDEN_PROCESS_WITNESS_CELL_V1.md | sha256sum | cut -d ' ' -f 1)" == \
   9538355b174c7d0fddb13ae5d554201ae408667b3328eb753895be377ac8c6b7 ]] ||
   fail 'ProcessWitnessCell Garden does not match its preregistration commit'
-[[ "$(file_hash "$SEMANTIC_MANIFEST")" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
+[[ "$(file_hash "$SEMANTIC_MANIFEST")" == d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen action 9030 manifest drifted'
 [[ "$(record_field "$SEMANTIC_MANIFEST" stage)" == SEMANTICS_FROZEN &&
    "$(record_field "$SEMANTIC_MANIFEST" producing_language)" == Sounio &&
@@ -64,5 +64,5 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" compile "$SOURCE" -o "$compiled"
 mkdir -p "$(dirname "$OUTPUT")"
 install -m 0755 "$compiled" "$OUTPUT"
 
-printf 'BUILT_LOOM_PROCESS_WITNESS_PAYLOAD path=%s producer=Sounio role=SEMANTIC_PAYLOAD action=9030 engine=%s semantic_manifest_sha256=a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 host_grant_manifest_sha256=8c0851bb5e0f2f1982ec220d3e335bfd8c41e6b0500a763c02a3f1901c834ac5 material_grant=true material_execution=false\n' \
+printf 'BUILT_LOOM_PROCESS_WITNESS_PAYLOAD path=%s producer=Sounio role=SEMANTIC_PAYLOAD action=9030 engine=%s semantic_manifest_sha256=d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be host_grant_manifest_sha256=8c0851bb5e0f2f1982ec220d3e335bfd8c41e6b0500a763c02a3f1901c834ac5 material_grant=true material_execution=false\n' \
   "$OUTPUT" "$ENGINE"

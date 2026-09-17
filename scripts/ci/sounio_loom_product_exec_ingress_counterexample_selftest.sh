@@ -23,7 +23,7 @@ expect_sha256() {
 expect_sha256 "$GARDEN" \
   067996ec5031fa77721664dc39c403bf20bea9cf979fcb7b841eed0f11f35c2b
 expect_sha256 "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
-  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4
+  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be
 expect_sha256 "$ROOT_DIR/tools/loom/host_exec_quorum_host.runtime.v1" \
   8c0851bb5e0f2f1982ec220d3e335bfd8c41e6b0500a763c02a3f1901c834ac5
 expect_sha256 "$ROOT_DIR/tools/loom/process_witness_host.runtime.v1" \

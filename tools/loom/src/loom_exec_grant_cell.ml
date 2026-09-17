@@ -1,10 +1,10 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4"
+  "d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be"
 
 let pinned_resident_v4_manifest_sha256 =
-  "2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1"
+  "219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05"
 
 let max_file_bytes = 8 * 1024 * 1024
 

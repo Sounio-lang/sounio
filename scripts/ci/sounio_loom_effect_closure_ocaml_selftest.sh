@@ -56,7 +56,7 @@ output="$(probe)"
 [[ "$output" != *'closure_code=0'* ]] || fail 'diagnostic coverage was promoted to closure'
 grep -Fq $'\tevent=EFFECT_CLOSURE\t' "$RECEIPTS" || fail 'closure receipt is missing'
 grep -Fq $'\tcode=447\t' "$RECEIPTS" || fail 'closure receipt omitted DENY447'
-grep -Fq $'\tparent_9025_manifest_sha256=d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613\t' \
+grep -Fq $'\tparent_9025_manifest_sha256=6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72\t' \
   "$RECEIPTS" || fail 'closure receipt omitted the frozen action 9025 manifest'
 grep -Fq $'\tresident_runtime_sha256=7c5089d47bf32372fbc60ba18567e319e934eb898660ee014e7707a14540e5e3\t' \
   "$RECEIPTS" || fail 'closure receipt omitted the frozen resident v2 runtime'

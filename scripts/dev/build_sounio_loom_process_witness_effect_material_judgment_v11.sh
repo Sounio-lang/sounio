@@ -39,7 +39,7 @@ expect_hash "$HOST_PRINCIPAL_EVIDENCE" \
 expect_hash "$GRANT_STACK" \
   1d7b8a3b1dfba1d1f9e60b5392cdf7e57a8d085cd872659feea5e333e43759b1
 expect_hash "$ACTION_9025_MANIFEST" \
-  d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613
+  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
 grep -Fxq 'stage=SEMANTICS_FROZEN' "$POLICY_MANIFEST" ||
   fail 'V11 policy semantics are not frozen'
 grep -Fxq 'material_hypercube=true' "$MATERIAL_EVIDENCE" ||

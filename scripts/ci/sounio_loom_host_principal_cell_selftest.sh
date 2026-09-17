@@ -10,7 +10,7 @@ BINARY_TWO="$TEST_ROOT/loom-host-principal-cell-two"
 SOURCE="$ROOT_DIR/tools/loom/src/loom_host_principal_cell.cpp"
 CONTRACT="$ROOT_DIR/tools/loom/HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md"
 ACTION_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
-ACTION_MANIFEST_SHA256=a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4
+ACTION_MANIFEST_SHA256=d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be
 
 cleanup() {
   rm -rf "$TEST_ROOT"

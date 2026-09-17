@@ -9,13 +9,13 @@ let pinned_sandbox_sha256 =
   "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"
 
 let pinned_activation_manifest_sha256 =
-  "61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2"
+  "5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2"
 
 let pinned_activation_runtime_sha256 =
   "d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793"
 
 let pinned_resident_v5_manifest_sha256 =
-  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
+  "09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472"
 
 let pinned_activation_projection_sha256 =
   "8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014"

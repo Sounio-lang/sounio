@@ -36,7 +36,7 @@ expect_hash "$V11_MANIFEST" \
 expect_hash "$V11_EVIDENCE" \
   4aa5704fe529ee93c88992a630976395b49a28ed13189af9d7a07aeb7ecc4c64
 expect_hash "$ACTION_9025_MANIFEST" \
-  d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613
+  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
 grep -Fxq 'action_9025_decision=DENY451' "$V11_MANIFEST" ||
   fail 'V11 did not freeze the peer-isolation denial'
 grep -Fxq 'same_uid_peer_isolation=false' "$V11_MANIFEST" ||

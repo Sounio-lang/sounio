@@ -29,7 +29,7 @@ manifest_value() {
 [[ -f "$AUTHORITY_MANIFEST" && ! -L "$AUTHORITY_MANIFEST" ]] ||
   fail 'frozen action 9030 manifest is absent or linked'
 [[ "$(sha256sum "$AUTHORITY_MANIFEST" | cut -d ' ' -f 1)" == \
-  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
+  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen action 9030 manifest hash drifted'
 [[ "$(manifest_value producing_language)" == Sounio &&
    "$(manifest_value language_role)" == SEMANTIC_AUTHORITY &&
@@ -50,5 +50,5 @@ metadata="$($OUTPUT | sed -n '1p')"
   'LOOM_PRODUCT_EXEC_CELL_FIXTURE_V1 semantic_authority=Sounio action=9030 fixtures=4' ]] ||
   fail "fixture metadata diverged: $metadata"
 
-printf 'BUILT_PRODUCT_EXEC_CELL_FIXTURE path=%s language=Sounio role=SEMANTIC_FIXTURE_PRODUCER authority_manifest_sha256=a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 engine=%s fixtures=4\n' \
+printf 'BUILT_PRODUCT_EXEC_CELL_FIXTURE path=%s language=Sounio role=SEMANTIC_FIXTURE_PRODUCER authority_manifest_sha256=d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be engine=%s fixtures=4\n' \
   "$OUTPUT" "$ENGINE"

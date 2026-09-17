@@ -237,7 +237,7 @@ done
 [[ "$(resident_manifest_value actions)" == 9023,9024,9025,9029,9030 ]] ||
   fail 'resident manifest omits action 9030 lineage'
 [[ "$(resident_manifest_value parent_9030_sha256)" == \
-  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
+  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'resident manifest is not bound to frozen action 9030'
 [[ "$(resident_manifest_value material_grant)" == false ]] ||
   fail 'resident manifest opened a material grant'
@@ -292,13 +292,13 @@ RESIDENT_ATTACHMENT_DOC_SHA256="$(sha256_file "$RESIDENT_ATTACHMENT_DOC")"
   fail 'frozen capsule manifest hash drifted from the broker contract'
 [[ "$CAPSULE_AUTHORITY_SHA256" == "$(capsule_manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio capsule authority hash differs from frozen manifest'
-[[ "$INVOCATION_MANIFEST_SHA256" == b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed ]] ||
+[[ "$INVOCATION_MANIFEST_SHA256" == f876926fe2b6c554611136daee0cbb7553117b7d9933dc9b779cc3ea1aa507a5 ]] ||
   fail 'frozen InvocationCell manifest hash drifted from the broker contract'
 [[ "$INVOCATION_AUTHORITY_SHA256" == "$(invocation_manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio InvocationCell authority hash differs from frozen manifest'
-[[ "$EXEC_GRANT_MANIFEST_SHA256" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
+[[ "$EXEC_GRANT_MANIFEST_SHA256" == d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen ExecGrantCell manifest hash drifted from the broker contract'
-[[ "$RESIDENT_MANIFEST_SHA256" == 2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1 ]] ||
+[[ "$RESIDENT_MANIFEST_SHA256" == 219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05 ]] ||
   fail 'frozen resident v4 manifest hash drifted from the broker contract'
 [[ "$RESIDENT_RUNTIME_SHA256" == "$(resident_manifest_value runtime_sha256)" ]] ||
   fail 'source-fresh resident v4 runtime hash differs from frozen manifest'

@@ -19,7 +19,7 @@ fail() {
 [[ -x "$SOUC" ]] || fail "Sounio compiler is missing: $SOUC"
 [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || fail 'fixture source is absent or linked'
 [[ "$(sha256sum "$AUTHORITY_MANIFEST" | cut -d ' ' -f 1)" == \
-  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
+  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen action 9030 manifest hash drifted'
 work="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-causal-attest-grant.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

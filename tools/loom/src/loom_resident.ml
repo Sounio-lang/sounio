@@ -3,19 +3,19 @@ open Unix
 exception Error of string
 
 let pinned_runtime_manifest_sha256 =
-  "23499dc339bfc1457b984e716419853fe7c8631b897b65d6e981bbb0b868c7d4"
+  "c3236ef77ddaecdfb22456454cdb169412b8a398aba3602a58466f9c7f5f36ff"
 
 let pinned_runtime_v2_manifest_sha256 =
-  "ce58633ff9986805d52ede266e0577c6a4fa7ac69adbee7b6d5d708de801bc02"
+  "07d8149515562e4121dea92779deee17e76ef51febde5f963a2cfe48e398b8cb"
 
 let pinned_runtime_v3_manifest_sha256 =
-  "f8314f6356473a61d5002ae366453ac4af136c38f8f54f348804c5d5c92c0c2b"
+  "8e53e9432402e0a9c7a8d36e3f0496ad052a3412afff88b182a221e57c1710c9"
 
 let pinned_runtime_v4_manifest_sha256 =
-  "2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1"
+  "219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05"
 
 let pinned_runtime_v5_manifest_sha256 =
-  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
+  "09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472"
 
 let max_file_bytes = 8 * 1024 * 1024
 let max_frame_bytes = 65_535

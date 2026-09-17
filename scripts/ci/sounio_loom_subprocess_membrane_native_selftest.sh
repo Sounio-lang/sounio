@@ -138,9 +138,9 @@ grep -Fq $'\tevent=START\t' "$RESIDENT_LOG" || fail 'resident START receipt is m
 grep -Fq $'\tevent=PEER_ACTIVATION_CAPSULE\t' "$RESIDENT_LOG" || fail 'resident peer-activation receipt is missing'
 grep -Fq $'\tevent=EFFECT_CLOSURE\t' "$RESIDENT_LOG" || fail 'resident effect-closure receipt is missing'
 grep -Fq $'\tevent=STOP\t' "$RESIDENT_LOG" || fail 'resident STOP receipt is missing'
-grep -Fq $'\tparent_9025_manifest_sha256=d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613\t' \
+grep -Fq $'\tparent_9025_manifest_sha256=6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72\t' \
   "$RESIDENT_LOG" || fail 'resident action 9025 binding is missing'
-grep -Fq $'\tparent_9031_manifest_sha256=61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2\t' \
+grep -Fq $'\tparent_9031_manifest_sha256=5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2\t' \
   "$RESIDENT_LOG" || fail 'resident action 9031 binding is missing'
 grep -Fq $'\tdecision=DENY\tcode=502\tauthorizing=false\tproduction_activation=false\t' \
   "$DARK_LOG" || fail 'product activation dark receipt is missing'

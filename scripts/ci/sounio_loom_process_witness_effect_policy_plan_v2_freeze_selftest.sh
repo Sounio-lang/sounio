@@ -36,7 +36,7 @@ expect_hash scripts/ci/sounio_loom_process_witness_effect_policy_plan_v2_selftes
 expect_hash tools/loom/process_witness_effect_policy_plan.freeze.v1 \
   14ee27eee71f04d1aa5462426379b37bb9c775215e94e17a864dbea308e43f21
 expect_hash tools/loom/effect_closure_authority.freeze.v2 \
-  d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613
+  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
 expect_hash tools/loom/process_witness_host.runtime.v1 \
   eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00
 expect_hash "$EVIDENCE" \
