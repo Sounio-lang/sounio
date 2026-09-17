@@ -12,8 +12,8 @@ MEMBRANE_ENTRYPOINT="$ROOT_DIR/tools/loom/subprocess_membrane_main.sio"
 RESIDENT_MODULE="$ROOT_DIR/stdlib/coordination/loom_resident_authority.sio"
 RESIDENT_ENTRYPOINT="$ROOT_DIR/tools/loom/resident_authority_main.sio"
 DISPATCH_MAIN="$ROOT_DIR/tools/loom/resident_membrane_main.sio"
-MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
+MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
 OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime}"
 
 fail() {
