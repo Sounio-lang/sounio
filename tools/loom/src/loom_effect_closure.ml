@@ -1,7 +1,7 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91"
+  "d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613"
 
 let max_file_bytes = 8 * 1024 * 1024
 let zero_digest = "0 0 0 0 0 0 0 0"
@@ -68,7 +68,7 @@ let manifest_path root =
   | Some value when value <> "" && test_mode () -> value
   | Some value when value <> "" ->
       failf "SOUNIO_LOOM_EFFECT_CLOSURE_MANIFEST-override-requires-test-mode"
-  | _ -> Filename.concat root "tools/loom/effect_closure_authority.freeze.v1"
+  | _ -> Filename.concat root "tools/loom/effect_closure_authority.freeze.v2"
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -82,7 +82,7 @@ let load root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "effect-closure-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-effect-closure-authority-freeze-v1"
+  if required manifest "schema" <> "loom-effect-closure-authority-freeze-v2"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"

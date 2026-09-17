@@ -30,12 +30,12 @@ MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v2"
 MANIFEST_SHA256='5581f29a5f48f3cfa26ea46c906ee73ef1b375ec0d58efcdad123d2e2e3601be'
 CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v2"
 CAPSULE_MANIFEST_SHA256='2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674'
-INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-INVOCATION_MANIFEST_SHA256='61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e'
-EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
-EXEC_GRANT_MANIFEST_SHA256='8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051'
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
-RESIDENT_MANIFEST_SHA256='f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473'
+INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+INVOCATION_MANIFEST_SHA256='b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed'
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+EXEC_GRANT_MANIFEST_SHA256='a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4'
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
+RESIDENT_MANIFEST_SHA256='2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1'
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -314,7 +314,7 @@ grep -Fqx 'LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST=/usr/lib/sounio/loom/kernel_exec_g
   fail 'config example omits frozen ExecGrantCell manifest path'
 grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_MANIFEST=/usr/lib/sounio/loom/resident_membrane.runtime.v4' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen resident v4 manifest path'
-grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_RUNTIME=/usr/libexec/sounio/sounio-loom-resident-membrane-runtime-v4' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_RUNTIME=/usr/libexec/sounio/sounio-loom-resident-membrane-runtime-v4.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen resident v4 runtime path'
 grep -Fq -- '--invocation-manifest ${LOOM_PRINCIPAL_INVOCATION_MANIFEST} --invocation-authority ${LOOM_PRINCIPAL_INVOCATION_AUTHORITY}' "$SERVICE_UNIT" ||
   fail 'service does not pin the InvocationCell authority'

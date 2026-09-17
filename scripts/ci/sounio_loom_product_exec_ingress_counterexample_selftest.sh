@@ -22,14 +22,14 @@ expect_sha256() {
 
 expect_sha256 "$GARDEN" \
   067996ec5031fa77721664dc39c403bf20bea9cf979fcb7b841eed0f11f35c2b
-expect_sha256 "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
-  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051
+expect_sha256 "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
+  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4
 expect_sha256 "$ROOT_DIR/tools/loom/host_exec_quorum_host.runtime.v1" \
   8c0851bb5e0f2f1982ec220d3e335bfd8c41e6b0500a763c02a3f1901c834ac5
 expect_sha256 "$ROOT_DIR/tools/loom/process_witness_host.runtime.v1" \
   eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00
-expect_sha256 "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1" \
-  f7adafcd1c79364b75ebe48b66999ec2d7b82a12d6b8e45d9c1cc4637a4ca9ca
+expect_sha256 "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2" \
+  71398f15e7e093d395fe5e9abdf42ac60536095f75e0d38e9175499f819a28fa
 
 grep -Fq 'tool_name:"exec_command"' "$CUSTODY_GATE" ||
   fail 'custody harness no longer fabricates an exec hook event'

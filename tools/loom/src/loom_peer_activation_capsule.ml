@@ -1,10 +1,10 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e"
+  "61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2"
 
 let pinned_resident_v5_manifest_sha256 =
-  "b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353"
+  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
 
 let max_file_bytes = 8 * 1024 * 1024
 
@@ -80,7 +80,7 @@ let manifest_path root =
       failf
         "SOUNIO_LOOM_KERNEL_PEER_ACTIVATION_CAPSULE_MANIFEST-override-requires-test-mode"
   | _ ->
-      Filename.concat root "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+      Filename.concat root "tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -96,7 +96,7 @@ let load root =
     failf "peer-activation-capsule-manifest-hash-mismatch";
   let manifest = parse_manifest path in
   if required manifest "schema"
-       <> "loom-kernel-peer-activation-capsule-authority-freeze-v1"
+       <> "loom-kernel-peer-activation-capsule-authority-freeze-v2"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -132,7 +132,7 @@ let load root =
   verify_file root manifest "parent_9030_manifest_path"
     "parent_9030_manifest_sha256" "peer-activation-capsule-parent-9030-hash-mismatch";
   let resident_v5_path =
-    Filename.concat root "tools/loom/resident_membrane.runtime.v5"
+    Filename.concat root "tools/loom/resident_membrane.runtime.v5.v2"
   in
   if sha256_file resident_v5_path <> pinned_resident_v5_manifest_sha256 then
     failf "peer-activation-capsule-resident-v5-manifest-hash-mismatch";

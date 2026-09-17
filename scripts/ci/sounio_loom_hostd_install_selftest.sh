@@ -32,7 +32,7 @@ trap cleanup EXIT
 
 runtime="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 authority="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-host-boot-reconciler"
-resident="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5"
+resident="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5.v2"
 stage="$TEST_ROOT/stage"
 mkdir -p "$stage"
 
@@ -71,7 +71,7 @@ unit="$stage/etc/systemd/system/sounio-loom-hostd.service"
 manifest="$prefix/manifest.v1"
 installed_runtime="$prefix/bin/sounio-loom-runtime"
 installed_authority="$prefix/bin/sounio-loom-host-boot-reconciler"
-installed_resident="$prefix/bin/sounio-loom-resident-membrane-runtime-v5"
+installed_resident="$prefix/bin/sounio-loom-resident-membrane-runtime-v5.v2"
 policy_root="$prefix/policy/product-activation"
 policy_manifest="$prefix/share/product-activation-policy.v1"
 exec_cell_manifest="$prefix/share/exec-cell-bundle.v1"
@@ -92,7 +92,7 @@ grep -Fxq 'language=OCaml' < <("$installed_runtime" runtime-version) ||
    'SOUNIO_HOST_BOOT_RECONCILER_SELFTEST PASS cases=14' ]] ||
   fail 'installed Sounio authority does not selftest'
 [[ "$(sha256sum "$installed_resident" | cut -d ' ' -f 1)" == \
-   "$(sed -n 's/^runtime_sha256=//p' "$policy_root/tools/loom/resident_membrane.runtime.v5")" ]] ||
+   "$(sed -n 's/^runtime_sha256=//p' "$policy_root/tools/loom/resident_membrane.runtime.v5.v2")" ]] ||
   fail 'installed resident runtime does not match its frozen manifest'
 grep -Fxq 'semantic_authority=Sounio' "$policy_manifest" ||
   fail 'installed product activation policy lost Sounio authority'
@@ -262,7 +262,7 @@ grep -q 'LOOM_STARTED' "$TEST_ROOT/installed-start.out" ||
   --cwd "$TEST_ROOT/isolated-cwd" --agent "$INSTALLED_AGENT" \
   --lane "$INSTALLED_LANE" >/dev/null
 
-action_manifest="$policy_root/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+action_manifest="$policy_root/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
 cp "$action_manifest" "$TEST_ROOT/action-manifest.clean"
 chmod 0644 "$action_manifest"
 printf 'X' | dd of="$action_manifest" bs=1 seek=128 conv=notrunc status=none

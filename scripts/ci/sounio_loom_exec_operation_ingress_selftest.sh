@@ -63,7 +63,7 @@ tail -n +2 "$TEST_ROOT/issued" >"$TEST_ROOT/record"
 
 LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 LANGUAGE_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5"
+RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 FROZEN_COMMIT="$(sed -n 's/^sounio_executable_commit=//p' "$LANGUAGE_MANIFEST")"
 [[ -n "$FROZEN_COMMIT" ]] || fail 'language authority commit absent'

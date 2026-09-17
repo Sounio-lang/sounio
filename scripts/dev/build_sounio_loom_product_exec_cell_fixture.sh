@@ -8,7 +8,7 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 SOUC="${SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_ENGINE:-lean_single}"
 SOURCE="$ROOT_DIR/tools/loom/product_exec_cell_fixture_main.sio"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 OUTPUT="${SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-product-exec-cell-fixture}"
 
 fail() {
@@ -29,7 +29,7 @@ manifest_value() {
 [[ -f "$AUTHORITY_MANIFEST" && ! -L "$AUTHORITY_MANIFEST" ]] ||
   fail 'frozen action 9030 manifest is absent or linked'
 [[ "$(sha256sum "$AUTHORITY_MANIFEST" | cut -d ' ' -f 1)" == \
-  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
   fail 'frozen action 9030 manifest hash drifted'
 [[ "$(manifest_value producing_language)" == Sounio &&
    "$(manifest_value language_role)" == SEMANTIC_AUTHORITY &&
@@ -50,5 +50,5 @@ metadata="$($OUTPUT | sed -n '1p')"
   'LOOM_PRODUCT_EXEC_CELL_FIXTURE_V1 semantic_authority=Sounio action=9030 fixtures=4' ]] ||
   fail "fixture metadata diverged: $metadata"
 
-printf 'BUILT_PRODUCT_EXEC_CELL_FIXTURE path=%s language=Sounio role=SEMANTIC_FIXTURE_PRODUCER authority_manifest_sha256=8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 engine=%s fixtures=4\n' \
+printf 'BUILT_PRODUCT_EXEC_CELL_FIXTURE path=%s language=Sounio role=SEMANTIC_FIXTURE_PRODUCER authority_manifest_sha256=a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 engine=%s fixtures=4\n' \
   "$OUTPUT" "$ENGINE"

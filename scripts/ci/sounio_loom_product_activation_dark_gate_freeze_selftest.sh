@@ -156,7 +156,7 @@ bash "$ROOT_DIR/$(field canonical_build_path)" >/dev/null
 resident_runtime="$ROOT_DIR/$(field resident_runtime_path)"
 [[ -L "$resident_runtime" ]] || fail 'canonical resident v5 is not a symlink'
 [[ "$(readlink "$resident_runtime")" == \
-   "sha256-$(field resident_runtime_sha256)/sounio-loom-resident-membrane-runtime-v5" ]] ||
+   "sha256-$(field resident_runtime_sha256)/sounio-loom-resident-membrane-runtime-v5.v2" ]] ||
   fail 'canonical resident v5 symlink is not content addressed'
 [[ "$(file_hash "$resident_runtime")" == "$(field resident_runtime_sha256)" && \
    ! -w "$(realpath "$resident_runtime")" ]] ||

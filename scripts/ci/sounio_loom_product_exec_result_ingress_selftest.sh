@@ -69,7 +69,7 @@ printf 'CLOSE\n' | env -i "$PAYLOAD" >"$TEST_ROOT/result.receipt"
 
 LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 LANGUAGE_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5"
+RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 frozen_commit="$(sed -n 's/^sounio_executable_commit=//p' "$LANGUAGE_MANIFEST")"
 [[ -n "$frozen_commit" ]] || fail 'language-authority manifest omitted its commit'

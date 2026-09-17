@@ -9,7 +9,7 @@ FIXTURE_ONE="$TEST_ROOT/fixture-one"
 FIXTURE_TWO="$TEST_ROOT/fixture-two"
 AUTHORITY="$TEST_ROOT/action-9030-authority"
 BUNDLE="$TEST_ROOT/fixtures.v1"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 
 cleanup() {
   rm -rf "$TEST_ROOT"

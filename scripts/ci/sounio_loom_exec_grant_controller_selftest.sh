@@ -11,7 +11,7 @@ FIXTURE="$TEST_ROOT/fixture"
 BUNDLE="$TEST_ROOT/fixtures.v1"
 RESIDENT="$TEST_ROOT/resident-v4"
 RECEIPTS="$TEST_ROOT/resident.tsv"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 GENERATION=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 cleanup() {

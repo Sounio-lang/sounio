@@ -73,7 +73,7 @@ expect_probe() {
 
 bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 resident_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime"
-resident_runtime_sha='5c432f4c56fb0be5c157fb12147566a5f74f2cc4cc1e25b46f37050eff1ac12b'
+resident_runtime_sha='54cec3bc77429b44b5e42d0d198df462c2d36da1b08c90fb69e74c811ec6b684'
 resident_runtime_target="sha256-$resident_runtime_sha/sounio-loom-resident-membrane-runtime"
 [[ -L "$resident_runtime" && "$(readlink "$resident_runtime")" == "$resident_runtime_target" ]] ||
   fail 'resident runtime was not promoted through its content-addressed symlink'
@@ -82,9 +82,9 @@ resident_runtime_sum="$(sha256sum "$resident_runtime")"
   fail 'promoted resident runtime hash drifted'
 [[ ! -w "$(realpath "$resident_runtime")" ]] ||
   fail 'content-addressed resident runtime remained writable'
-resident_v2_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2"
-resident_v2_runtime_sha='da1de5041588f722e5b1904af3d13ac435a29e7bc254ec6b0a5df375116b0b44'
-resident_v2_runtime_target="sha256-$resident_v2_runtime_sha/sounio-loom-resident-membrane-runtime-v2"
+resident_v2_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2.v2"
+resident_v2_runtime_sha='7c5089d47bf32372fbc60ba18567e319e934eb898660ee014e7707a14540e5e3'
+resident_v2_runtime_target="sha256-$resident_v2_runtime_sha/sounio-loom-resident-membrane-runtime-v2.v2"
 [[ -L "$resident_v2_runtime" && "$(readlink "$resident_v2_runtime")" == "$resident_v2_runtime_target" ]] ||
   fail 'resident v2 runtime was not promoted through its content-addressed symlink'
 resident_v2_runtime_sum="$(sha256sum "$resident_v2_runtime")"
@@ -92,9 +92,9 @@ resident_v2_runtime_sum="$(sha256sum "$resident_v2_runtime")"
   fail 'promoted resident v2 runtime hash drifted'
 [[ ! -w "$(realpath "$resident_v2_runtime")" ]] ||
   fail 'content-addressed resident v2 runtime remained writable'
-resident_v5_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5"
-resident_v5_runtime_sha='fa285dd747793cf62e0e0e30cdb405515e554b6d8a644c8836cd89a4f0fef141'
-resident_v5_runtime_target="sha256-$resident_v5_runtime_sha/sounio-loom-resident-membrane-runtime-v5"
+resident_v5_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5.v2"
+resident_v5_runtime_sha='af7b36bcb221f7aa20f2632a5838052274dc8956698a987c0f68689749912d79'
+resident_v5_runtime_target="sha256-$resident_v5_runtime_sha/sounio-loom-resident-membrane-runtime-v5.v2"
 [[ -L "$resident_v5_runtime" && "$(readlink "$resident_v5_runtime")" == "$resident_v5_runtime_target" ]] ||
   fail 'resident v5 runtime was not promoted through its content-addressed symlink'
 resident_v5_runtime_sum="$(sha256sum "$resident_v5_runtime")"
@@ -138,9 +138,9 @@ grep -Fq $'\tevent=START\t' "$RESIDENT_LOG" || fail 'resident START receipt is m
 grep -Fq $'\tevent=PEER_ACTIVATION_CAPSULE\t' "$RESIDENT_LOG" || fail 'resident peer-activation receipt is missing'
 grep -Fq $'\tevent=EFFECT_CLOSURE\t' "$RESIDENT_LOG" || fail 'resident effect-closure receipt is missing'
 grep -Fq $'\tevent=STOP\t' "$RESIDENT_LOG" || fail 'resident STOP receipt is missing'
-grep -Fq $'\tparent_9025_manifest_sha256=c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91\t' \
+grep -Fq $'\tparent_9025_manifest_sha256=d6b7261a347f8457c3e0b2ea580f9e28cd9e14ca482488e0b770b843d5471613\t' \
   "$RESIDENT_LOG" || fail 'resident action 9025 binding is missing'
-grep -Fq $'\tparent_9031_manifest_sha256=f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e\t' \
+grep -Fq $'\tparent_9031_manifest_sha256=61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2\t' \
   "$RESIDENT_LOG" || fail 'resident action 9031 binding is missing'
 grep -Fq $'\tdecision=DENY\tcode=502\tauthorizing=false\tproduction_activation=false\t' \
   "$DARK_LOG" || fail 'product activation dark receipt is missing'
@@ -284,7 +284,7 @@ set -e
 [[ ! -e "$missing_sentinel" ]] || fail 'missing policy executed the child'
 
 tampered_manifest="$TEST_ROOT/tampered.freeze.v1"
-cp "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1" "$tampered_manifest"
+cp "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2" "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e
 tamper_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -327,7 +327,7 @@ set -e
 
 resident_v5_manifest_sentinel="$TEST_ROOT/resident-v5-manifest-tamper-executed"
 tampered_resident_v5_manifest="$TEST_ROOT/resident-v5.runtime"
-cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5" "$tampered_resident_v5_manifest"
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" "$tampered_resident_v5_manifest"
 printf '\n' >> "$tampered_resident_v5_manifest"
 set +e
 resident_v5_manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -346,7 +346,7 @@ set -e
 
 closure_manifest_sentinel="$TEST_ROOT/closure-manifest-tamper-executed"
 tampered_closure_manifest="$TEST_ROOT/effect-closure.freeze"
-cp "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1" "$tampered_closure_manifest"
+cp "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2" "$tampered_closure_manifest"
 printf '\n' >> "$tampered_closure_manifest"
 set +e
 closure_manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -392,7 +392,7 @@ set -e
 for code in 0 410 413 415 422 426; do
   grep -q $'\tcode='"$code"$'\t' "$LOG" || fail "decision log omitted code $code"
 done
-grep -q $'\tmanifest_sha256=0024178b8928f0c82d794d390244e83e5ce431054587fc7dd609c0f25c2e5b4f\t' \
+grep -q $'\tmanifest_sha256=75cdaf0b48665b90b5fd18389179b9224f8eff0f65853e140f700b25ef5de65b\t' \
   "$LOG" || fail 'decision log omitted frozen manifest binding'
 grep -q $'\tsource_sha256=d72aa2e11d36ec0f6ff1e0048d2957aff5a1fb55ef2f960b9b3e13d0c25a992c\t' \
   "$LOG" || fail 'decision log omitted Sounio source binding'

@@ -9,7 +9,7 @@ SOUC="${SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_ENGINE:-lean_single}"
 SOURCE="$ROOT_DIR/tools/loom/process_witness_handshake_payload_main.sio"
 GARDEN="$ROOT_DIR/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md"
-SEMANTIC_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+SEMANTIC_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 HOST_GRANT_MANIFEST="$ROOT_DIR/tools/loom/host_exec_quorum_host.runtime.v1"
 PARENT_PAYLOAD_MANIFEST="$ROOT_DIR/tools/loom/process_witness_payload.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-process-witness-handshake}"
@@ -42,7 +42,7 @@ done
 [[ "$(git -C "$ROOT_DIR" show 3f4a09b7ceb4d2f2ed5da5e80e25604661d0a3b3:tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md | sha256sum | cut -d ' ' -f 1)" == \
   b2e73974a7b5e06269c808b46e63602e06d83eedafad6f450c576eccca80d9dc ]] ||
   fail 'exec-handshake Garden differs from its preregistration commit'
-[[ "$(file_hash "$SEMANTIC_MANIFEST")" == 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 &&
+[[ "$(file_hash "$SEMANTIC_MANIFEST")" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 &&
    "$(record_field "$SEMANTIC_MANIFEST" stage)" == SEMANTICS_FROZEN &&
    "$(record_field "$SEMANTIC_MANIFEST" producing_language)" == Sounio &&
    "$(record_field "$SEMANTIC_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&

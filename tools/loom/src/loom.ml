@@ -852,7 +852,7 @@ let change_stage_parent session_dir =
 
 let product_activation_policy_root () =
   let manifest_relative =
-    "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+    "tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
   in
   let rec source_root candidate =
     let manifest = Filename.concat candidate manifest_relative in

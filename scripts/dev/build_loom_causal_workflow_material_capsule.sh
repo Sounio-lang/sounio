@@ -70,12 +70,12 @@ MID_EXEC_FREEZE_COMMIT=469d7fecaf8609275250223e7b55993c1e6f641e
 git -C "$ROOT_DIR" merge-base --is-ancestor "$MID_EXEC_FREEZE_COMMIT" "$SOURCE_COMMIT" ||
   fail 'committed Sounio mid-exec freeze is not an ancestor of the capsule source'
 CONTROLLER_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1" controller_commit)"
-RESIDENT_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" sounio_resident_v4_commit)"
+RESIDENT_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" sounio_resident_v4_commit)"
 [[ "$CONTROLLER_COMMIT" =~ ^[0-9a-f]{40}$ && "$RESIDENT_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
   fail 'action-9030 dependency commits are not canonical'
 
 CONTROLLER_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
-RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
 MATERIAL_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_material.runtime.v1"
 [[ "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
    "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" action)" == 9030 &&
@@ -182,7 +182,7 @@ AUTHORITY_FILES=(
   bin/souc
   bin/souc-lean-single-x86_64
   tests/verify-ir/call_b.sio
-  tools/loom/kernel_exec_grant_cell_authority.freeze.v1
+  tools/loom/kernel_exec_grant_cell_authority.freeze.v2
   tools/loom/host_exec_quorum_fixture.freeze.v1
   tools/loom/exec_intent_envelope.freeze.v2
   tools/loom/exec_operation_grant_fixture.freeze.v2
@@ -195,7 +195,7 @@ AUTHORITY_FILES=(
   tools/loom/causal_workflow_journal.runtime.v1
 	  tools/loom/causal_workflow_material.runtime.v1
 	  tools/loom/exec_grant_controller.runtime.v1
-	  tools/loom/resident_membrane.runtime.v4
+	  tools/loom/resident_membrane.runtime.v4.v2
   stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio
   tools/loom/kernel_exec_grant_cell_authority_main.sio
   stdlib/coordination/loom_exec_operation_catalog_authority.sio
@@ -240,7 +240,7 @@ install_manifest_closure "$HOST_QUORUM_MANIFEST" \
   garden source authority_manifest build_script selftest freeze_selftest \
   toolchain_wrapper toolchain_compiler evidence
 
-KERNEL_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+KERNEL_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 install_manifest_closure "$KERNEL_GRANT_MANIFEST" \
   garden source entrypoint parent_9029_manifest parent_9021_manifest \
   parent_9022_manifest toolchain_wrapper toolchain_compiler build_script \
@@ -358,11 +358,11 @@ SOUNIO_LOOM_CAUSAL_MATERIAL_CELL_OUTPUT="$BIN/loom-causal-workflow-material-cell
   bash "$ROOT_DIR/scripts/dev/build_loom_causal_workflow_material_cell.sh" >/dev/null
 SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_OUTPUT="$BIN/loom-exec-grant-controller" \
   bash "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
-SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v4" \
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v4.v2" \
   bash "$FROZEN_RESIDENT_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
 [[ "$(sha256_file "$BIN/loom-exec-grant-controller")" == "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" runtime_sha256)" ]] ||
   fail 'controller runtime is not reproducible from its frozen dependency commit'
-[[ "$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v4")" == "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" runtime_sha256)" ]] ||
+[[ "$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v4.v2")" == "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" runtime_sha256)" ]] ||
   fail 'resident runtime is not reproducible from its frozen dependency commit'
 SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_OUTPUT="$BIN/sounio-loom-product-exec-cell-fixture" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh" >/dev/null
@@ -492,7 +492,7 @@ broker_source_sha256=$(sha256_file "$ROOT_DIR/tools/loom/src/loom_kernel_princip
 host_canary_source_path=release/authority-root/tools/loom/src/loom_causal_workflow_host_canary.inc
 host_canary_source_sha256=$(sha256_file "$ROOT_DIR/tools/loom/src/loom_causal_workflow_host_canary.inc")
 controller_runtime_path=release/bin/loom-exec-grant-controller
-resident_runtime_path=release/bin/sounio-loom-resident-membrane-runtime-v4
+resident_runtime_path=release/bin/sounio-loom-resident-membrane-runtime-v4.v2
 product_runtime_path=release/bin/sounio-loom-runtime
 product_runtime_sha256=$(sha256_file "$BIN/sounio-loom-runtime")
 product_runtime_language=OCaml
@@ -533,7 +533,7 @@ host_selftest_sha256=$(sha256_file "$GATES/sounio_loom_causal_workflow_material_
 host_probe_path=release/gates/run_loom_causal_workflow_material_host_probe.sh
 host_probe_sha256=$(sha256_file "$GATES/run_loom_causal_workflow_material_host_probe.sh")
 controller_runtime_manifest_path=release/authority-root/tools/loom/exec_grant_controller.runtime.v1
-resident_runtime_manifest_path=release/authority-root/tools/loom/resident_membrane.runtime.v4
+resident_runtime_manifest_path=release/authority-root/tools/loom/resident_membrane.runtime.v4.v2
 operation_fixture_manifest_path=release/authority-root/tools/loom/exec_operation_grant_fixture.freeze.v2
 operation_fixture_bundle_path=release/data/operation-grant-fixtures.v1
 operation_catalog_manifest_path=release/authority-root/tools/loom/exec_operation_catalog.freeze.v2

@@ -21,7 +21,7 @@ RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
 CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
 CELL_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
 RESIDENT_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2"
-OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3}"
+OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3.v2}"
 
 fail() {
   printf 'build-sounio-loom-resident-membrane-v3: FAIL: %s\n' "$*" >&2
@@ -95,7 +95,7 @@ resident_adapter="$work/resident_authority_resident_v3_adapter.sio"
 closure_adapter="$work/effect_closure_resident_v3_adapter.sio"
 cell_adapter="$work/kernel_invocation_cell_resident_v3_adapter.sio"
 combined="$work/loom_resident_membrane_v3_runtime.sio"
-compiled="$work/sounio-loom-resident-membrane-runtime-v3"
+compiled="$work/sounio-loom-resident-membrane-runtime-v3.v2"
 
 adapt_entrypoint "$MEMBRANE_ENTRYPOINT" subprocess_membrane_v3_decide_one "$membrane_adapter"
 adapt_entrypoint "$RESIDENT_ENTRYPOINT" resident_authority_v3_decide_one "$resident_adapter"

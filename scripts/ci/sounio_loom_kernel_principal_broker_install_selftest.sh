@@ -120,7 +120,7 @@ INVOCATION_MANIFEST="$RELEASE/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_AUTHORITY="$RELEASE/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST="$RELEASE/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST="$RELEASE/resident_membrane.runtime.v4"
-RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4.v2"
 BROKER="$RELEASE/loom-kernel-principal-broker"
 RECEIPT="$RELEASE/install.receipt.v1"
 BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
@@ -276,7 +276,7 @@ resident_bytes_refusal="$(run_refusal resident-release-byte-tamper "$INSTALLER" 
 
 TAMPER_RESIDENT_MODE="$WORK/tamper-resident-mode"
 cp -a "$STAGE" "$TAMPER_RESIDENT_MODE"
-chmod 0755 "$TAMPER_RESIDENT_MODE/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4"
+chmod 0755 "$TAMPER_RESIDENT_MODE/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4.v2"
 resident_mode_refusal="$(run_refusal resident-release-mode-tamper "$INSTALLER" --staging-root "$TAMPER_RESIDENT_MODE")"
 [[ "$resident_mode_refusal" == *'existing immutable release resident v4 runtime mode drifted'* ]] ||
   fail 'resident release-mode sabotage did not trigger the runtime-mode rule'

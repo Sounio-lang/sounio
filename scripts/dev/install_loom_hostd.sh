@@ -23,20 +23,20 @@ EXEC_CELL_CAPSULE_SHA256=''
 ACTIVATE=0
 
 POLICY_FILES=(
-  tools/loom/kernel_peer_activation_capsule_authority.freeze.v1
+  tools/loom/kernel_peer_activation_capsule_authority.freeze.v2
   tools/loom/kernel_peer_activation_capsule.runtime.v1
   tools/loom/kernel_peer_activation_capsule.current.v1
-  tools/loom/resident_membrane.runtime.v5
+  tools/loom/resident_membrane.runtime.v5.v2
   tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md
   stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio
   tools/loom/kernel_peer_activation_capsule_authority_main.sio
-  tools/loom/kernel_peer_material_judgment_v13.freeze.v1
-  tools/loom/kernel_exec_grant_cell_authority.freeze.v1
-  tools/loom/subprocess_membrane.freeze.v1
-  tools/loom/resident_authority.freeze.v1
-  tools/loom/effect_closure_authority.freeze.v1
-  tools/loom/kernel_invocation_cell_authority.freeze.v1
-  tools/loom/resident_membrane.runtime.v4
+  tools/loom/kernel_peer_material_judgment_v13.freeze.v2
+  tools/loom/kernel_exec_grant_cell_authority.freeze.v2
+  tools/loom/subprocess_membrane.freeze.v2
+  tools/loom/resident_authority.freeze.v2
+  tools/loom/effect_closure_authority.freeze.v2
+  tools/loom/kernel_invocation_cell_authority.freeze.v3
+  tools/loom/resident_membrane.runtime.v4.v2
   tools/loom/resident_membrane_v5_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v5.sh
   scripts/dev/promote_loom_host_exec_quorum_capsule.sh
@@ -156,7 +156,7 @@ if [[ -z "$AUTHORITY" ]]; then
 fi
 if [[ -z "$RESIDENT" ]]; then
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
-  RESIDENT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5"
+  RESIDENT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5.v2"
 fi
 RUNTIME="$(readlink -f "$RUNTIME")"
 AUTHORITY="$(readlink -f "$AUTHORITY")"
@@ -185,7 +185,7 @@ authority_probe="$(printf '0\n' | "$AUTHORITY")"
 [[ "$authority_probe" == 'SOUNIO_HOST_BOOT_RECONCILER_SELFTEST PASS cases=14' ]] ||
   fail "Sounio authority selftest diverged: $authority_probe"
 resident_expected_sha256="$(sed -n 's/^runtime_sha256=//p' \
-  "$POLICY_ROOT/tools/loom/resident_membrane.runtime.v5")"
+  "$POLICY_ROOT/tools/loom/resident_membrane.runtime.v5.v2")"
 [[ "$resident_expected_sha256" =~ ^[0-9a-f]{64}$ && \
    "$resident_sha256" == "$resident_expected_sha256" ]] ||
   fail "Sounio resident hash drifted: expected=$resident_expected_sha256 actual=$resident_sha256"
@@ -410,7 +410,7 @@ fi
 install -m 0755 "$RUNTIME" "$dest_prefix/bin/sounio-loom-runtime"
 install -m 0755 "$AUTHORITY" "$dest_prefix/bin/sounio-loom-host-boot-reconciler"
 install -m 0755 "$RESIDENT" \
-  "$dest_prefix/bin/sounio-loom-resident-membrane-runtime-v5"
+  "$dest_prefix/bin/sounio-loom-resident-membrane-runtime-v5.v2"
 for relative in "${POLICY_FILES[@]}"; do
   destination="$dest_policy_root/$relative"
   policy_mode=0444

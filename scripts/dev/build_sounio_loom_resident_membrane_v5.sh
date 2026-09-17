@@ -27,7 +27,7 @@ INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freez
 GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 ACTIVATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
 RESIDENT_V4_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
-OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5}"
+OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5.v2}"
 
 fail() {
   printf 'build-sounio-loom-resident-membrane-v5: FAIL: %s\n' "$*" >&2
@@ -110,7 +110,7 @@ invocation_adapter="$work/kernel_invocation_cell_resident_v5_adapter.sio"
 grant_adapter="$work/kernel_exec_grant_cell_resident_v5_adapter.sio"
 activation_adapter="$work/kernel_peer_activation_capsule_resident_v5_adapter.sio"
 combined="$work/loom_resident_membrane_v5_runtime.sio"
-compiled="$work/sounio-loom-resident-membrane-runtime-v5"
+compiled="$work/sounio-loom-resident-membrane-runtime-v5.v2"
 activation_reference="$work/sounio-loom-kernel-peer-activation-capsule-authority-runtime"
 
 adapt_entrypoint "$MEMBRANE_ENTRYPOINT" subprocess_membrane_v5_decide_one "$membrane_adapter"

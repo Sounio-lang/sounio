@@ -92,7 +92,7 @@ INVOCATION_MANIFEST="$RELEASE_DIR/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST="$RELEASE_DIR/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST="$RELEASE_DIR/resident_membrane.runtime.v4"
-RESIDENT_RUNTIME="$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME="$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4.v2"
 
 root_file_mode "$BROKER_TARGET" 555
 root_file_mode "$MANIFEST" 444

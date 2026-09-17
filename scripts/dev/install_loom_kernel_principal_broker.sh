@@ -8,9 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v2"
 CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v2"
-INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
 BROKER_SOURCE="$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp"
 SOCKET_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.socket"
 SERVICE_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.service"
@@ -216,7 +216,7 @@ done
   fail 'InvocationCell manifest action is not 9029'
 [[ "$(invocation_manifest_value material_invocation)" == false ]] ||
   fail 'InvocationCell manifest opened material invocation'
-[[ "$(exec_grant_manifest_value schema)" == loom-kernel-exec-grant-cell-authority-freeze-v1 ]] ||
+[[ "$(exec_grant_manifest_value schema)" == loom-kernel-exec-grant-cell-authority-freeze-v2 ]] ||
   fail 'ExecGrantCell manifest schema is not frozen action 9030'
 [[ "$(exec_grant_manifest_value stage)" == SEMANTICS_FROZEN ]] ||
   fail 'ExecGrantCell manifest stage is not frozen'
@@ -228,7 +228,7 @@ done
   fail 'ExecGrantCell manifest action is not 9030'
 [[ "$(exec_grant_manifest_value material_grant)" == false ]] ||
   fail 'ExecGrantCell manifest opened a material grant'
-[[ "$(resident_manifest_value schema)" == loom-resident-membrane-runtime-v4 ]] ||
+[[ "$(resident_manifest_value schema)" == loom-resident-membrane-runtime-v4.v2 ]] ||
   fail 'resident manifest schema is not v4'
 [[ "$(resident_manifest_value stage)" == SOUNIO_RESIDENT_REALIZATION ]] ||
   fail 'resident manifest stage is not Sounio resident realization'
@@ -237,7 +237,7 @@ done
 [[ "$(resident_manifest_value actions)" == 9023,9024,9025,9029,9030 ]] ||
   fail 'resident manifest omits action 9030 lineage'
 [[ "$(resident_manifest_value parent_9030_sha256)" == \
-  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+  a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
   fail 'resident manifest is not bound to frozen action 9030'
 [[ "$(resident_manifest_value material_grant)" == false ]] ||
   fail 'resident manifest opened a material grant'
@@ -253,7 +253,7 @@ trap 'rm -rf "$WORK"' EXIT
 AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-lease-authority-runtime"
 CAPSULE_AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_AUTHORITY_BUILD="$WORK/sounio-loom-kernel-invocation-cell-authority-runtime"
-RESIDENT_RUNTIME_BUILD="$WORK/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME_BUILD="$WORK/sounio-loom-resident-membrane-runtime-v4.v2"
 BROKER_BUILD="$WORK/loom-kernel-principal-broker"
 SOUNIO_LOOM_KERNEL_PRINCIPAL_LEASE_OUTPUT="$AUTHORITY_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_lease_authority.sh" >/dev/null
@@ -292,13 +292,13 @@ RESIDENT_ATTACHMENT_DOC_SHA256="$(sha256_file "$RESIDENT_ATTACHMENT_DOC")"
   fail 'frozen capsule manifest hash drifted from the broker contract'
 [[ "$CAPSULE_AUTHORITY_SHA256" == "$(capsule_manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio capsule authority hash differs from frozen manifest'
-[[ "$INVOCATION_MANIFEST_SHA256" == 61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e ]] ||
+[[ "$INVOCATION_MANIFEST_SHA256" == b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed ]] ||
   fail 'frozen InvocationCell manifest hash drifted from the broker contract'
 [[ "$INVOCATION_AUTHORITY_SHA256" == "$(invocation_manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio InvocationCell authority hash differs from frozen manifest'
-[[ "$EXEC_GRANT_MANIFEST_SHA256" == 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+[[ "$EXEC_GRANT_MANIFEST_SHA256" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
   fail 'frozen ExecGrantCell manifest hash drifted from the broker contract'
-[[ "$RESIDENT_MANIFEST_SHA256" == f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473 ]] ||
+[[ "$RESIDENT_MANIFEST_SHA256" == 2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1 ]] ||
   fail 'frozen resident v4 manifest hash drifted from the broker contract'
 [[ "$RESIDENT_RUNTIME_SHA256" == "$(resident_manifest_value runtime_sha256)" ]] ||
   fail 'source-fresh resident v4 runtime hash differs from frozen manifest'
@@ -395,9 +395,9 @@ if [[ -e "$RELEASE_DIR" ]]; then
     fail 'existing immutable release resident v4 manifest drifted'
   [[ "$(mode_of "$RELEASE_DIR/resident_membrane.runtime.v4")" == 444 ]] ||
     fail 'existing immutable release resident v4 manifest mode drifted'
-  [[ "$(sha256_file "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4")" == "$RESIDENT_RUNTIME_SHA256" ]] ||
+  [[ "$(sha256_file "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4.v2")" == "$RESIDENT_RUNTIME_SHA256" ]] ||
     fail 'existing immutable release resident v4 runtime drifted'
-  [[ "$(mode_of "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4")" == 555 ]] ||
+  [[ "$(mode_of "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4.v2")" == 555 ]] ||
     fail 'existing immutable release resident v4 runtime mode drifted'
   [[ "$(sha256_file "$RELEASE_DIR/loom-kernel-principal-broker")" == "$BROKER_SHA256" ]] ||
     fail 'existing immutable release broker drifted'
@@ -430,7 +430,7 @@ else
   install -m 0555 "$INVOCATION_AUTHORITY_BUILD" \
     "$RELEASE_STAGE/sounio-loom-kernel-invocation-cell-authority-runtime"
   install -m 0555 "$RESIDENT_RUNTIME_BUILD" \
-    "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4"
+    "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4.v2"
   install -m 0444 "$MANIFEST" "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v2"
   install -m 0444 "$CAPSULE_MANIFEST" "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v2"
   install -m 0444 "$INVOCATION_MANIFEST" "$RELEASE_STAGE/kernel_invocation_cell_authority.freeze.v1"
@@ -451,7 +451,7 @@ else
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-lease-authority-runtime"
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-capsule-authority-runtime"
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-invocation-cell-authority-runtime"
-  sync_path "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4"
+  sync_path "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4.v2"
   sync_path "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v2"
   sync_path "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v2"
   sync_path "$RELEASE_STAGE/kernel_invocation_cell_authority.freeze.v1"
@@ -482,7 +482,7 @@ INVOCATION_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_inv
 INVOCATION_AUTHORITY_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/resident_membrane.runtime.v4"
-RESIDENT_RUNTIME_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4.v2"
 atomic_symlink "$BROKER_TARGET" "$DEST_ROOT/usr/libexec/sounio/loom-kernel-principal-broker"
 atomic_file "$SOCKET_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.socket" 0644
 atomic_file "$SERVICE_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.service" 0644

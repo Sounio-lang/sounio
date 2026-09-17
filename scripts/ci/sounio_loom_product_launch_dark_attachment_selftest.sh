@@ -87,7 +87,7 @@ seal_code="$(projection_code seal)"
 
 mkdir -p "$TEST_ROOT/untrusted-cwd/tools/loom"
 printf 'schema=attacker-selected-policy\n' > \
-  "$TEST_ROOT/untrusted-cwd/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+  "$TEST_ROOT/untrusted-cwd/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
 
 direct_output="$($LOOM start --state-dir "$STATE_DIR" --agent "$AGENT" \
   --lane direct --session-id direct-session --cwd "$TEST_ROOT/untrusted-cwd" \
