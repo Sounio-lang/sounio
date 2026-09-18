@@ -43,6 +43,15 @@ MADAROS="${SOUNIO_MADAROS_CORPUS_BIN:-}"
 REFRESH="${SOUNIO_MADAROS_CORPUS_REFRESH:-0}"
 JOBS="${SOUNIO_TEST_JOBS:-4}"
 
+# This gate execs the raw Madaros ELF directly, not through bin/madaros, so it
+# applies the limits bin/madaros would. The stack is raised once for the whole
+# gate below (SOUNIO_MADAROS_CORPUS_STACK_KB): under the default 8 MiB stack,
+# measured 2026-09-14, a hello-world compile exits 139 and the gate reported 1792
+# of 1915 programs as having SEGFAULTED the compiler. The virtual-memory cap is
+# bin/madaros's, with the same variable and default, and is scoped to each
+# compile.
+MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
+
 fail() {
   echo "[madaros-corpus] FAIL: $*" >&2
   exit 1
@@ -72,12 +81,19 @@ ulimit -s "$CORPUS_STACK_KB" 2>/dev/null \
 [[ "$(ulimit -s)" == "$CORPUS_STACK_KB" ]] \
   || fail "stack is $(ulimit -s) KiB after requesting $CORPUS_STACK_KB -- no verdict"
 
+# bin/madaros ignores a vmem ulimit the hard limit refuses. A gate cannot: the
+# run would silently fall back to the caller's limit. Probe in a subshell and
+# refuse if the cap did not take effect.
+got_vmem="$(ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null; ulimit -v)"
+[[ "$got_vmem" == "$MADAROS_VMEM_LIMIT_KB" ]] \
+  || fail "cannot set vmem limit $MADAROS_VMEM_LIMIT_KB KiB (got $got_vmem; hard limit $(ulimit -Hv)) -- no verdict"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-madaros-corpus.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "[madaros-corpus] compiler: $MADAROS"
 "$MADAROS" --version 2>&1 | head -1 | sed 's/^/[madaros-corpus] /'
-echo "[madaros-corpus] stack: ulimit -s $(ulimit -s) KiB (SOUNIO_MADAROS_CORPUS_STACK_KB)"
+echo "[madaros-corpus] stack: ulimit -s $(ulimit -s) KiB (SOUNIO_MADAROS_CORPUS_STACK_KB); compiler vmem: $MADAROS_VMEM_LIMIT_KB KiB (MADAROS_VMEM_LIMIT_KB)"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
@@ -127,7 +143,12 @@ if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 # The status is captured BEFORE any test, because inside `if ! cmd; then` the
 # value of $? is the negation's status and always 0 -- which would classify
 # every kill as an ordinary compile failure, the exact reading this guards.
-"$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1
+# The vmem cap is scoped to the compiler exec, as bin/madaros scopes it; the test
+# ELF below runs under the caller's vmem. The stack was raised for the whole gate
+# and is inherited here. `exec` keeps the subshell's status the compiler's own,
+# so 137 and 139 still arrive as signals.
+( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true
+  exec "$MADAROS" compile "$src" -o "$elf" ) >/dev/null 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
   # Three different things exit non-zero here, and they are not interchangeable.
@@ -182,7 +203,7 @@ cat > "$WORK/timeout_run.sh" <<'TR'
 timeout 30 "$1" 2>/dev/null
 TR
 chmod +x "$WORK/timeout_run.sh"
-export MADAROS WORK
+export MADAROS WORK MADAROS_VMEM_LIMIT_KB
 
 : > "$WORK/ran.txt"
 : > "$WORK/killed.txt"

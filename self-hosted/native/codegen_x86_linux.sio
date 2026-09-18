@@ -1248,6 +1248,23 @@ fn name_is_ffi_system(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_heap_realloc(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 12 { return false }
+    if n.buf[0] != 104 as i8 { return false }     // 'h'
+    if n.buf[1] != 101 as i8 { return false }     // 'e'
+    if n.buf[2] != 97 as i8 { return false }      // 'a'
+    if n.buf[3] != 112 as i8 { return false }     // 'p'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 114 as i8 { return false }     // 'r'
+    if n.buf[6] != 101 as i8 { return false }     // 'e'
+    if n.buf[7] != 97 as i8 { return false }      // 'a'
+    if n.buf[8] != 108 as i8 { return false }     // 'l'
+    if n.buf[9] != 108 as i8 { return false }     // 'l'
+    if n.buf[10] != 111 as i8 { return false }    // 'o'
+    if n.buf[11] != 99 as i8 { return false }     // 'c'
+    true
+}
+
 fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 9 { return false }
     if n.buf[0] != 104 as i8 { return false }     // 'h'
@@ -1308,6 +1325,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_assert(*name) { return 21 }
     if name_is_heap_alloc(*name) { return 23 }
     if name_is_heap_free(*name) { return 24 }
+    if name_is_heap_realloc(*name) { return 60 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
     if name_is_arena_mark(*name) { return 56 }
@@ -1415,6 +1433,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
     if name_is_heap_free((*func).name) { return 24 }
+    if name_is_heap_realloc((*func).name) { return 60 }
     if name_is_syscall6((*func).name) { return 27 }
     if name_is_malloc((*func).name) { return 23 }
     if name_is_free((*func).name) { return 24 }
@@ -4154,6 +4173,75 @@ fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_patch_u32_le(nc, nonpositive_patch, fail_offset - (nonpositive_patch + 4))
     nc_patch_u32_le(nc, overflow_patch, fail_offset - (overflow_patch + 4))
     nc_patch_u32_le(nc, mmap_error_patch, fail_offset - (mmap_error_patch + 4))
+}
+
+// heap_realloc(ptr, n) -> payload of n bytes holding ptr's contents, or 0 on
+// failure (ptr stays valid). Same header ABI as heap_alloc: mremap the mapping
+// whose page-rounded length sits at ptr-8, MAYMOVE, and rewrite the header.
+// A null ptr is heap_alloc(n). Madaros had no body for this builtin, so every
+// call reached a ud2 stub: a HeapI64Vec growing past its capacity SIGILLed.
+fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_test_rdi_rdi(nc)
+    let null_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x84)
+    nc_emit_u32_le(nc, 0) // jz alloc
+
+    // rdx = page_round_up(n + 8); the signed test rejects n <= 0 and overflow.
+    nc_emit_mov_reg_reg(nc, 2, 6)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_u32_le(nc, 4103) // add rdx,4103
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xd2) // test rdx,rdx
+    let size_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0) // jle fail
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xe2)
+    nc_emit_u32_le(nc, -4096) // and rdx,-4096
+
+    // mremap(ptr-8, [ptr-8], rdx, MREMAP_MAYMOVE). The syscall preserves rdx.
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xef)
+    nc_emit_byte(nc, 8) // sub rdi,8
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x37) // mov rsi,[rdi]
+    nc_emit_mov_r10_imm32(nc, 1)
+    nc_emit_mov_rax_imm(nc, 25)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    let remap_error_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x88)
+    nc_emit_u32_le(nc, 0) // js fail
+
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x10) // mov [rax],rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 8) // add rax,8
+    nc_emit_ret(nc)
+
+    let fail_offset = (*nc).code.len
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_ret(nc)
+
+    let alloc_offset = (*nc).code.len
+    nc_emit_mov_reg_reg(nc, 7, 6)
+    emit_builtin_heap_alloc_into(nc)
+
+    nc_patch_u32_le(nc, null_patch, alloc_offset - (null_patch + 4))
+    nc_patch_u32_le(nc, size_patch, fail_offset - (size_patch + 4))
+    nc_patch_u32_le(nc, remap_error_patch, fail_offset - (remap_error_patch + 4))
 }
 
 // heap_free(NULL) is a no-op. Non-null pointers must come from heap_alloc.
@@ -7931,6 +8019,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is_heap_realloc(name) { return 60 }
     if name_is___sounio_seq_push(name) { return 51 }
     if name_is___sounio_seq_get(name) { return 52 }
     if name_is___sounio_seq_set(name) { return 53 }
@@ -8045,6 +8134,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 60 { emit_builtin_heap_realloc_into(nc); return }
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
@@ -8127,6 +8217,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(&! c); return c }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(&! c); return c }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+        if name_is_heap_realloc(func.name) { emit_builtin_heap_realloc_into(&! c); return c }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
         if name_is_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
         if name_is_getpid(func.name) { emit_builtin_getpid_into(&! c); return c }
@@ -8275,6 +8366,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         }
         if builtin_id == 24 {
             emit_builtin_heap_free_into(nc)
+            return
+        }
+        if builtin_id == 60 {
+            emit_builtin_heap_realloc_into(nc)
             return
         }
         return
@@ -10608,6 +10703,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(nc); return }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(nc); return }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+        if name_is_heap_realloc(func.name) { emit_builtin_heap_realloc_into(nc); return }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
         if name_is_free(func.name) { emit_builtin_heap_free_into(nc); return }
         if name_is_getpid(func.name) { emit_builtin_getpid_into(nc); return }

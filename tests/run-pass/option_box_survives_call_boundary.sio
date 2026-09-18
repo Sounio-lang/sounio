@@ -1,0 +1,57 @@
+//@ run-pass
+//@ expect-stdout: option box across call: PASS
+// An Option<T> that matches Some in the caller must still match Some inside the
+// function it is passed to. lean_single gets this right, which is why this test
+// passes here. MADAROS DOES NOT.
+//
+// Measured on the same source, and each line rules something out:
+//
+//   ordinary i64 argument                    arrives correctly
+//   Option passed in and RETURNED unchanged  caller matches Some
+//   match on the Option parameter            None
+//   copy the parameter to a local, then match None
+//   Option<i64> instead of Option<Box<T>>    None
+//   Option as second argument                None
+//
+// The second line is the important one: the value crosses into the callee
+// intact, so this is not argument passing. The ABI code is generic over
+// scalars and never mentions sum types, and the IR lowerer binds the parameters
+// correctly -- SOUNIO_LOWER_LIVE_TRACE=1 shows the right param_count for each
+// function. What fails is every match on that value once inside, and copying it
+// to a local first does not dodge it.
+//
+// WHY IT MATTERS. lex_file_parse_items ends in reverse_item_list_loop(items,
+// None); under Madaros that loop takes the None arm immediately and returns the
+// empty accumulator. The modular parser therefore returns ZERO items for every
+// file -- measured on hello.sio: token_count=17, tok[0]=Fn, the item loop runs,
+// the item is appended, the list entering the reversal is non-empty, and what
+// comes out is empty with errors=0. Both k2_knowledge_unit_constraint_probe and
+// k2_unit_derived_ast_probe are built on it, so unit_types_derived_gate and
+// knowledge_context_unit_gate have been validating empty lists and have never
+// tested their subject.
+struct Node {
+    v: i64,
+}
+
+fn takes_one(current: Option<Box<Node> >) -> i64 with Mut, Alloc {
+    match current {
+        None => 0
+        Some(n) => 1
+    }
+}
+
+fn takes_two(current: Option<Box<Node> >, acc: Option<Box<Node> >) -> i64 with Mut, Alloc {
+    match current {
+        None => 0
+        Some(n) => 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let node = Node { v: 42 }
+    let items = Some(Box::new(node))
+    if takes_one(items) == 1 && takes_two(items, None) == 1 {
+        print("option box across call: PASS\n")
+    }
+    return 0
+}
