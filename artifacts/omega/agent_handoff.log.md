@@ -3337,3 +3337,62 @@ notes: |
   ladder + 17-test battery + both cd_exact consumers all ran green on the clean binary,
   which covers the brief's done criteria; the umbrella adds regression breadth I did not
   claim. Whoever merges the next A-track change should run it before/after.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T12:45:00Z
+files:
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: NOTIFY founder + continuity campaign — B1 and B2 closed; the campaign's work-packet table is now fully DONE. Nothing was implemented: both were already landed, and B1's brief was wrong about its own mechanism. Re-measured everything on clean main before concluding.
+checks:
+  - "git -C /tmp/repro-e259 rev-parse HEAD  # 8fc294b7 (= main), binary 2026-09-18"
+  - "./bin/madaros run tests/stdlib/eisa/test_eisa_isa.sio  # 'ALL PASS: eisa isa P1 P2 P3 P4 P5' rc=0, no SIGILL, no ud2  (W2)"
+  - "( ulimit -v 16000000; ./bin/madaros run tests/stdlib/eisa/test_eisa_evm.sio )  # 'ALL PASS: eisa evm V1 V2 V3 V4 V5' rc=0  (W3)"
+  - "W1 author-written 3-module repro in /tmp/w1t (main -> mod_a -> mod_b -> str::lib)  # rc=0, prints 7 then W1 REACHED"
+  - "for t in tests/stdlib/eisa/*.sio; do ./bin/madaros run $t; done  # default lane 13/14; lean lane 14/14"
+  - "SOUNIO_MADAROS_BIN=<canonical> bash scripts/ci/eisa_bridge_conformance_gate.sh  # 25/25 PASS incl. tamper-sensitivity + anti-vacuity"
+  - "git diff --name-status origin/main origin/gpu/epistemic-tensor-core-next -- stdlib/eisa/ tools/eisa/ tests/stdlib/eisa/  # no 'A' rows: nothing exists only on the branch"
+commit: docs/handoff/continuity/SCOREBOARD.md (uncommitted at time of entry)
+status: lock-released
+notes: |
+  B1 — PREMISE FALSIFIED, then fixed somewhere else entirely. PR #664 (CLOSED) built Madaros
+  from source on Slurm for both origin/main a08a0a737 and the integration base, and proved the
+  brief's story wrong: the module dep-closure WORKS, str::lib IS pulled transitively (minimal
+  repro reports 'loaded 4 modules'), and NO ud2 is emitted and NO ELF is produced — so there
+  was never a runtime SIGILL to reach. The actual defect was a builtin carrying no IR body,
+  reachable only through an imported function's body, and the fix is in native codegen, not in
+  the module_loader.sio/module_frontend.sio the brief named: PR #710 f26bdd2981
+  'fix(native): emit builtins referenced only transitively via imported functions' adds
+  ir_module_ensure_builtin_call_targets (append a named stub + rebind the call) and the missing
+  str_from_bytes (id 22) case in native_v2_builtin_id_for_name. PR #714 ported the merged-checker
+  fixes. #710's own body predicts my W2 output verbatim, which is a good sign the measurement
+  matched the intended acceptance.
+
+  Reproduced all three witnesses independently rather than trusting the PR text: W1 written from
+  scratch (my first version failed on a bug of MY OWN making — [0;256] infers [i64;256] where
+  str_from_bytes_buf wants &[i8;256]; fixed by declaring var buf: [i8; 256]). Worth recording
+  because that is exactly the kind of self-inflicted failure that gets misread as a compiler red.
+
+  B2 — gate is 25/25, not the brief's 21/21 (program list grew; 31 artifacts/eisa/*.eisax.elf
+  already exist so step 1's regeneration is moot). Suite is 14 tests, not 13. Default lane 13/14
+  with lean lane 14/14. The single difference is test_eisax_format (rc=1, no stdout verdict).
+  Instead of filing it as a vague 'known red' I isolated it: compiles and lowers clean (116
+  functions, ELF produced) so it is wrong-code, not SIGILL and not a refusal; per-section
+  counters localise the 9 failing asserts: the counter printed at the F4 boundary is still 0,
+  at the F5 boundary it is 8, and at the F6 boundary (== total) it is 9 — so all 9 come from the
+  F3 validation-error-code block plus 1 more in F5's assembler-golden block. It is already
+  documented as a pre-existing engine split in EISA_ORIGIN_GUM_2026-08-20.md, and the file's own
+  header says validated_lane: lean_single. Filed in the ledger for the engine-parity campaign.
+
+  B2 step 4 REVISED: /workspace/sounio-eisa no longer exists. Measured the branch instead —
+  gpu/epistemic-tensor-core-next is 247 commits ahead of main but has NO file present only on the
+  branch across stdlib/eisa/, tools/eisa/ or tests/stdlib/eisa/; main is a strict superset (it
+  even has hypercomplex_zd.sio, which the branch deleted). There is no unmerged EISA content to
+  inventory. Also removed a stale instruction that told future sessions to pair against
+  /workspace/sounio/bin/madaros-linux-x86_64 — that path is on a dirty lane branch, and pairing
+  with it is how the A4 session nearly measured the wrong tree.
+
+  NOT RUN (needs the cluster, not the pod): the umbrella gate and the CI-parity battery
+  (selfhost_host_gate + souc_v2_gate + runtime proof). No compiler file was edited, so their
+  verdict cannot be affected by this entry.
