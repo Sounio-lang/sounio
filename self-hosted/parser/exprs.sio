@@ -25,23 +25,6 @@ fn expr_kind_ends_line_stmt(kind: ExprKind) -> bool {
         || kind == ExprKind::ExprForIn
 }
 
-// Append one segment to a path's segment list (kept in source order).
-fn expr_path_segments_append(list: StringList, seg: Name) -> StringList with Mut, Alloc {
-    let rest = list.tail
-    match rest {
-        None => StringList {
-            head_buf: list.head_buf,
-            head_len: list.head_len,
-            tail: Some(Box::new(StringList { head_buf: seg.buf, head_len: seg.len, tail: None })),
-        },
-        Some(more) => StringList {
-            head_buf: list.head_buf,
-            head_len: list.head_len,
-            tail: Some(Box::new(expr_path_segments_append(*more, seg))),
-        },
-    }
-}
-
 impl Parser {
     // ============================================================
     // Expression entry point (dispatches to Pratt parser)
@@ -339,12 +322,31 @@ impl Parser {
         else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::Var || tk_is_contextual_ident(k) {
             self.parse_ident_expr()
         }
-        // Error recovery: advance past unrecognized token to avoid infinite loops
+        // Error recovery: advance past unrecognized token to avoid infinite loops.
+        // This used to count the error without printing anything, so a module
+        // that failed here reported only "Parse failed for module 0: N errors"
+        // with no position -- `HeapVec::<i64>::new()` produced three of those and
+        // no clue which token was refused. Same format and cap as expect().
         else {
             let span = self.current_span()
             var p = self
             p.had_error = true
             p.error_count = p.error_count + 1
+            if p.error_count <= 20 {
+                print("parse error: unexpected token at line ")
+                if p.pos >= 0 && p.pos < 2097152 {
+                    print_int(PT_LINE[p.pos as usize])
+                    print(":")
+                    print_int(PT_COL[p.pos as usize])
+                    print(" actual=")
+                    print_int(PT_KIND_CODE[p.pos as usize])
+                    print("\n")
+                } else {
+                    print("unknown\n")
+                }
+            } else if p.error_count == 21 {
+                print("parse error: additional errors suppressed\n")
+            }
             p = p.advance()
             parser_store_expr_box(Box::new(error_expr(span)))
             p
@@ -1208,23 +1210,49 @@ impl Parser {
 
             // Turbofish: ident_or_path followed by ::<T, U>
             var turbofish_args: Option<Box<TypeExprList>> = None
+            var had_turbofish = false
             if parser_peek(p1) == TokenKind::ColonColon && parser_peek_ahead(p1, 1) == TokenKind::Lt {
                 p1 = p1.advance()  // skip ::
                 let ta_pair = p1.parse_type_args()
                 p1 = ta_pair.0
                 turbofish_args = Some(Box::new(ta_pair.1))
-                // `Type::<T>::method(...)`: the path continues past the type's
-                // arguments. Append the trailing segments so the call has the
-                // same `Type::method` shape `Type::method()` produces, now
-                // carrying type_args. Without this the leftover `::method`
-                // failed the statement parse.
-                while parser_peek(p1) == TokenKind::ColonColon && parser_peek_ahead(p1, 1) == TokenKind::Ident {
+                had_turbofish = true
+            }
+
+            // `Type::<A>::name`: the turbofish sits on the type segment and more
+            // segments follow -- an associated fn of a generic type, as in
+            // `HeapVec::<i64>::new()`. Parsing used to stop after the type args:
+            // the expression ended, `::` began a new statement, and parse_prefix's
+            // recovery counted one silent error per occurrence
+            // (tests/stdlib/collections/test_heap_vec_generic.sio: "Parse failed for
+            // module 0: 3 errors"). The trailing segments now join the path and the
+            // args stay on the node, so it is shaped exactly like `Foo::new()` with
+            // type args attached. A second turbofish, `Type::<A>::f::<B>`, is refused.
+            if had_turbofish && parser_peek(p1) == TokenKind::ColonColon {
+                let after_k = parser_peek_ahead(p1, 1)
+                if after_k == TokenKind::Ident || tk_is_keyword(after_k) {
                     p1 = p1.advance()  // skip ::
-                    path = AstPath {
-                        segments: expr_path_segments_append(path.segments, p1.current_name()),
-                        seg_count: path.seg_count + 1,
+                    let rest_pair = p1.parse_type_path()
+                    p1 = rest_pair.0
+                    let rest_path = rest_pair.1
+                    let joined = string_list_append(path.segments, rest_path.segments)
+                    path = AstPath { segments: joined, seg_count: path.seg_count + rest_path.seg_count }
+                    if parser_peek(p1) == TokenKind::ColonColon && parser_peek_ahead(p1, 1) == TokenKind::Lt {
+                        p1.had_error = true
+                        p1.error_count = p1.error_count + 1
+                        if p1.error_count <= 20 {
+                            print("parse error: a second turbofish after `Type::<...>::name` is not supported at line ")
+                            if p1.pos >= 0 && p1.pos < 2097152 {
+                                print_int(PT_LINE[p1.pos as usize])
+                                print(":")
+                                print_int(PT_COL[p1.pos as usize])
+                            }
+                            print("\n")
+                        }
+                        p1 = p1.advance()  // skip ::
+                        let extra_pair = p1.parse_type_args()
+                        p1 = extra_pair.0
                     }
-                    p1 = p1.advance()  // skip ident
                 }
             }
 
