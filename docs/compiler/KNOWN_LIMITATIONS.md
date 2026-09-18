@@ -39,7 +39,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
-| KL-16 | Hessian Tier-4 (16a–16e CLOSED; residual loops/H-multi/a64) | lean_single |
+| KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
 
 ## Ledger
 
@@ -187,8 +187,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   (phi-like select by execution). Pin:
   `tests/run-pass/kl16e_ifelse_shadow_merge.sio`,
   `scripts/ci/lean_single_kl16e_ifelse_shadow_merge_gate.sh`.
-- **Residual (OPEN).** Loop accumulation; HSHADOW multi-pair interproc;
-  a64 `atan2`/`pow` AD; HSHADOW pairs other than `[0,0]` through if/else.
+- **KL-16f — CLOSED (seed).** Loop accumulation of FO
+  `VAR_SSHADOW(_1..7)` and `VAR_HSHADOW_00` on mutable `f64`. Declaration
+  allocates nine fixed slots and spills the RHS; reassignment spills into
+  those slots and does not retarget the metadata pointers (ephemeral
+  `EXPR_*` no longer alias the variable). Pin:
+  `tests/run-pass/kl16f_loop_accum.sio`,
+  `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
+- **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
+  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
