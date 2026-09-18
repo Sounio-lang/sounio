@@ -11,8 +11,6 @@ let pinned_sandbox_sha256 =
 let pinned_activation_manifest_sha256 =
   "5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2"
 
-let pinned_activation_runtime_sha256 =
-  "d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793"
 
 let pinned_resident_v5_manifest_sha256 =
   "09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472"
@@ -286,7 +284,7 @@ let load_activation_dark_policy root =
     match test_override "SOUNIO_LOOM_ACTIVATION_DARK_OPERATIONAL_MANIFEST" with
     | Some path -> path
     | None ->
-        Filename.concat root "tools/loom/kernel_peer_activation_capsule.runtime.v1"
+        Filename.concat root "tools/loom/kernel_peer_activation_capsule.runtime.v2"
   in
   let resident_path =
     match test_override "SOUNIO_LOOM_ACTIVATION_DARK_RESIDENT_MANIFEST" with
@@ -302,8 +300,10 @@ let load_activation_dark_policy root =
   in
   if sha256_file action_path <> pinned_activation_manifest_sha256 then
     failf "activation-dark-action-manifest-hash-mismatch";
-  if sha256_file operational_path <> pinned_activation_runtime_sha256 then
-    failf "activation-dark-operational-manifest-hash-mismatch";
+  (* O hash do arquivo deste registro nao pode ser pinado aqui: o registro
+     pina o sha256 do loom.exe, e o loom.exe contem este modulo — nao existe
+     ponto fixo. O que o pino pretendia garantir esta nos campos validados
+     logo abaixo, inclusive os dois pais, que nao sao auto-referentes. *)
   if sha256_file resident_path <> pinned_resident_v5_manifest_sha256 then
     failf "activation-dark-resident-manifest-hash-mismatch";
   if sha256_file projection_path <> pinned_activation_projection_sha256 then
@@ -322,7 +322,7 @@ let load_activation_dark_policy root =
      || required action "capsule_is_bearer" <> "false"
   then failf "activation-dark-action-state-invalid";
   if required operational "schema"
-       <> "loom-kernel-peer-activation-capsule-ocaml-runtime-v1"
+       <> "loom-kernel-peer-activation-capsule-ocaml-runtime-v2"
      || required operational "stage" <> "OPERATIONAL_REALIZATION_FROZEN"
      || required operational "producing_language" <> "OCaml"
      || required operational "language_role" <> "OPERATIONAL_REALIZATION"
@@ -371,7 +371,7 @@ let load_activation_dark_policy root =
     failf "activation-dark-projection-frame-invalid";
   { action_manifest_sha256 = pinned_activation_manifest_sha256;
     semantics_sha256 = required action "semantics_sha256";
-    operational_manifest_sha256 = pinned_activation_runtime_sha256;
+    operational_manifest_sha256 = sha256_file operational_path;
     resident_manifest_sha256 = pinned_resident_v5_manifest_sha256;
     projection_sha256 = pinned_activation_projection_sha256;
     frame; frame_sha256 = sha256 frame; label }
