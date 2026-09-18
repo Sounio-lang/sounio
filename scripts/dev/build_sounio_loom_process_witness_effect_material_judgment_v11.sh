@@ -12,7 +12,7 @@ POLICY_MANIFEST="$ROOT_DIR/tools/loom/process_witness_effect_policy_plan_v11.fre
 MATERIAL_EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-process-witness-effect-hypercube-v11-host-20260829.txt"
 HOST_PRINCIPAL_EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-host-principal-cell-v1-20260828.txt"
 GRANT_STACK="$ROOT_DIR/tools/loom/kernel_exec_grant_cell.stack.v1"
-ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_EFFECT_MATERIAL_JUDGMENT_V11_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-process-witness-effect-material-judgment-v11}"
 
 fail() {
@@ -39,7 +39,7 @@ expect_hash "$HOST_PRINCIPAL_EVIDENCE" \
 expect_hash "$GRANT_STACK" \
   1d7b8a3b1dfba1d1f9e60b5392cdf7e57a8d085cd872659feea5e333e43759b1
 expect_hash "$ACTION_9025_MANIFEST" \
-  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
+  c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91
 grep -Fxq 'stage=SEMANTICS_FROZEN' "$POLICY_MANIFEST" ||
   fail 'V11 policy semantics are not frozen'
 grep -Fxq 'material_hypercube=true' "$MATERIAL_EVIDENCE" ||

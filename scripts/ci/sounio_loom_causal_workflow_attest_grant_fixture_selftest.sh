@@ -6,7 +6,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-causal-attest-grant.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
 
 fail() {
   printf 'sounio-loom-causal-workflow-attest-grant-fixture-selftest: FAIL: %s\n' "$*" >&2

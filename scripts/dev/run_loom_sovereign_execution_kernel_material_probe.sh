@@ -16,4 +16,4 @@ SOUNIO_LOOM_SOVEREIGN_MATERIAL_OUTPUT="$MATERIAL" \
 
 "$MATERIAL" --selftest "$RUNTIME" \
   "$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v2" \
-  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2"
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1"

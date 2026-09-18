@@ -118,13 +118,13 @@ done
 
 grep -Fq $'\tevent=EXEC_GRANT_CELL\t' "$RECEIPTS" ||
   fail 'exec-grant-cell receipt is missing'
-grep -Fq $'\tparent_9030_manifest_sha256=d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be\t' \
+grep -Fq $'\tparent_9030_manifest_sha256=8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9030'
-grep -Fq $'\tresident_manifest_sha256=219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05\t' \
+grep -Fq $'\tresident_manifest_sha256=f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v4 manifest'
 
 tampered_manifest="$TEST_ROOT/kernel-exec-grant-cell.freeze.v1"
-cp "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
+cp "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
   "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e
@@ -140,7 +140,7 @@ set -e
   fail "action 9030 manifest tamper did not fail before spawn: $manifest_output"
 
 tampered_resident_manifest="$TEST_ROOT/resident-v4.runtime"
-cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" \
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
   "$tampered_resident_manifest"
 printf '\n' >> "$tampered_resident_manifest"
 set +e

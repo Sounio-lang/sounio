@@ -41,7 +41,7 @@ SOUNIO_LOOM_EFFECT_CLOSURE_OUTPUT="$AUTHORITY" \
   'LOOM_PROCESS_WITNESS_EFFECT_POLICY_PLAN_V2 producer=Sounio role=SEMANTIC_POLICY_PLAN semantic_authority=Sounio action=9025 schema=2 families=12 treatments=12 sabotages=12 allowed_syscalls=4' ]] ||
   fail 'V2 policy metadata diverged'
 [[ "$(sed -n '2p' "$BUNDLE")" == \
-  'PARENTS effect_closure_manifest_sha256=6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72 process_witness_manifest_sha256=eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00 v1_policy_manifest_sha256=14ee27eee71f04d1aa5462426379b37bb9c775215e94e17a864dbea308e43f21 garden_commit=13ccfc7896' ]] ||
+  'PARENTS effect_closure_manifest_sha256=c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91 process_witness_manifest_sha256=eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00 v1_policy_manifest_sha256=14ee27eee71f04d1aa5462426379b37bb9c775215e94e17a864dbea308e43f21 garden_commit=13ccfc7896' ]] ||
   fail 'V2 parent binding diverged'
 
 [[ "$(grep -c '^SYSCALL ' "$BUNDLE" || true)" == 4 ]] ||

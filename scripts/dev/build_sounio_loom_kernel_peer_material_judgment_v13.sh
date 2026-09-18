@@ -10,7 +10,7 @@ ENGINE="${SOUNIO_LOOM_KERNEL_PEER_MATERIAL_JUDGMENT_V13_ENGINE:-lean_single}"
 SOURCE="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13_main.sio"
 SEMANTIC_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_authority_plan_v13.freeze.v1"
 MATERIAL_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_controls_v13.freeze.v1"
-ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_KERNEL_PEER_MATERIAL_JUDGMENT_V13_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-kernel-peer-material-judgment-v13}"
 
 fail() {
@@ -28,7 +28,7 @@ expect_hash() {
 expect_hash "$SOURCE" a2e30c1463f7ea1101d32d602304948d11e9afc4b29a83c055f66e09f1552281
 expect_hash "$SEMANTIC_MANIFEST" b3557d850ce0dc13c900f8dbb10c33f824ac25e908cb4a48dd2ef913267194c2
 expect_hash "$MATERIAL_MANIFEST" 7ffdff3f9dd48753502e9151a117fdcac8ea5149ef4772aaea5594269c54b301
-expect_hash "$ACTION_9025_MANIFEST" 6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
+expect_hash "$ACTION_9025_MANIFEST" c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91
 grep -Fxq 'stage=SEMANTICS_FROZEN_V13' "$SEMANTIC_MANIFEST" ||
   fail 'V13 peer semantics are not frozen'
 grep -Fxq 'stage=MATERIAL_CONTROL_MATRIX_FROZEN_V13' "$MATERIAL_MANIFEST" ||

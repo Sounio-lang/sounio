@@ -11,7 +11,7 @@ SOURCE="$ROOT_DIR/tools/loom/kernel_peer_authority_plan_v12_main.sio"
 GARDEN="$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_AUTHORITY_V12.md"
 V11_MANIFEST="$ROOT_DIR/tools/loom/process_witness_effect_material_judgment_v11.freeze.v1"
 V11_EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-process-witness-effect-material-judgment-v11-20260829.txt"
-ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+ACTION_9025_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_KERNEL_PEER_PLAN_V12_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-kernel-peer-authority-plan-v12}"
 
 fail() {
@@ -36,7 +36,7 @@ expect_hash "$V11_MANIFEST" \
 expect_hash "$V11_EVIDENCE" \
   4aa5704fe529ee93c88992a630976395b49a28ed13189af9d7a07aeb7ecc4c64
 expect_hash "$ACTION_9025_MANIFEST" \
-  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
+  c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91
 grep -Fxq 'action_9025_decision=DENY451' "$V11_MANIFEST" ||
   fail 'V11 did not freeze the peer-isolation denial'
 grep -Fxq 'same_uid_peer_isolation=false' "$V11_MANIFEST" ||

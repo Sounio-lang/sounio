@@ -5,7 +5,7 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-ACTION_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
+ACTION_MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_KERNEL_PEER_ACTIVATION_CURRENT_OUTPUT:-$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.current.v1}"
 
 fail() {

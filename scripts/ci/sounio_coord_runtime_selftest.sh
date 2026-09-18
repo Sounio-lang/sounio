@@ -18,8 +18,8 @@ export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/s
 export SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-outcome-runtime"
 export SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-subprocess-membrane-runtime"
 export SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime"
-export SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2.v2"
-export SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3.v2"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3"
 export SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
@@ -207,22 +207,22 @@ cp "$ROOT_DIR/tools/loom/subprocess_membrane_main.sio" \
   "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.runtime.v1" \
   "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.current.v1" \
-  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" \
-  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2" \
-  "$ROOT_DIR/tools/loom/resident_authority.freeze.v2" \
-  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2" \
-  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3" \
-  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
-  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5" \
+  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1" \
+  "$ROOT_DIR/tools/loom/resident_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1" \
   "$ROOT_DIR/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md" \
   "$ROOT_DIR/tools/loom/product_exec_ingress_dark.runtime.v1" \
-  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2" \
-  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2" \
-  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3.v2" \
-  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
   "$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio" \
   "$ROOT_DIR/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_execution_kernel_authority_main.sio" \
@@ -383,7 +383,7 @@ git -C "$REPO" config user.email 'coord-runtime-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 subprocess_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
-  "$REPO/tools/loom/subprocess_membrane.freeze.v2")"
+  "$REPO/tools/loom/subprocess_membrane.freeze.v1")"
 native_hook_cutover_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
   "$REPO/tools/loom/native_hook_cutover.freeze.v2")"
 [[ "$subprocess_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \

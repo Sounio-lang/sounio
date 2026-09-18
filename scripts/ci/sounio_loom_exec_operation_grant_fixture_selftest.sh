@@ -12,7 +12,7 @@ fail() {
   exit 1
 }
 
-MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
 FIXTURE_ONE="$TEST_ROOT/fixture-one"
 FIXTURE_TWO="$TEST_ROOT/fixture-two"
 AUTHORITY="$TEST_ROOT/action-9030-authority"

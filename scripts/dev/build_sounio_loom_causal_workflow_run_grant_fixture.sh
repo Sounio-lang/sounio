@@ -8,7 +8,7 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 SOUC="${SOUNIO_LOOM_CAUSAL_RUN_GRANT_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_LOOM_CAUSAL_RUN_GRANT_ENGINE:-lean_single}"
 SOURCE="$ROOT_DIR/tools/loom/causal_workflow_run_grant_fixture_main.sio"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
 OUTPUT="${SOUNIO_LOOM_CAUSAL_RUN_GRANT_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-causal-workflow-run-grant-fixture}"
 
 fail() {
@@ -21,7 +21,7 @@ fail() {
 [[ -f "$AUTHORITY_MANIFEST" && ! -L "$AUTHORITY_MANIFEST" ]] ||
   fail 'frozen action 9030 manifest is absent or linked'
 [[ "$(sha256sum "$AUTHORITY_MANIFEST" | cut -d ' ' -f 1)" == \
-  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
+  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
   fail 'frozen action 9030 manifest hash drifted'
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-causal-run-grant.XXXXXX")"

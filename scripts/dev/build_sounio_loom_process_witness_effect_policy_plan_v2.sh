@@ -10,7 +10,7 @@ ENGINE="${SOUNIO_LOOM_PROCESS_WITNESS_EFFECT_POLICY_V2_ENGINE:-lean_single}"
 SOURCE="$ROOT_DIR/tools/loom/process_witness_effect_policy_plan_v2_main.sio"
 GARDEN="$ROOT_DIR/tools/loom/GARDEN_PROCESS_WITNESS_EFFECT_POLICY_V2.md"
 V1_MANIFEST="$ROOT_DIR/tools/loom/process_witness_effect_policy_plan.freeze.v1"
-EFFECT_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+EFFECT_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
 PROCESS_MANIFEST="$ROOT_DIR/tools/loom/process_witness_host.runtime.v1"
 OUTPUT="${SOUNIO_LOOM_PROCESS_WITNESS_EFFECT_POLICY_V2_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-process-witness-effect-policy-plan-v2}"
 
@@ -32,7 +32,7 @@ expect_regular_hash "$GARDEN" \
 expect_regular_hash "$V1_MANIFEST" \
   14ee27eee71f04d1aa5462426379b37bb9c775215e94e17a864dbea308e43f21
 expect_regular_hash "$EFFECT_MANIFEST" \
-  6d3142cb05f7be998f1386f4c8121878690acd29c5d5dc553188b27df236cf72
+  c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91
 expect_regular_hash "$PROCESS_MANIFEST" \
   eda00fee106a9f4090d381194b9f1bcd3838f3dcc0bafb0c7769a0877e05aa00
 [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || fail 'Sounio V2 policy-plan source is absent or linked'

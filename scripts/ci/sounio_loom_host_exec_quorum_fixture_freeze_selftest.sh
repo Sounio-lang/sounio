@@ -29,7 +29,7 @@ expect_hash tools/loom/GARDEN_HOST_EXEC_QUORUM_V1.md 67aecd9785a1aa6e95f80cac41f
 expect_hash tools/loom/host_exec_quorum_fixture_main.sio b6b4ab0a4e623c742e44662e484982e483efd84e716d25cd60b8fa39af5a514a
 expect_hash scripts/dev/build_sounio_loom_host_exec_quorum_fixture.sh 885d4f15538ce6a7f07d2383cb43cd5233f6a6236cded5bfdb9def1ed749db2e
 expect_hash scripts/ci/sounio_loom_host_exec_quorum_fixture_selftest.sh a938234f2c6aa26cb38a31b436a6fa11c724cb97589a55b4af53d7557b2f62bb
-expect_hash tools/loom/kernel_exec_grant_cell_authority.freeze.v2 d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be
+expect_hash tools/loom/kernel_exec_grant_cell_authority.freeze.v1 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051
 expect_hash "$EVIDENCE" 175e9f0e030ced98a34d6c430b17748aefcb615924601b980f225463467b3d28
 
 require_line "$MANIFEST" 'schema=loom-host-exec-quorum-fixture-freeze-v1'
@@ -50,7 +50,7 @@ require_line "$MANIFEST" 'parity_open=false'
 require_line "$MANIFEST" 'claim_ready=false'
 require_line "$MANIFEST" 'evidence_sha256=175e9f0e030ced98a34d6c430b17748aefcb615924601b980f225463467b3d28'
 
-require_line "$EVIDENCE" 'expected_results_source=tools/loom/kernel_exec_grant_cell_authority.freeze.v2'
+require_line "$EVIDENCE" 'expected_results_source=tools/loom/kernel_exec_grant_cell_authority.freeze.v1'
 require_line "$EVIDENCE" 'expected_results_encoded_in_shell=false'
 require_line "$EVIDENCE" 'python_executable_invoked=false'
 require_line "$EVIDENCE" 'deterministic_rebuild=true'
