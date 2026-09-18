@@ -3290,3 +3290,50 @@ commit: d183a6babd (pushed; PR #1968 auto-updated)
 status: lock-released
 notes: |
   Acknowledging the regra_idioma violation in the original audit doc. Per founder instruction "diz e corrige no proximo commit. Nao abras PR so para isso a menos que o texto ja esteja em main." — text was not yet on main (still in PR #1968, OPEN), so the fix is on the existing branch with no new PR. Lane discipline preserved.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T12:10:00Z
+files:
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: NOTIFY founder + continuity campaign — stale-status audit of the A-track. Claimed A4 next; found A1, A2 and A4 all already DONE on clean main, so A4 was NOT re-implemented (nothing to build). Scoreboard rows A1/A2/A4 flipped TODO→DONE with the closing PRs and fresh measured evidence; new "Stale-status audit" section records the measurement surface trap.
+checks:
+  - "git -C /tmp/repro-e259 rev-parse HEAD  # 8fc294b7a6cfaba6dd84522de6157730f0bb1e49 (= main, only self-hosted/check/check.sio dirty)"
+  - "./bin/madaros run tests/run-pass/sret_8_field_return.sio  # L0 rc=0 'OK'"
+  - "./bin/madaros run tests/run-pass/generic_struct_return.sio  # L4 rc=0 '6' 'spike PASS'"
+  - "./bin/madaros run tests/run-pass/cd_exact_generic_i64.sio  # ZD PROVED / SQ PASS / NONZERO PASS / 16x COMP i 0"
+  - "./bin/madaros run tests/run-pass/cd_exact_generic_vs_concrete.sio  # BYTECOMPARE PASS"
+  - "W1 rmix primitive receiver -> rc=23 (expected 23); W2 g::<Wrap> -> rc=60 (expected 60)  # A2 brief witnesses exact"
+  - "17/17 SRET regression battery rc=0 (mc_struct_basic, array_elem_field_store, impl_inherent_method, linear_return_value, sret_*, tuple_return_sret_r12_slot, native_v2_f32_struct_sret, test_nested_struct_return, generic_struct_*)"
+  - "bash scripts/ci/madaros_binary_source_drift_gate.sh  # 3/5 BEHIND: pre-existing committed-binary lag, not source"
+commit: docs/handoff/continuity/SCOREBOARD.md (uncommitted at time of entry)
+status: lock-released
+notes: |
+  MEASUREMENT SURFACE TRAP (found before any edit, worth broadcasting): /workspace/sounio
+  is on lane/cursor-1/20260826 (3a50ccec92) with self-hosted/ir/lower.sio carrying ~9943
+  insertions / 6347 deletions UNCOMMITTED, and the workspace bin/madaros-linux-x86_64 was
+  built from that dirty tree. The A4 ladder run there measures a private lane branch, not
+  main — and it returns GREEN either way, which is what makes it dangerous. All ladder and
+  consumer numbers above come from /tmp/repro-e259 (clean 8fc294b7, binary dated 2026-09-18).
+
+  A4 closed by a CHAIN of PRs rather than the single "own branch/PR" the brief assumed:
+  #659 a08a0a737 (println of i64 array element -> print_int, 'unblocks generic_struct_return
+  [WP-A4]'), #662 (witnesses to rc=0), #678 f935dbd38 (A8 cross-module large-struct SRET
+  forwarding), #1392 (cd_exact e2e). The brief's three "worked examples" in lower.sio
+  (is_sret / sret_dest_reg / IrCallSret) do not exist as literals in main's lower.sio —
+  grep returns nothing, so the mechanism was implemented under different names or elsewhere.
+  Recorded rather than chased: the observable behaviour is what the brief gates on, and it
+  is correct.
+
+  Residual left alone deliberately (BOUNDARY): trait_bounded_dispatch_multi_call.sio —
+  monomorphization keeps one instantiation per template, so a generic fn instantiated at
+  both <i64> and <Pair> in ONE compilation unit is refused. That is the A2 monomorphizer
+  family, already baselined (madaros_corpus_baseline.txt:246, LEAN-ONLY at
+  engine_parity_baseline.txt:301), NOT the A4 SRET family. Filed, not chased.
+
+  SKIPPED (needs the cluster, not the pod): WP-A4's umbrella gate
+  native_v2_cpu_compiler_umbrella_gate.sh (~100s-8m) and the Slurm differential. The
+  ladder + 17-test battery + both cd_exact consumers all ran green on the clean binary,
+  which covers the brief's done criteria; the umbrella adds regression breadth I did not
+  claim. Whoever merges the next A-track change should run it before/after.
