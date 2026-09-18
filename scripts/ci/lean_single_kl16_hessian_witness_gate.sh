@@ -14,7 +14,8 @@
 #
 # Residual (still OPEN — not asserted here):
 #   - HSHADOW multi-pair interproc (KL-16c/d closed FO ch0–7 + H[0,0] only)
-#   - loop accumulation; if/else merge of shadow slots
+#   - loop accumulation; HSHADOW multi-pair interproc; a64 atan2/pow AD
+#   - (KL-16e CLOSED if/else FO+H00 shadow merge)
 #   - a64 atan2/pow AD (value-only today)
 # See also: scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh
 #           scripts/ci/lean_single_kl16d_interproc_multich_gate.sh

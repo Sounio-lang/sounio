@@ -1,0 +1,56 @@
+//@ run-pass
+// KL-16e: if/else merge of FO SSHADOW (+ H[0,0] plumbing) on lean_single.
+// Seed-only pin via scripts/ci/lean_single_kl16e_ifelse_shadow_merge_gate.sh —
+// no Madaros sabotage.
+//
+// Before this rung, EXPR_CH_SET was unioned at the join but EXPR_SSHADOW was
+// left as whichever arm compiled last (or cleared), so sensitivity_of through
+// `let z = if c { … } else { … }` returned 0.0.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Epistemic, Mut, Div {
+    let xm: Knowledge<f64> = measure(2.0, uncertainty: 0.0)
+    let ym: Knowledge<f64> = measure(3.0, uncertainty: 0.0)
+    let x = xm.value
+    let y = ym.value
+
+    // Both arms live on ch0 (x); then scales by 2, else by 3.
+    // cond true → z = 2x → ∂z/∂x = 2; cond false → z = 3x → ∂z/∂x = 3.
+    let z_then = if true { x * 2.0 } else { x * 3.0 }
+    let z_else = if false { x * 2.0 } else { x * 3.0 }
+    let s_then = sensitivity_of(z_then, 0)
+    let s_else = sensitivity_of(z_else, 0)
+
+    println(s_then)
+    println(s_else)
+
+    // Cross-channel: then carries ch0 (x), else carries ch1 (y).
+    // sensitivity_of(z, 0) must be 1 on the then path and 0 on the else path.
+    let z_ch_then = if true { x } else { y }
+    let z_ch_else = if false { x } else { y }
+    let s0_then = sensitivity_of(z_ch_then, 0)
+    let s0_else = sensitivity_of(z_ch_else, 0)
+    let s1_then = sensitivity_of(z_ch_then, 1)
+    let s1_else = sensitivity_of(z_ch_else, 1)
+
+    println(s0_then)
+    println(s0_else)
+    println(s1_then)
+    println(s1_else)
+
+    let ok = abs_f(s_then - 2.0) < 1.0e-9
+        && abs_f(s_else - 3.0) < 1.0e-9
+        && abs_f(s0_then - 1.0) < 1.0e-9
+        && abs_f(s0_else - 0.0) < 1.0e-9
+        && abs_f(s1_then - 0.0) < 1.0e-9
+        && abs_f(s1_else - 1.0) < 1.0e-9
+    if ok {
+        print("KL16E_IFELSE_SHADOW_MERGE_PASS\n")
+    } else {
+        print("KL16E_IFELSE_SHADOW_MERGE_FAIL\n")
+    }
+}
