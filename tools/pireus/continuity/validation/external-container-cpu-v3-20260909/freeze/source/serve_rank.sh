@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]] || { echo "external profile requires offline generate" >&2; exit 76; }
+: "${SLURM_JOB_ID:?Slurm allocation required}"
+: "${MASTER_ADDR:?master pod address required}"
+: "${MASTER_PORT:?rendezvous port required}"
+: "${SLURM_PROCID:?Slurm rank required}"
+export NCCL_NET=IB NCCL_IB_DISABLE=0 NCCL_DEBUG=INFO NCCL_SOCKET_IFNAME=eth0
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
+export TRITON_CACHE_DIR=/scratch/pireus/cache/triton
+export TORCHINDUCTOR_CACHE_DIR=/scratch/pireus/cache/inductor
+export HF_HOME=/scratch/pireus/cache/huggingface
+export XDG_CACHE_HOME=/scratch/pireus/cache
+export TIKTOKEN_CACHE_DIR=/scratch/pireus/cache/tiktoken
+echo "PIREUS_SERVING_JOB=$SLURM_JOB_ID rank=$PIREUS_RANK host=$(hostname)"
+MODEL=/scratch/pireus/models/Inkling-Small-NVFP4/b6a99534467840620d411e4cd4ad5819b2610d9c
+python3 -c 'import json,hashlib;from pathlib import Path;p=Path("/scratch/pireus/receipts/inkling-model.json");r=json.loads(p.read_text());assert r["revision"]=="b6a99534467840620d411e4cd4ad5819b2610d9c";assert r["manifest_sha256"]==hashlib.sha256(Path("/scratch/pireus/runtime/inkling-files.json").read_bytes()).hexdigest()'
+PIREUS_MARLIN_OVERLAY=0 /scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/install_marlin_overlay.py
+export PIREUS_MARLIN_OVERLAY=1
+/scratch/pireus/runtime/run_in_container.sh python3 /scratch/pireus/runtime/inspect_runtime.py
+export MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072
+if [[ "${PIREUS_COLD_CHECKPOINT:-0}" == "1" ]]; then
+  python3 /scratch/pireus/runtime/evict_checkpoint_cache.py
+fi
+entrypoint=(-m sglang.launch_server)
+guard_args=()
+profile_args=()
+max_total_tokens=16384
+swa_full_tokens_ratio=0.1
+if [[ "${PIREUS_META_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_model_memory.py)
+  if [[ "${PIREUS_META_SKIP_TOKENIZER:-0}" == "1" ]]; then
+    profile_args=(--skip-tokenizer-init)
+  fi
+fi
+if [[ "${PIREUS_CUDA_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_cuda_memory.py)
+fi
+if [[ "${PIREUS_OFFLINE_MODE:-}" == "generate" ]]; then
+  # Frozen offline profile must not depend on a parent tmux environment.
+  export SGLANG_OPT_LINEARIZED_SHARED_SINK=0 NCCL_MAX_NCHANNELS=2 NCCL_BUFFSIZE=262144
+  export TORCHINDUCTOR_COMPILE_THREADS=1
+  max_total_tokens=6144
+  swa_full_tokens_ratio=0.15
+  entrypoint=(/scratch/pireus/runtime/publish_observer_target.py --entry /scratch/pireus/runtime/offline_generate.py --entry-sha 8794694d22b4319a8e8df719eabdce9a89115fa2d1d11e630780bf3c9d867d5d --)
+fi
+if [[ "${PIREUS_PREPARATION_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/qualify_offline_preparation.py)
+fi
+if [[ "${PIREUS_EMBEDDING_OFFLOAD_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/qualify_embedding_offload.py)
+fi
+if [[ "${PIREUS_LM_HEAD_TILING_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/qualify_lm_head_tiling.py)
+fi
+if [[ "${PIREUS_KERNEL_WARMUP:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/warmup_offline_kernels.py)
+fi
+if [[ "${PIREUS_CHECKPOINT_PATH_PROBE:-0}" == "1" ]]; then
+  entrypoint=(/scratch/pireus/runtime/profile_checkpoint_path.py)
+fi
+if [[ "${PIREUS_TOKEN_IDS:-0}" == "1" ]]; then
+  profile_args=(--skip-tokenizer-init --disable-cuda-graph --chunked-prefill-size 128
+                --max-mamba-cache-size 8 --disable-overlap-schedule --disable-custom-all-reduce
+                --model-loader-extra-config '{"enable_multithread_load":false}'
+                --weight-loader-drop-cache-after-load)
+  guard_args=(--reserve-gib 33)
+fi
+exec python3 /scratch/pireus/runtime/external_rank_supervisor.py --output "/scratch/pireus/receipts/external-${SLURM_JOB_ID}-${PIREUS_RANK}" --worker-uid "${PIREUS_EXTERNAL_WORKER_UID:?declared worker UID required}" --boot-id "${PIREUS_EXTERNAL_BOOT_ID:?declared boot ID required}" --entry-sha 8794694d22b4319a8e8df719eabdce9a89115fa2d1d11e630780bf3c9d867d5d -- python3 /scratch/pireus/runtime/memory_guard.py "${guard_args[@]}" -- /scratch/pireus/runtime/run_in_container.sh python3 "${entrypoint[@]}" \
+  --model-path "$MODEL" --trust-remote-code --tp 2 --nnodes 2 \
+  --node-rank "${PIREUS_RANK:?explicit node rank required}" --dist-init-addr "$MASTER_ADDR:$MASTER_PORT" \
+  --quantization modelopt_fp4 --attention-backend triton --page-size 128 \
+  --fp4-gemm-backend marlin --moe-runner-backend marlin \
+  --mamba-radix-cache-strategy extra_buffer --mem-fraction-static 0.85 \
+  --swa-full-tokens-ratio "$swa_full_tokens_ratio" --mamba-full-memory-ratio 0.1 \
+  --disable-prefill-cuda-graph --reasoning-parser inkling --tool-call-parser inkling \
+  --context-length 16384 --max-total-tokens "$max_total_tokens" --max-running-requests 1 --host 0.0.0.0 --port 30000 "${profile_args[@]}"
