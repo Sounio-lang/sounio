@@ -647,6 +647,14 @@ var B5_ARG_VCOUNT:  i64 = 0
 // arg overwrites them; stores into BSS; callee prologue seeds VAR_*;
 // return writes RET BSS; caller reloads into EXPR_* and clears other
 // channel EXPR shadows so last-arg leak dies.
+//
+// Gated on B16_ACTIVE (set once in compile_all() from a whole-source scan
+// for "sensitivity_of"/"hessian_of"): without a gate this machinery ran at
+// every call/param/return of every f64 function in every program, tripling
+// binary size and making EXPR_SSHADOW spuriously live across calls that
+// never touch first-order sensitivity tracking (job: main regression
+// between 75e80fe022 and 1e10f44325, KL-16c PR #2539).
+var B16_ACTIVE: i64 = 0
 var B16_SSHADOW:     [i64; 16] = [-1; 16]
 var B16_HSHADOW_00:  [i64; 16] = [-1; 16]
 
@@ -3389,6 +3397,22 @@ fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     var i: i64 = 0
     while i < l { if sb(p + i) != str_char_at(kw, i) { return false }; i = i + 1 }
     return true
+}
+
+// Whole-buffer substring scan over SRC[0..SRC_LEN) (post import-resolution,
+// pre-codegen) for a fixed keyword. Used to gate B16_ACTIVE (KL-16c
+// interprocedural FO/Hessian shadow propagation) behind an actual textual
+// use of sensitivity_of/hessian_of, so programs that never call either
+// builtin pay zero extra instructions at calls/params/returns.
+fn src_scan_contains(kw: string) -> bool with Panic, Mut {
+    let kl = str_len(kw)
+    if kl <= 0 || kl > SRC_LEN { return false }
+    var i: i64 = 0
+    while i <= SRC_LEN - kl {
+        if src_match(i, kl, kw) { return true }
+        i = i + 1
+    }
+    return false
 }
 
 // Compare two source regions byte-for-byte (for struct field collision resolution)
@@ -17962,8 +17986,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
-                // KL-16c: capture FO ch0 + H[0,0] for this argument
-                if argc < 16 {
+                // KL-16c: capture FO ch0 + H[0,0] for this argument (only
+                // when the program uses sensitivity_of/hessian_of)
+                if B16_ACTIVE == 1 && argc < 16 {
                     B16_SSHADOW[argc as usize] = EXPR_SSHADOW
                     B16_HSHADOW_00[argc as usize] = EXPR_HSHADOW_00
                 }
@@ -18161,16 +18186,20 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + b5_pvi * 8)
                         b5_pvi = b5_pvi + 1
                     }
-                    // KL-16c: store arg FO ch0 + H[0,0] into BSS (same rcx-save window)
-                    var b16_pvi: i64 = 0
-                    while b16_pvi < B5_ARG_VCOUNT && b16_pvi < 16 {
-                        let b16_ss = B16_SSHADOW[b16_pvi as usize]
-                        if b16_ss >= 0 { emit_load_var(b16_ss) } else { emit_imm64(0) }
-                        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16_pvi * 8)
-                        let b16_hs = B16_HSHADOW_00[b16_pvi as usize]
-                        if b16_hs >= 0 { emit_load_var(b16_hs) } else { emit_imm64(0) }
-                        emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16_pvi * 8)
-                        b16_pvi = b16_pvi + 1
+                    // KL-16c: store arg FO ch0 + H[0,0] into BSS (same rcx-save window).
+                    // Gated on B16_ACTIVE — skip for programs that never call
+                    // sensitivity_of/hessian_of.
+                    if B16_ACTIVE == 1 {
+                        var b16_pvi: i64 = 0
+                        while b16_pvi < B5_ARG_VCOUNT && b16_pvi < 16 {
+                            let b16_ss = B16_SSHADOW[b16_pvi as usize]
+                            if b16_ss >= 0 { emit_load_var(b16_ss) } else { emit_imm64(0) }
+                            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16_pvi * 8)
+                            let b16_hs = B16_HSHADOW_00[b16_pvi as usize]
+                            if b16_hs >= 0 { emit_load_var(b16_hs) } else { emit_imm64(0) }
+                            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16_pvi * 8)
+                            b16_pvi = b16_pvi + 1
+                        }
                     }
                     em(0x59)
                     emit_direct_fn_call_x86(fi, abi_argc)
@@ -18292,26 +18321,32 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                     // KL-16c: load callee FO ch0 + H[0,0] from BSS; clear other
                     // channel EXPR_* so last-arg leak cannot survive the call.
-                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
-                    let b16_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var(b16_sret)
-                    EXPR_SSHADOW = b16_sret
-                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
-                    let b16_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var(b16_hret)
-                    EXPR_HSHADOW_00 = b16_hret
-                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
-                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
-                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
-                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
-                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
-                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
-                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
-                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
-                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
-                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
-                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
+                    // Gated on B16_ACTIVE: when off, EXPR_SSHADOW/EXPR_HSHADOW_*
+                    // are left untouched by this call, matching pre-KL-16c
+                    // (75e80fe022) behavior exactly for programs that never
+                    // read a sensitivity/Hessian.
+                    if B16_ACTIVE == 1 {
+                        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                        let b16_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b16_sret)
+                        EXPR_SSHADOW = b16_sret
+                        emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                        let b16_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var(b16_hret)
+                        EXPR_HSHADOW_00 = b16_hret
+                        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                        EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                        EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                        EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                        EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                        EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                        EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                        EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                        EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                        EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                        EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                        EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
+                    }
                     // Restore f64 result
                     emit_load_var(b5_res)
                 }
@@ -27284,11 +27319,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 emit_imm64(0)
             }
             emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
-            // KL-16c: store FO ch0 + H[0,0] alongside variance
-            if EXPR_SSHADOW >= 0 { emit_load_var(EXPR_SSHADOW) } else { emit_imm64(0) }
-            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
-            if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
-            emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+            // KL-16c: store FO ch0 + H[0,0] alongside variance (only when used)
+            if B16_ACTIVE == 1 {
+                if EXPR_SSHADOW >= 0 { emit_load_var(EXPR_SSHADOW) } else { emit_imm64(0) }
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                if EXPR_HSHADOW_00 >= 0 { emit_load_var(EXPR_HSHADOW_00) } else { emit_imm64(0) }
+                emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+            }
             em(0x58)  // pop rax (restore return value)
         }
         em(0x48); em(0x81); em(0xc4); record_frame_patch(); em32(0)
@@ -31376,6 +31413,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     LIMIT_ERROR_KIND = 0
     var p: i64 = 0
 
+    // KL-16c gate: B16_* interprocedural FO ch0 + H[0,0] shadow propagation
+    // (arg capture/BSS store at call sites, param seeding, return store,
+    // EXPR_HSHADOW clear-on-return) only matters for programs that actually
+    // read a sensitivity via sensitivity_of()/hessian_of(). SRC[0..SRC_LEN)
+    // is the fully import-resolved, prelude-appended source at this point
+    // (main() finishes resolve_imports()/append_native_prelude() before
+    // lex_all(), which runs before compile_all()), so one whole-buffer scan
+    // here covers every module. Leaving this unconditional (as PR #2539
+    // originally did) emitted the B16 machinery at every f64 call/param/
+    // return in every program — tripling binary size on programs with zero
+    // epistemic types, and making EXPR_SSHADOW spuriously live across any
+    // call, corrupting unrelated shadow-based codegen (e.g. the β¹¹ product-
+    // variance rebuild in compile_multiplicative).
+    B16_ACTIVE = if src_scan_contains("sensitivity_of") || src_scan_contains("hessian_of") { 1 } else { 0 }
+
     // Gen 19: preload unit dimension table (SI, CGS, Imperial, Astronomical, Pharma, Atomic)
     init_unit_table()
 
@@ -33164,15 +33216,17 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B5_ARG_VSHADOW_BSS_OFF + param_vi * 8)
                 emit_store_var(pvs)
                 VAR_VSHADOW[param_vi as usize] = pvs
-                // KL-16c: seed FO ch0 + H[0,0] from caller BSS
-                let pss = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi * 8)
-                emit_store_var(pss)
-                VAR_SSHADOW[param_vi as usize] = pss
-                let phs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi * 8)
-                emit_store_var(phs)
-                VAR_HSHADOW_00[param_vi as usize] = phs
+                // KL-16c: seed FO ch0 + H[0,0] from caller BSS (only when used)
+                if B16_ACTIVE == 1 {
+                    let pss = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi * 8)
+                    emit_store_var(pss)
+                    VAR_SSHADOW[param_vi as usize] = pss
+                    let phs = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_abs_qword_to_rax_x86(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi * 8)
+                    emit_store_var(phs)
+                    VAR_HSHADOW_00[param_vi as usize] = phs
+                }
             }
             param_vi = param_vi + 1
         }
@@ -33332,8 +33386,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             // KL-16c: expression-bodied f64 returns (`{ x }`) never hit the
             // explicit `return` store; write FO ch0 + H[0,0] here while
-            // EXPR_* still hold the tail expression's shadows.
-            if LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
+            // EXPR_* still hold the tail expression's shadows. Gated on
+            // B16_ACTIVE (only when the program uses sensitivity_of/hessian_of).
+            if B16_ACTIVE == 1 && LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
                 em(0x50)
                 if EXPR_SSHADOW >= 0 { emit_load_var(EXPR_SSHADOW) } else { emit_imm64(0) }
                 emit_store_rax_to_abs_qword_x86(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
@@ -38142,8 +38197,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // β⁵: capture variance shadow for this argument
                 if argc < 16 { B5_VSHADOW[argc as usize] = EXPR_VSHADOW }
                 B5_ARG_VCOUNT = argc + 1
-                // KL-16c a64: capture FO ch0 + H[0,0] for this argument
-                if argc < 16 {
+                // KL-16c a64: capture FO ch0 + H[0,0] for this argument (only when used)
+                if B16_ACTIVE == 1 && argc < 16 {
                     B16_SSHADOW[argc as usize] = EXPR_SSHADOW
                     B16_HSHADOW_00[argc as usize] = EXPR_HSHADOW_00
                 }
@@ -38260,20 +38315,22 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     em32(0xF900016A)  // str x10, [x11]
                     b5a_pvi = b5a_pvi + 1
                 }
-                // KL-16c a64: store arg FO ch0 + H[0,0] into BSS
-                var b16a_pvi: i64 = 0
-                while b16a_pvi < B5_ARG_VCOUNT && b16a_pvi < 16 {
-                    let b16a_ss = B16_SSHADOW[b16a_pvi as usize]
-                    if b16a_ss >= 0 { emit_load_var_a64(b16a_ss) } else { emit_imm64_a64(0) }
-                    em32(0xAA0003EA)
-                    emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16a_pvi * 8)
-                    em32(0xF900016A)
-                    let b16a_hs = B16_HSHADOW_00[b16a_pvi as usize]
-                    if b16a_hs >= 0 { emit_load_var_a64(b16a_hs) } else { emit_imm64_a64(0) }
-                    em32(0xAA0003EA)
-                    emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16a_pvi * 8)
-                    em32(0xF900016A)
-                    b16a_pvi = b16a_pvi + 1
+                // KL-16c a64: store arg FO ch0 + H[0,0] into BSS (only when used)
+                if B16_ACTIVE == 1 {
+                    var b16a_pvi: i64 = 0
+                    while b16a_pvi < B5_ARG_VCOUNT && b16a_pvi < 16 {
+                        let b16a_ss = B16_SSHADOW[b16a_pvi as usize]
+                        if b16a_ss >= 0 { emit_load_var_a64(b16a_ss) } else { emit_imm64_a64(0) }
+                        em32(0xAA0003EA)
+                        emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + b16a_pvi * 8)
+                        em32(0xF900016A)
+                        let b16a_hs = B16_HSHADOW_00[b16a_pvi as usize]
+                        if b16a_hs >= 0 { emit_load_var_a64(b16a_hs) } else { emit_imm64_a64(0) }
+                        em32(0xAA0003EA)
+                        emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + b16a_pvi * 8)
+                        em32(0xF900016A)
+                        b16a_pvi = b16a_pvi + 1
+                    }
                 }
                 let a64_dargs_drop = emit_setup_call_args_a64(abi_argc)
                 PATCH_OFF[PATCH_COUNT as usize] = CL
@@ -38393,29 +38450,32 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     } else if b5a_exact_slot >= 0 {
                         EXPR_VSHADOW = b5a_exact_slot
                     }
-                    // KL-16c a64: load FO ch0 + H[0,0]; clear other EXPR channels
-                    emit_image_addr_a64(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
-                    em32(0xF9400000)  // ldr x0, [x0]
-                    let b16a_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b16a_sret)
-                    EXPR_SSHADOW = b16a_sret
-                    emit_image_addr_a64(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
-                    em32(0xF9400000)
-                    let b16a_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                    emit_store_var_a64(b16a_hret)
-                    EXPR_HSHADOW_00 = b16a_hret
-                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
-                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
-                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
-                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
-                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
-                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
-                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
-                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
-                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
-                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
-                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
+                    // KL-16c a64: load FO ch0 + H[0,0]; clear other EXPR channels.
+                    // Gated on B16_ACTIVE (only when used).
+                    if B16_ACTIVE == 1 {
+                        emit_image_addr_a64(GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                        em32(0xF9400000)  // ldr x0, [x0]
+                        let b16a_sret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b16a_sret)
+                        EXPR_SSHADOW = b16a_sret
+                        emit_image_addr_a64(GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                        em32(0xF9400000)
+                        let b16a_hret = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b16a_hret)
+                        EXPR_HSHADOW_00 = b16a_hret
+                        EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                        EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                        EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                        EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                        EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                        EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                        EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                        EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                        EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                        EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                        EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                        EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1; EXPR_HSHADOW_77 = -1
+                    }
                     // Restore return value
                     emit_load_var_a64(b5a_res)
                 }
@@ -41796,15 +41856,17 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             em32(0xAA0003EA)  // mov x10, x0
             emit_image_addr_reg_a64(11, GL_BSS_BASE + B5_RET_VSHADOW_BSS_OFF)
             em32(0xF900016A)  // str x10, [x11]
-            // KL-16c a64: store FO ch0 + H[0,0] alongside variance
-            if EXPR_SSHADOW >= 0 { emit_load_var_a64(EXPR_SSHADOW) } else { emit_imm64_a64(0) }
-            em32(0xAA0003EA)
-            emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
-            em32(0xF900016A)
-            if EXPR_HSHADOW_00 >= 0 { emit_load_var_a64(EXPR_HSHADOW_00) } else { emit_imm64_a64(0) }
-            em32(0xAA0003EA)
-            emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
-            em32(0xF900016A)
+            // KL-16c a64: store FO ch0 + H[0,0] alongside variance (only when used)
+            if B16_ACTIVE == 1 {
+                if EXPR_SSHADOW >= 0 { emit_load_var_a64(EXPR_SSHADOW) } else { emit_imm64_a64(0) }
+                em32(0xAA0003EA)
+                emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_SSHADOW_BSS_OFF)
+                em32(0xF900016A)
+                if EXPR_HSHADOW_00 >= 0 { emit_load_var_a64(EXPR_HSHADOW_00) } else { emit_imm64_a64(0) }
+                em32(0xAA0003EA)
+                emit_image_addr_reg_a64(11, GL_BSS_BASE + B16_RET_HSHADOW_00_BSS_OFF)
+                em32(0xF900016A)
+            }
             emit_pop_x0_a64()  // ldr x0, [sp], #16 (restore return value)
         }
         // Restore sp from the frame pointer so any transient expression-stack
@@ -42894,17 +42956,19 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 em32(0xF9400000)  // ldr x0, [x0]
                 emit_store_var_a64(pvs_a)
                 VAR_VSHADOW[param_vi_a as usize] = pvs_a
-                // KL-16c a64: seed FO ch0 + H[0,0]
-                let pss_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_image_addr_a64(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi_a * 8)
-                em32(0xF9400000)
-                emit_store_var_a64(pss_a)
-                VAR_SSHADOW[param_vi_a as usize] = pss_a
-                let phs_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_image_addr_a64(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi_a * 8)
-                em32(0xF9400000)
-                emit_store_var_a64(phs_a)
-                VAR_HSHADOW_00[param_vi_a as usize] = phs_a
+                // KL-16c a64: seed FO ch0 + H[0,0] (only when used)
+                if B16_ACTIVE == 1 {
+                    let pss_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_image_addr_a64(GL_BSS_BASE + B16_ARG_SSHADOW_BSS_OFF + param_vi_a * 8)
+                    em32(0xF9400000)
+                    emit_store_var_a64(pss_a)
+                    VAR_SSHADOW[param_vi_a as usize] = pss_a
+                    let phs_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_image_addr_a64(GL_BSS_BASE + B16_ARG_HSHADOW_00_BSS_OFF + param_vi_a * 8)
+                    em32(0xF9400000)
+                    emit_store_var_a64(phs_a)
+                    VAR_HSHADOW_00[param_vi_a as usize] = phs_a
+                }
             }
             param_vi_a = param_vi_a + 1
         }
@@ -43003,8 +43067,10 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                 tc_observe_boundary(EP - 1, "cannot return Unobserved<T> as non-Unobserved type")
             }
             }
-            // KL-16c a64: expression-bodied f64 fallthrough FO/H00 store
-            if LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
+            // KL-16c a64: expression-bodied f64 fallthrough FO/H00 store.
+            // Gated on B16_ACTIVE (only when the program uses
+            // sensitivity_of/hessian_of).
+            if B16_ACTIVE == 1 && LAST_STMT_HAS_VALUE == 1 && (LAST_STMT_TY == 2 || EXPR_IS_F64 == 1) {
                 emit_push_a64()
                 if EXPR_SSHADOW >= 0 { emit_load_var_a64(EXPR_SSHADOW) } else { emit_imm64_a64(0) }
                 em32(0xAA0003EA)
