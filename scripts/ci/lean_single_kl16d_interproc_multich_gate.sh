@@ -7,8 +7,8 @@
 #   sensitivity_of(add(x, y), 1) == 1.0  (y = measure #1 .value)
 #
 # No Madaros sabotage — this is a seed pin. Residual still OPEN:
-#   loop accumulation, if/else merge, HSHADOW multi-pair interproc,
-#   a64 atan2/pow AD.
+#   loop accumulation, HSHADOW multi-pair interproc,
+#   a64 atan2/pow AD. (KL-16e closed if/else FO merge.)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"

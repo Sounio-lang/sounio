@@ -2795,6 +2795,30 @@ fn emit_pop_x0_a64() with Mut { em32(0xF84107E0) }  // ldr x0, [sp], #16
 
 fn emit_pop_x2_a64() with Mut { em32(0xF84107E2) }  // ldr x2, [sp], #16
 
+// KL-16e a64: spill one FO/Hessian shadow into an if/else join slot.
+fn emit_spill_shadow_slot_a64(dst: i64, src: i64) with Mut, Panic {
+    if src >= 0 { emit_load_var_a64(src) } else { emit_imm64_a64(0) }
+    emit_store_var_a64(dst)
+}
+
+// KL-16e a64: path-local spill of FO ch0–7 + H[0,0]; preserves primal in x0.
+fn emit_kl16e_spill_fo_h00_a64(
+    m0: i64, m1: i64, m2: i64, m3: i64, m4: i64, m5: i64, m6: i64, m7: i64, mh: i64,
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64, sh: i64
+) with Mut, Panic {
+    emit_push_a64()
+    emit_spill_shadow_slot_a64(m0, s0)
+    emit_spill_shadow_slot_a64(m1, s1)
+    emit_spill_shadow_slot_a64(m2, s2)
+    emit_spill_shadow_slot_a64(m3, s3)
+    emit_spill_shadow_slot_a64(m4, s4)
+    emit_spill_shadow_slot_a64(m5, s5)
+    emit_spill_shadow_slot_a64(m6, s6)
+    emit_spill_shadow_slot_a64(m7, s7)
+    emit_spill_shadow_slot_a64(mh, sh)
+    emit_pop_x0_a64()
+}
+
 fn emit_copy_words_x10_x11_a64(words: i64) with Mut {
     if words <= 0 { return }
     emit_imm64_reg_a64(12, words)
@@ -9081,6 +9105,32 @@ fn emit_imm64(v: i64) with Mut { em(0x48); em(0xb8); em64(v) }
 fn emit_store_rdx_var(slot: i64) with Mut { em(0x48); em(0x89); em(0x95); em32(0 - slot * 8) }
 // mov rdx, [rbp - 8*slot]
 fn emit_load_rdx_var(slot: i64) with Mut { em(0x48); em(0x8b); em(0x95); em32(0 - slot * 8) }
+
+// KL-16e: spill one FO/Hessian shadow into an if/else join slot.
+// src < 0 → store 0.0 bit pattern (no sensitivity on that arm).
+fn emit_spill_shadow_slot(dst: i64, src: i64) with Mut {
+    if src >= 0 { emit_load_var(src) } else { emit_imm64(0) }
+    emit_store_var(dst)
+}
+
+// KL-16e: path-local spill of FO ch0–7 + H[0,0] into join slots.
+// Preserves the primal in rax (push/pop) so the if-expression value survives.
+fn emit_kl16e_spill_fo_h00(
+    m0: i64, m1: i64, m2: i64, m3: i64, m4: i64, m5: i64, m6: i64, m7: i64, mh: i64,
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64, sh: i64
+) with Mut {
+    em(0x50)  // push rax
+    emit_spill_shadow_slot(m0, s0)
+    emit_spill_shadow_slot(m1, s1)
+    emit_spill_shadow_slot(m2, s2)
+    emit_spill_shadow_slot(m3, s3)
+    emit_spill_shadow_slot(m4, s4)
+    emit_spill_shadow_slot(m5, s5)
+    emit_spill_shadow_slot(m6, s6)
+    emit_spill_shadow_slot(m7, s7)
+    emit_spill_shadow_slot(mh, sh)
+    em(0x58)  // pop rax
+}
 
 fn emit_call_rax_aligned_x86() with Mut {
     em(0x49); em(0x89); em(0xc3)
@@ -27908,12 +27958,50 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
+        // KL-16e: capture then FO/H00 shadow slot indices before else overwrites EXPR_*.
+        let then_s0 = EXPR_SSHADOW
+        let then_s1 = EXPR_SSHADOW_1
+        let then_s2 = EXPR_SSHADOW_2
+        let then_s3 = EXPR_SSHADOW_3
+        let then_s4 = EXPR_SSHADOW_4
+        let then_s5 = EXPR_SSHADOW_5
+        let then_s6 = EXPR_SSHADOW_6
+        let then_s7 = EXPR_SSHADOW_7
+        let then_h00 = EXPR_HSHADOW_00
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 14 {
             EP = EP + 1
+            // KL-16e: allocate join slots + spill then shadows before jmp-to-end.
+            // Only one arm executes at runtime; both arms write the same slots.
+            var merge_s0: i64 = -1
+            var merge_s1: i64 = -1
+            var merge_s2: i64 = -1
+            var merge_s3: i64 = -1
+            var merge_s4: i64 = -1
+            var merge_s5: i64 = -1
+            var merge_s6: i64 = -1
+            var merge_s7: i64 = -1
+            var merge_h00: i64 = -1
+            var do_shadow_merge: i64 = 0
+            if then_has_value == 1 && then_ty == 2 {
+                do_shadow_merge = 1
+                merge_s0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s4 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s5 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s6 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s7 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_h00 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_kl16e_spill_fo_h00(
+                    merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
+                    then_s0, then_s1, then_s2, then_s3, then_s4, then_s5, then_s6, then_s7, then_h00
+                )
+            }
             em(0xe9)
             let jmp_off = CL; em32(0)
             patch32(je_off, CL)
@@ -27944,6 +28032,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // per this same rule, so EXPR_CH_SET is the full union from the
             // recursive call.
             let if_else_ch_set = EXPR_CH_SET
+            let else_s0 = EXPR_SSHADOW
+            let else_s1 = EXPR_SSHADOW_1
+            let else_s2 = EXPR_SSHADOW_2
+            let else_s3 = EXPR_SSHADOW_3
+            let else_s4 = EXPR_SSHADOW_4
+            let else_s5 = EXPR_SSHADOW_5
+            let else_s6 = EXPR_SSHADOW_6
+            let else_s7 = EXPR_SSHADOW_7
+            let else_h00 = EXPR_HSHADOW_00
             // Linear branch asymmetry check: compare then vs else VAR_USED
             var lchk: i64 = 0
             while lchk < VAR_COUNT {
@@ -27970,6 +28067,13 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
+            // KL-16e: spill else shadows into the same join slots before fall-through.
+            if do_shadow_merge == 1 && else_has_value == 1 && else_ty == 2 {
+                emit_kl16e_spill_fo_h00(
+                    merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
+                    else_s0, else_s1, else_s2, else_s3, else_s4, else_s5, else_s6, else_s7, else_h00
+                )
+            }
             patch32(jmp_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
                 if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
@@ -27985,6 +28089,35 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 // the if-expression's EXPR_CH_SET.  Matches `Typing.tIf`'s
                 // conclusion `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
                 EXPR_CH_SET = if_cond_ch_set | if_then_ch_set | if_else_ch_set
+                // KL-16e: point EXPR FO/H00 at join slots. Other H pairs stay
+                // OPEN through if (multi-pair if-merge not in this rung).
+                if do_shadow_merge == 1 {
+                    EXPR_SSHADOW = merge_s0
+                    EXPR_SSHADOW_1 = merge_s1
+                    EXPR_SSHADOW_2 = merge_s2
+                    EXPR_SSHADOW_3 = merge_s3
+                    EXPR_SSHADOW_4 = merge_s4
+                    EXPR_SSHADOW_5 = merge_s5
+                    EXPR_SSHADOW_6 = merge_s6
+                    EXPR_SSHADOW_7 = merge_s7
+                    EXPR_HSHADOW_00 = merge_h00
+                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+                    EXPR_HSHADOW_77 = -1
+                } else {
+                    EXPR_SSHADOW = -1
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_HSHADOW_00 = -1
+                }
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -42965,12 +43098,49 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
+        // KL-16e a64: capture then FO/H00 before else overwrites EXPR_*.
+        let then_s0_a = EXPR_SSHADOW
+        let then_s1_a = EXPR_SSHADOW_1
+        let then_s2_a = EXPR_SSHADOW_2
+        let then_s3_a = EXPR_SSHADOW_3
+        let then_s4_a = EXPR_SSHADOW_4
+        let then_s5_a = EXPR_SSHADOW_5
+        let then_s6_a = EXPR_SSHADOW_6
+        let then_s7_a = EXPR_SSHADOW_7
+        let then_h00_a = EXPR_HSHADOW_00
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
         LAST_STMT_TY_HASH = 0
         if TK[EP as usize] == 14 {
             EP = EP + 1
+            // KL-16e a64: allocate join slots + spill then before b-to-end.
+            var merge_s0_a: i64 = -1
+            var merge_s1_a: i64 = -1
+            var merge_s2_a: i64 = -1
+            var merge_s3_a: i64 = -1
+            var merge_s4_a: i64 = -1
+            var merge_s5_a: i64 = -1
+            var merge_s6_a: i64 = -1
+            var merge_s7_a: i64 = -1
+            var merge_h00_a: i64 = -1
+            var do_shadow_merge_a: i64 = 0
+            if then_has_value == 1 && then_ty == 2 {
+                do_shadow_merge_a = 1
+                merge_s0_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s1_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s2_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s3_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s4_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s5_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s6_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_s7_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                merge_h00_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_kl16e_spill_fo_h00_a64(
+                    merge_s0_a, merge_s1_a, merge_s2_a, merge_s3_a, merge_s4_a, merge_s5_a, merge_s6_a, merge_s7_a, merge_h00_a,
+                    then_s0_a, then_s1_a, then_s2_a, then_s3_a, then_s4_a, then_s5_a, then_s6_a, then_s7_a, then_h00_a
+                )
+            }
             let b_end_off = CL
             em32(0x14000000)
             patch_branch_a64(cbz_off, CL)
@@ -42997,6 +43167,15 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             }
             // β⁹ GTT week-6 stage-2: capture else-body's tail channel-set topology.
             let if_else_ch_set_a = EXPR_CH_SET
+            let else_s0_a = EXPR_SSHADOW
+            let else_s1_a = EXPR_SSHADOW_1
+            let else_s2_a = EXPR_SSHADOW_2
+            let else_s3_a = EXPR_SSHADOW_3
+            let else_s4_a = EXPR_SSHADOW_4
+            let else_s5_a = EXPR_SSHADOW_5
+            let else_s6_a = EXPR_SSHADOW_6
+            let else_s7_a = EXPR_SSHADOW_7
+            let else_h00_a = EXPR_HSHADOW_00
             // Linear branch asymmetry check + merge (mirror of x86 compile_stmt).
             // Without this the a64 pass counted a linear value consumed in BOTH
             // arms as two uses and reported "used more than once" on a program
@@ -43024,6 +43203,12 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
+            if do_shadow_merge_a == 1 && else_has_value == 1 && else_ty == 2 {
+                emit_kl16e_spill_fo_h00_a64(
+                    merge_s0_a, merge_s1_a, merge_s2_a, merge_s3_a, merge_s4_a, merge_s5_a, merge_s6_a, merge_s7_a, merge_h00_a,
+                    else_s0_a, else_s1_a, else_s2_a, else_s3_a, else_s4_a, else_s5_a, else_s6_a, else_s7_a, else_h00_a
+                )
+            }
             patch_branch_a64(b_end_off, CL)
             if then_has_value == 1 && else_has_value == 1 && then_ty != 5 && else_ty != 5 {
                 if ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
@@ -43039,6 +43224,33 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 // of x86 compile_stmt.  Matches `Typing.tIf`'s conclusion
                 // `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
                 EXPR_CH_SET = if_cond_ch_set_a | if_then_ch_set_a | if_else_ch_set_a
+                if do_shadow_merge_a == 1 {
+                    EXPR_SSHADOW = merge_s0_a
+                    EXPR_SSHADOW_1 = merge_s1_a
+                    EXPR_SSHADOW_2 = merge_s2_a
+                    EXPR_SSHADOW_3 = merge_s3_a
+                    EXPR_SSHADOW_4 = merge_s4_a
+                    EXPR_SSHADOW_5 = merge_s5_a
+                    EXPR_SSHADOW_6 = merge_s6_a
+                    EXPR_SSHADOW_7 = merge_s7_a
+                    EXPR_HSHADOW_00 = merge_h00_a
+                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
+                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
+                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
+                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
+                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
+                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
+                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
+                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
+                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
+                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
+                    EXPR_HSHADOW_77 = -1
+                } else {
+                    EXPR_SSHADOW = -1
+                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
+                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1
+                    EXPR_HSHADOW_00 = -1
+                }
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
