@@ -643,19 +643,8 @@ var B5_VSHADOW: [i64; 16] = [-1; 16]
 var B5_ARG_VCOUNT:  i64 = 0
 
 // KL-16c/d inter-procedural FO + H[0,0]: mirror β⁵ variance path.
-// Caller captures per-arg EXPR_SSHADOW(_1..7) / EXPR_HSHADOW_00 before the
-// next arg overwrites them; stores into BSS; callee prologue seeds VAR_*;
-// return writes RET BSS; caller reloads into EXPR_*. KL-16c closed ch0 +
-// H[0,0]; KL-16d extends FO to channels 1–7. Other HSHADOW pairs across
-// calls remain OPEN (cleared at call return to kill last-arg leak).
-//
-// Gated on B16_ACTIVE (set once in compile_all() from a whole-source scan
-// for "sensitivity_of"/"hessian_of"): without a gate, this machinery runs
-// at every call/param/return of every f64 function in every program,
-// tripling binary size and making EXPR_SSHADOW spuriously live across calls
-// that never touch first-order sensitivity tracking (job: main regression
-// between 75e80fe022 and 1e10f44325, KL-16c PR #2539). KL-16d extends the
-// same issue to channels 1–7 if not gated.
+// Gated on B16_ACTIVE to avoid binary bloat on programs that never call
+// sensitivity_of() or hessian_of(). See: KL-16c PR #2539.
 var B16_ACTIVE: i64 = 0
 
 // KL-16c/d inter-procedural FO + H[0,0]: mirror β⁵ variance path.
@@ -18207,7 +18196,6 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         b5_pvi = b5_pvi + 1
                     }
                     // KL-16c/d: store arg FO ch0–7 + H[0,0] into BSS (same rcx-save window)
-                    if B16_ACTIVE == 1 {
                     var b16_pvi: i64 = 0
                     while b16_pvi < B5_ARG_VCOUNT && b16_pvi < 16 {
                         let b16_ss = B16_SSHADOW[b16_pvi as usize]
@@ -31467,7 +31455,6 @@ fn resolve_forward_struct_types() with Mut, Panic, Div {
     return
 }
 
-
 fn src_scan_contains(kw: string) -> bool with Panic, Mut {
     let kl = str_len(kw)
     if kl <= 0 || kl > SRC_LEN { return false }
@@ -31478,6 +31465,8 @@ fn src_scan_contains(kw: string) -> bool with Panic, Mut {
     }
     return false
 }
+
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
@@ -31509,9 +31498,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     // directly. Trait blocks (kw 75) are skipped entirely — they have no
     // concrete target to rewrite to, and bodyless trait methods must keep
     // `Self` unresolved (there is nothing else to check it against there).
-    var selfrw_p: i64 = 0
     B16_ACTIVE = if src_scan_contains("sensitivity_of") || src_scan_contains("hessian_of") { 1 } else { 0 }
-
+    var selfrw_p: i64 = 0
     while selfrw_p < TC {
         if TK[selfrw_p as usize] == 75 {
             // Skip the whole trait block untouched.

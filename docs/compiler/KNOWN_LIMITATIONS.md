@@ -177,8 +177,13 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   ARG/RET slots mirroring β⁵ variance. Pin:
   `tests/run-pass/kl16c_fo_across_user_fn.sio`,
   `scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh`.
+- **KL-16d — CLOSED (seed).** Extends inter-procedural FO to channels
+  1–7 (`EXPR_SSHADOW_1..7` / `VAR_SSHADOW_1..7`) across user
+  `f64 → f64` fns; HSHADOW multi-pair across calls remains OPEN.
+  Pin: `tests/run-pass/kl16d_fo_multich_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16d_interproc_multich_gate.sh`.
 - **Residual (OPEN).** Loop accumulation; `if/else` merge of shadow
-  slots; multi-channel interproc; a64 `atan2`/`pow` AD.
+  slots; HSHADOW multi-pair interproc; a64 `atan2`/`pow` AD.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
