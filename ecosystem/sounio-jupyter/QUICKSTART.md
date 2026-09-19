@@ -344,7 +344,7 @@ PYTHONPATH                  # Python module search path
 
 ## Documentation
 
-- **Language Guide**: [docs/LLM_PROGRAMMING_GUIDE.md](../../../docs/LLM_PROGRAMMING_GUIDE.md)
+- **Language Guide**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](../../../docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - **Minimum Viable Sounio**: [docs/MINIMUM_VIABLE_SOUNIO.md](../../../docs/MINIMUM_VIABLE_SOUNIO.md)
 - **Implementation Details**: [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
 

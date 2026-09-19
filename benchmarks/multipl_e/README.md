@@ -116,4 +116,4 @@ target-language source code.
 - **Struct wrappers** -- mutable array parameters often need a struct wrapper
   due to the `&![T; N]` JIT propagation bug.
 
-See `docs/LLM_PROGRAMMING_GUIDE.md` for the full Sounio syntax reference.
+See `docs/guide/LLM_PROGRAMMING_GUIDE.md` for the full Sounio syntax reference.

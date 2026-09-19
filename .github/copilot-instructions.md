@@ -1,7 +1,7 @@
 # Sounio Language Instructions for GitHub Copilot
 
 Sounio (.sio) is a systems + scientific programming language. It is **NOT Rust**.
-Full syntax reference: `docs/LLM_PROGRAMMING_GUIDE.md`
+Full syntax reference: `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 
 ## Compiler
 
