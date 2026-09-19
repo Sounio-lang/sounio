@@ -146,6 +146,16 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src" "$REPO/tools/loom/message_bridge"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" \
+  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2" \
+  "$ROOT_DIR/tools/loom/resident_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2" \
+  "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/message_bridge/dune" \
   "$ROOT_DIR/tools/loom/message_bridge/loom_message_bridge.ml" \
   "$REPO/tools/loom/message_bridge/"
