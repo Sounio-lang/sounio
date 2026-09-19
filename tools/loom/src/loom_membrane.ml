@@ -13,7 +13,7 @@ let pinned_activation_manifest_sha256 =
 
 
 let pinned_resident_v5_manifest_sha256 =
-  "09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472"
+  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
 
 let pinned_activation_projection_sha256 =
   "8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014"
