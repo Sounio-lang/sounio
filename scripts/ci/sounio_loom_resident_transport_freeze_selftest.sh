@@ -5,7 +5,7 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-transport-v1.v2-20260919.txt"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-transport-v1.v2-20260917.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-resident-transport-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/resident-one"
 RUNTIME_TWO="$TEST_ROOT/resident-two"
