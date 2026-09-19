@@ -3396,3 +3396,27 @@ notes: |
   NOT RUN (needs the cluster, not the pod): the umbrella gate and the CI-parity battery
   (selfhost_host_gate + souc_v2_gate + runtime proof). No compiler file was edited, so their
   verdict cannot be affected by this entry.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T23:15:00Z
+files: docs/handoff/continuity/SCOREBOARD.md, artifacts/omega/agent_handoff.log.md
+intent: NOTIFY founder — A2 residual status update (subagent aa3b94cf still working; concrete progress made independently).
+checks:
+  - "/tmp/repro-e259/bin/madaros run /tmp/A2_w1.sio  # rc=0, 'Compilation successful!' (W1 passes)"
+  - "/tmp/repro-e259/bin/madaros run /tmp/A2_w2.sio  # rc=0, 'Compilation successful!' (W2 passes)"
+  - "/tmp/repro-e259/bin/madaros check tests/run-pass/trait_bounded_dispatch_multi_call.sio  # error[E009] expected i64 / found F (2x); E008 expected F / found i64 (1x); monomorphization message: 'instantiated with more than one type-argument list... non-primitive scalar'"
+commit: (docs audit only, uncommitted in current workspace)
+status: in-progress (subagent aa3b94cf-483d-4758-9e8f-d708b6ed1e12 running; no /tmp/A2_diagnosis.md produced yet)
+notes: |
+  A2 residual confirmed as a MONOMORPHIZATION issue, NOT a checker method-resolution gap.
+  The multi_call.sio file contains both <i64> and <Pair> instantiations of the same generic
+  trait-bounded function `compute<F: R>` / `combine<F: R>` in ONE module. The error message is
+  unambiguous: "monomorphization keeps only one instantiation per template; the others would reach
+  code generation unspecialized and evaluate to zero". W1 (primitive receiver only, <i64>) and
+  W2 (disambiguation, <i64> vs <Wrap> but in SEPARATE call sites, not both in the same fn) pass.
+  The fix, if attempted, belongs in the specializer / monomorphizer (self-hosted/compiler/specializer.sio
+  or parser/instantiation tracking), not in check.sio's current_impl_type/method lookup.
+  Subagent analysis not yet delivered; will report once available. No PR opened — the campaign is
+  fully documented as DONE; A2 residual is a separate engineering problem, not a missing handoff item.
