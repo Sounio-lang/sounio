@@ -104,7 +104,7 @@ done
 
 grep -Fq $'\tevent=INVOCATION_CELL\t' "$RECEIPTS" ||
   fail 'invocation-cell receipt is missing'
-grep -Fq $'\tparent_9029_manifest_sha256=f876926fe2b6c554611136daee0cbb7553117b7d9933dc9b779cc3ea1aa507a5\t' \
+grep -Fq $'\tparent_9029_manifest_sha256=b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9029'
 grep -Fq $'\tresident_manifest_sha256=8e53e9432402e0a9c7a8d36e3f0496ad052a3412afff88b182a221e57c1710c9\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v3 manifest'

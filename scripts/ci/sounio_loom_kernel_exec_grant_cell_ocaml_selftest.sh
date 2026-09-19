@@ -118,7 +118,7 @@ done
 
 grep -Fq $'\tevent=EXEC_GRANT_CELL\t' "$RECEIPTS" ||
   fail 'exec-grant-cell receipt is missing'
-grep -Fq $'\tparent_9030_manifest_sha256=d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be\t' \
+grep -Fq $'\tparent_9030_manifest_sha256=a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9030'
 grep -Fq $'\tresident_manifest_sha256=219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v4 manifest'
