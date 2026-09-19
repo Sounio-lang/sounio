@@ -9,7 +9,7 @@ let pinned_sandbox_sha256 =
   "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"
 
 let pinned_activation_manifest_sha256 =
-  "5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2"
+  "61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2"
 
 
 let pinned_resident_v5_manifest_sha256 =
