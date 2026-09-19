@@ -148,6 +148,9 @@ mkdir -p "$REPO/tools/loom/src" "$REPO/tools/loom/message_bridge"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3.v2" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" \
   "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2" \
   "$ROOT_DIR/tools/loom/resident_authority.freeze.v2" \
