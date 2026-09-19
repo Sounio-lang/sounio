@@ -1,7 +1,7 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "f876926fe2b6c554611136daee0cbb7553117b7d9933dc9b779cc3ea1aa507a5"
+  "b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed"
 
 let max_file_bytes = 8 * 1024 * 1024
 

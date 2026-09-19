@@ -1,7 +1,7 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be"
+  "a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4"
 
 let pinned_resident_v4_manifest_sha256 =
   "2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1"
