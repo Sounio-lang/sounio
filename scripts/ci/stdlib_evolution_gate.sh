@@ -83,7 +83,7 @@ run_file "test_result"           tests/stdlib/core/test_result_e2e.sio
 # --- Phase 3: LLM docs exist ---
 echo ""
 echo "Phase 3: LLM training docs"
-for doc in docs/LLM_PROGRAMMING_GUIDE.md SOUNIO_QUICK_START.md SOUNIO_GOTCHAS.md SOUNIO_STYLE_GUIDE.md; do
+for doc in docs/guide/LLM_PROGRAMMING_GUIDE.md docs/guide/SOUNIO_QUICK_START.md docs/guide/SOUNIO_GOTCHAS.md docs/guide/SOUNIO_STYLE_GUIDE.md; do
     TOTAL=$((TOTAL+1))
     if [ -f "$doc" ] && [ -s "$doc" ]; then
         PASS=$((PASS+1))

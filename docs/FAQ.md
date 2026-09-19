@@ -43,7 +43,8 @@ Existing languages treat uncertainty as an afterthought (manual error propagatio
 research, evaluation, and artifact-backed workflows, but still not "everything
 in the source tree is equally public".
 - ✅ Core language and science lanes are artifact-backed
-- ✅ Checked JIT and GPU compiler profiles exist
+- ✅ Checked GPU compiler profile exists
+- 🚧 No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
 - ✅ The repo-wide checkpoint now includes self-hosted render/bootstrap proofs and the skills/dispatch wave
 - 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
 - 📋 Public docs should still track the exact artifact and gate behind each claim
@@ -245,7 +246,7 @@ Yes! See `/home/demetrios/sounio-1/jupyter/` for setup.
 Yes. Performance comparable to Rust/C++:
 - Native code generation (ELF/Mach-O)
 - LLVM backend (experimental)
-- Cranelift JIT for fast iteration
+- Fast iteration via the checked `bin/souc` artifact — AOT only, no JIT tier (measured 2026-08-27)
 - GPU acceleration for parallel workloads
 
 ### Does `Knowledge<T>` have runtime overhead?
