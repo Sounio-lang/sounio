@@ -1219,16 +1219,17 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
     let inst_hash = ast_name_hash(mangled_inst)
     if SPEC_GF_INST_HASH[gt_idx as usize] != 0 {
         if SPEC_GF_INST_HASH[gt_idx as usize] != inst_hash {
-            SPEC_GF_POISONED[gt_idx as usize] = true
-            // A poisoned template keeps its unspecialized body, and lowering
-            // has no generics concept. That is survivable for scalars and
-            // silently returns zeros for everything else, so refuse rather
-            // than emit code we know is wrong.
+            // A2 fix: scalar-only concrete instances should NOT poison the template.
+            // Only non-scalar (struct/generic) second instances are unsound — lowering
+            // has no generics concept and non-scalar unspecialized bodies evaluate to zero.
             if !args_scalar || SPEC_GF_NONSCALAR[gt_idx as usize] {
+                SPEC_GF_POISONED[gt_idx as usize] = true
                 SPEC_UNSOUND_POISON = true
             }
             if spec_trace_enabled() { print("specializer: poisoned (second distinct instantiation)\n") }
+            return
         }
+        // Same hash: same concrete instance already exists; nothing new.
         return
     }
     SPEC_GF_INST_HASH[gt_idx as usize] = inst_hash
@@ -1248,7 +1249,14 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             // (read-only walk; no tree mutation).
             spec_scan_block((*fp).fd.body)
             let np = heap_alloc(16384) as *mut SpecItemNode
-            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
+            // A2 fix (real): emit clone with mangled instance name (not template base name)
+            // so multiple scalar concrete instances (<i64>, <f64>) can coexist.
+            let clone_name = if args_scalar && !spec_name_is_empty(mangled_inst) {
+                mangled_inst
+            } else {
+                (*fp).fd.name
+            }
+            (*np).it = spec_make_fn_item(clone_name, (*fp).fd)
             (*np).next = 0
             SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
             if spec_trace_enabled() {
