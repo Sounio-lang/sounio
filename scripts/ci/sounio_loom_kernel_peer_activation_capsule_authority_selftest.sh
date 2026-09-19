@@ -24,7 +24,7 @@ file_hash() {
 [[ -f "$ENTRYPOINT" && ! -L "$ENTRYPOINT" ]] || fail 'action 9031 entrypoint is absent or linked'
 [[ "$(file_hash "$PARENT_9025")" == 71398f15e7e093d395fe5e9abdf42ac60536095f75e0d38e9175499f819a28fa ]] ||
   fail 'action 9025 material judgment parent drifted'
-[[ "$(file_hash "$PARENT_9030")" == d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
+[[ "$(file_hash "$PARENT_9030")" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
   fail 'action 9030 authority parent drifted'
 grep -Fxq 'action_9025_allow=true' "$PARENT_9025" || fail 'action 9025 material judgment is not ALLOW'
 grep -Fxq 'same_uid_peer_isolation=true' "$PARENT_9025" || fail 'same-UID peer isolation is not frozen true'
