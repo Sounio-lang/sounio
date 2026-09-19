@@ -4,7 +4,7 @@ let pinned_manifest_sha256 =
   "5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2"
 
 let pinned_resident_v5_manifest_sha256 =
-  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
+  "af7b36bcb221f7aa20f2632a5838052274dc8956698a987c0f68689749912d79"
 
 let max_file_bytes = 8 * 1024 * 1024
 
