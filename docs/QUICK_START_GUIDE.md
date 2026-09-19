@@ -38,10 +38,10 @@ let concentration = add_epistemic(dose, volume)  // Error automatically calculat
 1. **Installation**:
 ```bash
 # Coming soon - package manager
-# For now, clone and build from source
+# For now, clone the repo and use the checked compiler artifact
 git clone https://github.com/sounio-lang/sounio
 cd sounio
-./build.sh
+bin/souc info
 ```
 
 2. **Create `hello_uncertainty.sio`**:
@@ -65,7 +65,7 @@ fn main() -> i32 {
 
 3. **Run it**:
 ```bash
-./souc run hello_uncertainty.sio
+bin/souc run hello_uncertainty.sio
 ```
 
 ### Key Concepts for Scientists
@@ -128,7 +128,7 @@ fn analyze_experiment(measurements: [Epistemic<f64>]) -> Epistemic<f64> {
 1. **Try the examples**:
 ```bash
 cd examples/epistemic
-../souc run core_demo.sio
+../../bin/souc run core_demo.sio
 ```
 
 2. **Explore your domain**:
