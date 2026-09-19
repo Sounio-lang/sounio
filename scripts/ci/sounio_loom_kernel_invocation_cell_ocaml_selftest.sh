@@ -106,7 +106,7 @@ grep -Fq $'\tevent=INVOCATION_CELL\t' "$RECEIPTS" ||
   fail 'invocation-cell receipt is missing'
 grep -Fq $'\tparent_9029_manifest_sha256=b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9029'
-grep -Fq $'\tresident_manifest_sha256=8e53e9432402e0a9c7a8d36e3f0496ad052a3412afff88b182a221e57c1710c9\t' \
+grep -Fq $'\tresident_manifest_sha256=f8314f6356473a61d5002ae366453ac4af136c38f8f54f348804c5d5c92c0c2b\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v3 manifest'
 
 tampered_manifest="$TEST_ROOT/kernel-invocation-cell.freeze.v1"
