@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-transport-v5.v2-20260917.txt"
+MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v5"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-transport-v5-20260829.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-resident-transport-v5-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/resident-v5-one"
 RUNTIME_TWO="$TEST_ROOT/resident-v5-two"
@@ -51,7 +51,7 @@ stream_hash() {
 
 [[ -f "$MANIFEST" ]] || fail 'resident v5 runtime manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'resident v5 runtime evidence is missing'
-[[ "$(field schema)" == loom-resident-membrane-runtime-v5.v2 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-resident-membrane-runtime-v5 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SOUNIO_RESIDENT_REALIZATION ]] || fail 'wrong runtime stage'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'
