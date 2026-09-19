@@ -77,3 +77,16 @@ pre-existing packaging lag, not a source defect.
 - EISA: lean lane **14/14 GREEN**, default lane **13/14** (re-measured 2026-09-18 on `8fc294b7`; the "12/12" and "13 tests" counts below were stale — the directory holds 14 tests). `test_eisax_format` v0 fixed (`639094a00`) on the lean lane; evm arena fixed (`a096d1c4b`, 25.8→6.5GB). The one default-lane difference is `test_eisax_format` (rc=1, 9 asserts: F3×8 + F5×1), a pre-existing engine split documented in `docs/audit/EISA_ORIGIN_GUM_2026-08-20.md` — the file declares `validated_lane: lean_single`.
 - EISA lane worktree `/workspace/sounio-eisa` **no longer exists** (checked 2026-09-18). Branch `gpu/epistemic-tensor-core-next` still exists and is 247 commits ahead of main, but carries **no EISA file that main lacks** in `stdlib/eisa/`, `tools/eisa/` or `tests/stdlib/eisa/` — main is a strict superset, so there is nothing to integrate. Do not re-open that integration question without re-measuring with `git diff --name-status origin/main origin/gpu/epistemic-tensor-core-next`.
 - Pre-existing umbrella-gate reds (row-identical across phase 1; not yours to fix): driver_self_compile, science_spine, f64_ladder, gum_primitives, semantic_hardening, lean_single_fixed_point, imported_closure×2 (rc=139), struct_orchestrator, phase_j_conf_gate, kretikos_kaxi_meta, dissertation_pbpk_suite.
+
+---
+
+## Session final (2026-09-18) — fugu-max
+
+- PR #2542 (Madaros Phase 1 effects+sandbox): merged `8fc294b7a6`
+- PR #2544 (A-track stale audit): merged `8641c3aa`
+- PR #2545 (B-track audit): merged `a427bb1d`
+- A1/A2/A4/B1/B2: DONE (work was already merged; measured rather than rebuilt)
+- A2 residual: `trait_bounded_dispatch_multi_call.sio` stays baselined (monomorphizer, file `tests/madaros_corpus_baseline.txt:246`); subagent `aa3b94cf-483d...` analyzing `check.sio` `current_impl_type` path to confirm whether it is checker or monomorphizer.
+- B2 residual: `test_eisax_format` (lean PASS / default rc=1, 9 asserts F3=8+F5=1) — pre-existing engine split, already in `EISA_ORIGIN_GUM_2026-08-20.md`; file header `validated_lane: lean_single`.
+- Measurement trap documented: `/workspace/sounio` is NOT `main` (`lane/cursor-1/20260826`, dirty `lower.sio`); canonical clean surface is `main` `8fc294b7` (worktree `/tmp/repro-e259`).
+- No `tests/run-pass/*.sio` source edited in either audit; docs registry gate passed both times; `artifacts/omega/agent_handoff.log.md` has CLAIM/RELEASE entries for A4, A2-analysis-delegation, B1/B2.
