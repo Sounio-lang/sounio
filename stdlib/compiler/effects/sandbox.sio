@@ -131,7 +131,7 @@ pub fn effect_vm_perform(evm: EffectVM, effect_id: i64, pc: i64) -> EffectVM wit
     var m = evm
 
     if !effect_vm_check_allowed(&m, effect_id) {
-        m.vm.error = true
+        m.vm = vm_with_error(m.vm)
         return m
     }
 
@@ -153,13 +153,13 @@ pub fn effect_vm_perform(evm: EffectVM, effect_id: i64, pc: i64) -> EffectVM wit
         let frame = m.handler_stack[h as usize]
         if effect_has(frame.handles_effects, effect_id) {
             found_handler = true
-            m.vm.pc = frame.resume_pc
+            m.vm = vm_with_pc(m.vm, frame.resume_pc)
         }
         h = h - 1
     }
 
     if !found_handler {
-        m.vm.error = true
+        m.vm = vm_with_error(m.vm)
     }
 
     m
@@ -190,11 +190,11 @@ pub fn effect_vm_remove_handler(evm: EffectVM) -> EffectVM with Mut {
 // Keep the bytecode VM implementation private while exposing the sandbox
 // observations that callers and run-pass tests need.
 pub fn effect_vm_pc(evm: &EffectVM) -> i64 {
-    evm.vm.pc
+    vm_pc(&evm.vm)
 }
 
 pub fn effect_vm_has_error(evm: &EffectVM) -> bool {
-    evm.vm.error
+    vm_has_error(&evm.vm)
 }
 
 pub fn effect_vm_log_count(evm: &EffectVM) -> i64 {
@@ -341,9 +341,9 @@ pub fn sandbox_execute(bc: ByteCode, policy: SandboxPolicy) -> (EffectVM, i64) w
     var evm = effect_vm_new(allowed_effects)
     var instruction_count: i64 = 0
 
-    while !evm.vm.halted && !evm.vm.error && instruction_count < policy.max_instructions {
-        if evm.vm.sp > policy.max_stack_depth {
-            evm.vm.error = true
+    while !vm_is_halted(&evm.vm) && !vm_has_error(&evm.vm) && instruction_count < policy.max_instructions {
+        if vm_stack_depth(&evm.vm) > policy.max_stack_depth {
+            evm.vm = vm_with_error(evm.vm)
             break
         }
         evm.vm = vm_step(evm.vm, bc)
@@ -419,7 +419,7 @@ pub fn sandbox_compile_and_run(src: [i8; 8192], src_len: i64, policy: SandboxPol
     let evm = exec.0
     let inst_count = exec.1
     let summary = effect_vm_summary(evm, inst_count)
-    let success = !evm.vm.error && !evm.vm.halted
+    let success = !vm_has_error(&evm.vm) && !vm_is_halted(&evm.vm)
     (summary, success)
 }
 
@@ -439,14 +439,14 @@ fn test_effect_vm_perform_allowed() -> bool with Mut, Panic, Div {
     // Install handler so perform does not treat IO as unhandled
     evm = effect_vm_install_handler(evm, effect_bit(EFFECT_IO()), 50, false)
     evm = effect_vm_perform(evm, EFFECT_IO(), 10)
-    !evm.vm.error && evm.current_effects == effect_bit(EFFECT_IO())
+    !vm_has_error(&evm.vm) && evm.current_effects == effect_bit(EFFECT_IO())
 }
 
 fn test_effect_vm_perform_denied() -> bool with Mut, Panic, Div {
     let allowed = effect_bit(EFFECT_MUT())
     var evm = effect_vm_new(allowed)
     evm = effect_vm_perform(evm, EFFECT_IO(), 10)
-    evm.vm.error
+    vm_has_error(&evm.vm)
 }
 
 fn test_effect_vm_handler() -> bool with Mut, Panic, Div {
@@ -454,7 +454,7 @@ fn test_effect_vm_handler() -> bool with Mut, Panic, Div {
     var evm = effect_vm_new(allowed)
     evm = effect_vm_install_handler(evm, effect_bit(EFFECT_IO()), 100, false)
     evm = effect_vm_perform(evm, EFFECT_IO(), 10)
-    evm.vm.pc == 100
+    vm_pc(&evm.vm) == 100
 }
 
 fn test_policy_to_mask() -> bool with Mut, Panic, Div {
@@ -488,7 +488,7 @@ fn test_sandbox_execute() -> bool with Mut, Panic, Div {
     let exec = sandbox_execute(bc, policy)
     let evm = exec.0
     let inst = exec.1
-    inst == 2 && evm.vm.sp == 1 && value_as_i64(evm.vm.stack[0]) == 42
+    inst == 2 && vm_stack_depth(&evm.vm) == 1 && value_as_i64(vm_result(evm.vm)) == 42
 }
 
 pub fn effects_sandbox_run_tests() -> i64 with IO, Mut, Panic, Div {
