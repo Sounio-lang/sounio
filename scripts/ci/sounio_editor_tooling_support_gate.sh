@@ -111,11 +111,20 @@ for needle in (
     assert needle in out, needle
 PY
 
-run_step "editor-assets-static-contract" python3 - <<'PY'
+run_step "editor-assets-static-contract" python3 - <<'PYCODE'
 import json
+import runpy
+import tempfile
+import zipfile
 from pathlib import Path
 
-pkg = json.loads(Path("tools/editors/vscode/package.json").read_text())
+fetch = runpy.run_path('scripts/ci/fetch_external_ecosystem.py')['fetch']
+with tempfile.TemporaryDirectory(prefix='sounio-editor-contract-') as directory:
+    paths = fetch(Path(directory))
+    vsix = next(path for path in paths if path.endswith('.vsix'))
+    with zipfile.ZipFile(vsix) as archive:
+        pkg = json.loads(archive.read('extension/package.json'))
+        extension_js = archive.read('extension/out/extension.js').decode()
 commands = {entry["command"] for entry in pkg["contributes"]["commands"]}
 for required in (
     "sounio.restartServer",
@@ -131,11 +140,11 @@ for required in (
 
 languages = pkg["contributes"]["languages"]
 assert any(lang["id"] == "sounio" and ".sio" in lang["extensions"] for lang in languages)
-assert Path("tools/editors/vscode/src/extension.ts").read_text().count("souc lsp") >= 1
+assert "--stdio" in extension_js and "lsp" in extension_js
 assert "souc lsp --stdio" in Path("tools/editors/README.md").read_text()
 assert "command = \"souc\"" in Path("tools/editors/helix/languages.toml").read_text()
 assert "cmd = { 'souc', 'lsp', '--stdio' }" in Path("tools/editors/neovim/lspconfig.lua").read_text()
-PY
+PYCODE
 
 run_step "pure-sounio-lsp-rebuild" ./bin/souc compile \
   self-hosted/lsp/server.sio -o "$ARTIFACT_DIR/pure-sounio-lsp.bin"
