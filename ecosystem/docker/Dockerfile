@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     curl \
+    jq \
     wget \
     vim \
     build-essential \
@@ -19,22 +20,22 @@ RUN apt-get update && apt-get install -y \
 # Create sounio user (optional, for non-root execution)
 RUN useradd -m -s /bin/bash sounio || true
 
-# Copy souc binary to /usr/local/bin/
-COPY bin/souc /usr/local/bin/souc
-RUN chmod +x /usr/local/bin/souc
-
-# Copy stdlib to /opt/sounio/stdlib/
-COPY stdlib /opt/sounio/stdlib
-
-# Set environment variables
-ENV SOUNIO_STDLIB_PATH=/opt/sounio/stdlib
-ENV SOUC=/usr/local/bin/souc
+# Preview compiler distribution supports Linux x86_64.
+RUN test "$(uname -m)" = x86_64
+ENV SOUC=/opt/sounio/bin/souc
 ENV PYTHONUNBUFFERED=1
 
 # Install published, checksum-pinned Python/Jupyter wheels into an owned venv.
 # The fetcher needs only the release catalog, not either in-tree package.
 COPY ecosystem/external-releases.json /opt/sounio-consumer/ecosystem/external-releases.json
 COPY scripts/ci/fetch_external_ecosystem.py /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py
+RUN python3.12 /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py /tmp/sounio-compiler --suffix .tar.gz && \
+    mkdir -p /opt/sounio && \
+    tar -xzf /tmp/sounio-compiler/madaros-distribution.tar.gz --strip-components=1 -C /opt/sounio && \
+    python3.12 /opt/sounio/verify-distribution.py --verify /opt/sounio && \
+    rm -rf /tmp/sounio-compiler
+ENV PATH="/opt/sounio/bin:${PATH}"
+
 RUN python3.12 -m venv /opt/sounio-python && \
     python3.12 /opt/sounio-consumer/scripts/ci/fetch_external_ecosystem.py /tmp/sounio-wheels --suffix .whl && \
     /opt/sounio-python/bin/python -m pip install --no-cache-dir jupyterlab /tmp/sounio-wheels/*.whl && \

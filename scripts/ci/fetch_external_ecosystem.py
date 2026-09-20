@@ -40,6 +40,6 @@ def fetch(destination, suffix=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination', type=Path)
-    parser.add_argument('--suffix', choices=['.whl', '.vsix'])
+    parser.add_argument('--suffix', choices=['.whl', '.vsix', '.tar.gz'])
     args = parser.parse_args()
     print(json.dumps(fetch(args.destination.resolve(), args.suffix)))
