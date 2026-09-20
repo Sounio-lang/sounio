@@ -52,7 +52,7 @@ The large PR latency reduction comes from moving gen2 off the ordinary PR path.
 | Native Linux complete self-host, source-bootstrap, macOS execution/cross-target witnesses | Deferred | Exhaustive | Exhaustive |
 | Full Test Suite + qd128 accuracy replay | Deferred | Exhaustive | Exhaustive |
 | Madaros gen2 fixed-point rung (minimum 122 unchanged) | Deferred | Exhaustive | Exhaustive |
-| Chemistry golden probes | Existing chemistry path-filtered PR workflow retained | Exhaustive (reusable workflow) | Exhaustive |
+| Chemistry golden probes | Existing chemistry path-filtered PR workflow retained, five independent probes | Exhaustive (reusable workflow) | Exhaustive |
 | R6 corpus sweep | Existing nightly-only policy | Dispatch with `nightly=true` | Yes |
 
 Unknown paths and CI changes classify `full=true` and run **exhaustive even on a
@@ -70,6 +70,18 @@ inspection**. Its future focused packaging workflow must be integrated on landin
 this change does not claim to validate code absent from this base or publish a
 release. Chemistry deliberately retains its committed lean_single engine and
 byte-for-byte goldens; replacing it with Madaros would change the scientific oracle.
+
+The rollout run `35479553149` exposed a scheduling limit: the serial Chemistry
+job allowed 45 minutes in total, while each of five probes could take 1500
+seconds. Its adiabatic probe failed while subsequent probes still awaited
+completion. The reusable workflow now runs all five probes as independent
+matrix jobs with `fail-fast: false`, each with the unchanged 1500-second script
+deadline and a 30-minute job envelope. A failing probe still fails the reusable
+workflow and required parent decision; siblings continue to report. No-argument
+local execution still runs all five, and unknown/empty/multiple selections fail
+before compiler invocation. This reduces serial waiting, not the scientific
+acceptance criteria. The new selection tests exercise harness behavior only;
+they do not count as passing Chemistry oracles.
 
 ## Artifact custody
 
