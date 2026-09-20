@@ -22,8 +22,10 @@ Twelve historical proof links under docs/papers/main/epistemic-types/proofs use
 absolute paths from an old machine. The exporter recognizes their exact recorded
 link text through an explicit allowlist and materializes the corresponding regular
 formal/lean4 blobs from the same commit. Their source_path is recorded in the
-inventory. It never reads those absolute paths on the host. All other source links
-are rejected, as are changed link destinations. Proof contents are copied without
+inventory. It never reads those absolute paths on the host. All twelve proof entries are mandatory and must retain exactly their mapped
+source paths. Regular files replacing those links, other source links and changed
+link destinations are rejected. File roots must be exact regular files; directory
+roots must contain selected descendants. Proof contents are copied without
 modification; exporting them does not mean their obligations were rechecked.
 
 Before consuming an archive, verify its digest against a separately pinned release
@@ -47,7 +49,9 @@ compiler distribution. All members have mode 0644. A site consumer can materiali
 this input layout beside its website directory; a future dedicated input-root
 adapter must preserve the same dependency checks.
 
-The workflow tests integrity failures and compares two real exports byte for byte.
+The workflow is triggered by exporter/contract changes and every selected input
+class, including mapped proof targets. It tests integrity failures and compares
+two real exports byte for byte.
 Its uploaded artifact is a CI artifact, not a permanent release. Release publication
 must preserve the receipt and digest; no release or standalone website deployment
 is implied by an export passing CI. The current isolated website proof uses

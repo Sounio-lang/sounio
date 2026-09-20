@@ -30,6 +30,8 @@ ROOTS = (
     'artifacts/omega/bootstrap_full_gate_status.v1.json',
     'website/public/assets/generated/render', 'examples/render',
 )
+DIR_ROOTS = ('docs', 'website/public/assets/generated/render', 'examples/render')
+FILE_ROOTS = tuple(root for root in ROOTS if root not in DIR_ROOTS)
 MANIFEST = 'website-inputs-manifest.json'
 # These tracked links contain a historical machine's absolute path. Map only
 # this explicit inventory to blobs at the selected commit; never follow disk links.
@@ -53,7 +55,14 @@ def safe_path(name):
 
 
 def selected(name):
-    return any(name == root or name.startswith(root + '/') for root in ROOTS)
+    return name in FILE_ROOTS or any(name.startswith(root + '/') for root in DIR_ROOTS)
+
+
+def missing_inputs(names):
+    missing = [root for root in FILE_ROOTS if root not in names]
+    missing += [root for root in DIR_ROOTS if not any(n.startswith(root + '/') for n in names)]
+    missing += [name for name in PROOF_LINKS if name not in names]
+    return missing
 
 
 def add_file(archive, name, data):
@@ -87,12 +96,12 @@ def export(repo, revision, output):
                     raise ValueError(f'Proof target is not a regular committed file: {origin}')
                 files[name] = subprocess.check_output(['git', '-C', str(repo), 'show', commit + ':' + origin])
                 origins[name] = origin
-            elif entry.isfile():
+            elif entry.isfile() and name not in PROOF_LINKS:
                 files[name] = source.extractfile(entry).read()
                 origins[name] = name
             else:
                 raise ValueError(f'Unsupported input member: {name}')
-    missing = [root for root in ROOTS if not any(n == root or n.startswith(root + '/') for n in files)]
+    missing = missing_inputs(files)
     if missing:
         raise ValueError(f'Missing selected inputs: {missing}')
     manifest = {
@@ -143,7 +152,7 @@ def verify(path, expected_sha256=None):
         name = safe_path(row['path'])
         if name in expected or not selected(name):
             raise ValueError(f'Duplicate or unselected inventory entry: {name}')
-        if row.get('source_path') not in (name, PROOF_LINKS.get(name, name)):
+        if row.get('source_path') != PROOF_LINKS.get(name, name):
             raise ValueError(f'Unexpected inventory source: {name}')
         expected.add(name)
         payload = files.get(name)
@@ -151,9 +160,9 @@ def verify(path, expected_sha256=None):
             raise ValueError(f'Inventory mismatch: {name}')
     if set(files) != expected:
         raise ValueError('Archive contains files outside its inventory')
-    for root in ROOTS:
-        if not any(n == root or n.startswith(root + '/') for n in expected):
-            raise ValueError(f'Missing selected input: {root}')
+    missing = missing_inputs(expected)
+    if missing:
+        raise ValueError(f'Missing selected inputs: {missing}')
     return {'sha256': actual, 'source_commit': manifest['source_commit'], 'files': len(files)}
 
 
