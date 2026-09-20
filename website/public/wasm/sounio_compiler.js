@@ -103,11 +103,26 @@ function checkSource(src) {
 // ---------------------------------------------------------------------------
 
 function decodePreviewStringLiteral(literal) {
-  try {
-    return JSON.parse(literal);
-  } catch {
-    return literal.slice(1, -1);
+  const content = literal.slice(1, -1);
+  let decoded = '';
+
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    if (char !== '\\' || i + 1 >= content.length) {
+      decoded += char;
+      continue;
+    }
+
+    i += 1;
+    const next = content[i];
+    if (next === 'n') decoded += '\n';
+    else if (next === 'r') decoded += '\r';
+    else if (next === 't') decoded += '\t';
+    else if (next === '0') decoded += '\0';
+    else decoded += next;
   }
+
+  return decoded;
 }
 
 function simulateRun(src) {
