@@ -105,11 +105,11 @@ function checkSource(src) {
 function simulateRun(src) {
   const output = [];
 
-  // Extract string literals from print and println calls
-  const printRe = /print(?:ln)?\s*\(\s*"([^"]*)"/g;
+  // Extract double-quoted string literals from print and println calls
+  const printRe = /print(?:ln)?\s*\(\s*("(?:[^"\\]|\\.)*")/g;
   let m;
   while ((m = printRe.exec(src)) !== null) {
-    output.push(m[1]);
+    output.push(JSON.parse(m[1]));
   }
 
   // Simple: detect the final expression in main as the return value
