@@ -7,7 +7,7 @@ import sys
 
 IMPACT_KEYS = ('docs', 'website', 'compiler', 'runtime', 'stdlib', 'tests',
                'lean', 'math', 'ontology', 'clinical', 'chemistry', 'sio', 'full')
-FAST = {'contracts', 'contracts-self-falsification', 'canonical-madaros', 'gate-wave-0', 'sounio-lint', 'website'}
+FAST = {'distribution-contract', 'contracts', 'contracts-self-falsification', 'canonical-madaros', 'gate-wave-0', 'sounio-lint', 'website'}
 DEEP = {'contracts-ontology', 'correlated-effect', 'canonical-madaros',
         'madaros-current-source-deref-f64', 'madaros-witness-gate', 'lean-proofs'}
 
@@ -23,6 +23,7 @@ def selected_jobs(impact, event, nightly=False):
         raise ValueError('exhaustive selection disagrees with event/impact')
     compiler = has('compiler', 'runtime', 'stdlib', 'tests', 'full')
     return {
+        'distribution-contract': True,
         'contracts': True,
         'contracts-self-falsification': True,
         'contracts-ontology': True,

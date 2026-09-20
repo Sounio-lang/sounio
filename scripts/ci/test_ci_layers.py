@@ -49,7 +49,8 @@ class Layers(unittest.TestCase):
 
     def test_intended_policy(self):
         for event in ('pull_request', 'push', 'merge_group', 'schedule', 'workflow_dispatch'):
-            self.assertEqual(fixture(event=event, layer='fast')['contracts-self-falsification']['result'], 'success')
+            for job in ('contracts-self-falsification', 'distribution-contract'):
+                self.assertEqual(fixture(event=event, layer='fast')[job]['result'], 'success')
         chemistry = fixture(('chemistry',))
         self.assertEqual(chemistry['chemistry']['result'], 'success')
         self.assertEqual(chemistry['full-test-suite']['result'], 'skipped')

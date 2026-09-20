@@ -63,12 +63,14 @@ on every main push. A docs-only PR still retains all existing unconditional
 Contracts and ontology contracts. This conservative first cut avoids guessing
 which scientific contracts can safely be path-filtered.
 
-Distribution at this base is covered by the existing package-support and
-prebuilt-receipt contracts, now also explicitly included in exhaustive runs.
-The pinned external-distribution implementation in PR #2553 was **not merged at
-inspection**. Its future focused packaging workflow must be integrated on landing;
-this change does not claim to validate code absent from this base or publish a
-release. Chemistry deliberately retains its committed lean_single engine and
+PR #2553 has now landed on main and is included in the qualification branch.
+Its deterministic packaging/refusal contract runs once through parent CI on
+**every PR and exhaustive event**, required by Fast PR Gate and CI Decision.
+This expands its prior path-specific PR/push coverage to include merge queue,
+nightly and dispatch. It does not publish a release or replace runtime consumer
+witnesses with packaging unit tests. Existing package-support and prebuilt
+receipt contracts remain intact.
+Chemistry deliberately retains its committed lean_single engine and
 byte-for-byte goldens; replacing it with Madaros would change the scientific oracle.
 
 The rollout run `35479553149` exposed a scheduling limit: the serial Chemistry
@@ -155,3 +157,9 @@ Measure Fast/Deep completion and queue delay over multiple representative PRs
 before claiming the target achieved. Do not waive pre-existing Full Suite failures.
 Rollback the workflow/evaluator switch together; the standalone artifact helper
 commit can remain unused without changing existing compiler resolution.
+
+The observed self-falsification battery took 192 seconds inside Contracts on
+run 35482016363. Its exact 20-rung command block now runs concurrently as
+`contracts-self-falsification`, still mandatory in Fast and final CI Decision on
+every event. No rung moves to nightly or becomes optional. This scheduling gain
+remains a prediction until measured on the new head.
