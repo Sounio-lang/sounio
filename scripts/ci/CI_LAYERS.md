@@ -144,12 +144,15 @@ only superseded PR runs are cancelled. GitHub may still replace older *pending*
 runs within one concurrency group; this is not a guarantee that every historical
 push gets exhaustive execution.
 
-On inspection, the main branch-protection endpoint returned **Branch not
-protected**; the only listed ruleset targeted `canon/madaros-v2-sota`. No settings
-are changed here. To enforce exhaustive qualification **before** integration,
-maintainers must require `CI Decision` and use the merge queue (the workflow
-already handles `merge_group`). Direct merges only get exhaustive evidence
-**after** integration via main push. Fast success alone is never full qualification.
+The earlier branch-protection inspection predated this rollout. As verified on
+2026-09-20, active GitHub ruleset `23713455` targets `refs/heads/main`, requires
+the `CI Decision` check and an `ALLGREEN` merge queue, and has no bypass actors.
+Pull requests and resolved review conversations are required; deletion and force
+pushes are blocked. The workflow handles `merge_group`, so exhaustive evidence
+is required before the queue merges a change. A main push also runs exhaustive
+qualification. Fast success alone is never full qualification. Recheck the live
+ruleset when changing these requirements; this paragraph records the verified
+configuration, not an enforcement mechanism in the repository.
 
 Acceptance: local unit/negative controls, impact self-test, actionlint, script
 reference and gate-reference ratchets; then inspect exact-head Actions results.
