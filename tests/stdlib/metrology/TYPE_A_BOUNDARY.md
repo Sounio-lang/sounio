@@ -52,3 +52,19 @@ instead of importing calibration.sio directly. The permanent test now uses
 this route; its numeric assertions are unchanged. Slurm 12380 separately tried
 `use metrology::{...}` and failed module-closure preflight (unresolved=1).
 That shorthand is not claimed as supported by this patch.
+
+ADR009 numerical reference: `type_a_reference.cpp` independently evaluates the
+same finite Type-A cases with C++23 and Boost cpp_dec_float_100. It computes
+symmetric, small-spread and large-spread expected values and asserts the
+reference's own algebraic controls before printing. On the development host:
+`c++ -std=c++23 -O2 -I/opt/homebrew/include tests/stdlib/metrology/type_a_reference.cpp -o /tmp/type_a_reference && /tmp/type_a_reference`.
+This produced `calibration-cpp23-oracle.json` in the task's evidence directory;
+C++23 compilation and execution returned zero. The previous decimal script
+result is historical only and is excluded from the verification note. The
+Sounio regression remains the executable consumer witness. Decimal precision
+is finite and does not prove arbitrary-input f64 accuracy.
+
+A subsequent independent math review (Grok 4.5 and Gemini 2.5 Pro) confirmed
+the formulas; Grok identified missing controls in the C++ reference. The
+reference now asserts zero large-case mean, constant-reading zero uncertainty,
+and rejection of 0/1/17 readings. The Sounio test covers nonfinite inputs.
