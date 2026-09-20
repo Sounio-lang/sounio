@@ -45,3 +45,10 @@ ef6063d4c079e91b6e18d1d0d4aa80be9a6357de92585c9b33a345a3b0711dca.
 The regression was renamed with the test_ prefix after execution (identical
 source bytes) to match the canonical suite's tests/stdlib/*/test_*.sio discovery.
 This is not a new compiler rebuild or a published stdlib release.
+
+Public facade follow-up: Slurm 12379 compiled and executed the complete
+regression through `use metrology::mod::{...}`, exercising mod.sio's re-exports
+instead of importing calibration.sio directly. The permanent test now uses
+this route; its numeric assertions are unchanged. Slurm 12380 separately tried
+`use metrology::{...}` and failed module-closure preflight (unresolved=1).
+That shorthand is not claimed as supported by this patch.
