@@ -102,6 +102,14 @@ function checkSource(src) {
 // Simulate program output for well-known patterns
 // ---------------------------------------------------------------------------
 
+function decodePreviewStringLiteral(literal) {
+  try {
+    return JSON.parse(literal);
+  } catch {
+    return literal.slice(1, -1);
+  }
+}
+
 function simulateRun(src) {
   const output = [];
 
@@ -109,7 +117,7 @@ function simulateRun(src) {
   const printRe = /print(?:ln)?\s*\(\s*("(?:[^"\\]|\\.)*")/g;
   let m;
   while ((m = printRe.exec(src)) !== null) {
-    output.push(JSON.parse(m[1]));
+    output.push(decodePreviewStringLiteral(m[1]));
   }
 
   // Simple: detect the final expression in main as the return value
