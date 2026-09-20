@@ -120,7 +120,7 @@ from pathlib import Path
 
 fetch = runpy.run_path('scripts/ci/fetch_external_ecosystem.py')['fetch']
 with tempfile.TemporaryDirectory(prefix='sounio-editor-contract-') as directory:
-    paths = fetch(Path(directory))
+    paths = fetch(Path(directory), suffix='.vsix')
     vsix = next(path for path in paths if path.endswith('.vsix'))
     with zipfile.ZipFile(vsix) as archive:
         pkg = json.loads(archive.read('extension/package.json'))

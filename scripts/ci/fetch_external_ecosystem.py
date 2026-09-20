@@ -8,12 +8,14 @@ import tempfile
 import urllib.request
 
 
-def fetch(destination):
+def fetch(destination, suffix=None):
     lock = Path(__file__).resolve().parents[2] / 'ecosystem/external-releases.json'
     destination.mkdir(parents=True, exist_ok=True)
     paths = []
     for asset in json.loads(lock.read_text())['assets']:
         name = asset['name']
+        if suffix is not None and not name.endswith(suffix):
+            continue
         if Path(name).name != name:
             raise ValueError('Asset must have a flat filename')
         target = destination / name
@@ -38,5 +40,6 @@ def fetch(destination):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination', type=Path)
+    parser.add_argument('--suffix', choices=['.whl', '.vsix'])
     args = parser.parse_args()
-    print(json.dumps(fetch(args.destination.resolve())))
+    print(json.dumps(fetch(args.destination.resolve(), args.suffix)))
