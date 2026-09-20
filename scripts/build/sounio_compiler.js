@@ -129,7 +129,7 @@ function simulateRun(src) {
   const output = [];
 
   // Extract double-quoted string literals from print and println calls
-  const printRe = /print(?:ln)?\s*\(\s*("(?:[^"\\]|\\.)*")/g;
+  const printRe = /\bprint(?:ln)?\s*\(\s*("(?:[^"\\]|\\.)*")/g;
   let m;
   while ((m = printRe.exec(src)) !== null) {
     output.push(decodePreviewStringLiteral(m[1]));
