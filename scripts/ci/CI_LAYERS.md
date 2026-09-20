@@ -52,7 +52,7 @@ The large PR latency reduction comes from moving gen2 off the ordinary PR path.
 | Native Linux complete self-host, source-bootstrap, macOS execution/cross-target witnesses | Deferred | Exhaustive | Exhaustive |
 | Full Test Suite + qd128 accuracy replay | Deferred | Exhaustive | Exhaustive |
 | Madaros gen2 fixed-point rung (minimum 122 unchanged) | Deferred | Exhaustive | Exhaustive |
-| Chemistry golden probes | Existing chemistry path-filtered PR workflow retained, five independent probes | Exhaustive (reusable workflow) | Exhaustive |
+| Chemistry golden probes | Same PR path coverage, selected once by parent CI, five independent probes | Exhaustive (reusable workflow) | Exhaustive |
 | R6 corpus sweep | Existing nightly-only policy | Dispatch with `nightly=true` | Yes |
 
 Unknown paths and CI changes classify `full=true` and run **exhaustive even on a
@@ -82,6 +82,14 @@ local execution still runs all five, and unknown/empty/multiple selections fail
 before compiler invocation. This reduces serial waiting, not the scientific
 acceptance criteria. The new selection tests exercise harness behavior only;
 they do not count as passing Chemistry oracles.
+
+The dedicated workflow retains manual dispatch and reusable invocation only.
+The parent classifier now owns the former PR path selection: chemistry examples,
+chemistry stdlib, committed chemistry goldens, the golden gate script and
+`bin/souc*`. It selects the same five probes on those PRs and all exhaustive
+events, eliminating the duplicate dedicated run on exhaustive PRs. The new
+`chemistry` output is required by the decision validator; missing classification
+fails closed. Previously unknown paths still select exhaustive qualification.
 
 ## Artifact custody
 

@@ -23,7 +23,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 declare -A impact=()
-keys=(docs website compiler runtime stdlib tests lean math ontology clinical sio full)
+keys=(docs website compiler runtime stdlib tests lean math ontology clinical chemistry sio full)
 for key in "${keys[@]}"; do impact["$key"]=false; done
 
 mark() { impact["$1"]=true; }
@@ -63,6 +63,15 @@ else
   for path in "${paths[@]}"; do
     [[ -n "$path" ]] || continue
     recognized=false
+
+    # Preserve the former dedicated Chemistry workflow's PR path filter.
+    # Do not mark an otherwise unknown path recognized: its exhaustive
+    # fallback remains required in addition to the Chemistry oracles.
+    case "$path" in
+      examples/chemistry/*|stdlib/chemistry/*|benchmarks/chemistry/golden/*|scripts/ci/chemistry_probe_golden_gate.sh|bin/souc*)
+        mark chemistry
+        ;;
+    esac
 
     case "$path" in
       .github/workflows/*|scripts/ci/classify_ci_impact.sh|scripts/ci/evaluate_ci_decision.py|scripts/ci/impact_ci_selftest.sh|scripts/dev/check_workflow_script_refs.sh)

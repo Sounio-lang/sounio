@@ -23,7 +23,7 @@ def fixture(keys=(), event='pull_request', nightly=False, layer='all'):
 class Layers(unittest.TestCase):
     def test_every_selected_job_must_answer(self):
         for event in ('pull_request', 'push', 'merge_group', 'schedule', 'workflow_dispatch'):
-            for keys in ((), ('compiler',), ('runtime',), ('stdlib',), ('tests',), ('lean',), ('full',)):
+            for keys in ((), ('compiler',), ('runtime',), ('stdlib',), ('tests',), ('lean',), ('chemistry',), ('full',)):
                 for nightly in (False, True):
                     for layer in ('fast', 'deep', 'all'):
                         n = fixture(keys, event, nightly, layer)
@@ -48,6 +48,10 @@ class Layers(unittest.TestCase):
         self.assertTrue(evaluate(n, 'pull_request'))
 
     def test_intended_policy(self):
+        chemistry = fixture(('chemistry',))
+        self.assertEqual(chemistry['chemistry']['result'], 'success')
+        self.assertEqual(chemistry['full-test-suite']['result'], 'skipped')
+        self.assertEqual(fixture()['chemistry']['result'], 'skipped')
         for key in ('compiler', 'stdlib', 'tests'):
             n = fixture((key,))
             self.assertEqual(n['madaros-current-source-deref-f64']['result'], 'success')

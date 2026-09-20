@@ -23,6 +23,15 @@ docs="$(classify_pr docs/internal/concepts/README.md)"
 expect "$docs" docs true
 expect "$docs" compiler false
 expect "$docs" lean false
+expect "$docs" chemistry false
+
+# Every path family previously covered by the standalone PR trigger remains
+# selected, including nested files and the bootstrap receipt suffix.
+for path in examples/chemistry/nested/probe.sio stdlib/chemistry/model.sio benchmarks/chemistry/golden/probe.lean_single.txt scripts/ci/chemistry_probe_golden_gate.sh bin/souc bin/souc-lean-single-x86_64.SeedReceipt.json; do
+  expect "$(classify_pr "$path")" chemistry true
+done
+expect "$(classify_pr stdlib/collections/list.sio)" chemistry false
+expect "$(classify_pr self-hosted/compiler/main.sio)" chemistry false
 
 lean="$(classify_pr formal/lean4/SounioGradedModal.lean)"
 expect "$lean" lean true
@@ -42,7 +51,7 @@ root_build="$(classify_pr Makefile)"
 expect "$root_build" full true
 
 workflow="$(classify_pr .github/workflows/ci.yml)"
-for key in docs website compiler runtime stdlib tests lean math ontology clinical sio full; do
+for key in docs website compiler runtime stdlib tests lean math ontology clinical chemistry sio full; do
   expect "$workflow" "$key" true
 done
 

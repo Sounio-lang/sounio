@@ -6,7 +6,7 @@ import os
 import sys
 
 IMPACT_KEYS = ('docs', 'website', 'compiler', 'runtime', 'stdlib', 'tests',
-               'lean', 'math', 'ontology', 'clinical', 'sio', 'full')
+               'lean', 'math', 'ontology', 'clinical', 'chemistry', 'sio', 'full')
 FAST = {'contracts', 'canonical-madaros', 'gate-wave-0', 'sounio-lint', 'website'}
 DEEP = {'contracts-ontology', 'correlated-effect', 'canonical-madaros',
         'madaros-current-source-deref-f64', 'madaros-witness-gate', 'lean-proofs'}
@@ -39,7 +39,7 @@ def selected_jobs(impact, event, nightly=False):
         'sounio-lint': has('compiler', 'stdlib', 'tests', 'sio', 'full'),
         'lean-proofs': has('lean', 'full'),
         'website': has('website', 'full'),
-        'chemistry': exhaustive,
+        'chemistry': exhaustive or has('chemistry'),
         'r6-corpus-sweep': event == 'schedule' or (event == 'workflow_dispatch' and nightly),
         'fast-pr-gate': True,
         'deep-compiler-gate': True,
