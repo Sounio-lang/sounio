@@ -105,8 +105,8 @@ function checkSource(src) {
 function simulateRun(src) {
   const output = [];
 
-  // Extract string literals from print calls
-  const printRe = /print\s*\(\s*"([^"]*)"/g;
+  // Extract string literals from print and println calls
+  const printRe = /print(?:ln)?\s*\(\s*"([^"]*)"/g;
   let m;
   while ((m = printRe.exec(src)) !== null) {
     output.push(m[1]);
