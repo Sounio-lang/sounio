@@ -43,8 +43,9 @@ The large PR latency reduction comes from moving gen2 off the ordinary PR path.
 | Existing Contracts except two ontology steps | Fast, original step selectors | All | All |
 | Backend claims, package support, receipt/provenance, canonical lean_single fixed point, boot4 fixed point, AArch64 refusal parity | Remain in Contracts | Yes | Yes |
 | Ontology frontiers + multi-ontology composition | Deep, **every PR**, unchanged commands/default engine | Yes | Yes |
-| Source-built canonical Madaros + Wave 0 smoke/negative controls | Fast when compiler/runtime/stdlib/tests/full selected | Yes | Yes |
+| Source-built canonical Madaros + Wave 0 smoke/negative controls | Build on every PR (Correlated requires it); Wave 0 on compiler/runtime/stdlib/tests/full | Yes | Yes |
 | Current-source f64, self-parse, IR capacity, DCE, changed Madaros tests, e-graph, warnings | Deep for compiler/stdlib/tests/full | Yes | Yes |
+| Correlated effect + slot-identity sabotage | Deep, **every PR**, unchanged oracles | Yes | Yes |
 | Full Witness Gate (including KL and sabotage/refusal controls) | Deep for compiler/runtime/stdlib/tests/full | Yes | Yes |
 | Lint / website | Fast with existing impact selectors | Yes | Yes |
 | Lean proofs and existing adjacent checks | Deep on Lean/full changes | Yes | Yes |
@@ -73,8 +74,10 @@ byte-for-byte goldens; replacing it with Madaros would change the scientific ora
 ## Artifact custody
 
 One `canonical-madaros` producer per selected CI run/commit derives the current
-lean_single seed and builds modular Madaros. Current-Source, Witness, Wave 0 and
-the exhaustive fixed-point job consume that ELF. No global mutable compiler
+lean_single seed and builds modular Madaros. Current-Source, Witness, Wave 0, Correlated effect and
+the exhaustive fixed-point job consume that ELF. The former standalone
+`correlated-effect.yml` job now lives in this graph, retaining every PR/main/merge
+trigger and gaining nightly coverage. Its manual entry is the CI dispatch. No global mutable compiler
 cache, cross-run artifact lookup, or prebuilt fallback is introduced.
 
 The artifact name includes the event SHA and producer attempt. All consumers
@@ -91,6 +94,18 @@ builds remain independent because those compilations are the oracle itself.
 GitHub's automatic artifact digest mismatch is a warning, so the consumer adds
 an explicit fatal check ([GitHub artifact documentation](https://docs.github.com/en/actions/tutorials/store-and-share-data)).
 The workflow has read-only repository permissions and no privileged PR trigger.
+
+## Remaining independent builds
+
+`engine-parity-nightly.yml` still builds Madaros in its own nightly/dispatch run
+and compares engines against its existing baseline. `release-gate.yml` still
+constructs native seed/self-host ladders for its independent release receipt.
+`madaros-prebuilt-refresh.yml` retains its publishing/provenance path. None blocks
+ordinary compiler PR feedback with another gen2 rung. Cross-workflow reuse is
+intentionally outside this first change: sharing a PR artifact with privileged
+release/publishing workflows would require a separately reviewed trust boundary.
+This is one canonical build per CI run/commit, not a repository-wide cache or a
+claim that all rebuilds across independent workflows have disappeared.
 
 ## Verdicts, rollout and rollback
 

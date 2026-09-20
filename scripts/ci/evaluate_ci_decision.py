@@ -8,7 +8,7 @@ import sys
 IMPACT_KEYS = ('docs', 'website', 'compiler', 'runtime', 'stdlib', 'tests',
                'lean', 'math', 'ontology', 'clinical', 'sio', 'full')
 FAST = {'contracts', 'canonical-madaros', 'gate-wave-0', 'sounio-lint', 'website'}
-DEEP = {'contracts-ontology', 'canonical-madaros',
+DEEP = {'contracts-ontology', 'correlated-effect', 'canonical-madaros',
         'madaros-current-source-deref-f64', 'madaros-witness-gate', 'lean-proofs'}
 
 
@@ -25,7 +25,9 @@ def selected_jobs(impact, event, nightly=False):
     return {
         'contracts': True,
         'contracts-ontology': True,
-        'canonical-madaros': compiler,
+        # Correlated-effect behavioural controls historically run on EVERY PR.
+        'canonical-madaros': True,
+        'correlated-effect': True,
         'native-selfhost-linux-x86_64': exhaustive,
         'source-bootstrap-selfhost-linux-x86_64': exhaustive,
         'madaros-current-source-deref-f64': has('compiler', 'stdlib', 'tests', 'full'),

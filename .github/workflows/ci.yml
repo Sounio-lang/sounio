@@ -72,7 +72,6 @@ jobs:
   canonical-madaros:
     name: Canonical current-source Madaros
     needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -95,6 +94,62 @@ jobs:
           path: /tmp/madaros-canonical
           if-no-files-found: error
           retention-days: 7
+
+  correlated-effect:
+    name: Correlated effect
+    needs: [impact, canonical-madaros]
+    runs-on: ubuntu-24.04
+    # Current-source Madaros build is required for E221 behavioural controls;
+    # the prebuilt bin/souc ELF does not carry this PR's checker.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Slot-identity debt ratchet
+        run: bash scripts/ci/correlated_slot_ratchet_gate.sh
+
+      - name: Negative control — a new slot-identity site must fail the ratchet
+        run: |
+          set -euo pipefail
+          # The ratchet freezes Knowledge-binding same-ident debt at 0 and
+          # skips tests/. Plant a live site under examples/ (counted path),
+          # assert the gate goes red for the right reason, then restore.
+          sabotage=examples/_correlated_ratchet_sabotage.sio
+          cat > "$sabotage" <<'SIO'
+          // temporary: CI negative control for correlated_slot_ratchet_gate
+          fn _corr_sabotage() -> i32 with IO, Epistemic {
+              let m = measure(1.0, uncertainty: 0.1)
+              let a = m + m
+              0
+          }
+          SIO
+          set +e
+          bash scripts/ci/correlated_slot_ratchet_gate.sh > /tmp/corr_neg.log 2>&1
+          rc=$?
+          set -e
+          rm -f "$sabotage"
+          if [[ "$rc" -eq 0 ]]; then
+            echo "NEGATIVE_CONTROL_FAIL: ratchet stayed green after planting m+m"
+            cat /tmp/corr_neg.log
+            exit 1
+          fi
+          grep -q 'debt rose' /tmp/corr_neg.log || {
+            echo "NEGATIVE_CONTROL_FAIL: red, but not for the ratchet reason"
+            cat /tmp/corr_neg.log
+            exit 1
+          }
+          echo "NEGATIVE_CONTROL_PASS"
+          tail -20 /tmp/corr_neg.log
+
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
+
+      - name: R6 acceptance controls
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
+        run: bash scripts/ci/correlated_effect_gate.sh
 
   contracts:
     name: Contracts
@@ -1599,7 +1654,7 @@ jobs:
   deep-compiler-gate:
     name: Deep Compiler Gate
     if: always()
-    needs: [impact, contracts-ontology, canonical-madaros, madaros-current-source-deref-f64, madaros-witness-gate, lean-proofs]
+    needs: [impact, contracts-ontology, correlated-effect, canonical-madaros, madaros-current-source-deref-f64, madaros-witness-gate, lean-proofs]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1617,6 +1672,7 @@ jobs:
       - impact
       - contracts
       - contracts-ontology
+      - correlated-effect
       - madaros-fixed-point
       - chemistry
       - fast-pr-gate
