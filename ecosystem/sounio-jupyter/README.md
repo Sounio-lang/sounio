@@ -1,5 +1,15 @@
 # Sounio Jupyter Kernel
 
+## Canonical source and transition
+
+The kernel is maintained in [sounio-py/jupyter](https://github.com/Sounio-lang/sounio-py/tree/main/jupyter), alongside its Python integration, and is distributed as a separate wheel. Submit kernel changes and tests there. This directory is a transitional source copy; the material below describes the earlier in-tree implementation and is not the current installation contract.
+
+The [consolidation prerelease](https://github.com/Sounio-lang/sounio-py/releases/tag/python-consolidation-20260920) includes the kernel wheel and checksums. The kernel consumes an explicitly installed compiler with its matching stdlib. The external image test starts the installed kernel, executes a declaration and subsequent expression, and checks invalid-cell errors. This does not certify every feature listed below or imply a PyPI release.
+
+Core consumer migration is tracked in [PR #2554](https://github.com/Sounio-lang/sounio/pull/2554). Keep this copy until the remaining consumers have transitioned and passed their tests.
+
+---
+
 A Jupyter kernel for the **Sounio** programming language with first-class support for **epistemic computing** and uncertainty quantification.
 
 ## Overview
