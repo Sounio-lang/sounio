@@ -1,0 +1,59 @@
+//@ run-pass
+//@ description: an f64 function with a conditional decrement of an i64 var must not pick up KL-16 shadow plumbing when the program does not use the AD intrinsics
+//@ expect-stdout-contains: f64_range_reduction_k_floor: PASS
+//
+// Range-reduced exp: k = trunc(x / ln2), corrected down by one for negative x, then the
+// series on the remainder and k doublings/halvings. KL-16's callee-prologue seeding and the
+// per-declaration FO spill used to run in every f64 function, and this shape then executed
+// its scaling loop twice as often as k, giving exp(1) = 2e. They are now emitted only when
+// the program uses the AD intrinsics.
+//
+// NOTE: that decision is a plain text scan of the whole source (comments included), so this
+// file must not spell the intrinsic names anywhere, or the plumbing is switched back on.
+
+fn ss_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn near(a: f64, b: f64) -> bool {
+    let d = a - b
+    if d < 0.0 { return (0.0 - d) < 1.0e-4 }
+    return d < 1.0e-4
+}
+
+fn main() -> i64 with IO, Mut, Div {
+    var bad: i64 = 0
+    if !near(ss_exp(1.0), 2.718282) { bad = bad + 1 }
+    if !near(ss_exp(0.5), 1.648721) { bad = bad + 1 }
+    if !near(ss_exp(1.69), 5.419481) { bad = bad + 1 }
+    if !near(ss_exp(0.0 - 1.0), 0.367879) { bad = bad + 1 }
+    if !near(ss_exp(0.0 - 3.5), 0.030197) { bad = bad + 1 }
+    if !near(ss_exp(5.0), 148.413159) { bad = bad + 1 }
+    if bad == 0 {
+        println("f64_range_reduction_k_floor: PASS")
+        return 0
+    }
+    print("f64_range_reduction_k_floor: FAIL, wrong results = ")
+    println(bad)
+    return 1
+}
