@@ -282,9 +282,12 @@ pub struct ODESolution {
     //    carried through every step. 0: diagonal-only fallback, used only when
     //    n_dims + n_params > 64; it drops all correlations and is known to
     //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
-    // 2: the full covariance became non-finite (the finite-difference Jacobian lost
-    //    conditioning, or an input variance was NaN). The reported variances are then
-    //    NaN/inf, NOT zero; the state values are unaffected.
+    // 2: the full covariance failed: a diagonal is non-finite, or MATERIALLY negative (loss of
+    //    positive semidefiniteness: the finite-difference Jacobian lost conditioning, or an
+    //    input variance was NaN or negative). The offending variances are reported as they
+    //    came out (NaN/inf/negative), NOT clamped to zero; the state values are unaffected.
+    //    Only a diagonal within 1e-9 of the block's largest one below zero is round-off, and
+    //    that alone is clamped.
     pub covariance_mode: i64,
     // Last time reached, and why the solve stopped:
     //   status 0: reached t_end
@@ -292,8 +295,10 @@ pub struct ODESolution {
     //   status 2: (adaptive) no acceptable step: the trial bound was hit, or the step size
     //             collapsed far from t_end (repeated rejection, or a non-finite error
     //             estimate: NaN/inf never passes for an accepted step)
-    //   status 3: the state was non-finite (NaN/inf) at the start, or a fixed step produced
-    //             one; the solve stops there and t_final is the last valid time
+    //   status 3: invalid input -- non-finite or backward interval, step size not finite and
+    //             > 0, negative or non-finite tolerances -- or a non-finite (NaN/inf) state at
+    //             the start or from a fixed step. Nothing (more) was integrated; t_final is
+    //             the last valid time
     // A truncated solve is NOT an error return: the last recorded point is then the state
     // at t_final, not at t_end. Check status == 0 before using it as the requested result.
     pub t_final: f64,
@@ -343,9 +348,27 @@ fn ode_estate_variances_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic 
     true
 }
 
-// t_end reached, up to the rounding left by accumulating t += dt
+// t_end reached, up to the rounding left by accumulating t += dt. Both endpoints must be
+// finite and the RESIDUAL is compared in absolute value: `t_end - t <= tol` alone is true for
+// t_end = +inf (inf <= inf) and for any t already past t_end.
 fn ode_reached(t: f64, t_end: f64) -> bool {
-    t_end - t <= 1.0e-12 * ode_max(1.0, ode_abs(t_end))
+    ode_finite(t) && ode_finite(t_end) && ode_abs(t_end - t) <= 1.0e-12 * ode_max(1.0, ode_abs(t_end))
+}
+
+// Inputs a solve can run on at all. Anything else is status 3, never a "completed" solve:
+//   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
+//   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
+//     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
+//   - adaptive: rtol, atol finite and >= 0
+fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, adaptive: bool) -> bool {
+    if !ode_finite(t_start) || !ode_finite(t_end) { return false }
+    if t_end < t_start { return false }
+    if !ode_finite(opts.dt) || !(opts.dt > 0.0) { return false }
+    if adaptive {
+        if !ode_finite(opts.rtol) || !ode_finite(opts.atol) { return false }
+        if opts.rtol < 0.0 || opts.atol < 0.0 { return false }
+    }
+    true
 }
 
 fn solution_record(
@@ -1008,19 +1031,44 @@ fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, P
     cov
 }
 
-// the state block's diagonal becomes the reported variances
-fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) with Mut {
+// The state block's diagonal becomes the reported variances. Returns false when a diagonal
+// is non-finite or materially negative; those are written UNCLAMPED so the failure stays
+// visible (a clamp to 0 would show failed propagation as exact certainty).
+// Round-off can leave a diagonal a few ulps below zero relative to the block's scale: only
+// that (within 1e-9 of the largest diagonal) is clamped to 0.
+fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) -> bool with Mut {
+    var scale = 0.0
     var i = 0
     while i < n {
         if i < 64 {
             let v = cov.data[i * 64 + i]
-            // Round-off can leave a tiny negative diagonal: clamp only those. `v > 0.0` is
-            // false for NaN, so the old form turned a NaN diagonal into a reported variance
-            // of 0 -- a failed propagation shown as "no uncertainty".
-            state.variances[i] = if v < 0.0 { 0.0 } else { v }
+            if ode_finite(v) && ode_abs(v) > scale { scale = ode_abs(v) }
         }
         i = i + 1
     }
+    let allow = 1.0e-9 * scale
+    var ok = true
+    i = 0
+    while i < n {
+        if i < 64 {
+            let v = cov.data[i * 64 + i]
+            if !ode_finite(v) {
+                ok = false
+                state.variances[i] = v
+            } else if v < 0.0 {
+                if v >= 0.0 - allow {
+                    state.variances[i] = 0.0
+                } else {
+                    ok = false
+                    state.variances[i] = v
+                }
+            } else {
+                state.variances[i] = v
+            }
+        }
+        i = i + 1
+    }
+    ok
 }
 
 // One step of the chosen integrator, values only: mode 0 = classical RK4,
@@ -1409,17 +1457,22 @@ pub fn solve_ode(
     if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, false) {
+        sol.t_final = t
+        sol.status = 3
+        return sol
+    }
 
     while t < t_end && step < opts.max_steps {
         let dt = ode_min(opts.dt, t_end - t)
-        if dt <= 0.0 { t = t_end }
+        if ode_reached(t, t_end) { t = t_end }
         else {
             if full_cov {
                 var before = estate_new(sys.n_dims)
                 estate_copy(&!before, &state)
                 eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
                 propagate_covariance_step(&sys, t, &before, &p, dt, 0, &!cov, &!n_evals)
-                augcov_write_variances(&cov, &!state, sys.n_dims)
+                if !augcov_write_variances(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
             } else {
                 eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
             }
@@ -1468,7 +1521,7 @@ pub fn solve_ode_adaptive(
     if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
-    if !ode_estate_values_finite(&state, sys.n_dims) {
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, true) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
@@ -1501,7 +1554,7 @@ pub fn solve_ode_adaptive(
                 // differentiated at the pre-step point
                 if full_cov {
                     propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
-                    augcov_write_variances(&cov, &!state, sys.n_dims)
+                    if !augcov_write_variances(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }

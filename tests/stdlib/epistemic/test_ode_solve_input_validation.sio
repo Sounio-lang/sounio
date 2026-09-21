@@ -1,0 +1,109 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/epistemic/test_ode_solve_input_validation.sio
+//
+// A solve must never report a run that did not happen as completed (status 0), and must never
+// show failed uncertainty propagation as zero variance. Inputs the solvers cannot run on end as
+// status 3 with nothing integrated:
+//   - non-finite endpoint (t_end = +inf used to satisfy the "reached" test, inf <= inf) and a
+//     backward interval (t_end < t_start)
+//   - a step size that is 0, negative or non-finite (dt <= 0 used to jump to t = t_end and
+//     return the initial state as finished)
+//   - adaptive: negative or non-finite rtol / atol
+// And a materially NEGATIVE covariance diagonal (an input variance < 0, i.e. a positive
+// semidefiniteness failure) is reported as it came out with covariance_mode 2, not clamped to 0.
+// Only round-off (within 1e-9 of the block's largest diagonal) is clamped; every zero-variance
+// channel in the chemistry and PBPK tests exercises that path and must keep passing.
+
+use epistemic::ode::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn inf_val() -> f64 { let big = 1.0e308; big * 10.0 }
+fn nan_val() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+
+fn decay(y0: f64, var0: f64, kk: f64) -> EState with Mut, Div, Panic {
+    var init = estate_new(1)
+    estate_set(&!init, 0, y0, var0)
+    init
+}
+
+fn params(kk: f64) -> ODEParams with Mut, Div, Panic {
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, kk, 0.0001)
+    p
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let inf = inf_val()
+    let nan = nan_val()
+
+    // ---- non-finite / backward interval: fixed and adaptive --------------------------------
+    let f_inf = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, inf, solver_options_fixed(0.1, 50))
+    let a_inf = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, inf, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 50))
+    print("t_end=inf: fixed status=") print(f_inf.status) print(" adaptive status=") print(a_inf.status) println("")
+    if f_inf.status != 3 { fail = fail + 1; println("FAIL: fixed solve to t_end = inf must be status 3") }
+    if a_inf.status != 3 { fail = fail + 1; println("FAIL: adaptive solve to t_end = inf must be status 3") }
+    if f_inf.n_steps != 1 || a_inf.n_steps != 1 { fail = fail + 1; println("FAIL: nothing may be integrated for an invalid interval") }
+
+    let f_nan = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, nan, solver_options_fixed(0.1, 50))
+    if f_nan.status != 3 { fail = fail + 1; println("FAIL: t_end = NaN must be status 3") }
+    let f_tsn = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), nan, 1.0, solver_options_fixed(0.1, 50))
+    if f_tsn.status != 3 { fail = fail + 1; println("FAIL: t_start = NaN must be status 3") }
+
+    let f_back = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 2.0, 1.0, solver_options_fixed(0.1, 50))
+    let a_back = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 2.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 50))
+    if f_back.status != 3 || a_back.status != 3 { fail = fail + 1; println("FAIL: a backward interval (t_end < t_start) must be status 3") }
+
+    // an empty interval is a legitimate, completed solve: status 0, only the initial point
+    let f_same = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 50))
+    if f_same.status != 0 || f_same.n_steps != 1 { fail = fail + 1; println("FAIL: t_end == t_start is a completed solve with one point") }
+
+    // ---- step size ---------------------------------------------------------------------------
+    let f_dt0 = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.0, 50))
+    let f_dtn = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.0 - 0.1, 50))
+    let f_dtnan = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(nan, 50))
+    let a_dt0 = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.0, 1.0e-8, 1.0e-10, 50))
+    print("dt=0: fixed status=") print(f_dt0.status) print(" adaptive status=") print(a_dt0.status) println("")
+    if f_dt0.status != 3 { fail = fail + 1; println("FAIL: fixed dt = 0 must be status 3, not a finished solve") }
+    if f_dtn.status != 3 { fail = fail + 1; println("FAIL: fixed dt < 0 must be status 3") }
+    if f_dtnan.status != 3 { fail = fail + 1; println("FAIL: fixed dt = NaN must be status 3") }
+    if a_dt0.status != 3 { fail = fail + 1; println("FAIL: adaptive dt = 0 must be status 3") }
+    if f_dt0.t_final > 0.0 { fail = fail + 1; println("FAIL: a zero step size made progress") }
+
+    // ---- tolerances ----------------------------------------------------------------------------
+    let a_rn = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 0.0 - 1.0e-8, 1.0e-10, 50))
+    let a_an = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, nan, 50))
+    if a_rn.status != 3 { fail = fail + 1; println("FAIL: negative rtol must be status 3") }
+    if a_an.status != 3 { fail = fail + 1; println("FAIL: NaN atol must be status 3") }
+
+    // ---- a valid solve is unaffected ------------------------------------------------------------
+    let f_ok = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 50))
+    let a_ok = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 50))
+    if f_ok.status != 0 || a_ok.status != 0 { fail = fail + 1; println("FAIL: a valid solve must still be status 0") }
+
+    // ---- covariance: a materially negative diagonal is reported, not zeroed ----------------------
+    // an input variance of -0.01 is a positive-semidefiniteness failure from the start
+    let f_neg = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let a_neg = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 50))
+    let vf = solution_get_variance(&f_neg, f_neg.n_steps - 1, 0)
+    let va = solution_get_variance(&a_neg, a_neg.n_steps - 1, 0)
+    print("negative input variance: fixed var=") print(vf) print(" mode=") print(f_neg.covariance_mode)
+    print(" adaptive var=") print(va) print(" mode=") print(a_neg.covariance_mode) println("")
+    if f_neg.covariance_mode != 2 { fail = fail + 1; println("FAIL: fixed negative covariance must set covariance_mode 2") }
+    if a_neg.covariance_mode != 2 { fail = fail + 1; println("FAIL: adaptive negative covariance must set covariance_mode 2") }
+    if !(vf < 0.0) { fail = fail + 1; println("FAIL: fixed negative variance was clamped to zero") }
+    if !(va < 0.0) { fail = fail + 1; println("FAIL: adaptive negative variance was clamped to zero") }
+    // the state itself is not affected
+    if absf(solution_get_value(&f_neg, f_neg.n_steps - 1, 0) - 0.904837418) > 1.0e-6 { fail = fail + 1; println("FAIL: state corrupted by a negative variance") }
+
+    // -inf variance: non-finite, so mode 2 as well
+    let f_ninf = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0 - inf, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 10))
+    if f_ninf.covariance_mode != 2 { fail = fail + 1; println("FAIL: a -inf variance must set covariance_mode 2") }
+
+    // and a healthy solve keeps mode 1
+    if f_ok.covariance_mode != 1 || a_ok.covariance_mode != 1 { fail = fail + 1; println("FAIL: a healthy solve must keep covariance_mode 1") }
+
+    if fail == 0 { println("ODE SOLVE INPUT VALIDATION PASS") }
+    fail
+}
