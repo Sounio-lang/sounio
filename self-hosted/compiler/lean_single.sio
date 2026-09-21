@@ -12849,6 +12849,43 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         while TK[EP as usize] == 50 {
             EP = EP + 1
             let f_tok = EP
+            // `&t.0` / `&!t.1`: borrow a tuple ELEMENT in place. rax holds the address of the
+            // tuple buffer (the same base the postfix `t.N` starts from); element 1 sits after
+            // element 0's slots. This used to fall into the struct-field path below, which
+            // reported `field borrow requires struct base` and emitted `xor eax, eax`, so the
+            // borrow was a null pointer that crashed on first use.
+            if TK[EP as usize] == 4 {
+                let bt_idx = TV[EP as usize]
+                EP = EP + 1
+                let bt_ci = tup_cache_lookup(inner_hash)
+                if bt_ci < 0 || bt_idx > 1 {
+                    tc_error(f_tok, "tuple element borrow requires a tuple base and index 0 or 1")
+                    em(0x31); em(0xc0)
+                    inner_ty = 0
+                    inner_hash = 0
+                } else if bt_idx == 0 {
+                    inner_ty = TUP_CACHE_FIRST_TY[bt_ci as usize]
+                    inner_hash = TUP_CACHE_FIRST_HASH[bt_ci as usize]
+                } else {
+                    let bt_off = tup_first_slots_true(inner_hash) * 8
+                    if bt_off > 0 && bt_off < 2000000000 { em(0x48); em(0x8d); em(0x80); em32(bt_off) }
+                    if TUP_CACHE_TCOUNT[bt_ci as usize] > 2 {
+                        inner_ty = TUP_CACHE_ELEM_TY[(bt_ci * 16 + 1) as usize]
+                        inner_hash = TUP_CACHE_ELEM_HASH[(bt_ci * 16 + 1) as usize]
+                    } else {
+                        inner_ty = TUP_CACHE_LAST_TY[bt_ci as usize]
+                        inner_hash = TUP_CACHE_LAST_HASH[bt_ci as usize]
+                    }
+                }
+                // The tuple constructor bulk-copies elements wider than one slot inline, but a
+                // ONE-slot struct element is stored as the struct value in rax, i.e. a pointer
+                // to its data. `t.N` therefore yields that pointer, and so must the reference;
+                // the element's own address would be a pointer to the pointer.
+                if bt_ci >= 0 && bt_idx <= 1 && type_is_struct_like(inner_ty, inner_hash) && ty_slot_count(inner_ty, inner_hash) == 1 {
+                    em(0x48); em(0x8b); em(0x00)   // mov rax, [rax]
+                }
+                continue
+            }
             let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
             EP = EP + 1
             let si = st_find(inner_hash)

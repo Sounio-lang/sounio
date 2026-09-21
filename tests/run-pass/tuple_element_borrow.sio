@@ -1,0 +1,74 @@
+//@ run-pass
+//@ description: &t.N / &!t.N borrow a tuple element in place (was a null pointer: `field borrow requires struct base`)
+//@ expect-stdout-contains: tuple_element_borrow: PASS
+//
+// `&t.0` on a tuple used to be routed into the struct-field path, which warned "field borrow
+// requires struct base" and emitted `xor eax, eax`, so the borrow was a null pointer and the
+// first use segfaulted. It now yields the element's address in place (or, for a one-slot struct
+// element, the pointer the tuple cell holds).
+//
+// Tuples returned from a function are used only with element kinds whose storage is stable. A
+// ONE-field struct inside a RETURNED tuple is a pointer into the callee's dead frame, which is
+// a separate older problem, so that shape is exercised with locally built tuples only.
+
+struct One { n: i64 }
+struct Three { a: i64, b: i64, c: i64 }
+
+fn mk_ints() -> (i64, i64) { (5, 2) }
+fn mk3() -> (i64, i64, i64) { (10, 20, 30) }
+fn mk_f() -> (f64, i64) { (2.5, 3) }
+fn mk_three() -> (Three, i64) { (Three { a: 1, b: 2, c: 30 }, 4) }
+fn mk_rev() -> (i64, Three) { (2, Three { a: 7, b: 8, c: 9 }) }
+
+fn iv(x: &i64) -> i64 { *x }
+fn fv(x: &f64) -> f64 { *x }
+fn three_c(b: &Three) -> i64 { b.c }
+fn one_n(b: &One) -> i64 { b.n }
+fn bump(x: &!i64) with Mut { *x = *x + 1 }
+fn set_n(b: &!One, v: i64) with Mut { b.n = v }
+fn noise(a: i64) -> i64 { a * 3 }
+
+fn main() -> i64 with IO, Mut {
+    var bad: i64 = 0
+
+    // returned tuples, scalar and multi-slot struct elements
+    let a = mk_ints()
+    if iv(&a.0) != 5 { bad = bad + 1 }
+    if iv(&a.1) != 2 { bad = bad + 1 }
+    let b3 = mk3()
+    if iv(&b3.1) != 20 { bad = bad + 1 }
+    let f = mk_f()
+    if fv(&f.0) != 2.5 { bad = bad + 1 }
+    let s = mk_three()
+    if three_c(&s.0) != 30 { bad = bad + 1 }
+    let r = mk_rev()
+    if three_c(&r.1) != 9 { bad = bad + 1 }
+
+    // a borrow survives other calls
+    let z = noise(5)
+    if iv(&a.0) != 5 { bad = bad + 1 }
+
+    // mutation through &!t.N changes the tuple itself, not a copy
+    var m = mk_ints()
+    bump(&!m.1)
+    if m.1 != 3 { bad = bad + 1 }
+
+    // one-field struct element, locally built tuple
+    var u = (One { n: 7 }, 2)
+    set_n(&!u.0, 42)
+    let z2 = noise(6)
+    if u.0.n != 42 { bad = bad + 1 }
+    let q = (One { n: 11 }, 22)
+    let z3 = noise(7)
+    if one_n(&q.0) != 11 { bad = bad + 1 }
+    if iv(&q.1) != 22 { bad = bad + 1 }
+    if iv(&q.0.n) != 11 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("tuple_element_borrow: PASS")
+        return 0
+    }
+    print("tuple_element_borrow: FAIL, wrong = ")
+    println(bad)
+    return 1
+}
