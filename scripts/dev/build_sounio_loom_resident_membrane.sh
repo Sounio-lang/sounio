@@ -12,8 +12,8 @@ MEMBRANE_ENTRYPOINT="$ROOT_DIR/tools/loom/subprocess_membrane_main.sio"
 RESIDENT_MODULE="$ROOT_DIR/stdlib/coordination/loom_resident_authority.sio"
 RESIDENT_ENTRYPOINT="$ROOT_DIR/tools/loom/resident_authority_main.sio"
 DISPATCH_MAIN="$ROOT_DIR/tools/loom/resident_membrane_main.sio"
-MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
+MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
 OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime}"
 
 fail() {
@@ -57,8 +57,8 @@ for path in "$MEMBRANE_MODULE" "$MEMBRANE_ENTRYPOINT" "$RESIDENT_MODULE" \
   "$RESIDENT_ENTRYPOINT" "$DISPATCH_MAIN"; do
   [[ -f "$path" ]] || fail "resident source is missing: $path"
 done
-verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v1 9023
-verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v1 9024
+verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v2 9023
+verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v2 9024
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-membrane-build.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -69,20 +69,20 @@ compiled="$work/sounio-loom-resident-membrane-runtime"
 
 grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$MEMBRANE_ENTRYPOINT" ||
   fail 'subprocess-membrane main signature changed'
-[[ "$(grep -Fxc '    let raw = read_line()' "$MEMBRANE_ENTRYPOINT")" == 1 ]] ||
+[[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$MEMBRANE_ENTRYPOINT")" == 1 ]] ||
   fail 'subprocess-membrane input boundary changed'
 sed \
   -e 's/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn subprocess_membrane_decide_one() -> i64 with IO, Mut, Div, Panic {/' \
-  -e 's/^    let raw = read_line()$/    let raw = resident_membrane_read_line()/' \
+  -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_read_line()/' \
   "$MEMBRANE_ENTRYPOINT" > "$membrane_adapter"
 
 grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$RESIDENT_ENTRYPOINT" ||
   fail 'resident-authority main signature changed'
-[[ "$(grep -Fxc '    let raw = read_line()' "$RESIDENT_ENTRYPOINT")" == 1 ]] ||
+[[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$RESIDENT_ENTRYPOINT")" == 1 ]] ||
   fail 'resident-authority input boundary changed'
 sed \
   -e 's/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn resident_authority_decide_one() -> i64 with IO, Mut, Div, Panic {/' \
-  -e 's/^    let raw = read_line()$/    let raw = resident_membrane_read_line()/' \
+  -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_read_line()/' \
   "$RESIDENT_ENTRYPOINT" > "$resident_adapter"
 
 # Source assembly and adapter derivation are mechanical. Both decisions remain

@@ -1,4 +1,4 @@
-# Loom Spatial for Apple platforms
+# Loom Native Workbench for Apple platforms
 
 This package is the native macOS 27 and iOS 27 client for Loom. It is the
 heavy-use visualization and configuration surface over the existing Loom
@@ -7,11 +7,11 @@ kernel. It does not own PTYs, routing authority, receipts, or session custody.
 The first slice connects read-only to `bin/loom serve`:
 
 ```sh
-bin/loom serve --bind 127.0.0.1 --port 8787
+bin/loom serve --bind 127.0.0.1 --port 8793
 ```
 
 Open `Package.swift` in Xcode 27 and run the `LoomSpatial` scheme. The default
-endpoint is `http://127.0.0.1:8787`. Without a reachable kernel the UI remains
+endpoint is `http://127.0.0.1:8793`. Without a reachable kernel the UI remains
 fully inspectable through its deterministic scenario gallery.
 
 The conversation composer uses a separate, authenticated command plane. Start
@@ -19,10 +19,15 @@ the source-built bridge with a private bearer capability and a fixed sender:
 
 ```sh
 bin/sounio-loom message-serve \
-  --cwd "$PWD" --bind 127.0.0.1 --port 8789 \
+  --cwd "$PWD" --bind 127.0.0.1 --port 8792 \
   --token-file /private/path/loom-message.cap \
   --agent founder-ui --lane loom-apple
 ```
+
+The installed macOS Workbench defaults to the loopback kernel at `8793`, the
+message bridge at `8792`, and the capability at
+`~/Library/Application Support/Loom/message-bridge.token`. Command-line
+arguments remain available to override all three development endpoints.
 
 Then launch the native client with the capability file, which must remain
 outside the repository and mode `0600`:

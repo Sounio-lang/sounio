@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-execution-authority-v2-20260827.txt"
+MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v3"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-execution-authority-v3-20260914.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-execution-authority-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/execution-authority-one"
 RUNTIME_TWO="$TEST_ROOT/execution-authority-two"
@@ -58,12 +58,17 @@ hash_u32_csv() {
 
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-execution-authority-freeze-v2 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-execution-authority-freeze-v3 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'
 [[ "$(field parity_open)" == false ]] || fail 'freeze manifest opened parity'
 [[ "$(field claim_ready)" == false ]] || fail 'freeze manifest promoted a claim'
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS && "$(field semantics_module_changed)" == false ]] || fail 'unexpected v3 change class'
+[[ "$(field predecessor_manifest_path)" == tools/loom/execution_authority.freeze.v2 ]] || fail 'unexpected predecessor'
+[[ "$(file_hash "$ROOT_DIR/$(field predecessor_manifest_path)")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor manifest drifted'
+[[ "$(field source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$(field predecessor_manifest_path)" | cut -d= -f2)" ]] || fail 'semantic module differs from predecessor'
+git -C "$ROOT_DIR" cat-file -e "$(field toolchain_commit)^{commit}" || fail 'toolchain commit is absent'
 for surface in exec_attached child_exec_attached commit_attached ci_attached; do
   [[ "$(field "$surface")" == false ]] || fail "$surface was promoted during freeze"
 done
@@ -101,7 +106,7 @@ freeze_script_path="$(field freeze_selftest_path)"
 # The live compiler is allowed to advance. Reconstruct the exact frozen
 # toolchain from the executable commit so this receipt remains reproducible.
 mkdir -p "$TOOLCHAIN_ROOT"
-git -C "$ROOT_DIR" archive "$executable_commit" "$wrapper_path" "$compiler_path" |
+git -C "$ROOT_DIR" archive "$(field toolchain_commit)" "$wrapper_path" "$compiler_path" |
   tar -x -C "$TOOLCHAIN_ROOT"
 [[ "$(file_hash "$TOOLCHAIN_ROOT/$wrapper_path")" == "$(field toolchain_wrapper_sha256)" ]] ||
   fail 'frozen compiler wrapper drifted'

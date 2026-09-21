@@ -1,12 +1,19 @@
 open Unix
 
 exception Error of string
+exception Forwarded of int
 
 let pinned_manifest_sha256 =
-  "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
+  "7019af35cddccddd2c34e7dca0f40300bc446f5e7add52c37b0325b6ae9c1037"
+
+let pinned_native_hook_cutover_manifest_sha256 =
+  "4ce46da965e6e19390dcfde8119bf8e9dcb1dab2c1722f5c27cc5e330532932a"
 
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
+(* Provider hook contracts allow 30 seconds. Keep a bounded five-second margin
+   while admitting supervisor recovery observed above 15 seconds under load. *)
+let coordination_process_timeout_seconds = 25.0
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
@@ -63,7 +70,13 @@ let read_stdin () =
   in
   loop 0
 
-let sha256_file path = sha256 (read_file path)
+let sha256_file path =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "file-not-regular:%s" path;
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
+      |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
 let rec mkdir_p path =
   if path = "" || path = "." || path = "/" || Sys.file_exists path then ()
@@ -98,7 +111,8 @@ let drop_environment_prefix prefix environment =
   |> List.filter (fun item -> not (starts_with item prefix))
   |> Array.of_list
 
-let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command arguments =
+let run_process ?(input = "") ?(environment = Unix.environment ())
+    ?(timeout_seconds = process_timeout_seconds) ~cwd command arguments =
   let stdin_read, stdin_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
   Unix.set_close_on_exec stdin_write;
@@ -134,7 +148,7 @@ let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command 
       (try write_all stdin_write input
        with error -> kill_noerr (); raise error);
       Unix.close stdin_write;
-      let deadline = Unix.gettimeofday () +. process_timeout_seconds in
+      let deadline = Unix.gettimeofday () +. timeout_seconds in
       let output = Buffer.create 4096 in
       let bytes = Bytes.create 16384 in
       let rec drain () =
@@ -369,6 +383,18 @@ let string_field ?(default = "") value name =
   | Some Json_null | None -> default
   | Some _ -> failf "invalid-json:%s-must-be-string" name
 
+let string_array_field value name =
+  match object_field value name with
+  | Some (Json_array values) ->
+      Some
+        (List.map
+           (function
+             | Json_string found -> found
+             | _ -> failf "invalid-json:%s-items-must-be-strings" name)
+           values)
+  | Some Json_null | None -> None
+  | Some _ -> failf "invalid-json:%s-must-be-array" name
+
 let replace_object_field value name replacement =
   match value with
   | Json_object fields ->
@@ -380,6 +406,135 @@ let replace_object_field value name replacement =
              else (field_name, field_value))
            fields)
   | _ -> failf "invalid-json:tool_input-must-be-object"
+
+type hook_profile = {
+  provider_id : string;
+  provider_code : int;
+  dialect_name : string;
+  dialect_code : int;
+  camel_case : bool;
+}
+
+let hook_profile agent =
+  if starts_with agent "codex" then
+    { provider_id = "codex"; provider_code = 1; dialect_name = "snake";
+      dialect_code = 1; camel_case = false }
+  else if starts_with agent "claude" then
+    { provider_id = "claude"; provider_code = 2; dialect_name = "snake";
+      dialect_code = 1; camel_case = false }
+  else if starts_with agent "cursor" then
+    { provider_id = "cursor"; provider_code = 3;
+      dialect_name = "cursor-camel"; dialect_code = 2; camel_case = false }
+  else if starts_with agent "grok" then
+    { provider_id = "grok"; provider_code = 4;
+      dialect_name = "grok-camel"; dialect_code = 3; camel_case = true }
+  else failf "unsupported-hook-agent:%s" agent
+
+let reject_alias event forbidden =
+  match object_field event forbidden with
+  | None -> ()
+  | Some _ -> failf "provider-hook-dialect-mismatch:field=%s" forbidden
+
+let aliased_field event profile snake camel =
+  if profile.camel_case then (reject_alias event snake; object_field event camel)
+  else (reject_alias event camel; object_field event snake)
+
+let aliased_string ?(default = "") event profile snake camel =
+  match aliased_field event profile snake camel with
+  | Some (Json_string value) -> value
+  | Some Json_null | None -> default
+  | Some _ -> failf "invalid-json:%s-must-be-string" (if profile.camel_case then camel else snake)
+
+let normalize_hook_event_name profile value =
+  match profile.provider_id, value with
+  | ("codex" | "claude"),
+    ("SessionStart" | "SessionEnd" | "UserPromptSubmit" | "PreToolUse"
+    | "PostToolUse" | "Stop") -> value
+  | "cursor", ("SessionStart" | "sessionStart") -> "SessionStart"
+  | "cursor", ("SessionEnd" | "sessionEnd") -> "SessionEnd"
+  | "cursor", ("UserPromptSubmit" | "beforeSubmitPrompt") -> "UserPromptSubmit"
+  | "cursor", ("PreToolUse" | "preToolUse" | "beforeShellExecution"
+    | "beforeFileEdit") -> "PreToolUse"
+  | "cursor", ("PostToolUse" | "postToolUse" | "afterShellExecution"
+    | "afterFileEdit") -> "PostToolUse"
+  | "cursor", ("Stop" | "stop") -> "Stop"
+  | "grok", ("SessionStart" | "sessionStart" | "session_start") -> "SessionStart"
+  | "grok", ("SessionEnd" | "sessionEnd" | "session_end") -> "SessionEnd"
+  | "grok", ("UserPromptSubmit" | "beforeSubmitPrompt" | "user_prompt_submit") -> "UserPromptSubmit"
+  | "grok", ("PreToolUse" | "preToolUse" | "pre_tool_use") -> "PreToolUse"
+  | "grok", ("PostToolUse" | "postToolUse" | "post_tool_use") -> "PostToolUse"
+  | "grok", ("Stop" | "stop") -> "Stop"
+  | _ -> failf "provider-hook-event-unsupported:%s:%s" profile.provider_id value
+
+let normalize_hook_tool profile value =
+  match profile.provider_id, value with
+  | "cursor", "run_terminal_command" -> "Bash"
+  | "cursor", "search_replace" -> "Edit"
+  | "cursor", "write_file" -> "Write"
+  | _, value -> value
+
+let cursor_workspace_root event =
+  let direct = string_field event "cwd" in
+  match string_array_field event "workspace_roots" with
+  | None -> direct
+  | Some [] -> failf "hook-workspace-roots-empty"
+  | Some [ root ] when root = "" -> failf "hook-workspace-roots-empty"
+  | Some [ root ] when direct = "" || direct = root -> root
+  | Some [ _ ] -> failf "hook-workspace-root-conflict"
+  | Some _ -> failf "hook-workspace-roots-ambiguous"
+
+let normalize_hook_event profile event =
+  let raw_name = aliased_string event profile "hook_event_name" "hookEventName" in
+  if raw_name = "" then failf "hook-event-name-missing";
+  let raw_session = aliased_string event profile "session_id" "sessionId" in
+  if raw_session = "" then failf "hook-session-id-missing";
+  let cwd =
+    if profile.provider_id = "cursor" then cursor_workspace_root event
+    else if profile.camel_case then
+      let direct = string_field event "cwd" in
+      if direct <> "" then direct else string_field event "workspaceRoot"
+    else string_field event "cwd"
+  in
+  if cwd = "" then failf "hook-cwd-missing";
+  let tool_name =
+    aliased_string event profile "tool_name" "toolName"
+    |> normalize_hook_tool profile
+  in
+  let tool_input = aliased_field event profile "tool_input" "toolInput" in
+  let optional name value fields =
+    match value with None -> fields | Some found -> (name, found) :: fields
+  in
+  let call_id =
+    if profile.camel_case then
+      match object_field event "toolUseId" with
+      | Some value -> Some value
+      | None -> object_field event "toolCallId"
+    else
+      match object_field event "tool_use_id" with
+      | Some value -> Some value
+      | None -> object_field event "tool_call_id"
+  in
+  let fields =
+    [ ("hook_event_name", Json_string (normalize_hook_event_name profile raw_name));
+      ("session_id", Json_string raw_session); ("cwd", Json_string cwd) ]
+  in
+  let fields =
+    if tool_name = "" then fields else ("tool_name", Json_string tool_name) :: fields
+  in
+  Json_object
+    (fields
+     |> optional "tool_input" tool_input
+     |> optional "tool_use_id" call_id)
+
+let hook_event_code event_name =
+  match event_name with
+  | "SessionStart" -> 1
+  | "UserPromptSubmit" -> 2
+  | "PreToolUse" -> 3
+  | "PostToolUse" -> 4
+  | "Stop" -> 5
+  | "SessionEnd" -> 6
+  | _ -> failf "hook-event-unsupported:%s" event_name
 
 let execution_tool name =
   List.mem name [ "Bash"; "Exec"; "exec_command"; "shell"; "Shell" ]
@@ -419,15 +574,16 @@ let execution_cwd event input root =
   in
   if Filename.is_relative selected then Filename.concat event_cwd selected else selected
 
-let execution_hook_output input field replacement =
+let execution_hook_output ?(reason =
+    "Sounio 9021 authorized one single-use execution capability") input field
+    replacement =
   let updated_input = replace_object_field input field (Json_string replacement) in
   Json_object
     [ ("hookSpecificOutput",
        Json_object
          [ ("hookEventName", Json_string "PreToolUse");
            ("permissionDecision", Json_string "allow");
-           ("permissionDecisionReason",
-            Json_string "Sounio 9021 authorized one single-use execution capability");
+           ("permissionDecisionReason", Json_string reason);
            ("updatedInput", updated_input) ]) ]
 
 let rec collect_named_strings names value =
@@ -478,6 +634,163 @@ let extract_paths event =
         else []
       in
       unique (direct @ patches)
+
+let change_tool name = List.mem name [ "Write"; "Edit"; "apply_patch" ]
+
+let change_string_field input name =
+  match object_field input name with
+  | Some (Json_string value) -> value
+  | Some _ -> failf "change-%s-must-be-string" name
+  | None -> failf "change-%s-missing" name
+
+let change_bool_field ~default input name =
+  match object_field input name with
+  | Some (Json_bool value) -> value
+  | Some _ -> failf "change-%s-must-be-boolean" name
+  | None -> default
+
+let change_mutation event target_paths =
+  let tool_name = string_field event "tool_name" in
+  let input =
+    match object_field event "tool_input" with
+    | Some value -> value
+    | None -> failf "change-tool-input-missing"
+  in
+  match tool_name, input, target_paths with
+  | "Write", Json_object _, [ path ] ->
+      Loom_change.Write { path; content = change_string_field input "content" }
+  | "Edit", Json_object _, [ path ] ->
+      Loom_change.Edit
+        { path;
+          old_string = change_string_field input "old_string";
+          new_string = change_string_field input "new_string";
+          replace_all = change_bool_field ~default:false input "replace_all" }
+  | "apply_patch", Json_string patch, _ -> Loom_change.Apply_patch patch
+  | "apply_patch", Json_object _, _ ->
+      let patch =
+        match object_field input "patch", object_field input "input" with
+        | Some (Json_string value), _ -> value
+        | None, Some (Json_string value) -> value
+        | Some _, _ -> failf "change-patch-must-be-string"
+        | None, Some _ -> failf "change-input-must-be-string"
+        | None, None -> failf "change-patch-missing"
+      in
+      Loom_change.Apply_patch patch
+  | ("Write" | "Edit"), _, _ -> failf "change-single-path-required"
+  | _ -> failf "change-tool-refused:%s" tool_name
+
+let change_call_id event =
+  [ "tool_use_id"; "tool_call_id"; "toolUseId" ]
+  |> List.find_map (fun name ->
+         match object_field event name with
+         | Some (Json_string value) when value <> "" -> Some value
+         | _ -> None)
+  |> function
+  | Some value when String.length value <= 256 -> value
+  | Some _ -> failf "change-tool-call-id-too-long"
+  | None -> failf "change-tool-call-id-missing"
+
+let rewrite_patch_for_stage root stage_root patch =
+  String.split_on_char '\n' patch
+  |> List.map (fun line ->
+         let prefixes = [ "*** Add File: "; "*** Update File: "; "*** Delete File: " ] in
+         match
+           List.find_map
+             (fun prefix ->
+               if starts_with line prefix then Some prefix else None)
+             prefixes
+         with
+         | None -> line
+         | Some prefix ->
+             let raw =
+               String.sub line (String.length prefix)
+                 (String.length line - String.length prefix)
+             in
+             let relative = Loom_change.normalize_declared_path root raw in
+             prefix ^ Filename.concat stage_root relative)
+  |> String.concat "\n"
+
+let change_hook_output root input mutation stage_root =
+  let updated_input =
+    match mutation, input with
+    | (Loom_change.Write { path; _ } | Loom_change.Edit { path; _ }),
+      Json_object _ ->
+        replace_object_field input "file_path"
+          (Json_string (Filename.concat stage_root path))
+    | Loom_change.Apply_patch patch, Json_string _ ->
+        Json_string (rewrite_patch_for_stage root stage_root patch)
+    | Loom_change.Apply_patch patch, Json_object _ ->
+        let field =
+          match object_field input "patch", object_field input "input" with
+          | Some _, _ -> "patch"
+          | None, Some _ -> "input"
+          | None, None -> failf "change-patch-missing"
+        in
+        replace_object_field input field
+          (Json_string (rewrite_patch_for_stage root stage_root patch))
+    | _ -> failf "change-stage-input-invalid"
+  in
+  Json_object
+    [ ("hookSpecificOutput",
+       Json_object
+         [ ("hookEventName", Json_string "PreToolUse");
+           ("permissionDecision", Json_string "allow");
+           ("permissionDecisionReason",
+            Json_string "Sounio 9043 admitted a kernel-resident staged change");
+           ("updatedInput", updated_input) ]) ]
+
+let provider_hook_output profile output =
+  match profile.provider_id with
+  | "codex" | "claude" -> output
+  | "cursor" | "grok" ->
+      let specific =
+        match object_field output "hookSpecificOutput" with
+        | Some (Json_object _ as value) -> value
+        | Some _ -> failf "native-hook-output-specific-must-be-object"
+        | None -> failf "native-hook-output-specific-missing"
+      in
+      let decision = string_field specific "permissionDecision" in
+      let reason = string_field specific "permissionDecisionReason" in
+      let updated =
+        match object_field specific "updatedInput" with
+        | Some value -> value
+        | None -> failf "native-hook-output-updated-input-missing"
+      in
+      if decision <> "allow" then
+        failf "native-hook-output-decision-unsupported:%s" decision;
+      if profile.provider_id = "cursor" then
+        Json_object
+          [ ("permission", Json_string "allow");
+            ("agent_message", Json_string reason);
+            ("updated_input", updated) ]
+      else
+        Json_object
+          [ ("decision", Json_string "allow");
+            ("reason", Json_string reason);
+            ("hookSpecificOutput", specific) ]
+  | provider -> failf "native-hook-output-provider-unsupported:%s" provider
+
+let git_commit_message command =
+  try
+    match Loom_exec.lex_command command with
+    | [ executable; "commit"; ("-m" | "--message"); message ]
+      when Filename.basename executable = "git" && message <> "" -> Some message
+    | words when
+        (match words with executable :: "commit" :: _ ->
+           Filename.basename executable = "git" | _ -> false) ->
+        failf "change-git-commit-form-refused"
+    | _ -> None
+  with Loom_exec.Dynamic_command reason ->
+    if starts_with (String.trim command) "git commit" then
+      failf "change-git-commit-dynamic-refused:%s" reason
+    else None
+
+let commit_presentation receipt oid path =
+  "/usr/bin/printf '%s\\n' " ^
+  Loom_exec.shell_quote
+    (Printf.sprintf
+       "LOOM_CHANGE_COMMITTED receipt_sha256=%s commit=%s receipt_path=%s"
+       receipt oid path)
 
 let safe_token ?(limit = 24) value =
   let output = Buffer.create (min limit (String.length value)) in
@@ -641,6 +954,10 @@ type authority_receipt = {
   hardware_sha256 : string;
   command : string;
   command_sha256 : string;
+  parent_authority_result : string;
+  provider : string;
+  dialect : string;
+  provider_config_sha256 : string;
   result : string;
 }
 
@@ -670,6 +987,10 @@ let operational_receipt raw_event command =
     hardware_sha256 = sha256 hardware;
     command;
     command_sha256 = sha256 raw_event;
+    parent_authority_result = "unavailable";
+    provider = "unverified";
+    dialect = "unverified";
+    provider_config_sha256 = "unavailable";
     result = "unavailable" }
 
 let runtime_authority_root () =
@@ -678,7 +999,7 @@ let runtime_authority_root () =
 
 let authority_policy_root worktree_root =
   let local_manifest =
-    Filename.concat worktree_root "tools/loom/language_authority.freeze.v1"
+    Filename.concat worktree_root "tools/loom/language_authority.freeze.v2"
   in
   let selected =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT" with
@@ -701,7 +1022,7 @@ let authorize_guard root _raw_event base_receipt =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then failf "Sounio-authority-policy-missing";
   if sha256_file manifest_path <> pinned_manifest_sha256 then
@@ -747,6 +1068,150 @@ let authorize_guard root _raw_event base_receipt =
     semantic_authority_language = required manifest "producing_language";
     semantic_authority_role = required manifest "language_role";
     semantic_authority_origin = policy_origin;
+    result = decision }
+
+let runtime_native_hook_cutover_root () =
+  let binary_dir = Filename.dirname (Unix.realpath Sys.executable_name) in
+  Filename.concat (Filename.dirname binary_dir) "policy/native-hook-cutover"
+
+let native_hook_cutover_policy_root worktree_root =
+  let local_manifest =
+    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v2"
+  in
+  let selected =
+    match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT" with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists local_manifest -> worktree_root
+    | _ -> runtime_native_hook_cutover_root ()
+  in
+  let selected = Unix.realpath selected in
+  let runtime_root = runtime_native_hook_cutover_root () in
+  let origin =
+    if selected = Unix.realpath worktree_root then "worktree"
+    else if Sys.file_exists runtime_root && selected = Unix.realpath runtime_root then
+      "runtime-capsule"
+    else "explicit-root"
+  in
+  (selected, origin)
+
+let native_hook_cutover_runtime root manifest =
+  let explicit = Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME" in
+  let sibling =
+    Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+      "sounio-loom-native-hook-cutover"
+  in
+  let local =
+    Filename.concat root "tools/loom/.runtime/sounio-loom-native-hook-cutover"
+  in
+  let selected =
+    match explicit with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists sibling -> sibling
+    | _ -> local
+  in
+  if not (Sys.file_exists selected) then
+    failf "Sounio-native-hook-cutover-runtime-missing:%s" selected;
+  if sha256_file selected <> required manifest "executable_sha256" then
+    failf "Sounio-native-hook-cutover-runtime-hash-mismatch";
+  selected
+
+let provider_config_relative profile =
+  match profile.provider_id with
+  | "codex" -> ".codex/hooks.json"
+  | "claude" -> ".claude/settings.json"
+  | "cursor" -> ".cursor/hooks.json"
+  | "grok" -> ".grok/hooks/loom-native.json"
+  | value -> failf "unsupported-hook-provider-config:%s" value
+
+let native_hook_config_path root policy_root profile =
+  match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CONFIG" with
+  | Some path when path <> "" && test_mode () -> path
+  | Some _ when not (test_mode ()) -> failf "hook-config-override-requires-test-mode"
+  | _ ->
+      let worktree = Filename.concat root (provider_config_relative profile) in
+      if Sys.file_exists worktree then worktree
+      else Filename.concat (Filename.concat policy_root "configs")
+          (profile.provider_id ^ ".json")
+
+let validate_native_hook_config profile path =
+  if not (Sys.file_exists path) then failf "native-hook-provider-config-missing:%s" path;
+  let content = read_file path in
+  let lowered = String.lowercase_ascii content in
+  List.iter
+    (fun prohibited ->
+      if contains lowered prohibited then
+        failf "native-hook-provider-config-prohibited-bridge:%s" prohibited)
+    [ "python"; "pypy"; "rustc"; "cargo"; "node "; "ruby "; "awk "; "bc " ];
+  if not (contains content "exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=")
+     || not (contains content "bin/sounio-loom-runtime")
+     || not (contains content ("agent-hook --agent " ^ profile.provider_id))
+  then failf "native-hook-provider-config-not-direct:%s" profile.provider_id;
+  sha256 content
+
+let digest_u60 digest offset =
+  if String.length digest <> 64 || offset < 0 || offset + 15 > 64 then
+    failf "invalid-sha256:%s" digest;
+  try Int64.of_string ("0x" ^ String.sub digest offset 15) |> Int64.to_string
+  with _ -> failf "invalid-sha256:%s" digest
+
+let authorize_native_hook_cutover root profile event _raw_event base_receipt =
+  let policy_root, policy_origin = native_hook_cutover_policy_root root in
+  let manifest_path =
+    match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST" with
+    | Some path when path <> "" -> path
+    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v2"
+  in
+  if not (Sys.file_exists manifest_path) then
+    failf "Sounio-native-hook-cutover-policy-missing";
+  if sha256_file manifest_path <> pinned_native_hook_cutover_manifest_sha256 then
+    failf "Sounio-native-hook-cutover-policy-hash-mismatch";
+  let manifest = parse_manifest manifest_path in
+  if required manifest "stage" <> "SEMANTICS_FROZEN"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "action" <> "9045"
+     || required manifest "parity_open" <> "false"
+     || required manifest "claim_ready" <> "false"
+  then failf "Sounio-native-hook-cutover-policy-state-invalid";
+  let source_path = Filename.concat policy_root (required manifest "source_path") in
+  let entrypoint_path = Filename.concat policy_root (required manifest "entrypoint_path") in
+  if sha256_file source_path <> required manifest "source_sha256" then
+    failf "Sounio-native-hook-cutover-source-hash-mismatch";
+  if sha256_file entrypoint_path <> required manifest "entrypoint_sha256" then
+    failf "Sounio-native-hook-cutover-entrypoint-hash-mismatch";
+  if sha256 (read_file source_path ^ read_file entrypoint_path)
+     <> required manifest "semantics_sha256"
+  then failf "Sounio-native-hook-cutover-semantics-hash-mismatch";
+  let runtime = native_hook_cutover_runtime policy_root manifest in
+  let config_path = native_hook_config_path root policy_root profile in
+  let config_sha256 = validate_native_hook_config profile config_path in
+  let event_name = string_field event "hook_event_name" in
+  let event_code = hook_event_code event_name in
+  let word = if event_code = 3 then 8388607 else 8359935 in
+  let semantics = required manifest "semantics_sha256" in
+  let frame =
+    Printf.sprintf "9045 1 3 %d %d %d %d 0 %s %s %s %s 4 4\n"
+      profile.provider_code profile.dialect_code event_code word
+      (digest_u60 semantics 0) (digest_u60 semantics 15)
+      (digest_u60 base_receipt.toolchain_sha256 0)
+      (digest_u60 config_sha256 0)
+  in
+  let result = run_process ~input:frame ~cwd:policy_root runtime [] in
+  let decision = trim result.output in
+  if result.code <> 0
+     || decision <>
+        "SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045"
+  then failf "Sounio-native-hook-cutover-denied:rc=%d:%s" result.code decision;
+  { base_receipt with
+    sounio_source_sha256 = required manifest "source_sha256";
+    semantics_sha256 = semantics;
+    semantic_authority_language = required manifest "producing_language";
+    semantic_authority_role = required manifest "language_role";
+    semantic_authority_origin = policy_origin;
+    parent_authority_result = base_receipt.result;
+    provider = profile.provider_id;
+    dialect = profile.dialect_name;
+    provider_config_sha256 = config_sha256;
     result = decision }
 
 let utc_now () =
@@ -795,6 +1260,10 @@ let append_decision_log root decision reason agent lane event receipt =
             "hardware_sha256=" ^ receipt.hardware_sha256;
             "command=" ^ log_escape receipt.command;
             "command_sha256=" ^ receipt.command_sha256;
+            "parent_authority_result=" ^ log_escape receipt.parent_authority_result;
+            "provider=" ^ receipt.provider;
+            "dialect=" ^ receipt.dialect;
+            "provider_config_sha256=" ^ receipt.provider_config_sha256;
             "result=" ^ log_escape receipt.result ] ^ "\n"
       in
       write_all descriptor line;
@@ -807,9 +1276,17 @@ let coordination_environment () =
   |> drop_environment_prefix "SOUNIO_AGENTD_"
   |> replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl
 
+let coordination_executable root =
+  let sibling =
+    Filename.concat (Filename.dirname Sys.executable_name) "sounio-coord-runtime"
+  in
+  if Sys.file_exists sibling then sibling
+  else Filename.concat root "bin/sounio-coord"
+
 let run_coord root worktree arguments =
-  run_process ~environment:(coordination_environment ()) ~cwd:worktree
-    (Filename.concat root "bin/sounio-coord") arguments
+  run_process ~environment:(coordination_environment ())
+    ~timeout_seconds:coordination_process_timeout_seconds ~cwd:worktree
+    (coordination_executable root) arguments
 
 let coord_ok root worktree arguments =
   let result = run_coord root worktree arguments in
@@ -817,12 +1294,25 @@ let coord_ok root worktree arguments =
     failf "coordination-failed:rc=%d:%s" result.code (trim result.output);
   trim result.output
 
+let atomic_session_close_enabled () =
+  not
+    (test_mode ()
+    && Sys.getenv_opt "SOUNIO_LOOM_SELFTEST_DISABLE_ATOMIC_CLOSE" = Some "1")
+
+let claim_missing agent lane result =
+  let expected = "error: claim not found: " ^ agent ^ "--" ^ lane in
+  result.code <> 0
+  && (String.split_on_char '\n' result.output
+      |> List.exists (fun line -> trim line = expected))
+
 let scope_arguments agent lane intent =
   [ "--agent"; agent; "--lane"; lane; "--intent"; intent ]
 
 let harness_of_agent agent =
   if starts_with agent "claude" then "claude"
   else if starts_with agent "codex" then "codex"
+  else if starts_with agent "cursor" then "cursor"
+  else if starts_with agent "grok" then "grok"
   else failf "unsupported-hook-agent:%s" agent
 
 let process_identity () =
@@ -843,23 +1333,456 @@ let process_identity () =
   (pid, pid_start, trim (read_file "/proc/sys/kernel/random/boot_id"),
    Unix.readlink "/proc/self/ns/pid", Unix.gethostname ())
 
+let coordination_state_root root =
+  match Sys.getenv_opt "SOUNIO_COORD_DIR" with
+  | Some path when path <> "" ->
+      if Filename.is_relative path then Filename.concat root path else path
+  | _ -> Filename.concat (git_common_dir root) "sounio-coord-state"
+
+let fsync_directory path =
+  let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () -> Unix.fsync descriptor)
+
+let write_atomic path value =
+  let directory = Filename.dirname path in
+  mkdir_p directory;
+  let temporary =
+    Filename.concat directory
+      (Printf.sprintf ".%s.tmp-%d" (Filename.basename path) (Unix.getpid ()))
+  in
+  let descriptor =
+    Unix.openfile temporary [ O_WRONLY; O_CREAT; O_EXCL ] 0o600
+  in
+  try
+    write_all descriptor value;
+    Unix.fsync descriptor;
+    Unix.close descriptor;
+    Unix.rename temporary path;
+    fsync_directory directory
+  with error ->
+    (try Unix.close descriptor with _ -> ());
+    (try Unix.unlink temporary with _ -> ());
+    raise error
+
+let hook_session_paths root agent lane raw_session_id =
+  let directory =
+    Filename.concat (coordination_state_root root) "hook-session-lifecycle"
+  in
+  let key = sha256 (agent ^ "\000" ^ lane ^ "\000" ^ raw_session_id) in
+  (directory, Filename.concat directory (key ^ ".lock"),
+   Filename.concat directory (key ^ ".closed"))
+
+let hook_session_watcher_path root agent lane raw_session_id =
+  let directory, _, _ = hook_session_paths root agent lane raw_session_id in
+  let key = sha256 (agent ^ "\000" ^ lane ^ "\000" ^ raw_session_id) in
+  Filename.concat directory (key ^ ".watcher")
+
+let validate_hook_session_tombstone path agent lane raw_session_id =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "hook-session-tombstone-not-regular";
+  let fields = parse_manifest path in
+  if required fields "schema" <> "loom-hook-session-lifecycle-v1"
+     || required fields "state" <> "CLOSED"
+     || required fields "agent" <> agent
+     || required fields "lane" <> lane
+     || required fields "session_id_sha256" <> sha256 raw_session_id
+  then failf "hook-session-tombstone-invalid"
+
+let write_hook_session_tombstone_for_identity path agent lane raw_session_id
+    (pid, pid_start, boot_id, pid_namespace) =
+  write_atomic path
+    (String.concat "\n"
+       [ "schema=loom-hook-session-lifecycle-v1"; "state=CLOSED";
+         "agent=" ^ agent; "lane=" ^ lane;
+         "session_id_sha256=" ^ sha256 raw_session_id;
+         "caller_pid=" ^ string_of_int pid; "caller_pid_start=" ^ pid_start;
+         "caller_boot_id=" ^ boot_id; "caller_pid_namespace=" ^ pid_namespace;
+         "closed_utc=" ^ utc_now (); "" ])
+
+let write_hook_session_tombstone path agent lane raw_session_id =
+  let pid, pid_start, boot_id, pid_namespace, _ = process_identity () in
+  write_hook_session_tombstone_for_identity path agent lane raw_session_id
+    (pid, pid_start, boot_id, pid_namespace)
+
+let append_hook_session_lifecycle root action agent lane raw_session_id event =
+  let directory, _, _ = hook_session_paths root agent lane raw_session_id in
+  mkdir_p directory;
+  let path = Filename.concat directory "events.tsv" in
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      write_all descriptor
+        (String.concat "\t"
+           [ "schema=loom-hook-session-lifecycle-v1"; "utc=" ^ utc_now ();
+             "action=" ^ action; "agent=" ^ agent; "lane=" ^ lane;
+             "session_id_sha256=" ^ sha256 raw_session_id; "event=" ^ event ]
+         ^ "\n");
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
+let process_start pid =
+  try
+    let stat = read_file (Printf.sprintf "/proc/%d/stat" pid) in
+    let closing =
+      match String.rindex_opt stat ')' with
+      | Some index -> index
+      | None -> raise Exit
+    in
+    let tail =
+      String.sub stat (closing + 2) (String.length stat - closing - 2)
+      |> String.split_on_char ' ' |> List.filter (( <> ) "")
+    in
+    List.nth_opt tail 19
+  with _ -> None
+
+let process_generation_alive pid pid_start =
+  match process_start pid with Some observed -> observed = pid_start | None -> false
+
+let session_close_barrier () =
+  if test_mode () then
+    match
+      ( Sys.getenv_opt "SOUNIO_LOOM_SELFTEST_CLOSE_READY",
+        Sys.getenv_opt "SOUNIO_LOOM_SELFTEST_CLOSE_CONTINUE" )
+    with
+    | Some ready, Some continue when ready <> "" && continue <> "" ->
+        let parent_pid = Unix.getppid () in
+        let parent_start =
+          match process_start parent_pid with
+          | Some value -> value
+          | None -> failf "session-close-barrier-parent-missing"
+        in
+        write_atomic ready "state=ATTESTED\n";
+        let rec wait_for_continue attempts =
+          if Sys.file_exists continue then ()
+          else if attempts = 0 then failf "session-close-barrier-timeout"
+          else (
+            ignore (Unix.select [] [] [] 0.01);
+            wait_for_continue (attempts - 1))
+        in
+        wait_for_continue 1000;
+        let rec wait_for_parent_exit attempts =
+          if not (process_generation_alive parent_pid parent_start) then ()
+          else if attempts = 0 then failf "session-close-provider-still-live"
+          else (
+            ignore (Unix.select [] [] [] 0.01);
+            wait_for_parent_exit (attempts - 1))
+        in
+        wait_for_parent_exit 1000
+    | None, None -> ()
+    | _ -> failf "session-close-barrier-incomplete"
+
+let watcher_record path agent lane raw_session_id =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "hook-session-watcher-not-regular";
+  let fields = parse_manifest path in
+  if required fields "schema" <> "loom-hook-session-watcher-v1"
+     || required fields "state" <> "WATCHING"
+     || required fields "agent" <> agent
+     || required fields "lane" <> lane
+     || required fields "session_id_sha256" <> sha256 raw_session_id
+  then failf "hook-session-watcher-invalid";
+  let integer key =
+    try int_of_string (required fields key)
+    with _ -> failf "hook-session-watcher-invalid:%s" key
+  in
+  (integer "watcher_pid", required fields "watcher_pid_start",
+   integer "target_pid", required fields "target_pid_start",
+   required fields "target_boot_id", required fields "target_pid_namespace")
+
+let remove_and_sync path =
+  if Sys.file_exists path then (
+    Unix.unlink path;
+    fsync_directory (Filename.dirname path))
+
+let close_dead_hook_session tool_root root agent lane raw_session_id target_identity
+    watcher_path watcher_pid watcher_pid_start =
+  let _directory, lock_path, tombstone_path =
+    hook_session_paths root agent lane raw_session_id
+  in
+  let descriptor = Unix.openfile lock_path [ O_WRONLY; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let owns_record =
+        if not (Sys.file_exists watcher_path) then false
+        else
+          let observed_pid, observed_start, target_pid, target_start,
+              target_boot, target_namespace =
+            watcher_record watcher_path agent lane raw_session_id
+          in
+          let expected_pid, expected_start, expected_boot, expected_namespace =
+            target_identity
+          in
+          observed_pid = watcher_pid && observed_start = watcher_pid_start
+          && target_pid = expected_pid && target_start = expected_start
+          && target_boot = expected_boot && target_namespace = expected_namespace
+      in
+      if not owns_record then ()
+      else if Sys.file_exists tombstone_path then (
+        validate_hook_session_tombstone tombstone_path agent lane raw_session_id;
+        remove_and_sync watcher_path)
+      else (
+        write_hook_session_tombstone_for_identity tombstone_path agent lane
+          raw_session_id target_identity;
+        let release =
+          run_coord tool_root root
+            [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
+              "native hook provider process exited" ]
+        in
+        let cleaned =
+          if release.code = 0 then true
+          else if claim_missing agent lane release then
+            let endpoint =
+              run_coord tool_root root
+                [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]
+            in
+            let presence =
+              run_coord tool_root root
+                [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]
+            in
+            endpoint.code = 0 && presence.code = 0
+          else false
+        in
+        if cleaned then (
+          append_hook_session_lifecycle root "PROCESS_EXIT_RECONCILE_PENDING" agent lane
+            raw_session_id "ProcessExit";
+          remove_and_sync watcher_path)
+        else
+          append_hook_session_lifecycle root "PROCESS_EXIT_CLOSE_FAILED" agent lane
+            raw_session_id "ProcessExit"))
+
+let redirect_watcher_stdio () =
+  let null = Unix.openfile "/dev/null" [ O_RDWR ] 0 in
+  Unix.dup2 null Unix.stdin;
+  Unix.dup2 null Unix.stdout;
+  Unix.dup2 null Unix.stderr;
+  if null <> Unix.stdin && null <> Unix.stdout && null <> Unix.stderr then
+    Unix.close null
+
+let wait_for_watcher_start pid =
+  let rec loop attempts =
+    match process_start pid with
+    | Some value -> value
+    | None when attempts > 0 ->
+        ignore (Unix.select [] [] [] 0.001);
+        loop (attempts - 1)
+    | None -> failf "hook-session-watcher-start-missing"
+  in
+  loop 100
+
+let ensure_hook_session_watcher tool_root root agent lane raw_session_id
+    replace_existing =
+  let watcher_path = hook_session_watcher_path root agent lane raw_session_id in
+  let target_pid, target_start, target_boot, target_namespace, _ =
+    process_identity ()
+  in
+  let existing =
+    if not (Sys.file_exists watcher_path) then false
+    else
+      let watcher_pid, watcher_start, observed_pid, observed_start,
+          observed_boot, observed_namespace =
+        watcher_record watcher_path agent lane raw_session_id
+      in
+      if process_generation_alive watcher_pid watcher_start then
+        if observed_pid = target_pid && observed_start = target_start
+           && observed_boot = target_boot && observed_namespace = target_namespace
+        then true
+        else if replace_existing then false
+        else failf "hook-session-watcher-generation-conflict"
+      else false
+  in
+  if not existing then (
+    remove_and_sync watcher_path;
+    let ready_read, ready_write = Unix.pipe () in
+    match Unix.fork () with
+    | 0 ->
+        Unix.close ready_write;
+        (try
+           ignore (Unix.setsid ());
+           redirect_watcher_stdio ();
+           let signal = Bytes.create 1 in
+           let started = Unix.read ready_read signal 0 1 = 1 in
+           Unix.close ready_read;
+           if started then (
+             let rec watch () =
+               if Sys.file_exists
+                    (let _, _, path = hook_session_paths root agent lane raw_session_id in
+                     path)
+                  || not (process_generation_alive target_pid target_start)
+               then ()
+               else (
+                 ignore (Unix.select [] [] [] 0.1);
+                 watch ())
+             in
+             watch ();
+             let watcher_pid = Unix.getpid () in
+             let watcher_start =
+               Option.value ~default:"missing" (process_start watcher_pid)
+             in
+             close_dead_hook_session tool_root root agent lane raw_session_id
+               (target_pid, target_start, target_boot, target_namespace)
+               watcher_path watcher_pid watcher_start)
+         with _ -> ());
+        Unix._exit 0
+    | watcher_pid ->
+        Unix.close ready_read;
+        let watcher_start = wait_for_watcher_start watcher_pid in
+        write_atomic watcher_path
+          (String.concat "\n"
+             [ "schema=loom-hook-session-watcher-v1"; "state=WATCHING";
+               "agent=" ^ agent; "lane=" ^ lane;
+               "session_id_sha256=" ^ sha256 raw_session_id;
+               "watcher_pid=" ^ string_of_int watcher_pid;
+               "watcher_pid_start=" ^ watcher_start;
+               "target_pid=" ^ string_of_int target_pid;
+               "target_pid_start=" ^ target_start;
+               "target_boot_id=" ^ target_boot;
+               "target_pid_namespace=" ^ target_namespace;
+               "created_utc=" ^ utc_now (); "" ]);
+        write_all ready_write "1";
+        Unix.close ready_write;
+        append_hook_session_lifecycle root "WATCHING" agent lane raw_session_id
+          "SessionStart")
+
+let process_exit_watcher_enabled () =
+  Sys.getenv_opt "SOUNIO_LOOM_PROCESS_EXIT_WATCHER" <> Some "0"
+  || not (test_mode ())
+
+let with_hook_session_lifecycle tool_root root agent lane raw_session_id event action =
+  let directory, lock_path, tombstone_path =
+    hook_session_paths root agent lane raw_session_id
+  in
+  mkdir_p directory;
+  let descriptor = Unix.openfile lock_path [ O_WRONLY; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let closed = Sys.file_exists tombstone_path in
+      if closed then
+        validate_hook_session_tombstone tombstone_path agent lane raw_session_id;
+      match event with
+      | "SessionStart" ->
+          let result = action () in
+          if closed then (
+            Unix.unlink tombstone_path;
+            fsync_directory directory;
+            append_hook_session_lifecycle root "REOPENED" agent lane raw_session_id
+              event);
+          if process_exit_watcher_enabled () then
+            ensure_hook_session_watcher tool_root root agent lane raw_session_id closed;
+          result
+      | "SessionEnd" when closed ->
+          append_hook_session_lifecycle root "LATE_NOOP" agent lane raw_session_id
+            event;
+          None
+      | "SessionEnd" ->
+          let closer_pid, closer_start, closer_boot, closer_namespace, _ =
+            process_identity ()
+          in
+          let closer_identity =
+            (closer_pid, closer_start, closer_boot, closer_namespace)
+          in
+          (try
+             let result = action () in
+             write_hook_session_tombstone_for_identity tombstone_path agent lane
+               raw_session_id closer_identity;
+             append_hook_session_lifecycle root "CLOSED" agent lane raw_session_id
+               event;
+             result
+           with error ->
+             append_hook_session_lifecycle root "CLOSE_FAILED" agent lane
+               raw_session_id event;
+             raise error)
+      | "Stop" when closed ->
+          append_hook_session_lifecycle root "LATE_NOOP" agent lane raw_session_id
+            event;
+          None
+      | _ when closed -> failf "hook-session-closed:event=%s" event
+      | _ -> action ())
+
+let parent_process () =
+  try
+    let pid = Unix.getppid () in
+    let executable = Unix.realpath (Unix.readlink (Printf.sprintf "/proc/%d/exe" pid)) in
+    let arguments =
+      read_file (Printf.sprintf "/proc/%d/cmdline" pid)
+      |> String.split_on_char '\000'
+      |> List.filter (( <> ) "")
+    in
+    Some (executable, arguments)
+  with _ -> None
+
+let exact_cursor_parent executable arguments =
+  match arguments with
+  | launcher :: rest ->
+      Filename.basename executable = "node"
+      && Filename.basename launcher = "cursor-agent"
+      && List.exists
+           (fun argument ->
+             Filename.basename argument = "index.js"
+             && contains argument "/cursor-agent/versions/")
+           rest
+  | [] -> false
+
+let exact_grok_parent executable arguments =
+  let command = Filename.basename executable in
+  match arguments with
+  | launcher :: _ ->
+      Filename.basename launcher = "grok"
+      && (command = "grok"
+          || (starts_with command "grok-" && ends_with command "-linux-x86_64"))
+  | [] -> false
+
+let observed_compatibility_provider () =
+  match parent_process () with
+  | Some (executable, arguments) when exact_cursor_parent executable arguments ->
+      Some "cursor"
+  | Some (executable, arguments) when exact_grok_parent executable arguments ->
+      Some "grok"
+  | _ -> None
+
+let route_compatibility_agent requested =
+  match observed_compatibility_provider () with
+  | Some observed when not (starts_with requested observed) ->
+      (observed, "verified-" ^ observed ^ "-provider-compat")
+  | _ -> (requested, "direct")
+
 let exact_environment name expected =
   Sys.getenv_opt name = Some expected
 
+let agentd_process_worktree root agent lane raw_session_id =
+  if not
+       (exact_environment "SOUNIO_AGENTD_AGENT" agent
+        && exact_environment "SOUNIO_AGENTD_LANE" lane
+        && exact_environment "SOUNIO_AGENTD_SESSION_ID" raw_session_id)
+  then None
+  else
+    match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
+    | Some path when path <> "" ->
+        (try
+           let process_root = git_root path |> Unix.realpath in
+           if git_common_dir process_root = git_common_dir root then
+             Some process_root
+           else None
+         with _ -> None)
+    | _ -> None
+
 let agentd_identity_matches root agent lane raw_session_id =
-  exact_environment "SOUNIO_AGENTD_AGENT" agent
-  && exact_environment "SOUNIO_AGENTD_LANE" lane
-  && exact_environment "SOUNIO_AGENTD_SESSION_ID" raw_session_id
-  &&
-  match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
-  | Some path when path <> "" ->
-      (try Unix.realpath path = Unix.realpath root with _ -> false)
-  | _ -> false
+  Option.is_some (agentd_process_worktree root agent lane raw_session_id)
 
 let process_worktree root agent lane raw_session_id =
-  if agentd_identity_matches root agent lane raw_session_id then
-    Unix.realpath root
-  else root
+  Option.value ~default:root
+    (agentd_process_worktree root agent lane raw_session_id)
 
 let refresh_presence tool_root process_root claim_root agent lane raw_session_id =
   let harness = harness_of_agent agent in
@@ -1011,26 +1934,32 @@ let execute_event tool_root root event agent lane raw_session_id
   let intent = "active " ^ agent ^ " session" in
   let common = scope_arguments agent lane intent in
   let presence_root = process_worktree root agent lane raw_session_id in
-  if event_name = "SessionEnd" then (
-    refresh_presence tool_root presence_root root agent lane raw_session_id;
+  let coordination_enabled =
+    Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0" || not (test_mode ())
+  in
+  let obligation_supervisor_enabled =
+    Sys.getenv_opt "SOUNIO_COORD_DURABLE_OBLIGATIONS" <> Some "0"
+    || not (test_mode ())
+  in
+  if event_name = "SessionEnd" && not coordination_enabled then None
+  else if event_name = "SessionEnd" then (
     ignore
       (coord_ok tool_root presence_root
-         [ "hook-capability-unregister"; "--agent"; agent; "--lane"; lane;
-           "--session-id"; raw_session_id ]);
-    ignore
-      (run_coord tool_root presence_root
-         [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]);
-    ignore
-      (run_coord tool_root presence_root
-         [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]);
+         [ "hook-caller-attest"; "--agent"; agent ]);
+    session_close_barrier ();
+    if not (atomic_session_close_enabled ()) then
+      failf "atomic-session-close-rule-disabled";
     ignore
       (coord_ok tool_root root
-         [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
-           "agent session ended" ]);
+         [ "hook-session-close"; "--agent"; agent; "--lane"; lane;
+           "--session-id"; raw_session_id; "--reason";
+           "native hook session ended after caller attestation" ]);
     None)
   else if event_name = "PreToolUse" then (
     let paths = extract_paths event in
     let tool_name = string_field event "tool_name" in
+    let change_target = ref None in
+    let staged_change_output = ref None in
     if List.mem tool_name [ "apply_patch"; "Edit"; "Write"; "MultiEdit";
                             "NotebookEdit" ] && paths = []
     then failf "write-path-missing";
@@ -1038,23 +1967,43 @@ let execute_event tool_root root event agent lane raw_session_id
       let target_root, target_paths =
         target_scope (string_field ~default:root event "cwd") root paths
       in
-      refresh_presence tool_root presence_root root agent lane raw_session_id;
-      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-      let authorization =
-        run_coord tool_root target_root
-          ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
-      in
-      if authorization.code <> 0 then (
-        let scoped =
-          if target_root = root then
-            run_coord tool_root root
-              ([ "scope" ] @ common @ [ "--files" ] @ target_paths)
-          else authorization
+      change_target := Some (target_root, target_paths);
+      if coordination_enabled then (
+        refresh_presence tool_root presence_root root agent lane raw_session_id;
+        refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+        let authorization =
+          run_coord tool_root target_root
+            ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
         in
-        if scoped.code <> 0 then (
-          notify_conflict tool_root root agent lane target_paths scoped.output;
-          failf "coordination-write-refused:%s" (trim scoped.output)));
-      refresh_endpoint tool_root presence_root agent lane raw_session_id);
+        if authorization.code <> 0 then (
+          let scoped =
+            if target_root = root then
+              run_coord tool_root root
+                ([ "scope" ] @ common @ [ "--files" ] @ target_paths)
+            else authorization
+          in
+          if scoped.code <> 0 then (
+            notify_conflict tool_root root agent lane target_paths scoped.output;
+            failf "coordination-write-refused:%s" (trim scoped.output)));
+        refresh_endpoint tool_root presence_root agent lane raw_session_id));
+    if Loom_change.required_mode () && change_tool tool_name then (
+      match !change_target with
+      | Some (_, target_paths) ->
+          let mutation = change_mutation event target_paths in
+          let prepared =
+            Loom_change.prepare_remote ~session_id:raw_session_id
+              ~call_id:(change_call_id event) ~event_sha256 mutation target_paths
+          in
+          let input =
+            match object_field event "tool_input" with
+            | Some value -> value
+            | None -> failf "change-tool-input-missing"
+          in
+          staged_change_output :=
+            Some
+              (change_hook_output root input mutation
+                 prepared.Loom_change.remote_stage_root)
+      | None -> failf "change-target-missing");
     if execution_tool tool_name then (
       let input =
         match object_field event "tool_input" with
@@ -1063,44 +2012,100 @@ let execute_event tool_root root event agent lane raw_session_id
       in
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
-      ignore
-        (Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
-           ~cwd ~event_sha256 ~command_sha256:(sha256 command));
-      if Loom_exec_ingress.probe_only () then None
-      else (
-        refresh_presence tool_root presence_root root agent lane raw_session_id;
-        refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-        refresh_endpoint tool_root presence_root agent lane raw_session_id;
-        let replacement =
-          Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
-        in
-        Some (execution_hook_output input field replacement)))
-    else None)
+      match git_commit_message command with
+      | Some message when Loom_change.required_mode () ->
+          let receipt, oid, receipt_path =
+            Loom_change.commit_remote ~session_id:raw_session_id
+              ~call_id:(change_call_id event) ~event_sha256 ~message
+          in
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9044 admitted a byte-exact kernel Git commit"
+               input field (commit_presentation receipt oid receipt_path))
+      | _ ->
+      let ingress =
+        Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
+          ~cwd ~event_sha256 ~command ~command_sha256:(sha256 command)
+      in
+      (match ingress with
+      | Some
+          { Loom_exec_ingress.result =
+              Some (Loom_exec_ingress.Frozen_result result); _ } ->
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9033 returned a read-only ExecCell result"
+               input field (Loom_exec_result.presentation_command result))
+      | Some
+          { Loom_exec_ingress.result =
+              Some (Loom_exec_ingress.Operation_record result); _ } ->
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9036 returned a verified ExecCell operation record"
+               input field
+               (Loom_exec_result_record.presentation_command result))
+      | _ when Loom_exec_ingress.probe_only () -> None
+      | _ ->
+          if coordination_enabled then (
+            refresh_presence tool_root presence_root root agent lane raw_session_id;
+            refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+            refresh_endpoint tool_root presence_root agent lane raw_session_id);
+          let replacement =
+            if Loom_sovereign_exec.required_mode () then (
+              if file_capability_fixture then
+                failf "file-capability-fixture-forbidden-in-sovereign-mode";
+              let prepared =
+                Loom_sovereign_exec.prepare ~root ~cwd ~event_sha256 ~command
+              in
+              Loom_sovereign_exec.start ~event_sha256 prepared
+              |> Loom_sovereign_exec.presentation_command)
+            else
+              Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd
+                ~command
+          in
+          Some (execution_hook_output input field replacement)))
+    else !staged_change_output)
   else (
-    let claim =
-      if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
-      else
-        let heartbeat =
-          run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
+    if event_name = "PostToolUse" && Loom_change.required_mode () then (
+      let tool_name = string_field event "tool_name" in
+      if change_tool tool_name then (
+        ignore
+          (Loom_change.consume_remote ~session_id:raw_session_id
+             ~call_id:(change_call_id event) ~event_sha256)));
+    if not coordination_enabled then None
+    else (
+      let claim =
+        if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
+        else
+          let heartbeat =
+            run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
+          in
+          if heartbeat.code = 0 then heartbeat
+          else run_coord tool_root root ([ "scope" ] @ common)
+      in
+      if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
+      then failf "coordination-claim-refused:%s" (trim claim.output);
+      refresh_presence tool_root presence_root root agent lane raw_session_id;
+      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+      refresh_endpoint tool_root presence_root agent lane raw_session_id;
+      if event_name = "SessionStart" then (
+        (* Um agente dentro da membrana do change kernel nao gerencia daemons do
+           host. De la o /proc/<pid>/exe do supervisor le vazio atraves do
+           namespace de usuario, o ensure nao consegue provar que o supervisor e
+           dele e recusa a sessao inteira. Quem garante o supervisor e a ativacao
+           do runtime e os agentes nao mediados. *)
+        let material_readonly =
+          Sys.getenv_opt "SOUNIO_LOOM_MATERIAL_READONLY" = Some "1"
         in
-        if heartbeat.code = 0 then heartbeat
-        else run_coord tool_root root ([ "scope" ] @ common)
-    in
-    if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
-    then failf "coordination-claim-refused:%s" (trim claim.output);
-    refresh_presence tool_root presence_root root agent lane raw_session_id;
-    refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-    refresh_endpoint tool_root presence_root agent lane raw_session_id;
-    if event_name = "SessionStart" then (
-      ignore
-        (coord_ok tool_root root
-           [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
-      Printf.printf
-        "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
-        agent lane);
-    if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
-      inject_messages tool_root root agent lane;
-    None)
+        if obligation_supervisor_enabled && not material_readonly then
+          ignore
+            (coord_ok tool_root root
+               [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
+        Printf.printf
+          "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
+          agent lane);
+      if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
+        inject_messages tool_root root agent lane;
+      None))
 
 let parse_agent arguments =
   let loop = function
@@ -1110,7 +2115,7 @@ let parse_agent arguments =
         (safe_token value, true)
     | _ ->
         failf
-          "usage: agent-hook --agent codex|claude [--test-file-capability-fixture]"
+          "usage: agent-hook --agent codex|claude|cursor|grok [--test-file-capability-fixture]"
   in
   loop arguments
 
@@ -1127,33 +2132,84 @@ let run arguments =
     if raw_event = "" then failf "hook-event-empty";
     (try root := Some (git_root (Unix.getcwd ()) |> Unix.realpath) with _ -> ());
     receipt := Some (operational_receipt raw_event "sounio-loom agent-hook event=unparsed");
-    let event = parse_json raw_event in
+    let parsed_event = parse_json raw_event in
+    let effective_agent, provider_route =
+      route_compatibility_agent parsed_agent
+    in
+    agent := effective_agent;
+    let profile = hook_profile !agent in
+    let event = normalize_hook_event profile parsed_event in
     let cwd = string_field ~default:(Unix.getcwd ()) event "cwd" in
     let current_root = git_root cwd |> Unix.realpath in
+    let tool_root =
+      match Sys.getenv_opt "SOUNIO_LOOM_TOOL_ROOT" with
+      | Some value when value <> "" ->
+          let selected = Unix.realpath value in
+          if not (Sys.file_exists (Filename.concat selected "bin/sounio-coord")) then
+            failf "configured-tool-root-missing-coordination-launcher";
+          selected
+      | _ -> current_root
+    in
     root := Some current_root;
     let raw_session_id = string_field ~default:"unknown" event "session_id" in
     lane := "session-" ^ safe_token raw_session_id;
     event_name := string_field ~default:"unknown" event "hook_event_name";
+    let pid, pid_start, boot_id, pid_namespace, host = process_identity () in
+    (match
+       Loom_hook_generation_pin.dispatch ~source_root:current_root
+         ~git_common:(git_common_dir current_root) ~agent:!agent ~lane:!lane
+         ~session_id:raw_session_id ~harness:(harness_of_agent !agent)
+         ~worktree:current_root ~host ~boot_id ~pid_namespace ~pid ~pid_start
+         ~raw_event ~arguments
+     with
+     | None -> ()
+     | Some result ->
+         print_string result.Loom_hook_generation_pin.output;
+         flush Stdlib.stdout;
+         raise (Forwarded result.Loom_hook_generation_pin.code));
     let tool_name = string_field ~default:"none" event "tool_name" in
     let command =
-      Printf.sprintf "sounio-loom agent-hook --agent %s event=%s tool=%s"
-        !agent !event_name tool_name
+      let base =
+        Printf.sprintf "sounio-loom agent-hook --agent %s event=%s tool=%s"
+          !agent !event_name tool_name
+      in
+      if provider_route = "direct" then base
+      else
+        Printf.sprintf "%s requested_provider=%s provider_route=%s" base
+          parsed_agent provider_route
     in
     let base_receipt = operational_receipt raw_event command in
     receipt := Some base_receipt;
-    let authorized_receipt = authorize_guard current_root raw_event base_receipt in
+    let parent_receipt = authorize_guard current_root raw_event base_receipt in
+    receipt := Some parent_receipt;
+    let authorized_receipt =
+      authorize_native_hook_cutover current_root profile event raw_event parent_receipt
+    in
     receipt := Some authorized_receipt;
     let hook_output =
-      execute_event current_root current_root event !agent !lane raw_session_id
-        file_capability_fixture (sha256 raw_event)
+      with_hook_session_lifecycle tool_root current_root !agent !lane raw_session_id
+        !event_name (fun () ->
+          execute_event tool_root current_root event !agent !lane raw_session_id
+            file_capability_fixture (sha256 raw_event))
+      |> Option.map (provider_hook_output profile)
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
       !event_name authorized_receipt;
     (match hook_output with Some output -> print_endline (json_string output) | None -> ());
     0
   with
+  | Forwarded code -> code
+  | Loom_hook_generation_pin.Error message ->
+      Printf.eprintf "sounio generation pin refused: %s\n%!" message;
+      2
   | Error message
   | Loom_exec.Error message
+  | Loom_sovereign_exec.Error message
+  | Loom_change.Error message
+  | Loom_exec_intent.Error message
+  | Loom_exec_catalog.Error message
+  | Loom_exec_result.Error message
+  | Loom_exec_result_record.Error message
   | Loom_exec_ingress.Error message
   | Loom_membrane.Error message
   | Sys_error message ->

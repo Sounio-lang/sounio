@@ -8,8 +8,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUILD="$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_authority.sh"
 MODULE="$ROOT_DIR/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio"
 ENTRYPOINT="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority_main.sio"
-PARENT_9025="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1"
-PARENT_9030="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+PARENT_9025="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2"
+PARENT_9030="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 
 fail() {
   printf 'sounio-loom-kernel-peer-activation-capsule-authority-selftest: FAIL: %s\n' "$*" >&2
@@ -22,9 +22,9 @@ file_hash() {
 [[ -x "$BUILD" ]] || fail 'build script is absent or not executable'
 [[ -f "$MODULE" && ! -L "$MODULE" ]] || fail 'action 9031 module is absent or linked'
 [[ -f "$ENTRYPOINT" && ! -L "$ENTRYPOINT" ]] || fail 'action 9031 entrypoint is absent or linked'
-[[ "$(file_hash "$PARENT_9025")" == f7adafcd1c79364b75ebe48b66999ec2d7b82a12d6b8e45d9c1cc4637a4ca9ca ]] ||
+[[ "$(file_hash "$PARENT_9025")" == 71398f15e7e093d395fe5e9abdf42ac60536095f75e0d38e9175499f819a28fa ]] ||
   fail 'action 9025 material judgment parent drifted'
-[[ "$(file_hash "$PARENT_9030")" == 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+[[ "$(file_hash "$PARENT_9030")" == a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4 ]] ||
   fail 'action 9030 authority parent drifted'
 grep -Fxq 'action_9025_allow=true' "$PARENT_9025" || fail 'action 9025 material judgment is not ALLOW'
 grep -Fxq 'same_uid_peer_isolation=true' "$PARENT_9025" || fail 'same-UID peer isolation is not frozen true'

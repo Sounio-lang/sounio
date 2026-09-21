@@ -6,6 +6,7 @@ constexpr std::string_view kProcessWitnessPayloadManifestSha256 =
     "624ccd7297778803eff8d9972a33d5e55fb022f9e7e37f444f0aee13c22fb4da";
 
 struct ProcessWitnessObservation {
+  std::string receipt;
   bool semantic_consumed = false;
   bool same_pid = false;
   bool start_tick = false;
@@ -172,6 +173,9 @@ class HostProcessWitnessCell {
     return uid_ != 0 && gid_ != 0 && uid_ != getuid() && gid_ != getgid();
   }
 
+  uid_t uid() const { return uid_; }
+  gid_t gid() const { return gid_; }
+
   ProcessWitnessObservation execute(bool semantic_consumed,
                                     std::string_view close_frame) {
     if (finished_) throw Error("ProcessWitness cell already consumed");
@@ -193,6 +197,7 @@ class HostProcessWitnessCell {
         result_.get(), result_buffer_, 512,
         std::chrono::steady_clock::now() + kExecQuorumDeadline,
         "ProcessWitness outcome timeout");
+    observation.receipt += outcome + "\n";
     observation.done = outcome == manifest_.require("done_line");
     observation.sounio_refusal =
         outcome == manifest_.require("refusal_line");
@@ -221,6 +226,7 @@ class HostProcessWitnessCell {
         result_.get(), result_buffer_, 512,
         std::chrono::steady_clock::now() + kExecQuorumDeadline,
         "ProcessWitness abort outcome timeout");
+    observation.receipt += outcome + "\n";
     observation.sounio_refusal =
         outcome == manifest_.require("refusal_line");
     if (await_client_exit() != 70 || !observation.sounio_refusal) {
@@ -454,6 +460,7 @@ class HostProcessWitnessCell {
         std::chrono::steady_clock::now() + kExecQuorumDeadline,
         "ProcessWitness READY timeout");
     ProcessWitnessObservation observation;
+    observation.receipt = ready + "\n";
     observation.semantic_consumed = semantic_consumed;
     observation.ready = ready == manifest_.require("ready_line");
     observation.same_pid = pid_ > 1;

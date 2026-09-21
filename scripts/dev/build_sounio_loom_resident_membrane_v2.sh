@@ -14,10 +14,10 @@ RESIDENT_ENTRYPOINT="$ROOT_DIR/tools/loom/resident_authority_main.sio"
 CLOSURE_MODULE="$ROOT_DIR/stdlib/coordination/loom_effect_closure_authority.sio"
 CLOSURE_ENTRYPOINT="$ROOT_DIR/tools/loom/effect_closure_authority_main.sio"
 DISPATCH_MAIN="$ROOT_DIR/tools/loom/resident_membrane_v2_main.sio"
-MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
-CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1"
-RESIDENT_V1_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1"
+MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
+CLOSURE_MANIFEST="$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2"
+RESIDENT_V1_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2"
 OUTPUT="${SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_OUTPUT:-$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2}"
 
 fail() {
@@ -60,11 +60,11 @@ adapt_entrypoint() {
   local entrypoint="$1" replacement="$2" output="$3"
   grep -Fqx 'fn main() -> i64 with IO, Mut, Div, Panic {' "$entrypoint" ||
     fail "main signature changed: $entrypoint"
-  [[ "$(grep -Fxc '    let raw = read_line()' "$entrypoint")" == 1 ]] ||
+  [[ "$(grep -cE '^    let raw = [a-z_]+_read_full_line\(\)$' "$entrypoint")" == 1 ]] ||
     fail "input boundary changed: $entrypoint"
   sed \
     -e "s/^fn main() -> i64 with IO, Mut, Div, Panic {$/fn $replacement() -> i64 with IO, Mut, Div, Panic {/" \
-    -e 's/^    let raw = read_line()$/    let raw = resident_membrane_v2_read_line()/' \
+    -e 's/^    let raw = [a-z_]*_read_full_line()$/    let raw = resident_membrane_v2_read_line()/' \
     "$entrypoint" > "$output"
 }
 
@@ -74,9 +74,9 @@ for path in "$MEMBRANE_MODULE" "$MEMBRANE_ENTRYPOINT" "$RESIDENT_MODULE" \
   "$DISPATCH_MAIN"; do
   [[ -f "$path" ]] || fail "resident v2 source is missing: $path"
 done
-verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v1 9023
-verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v1 9024
-verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v1 9025
+verify_parent "$MEMBRANE_MANIFEST" loom-subprocess-membrane-freeze-v2 9023
+verify_parent "$RESIDENT_MANIFEST" loom-resident-authority-freeze-v2 9024
+verify_parent "$CLOSURE_MANIFEST" loom-effect-closure-authority-freeze-v2 9025
 [[ "$(manifest_value "$CLOSURE_MANIFEST" parent_9023_manifest_sha256)" == "$(file_hash "$MEMBRANE_MANIFEST")" ]] ||
   fail 'action 9025 does not bind the current action 9023 manifest'
 [[ "$(manifest_value "$CLOSURE_MANIFEST" parent_9024_manifest_sha256)" == "$(file_hash "$RESIDENT_MANIFEST")" ]] ||

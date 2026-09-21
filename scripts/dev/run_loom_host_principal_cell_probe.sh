@@ -77,8 +77,8 @@ SOUNIO_LOOM_HOST_PRINCIPAL_CELL_OUTPUT="$BINARY" bash "$BUILDER" >/dev/null
 BINARY_SHA256="$(sha256sum "$BINARY" | cut -d ' ' -f 1)"
 HOST_GATE_SHA256="$(sha256sum "$HOST_GATE" | cut -d ' ' -f 1)"
 SOURCE_SHA256="$(sha256sum "$ROOT_DIR/tools/loom/src/loom_host_principal_cell.cpp" | cut -d ' ' -f 1)"
-ACTION_MANIFEST_SHA256="$(sha256sum "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" | cut -d ' ' -f 1)"
-[[ "$ACTION_MANIFEST_SHA256" == 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+ACTION_MANIFEST_SHA256="$(sha256sum "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" | cut -d ' ' -f 1)"
+[[ "$ACTION_MANIFEST_SHA256" == d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen Sounio action 9030 manifest drifted before host transport'
 
 mapfile -t candidate_pods < <(

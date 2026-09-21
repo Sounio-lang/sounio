@@ -29,10 +29,19 @@ struct GlassSurface<Content: View>: View {
             .background {
                 ZStack {
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(reduceTransparency ? LoomColor.graphite : Color.black.opacity(0.36))
+                        .fill(reduceTransparency ? LoomColor.graphite : Color.black.opacity(0.22))
                     if !reduceTransparency {
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(.ultraThinMaterial)
+                        if #available(macOS 26.0, iOS 26.0, *) {
+                            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                                .fill(Color.white.opacity(0.001))
+                                .glassEffect(
+                                    .regular.tint(Color.white.opacity(0.025)),
+                                    in: .rect(cornerRadius: radius)
+                                )
+                        } else {
+                            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                                .fill(.ultraThinMaterial)
+                        }
                         RoundedRectangle(cornerRadius: radius, style: .continuous)
                             .fill(
                                 LinearGradient(
@@ -130,11 +139,12 @@ extension AdapterHealth {
 extension ReceiptStatus {
     var loomColor: Color {
         switch self {
-        case .committed: LoomColor.cyan
+        case .committed, .completed: LoomColor.cyan
         case .running: LoomColor.green
         case .fallback: LoomColor.amber
         case .planned: LoomColor.violet
-        case .refused: LoomColor.red
+        case .cancelled: LoomColor.amber
+        case .refused, .failed: LoomColor.red
         }
     }
 }

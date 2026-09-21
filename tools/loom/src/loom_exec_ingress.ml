@@ -9,6 +9,14 @@ external file_descr_of_int : int -> file_descr = "sounio_loom_file_descr_of_int"
 external peer_credentials : file_descr -> int * int * int
   = "sounio_loom_peer_credentials"
 
+type semantic_projection =
+  | Intent_projection of Loom_exec_intent.projection
+  | Operation_projection of Loom_exec_catalog.projection
+
+type transported_result =
+  | Frozen_result of Loom_exec_result.transported_result
+  | Operation_record of Loom_exec_result_record.transported
+
 type observation = {
   descriptor_present : bool;
   descriptor_bound : bool;
@@ -18,6 +26,7 @@ type observation = {
   peer_distinct_uid : bool;
   activation_code : int;
   activation_generation_sha256 : string;
+  result : transported_result option;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -52,6 +61,48 @@ let required_mode () =
   | Some _ -> failf "product-exec-ingress-required-mode-invalid"
 
 let probe_only () = exact_test_flag "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY"
+
+let operation_command_prefix = "loom-exec-cell-v2 sounio-check source="
+
+let operation_source command =
+  if not (starts_with command operation_command_prefix) then
+    failf "product-exec-operation-command-shape-invalid";
+  let source =
+    String.sub command (String.length operation_command_prefix)
+      (String.length command - String.length operation_command_prefix)
+  in
+  if source = "" then failf "product-exec-operation-source-absent";
+  source
+
+let event_binding ~root ~command ~command_sha256 raw_event_sha256 =
+  if sha256 command <> command_sha256 then
+    failf "product-exec-command-hash-mismatch";
+  match (Sys.getenv_opt "SOUNIO_LOOM_EXEC_INTENT_PROJECTION",
+         Sys.getenv_opt "SOUNIO_LOOM_EXEC_OPERATION_PROJECTION") with
+  | Some "1", None ->
+      let projection =
+        Loom_exec_intent.project ~root ~raw_event_sha256 ~command_sha256
+      in
+      (projection.event_sha256, Some (Intent_projection projection))
+  | None, Some "1" ->
+      let projection =
+        Loom_exec_catalog.project ~root ~operation:"sounio-check"
+          ~source:(Some (operation_source command))
+      in
+      (projection.semantic_event_sha256,
+       Some (Operation_projection projection))
+  | Some _, Some _ -> failf "product-exec-projection-mode-conflict"
+  | Some _, None -> failf "product-exec-intent-projection-mode-invalid"
+  | None, Some _ -> failf "product-exec-operation-projection-mode-invalid"
+  | None, None ->
+      (match Sys.getenv_opt "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256" with
+      | None | Some "" -> (raw_event_sha256, None)
+      | Some value ->
+          if not (test_mode () && probe_only ()) then
+            failf "product-exec-result-event-override-requires-probe-only";
+          if not (valid_sha256 value) then
+            failf "product-exec-result-event-override-invalid";
+          (value, None))
 
 let utc_now () =
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
@@ -221,8 +272,9 @@ let descriptor_from_environment () =
        with Failure _ -> failf "product-exec-ingress-descriptor-unavailable")
 
 let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-    ~command_sha256 ~descriptor_present ~descriptor_bound ~peer_pid ~peer_uid
-    ~peer_gid ~peer_distinct_uid ~decision ~reason evaluation =
+    ~raw_event_sha256 ~command_sha256 ~descriptor_present ~descriptor_bound
+    ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid ~decision ~reason ~result
+    ~intent_projection evaluation =
   let path = audit_path root in
   mkdir_p (Filename.dirname path);
   let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
@@ -261,50 +313,112 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
               "authority_sequence=" ^ string_of_int authority.sequence ]
       in
       let line =
+        let intent_fields =
+          match intent_projection with
+          | None ->
+              [ "exec_intent_projected=false"; "exec_intent_action=-";
+                "exec_intent_manifest_sha256=-";
+                "exec_intent_source_sha256=-";
+                "exec_intent_executable_sha256=-";
+                "exec_intent_authority_output_sha256=-" ]
+          | Some (Intent_projection (value : Loom_exec_intent.projection)) ->
+              [ "exec_intent_projected=true"; "exec_intent_action=9034";
+                "exec_intent_manifest_sha256=" ^ value.manifest_sha256;
+                "exec_intent_source_sha256=" ^ value.source_sha256;
+                "exec_intent_executable_sha256=" ^ value.executable_sha256;
+                "exec_intent_authority_output_sha256=" ^
+                value.authority_output_sha256;
+                "exec_projection_kind=intent-envelope" ]
+          | Some (Operation_projection (value : Loom_exec_catalog.projection)) ->
+              [ "exec_intent_projected=true"; "exec_intent_action=9035";
+                "exec_intent_manifest_sha256=" ^ value.manifest_sha256;
+                "exec_intent_source_sha256=" ^ value.authority_source_sha256;
+                "exec_intent_executable_sha256=" ^
+                value.authority_executable_sha256;
+                "exec_intent_authority_output_sha256=" ^
+                value.authority_output_sha256;
+                "exec_projection_kind=operation-catalog" ]
+        in
+        let result_fields =
+          match result with
+          | None ->
+              [ "result_returned=false"; "result_handle_sha256=-";
+                "result_receipt_sha256=-"; "result_manifest_sha256=-" ]
+          | Some (Frozen_result (value : Loom_exec_result.transported_result)) ->
+              [ "result_returned=true";
+                "result_action=9033"; "result_kind=frozen-receipt";
+                "result_handle_sha256=" ^ sha256 value.handle;
+                "result_receipt_sha256=" ^ value.receipt_sha256;
+                "result_manifest_sha256=" ^ value.manifest_sha256 ]
+          | Some (Operation_record
+                    (value : Loom_exec_result_record.transported)) ->
+              [ "result_returned=true";
+                "result_action=9036"; "result_kind=operation-record";
+                "result_handle_sha256=" ^ sha256 value.handle;
+                "result_receipt_sha256=" ^ value.record_sha256;
+                "result_manifest_sha256=" ^ value.manifest_sha256 ]
+        in
         String.concat "\t"
           ([ "schema=loom-product-exec-ingress-dark-decision-v1";
              "utc=" ^ utc_now (); "decision=" ^ decision; "reason=" ^ reason;
              "authorizing=false"; "production_activation=false";
-             "exec_attached=false"; "descriptor_present=" ^
+             "exec_attached=" ^ string_of_bool (Option.is_some result);
+             "descriptor_present=" ^
                string_of_bool descriptor_present;
              "descriptor_bound=" ^ string_of_bool descriptor_bound;
              "descriptor_transport=unix-stream-inherited";
              "descriptor_is_bearer=false";
+             "process_pid=" ^ string_of_int (Unix.getpid ());
+             "process_parent_pid=" ^ string_of_int (Unix.getppid ());
+             "process_uid=" ^ string_of_int (Unix.getuid ());
+             "process_euid=" ^ string_of_int (Unix.geteuid ());
+             "process_gid=" ^ string_of_int (Unix.getgid ());
+             "process_egid=" ^ string_of_int (Unix.getegid ());
              "peer_pid=" ^ string_of_int peer_pid;
              "peer_uid=" ^ string_of_int peer_uid;
              "peer_gid=" ^ string_of_int peer_gid;
              "peer_distinct_uid=" ^ string_of_bool peer_distinct_uid;
              "agent_sha256=" ^ sha256 agent; "lane_sha256=" ^ sha256 lane;
              "session_id_sha256=" ^ sha256 session_id;
-             "cwd_sha256=" ^ sha256 cwd; "event_sha256=" ^ event_sha256;
+             "cwd_sha256=" ^ sha256 cwd;
+             "raw_event_sha256=" ^ raw_event_sha256;
+             "event_sha256=" ^ event_sha256;
              "command_sha256=" ^ command_sha256;
              "operational_language=OCaml";
-             "operational_role=OPERATIONAL_ATTACHMENT" ] @ activation_fields)
+             "operational_role=OPERATIONAL_ATTACHMENT" ] @ intent_fields @ result_fields
+             @ activation_fields)
         ^ "\n"
       in
       write_all descriptor line;
       Unix.fsync descriptor;
       Unix.lockf descriptor F_ULOCK 0)
 
-let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
+let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command
+    ~command_sha256 =
   if not (valid_sha256 event_sha256 && valid_sha256 command_sha256) then
     failf "product-exec-ingress-digest-invalid";
   let root = Unix.realpath root in
+  let inherited_descriptor = descriptor_from_environment () in
+  Option.iter Unix.set_close_on_exec inherited_descriptor;
+  let raw_event_sha256 = event_sha256 in
+  let event_sha256, intent_projection =
+    event_binding ~root ~command ~command_sha256 raw_event_sha256
+  in
   let cwd = Unix.realpath cwd in
-  match descriptor_from_environment () with
+  match inherited_descriptor with
   | None ->
       append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-        ~command_sha256 ~descriptor_present:false ~descriptor_bound:false
+        ~raw_event_sha256 ~command_sha256 ~descriptor_present:false
+        ~descriptor_bound:false
         ~peer_pid:0 ~peer_uid:(Unix.geteuid ()) ~peer_gid:(Unix.getegid ())
         ~peer_distinct_uid:false ~decision:"DENY" ~reason:"descriptor-absent"
-        None;
+        ~result:None ~intent_projection None;
       if required_mode () then failf "product-exec-ingress-descriptor-absent";
       None
   | Some descriptor ->
       Fun.protect
         ~finally:(fun () -> try Unix.close descriptor with _ -> ())
         (fun () ->
-          Unix.set_close_on_exec descriptor;
           let info = Unix.fstat descriptor in
           if info.st_kind <> S_SOCK then
             failf "product-exec-ingress-descriptor-not-socket";
@@ -323,17 +437,21 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
               try same_uid_fixture_allowed () with
               | Error reason as error ->
                   append_audit ~root ~agent ~lane ~session_id ~cwd
-                    ~event_sha256 ~command_sha256 ~descriptor_present:true
+                    ~event_sha256 ~raw_event_sha256 ~command_sha256
+                    ~descriptor_present:true
                     ~descriptor_bound:false ~peer_pid ~peer_uid ~peer_gid
-                    ~peer_distinct_uid:false ~decision:"DENY" ~reason None;
+                    ~peer_distinct_uid:false ~decision:"DENY" ~reason
+                    ~result:None ~intent_projection None;
                   raise error
           in
           if not peer_admitted
           then (
             append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-              ~command_sha256 ~descriptor_present:true ~descriptor_bound:false
+              ~raw_event_sha256 ~command_sha256 ~descriptor_present:true
+              ~descriptor_bound:false
               ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid:false
-              ~decision:"DENY" ~reason:"peer-not-distinct" None;
+              ~decision:"DENY" ~reason:"peer-not-distinct" ~result:None
+              ~intent_projection None;
             failf "product-exec-ingress-peer-not-distinct");
           let deadline = Unix.gettimeofday () +. descriptor_deadline_seconds in
           write_all descriptor
@@ -341,12 +459,34 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
                [ "LOOM_EXEC_INGRESS/1"; event_sha256; command_sha256 ] ^ "\n");
           Unix.shutdown descriptor SHUTDOWN_SEND;
           let response = read_line descriptor deadline in
-          let expected =
-            String.concat "\t"
-              [ "LOOM_EXEC_INGRESS_BOUND/1"; event_sha256; command_sha256 ]
+          let result =
+            match String.split_on_char '\t' response with
+            | [ "LOOM_EXEC_INGRESS_BOUND/1"; response_event; response_command ]
+              when response_event = event_sha256
+                   && response_command = command_sha256 ->
+                None
+            | [ "LOOM_EXEC_RESULT/1"; response_event; response_command; handle;
+                receipt_sha256; receipt_hex; manifest_sha256 ]
+              when response_event = event_sha256
+                   && response_command = command_sha256 ->
+                Some
+                  (Frozen_result
+                     (Loom_exec_result.validate_transport ~root
+                        ~event_sha256:response_event
+                        ~command_sha256:response_command ~handle ~receipt_sha256
+                        ~receipt_hex ~manifest_sha256))
+            | [ "LOOM_EXEC_RESULT_RECORD/1"; response_event; response_command;
+                handle; record_sha256; record_hex; manifest_sha256 ]
+              when response_event = event_sha256
+                   && response_command = command_sha256 ->
+                Some
+                  (Operation_record
+                     (Loom_exec_result_record.validate_transport ~root
+                        ~event_sha256:response_event
+                        ~command_sha256:response_command ~handle ~record_sha256
+                        ~record_hex ~manifest_sha256))
+            | _ -> failf "product-exec-ingress-response-binding-mismatch"
           in
-          if response <> expected then
-            failf "product-exec-ingress-response-binding-mismatch";
           require_eof descriptor deadline;
           let evaluation =
             Loom_membrane.evaluate_product_activation_dark ~policy_root:root
@@ -354,14 +494,26 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
           in
           let authority = evaluation.activation_decision in
           append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-            ~command_sha256 ~descriptor_present:true ~descriptor_bound:true
+            ~raw_event_sha256 ~command_sha256 ~descriptor_present:true
+            ~descriptor_bound:true
             ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid
             ~decision:(if authority.code = 0 then "ALLOW" else "DENY")
-            ~reason:"descriptor-bound-action-9031" (Some evaluation);
+            ~reason:(match result, intent_projection with
+                     | Some (Operation_record _), _ ->
+                         "descriptor-result-bound-actions-9030+9031+9035+9036"
+                     | Some (Frozen_result _), _ ->
+                         "descriptor-result-bound-actions-9030+9031+9033+9034"
+                     | None, Some (Operation_projection _) ->
+                         "descriptor-bound-actions-9031+9035"
+                     | None, Some (Intent_projection _) ->
+                         "descriptor-bound-actions-9031+9034"
+                     | None, None -> "descriptor-bound-action-9031")
+            ~result ~intent_projection (Some evaluation);
           if authority.code = 0 then
             failf "product-exec-ingress-dark-unexpected-allow";
           Some
             { descriptor_present = true; descriptor_bound = true; peer_pid;
               peer_uid; peer_gid; peer_distinct_uid;
               activation_code = authority.code;
-              activation_generation_sha256 = authority.generation_sha256 })
+              activation_generation_sha256 = authority.generation_sha256;
+              result })

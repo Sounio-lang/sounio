@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/routing_authority.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/routing_authority.freeze.v2"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-routing-freeze.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 fail() { printf 'sounio-loom-routing-authority-freeze-selftest: FAIL: %s\n' "$*" >&2; exit 1; }
@@ -17,6 +17,14 @@ hash() { sha256sum "$1" | awk '{print $1}'; }
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'role is not SEMANTIC_AUTHORITY'
 [[ "$(field parity_open)" == false && "$(field claim_ready)" == false ]] || fail 'freeze improperly promoted parity or claims'
 [[ "$(field python_executed)" == false && "$(field rust_executed)" == false ]] || fail 'prohibited language execution recorded'
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS && "$(field semantics_module_changed)" == false ]] || fail 'unexpected v2 change class'
+[[ "$(field predecessor_manifest_path)" == tools/loom/routing_authority.freeze.v1 ]] || fail 'unexpected predecessor'
+[[ "$(hash "$ROOT_DIR/$(field predecessor_manifest_path)")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor manifest drifted'
+[[ "$(field source_sha256)" == "$(sed -n 's/^source_sha256=//p' "$ROOT_DIR/$(field predecessor_manifest_path)")" ]] || fail 'semantic module differs from predecessor'
+[[ "$(hash "$ROOT_DIR/$(field evidence_path)")" == "$(field evidence_sha256)" ]] || fail 'evidence drifted'
+[[ "$(git -C "$ROOT_DIR" rev-parse "$(field sounio_executable_commit)^")" == "$(field garden_commit)" ]] || fail 'executable commit does not follow Garden'
+hardware_record="$(printf '%s\n' "kernel=$(field hardware_kernel)" "architecture=$(field hardware_architecture)" "logical_cpus=$(field hardware_logical_cpus)" "cpu_model=$(field hardware_cpu_model)" | sha256sum | awk '{print $1}')"
+[[ "$hardware_record" == "$(field hardware_record_sha256)" ]] || fail 'hardware record does not follow its declared recipe'
 
 source_path="$ROOT_DIR/$(field source_path)"
 entrypoint_path="$ROOT_DIR/$(field entrypoint_path)"

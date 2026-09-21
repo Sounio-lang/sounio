@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-subprocess-membrane-v1-20260828.txt"
+MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-subprocess-membrane-v2-20260917.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-subprocess-membrane-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/subprocess-membrane-one"
 RUNTIME_TWO="$TEST_ROOT/subprocess-membrane-two"
@@ -57,7 +57,7 @@ hash_u32_csv() {
 
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-subprocess-membrane-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-subprocess-membrane-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'

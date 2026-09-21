@@ -25,7 +25,9 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -42,9 +44,9 @@
 namespace {
 
 constexpr std::string_view kFrozenManifestSha256 =
-    "7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5";
+    "5581f29a5f48f3cfa26ea46c906ee73ef1b375ec0d58efcdad123d2e2e3601be";
 constexpr std::string_view kFrozenCapsuleManifestSha256 =
-    "76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f";
+    "2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674";
 constexpr std::string_view kFrozenInvocationCellManifestSha256 =
     "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e";
 constexpr std::string_view kFrozenExecGrantCellManifestSha256 =
@@ -1937,6 +1939,9 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
 
 #include "loom_exec_quorum_lab.inc"
 #include "loom_process_witness_lab.inc"
+#include "loom_product_exec_ingress_host_canary.inc"
+#include "loom_product_exec_cell_host_canary.inc"
+#include "loom_causal_workflow_host_canary.inc"
 
 struct Options {
   std::string mode;
@@ -1959,6 +1964,27 @@ struct Options {
   std::string process_witness_runtime;
   std::string process_witness_payload;
   std::string process_witness_manifest;
+  std::string product_root;
+  std::string product_runtime;
+  std::string product_language_runtime;
+  std::string product_resident_runtime;
+  std::string product_exec_cell_fixture_manifest;
+  std::string product_exec_cell_fixture_bundle;
+  std::string product_exec_result_manifest;
+  std::string product_provider_hook_fixture;
+  std::string operation_fixture_manifest;
+  std::string operation_fixture_bundle;
+  std::string operation_catalog_manifest;
+  std::string operation_result_manifest;
+  std::string causal_run_grant_manifest;
+  std::string causal_run_grant_bundle;
+  std::string causal_attest_grant_manifest;
+  std::string causal_attest_grant_bundle;
+  std::string causal_workflow_manifest;
+  std::string causal_workflow_journal_runtime;
+  std::string causal_material_cell;
+  std::string causal_material_store;
+  std::string causal_pod_loss_control;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2013,6 +2039,48 @@ Options parse_options(int argc, char** argv) {
       options.process_witness_payload = value;
     } else if (argument == "--process-witness-manifest") {
       options.process_witness_manifest = value;
+    } else if (argument == "--product-root") {
+      options.product_root = value;
+    } else if (argument == "--product-runtime") {
+      options.product_runtime = value;
+    } else if (argument == "--product-language-runtime") {
+      options.product_language_runtime = value;
+    } else if (argument == "--product-resident-runtime") {
+      options.product_resident_runtime = value;
+    } else if (argument == "--product-exec-cell-fixture-manifest") {
+      options.product_exec_cell_fixture_manifest = value;
+    } else if (argument == "--product-exec-cell-fixture-bundle") {
+      options.product_exec_cell_fixture_bundle = value;
+    } else if (argument == "--product-exec-result-manifest") {
+      options.product_exec_result_manifest = value;
+    } else if (argument == "--product-provider-hook-fixture") {
+      options.product_provider_hook_fixture = value;
+    } else if (argument == "--operation-fixture-manifest") {
+      options.operation_fixture_manifest = value;
+    } else if (argument == "--operation-fixture-bundle") {
+      options.operation_fixture_bundle = value;
+    } else if (argument == "--operation-catalog-manifest") {
+      options.operation_catalog_manifest = value;
+    } else if (argument == "--operation-result-manifest") {
+      options.operation_result_manifest = value;
+    } else if (argument == "--causal-run-grant-manifest") {
+      options.causal_run_grant_manifest = value;
+    } else if (argument == "--causal-run-grant-bundle") {
+      options.causal_run_grant_bundle = value;
+    } else if (argument == "--causal-attest-grant-manifest") {
+      options.causal_attest_grant_manifest = value;
+    } else if (argument == "--causal-attest-grant-bundle") {
+      options.causal_attest_grant_bundle = value;
+    } else if (argument == "--causal-workflow-manifest") {
+      options.causal_workflow_manifest = value;
+    } else if (argument == "--causal-workflow-journal-runtime") {
+      options.causal_workflow_journal_runtime = value;
+    } else if (argument == "--causal-material-cell") {
+      options.causal_material_cell = value;
+    } else if (argument == "--causal-material-store") {
+      options.causal_material_store = value;
+    } else if (argument == "--causal-pod-loss-control") {
+      options.causal_pod_loss_control = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2095,6 +2163,54 @@ void require_host_process_witness_selftest_artifacts(const Options& options) {
   }
 }
 
+void require_product_exec_ingress_host_artifacts(const Options& options) {
+  if (options.product_root.empty() || options.product_runtime.empty() ||
+      options.product_language_runtime.empty() ||
+      options.product_resident_runtime.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("product root, product runtime, language runtime, resident runtime, systemd-run, and systemctl are required");
+  }
+}
+
+void require_product_exec_cell_host_artifacts(const Options& options) {
+  require_product_exec_ingress_host_artifacts(options);
+  if (options.controller_manifest.empty() || options.controller_runtime.empty() ||
+      options.controller_root.empty() || options.resident_runtime.empty() ||
+      options.process_witness_runtime.empty() ||
+      options.process_witness_payload.empty() ||
+      options.process_witness_manifest.empty() ||
+      options.product_exec_cell_fixture_manifest.empty() ||
+      options.product_exec_cell_fixture_bundle.empty() ||
+      options.product_exec_result_manifest.empty() ||
+      options.product_provider_hook_fixture.empty() ||
+      options.operation_fixture_manifest.empty() ||
+      options.operation_fixture_bundle.empty() ||
+      options.operation_catalog_manifest.empty() ||
+      options.operation_result_manifest.empty()) {
+    throw Error("product ExecCell controller, resident, witness, exact and operation fixtures, ExecResult manifests, and provider hook fixture are required");
+  }
+}
+
+void require_causal_workflow_material_host_artifacts(const Options& options) {
+  if (options.controller_runtime.empty() || options.controller_root.empty() ||
+      options.resident_runtime.empty() || options.product_root.empty() ||
+      options.product_runtime.empty() || options.operation_fixture_manifest.empty() ||
+      options.operation_fixture_bundle.empty() ||
+      options.operation_catalog_manifest.empty() ||
+      options.operation_result_manifest.empty() ||
+      options.causal_run_grant_manifest.empty() ||
+      options.causal_run_grant_bundle.empty() ||
+      options.causal_attest_grant_manifest.empty() ||
+      options.causal_attest_grant_bundle.empty() ||
+      options.causal_workflow_manifest.empty() ||
+      options.causal_workflow_journal_runtime.empty() ||
+      options.causal_material_cell.empty() ||
+      options.causal_material_store.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("causal workflow material host artifacts are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2152,6 +2268,57 @@ int main(int argc, char** argv) {
           options.process_witness_runtime, options.process_witness_payload,
           options.process_witness_manifest, options.systemd_run,
           options.systemctl);
+    }
+    if (options.mode == "--selftest-product-exec-ingress-host") {
+      require_product_exec_ingress_host_artifacts(options);
+      return selftest_product_exec_ingress_host(
+          options.product_root, options.product_runtime,
+          options.product_language_runtime, options.product_resident_runtime,
+          options.systemd_run, options.systemctl);
+    }
+    if (options.mode == "--selftest-product-exec-cell-host") {
+      require_product_exec_cell_host_artifacts(options);
+      return selftest_product_exec_cell_host(
+          options.controller_root, options.controller_manifest,
+          options.controller_runtime, options.resident_runtime,
+          options.process_witness_runtime, options.process_witness_payload,
+          options.process_witness_manifest, options.product_root,
+          options.product_runtime, options.product_language_runtime,
+          options.product_resident_runtime,
+          options.product_exec_cell_fixture_manifest,
+          options.product_exec_cell_fixture_bundle,
+          options.product_exec_result_manifest,
+          options.product_provider_hook_fixture,
+          options.operation_fixture_manifest,
+          options.operation_fixture_bundle,
+          options.operation_catalog_manifest,
+          options.operation_result_manifest, options.systemd_run,
+          options.systemctl);
+    }
+    if (options.mode == "--selftest-causal-workflow-material-host") {
+      require_causal_workflow_material_host_artifacts(options);
+      return selftest_causal_workflow_material_host(
+          options.controller_root, options.controller_runtime,
+          options.resident_runtime, options.product_root,
+          options.product_runtime, options.operation_fixture_manifest,
+          options.operation_fixture_bundle, options.operation_catalog_manifest,
+          options.operation_result_manifest,
+          options.causal_run_grant_manifest,
+          options.causal_run_grant_bundle,
+          options.causal_attest_grant_manifest,
+          options.causal_attest_grant_bundle,
+          options.causal_workflow_manifest,
+          options.causal_workflow_journal_runtime,
+          options.causal_material_cell,
+          options.causal_material_store, options.causal_pod_loss_control,
+          options.systemd_run,
+          options.systemctl);
+    }
+    if (options.mode == "--selftest-causal-atomic-publish") {
+      if (options.causal_material_store.empty()) {
+        throw Error("causal material store is required");
+      }
+      return selftest_causal_atomic_publish(options.causal_material_store);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");

@@ -13,12 +13,19 @@ CONTROLLER_ONE="$TEST_ROOT/controller-one"
 CONTROLLER_TWO="$TEST_ROOT/controller-two"
 RESIDENT_ONE="$TEST_ROOT/resident-one"
 RESIDENT_TWO="$TEST_ROOT/resident-two"
+LANGUAGE_ONE="$TEST_ROOT/language-one"
+LANGUAGE_TWO="$TEST_ROOT/language-two"
 FIXTURE_ONE="$TEST_ROOT/fixture-one"
 FIXTURE_TWO="$TEST_ROOT/fixture-two"
 BUNDLE_ONE="$TEST_ROOT/fixtures-one.v1"
 BUNDLE_TWO="$TEST_ROOT/fixtures-two.v1"
 CONTROLLER_MANIFEST="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
 FIXTURE_MANIFEST="$ROOT_DIR/tools/loom/host_exec_quorum_fixture.freeze.v1"
+RESIDENT_V4_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
+FROZEN_CONTROLLER_ROOT="$TEST_ROOT/frozen-controller"
+FROZEN_RESIDENT_V4_ROOT="$TEST_ROOT/frozen-resident-v4"
+FROZEN_LANGUAGE_ROOT="$TEST_ROOT/frozen-language-authority"
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -28,6 +35,14 @@ trap cleanup EXIT
 fail() {
   printf 'sounio-loom-host-exec-quorum-selftest: FAIL: %s\n' "$*" >&2
   exit 1
+}
+
+field() {
+  local manifest="$1" key="$2" count line
+  count="$(grep -c "^${key}=" "$manifest" || true)"
+  [[ "$count" == 1 ]] || fail "manifest field $key occurs $count times: $manifest"
+  line="$(grep -m1 "^${key}=" "$manifest")"
+  printf '%s' "${line#*=}"
 }
 
 run_refusal() {
@@ -53,8 +68,23 @@ run_quorum() {
     --barrier-runtime "$6"
 }
 
-bash "$ROOT_DIR/scripts/ci/sounio_loom_exec_grant_controller_freeze_selftest.sh" \
-  >/dev/null
+FROZEN_CONTROLLER_COMMIT="$(field "$CONTROLLER_MANIFEST" controller_commit)"
+FROZEN_RESIDENT_V4_COMMIT="$(field "$RESIDENT_V4_MANIFEST" sounio_resident_v4_commit)"
+FROZEN_LANGUAGE_COMMIT="$(field "$LANGUAGE_MANIFEST" sounio_executable_commit)"
+mkdir -p "$FROZEN_CONTROLLER_ROOT" "$FROZEN_RESIDENT_V4_ROOT" \
+  "$FROZEN_LANGUAGE_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_CONTROLLER_COMMIT" |
+  tar -x -C "$FROZEN_CONTROLLER_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
+  tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_COMMIT" |
+  tar -x -C "$FROZEN_LANGUAGE_ROOT"
+FROZEN_LANGUAGE_TOOLCHAIN_COMMIT="$(field "$LANGUAGE_MANIFEST" toolchain_commit)"
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" bin/souc bin/souc-lean-single-x86_64 |
+  tar -x -C "$FROZEN_LANGUAGE_ROOT"
+[[ "$(sha256sum "$FROZEN_CONTROLLER_ROOT/tools/loom/src/loom_resident.ml" | cut -d ' ' -f 1)" == \
+   "$(field "$CONTROLLER_MANIFEST" resident_source_sha256)" ]] ||
+  fail 'frozen action-9030 resident source did not rehydrate'
 bash "$ROOT_DIR/scripts/ci/sounio_loom_host_exec_quorum_fixture_freeze_selftest.sh" \
   >/dev/null
 bash "$ROOT_DIR/scripts/ci/sounio_loom_principal_cell_barrier_selftest.sh" \
@@ -71,11 +101,16 @@ for output in "$BARRIER_ONE" "$BARRIER_TWO"; do
 done
 for output in "$CONTROLLER_ONE" "$CONTROLLER_TWO"; do
   SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_OUTPUT="$output" \
-    bash "$ROOT_DIR/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
+    bash "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
 done
 for output in "$RESIDENT_ONE" "$RESIDENT_TWO"; do
   SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$output" \
-    bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" \
+    bash "$FROZEN_RESIDENT_V4_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" \
+      >/dev/null
+done
+for output in "$LANGUAGE_ONE" "$LANGUAGE_TWO"; do
+  SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$output" \
+    bash "$FROZEN_LANGUAGE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh" \
       >/dev/null
 done
 for output in "$FIXTURE_ONE" "$FIXTURE_TWO"; do
@@ -90,6 +125,7 @@ cmp "$BROKER_ONE" "$BROKER_TWO" || fail 'two broker builds differ'
 cmp "$BARRIER_ONE" "$BARRIER_TWO" || fail 'two integrated barrier builds differ'
 cmp "$CONTROLLER_ONE" "$CONTROLLER_TWO" || fail 'two controller builds differ'
 cmp "$RESIDENT_ONE" "$RESIDENT_TWO" || fail 'two resident builds differ'
+cmp "$LANGUAGE_ONE" "$LANGUAGE_TWO" || fail 'two language-authority builds differ'
 cmp "$FIXTURE_ONE" "$FIXTURE_TWO" || fail 'two Sounio fixture builds differ'
 cmp "$BUNDLE_ONE" "$BUNDLE_TWO" || fail 'two Sounio fixture bundles differ'
 [[ "$(sha256sum "$BARRIER_ONE" | cut -d ' ' -f 1)" == \
@@ -98,6 +134,9 @@ cmp "$BUNDLE_ONE" "$BUNDLE_TWO" || fail 'two Sounio fixture bundles differ'
 [[ "$(sha256sum "$CONTROLLER_ONE" | cut -d ' ' -f 1)" == \
   a38d499bb01d29b470775fe1a2bd503c7a626b554e425634dbd14508a4747fa7 ]] ||
   fail 'frozen ExecGrantController runtime hash drifted'
+[[ "$(sha256sum "$LANGUAGE_ONE" | cut -d ' ' -f 1)" == \
+   "$(field "$LANGUAGE_MANIFEST" executable_sha256)" ]] ||
+  fail 'frozen Sounio language-authority runtime hash drifted'
 [[ "$(sha256sum "$BUNDLE_ONE" | cut -d ' ' -f 1)" == \
   523e132c4ab6a41ade56c2421472b092171627087fe4cf55ba4c74ac1f5d98fe ]] ||
   fail 'frozen Sounio fixture bundle hash drifted'
@@ -107,6 +146,7 @@ dependencies="$(
   ldd "$BARRIER_ONE" 2>&1 || true
   ldd "$CONTROLLER_ONE" 2>&1 || true
   ldd "$RESIDENT_ONE" 2>&1 || true
+  ldd "$LANGUAGE_ONE" 2>&1 || true
 )"
 if printf '%s\n' "$dependencies" | grep -Eqi 'python|rust'; then
   fail 'integrated quorum has a prohibited Python or Rust runtime dependency'
@@ -114,6 +154,23 @@ fi
 if rg -n 'DENY49[1-9]|DENY500|DENY501|ALLOW code=0 reason=allow|code=491|code=499' \
   "$ROOT_DIR/tools/loom/src/loom_exec_quorum_lab.inc" >/dev/null; then
   fail 'material quorum module copied a Sounio expected result'
+fi
+if rg -n 'DENY49[1-9]|DENY500|DENY501|ALLOW code=0 reason=allow|code=491|code=499' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc" >/dev/null; then
+  fail 'product material canary copied a Sounio expected result'
+fi
+if rg -n 'DENY49[1-9]|DENY500|DENY501|ALLOW code=0 reason=allow|code=491|code=499' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_cell_host_canary.inc" >/dev/null; then
+  fail 'product ExecCell material canary copied a Sounio expected result'
+fi
+[[ "$(rg -c '/usr/bin/python3 --version' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc")" == 1 && \
+   "$(rg -c '/usr/bin/rustc --version' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc")" == 1 ]] ||
+  fail 'product prohibited-oracle controls drifted'
+if rg -n 'SOUNIO_COORD_NATIVE_HOOK_SELFTEST' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc" >/dev/null; then
+  fail 'product host canary enabled the coordination-hook selftest bypass'
 fi
 
 result="$(run_quorum "$CONTROLLER_MANIFEST" "$CONTROLLER_ONE" \
@@ -172,9 +229,13 @@ refusal="$(run_refusal barrier-runtime-tamper run_quorum \
 [[ "$refusal" == *'integrated PrincipalCell runtime hash mismatch'* ]] ||
   fail 'barrier runtime mutation reached the transaction'
 
-printf 'sounio-loom-host-exec-quorum-selftest: PASS semantic_authority=Sounio controller=OCaml controller_role=EFFECT_PARITY material_layer=C++20+Linux material_role=MATERIAL_PARITY transitory=true single_resident_controller=true source_fixtures=Sounio inherited_descriptor=true deterministic_rebuilds=broker+barrier+controller+resident+fixtures treatment=closed positive_semantics=ready positive_local=closed positive_local_reason=same-uid-principal exact_write_sabotage=open causal_rule=three-object-quorum replay=closed controller_death=closed resident_death=closed wrong_generation=closed python=closed textual_receipt=closed controller_manifest_tamper=refused controller_runtime_tamper=refused fixture_manifest_tamper=refused fixture_bundle_tamper=refused barrier_runtime_tamper=refused principal_pidfd=bound principal_start_tick=bound principal_executable=bound principal_cgroup=bound principal_distinct_uid=false non_bearer_transport=measured same_uid_peer_isolation=false public_protocol=closed expected_results_encoded_in_material_layer=false runtime_dependencies=clean material_threshold_measured=true descriptor_barrier_causal=true material_grant=false material_execution=false barrier_release=false launch_open=false exec_attached=false parity_open=false claim_ready=false broker_source_sha256=%s quorum_module_sha256=%s barrier_source_sha256=%s broker_binary_sha256=%s barrier_binary_sha256=%s\n' \
+printf 'sounio-loom-host-exec-quorum-selftest: PASS semantic_authority=Sounio controller=OCaml controller_role=EFFECT_PARITY material_layer=C++20+Linux material_role=MATERIAL_PARITY transitory=true single_resident_controller=true source_fixtures=Sounio frozen_commits_rehydrated=true controller_commit=%s resident_v4_commit=%s language_authority_commit=%s inherited_descriptor=true deterministic_rebuilds=broker+barrier+controller+resident+language-authority+fixtures treatment=closed positive_semantics=ready positive_local=closed positive_local_reason=same-uid-principal exact_write_sabotage=open causal_rule=three-object-quorum replay=closed controller_death=closed resident_death=closed wrong_generation=closed python=closed textual_receipt=closed controller_manifest_tamper=refused controller_runtime_tamper=refused fixture_manifest_tamper=refused fixture_bundle_tamper=refused barrier_runtime_tamper=refused principal_pidfd=bound principal_start_tick=bound principal_executable=bound principal_cgroup=bound principal_distinct_uid=false non_bearer_transport=measured same_uid_peer_isolation=false public_protocol=closed expected_results_encoded_in_material_layer=false prohibited_oracle_controls=python+rust runtime_dependencies=clean material_threshold_measured=true descriptor_barrier_causal=true material_grant=false material_execution=false barrier_release=false launch_open=false exec_attached=false parity_open=false claim_ready=false language_authority_binary_sha256=%s broker_source_sha256=%s quorum_module_sha256=%s product_canary_source_sha256=%s product_exec_cell_canary_source_sha256=%s barrier_source_sha256=%s broker_binary_sha256=%s barrier_binary_sha256=%s\n' \
+  "$FROZEN_CONTROLLER_COMMIT" "$FROZEN_RESIDENT_V4_COMMIT" \
+  "$FROZEN_LANGUAGE_COMMIT" "$(sha256sum "$LANGUAGE_ONE" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_quorum_lab.inc" | cut -d ' ' -f 1)" \
+  "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc" | cut -d ' ' -f 1)" \
+  "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_product_exec_cell_host_canary.inc" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_principal_cell_barrier_integrated.cpp" | cut -d ' ' -f 1)" \
   "$(sha256sum "$BROKER_ONE" | cut -d ' ' -f 1)" \
   "$(sha256sum "$BARRIER_ONE" | cut -d ' ' -f 1)"

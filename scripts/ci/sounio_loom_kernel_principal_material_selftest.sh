@@ -8,8 +8,8 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-kernel-principal-material.XX
 AUTHORITY="$TEST_ROOT/kernel-principal-authority"
 PROBE_ONE="$TEST_ROOT/kernel-principal-probe-one"
 PROBE_TWO="$TEST_ROOT/kernel-principal-probe-two"
-FROZEN_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_authority.freeze.v1"
-FROZEN_MANIFEST_SHA256='4cbf80364b1d266ab1417103642cc66917acdc4f5ec68d8cdba92ece34db07dc'
+FROZEN_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_authority.freeze.v2"
+FROZEN_MANIFEST_SHA256='e24950a423879289f005ecfba414cd8f20227b361f4805bf333afc867b971f0c'
 
 cleanup() {
   rm -rf "$TEST_ROOT"

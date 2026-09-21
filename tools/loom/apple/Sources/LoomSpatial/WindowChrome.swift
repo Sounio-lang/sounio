@@ -46,7 +46,7 @@ final class WindowProbeView: NSView {
 
         if let snapshotPath = Self.snapshotPath {
             Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(Self.snapshotDelaySeconds))
                 self?.writeSnapshot(to: snapshotPath)
             }
         }
@@ -72,6 +72,15 @@ final class WindowProbeView: NSView {
               arguments.indices.contains(index + 1)
         else { return nil }
         return arguments[index + 1]
+    }
+
+    private static var snapshotDelaySeconds: Double {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "--snapshot-delay-seconds"),
+              arguments.indices.contains(index + 1),
+              let value = Double(arguments[index + 1])
+        else { return 2 }
+        return min(max(value, 0.5), 30)
     }
 }
 #endif

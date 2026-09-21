@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.runtime.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-kernel-peer-activation-capsule-ocaml-v1-20260829.txt"
+MANIFEST="$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.runtime.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-kernel-peer-activation-capsule-ocaml-v2-20260919.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-peer-activation-capsule-ocaml-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/loom-one"
 RUNTIME_TWO="$TEST_ROOT/loom-two"
@@ -51,7 +51,7 @@ stream_hash() {
 
 [[ -f "$MANIFEST" ]] || fail 'OCaml runtime manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'OCaml runtime evidence is missing'
-[[ "$(field schema)" == loom-kernel-peer-activation-capsule-ocaml-runtime-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-kernel-peer-activation-capsule-ocaml-runtime-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == OPERATIONAL_REALIZATION_FROZEN ]] || fail 'wrong operational stage'
 [[ "$(field producing_language)" == OCaml ]] || fail 'producer is not OCaml'
 [[ "$(field language_role)" == OPERATIONAL_REALIZATION ]] || fail 'wrong language role'

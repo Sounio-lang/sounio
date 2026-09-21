@@ -11,8 +11,8 @@ RESIDENT_ONE="$TEST_ROOT/resident-one"
 RESIDENT_TWO="$TEST_ROOT/resident-two"
 CURRENT_FRAME="$TEST_ROOT/current.frame"
 PYTHON_FRAME="$TEST_ROOT/python.frame"
-EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
 GARDEN="$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md"
 
 cleanup() {
@@ -41,10 +41,10 @@ for path in "$EXEC_GRANT_MANIFEST" "$RESIDENT_MANIFEST" "$GARDEN"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "required input is absent or linked: $path"
 done
 [[ "$(sha256sum "$EXEC_GRANT_MANIFEST" | cut -d ' ' -f 1)" == \
-  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+  d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be ]] ||
   fail 'frozen action 9030 manifest drifted'
 [[ "$(sha256sum "$RESIDENT_MANIFEST" | cut -d ' ' -f 1)" == \
-  f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473 ]] ||
+  219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05 ]] ||
   fail 'frozen resident v4 manifest drifted'
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_ONE" \

@@ -39,24 +39,44 @@ struct LoomObservatoryView: View {
 
 private struct DesktopObservatory: View {
     @ObservedObject var store: LoomStore
+    @State private var mode: WorkbenchMode = .conversation
 
     var body: some View {
         VStack(spacing: 0) {
-            ObservatoryToolbar(store: store)
-            HStack(spacing: 10) {
-                LaneRail(store: store)
-                    .frame(width: 218)
+            ObservatoryToolbar(store: store, mode: $mode)
+            workbench
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+        }
+    }
 
+    @ViewBuilder
+    private var workbench: some View {
+        switch mode {
+        case .conversation:
+            HStack(spacing: 12) {
+                LaneRail(store: store)
+                    .frame(width: 236)
+                ConversationSpaceView(store: store)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ConversationContextDrawer(store: store)
+                    .frame(width: 286)
+            }
+        case .spatial:
+            HStack(spacing: 12) {
+                LaneRail(store: store)
+                    .frame(width: 226)
                 VStack(spacing: 10) {
-                    TopologyPanel(snapshot: store.dashboard, fleet: store.fleet)
+                    TopologyPanel(snapshot: store.dashboard, fleet: store.fleet, live: store.dashboardIsLive)
                     FabricSignals(snapshot: store.dashboard)
                 }
-
                 ConversationDock(store: store)
-                    .frame(width: 342)
+                    .frame(width: 380)
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
+        case .focus:
+            ConversationSpaceView(store: store)
+                .frame(maxWidth: 980, maxHeight: .infinity)
+                .frame(maxWidth: .infinity)
         }
     }
 }
@@ -67,7 +87,7 @@ private struct CompactObservatory: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ObservatoryToolbar(store: store)
+            ObservatoryToolbar(store: store, mode: .constant(.conversation))
             Picker("Surface", selection: $selection) {
                 Label("Weave", systemImage: "point.3.connected.trianglepath.dotted").tag(0)
                 Label("Agents", systemImage: "bubble.left.and.bubble.right").tag(1)
@@ -84,7 +104,7 @@ private struct CompactObservatory: View {
                 case 2: LaneRail(store: store)
                 default:
                     VStack(spacing: 8) {
-                        TopologyPanel(snapshot: store.dashboard, fleet: store.fleet)
+                        TopologyPanel(snapshot: store.dashboard, fleet: store.fleet, live: store.dashboardIsLive)
                         FabricSignals(snapshot: store.dashboard)
                     }
                 }
@@ -97,6 +117,7 @@ private struct CompactObservatory: View {
 
 private struct ObservatoryToolbar: View {
     @ObservedObject var store: LoomStore
+    @Binding var mode: WorkbenchMode
 
     var connectionColor: Color {
         store.connection == .connected ? LoomColor.green : LoomColor.amber
@@ -110,7 +131,7 @@ private struct ObservatoryToolbar: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("LOOM")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                Text("SPATIAL OBSERVATORY")
+                Text("NATIVE WORKBENCH")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -119,12 +140,24 @@ private struct ObservatoryToolbar: View {
 
             StatusPill(label: store.connection.label, color: connectionColor)
             StatusPill(
-                label: "scenario \(store.dashboard.receipt.status.rawValue)",
+                label: store.dashboardIsLive
+                    ? "Sounio \(store.dashboard.receipt.status.rawValue)"
+                    : "scenario \(store.dashboard.receipt.status.rawValue)",
                 color: store.dashboard.receipt.status.loomColor,
-                systemImage: "sparkles"
+                systemImage: store.dashboardIsLive ? "checkmark.shield.fill" : "sparkles"
             )
 
             Spacer(minLength: 8)
+
+            Picker("Workbench mode", selection: $mode) {
+                ForEach(WorkbenchMode.allCases) { mode in
+                    Label(mode.label, systemImage: mode.symbol).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 280)
+            .accessibilityIdentifier("loom-workbench-mode")
 
             Menu {
                 Picker("Scenario", selection: $store.scenario) {
@@ -148,5 +181,29 @@ private struct ObservatoryToolbar: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 54)
+    }
+}
+
+private enum WorkbenchMode: String, CaseIterable, Identifiable {
+    case conversation
+    case spatial
+    case focus
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .conversation: "Talk"
+        case .spatial: "Fleet"
+        case .focus: "Focus"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .conversation: "bubble.left.and.bubble.right"
+        case .spatial: "point.3.connected.trianglepath.dotted"
+        case .focus: "rectangle.inset.filled"
+        }
     }
 }

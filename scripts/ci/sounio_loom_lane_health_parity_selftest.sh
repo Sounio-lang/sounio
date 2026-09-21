@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-FREEZE="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
+FREEZE="$ROOT_DIR/tools/loom/lane_health.freeze.v2"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-lane-health-parity.XXXXXX")"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 SOUNIO_RUNTIME="$TEST_ROOT/sounio-lane-health-parity"

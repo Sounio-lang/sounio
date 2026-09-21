@@ -84,15 +84,15 @@ set -e
 [[ -s "$RECEIPTS" ]] || fail 'resident receipt log is empty'
 grep -Fq $'event=EFFECT\t' "$RECEIPTS" || fail 'effect receipt is missing'
 grep -Fq $'event=POISON\t' "$RECEIPTS" || fail 'poison receipt is missing'
-grep -Fq 'parent_9023_manifest_sha256=0024178b8928f0c82d794d390244e83e5ce431054587fc7dd609c0f25c2e5b4f' "$RECEIPTS" ||
+grep -Fq 'parent_9023_manifest_sha256=75cdaf0b48665b90b5fd18389179b9224f8eff0f65853e140f700b25ef5de65b' "$RECEIPTS" ||
   fail '9023 parent hash is missing from receipts'
-grep -Fq 'parent_9024_manifest_sha256=7ba1917b083b61f6c335c1e64764085d93474dd67896c9dea58516ef9f0e16f2' "$RECEIPTS" ||
+grep -Fq 'parent_9024_manifest_sha256=9647fa771c3818181bc45f9bc20ad0abce03c7d64223d05e4d146ef730f6e321' "$RECEIPTS" ||
   fail '9024 parent hash is missing from receipts'
-grep -Fq 'resident_runtime_sha256=5c432f4c56fb0be5c157fb12147566a5f74f2cc4cc1e25b46f37050eff1ac12b' "$RECEIPTS" ||
+grep -Fq 'resident_runtime_sha256=54cec3bc77429b44b5e42d0d198df462c2d36da1b08c90fb69e74c811ec6b684' "$RECEIPTS" ||
   fail 'resident runtime hash is missing from receipts'
 
 tampered_manifest="$TEST_ROOT/tampered.runtime.v1"
-cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1" "$tampered_manifest"
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2" "$tampered_manifest"
 printf '%s\n' 'tamper=1' >> "$tampered_manifest"
 set +e
 manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \

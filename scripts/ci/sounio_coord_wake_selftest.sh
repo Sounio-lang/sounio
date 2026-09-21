@@ -243,6 +243,30 @@ prompt_count_after="$(grep -o "$stalled_message" "$STALLED_LOG" | wc -l | tr -d 
 output="$(coord "$REPO" message-status --agent sender --lane origin --message "$stalled_message")"
 grep -q 'injected=0 .*wakes=0 wake_pending=1$' <<< "$output" || \
   fail 'pending status fabricated a start receipt'
+
+# A backlog must never monopolize the shared coordination lock. Each replay
+# cycle admits only its configured number of transport attempts.
+budget_messages=()
+for index in 1 2 3 4 5; do
+  output="$(SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS=50 coord "$REPO" send \
+    --agent sender --lane origin --to-agent codex --to-lane stalled --kind request \
+    --message "bounded replay fixture $index")"
+  budget_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+  [[ -n "$budget_message" ]] || fail 'bounded replay fixture did not persist a message'
+  grep -q "^WAKE_PENDING message_id=$budget_message " <<< "$output" || \
+    fail 'bounded replay fixture did not remain pending'
+  budget_messages+=("$budget_message")
+done
+sleep 1
+output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=50 \
+  SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS=1 \
+  SOUNIO_COORD_WAKE_RECONCILE_BUDGET=2 coord "$REPO" wake-reconcile)"
+grep -q '^WAKE_RECONCILE attempted=2 started=0 pending=2 .*eligible=6 budget_skipped=4 budget=2 ' \
+  <<< "$output" || fail "wake replay exceeded its cycle budget: $output"
+for budget_message in "${budget_messages[@]}"; do
+  coord "$SECOND" ack --agent codex --lane stalled --message "$budget_message" >/dev/null
+done
+
 output="$(coord "$SECOND" injected --agent codex --lane stalled --messages "$stalled_message")"
 grep -q "^WAKE_STARTED message_id=$stalled_message .*generation=" <<< "$output" || \
   fail 'real hook injection did not promote the matching generation'
@@ -288,7 +312,8 @@ grep -q "$insert_crash_message" <<< "$insert_crash_capture" || \
 insert_crash_count_before="$(grep -o 'Sounio coordination wake:' \
   <<< "$insert_crash_capture" | wc -l | tr -d ' ')"
 sleep 1
-output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=100 coord "$REPO" wake-reconcile)"
+output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=100 \
+  SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS=1 coord "$REPO" wake-reconcile)"
 grep -q "WAKE_PENDING message_id=$insert_crash_message .*state=awaiting-start" <<< "$output" || \
   fail 'automatic exact-id recovery did not advance to submit-only pending state'
 grep -q '^WAKE_RECONCILE attempted=1 started=0 pending=1 ' <<< "$output" || \
@@ -340,7 +365,8 @@ grep -q "WAKE_PENDING message_id=$retry_message .*state=awaiting-start" <<< "$ou
 wait_for_text "$RETRY_LOG" "$retry_message" || fail 'retry prompt was not inserted'
 retry_prompt_count_before="$(grep -o "$retry_message" "$RETRY_LOG" | wc -l | tr -d ' ')"
 sleep 1
-output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=800 coord "$REPO" wake-reconcile)"
+output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=800 \
+  SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS=1 coord "$REPO" wake-reconcile)"
 grep -q '^WAKE_RECONCILE attempted=1 started=1 pending=0 ' <<< "$output" || \
   fail 'control-service reconciliation did not start the pending turn'
 retry_prompt_count_after="$(grep -o "$retry_message" "$RETRY_LOG" | wc -l | tr -d ' ')"
@@ -351,6 +377,20 @@ grep -q 'injected=1 .*wakes=1 wake_pending=0$' <<< "$output" || \
   fail 'automatic retry lacked a generation-bound start receipt'
 coord "$SECOND" release --agent codex --lane retry-auto --reason 'automatic retry complete' >/dev/null
 tmux -S "$SOCKET" kill-window -t recipient:retry-auto
+
+# Historical discovery is optional outside tmux. An unset TMUX must degrade to
+# durable delivery instead of aborting under set -u before the message persists.
+coord "$SECOND" send --agent codex --lane no-tmux-recipient \
+  --to-agent sender --to-lane origin --kind info \
+  --message 'establish history for the no-tmux negative control' >/dev/null
+output="$(
+  unset TMUX SOUNIO_COORD_DISCOVERY_SOCKET
+  coord "$REPO" send --agent sender --lane origin --to-agent codex \
+    --to-lane no-tmux-recipient --kind info \
+    --message 'persist without an ambient tmux socket'
+)"
+grep -q '^WAKE_UNAVAILABLE .*status=unavailable$' <<< "$output" || \
+  fail 'no-tmux discovery did not fall back to durable delivery'
 
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
   --lane legacy-recipient --to-agent sender --to-lane origin --kind info \
@@ -507,7 +547,8 @@ output="$(coord "$REPO" message-status --agent sender --lane origin --message "$
 grep -q 'injected=1 .*wakes=0 wake_pending=1$' <<< "$output" || \
   fail 'generation sabotage fabricated or discarded the predecessor state'
 sleep 1
-output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=100 coord "$REPO" wake-reconcile)"
+output="$(SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS=100 \
+  SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS=1 coord "$REPO" wake-reconcile)"
 grep -q '^WAKE_RECONCILE attempted=1 started=0 pending=1 ' <<< "$output" || \
   fail 'successor generation did not receive a fresh pending submission'
 wait_for_text "$TEST_ROOT/stale-successor.log" "$stale_message" || \

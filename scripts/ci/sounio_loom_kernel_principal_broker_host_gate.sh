@@ -84,15 +84,15 @@ BROKER_TARGET="$(readlink "$BROKER_LINK")"
   fail 'stable broker target is outside an action 9027+9028+9029+9030 release'
 RELEASE_DIR="${BROKER_TARGET%/loom-kernel-principal-broker}"
 RECEIPT="$RELEASE_DIR/install.receipt.v1"
-MANIFEST="$RELEASE_DIR/kernel_principal_lease_authority.freeze.v1"
+MANIFEST="$RELEASE_DIR/kernel_principal_lease_authority.freeze.v2"
 AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-principal-lease-authority-runtime"
-CAPSULE_MANIFEST="$RELEASE_DIR/kernel_principal_capsule_authority.freeze.v1"
+CAPSULE_MANIFEST="$RELEASE_DIR/kernel_principal_capsule_authority.freeze.v2"
 CAPSULE_AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_MANIFEST="$RELEASE_DIR/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST="$RELEASE_DIR/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST="$RELEASE_DIR/resident_membrane.runtime.v4"
-RESIDENT_RUNTIME="$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME="$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4.v2"
 
 root_file_mode "$BROKER_TARGET" 555
 root_file_mode "$MANIFEST" 444

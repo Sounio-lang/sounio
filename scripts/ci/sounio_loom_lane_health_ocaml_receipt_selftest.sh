@@ -4,10 +4,10 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/lane_health.ocaml.v1"
-FREEZE="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-lane-health-ocaml-v1-20260827.txt"
+MANIFEST="$ROOT_DIR/tools/loom/lane_health.ocaml.v2"
+FREEZE="$ROOT_DIR/tools/loom/lane_health.freeze.v2"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-lane-health-ocaml-v2-20260914.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-lane-health-ocaml-receipt.XXXXXX")"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 AUTHORITY_TOOLCHAIN_ROOT="$TEST_ROOT/authority-toolchain"
@@ -52,12 +52,15 @@ stream_hash() {
 
 [[ -f "$MANIFEST" && -f "$FREEZE" && -f "$AUTHORITY_MANIFEST" ]] || fail 'required manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'receipt evidence is missing'
-[[ "$(field schema)" == loom-lane-health-ocaml-realization-v1 ]] || fail 'unknown receipt schema'
+[[ "$(field schema)" == loom-lane-health-ocaml-realization-v2 ]] || fail 'unknown receipt schema'
 [[ "$(field producing_language)" == OCaml ]] || fail 'producer is not OCaml'
 [[ "$(field language_role)" == OPERATIONAL_REALIZATION ]] || fail 'OCaml was assigned an authority role'
 [[ "$(field operational_realization_admitted)" == true ]] || fail 'operational realization is not admitted'
 [[ "$(field formal_parity_open)" == false ]] || fail 'receipt claimed formal parity'
 [[ "$(field claim_ready)" == false ]] || fail 'receipt claimed product readiness'
+[[ "$(field predecessor_manifest_path)" == tools/loom/lane_health.ocaml.v1 ]] || fail 'unexpected predecessor receipt'
+[[ "$(file_hash "$ROOT_DIR/$(field predecessor_manifest_path)")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor receipt drifted'
+[[ "$(field decision_stream_sha256)" == "$(manifest_field "$ROOT_DIR/$(field predecessor_manifest_path)" decision_stream_sha256)" ]] || fail 'decision stream differs from the v1 realization'
 [[ "$(file_hash "$FREEZE")" == "$(field frozen_parent_manifest_sha256)" ]] || fail 'frozen parent manifest drifted'
 [[ "$(field frozen_semantics_sha256)" == "$(freeze_field semantics_sha256)" ]] || fail 'parent semantics hash differs'
 
@@ -133,7 +136,7 @@ gate_result="$(bash "$ROOT_DIR/$(field parity_gate_path)")"
 [[ "$(printf '%s\n' "$gate_result" | stream_hash)" == "$(field result_sha256)" ]] || fail 'parity gate result hash differs'
 
 bash "$ROOT_DIR/scripts/ci/sounio_loom_language_authority_freeze_selftest.sh" >/dev/null
-authority_commit="$(authority_field sounio_executable_commit)"
+authority_commit="$(authority_field toolchain_commit)"
 authority_wrapper="$(authority_field toolchain_wrapper_path)"
 authority_compiler="$(authority_field toolchain_compiler_path)"
 mkdir -p "$AUTHORITY_TOOLCHAIN_ROOT"

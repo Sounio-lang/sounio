@@ -130,6 +130,10 @@ done
 [[ "$(record_value "$CAPSULE_MANIFEST" schema)" == loom-host-exec-quorum-experiment-capsule-v1 ]] || fail 'capsule schema drifted'
 [[ "$(record_value "$CAPSULE_MANIFEST" source_tree_state)" == CLEAN ]] || fail 'dirty-source capsule cannot reach host'
 [[ "$(record_value "$CAPSULE_MANIFEST" production_activation)" == false ]] || fail 'capsule requested production activation'
+[[ "$(record_value "$CAPSULE_MANIFEST" product_lane_cell_canary)" == false && \
+   "$(record_value "$CAPSULE_MANIFEST" distinct_uid_product_broker_canary)" == false && \
+   "$(record_value "$CAPSULE_MANIFEST" product_exec_cell_canary)" == false ]] ||
+  fail 'capsule preclaimed a product lane-cell canary'
 [[ "$(record_value "$CAPSULE_MANIFEST" material_grant)" == false ]] || fail 'capsule preclaimed a material grant'
 [[ "$(sha256_file "$RELEASE_MANIFEST")" == "$(record_value "$CAPSULE_MANIFEST" release_manifest_sha256)" ]] || fail 'release manifest hash drifted'
 [[ "$(sha256_file "$HOST_GATE")" == "$(record_value "$CAPSULE_MANIFEST" host_gate_sha256)" ]] || fail 'host gate hash drifted'
@@ -146,7 +150,7 @@ RELEASE_ID="$(record_value "$RELEASE_MANIFEST" release_id)"
 [[ "$RELEASE_ID" =~ ^9030-hostq-[0-9a-f]{32}$ && "$RELEASE_ID" == "$(record_value "$CAPSULE_MANIFEST" release_id)" ]] || fail 'release identity drifted'
 RELEASE_MANIFEST_SHA256="$(sha256_file "$RELEASE_MANIFEST")"
 if [[ "$MODE" == verify ]]; then
-  printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_VERIFY PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+  printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_VERIFY PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY product_lane_cell_canary=false distinct_uid_product_broker_canary=false product_exec_cell_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
     "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256"
   exit 0
 fi
@@ -183,6 +187,50 @@ set -e
    "$host_output" == *' process_witness_core=true '* && \
    "$host_output" == *' complete_effects=false '* ]] ||
   fail 'host ProcessWitness measurement is absent'
+[[ "$host_output" == *'LOOM_PRODUCT_EXEC_INGRESS_DYNAMIC_USER_HOST_GATE PASS '* && \
+   "$host_output" == *' lane_cell_canary_attached=true '* && \
+   "$host_output" == *' distinct_uid_product_broker_canary=true '* && \
+   "$host_output" == *' exec_cell_attached=false '* && \
+   "$host_output" == *' production_activation=false '* ]] ||
+  fail 'host product DynamicUser ExecIngress measurement is absent'
+[[ "$host_output" == *'loom-product-exec-cell-host: PASS '* && \
+   "$host_output" == *' simultaneous_distinct_dynamic_users=true '* && \
+   "$host_output" == *' command_mismatch=DENY492 '* && \
+   "$host_output" == *' sabotage_exec_cell_created=false '* && \
+   "$host_output" == *' sabotage_payload_executed=false '* && \
+   "$host_output" == *' result_action=9033 '* && \
+   "$host_output" == *' intent_action=9034 '* && \
+   "$host_output" == *' result_returned=true result_presenter=read-only '* && \
+   "$host_output" == *' exact_fixture_hook_switched=true local_exec_capability_used=false '* && \
+   "$host_output" == *' provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml '* && \
+   "$host_output" == *' operation_catalog_action=9035 operation_result_action=9036 '* && \
+   "$host_output" == *' operation_simultaneous_distinct_dynamic_users=true '* && \
+   "$host_output" == *' operation_protocol=READY+ARM+CLOSE '* && \
+   "$host_output" == *' operation_close_receipt_bound=true '* && \
+   "$host_output" == *' operation_runtime_storage=systemd-private-symlink '* && \
+   "$host_output" == *' operation_runtime_custody_pre_close=true '* && \
+   "$host_output" == *' operation_runtime_released_after_close=true '* && \
+   "$host_output" == *' operation_material_files=artifact+stdout+stderr '* && \
+   "$host_output" == *' operation_material_files_measured=3 '* && \
+   "$host_output" == *' operation_principal_self_measured=true '* && \
+   "$host_output" == *' operation_descriptor_self_measured=true '* && \
+   "$host_output" == *' operation_pidfd_extinct=true '* && \
+   "$host_output" == *' operation_cgroup_unpopulated=true '* && \
+   "$host_output" == *' operation_unit_inactive=true '* && \
+   "$host_output" == *' operation_runtime_directory_extinct=true '* && \
+   "$host_output" == *' operation_record_returned=true '* && \
+   "$host_output" == *' operation_result_presenter=read-only '* && \
+   "$host_output" == *' operation_command_mismatch=DENY492 '* && \
+   "$host_output" == *' operation_sabotage_cell_created=false '* && \
+   "$host_output" == *' operation_result_binding_sabotage=closed '* && \
+   "$host_output" == *' operation_result_digest_sabotage=closed '* && \
+   "$host_output" == *' operation_result_manifest_sabotage=closed '* && \
+   "$host_output" == *' python_executed=false rust_executed=false '* && \
+   "$host_output" == *' raw_event_separate=true event_projection=Sounio-9034 event_override=false intent_command_mismatch=DENY555 '* && \
+   "$host_output" == *' exec_cell_attached=true '* && \
+   "$host_output" == *' material_execution=true '* && \
+   "$host_output" == *' test_only=true '* ]] ||
+  fail 'host product ExecCell material measurement is absent'
 [[ "$(stable_identity /usr/lib/sounio/loom/current)" == "$stable_current_before" ]] || fail 'production current target moved during experiment'
 [[ "$(stable_identity /usr/libexec/sounio/loom-kernel-principal-broker)" == "$stable_broker_before" ]] || fail 'production broker target moved during experiment'
 
@@ -190,5 +238,5 @@ created_release=false
 cleanup
 trap - EXIT
 printf '%s\n' "$host_output"
-printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exact_fixture_hook_switched=true provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml operation_catalog_action=9035 operation_result_action=9036 operation_exec_cell_attached=true operation_record_returned=true operation_result_presenter=read-only operation_protocol=READY+ARM+CLOSE operation_close_receipt_bound=true operation_runtime_storage=systemd-private-symlink operation_runtime_custody_pre_close=true operation_runtime_released_after_close=true operation_material_files=artifact+stdout+stderr operation_material_files_measured=3 operation_principal_self_measured=true operation_descriptor_self_measured=true operation_pidfd_extinct=true operation_cgroup_unpopulated=true operation_unit_inactive=true operation_runtime_directory_extinct=true operation_command_mismatch=DENY492 operation_sabotage_cell_created=false operation_result_binding_sabotage=closed operation_result_digest_sabotage=closed operation_result_manifest_sabotage=closed python_executed=false rust_executed=false local_exec_capability_used=false event_projection=Sounio-9034+9035 event_override=false intent_command_mismatch=DENY555 exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false parity_open=false claim_ready=false\n' \
   "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256" "$HOST_RELEASE"

@@ -1,10 +1,10 @@
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051"
+  "a763255a922b95c5eb8855c85250f2f3e9db5f54889ea910250434b1df00e0f4"
 
 let pinned_resident_v4_manifest_sha256 =
-  "f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473"
+  "2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1"
 
 let max_file_bytes = 8 * 1024 * 1024
 
@@ -81,7 +81,7 @@ let manifest_path root =
       failf
         "SOUNIO_LOOM_KERNEL_EXEC_GRANT_CELL_MANIFEST-override-requires-test-mode"
   | _ ->
-      Filename.concat root "tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+      Filename.concat root "tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -97,7 +97,7 @@ let load root =
     failf "exec-grant-cell-manifest-hash-mismatch";
   let manifest = parse_manifest path in
   if required manifest "schema"
-       <> "loom-kernel-exec-grant-cell-authority-freeze-v1"
+       <> "loom-kernel-exec-grant-cell-authority-freeze-v2"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -131,7 +131,7 @@ let load root =
   verify_file root manifest "parent_9022_manifest_path"
     "parent_9022_manifest_sha256" "exec-grant-cell-parent-9022-hash-mismatch";
   let resident_v4_path =
-    Filename.concat root "tools/loom/resident_membrane.runtime.v4"
+    Filename.concat root "tools/loom/resident_membrane.runtime.v4.v2"
   in
   if sha256_file resident_v4_path <> pinned_resident_v4_manifest_sha256 then
     failf "exec-grant-cell-resident-v4-manifest-hash-mismatch";

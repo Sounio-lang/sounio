@@ -6,8 +6,8 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT_DIR"
 
-MANIFEST=tools/loom/process_witness_effect_material_judgment_v11.freeze.v1
-EVIDENCE=tools/loom/evidence/loom-process-witness-effect-material-judgment-v11-20260829.txt
+MANIFEST=tools/loom/process_witness_effect_material_judgment_v11.freeze.v2
+EVIDENCE=tools/loom/evidence/loom-process-witness-effect-material-judgment-v11-v2-20260916.txt
 
 fail() {
   printf 'sounio-loom-process-witness-effect-material-judgment-v11-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -55,17 +55,17 @@ expect_evidence() {
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'freeze manifest is absent or linked'
 [[ -f "$EVIDENCE" && ! -L "$EVIDENCE" ]] || fail 'judgment evidence is absent or linked'
 
-expect_field schema loom-process-witness-effect-material-judgment-v11-freeze-v1
+expect_field schema loom-process-witness-effect-material-judgment-v11-freeze-v2
 expect_field stage ACTION_9025_JUDGMENT_FROZEN
 expect_field producing_language Sounio
 expect_field language_role SEMANTIC_AUTHORITY
 expect_field semantic_authority Sounio
 expect_field action 9025
-expect_field source_commit ceacb88cc1a9490aedc0f631b31cd4651f1fcd10
-expect_field source_sha256 48f49e4da369bc2704523692db99966d8647c64f5449b993236288d411aa2017
-expect_field build_script_sha256 e5052548d1ac2b1712696b38cccc888824b09273f3f21e9eb5bdde57ef615527
+expect_field source_commit f716c262b9fc91866eb02adad3c3a66331939738
+expect_field source_sha256 dbb14bbfb60c6357a5a61d02f92bb1d6e198ec481b451b3336ae3d3baab2257d
+expect_field build_script_sha256 95ef26b2f62a1117c030302120fd5998d98f2f2d6e904e67bc2be1c95be4e1e3
 expect_field selftest_sha256 a46ca1ad751bdc3e9eafd55d3bab337fd896467b04f3fda3443029a2cab4f764
-expect_field executable_sha256 c1b7a5117eda986ac2c86c6ad7a60eff1215b31f3c8dabdbe024887b453bfdf6
+expect_field executable_sha256 f27c6d2e711ce497d1e8afcc5c073895e2bdc384a1aa9b6af6343e8477c11540
 expect_field fixture_bundle_sha256 0ec00121b7347260574747abb54743b032f0aef3724bd074d6854025007fc308
 expect_field policy_manifest_sha256 adbc7151da91bd12928cf059a4fce01de59b38096bb7bebe55be0402fab9972c
 expect_field material_evidence_sha256 57bc9730b0b5662a548af8271bdca6ed1651c5684c7999182e6c3d6e6ad53738
@@ -74,7 +74,7 @@ expect_field material_command_result_sha256 f0a31473d9e530de862a1b25911ecb6df0c3
 expect_field host_principal_evidence_sha256 01c63677ab36668c17fe4454f9792c4595350d0d091ba21407a0e5061c36c7f7
 expect_field grant_stack_sha256 1d7b8a3b1dfba1d1f9e60b5392cdf7e57a8d085cd872659feea5e333e43759b1
 expect_field action_9025_manifest_sha256 c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91
-expect_field evidence_sha256 4aa5704fe529ee93c88992a630976395b49a28ed13189af9d7a07aeb7ecc4c64
+expect_field evidence_sha256 8a38e7a88c27d3b310a28366b1118a71fc1fd44b2e06305c46f61e5dd8c34627
 expect_field material_receipt_decision ALLOW
 expect_field action_9025_decision DENY451
 expect_field action_9025_reason same-uid-peer-isolation-absent

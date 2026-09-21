@@ -243,3 +243,18 @@ Authoritative-Only-If: Sounio executable and expected results precede every pari
   command string, or review receipt authoritative by possession.
 - It does not claim external novelty or priority; the supported novelty is the
   project-local executable semantic join and its falsifiable controls.
+
+## 2026-09-17 — a entrada fragmentada da acao 9029
+
+**Pergunta.** O adaptador lia o quadro de entrada com `read_line()`, que devolve
+so o primeiro pedaco quando o stdin chega fragmentado. Sob carga, um quadro
+partido virava um campo truncado, e a autoridade decidia sobre uma linha que nao
+era a que o chamador enviou.
+
+**Resposta.** `kernel_invocation_cell_authority_main.sio` passa a montar a linha byte a byte, ate o `\n` ou o teto
+do buffer, como os outros quarenta e quatro adaptadores ja faziam. A semantica
+das decisoes nao muda: os mesmos casos, os mesmos codigos, o mesmo recibo.
+
+**Fronteira.** O conserto e de leitura, nao de julgamento. O congelamento
+seguinte desta autoridade registra a fonte nova e reaponta os pais re-congelados
+na mesma passagem; nenhuma versao anterior foi reescrita.

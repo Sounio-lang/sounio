@@ -104,13 +104,13 @@ done
 
 grep -Fq $'\tevent=INVOCATION_CELL\t' "$RECEIPTS" ||
   fail 'invocation-cell receipt is missing'
-grep -Fq $'\tparent_9029_manifest_sha256=61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e\t' \
+grep -Fq $'\tparent_9029_manifest_sha256=b0480707dba0abab4eadd444464b5db0ae6fc99b826d3ff0d768cd9b91b71fed\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9029'
-grep -Fq $'\tresident_manifest_sha256=6d5e8d1fd0d6b3badf707ed438804a9e1b46dc74862e09e2f98d143c40665431\t' \
+grep -Fq $'\tresident_manifest_sha256=f8314f6356473a61d5002ae366453ac4af136c38f8f54f348804c5d5c92c0c2b\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v3 manifest'
 
 tampered_manifest="$TEST_ROOT/kernel-invocation-cell.freeze.v1"
-cp "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
+cp "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3" \
   "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e
@@ -126,7 +126,7 @@ set -e
   fail "action 9029 manifest tamper did not fail before spawn: $manifest_output"
 
 tampered_resident_manifest="$TEST_ROOT/resident-v3.runtime"
-cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3.v2" \
   "$tampered_resident_manifest"
 printf '\n' >> "$tampered_resident_manifest"
 set +e

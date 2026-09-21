@@ -5,8 +5,8 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT_DIR"
-MANIFEST=tools/loom/kernel_peer_material_judgment_v13.freeze.v1
-EVIDENCE=tools/loom/evidence/loom-kernel-peer-material-judgment-v13-20260829.txt
+MANIFEST=tools/loom/kernel_peer_material_judgment_v13.freeze.v2
+EVIDENCE=tools/loom/evidence/loom-kernel-peer-material-judgment-v13-v2-20260916.txt
 
 fail() {
   printf 'sounio-loom-kernel-peer-material-judgment-v13-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -39,15 +39,15 @@ expect_evidence() {
 ! grep -Fq '__' "$MANIFEST" || fail 'manifest contains an unresolved marker'
 ! grep -Fq '__' "$EVIDENCE" || fail 'evidence contains an unresolved marker'
 
-expect_field schema loom-kernel-peer-material-judgment-v13-freeze-v1
+expect_field schema loom-kernel-peer-material-judgment-v13-freeze-v2
 expect_field stage SOUNIO_MATERIAL_JUDGMENT_FROZEN_V13
 expect_field semantic_authority Sounio
 expect_field action 9025
-expect_field judgment_source_commit 7b35129137e1ca716684897c9c59ac4a1ef76306
+expect_field judgment_source_commit 4ff7d37a913e45b564ba7c1de7af8374c00d28af
 expect_field producing_language Sounio
 expect_field language_role SEMANTIC_AUTHORITY
-expect_field source_sha256 3383ad078cbdc3d029a1c96a6a3bd20928b206f6a634d2a2d4afced0c693accb
-expect_field build_script_sha256 9183db8ada6dfb4e777e606a95d56716d00fd9e3b134d853cff6b7b6b5b6dc2a
+expect_field source_sha256 a2e30c1463f7ea1101d32d602304948d11e9afc4b29a83c055f66e09f1552281
+expect_field build_script_sha256 367ed31e6079beb6ce1c8e57caa9d1c3b6806aa288295e293e708e9d3feeffbf
 expect_field selftest_sha256 0180f3f0869f708a565296536954d91b79527038e4b65c3685d8a5b7cdcf15ea
 expect_field semantic_manifest_sha256 b3557d850ce0dc13c900f8dbb10c33f824ac25e908cb4a48dd2ef913267194c2
 expect_field material_manifest_sha256 7ffdff3f9dd48753502e9151a117fdcac8ea5149ef4772aaea5594269c54b301
@@ -59,7 +59,7 @@ expect_field hardware_kernel 7.0.2-5-pve
 expect_field hardware_architecture x86_64
 expect_field hardware_cpu_model INTEL\(R\)_XEON\(R\)_GOLD_6526Y
 expect_field cases 14
-expect_field executable_sha256 e084ef14390e825a888efb2dad4e66fe5d463f8f9bf3c5bad21c10eea14b9ff9
+expect_field executable_sha256 f9a503563b1d1e6729d578cde5afce4485cbd566cd01a299ba0409c283a48fec
 expect_field fixture_bundle_sha256 f05c8c4825eb8aa280808b910edd749ba4cf1d47954575f52d54c91ad1caafb6
 for enabled in controls_executed material_peer_matrix same_uid_peer_isolation material_coverage complete_effects material_execution action_9025_judged action_9025_allow peer_rule_sabotage_promotes_false_receipt peer_rule_sabotage_promotes_9025; do
   expect_field "$enabled" true

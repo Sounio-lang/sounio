@@ -5,10 +5,10 @@ exception Dynamic_command of string
 exception Authority_denied of int * string
 
 let pinned_manifest_sha256 =
-  "d07823382125e668eb0d7afe5d52092de3c58ec5bef9655fa2f1f56a9c84d8c0"
+  "015e43eb31ccad800de641d924a73327d5c8636b502f32e8331416a7616c13d7"
 
 let pinned_outcome_manifest_sha256 =
-  "f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e"
+  "e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1"
 
 let max_file_bytes = 8 * 1024 * 1024
 let max_command_bytes = 64 * 1024
@@ -58,7 +58,13 @@ let read_file ?(limit = max_file_bytes) path =
       in
       loop 0)
 
-let sha256_file path = sha256 (read_file path)
+let sha256_file path =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "file-not-regular:%s" path;
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
+      |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
 let write_all descriptor value =
   let rec loop offset =
@@ -434,14 +440,14 @@ let load_policy root =
   let manifest_path =
     match getenv_test_only "SOUNIO_LOOM_EXECUTION_AUTHORITY_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/execution_authority.freeze.v2"
+    | None -> Filename.concat root "tools/loom/execution_authority.freeze.v3"
   in
   if not (Sys.file_exists manifest_path) then failf "execution-authority-policy-missing";
   let manifest_sha256 = sha256_file manifest_path in
   if manifest_sha256 <> pinned_manifest_sha256 then
     failf "execution-authority-policy-hash-mismatch";
   let manifest = parse_manifest manifest_path in
-  if required manifest "schema" <> "loom-execution-authority-freeze-v2"
+  if required manifest "schema" <> "loom-execution-authority-freeze-v3"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -492,7 +498,7 @@ let load_outcome_policy root =
   let manifest_path =
     match getenv_test_only "SOUNIO_LOOM_EXECUTION_OUTCOME_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/execution_outcome.freeze.v1"
+    | None -> Filename.concat root "tools/loom/execution_outcome.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then
     failf "execution-outcome-policy-missing";
@@ -500,7 +506,7 @@ let load_outcome_policy root =
   if manifest_sha256 <> pinned_outcome_manifest_sha256 then
     failf "execution-outcome-policy-hash-mismatch";
   let manifest = parse_manifest manifest_path in
-  if required manifest "schema" <> "loom-execution-outcome-freeze-v1"
+  if required manifest "schema" <> "loom-execution-outcome-freeze-v2"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -726,7 +732,7 @@ let audited_leaf executable =
   let name = basename_lower canonical in
   let info = Unix.stat canonical in
   within "/usr/bin" canonical
-  && one_of name [ "true"; "false"; "printf"; "pwd" ]
+  && one_of name [ "true"; "false"; "printf"; "pwd"; "sleep" ]
   && info.st_kind = S_REG
   && info.st_uid = 0
   && info.st_perm land 0o022 = 0

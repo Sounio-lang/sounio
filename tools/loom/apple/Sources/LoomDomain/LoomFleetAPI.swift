@@ -147,7 +147,7 @@ public struct LoomFleetClient: Sendable {
         let url = baseURL.appending(path: "api/fleet")
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 4
+        request.timeoutInterval = 12
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
@@ -322,6 +322,11 @@ public struct LoomRoutingConfigReceipt: Codable, Equatable, Sendable {
     public let config: LoomRoutingConfig
 }
 
+public struct LoomLatestRouteOperation: Codable, Equatable, Sendable {
+    public let schema: String
+    public let operation: LoomRouteOperation?
+}
+
 public enum LoomMessageClientError: LocalizedError, Equatable, Sendable {
     case refused(status: Int, reason: String)
     case invalidReceipt
@@ -354,6 +359,16 @@ public struct LoomMessageClient: Sendable {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 12
         request.setValue("Bearer \(capability)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    private func authorizedRequest(
+        path: String,
+        method: String,
+        timeout: TimeInterval
+    ) -> URLRequest {
+        var request = authorizedRequest(path: path, method: method)
+        request.timeoutInterval = timeout
         return request
     }
 
@@ -455,6 +470,26 @@ public struct LoomMessageClient: Sendable {
         return config
     }
 
+    public func latestRouteOperation() async throws -> LoomRouteOperation? {
+        let latest = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/receipts/latest"),
+            as: LoomLatestRouteOperation.self
+        )
+        guard latest.schema == "loom-latest-route-operation-v1" else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        if let operation = latest.operation {
+            guard operation.schema == "loom-route-operation-v1",
+                  operation.decision.taskId == operation.receipt.taskId,
+                  operation.receipt.producingLanguage == "Sounio",
+                  operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+            else {
+                throw LoomMessageClientError.invalidReceipt
+            }
+        }
+        return latest.operation
+    }
+
     public func updateRoutingConfig(
         _ update: LoomRoutingConfigUpdate
     ) async throws -> LoomRoutingConfigReceipt {
@@ -472,5 +507,57 @@ public struct LoomMessageClient: Sendable {
             throw LoomMessageClientError.invalidReceipt
         }
         return receipt
+    }
+
+    public func route(_ task: LoomRouteTaskRequest) async throws -> LoomRouteOperation {
+        var request = authorizedRequest(
+            path: "v1/routing/tasks",
+            method: "POST",
+            timeout: 75
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(task)
+        let operation = try await checkedResponse(request, as: LoomRouteOperation.self)
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == task.taskId,
+              operation.receipt.taskId == task.taskId,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
+    }
+
+    public func routeOperation(taskID: String) async throws -> LoomRouteOperation {
+        let operation = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/tasks/\(taskID)"),
+            as: LoomRouteOperation.self
+        )
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == taskID,
+              operation.receipt.taskId == taskID,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
+    }
+
+    public func cancelRoute(taskID: String) async throws -> LoomRouteOperation {
+        let operation = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/tasks/\(taskID)/cancel", method: "POST"),
+            as: LoomRouteOperation.self
+        )
+        guard operation.schema == "loom-route-operation-v1",
+              operation.decision.taskId == taskID,
+              operation.receipt.taskId == taskID,
+              operation.receipt.producingLanguage == "Sounio",
+              operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+        else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        return operation
     }
 }

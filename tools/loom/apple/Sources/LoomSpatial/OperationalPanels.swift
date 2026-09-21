@@ -152,6 +152,7 @@ private struct MockLaneRow: View {
 struct TopologyPanel: View {
     let snapshot: DashboardSnapshot
     let fleet: LoomFleetSnapshot?
+    let live: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -160,7 +161,7 @@ struct TopologyPanel: View {
                     HStack(spacing: 7) {
                         Text("ROUTE TOPOLOGY")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        Text("SCENARIO")
+                        Text(live ? "LIVE AUTHORITY" : "SCENARIO")
                             .font(.system(size: 8, weight: .black, design: .monospaced))
                             .foregroundStyle(LoomColor.amber)
                     }
@@ -178,7 +179,9 @@ struct TopologyPanel: View {
                     )
                 }
                 StatusPill(
-                    label: "simulated \(snapshot.receipt.status.rawValue)",
+                    label: live
+                        ? "9032 \(snapshot.receipt.status.rawValue)"
+                        : "simulated \(snapshot.receipt.status.rawValue)",
                     color: snapshot.receipt.status.loomColor
                 )
             }
@@ -190,7 +193,7 @@ struct TopologyPanel: View {
                 .accessibilityLabel("Routing topology scenario")
                 .accessibilityValue(snapshot.receipt.reason)
 
-            RouteReceiptStrip(receipt: snapshot.receipt)
+            RouteReceiptStrip(receipt: snapshot.receipt, live: live)
         }
         .background(Color.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
         .overlay(
@@ -202,14 +205,15 @@ struct TopologyPanel: View {
 
 private struct RouteReceiptStrip: View {
     let receipt: RouteReceipt
+    let live: Bool
 
     var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: receipt.status == .committed ? "checkmark.seal.fill" : "xmark.seal.fill")
+                Image(systemName: receiptIcon)
                     .foregroundStyle(receipt.status.loomColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("SCENARIO RECEIPT · NOT AUTHORITY")
+                    Text(live ? "SOUNIO ROUTE RECEIPT · ACTION 9032" : "SCENARIO RECEIPT · NOT AUTHORITY")
                         .font(.system(size: 8, weight: .black, design: .monospaced))
                         .foregroundStyle(LoomColor.amber)
                     Text(receipt.reason)
@@ -228,10 +232,26 @@ private struct RouteReceiptStrip: View {
                     ReceiptField(name: "effort", value: receipt.effort)
                     ReceiptField(name: "fallbackChain", value: receipt.fallbackChain.joined(separator: " -> ").nilIfEmpty ?? "none")
                     ReceiptField(name: "status", value: receipt.status.rawValue)
+                    if let semanticsHash = receipt.semanticsHash {
+                        ReceiptField(name: "semanticsHash", value: String(semanticsHash.prefix(16)) + "...")
+                    }
+                    if let sessionId = receipt.sessionId, !sessionId.isEmpty {
+                        ReceiptField(name: "sessionId", value: sessionId)
+                    }
                 }
             }
         }
         .padding(12)
+    }
+
+    private var receiptIcon: String {
+        switch receipt.status {
+        case .committed, .completed: "checkmark.seal.fill"
+        case .running: "bolt.shield.fill"
+        case .planned, .fallback: "arrow.triangle.branch"
+        case .cancelled: "stop.circle.fill"
+        case .refused, .failed: "xmark.seal.fill"
+        }
     }
 }
 
@@ -358,8 +378,8 @@ struct ConversationDock: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("AGENT CHANNEL")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        Text("CONVERSATION")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
                         Text(selectedLane.map { "\($0.agent) / \($0.lane)" } ?? "No live lane selected")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundStyle(.secondary)
@@ -372,9 +392,9 @@ struct ConversationDock: View {
                 .padding(12)
 
                 Picker("Channel", selection: $tab) {
-                    Text("Conversation").tag(0)
+                    Text("Chat").tag(0)
                     Text("Evidence").tag(1)
-                    Text("Configure").tag(2)
+                    Text("Routing").tag(2)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -388,45 +408,54 @@ struct ConversationDock: View {
                     Divider().opacity(0.35)
                 }
 
-                ScrollView {
-                    if tab == 0 {
-                        LazyVStack(spacing: 12) {
-                            HStack {
-                                Text("THREAD TRUTH")
-                                    .font(.system(size: 8, weight: .black, design: .monospaced))
-                                    .foregroundStyle(store.visibleThreadState == "answered" ? LoomColor.green : LoomColor.cyan)
-                                Spacer()
-                                Text(store.visibleThreadState?.replacingOccurrences(of: "_", with: " ").uppercased() ?? "NO DURABLE THREAD")
-                                    .font(.system(size: 8, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let error = store.threadError {
-                                ThreadStateCard(
-                                    title: "THREAD READ REFUSED",
-                                    detail: error,
-                                    color: LoomColor.red
-                                )
-                            } else if store.visibleThreadEvents.isEmpty {
-                                ThreadStateCard(
-                                    title: store.messageBridgeConfigured ? "NO THREAD FOR THIS LANE" : "MESSAGE BRIDGE NOT CONFIGURED",
-                                    detail: selectedLane?.deliveryReadiness == .immediate
-                                        ? "ACTIVE ENDPOINT / READY FOR A DURABLE REQUEST"
-                                        : "DURABLE BUS AVAILABLE WHEN CONFIGURED",
-                                    color: selectedLane?.deliveryReadiness == .immediate ? LoomColor.green : LoomColor.amber
-                                )
-                            } else {
-                                ForEach(store.visibleThreadEvents) { event in
-                                    ThreadEventBubble(event: event)
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        if tab == 0 {
+                            LazyVStack(spacing: 12) {
+                                HStack {
+                                    Text("DURABLE TIMELINE")
+                                        .font(.system(size: 8, weight: .black, design: .monospaced))
+                                        .foregroundStyle(store.visibleThreadState == "active" ? LoomColor.green : LoomColor.cyan)
+                                    Spacer()
+                                    Text(store.visibleThreadEvents.isEmpty
+                                        ? "NO MESSAGES"
+                                        : "\(store.visibleThreadEvents.count) TURNS · \(store.visibleThreadState?.uppercased() ?? "STORED")")
+                                        .font(.system(size: 8, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let error = store.threadError {
+                                    ThreadStateCard(
+                                        title: "THREAD READ REFUSED",
+                                        detail: error,
+                                        color: LoomColor.red
+                                    )
+                                } else if store.visibleThreadEvents.isEmpty {
+                                    ThreadStateCard(
+                                        title: store.messageBridgeConfigured ? "START A CONVERSATION" : "MESSAGE BRIDGE NOT CONFIGURED",
+                                        detail: selectedLane?.deliveryReadiness == .immediate
+                                            ? "This agent is present and can receive a live turn."
+                                            : "Messages remain durable while the agent is away.",
+                                        color: selectedLane?.deliveryReadiness == .immediate ? LoomColor.green : LoomColor.amber
+                                    )
+                                } else {
+                                    ForEach(store.visibleThreadEvents) { event in
+                                        ThreadEventBubble(event: event)
+                                            .id(event.id)
+                                    }
                                 }
                             }
+                            .padding(12)
+                        } else if tab == 1 {
+                            EvidenceLedger(snapshot: store.dashboard, eventGroups: store.eventGroups)
+                                .padding(12)
+                        } else {
+                            RoutingConfigurationPanel(store: store)
+                                .padding(12)
                         }
-                        .padding(12)
-                    } else if tab == 1 {
-                        EvidenceLedger(snapshot: store.dashboard, eventGroups: store.eventGroups)
-                            .padding(12)
-                    } else {
-                        RoutingConfigurationPanel(store: store)
-                            .padding(12)
+                    }
+                    .onChange(of: store.visibleThreadEvents.last?.id) { _, eventID in
+                        guard tab == 0, let eventID else { return }
+                        scrollProxy.scrollTo(eventID, anchor: .bottom)
                     }
                 }
 
@@ -435,12 +464,21 @@ struct ConversationDock: View {
 
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(alignment: .bottom, spacing: 8) {
-                            TextField("Message selected agent", text: $store.conversationDraft, axis: .vertical)
+                            TextField(
+                                selectedLane.map { "Message \($0.agent)" } ?? "Select an agent to begin",
+                                text: $store.conversationDraft,
+                                axis: .vertical
+                            )
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 12))
-                                .lineLimit(1...4)
-                                .padding(9)
-                                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                                .font(.system(size: 13))
+                                .lineLimit(1...6)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(selectedLaneColor.opacity(0.18), lineWidth: 0.8)
+                                )
                                 .accessibilityIdentifier("loom-conversation-draft")
                                 .accessibilityLabel("Message selected agent")
                             Button {
@@ -616,6 +654,114 @@ private struct RoutingConfigurationPanel: View {
                 }
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
             }
+
+            Divider().opacity(0.45)
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("ROUTE A REVIEW")
+                            .font(.system(size: 10, weight: .black, design: .monospaced))
+                        Text("TASK -> SOUNIO 9032 -> PROVIDER CUSTODY")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    routeStateIndicator
+                }
+
+                TextField("Task title", text: $store.routeTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(8)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("loom-route-title")
+
+                TextField("Review brief", text: $store.routePrompt, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .lineLimit(3...7)
+                    .padding(8)
+                    .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("loom-route-prompt")
+
+                HStack(spacing: 9) {
+                    Button {
+                        Task { await store.routeTask() }
+                    } label: {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 21, weight: .semibold))
+                            .foregroundStyle(store.canRouteTask ? LoomColor.magenta : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!store.canRouteTask)
+                    .help("Submit a review task to the Sounio routing authority")
+                    .accessibilityIdentifier("loom-route-submit")
+                    .accessibilityLabel("Route review task")
+
+                    if store.routeOperation?.receipt.status == .running {
+                        Button {
+                            Task { await store.cancelRouteTask() }
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 21, weight: .semibold))
+                                .foregroundStyle(LoomColor.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel the running routed task")
+                        .accessibilityIdentifier("loom-route-cancel")
+                        .accessibilityLabel("Cancel routed task")
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.routeState.label)
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(routeStateColor)
+                        Text("External models remain REVIEW_ONLY.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if case let .failed(reason) = store.routeState {
+                    ThreadStateCard(title: "ROUTING FAILED CLOSED", detail: reason, color: LoomColor.red)
+                }
+            }
+        }
+    }
+
+    private var routeStateColor: Color {
+        switch store.routeState {
+        case .ready: LoomColor.cyan
+        case .deciding: LoomColor.magenta
+        case let .received(operation): operation.receipt.status.loomColor
+        case .failed: LoomColor.red
+        }
+    }
+
+    @ViewBuilder
+    private var routeStateIndicator: some View {
+        switch store.routeState {
+        case .deciding:
+            ProgressView().controlSize(.small).tint(LoomColor.magenta)
+        case let .received(operation):
+            Image(systemName: routeStatusIcon(operation.receipt.status))
+                .foregroundStyle(operation.receipt.status.loomColor)
+        case .failed:
+            Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(LoomColor.red)
+        case .ready:
+            Image(systemName: "shield.lefthalf.filled").foregroundStyle(LoomColor.cyan)
+        }
+    }
+
+    private func routeStatusIcon(_ status: ReceiptStatus) -> String {
+        switch status {
+        case .running: "bolt.shield.fill"
+        case .completed, .committed: "checkmark.shield.fill"
+        case .cancelled: "stop.circle.fill"
+        case .planned, .fallback: "arrow.triangle.branch"
+        case .refused, .failed: "xmark.shield.fill"
         }
     }
 
@@ -682,29 +828,39 @@ private struct ThreadEventBubble: View {
             if event.isLocal { Spacer(minLength: 28) }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(event.kind.replacingOccurrences(of: "_", with: " ").uppercased())
-                    Text(event.state.uppercased())
-                        .foregroundStyle(.secondary)
+                    Text(event.isLocal ? "YOU" : displayActor)
                     Spacer(minLength: 0)
-                    Text(event.utc)
+                    Text(shortTime)
                         .foregroundStyle(.secondary)
                 }
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(event.isLocal ? LoomColor.cyan : LoomColor.magenta)
-                Text(event.actor.uppercased())
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
                 Text(event.body)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(10)
+            .padding(11)
             .background(
-                (event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 7)
+                (event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.10),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke((event.isLocal ? LoomColor.cyan : LoomColor.magenta).opacity(0.16), lineWidth: 0.7)
             )
             if !event.isLocal { Spacer(minLength: 28) }
         }
+    }
+
+    private var shortTime: String {
+        guard let marker = event.utc.lastIndex(of: "T") else { return event.utc }
+        return String(event.utc[event.utc.index(after: marker)...].prefix(8))
+    }
+
+    private var displayActor: String {
+        event.actor.split(separator: "/", maxSplits: 1).first
+            .map { String($0).uppercased() } ?? event.actor.uppercased()
     }
 }
 
@@ -736,7 +892,9 @@ private struct ReceiptEvidence: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .foregroundStyle(receipt.status.loomColor)
             VStack(alignment: .leading, spacing: 4) {
-                Text("SCENARIO RECEIPT · NOT AUTHORITY")
+                Text(receipt.producingLanguage == "Sounio"
+                    ? "LIVE SOUNIO RECEIPT · ACTION 9032"
+                    : "SCENARIO RECEIPT · NOT AUTHORITY")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text(receipt.taskId)

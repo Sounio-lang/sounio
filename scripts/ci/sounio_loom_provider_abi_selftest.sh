@@ -11,6 +11,7 @@ STATE_DIR="$TEST_ROOT/state"
 SESSION_ID='11111111-1111-4111-8111-111111111111'
 AGENT='provider-abi-test'
 LANE='codex-headless'
+WAIT_LANE='codex-headless-wait'
 PERSISTENT_LANE='codex-persistent'
 CLAUDE_PERSISTENT_LANE='claude-persistent'
 CLAUDE_RESUME_LANE='claude-resume'
@@ -25,6 +26,8 @@ fail() {
 cleanup() {
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$WAIT_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$PERSISTENT_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
@@ -72,7 +75,16 @@ case "$name:${1:-}:${2:-}" in
     fi
     printf '{"type":"thread.started","thread_id":"provider-abi-thread"}\n'
     printf 'FAKE_CODEX_OUTPUT:%s\n' "$prompt"
-    sleep 1
+    if [[ "$prompt" == PROVIDER_ABI_FAST_EXIT_WITNESS ]]; then
+      [[ "${SOUNIO_LOOM_PROVIDER_START_READY_PATH:-}" == /* ]] || exit 48
+      for _ in $(seq 1 3000); do
+        [[ -f "$SOUNIO_LOOM_PROVIDER_START_READY_PATH" ]] && break
+        sleep 0.01
+      done
+      [[ -f "$SOUNIO_LOOM_PROVIDER_START_READY_PATH" ]] || exit 49
+    else
+      sleep 1
+    fi
     ;;
   fake-codex:--no-alt-screen:*)
     if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
@@ -140,6 +152,9 @@ case "$name:${1:-}:${2:-}" in
   fake-grok:--version:)
     printf 'grok provider-abi-test\n'
     ;;
+  fake-cursor:--version:)
+    printf 'cursor-agent provider-abi-test\n'
+    ;;
   fake-grok:login:)
     printf 'FAKE_LOGIN provider=grok\n'
     ;;
@@ -159,7 +174,7 @@ case "$name:${1:-}:${2:-}" in
 esac
 FAKE
 chmod +x "$TEST_ROOT/fake-provider"
-for provider in codex claude kimi grok opencode; do
+for provider in codex claude kimi grok cursor opencode; do
   cp "$TEST_ROOT/fake-provider" "$TEST_ROOT/fake-$provider"
 done
 
@@ -167,15 +182,16 @@ export SOUNIO_LOOM_PROVIDER_CODEX="$TEST_ROOT/fake-codex"
 export SOUNIO_LOOM_PROVIDER_CLAUDE="$TEST_ROOT/fake-claude"
 export SOUNIO_LOOM_PROVIDER_KIMI="$TEST_ROOT/fake-kimi"
 export SOUNIO_LOOM_PROVIDER_GROK="$TEST_ROOT/fake-grok"
+export SOUNIO_LOOM_PROVIDER_CURSOR="$TEST_ROOT/fake-cursor"
 export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.27.39$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.31.0$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
-jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 5)' \
+jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 6)' \
   <<< "$providers" >/dev/null || fail 'provider catalog schema or cardinality changed'
 jq -e '.providers[] | select(.provider == "codex") |
   .installed == true and .auth == "authenticated" and
@@ -201,15 +217,18 @@ jq -e '.providers[] | select(.provider == "opencode") |
 secret='PROVIDER_ABI_SECRET_PROMPT'
 secret_sha="$(printf '%s' "$secret" | sha256sum | awk '{print $1}')"
 plan="$($LOOM provider-plan --provider codex --session-id "$SESSION_ID" \
-  --cwd "$TEST_ROOT" --model provider-test --prompt "$secret" --json)"
+  --cwd "$TEST_ROOT" --model provider-test --effort high --prompt "$secret" --json)"
 if grep -Fq "$secret" <<< "$plan"; then
   fail 'provider plan disclosed the raw prompt'
 fi
 jq -e --arg digest "$secret_sha" '
   .schema == "loom-provider-abi-v1" and .provider == "codex" and
   .lifecycle == "turn" and .stdin_authority == "closed" and
-  .prompt_sha256 == $digest and .prompt_bytes == 26 and
+  .prompt_sha256 == $digest and .prompt_bytes == 26 and .effort == "high" and
   .unsafe_auto == false and .context_isolation == false and
+  (.argv | index("-c")) as $effort_index |
+  $effort_index != null and
+  .argv[$effort_index + 1] == "model_reasoning_effort=\"high\"" and
   (.argv | index("--dangerously-bypass-approvals-and-sandbox") == null) and
   (.argv | index("--ephemeral") == null)' \
   <<< "$plan" >/dev/null || fail 'safe Codex plan has the wrong custody fields'
@@ -460,6 +479,17 @@ grep -q "FAKE_CODEX_OUTPUT:$run_prompt" <<< "$replay" || \
   fail 'provider output was not durably replayable'
 grep -q 'source=offline' "$TEST_ROOT/snapshot.meta" || \
   fail 'terminal provider replay did not use verified offline custody'
+
+wait_prompt='PROVIDER_ABI_FAST_EXIT_WITNESS'
+"$LOOM" provider-start --wait --provider codex --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$WAIT_LANE" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$wait_prompt" --isolate-context \
+  > "$TEST_ROOT/wait-start.out"
+wait_descriptor="$STATE_DIR/sessions/$AGENT--$WAIT_LANE/session.state"
+[[ "$(sed -n 's/^state=//p' "$wait_descriptor")" == exited ]] || \
+  fail 'provider-start --wait returned before the provider reached terminal state'
+grep -q "FAKE_CODEX_OUTPUT:$wait_prompt" "$TEST_ROOT/wait-start.out" || \
+  fail 'provider-start --wait did not relay provider output'
 
 kimi_run_prompt='KIMI_ABI_RUN_WITNESS'
 CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
