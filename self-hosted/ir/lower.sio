@@ -457,8 +457,19 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 var IR_LOWER_HARD_ERROR_FN_BUF: [i8; 128]
 var IR_LOWER_HARD_ERROR_FN_LEN: i64 = 0
 var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
-// 0=unspecified, 1=instruction capacity, 2=unresolved print ABI.
+// 0=unspecified, 1=instruction capacity, 2=unresolved print ABI,
+// 3=f64-array tuple side table full.
 var IR_LOWER_HARD_ERROR_REASON: i64 = 0
+// Reason 3's sticky half. The f64-array tuple table below is process-global
+// and never reset, so its overflow is a property of the SOURCE, not of one
+// lowering pass -- and it is found in a pre-pass that runs ONE LINE before the
+// lowerer_new() whose lower_hard_error_reset() would clear it. Keeping the bit
+// here lets the reset re-arm from it instead of dropping the only warning that
+// the metadata is incomplete.
+var LOWER_FN_TUPLE_ARR_OVERFLOW: i64 = 0
+var LOWER_FN_TUPLE_ARR_OVERFLOW_BUF: [i8; 128]
+var LOWER_FN_TUPLE_ARR_OVERFLOW_LEN: i64 = 0
+let LOWER_FN_TUPLE_ARR_CAP: i64 = 4096
 // Same flat-array treatment, same reason.
 var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
 var IR_LOWER_ERROR_FIRST_FN_LEN: i64 = 0
@@ -631,9 +642,32 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print(" IR instructions but IR_MAX_INSTRS is ")
         print_int(IR_LOWER_HARD_ERROR_LIMIT)
         print("\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 3 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" functions return a tuple with an `[f64; N]` slot, starting at `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("`;\n")
+        print("         recording more would need a bigger LOWER_FN_TUPLE_ARR_CAP. Refused\n")
+        print("         rather than lower those f64 array elements as integers.\n")
     } else {
         print("  cause: lowering raised a hard error and recorded no detail — if this\n")
         print("         prints, a NEW raise site was added without recording its reason.\n")
+    }
+}
+
+fn lower_fn_tuple_arr_arm_hard_error() with Mut {
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 3
+        IR_LOWER_HARD_ERROR_LIMIT = LOWER_FN_TUPLE_ARR_CAP
+        IR_LOWER_HARD_ERROR_NEEDED = 0
+        var i: i64 = 0
+        while i < LOWER_FN_TUPLE_ARR_OVERFLOW_LEN && i < 128 {
+            IR_LOWER_HARD_ERROR_FN_BUF[i as usize] = LOWER_FN_TUPLE_ARR_OVERFLOW_BUF[i as usize]
+            i = i + 1
+        }
+        IR_LOWER_HARD_ERROR_FN_LEN = LOWER_FN_TUPLE_ARR_OVERFLOW_LEN
     }
 }
 
@@ -647,6 +681,11 @@ pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_ERROR_FIRST_FN_LEN = 0
     IR_LOWER_ERROR_STAGE = 0
     IR_LOWER_ERROR_STAGE_IDX = 0
+    // Re-arm, do not drop: see LOWER_FN_TUPLE_ARR_OVERFLOW. A reset clears what
+    // one pass recorded; it cannot un-exhaust the table.
+    if LOWER_FN_TUPLE_ARR_OVERFLOW != 0 {
+        lower_fn_tuple_arr_arm_hard_error()
+    }
 }
 
 // OR the durable flag into a value-threaded had_error. Used at every
@@ -755,9 +794,68 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // structural_ensemble under Madaros). Kept out of returns_float on purpose: that
 // code is read by codegen, the optimizer and the IR serializer, where a new
 // nonzero value for these tuples would change behaviour.
+//
+// THE HASH IS NOT THE KEY. fo_name_hash is unmixed djb2 (h*33 + b, seed 5381,
+// plus n.len, capped at 64 bytes) and collides on short names -- "ab" and "bA"
+// both hash to 5863210. Matching on the hash alone let an integer-returning
+// tuple fn pick up an unrelated fn's f64 mask, which is the SAME
+// bits-as-i64 corruption this table exists to prevent, only pointed the other
+// way. It also broke the dedup probe below: a colliding second fn looked
+// already-present and was dropped. The stored name settles both, as
+// lowerer_lookup_fn_id_by_name_ref does with ir_name_eq.
+//
+// Names live in a FLAT [i8] buffer with a parallel length array, not a
+// [Name; N] global: Name-typed globals overrun into their neighbours in this
+// tree (see IR_LOWER_HARD_ERROR_FN_BUF above and the note on why the probe
+// buffers are flat). Stride is Name.buf's own 384, so no name is ever clipped
+// and the compare is exact for any length.
 var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
 var LOWER_FN_TUPLE_ARR_HASH: [i64; 4096] = [0; 4096]
 var LOWER_FN_TUPLE_ARR_MASK: [i64; 4096] = [0; 4096]
+let LOWER_FN_TUPLE_ARR_NAME_STRIDE: i64 = 384
+var LOWER_FN_TUPLE_ARR_NAME_BUF: [i8; 1572864]
+var LOWER_FN_TUPLE_ARR_NAME_LEN: [i64; 4096] = [0; 4096]
+
+fn lower_fn_tuple_arr_name_store(slot: i64, n: Name) with Mut, Panic, Div {
+    let base = slot * LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    var nlen = n.len
+    if nlen > LOWER_FN_TUPLE_ARR_NAME_STRIDE {
+        nlen = LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    }
+    var i: i64 = 0
+    while i < nlen {
+        LOWER_FN_TUPLE_ARR_NAME_BUF[(base + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    LOWER_FN_TUPLE_ARR_NAME_LEN[slot as usize] = nlen
+}
+
+fn lower_fn_tuple_arr_name_eq(slot: i64, n: Name) -> bool with Mut, Panic, Div {
+    if LOWER_FN_TUPLE_ARR_NAME_LEN[slot as usize] != n.len {
+        return false
+    }
+    let base = slot * LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    var i: i64 = 0
+    while i < n.len && i < LOWER_FN_TUPLE_ARR_NAME_STRIDE {
+        if LOWER_FN_TUPLE_ARR_NAME_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Past the cap the table used to stop recording and say nothing, so every
+// later tuple-returning fn quietly went back to the integer element path in a
+// program that still compiled clean -- the exact silent miscompile this table
+// exists to stop. Refuse instead. Reason 3 is read by lower_hard_error_report.
+fn lower_fn_tuple_arr_capacity_exhausted(n: Name) with Mut {
+    if LOWER_FN_TUPLE_ARR_OVERFLOW == 0 {
+        LOWER_FN_TUPLE_ARR_OVERFLOW = 1
+        ir_copy_name_to_flat(&n, &! LOWER_FN_TUPLE_ARR_OVERFLOW_BUF, &! LOWER_FN_TUPLE_ARR_OVERFLOW_LEN)
+    }
+    lower_fn_tuple_arr_arm_hard_error()
+}
 
 fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
     match *opt {
@@ -781,7 +879,8 @@ fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
     let h = fo_name_hash(name)
     var i: i64 = 0
     while i < LOWER_FN_TUPLE_ARR_COUNT {
-        if LOWER_FN_TUPLE_ARR_HASH[i as usize] == h {
+        // Hash first only because it is cheap; the name is what decides.
+        if LOWER_FN_TUPLE_ARR_HASH[i as usize] == h && lower_fn_tuple_arr_name_eq(i, name) {
             return LOWER_FN_TUPLE_ARR_MASK[i as usize]
         }
         i = i + 1
@@ -804,10 +903,16 @@ fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Pa
                                 Some(rt) => {
                                     if (*rt).kind == TypeExprKind::TypeTuple {
                                         let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
-                                        if mask != 0 && LOWER_FN_TUPLE_ARR_COUNT < 4096 && lower_fn_tuple_f64_array_mask(item_ref.name) == 0 {
-                                            LOWER_FN_TUPLE_ARR_HASH[LOWER_FN_TUPLE_ARR_COUNT as usize] = fo_name_hash(item_ref.name)
-                                            LOWER_FN_TUPLE_ARR_MASK[LOWER_FN_TUPLE_ARR_COUNT as usize] = mask
-                                            LOWER_FN_TUPLE_ARR_COUNT = LOWER_FN_TUPLE_ARR_COUNT + 1
+                                        if mask != 0 && lower_fn_tuple_f64_array_mask(item_ref.name) == 0 {
+                                            if LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP {
+                                                let slot = LOWER_FN_TUPLE_ARR_COUNT
+                                                LOWER_FN_TUPLE_ARR_HASH[slot as usize] = fo_name_hash(item_ref.name)
+                                                LOWER_FN_TUPLE_ARR_MASK[slot as usize] = mask
+                                                lower_fn_tuple_arr_name_store(slot, item_ref.name)
+                                                LOWER_FN_TUPLE_ARR_COUNT = slot + 1
+                                            } else {
+                                                lower_fn_tuple_arr_capacity_exhausted(item_ref.name)
+                                            }
                                         }
                                     }
                                 }
@@ -8405,7 +8510,16 @@ impl Lowerer {
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
             Some(value_expr) => {
+                // lower_expr_has_float_source_ref is the free fn: it sees float
+                // literals, casts and binary subtrees of them, and returns false
+                // for an f64 LOCAL. lower_array_literal_expr_ref routes every
+                // `Some(_)` repeat literal here, so `([x; 2])[0] * 2.0` with an
+                // f64 local x stayed unmarked and took the integer element path
+                // -- the same gap the elementwise branch closed by asking the
+                // local-aware classifier. Ask it here too; it reads the repeat
+                // value through e.left, which is value_expr.
                 let elem_is_float = lower_expr_has_float_source_ref(&(*value_expr))
+                    || lo.array_literal_elems_are_float_ref(e)
                 // Aggregate literals must be re-materialised per slot, otherwise
                 // every element aliases one object. repeat_count <= 0 keeps the
                 // legacy path so the value expression is still lowered exactly
