@@ -4,10 +4,10 @@ exception Error of string
 exception Forwarded of int
 
 let pinned_manifest_sha256 =
-  "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
+  "7019af35cddccddd2c34e7dca0f40300bc446f5e7add52c37b0325b6ae9c1037"
 
 let pinned_native_hook_cutover_manifest_sha256 =
-  "16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a"
+  "4ce46da965e6e19390dcfde8119bf8e9dcb1dab2c1722f5c27cc5e330532932a"
 
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
@@ -999,7 +999,7 @@ let runtime_authority_root () =
 
 let authority_policy_root worktree_root =
   let local_manifest =
-    Filename.concat worktree_root "tools/loom/language_authority.freeze.v1"
+    Filename.concat worktree_root "tools/loom/language_authority.freeze.v2"
   in
   let selected =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT" with
@@ -1022,7 +1022,7 @@ let authorize_guard root _raw_event base_receipt =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then failf "Sounio-authority-policy-missing";
   if sha256_file manifest_path <> pinned_manifest_sha256 then
@@ -1076,7 +1076,7 @@ let runtime_native_hook_cutover_root () =
 
 let native_hook_cutover_policy_root worktree_root =
   let local_manifest =
-    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v1"
+    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v2"
   in
   let selected =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT" with
@@ -1159,7 +1159,7 @@ let authorize_native_hook_cutover root profile event _raw_event base_receipt =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v2"
   in
   if not (Sys.file_exists manifest_path) then
     failf "Sounio-native-hook-cutover-policy-missing";
@@ -2088,7 +2088,15 @@ let execute_event tool_root root event agent lane raw_session_id
       refresh_hook_capability tool_root presence_root agent lane raw_session_id;
       refresh_endpoint tool_root presence_root agent lane raw_session_id;
       if event_name = "SessionStart" then (
-        if obligation_supervisor_enabled then
+        (* Um agente dentro da membrana do change kernel nao gerencia daemons do
+           host. De la o /proc/<pid>/exe do supervisor le vazio atraves do
+           namespace de usuario, o ensure nao consegue provar que o supervisor e
+           dele e recusa a sessao inteira. Quem garante o supervisor e a ativacao
+           do runtime e os agentes nao mediados. *)
+        let material_readonly =
+          Sys.getenv_opt "SOUNIO_LOOM_MATERIAL_READONLY" = Some "1"
+        in
+        if obligation_supervisor_enabled && not material_readonly then
           ignore
             (coord_ok tool_root root
                [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);

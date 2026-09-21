@@ -5,8 +5,8 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT_DIR"
-MANIFEST=tools/loom/kernel_peer_activation_capsule_authority.freeze.v1
-EVIDENCE=tools/loom/evidence/loom-kernel-peer-activation-capsule-authority-v1-20260829.txt
+MANIFEST=tools/loom/kernel_peer_activation_capsule_authority.freeze.v2
+EVIDENCE=tools/loom/evidence/loom-kernel-peer-activation-capsule-authority-v2-20260917.txt
 
 fail() {
   printf 'sounio-loom-kernel-peer-activation-capsule-authority-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -38,7 +38,7 @@ hash_u32_csv() {
 ! grep -Fq '__' "$MANIFEST" || fail 'manifest contains an unresolved marker'
 ! grep -Fq '__' "$EVIDENCE" || fail 'evidence contains an unresolved marker'
 
-[[ "$(field schema)" == loom-kernel-peer-activation-capsule-authority-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-kernel-peer-activation-capsule-authority-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'action 9031 semantics are not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role drifted'

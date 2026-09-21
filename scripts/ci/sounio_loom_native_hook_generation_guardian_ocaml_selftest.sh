@@ -125,7 +125,7 @@ write_rotation_canary_fixture() {
   : > "$decisions"
   for event in SessionStart UserPromptSubmit Stop; do
     printf '%b\n' \
-      "schema=loom-agent-hook-receipt-v1\tdecision=ALLOW\tprovider=codex\tevent=$event\tsemantics_sha256=27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\ttoolchain_sha256=$loom_sha256\tprovider_config_sha256=$codex_sha256\tresult=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045" \
+      "schema=loom-agent-hook-receipt-v1\tdecision=ALLOW\tprovider=codex\tevent=$event\tsemantics_sha256=842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\ttoolchain_sha256=$loom_sha256\tprovider_config_sha256=$codex_sha256\tresult=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045" \
       >> "$decisions"
   done
   printf '%b\n' \

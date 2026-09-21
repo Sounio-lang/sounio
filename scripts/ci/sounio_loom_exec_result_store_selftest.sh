@@ -14,17 +14,17 @@ fail() {
 
 manifest_value() {
   local key="$1" line count
-  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" || true)"
+  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" || true)"
   [[ "$count" == 1 ]] || fail "manifest field $key occurs $count times"
-  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1")"
+  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2")"
   printf '%s' "${line#*=}"
 }
 
 evidence_value() {
   local key="$1" line count
-  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v1-20260830.txt" || true)"
+  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v2-20260916.txt" || true)"
   [[ "$count" == 1 ]] || fail "evidence field $key occurs $count times"
-  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v1-20260830.txt")"
+  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/evidence/loom-exec-result-store-v2-20260916.txt")"
   printf '%s' "${line#*=}"
 }
 
@@ -102,7 +102,7 @@ set -e
   fail "authority promotion was not refused: $promotion"
 
 tampered_manifest="$TEST_ROOT/tampered.freeze.v1"
-cp "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" "$tampered_manifest"
+cp "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" "$tampered_manifest"
 printf 'tampered=true\n' >> "$tampered_manifest"
 set +e
 manifest_refusal="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -196,7 +196,7 @@ printf '%s\n' "$dependencies" | grep -Eqi 'python|rust' &&
 
 result="$(printf 'sounio-loom-exec-result-store-selftest: PASS semantic_authority=Sounio action=9033 operational_kernel=OCaml material_result_store=true result_store_attached=false publish=PASS resolve=PASS duplicate_publish=REFUSED receipt_tamper=REFUSED manifest_tamper=REFUSED runtime_tamper=REFUSED authority_promotion=REFUSED command_mismatch=DENY534 canonical_record_sabotage=PASS record_mode=0400 atomic_commit=link-no-replace+fsync receipt_sha256=%s manifest_sha256=%s record_sha256=%s authority_output_sha256=%s python_executed=false rust_executed=false exec_cell_attached=false provider_hook_switched=false production_activation=false parity_open=false claim_ready=false' \
   "$(manifest_value result_receipt_sha256)" \
-  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)" \
+  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" | cut -d ' ' -f 1)" \
   "$record_sha256" "$authority_output_sha256")"
 [[ "$(evidence_value operational_source_sha256)" == \
    "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_result.ml" | cut -d ' ' -f 1)" ]] ||
@@ -205,7 +205,7 @@ result="$(printf 'sounio-loom-exec-result-store-selftest: PASS semantic_authorit
    "$(sha256sum "$ROOT_DIR/scripts/ci/sounio_loom_exec_result_store_selftest.sh" | cut -d ' ' -f 1)" ]] ||
   fail 'evidence gate hash drifted'
 [[ "$(evidence_value sounio_semantics_manifest_sha256)" == \
-   "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)" ]] ||
+   "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" | cut -d ' ' -f 1)" ]] ||
   fail 'evidence Sounio freeze hash drifted'
 [[ "$(evidence_value loom_executable_sha256)" == \
    "$(sha256sum "$LOOM" | cut -d ' ' -f 1)" ]] ||

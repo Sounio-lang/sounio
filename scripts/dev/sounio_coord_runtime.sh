@@ -190,7 +190,15 @@ DURABLE_STATE_DIR="$GIT_COMMON_DIR/sounio-coord-state"
 OBLIGATION_ACTIVATION_FILE="$DURABLE_STATE_DIR/loom-obligation-activation.v1"
 
 migrate_legacy_state() {
+  # Depois da migracao o lock mora dentro do estado duravel. Fora dele o lock
+  # precisava de escrita no git common dir, que a membrana do change kernel
+  # (SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED=1) monta read-only: todo claim do
+  # agente mediado falhava com EROFS aqui. O caminho antigo so e usado no mundo
+  # pre-migracao, quando ainda nao existe estado duravel onde pegar o lock.
   local lock_file="$GIT_COMMON_DIR/.sounio-coord-state-migration.lock"
+  if [[ -d "$DURABLE_STATE_DIR" ]]; then
+    lock_file="$DURABLE_STATE_DIR/.migration.lock"
+  fi
   exec 8>"$lock_file"
   flock 8
 
@@ -3820,7 +3828,11 @@ coord_obligation_supervisor_owned_pids() {
             break
             ;;
         esac
-      done < "$proc/environ"
+      done 2>/dev/null < "$proc/environ" || true
+      # De dentro da membrana do change kernel o supervisor roda noutro
+      # namespace de usuario: o kernel nega abrir o environ dele mesmo com o
+      # [[ -r ]] passando. Sem ler, cai na regra de baixo, que ja e a do caso
+      # normal (supervisor do bundle usa o sounio-coord-state do git common).
     fi
     if [[ -z "$observed_state_dir" && -n "$runtime_root" ]]; then
       case "$script_path" in

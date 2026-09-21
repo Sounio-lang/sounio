@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-authority-v1-20260828.txt"
+MANIFEST="$ROOT_DIR/tools/loom/resident_authority.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-resident-authority-v2-20260917.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-resident-authority-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/resident-authority-one"
 RUNTIME_TWO="$TEST_ROOT/resident-authority-two"
@@ -57,7 +57,7 @@ hash_u32_csv() {
 
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-resident-authority-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-resident-authority-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'

@@ -19,7 +19,7 @@ external get_winsize : file_descr -> int * int = "sounio_loom_get_winsize"
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
-external enter_readonly_namespace : string array -> unit =
+external enter_readonly_namespace : string array -> string array -> unit =
   "sounio_loom_enter_readonly_namespace"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
@@ -837,9 +837,23 @@ let state_root ?override cwd =
   Unix.chmod root 0o700;
   Unix.realpath root
 
+let change_stage_parent session_dir =
+  (* O change kernel redireciona o Write do agente para o staging. Sob .git o
+     proprio Claude Code bloqueia a escrita como caminho sensivel, e dentro da
+     membrana o .git e read-only. SOUNIO_LOOM_CHANGE_STAGING_ROOT poe o staging
+     fora dos dois. Nao e fronteira de seguranca: o consume confere o conteudo
+     staged contra o hash esperado antes de o kernel materializar. *)
+  match Sys.getenv_opt "SOUNIO_LOOM_CHANGE_STAGING_ROOT" with
+  | Some root when root <> "" ->
+      let parent = Filename.concat root (Filename.basename session_dir) in
+      mkdir_p parent;
+      Unix.chmod parent 0o700;
+      parent
+  | _ -> Filename.concat session_dir "change-staging"
+
 let product_activation_policy_root () =
   let manifest_relative =
-    "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+    "tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
   in
   let rec source_root candidate =
     let manifest = Filename.concat candidate manifest_relative in
@@ -1581,6 +1595,16 @@ let guardian_handle_request guardian client line =
             let rows = parse_nonnegative "rows" rows in
             if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
               failf "invalid-terminal-size";
+            (* set_winsize takes (fd, rows, cols) -- see its call at fork
+               time above and the C stub sounio_loom_set_winsize, which
+               stores its second argument into ws_row and third into
+               ws_col. The RESIZE wire message carries [cols; rows] (see
+               resize_request/guardian_resize_request), so the arguments
+               must be swapped here to avoid setting ws_row=cols and
+               ws_col=rows -- which is exactly what silently made every
+               live resize (including this session's new attach-time
+               sync_winsize) collapse rendering width down to the
+               terminal's row count instead of widening it. *)
             set_winsize guardian.guardian_master_fd rows cols;
             ignore
               (append_event guardian.guardian_journal "RESIZE"
@@ -1823,8 +1847,8 @@ let guardian_stop_child guardian =
     in
     wait ())
 
-let run_guardian paths agent lane session_id cwd command instance_id output_path
-    guardian_journal_path =
+let run_guardian ?cols ?rows paths agent lane session_id cwd command instance_id
+    output_path guardian_journal_path =
   let lock = Unix.openfile paths.guardian_lock_path [ O_WRONLY; O_CREAT ] 0o600 in
   Unix.set_close_on_exec lock;
   (try Unix.lockf lock F_TLOCK 0
@@ -1851,7 +1875,42 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
         |> List.map Unix.realpath |> List.sort_uniq String.compare
         |> Array.of_list
       in
-      enter_readonly_namespace selected_roots);
+      (* O coord-state volta a ser gravavel dentro da membrana: sem isso o hook
+         do generation pin falha com EROFS no proprio lock e o agente nunca ve o
+         prompt. Respeita SOUNIO_COORD_DIR como o activation epoch ja faz. *)
+      let writable_roots =
+        let common = git_common_dir cwd in
+        (* Logs de decisao e auditoria que o proprio codigo do hook grava de
+           dentro da membrana (loom_hook, loom_exec, loom_exec_ingress,
+           loom_membrane). O estado de sessao do daemon, sounio-loom, fica de
+           fora de proposito: o daemon roda fora da membrana e o agente nao tem
+           por que escrever nele. *)
+        (match Sys.getenv_opt "SOUNIO_COORD_DIR" with
+         | Some path when path <> "" -> path
+         | _ -> Filename.concat common "sounio-coord-state")
+        :: List.map (Filename.concat common)
+             [ "sounio-loom-language-authority";
+               "sounio-loom-execution-authority";
+               "sounio-loom-execution-capabilities";
+               "sounio-loom-product-exec-ingress";
+               "sounio-loom-subprocess-membrane.tsv";
+               "sounio-loom-product-activation-dark.tsv" ]
+        |> List.map (fun path ->
+               (* O codigo do hook cria alguns desses caminhos sob demanda. Aqui
+                  o filho ainda enxerga o disco gravavel, entao cria o que falta:
+                  depois dos binds read-only, criar la dentro daria EROFS. *)
+               (if not (Sys.file_exists path) then
+                  try
+                    if Filename.check_suffix path ".tsv" then
+                      Unix.close (Unix.openfile path [ O_WRONLY; O_CREAT ] 0o600)
+                    else Unix.mkdir path 0o700
+                  with Unix_error (EEXIST, _, _) -> ());
+               path)
+        |> List.filter Sys.file_exists
+        |> List.map Unix.realpath |> List.sort_uniq String.compare
+        |> Array.of_list
+      in
+      enter_readonly_namespace selected_roots writable_roots);
     Unix.chdir cwd;
     let environment =
       Array.append (Unix.environment ())
@@ -1870,7 +1929,17 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
     Unix.execvpe command.(0) command environment);
   Unix.set_close_on_exec master_fd;
   Unix.set_nonblock master_fd;
-  (try set_winsize master_fd 40 140 with _ -> ());
+  (* Fall back to a fixed default only when the caller (ultimately, the
+     tmux wrapper that will attach to this session) did not report the
+     real terminal size. Starting the child at the wrong size and
+     resizing after the fact (see [stream_command]'s attach-time
+     [sync_winsize]) is too late: the child's TUI has often already
+     rendered its first diff-based frame against the fallback size by
+     the time a later SIGWINCH arrives, leaving stale/misaligned cells
+     behind that a diff-based renderer never fully overwrites. *)
+  let initial_rows = Option.value rows ~default:40 in
+  let initial_cols = Option.value cols ~default:140 in
+  (try set_winsize master_fd initial_rows initial_cols with _ -> ());
   let kernel_pid = Unix.getppid () in
   let guardian =
     {
@@ -2926,7 +2995,7 @@ let handle_request kernel client line =
                  (git_common_dir kernel.cwd)
           in
           Loom_change.prepare ~root:kernel.cwd
-            ~stage_parent:(Filename.concat kernel.paths.session_dir "change-staging")
+            ~stage_parent:(change_stage_parent kernel.paths.session_dir)
             ~kernel_generation:kernel.kernel_generation ~session_id ~call_id
             ~event_sha256 ~patch_sha256 ~mutation_payload ~paths
             ~provider_root_readonly
@@ -3811,20 +3880,25 @@ let acquire_kernel_lock paths =
    with Unix_error _ -> failf "another Loom kernel owns this lane");
   lock
 
-let launch_guardian paths agent lane session_id cwd command instance_id
-    output_path guardian_journal_path kernel_lock =
+let launch_guardian ?cols ?rows paths agent lane session_id cwd command
+    instance_id output_path guardian_journal_path kernel_lock kernel_listener =
   (try Unix.unlink paths.guardian_descriptor_path with _ -> ());
   match Unix.fork () with
   | 0 ->
       Unix.close kernel_lock;
+      (* serve_session binds the kernel listener before releasing the Guardian.
+         The Guardian must not keep that descriptor: otherwise a crashed kernel's
+         socket keeps accepting connections that nobody answers, and recover
+         blocks forever in its STATUS probe. *)
+      Unix.close kernel_listener;
       ignore (Unix.setsid ());
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
       Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_process_log paths.guardian_log_path;
       let code =
         try
-          run_guardian paths agent lane session_id cwd command instance_id
-            output_path guardian_journal_path
+          run_guardian ?cols ?rows paths agent lane session_id cwd command
+            instance_id output_path guardian_journal_path
         with
         | Loom_error error ->
             Printf.eprintf "guardian error: %s\n%!" error;
@@ -3944,7 +4018,7 @@ let close_kernel kernel lock =
   (try Unix.close kernel.guardian_fd with _ -> ());
   Unix.close lock
 
-let serve_session paths agent lane session_id cwd command =
+let serve_session ?cols ?rows paths agent lane session_id cwd command =
   let lock = acquire_kernel_lock paths in
   let instance_id = random_hex 16 in
   let generation_dir = Filename.concat (Filename.concat paths.session_dir "generations") instance_id in
@@ -3959,8 +4033,8 @@ let serve_session paths agent lane session_id cwd command =
   let kernel =
     try
       ignore
-        (launch_guardian paths agent lane session_id cwd command instance_id
-           output_path guardian_journal_path lock);
+        (launch_guardian ?cols ?rows paths agent lane session_id cwd command
+           instance_id output_path guardian_journal_path lock listener);
       let journal = open_journal journal_path in
       ignore
         (append_event journal "SESSION_STARTED"
@@ -4401,6 +4475,13 @@ let start_command ?(launch_source = "start")
   let session_id = required cli "--session-id" in
   let command = Array.of_list cli.rest in
   if Array.length command = 0 then failf "start requires a command after --";
+  (* The caller (normally the tmux wrapper about to attach) may report
+     the real terminal size up front, so the child's PTY -- and
+     whatever TUI runs inside it -- starts at the right size instead of
+     a fixed fallback. See [run_guardian] for why this must happen
+     before the child execs, not via a resize after the fact. *)
+  let cols = Option.map (parse_nonnegative "cols") (optional cli "--cols") in
+  let rows = Option.map (parse_nonnegative "rows") (optional cli "--rows") in
   let command_sha256 = command_argv_digest command in
   let paths = session_paths root agent lane in
   let already_active =
@@ -4433,7 +4514,7 @@ let start_command ?(launch_source = "start")
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
       Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_daemon_log paths.daemon_log_path;
-      let code = serve_session paths agent lane session_id cwd command in
+      let code = serve_session ?cols ?rows paths agent lane session_id cwd command in
       exit code
   | daemon_pid ->
       let deadline = Unix.gettimeofday () +. ready_timeout in
@@ -4706,10 +4787,34 @@ let stream_command cli interactive =
       Some (set_terminal_raw Unix.stdin)
     else None
   in
+  (* The guardian's PTY starts at a hardcoded fallback size (see
+     [start_command]/guardian fork) and previously stayed there forever,
+     because nothing ever told it the attaching terminal's real size:
+     the underlying program renders assuming that fallback width/height,
+     which the real (usually smaller) terminal then wraps/truncates,
+     producing corrupted-looking output. Sync the real size once on
+     attach, and again on every SIGWINCH, using the existing RESIZE
+     wire protocol ([resize_request], unchanged). *)
+  let sync_winsize () =
+    if Option.is_some terminal then
+      try
+        let rows, cols = get_winsize Unix.stdin in
+        if rows > 0 && cols > 0 then ignore (resize_request paths cols rows)
+      with _ -> ()
+  in
+  (* OCaml's [Sys] module does not expose SIGWINCH (it isn't portable to
+     Windows); this whole binary is Linux-only already (see the
+     [#ifdef __linux__] guards in loom_pty_stubs.c), where SIGWINCH is
+     always signal 28. *)
+  let sigwinch = 28 in
+  sync_winsize ();
+  if Option.is_some terminal then
+    Sys.set_signal sigwinch (Sys.Signal_handle (fun _ -> sync_winsize ()));
   let running = ref true in
   Fun.protect
     ~finally:(fun () ->
       Option.iter (fun original -> Unix.tcsetattr Unix.stdin TCSANOW original) terminal;
+      if Option.is_some terminal then Sys.set_signal sigwinch Sys.Signal_default;
       Unix.close socket)
     (fun () ->
       while !running do
@@ -11061,13 +11166,13 @@ let fleet_run_loom root spec action =
   run_captured ~environment:(fleet_provider_environment spec) runtime arguments
 
 let custody_transfer_semantics_sha256 =
-  "5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c"
+  "4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727"
 
 let custody_transfer_manifest_sha256 =
-  "ee4e5d128bf5b0fd7166e74c9815a17506a5b9844730c1be2155ac68c370be66"
+  "d1815a7be8734e2c64b3acbbe9e607b0e0dd86290a598146dacccc47b79f9bab"
 
 let custody_transfer_executable_sha256 =
-  "958398e61763d6118c5bd8b86292533dd1b5cc73449df1ede5fb117e37b54ce4"
+  "5bd2be0833eefbd84c40771ea2f0ae85a21f666ed4ab6413e2695ffb3ae9aa87"
 
 let custody_transfer_policy_command () =
   let candidate =

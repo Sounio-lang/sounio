@@ -2,9 +2,9 @@ open Unix
 
 exception Error of string
 
-let freeze_sha256 = "b485768773da28e0b42b2a8f9d629167c9513ceacdd6df9d2df30f9f4ac82000"
-let semantics_sha256 = "c2b117b11f58e90410b5222bf6fddfac7280d0d3c6af0b71f94e75efc001a017"
-let executable_sha256 = "687d5ad15f0ec27a66db5da0f3df2790a4bbbfffb8a09cfaf11433e91adff46a"
+let freeze_sha256 = "133d3e10ceb06e88b82c017e1110bedc726fb4e083b00e0598f2393a837d4c6a"
+let semantics_sha256 = "a63f34dfbdd56621b3af502a2c4f46bb87fc6d6e528efd62c241b5ace31052ec"
+let executable_sha256 = "33596b07ecbf0ad3d75767c24679c701e36f3fb971acea3abfa9bffcf4a684eb"
 let failf fmt = Printf.ksprintf (fun s -> raise (Error s)) fmt
 
 let sha256 s = Cryptokit.hash_string (Cryptokit.Hash.sha256 ()) s |> Cryptokit.transform_string (Cryptokit.Hexa.encode ())
@@ -56,11 +56,11 @@ let load_authority source_root =
   let installed=Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name)) "sounio-loom-activation-epoch" in
   let runtime_fallback=Filename.concat source_root "tools/loom/.runtime/sounio-loom-activation-epoch" in
   let build_fallback=Filename.concat source_root "tools/loom/_build/default/src/sounio-loom-activation-epoch" in
-  let installed_policy=Filename.concat (Filename.dirname (Filename.dirname (Unix.realpath Sys.executable_name))) "policy/activation-epoch/tools/loom/activation_epoch.freeze.v1" in
+  let installed_policy=Filename.concat (Filename.dirname (Filename.dirname (Unix.realpath Sys.executable_name))) "policy/activation-epoch/tools/loom/activation_epoch.freeze.v2" in
   let use_installed=Sys.file_exists installed && Sys.file_exists installed_policy in
   let exe=if use_installed then installed else if Sys.file_exists runtime_fallback then runtime_fallback else build_fallback in
   if sha256_file exe <> executable_sha256 then failf "action-9049-executable-drift";
-  let policy=if use_installed then installed_policy else Filename.concat source_root "tools/loom/activation_epoch.freeze.v1" in
+  let policy=if use_installed then installed_policy else Filename.concat source_root "tools/loom/activation_epoch.freeze.v2" in
   if sha256_file policy <> freeze_sha256 then failf "action-9049-freeze-drift";
   exe
 

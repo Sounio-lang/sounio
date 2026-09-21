@@ -18,9 +18,9 @@ fail() {
 
 manifest_value() {
   local key="$1" line count
-  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" || true)"
+  count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" || true)"
   [[ "$count" == 1 ]] || fail "manifest field $key occurs $count times"
-  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1")"
+  line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2")"
   printf '%s' "${line#*=}"
 }
 
@@ -53,7 +53,7 @@ SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_OUTPUT="$INTENT_RUNTIME" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_intent_envelope_fixture.sh" \
   >/dev/null
 intent_runtime_sha256="$(sed -n 's/^executable_sha256=//p' \
-  "$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v1")"
+  "$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v2")"
 [[ "$(sha256sum "$INTENT_RUNTIME" | cut -d ' ' -f 1)" == \
    "$intent_runtime_sha256" ]] ||
   fail 'source-fresh Sounio 9034 runtime hash drifted'
@@ -69,7 +69,7 @@ printf 'CLOSE\n' | env -i "$PAYLOAD" >"$TEST_ROOT/result.receipt"
 
 LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 LANGUAGE_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5"
+RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 frozen_commit="$(sed -n 's/^sounio_executable_commit=//p' "$LANGUAGE_MANIFEST")"
 [[ -n "$frozen_commit" ]] || fail 'language-authority manifest omitted its commit'
@@ -117,7 +117,7 @@ positive="$(probe positive result)"
 grep -Fq $'reason=descriptor-result-bound-actions-9030+9031+9033+9034\tauthorizing=false\tproduction_activation=false\texec_attached=true' \
   "$TEST_ROOT/positive.ingress.tsv" ||
   fail 'positive ingress receipt did not join the returned result'
-grep -Fq $'exec_intent_projected=true\texec_intent_action=9034\texec_intent_manifest_sha256=8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e\t' \
+grep -Fq $'exec_intent_projected=true\texec_intent_action=9034\texec_intent_manifest_sha256=30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33\t' \
   "$TEST_ROOT/positive.ingress.tsv" ||
   fail 'positive ingress receipt omitted the Sounio 9034 projection'
 grep -Fq $'result_returned=true\t' "$TEST_ROOT/positive.ingress.tsv" ||
@@ -138,7 +138,7 @@ SOUNIO_LOOM_EXEC_RESULT_HANDLE_RUNTIME="$AUTHORITY_RUNTIME" \
     --handle "$(manifest_value canonical_handle)" \
     --receipt-sha256 "$(manifest_value result_receipt_sha256)" \
     --receipt-hex "$receipt_hex" \
-    --manifest-sha256 "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)" \
+    --manifest-sha256 "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" | cut -d ' ' -f 1)" \
     >"$TEST_ROOT/presented.receipt"
 cmp "$TEST_ROOT/result.receipt" "$TEST_ROOT/presented.receipt" ||
   fail 'read-only presenter changed the receipt bytes'
@@ -156,7 +156,7 @@ do
     fail "$tag sabotage did not fail closed: $output"
 done
 
-bad_manifest="$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)"
+bad_manifest="$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" | cut -d ' ' -f 1)"
 bad_manifest="${bad_manifest%?}$( [[ "${bad_manifest: -1}" == 0 ]] && printf 1 || printf 0 )"
 set +e
 original_refusal="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -217,10 +217,10 @@ printf '%s\n' "$dependencies" | grep -Eqi 'python|rust' &&
 
 result="$(printf 'sounio-loom-product-exec-result-ingress-selftest: PASS semantic_authority=Sounio actions=9030+9031+9033+9034 operational_attachment=OCaml transport=authenticated-inherited-descriptor result_returned=true presenter=read-only receipt_sha256=%s manifest_sha256=%s raw_event_separate=true event_projection=Sounio-9034 event_override=false exact_fixture_hook_switched=true local_exec_capability_used=false binding_sabotage=REFUSED receipt_sabotage=REFUSED manifest_sabotage=REFUSED causal_rule=manifest_sha256_equal causal_mutant=ADMITTED python_executed=false rust_executed=false material_exec_cell=false production_activation=false parity_open=false claim_ready=false' \
   "$(manifest_value result_receipt_sha256)" \
-  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)")"
+  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v2" | cut -d ' ' -f 1)")"
 for binding in \
-  "sounio_semantics_manifest_sha256:tools/loom/exec_result_handle.freeze.v1" \
-  "sounio_intent_manifest_sha256:tools/loom/exec_intent_envelope.freeze.v1" \
+  "sounio_semantics_manifest_sha256:tools/loom/exec_result_handle.freeze.v2" \
+  "sounio_intent_manifest_sha256:tools/loom/exec_intent_envelope.freeze.v2" \
   "operational_result_source_sha256:tools/loom/src/loom_exec_result.ml" \
   "operational_intent_source_sha256:tools/loom/src/loom_exec_intent.ml" \
   "operational_ingress_source_sha256:tools/loom/src/loom_exec_ingress.ml" \

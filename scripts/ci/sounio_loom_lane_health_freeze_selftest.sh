@@ -4,9 +4,9 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-lane-health-v1-20260827.txt"
+MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v2"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-lane-health-v2-20260914.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-lane-health-freeze.XXXXXX")"
 RUNTIME_A="$TEST_ROOT/sounio-lane-health-a"
 RUNTIME_B="$TEST_ROOT/sounio-lane-health-b"
@@ -55,12 +55,16 @@ stream_hash() {
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$AUTHORITY_MANIFEST" ]] || fail 'language-authority manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-lane-health-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-lane-health-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'
 [[ "$(field parity_open)" == false ]] || fail 'freeze manifest opened parity'
 [[ "$(field claim_ready)" == false ]] || fail 'freeze manifest promoted a claim'
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS && "$(field semantics_module_changed)" == false ]] || fail 'unexpected v2 change class'
+[[ "$(field predecessor_manifest_path)" == tools/loom/lane_health.freeze.v1 ]] || fail 'unexpected predecessor'
+[[ "$(file_hash "$ROOT_DIR/$(field predecessor_manifest_path)")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor manifest drifted'
+[[ "$(field source_sha256)" == "$(manifest_field "$ROOT_DIR/$(field predecessor_manifest_path)" source_sha256)" ]] || fail 'semantic module differs from predecessor'
 [[ "$(file_hash "$AUTHORITY_MANIFEST")" == "$(field language_authority_manifest_sha256)" ]] ||
   fail 'language-authority parent manifest drifted'
 
@@ -139,7 +143,7 @@ gate_result="$(bash "$gate_script")"
 # Reconstruct the already-frozen language authority before asking it to admit
 # this freeze. The live checkout compiler is not an approval oracle.
 bash "$ROOT_DIR/scripts/ci/sounio_loom_language_authority_freeze_selftest.sh" >/dev/null
-authority_commit="$(authority_field sounio_executable_commit)"
+authority_commit="$(authority_field toolchain_commit)"
 authority_wrapper="$(authority_field toolchain_wrapper_path)"
 authority_compiler="$(authority_field toolchain_compiler_path)"
 mkdir -p "$AUTHORITY_TOOLCHAIN_ROOT"

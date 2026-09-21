@@ -3,7 +3,7 @@ open Unix
 exception Error of string
 
 let pinned_grant_manifest_sha256 =
-  "4abfbc8a0fa9cdd1c2164f9f72ea4d408939b3d53497fa7fcaf008d71b1ea1e4"
+  "b015107cbc6104306613035017f1ef916b81bf6465dd59745198e1991c68c78b"
 
 type grant_policy = {
   manifest_sha256 : string;
@@ -40,6 +40,7 @@ let sha256_file = Loom_exec_intent.sha256_file
 let parse_manifest = Loom_exec_intent.parse_manifest
 let required = Loom_exec_intent.required
 let exact = Loom_exec_intent.exact
+let exact_frozen_schema = Loom_exec_intent.exact_frozen_schema
 let digest = Loom_exec_intent.digest
 let require_regular_file = Loom_exec_intent.require_regular_file
 
@@ -82,13 +83,13 @@ let load_grant_policy ~root =
   let path =
     configured_path ~name:"SOUNIO_LOOM_EXEC_OPERATION_GRANT_FIXTURE_MANIFEST"
       ~default:(Filename.concat root
-        "tools/loom/exec_operation_grant_fixture.freeze.v1")
+        "tools/loom/exec_operation_grant_fixture.freeze.v2")
   in
   ignore (require_regular_file path);
   if sha256_file path <> pinned_grant_manifest_sha256 then
     failf "exec-operation-cell-grant-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  exact manifest "schema" "loom-exec-operation-grant-fixture-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-exec-operation-grant-fixture-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_FIXTURE_PRODUCER";

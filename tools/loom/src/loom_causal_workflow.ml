@@ -5,7 +5,7 @@ exception Error of string
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let pinned_manifest_sha256 =
-  "ef8dc0fadeb1cb33b1ba31d77551b8ca962bc97d1204998057b071b9b7921437"
+  "5520c1bc2a29e6d72b5eb2862e9ea4efa3111551f672f3c9cd30b7c1e68e7bcc"
 
 let journal_domain = "loom-causal-workflow-journal-v1"
 let zero_digest = String.make 64 '0'
@@ -113,6 +113,9 @@ let exact table key expected =
   if actual <> expected then
     failf "causal-workflow-manifest-field-mismatch:%s" key
 
+let exact_frozen_schema table key base =
+  try exact table key (base ^ "-v2") with Error _ -> exact table key (base ^ "-v1")
+
 let require_regular_file path =
   let stat = Unix.lstat path in
   if stat.st_kind <> S_REG || stat.st_nlink <> 1 then
@@ -138,13 +141,13 @@ let load_policy ~repo_root =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_CAUSAL_WORKFLOW_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat repo_root "tools/loom/causal_workflow_kernel.freeze.v1"
+    | None -> Filename.concat repo_root "tools/loom/causal_workflow_kernel.freeze.v2"
   in
   ignore (require_regular_file manifest_path);
   if sha256_file manifest_path <> pinned_manifest_sha256 then
     failf "causal-workflow-manifest-hash-mismatch";
   let manifest = parse_manifest manifest_path in
-  exact manifest "schema" "loom-causal-workflow-kernel-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-causal-workflow-kernel-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_AUTHORITY";
@@ -193,14 +196,14 @@ let load_mid_exec_policy ~repo_root =
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_CAUSAL_MID_EXEC_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat repo_root "tools/loom/causal_workflow_mid_exec.freeze.v1"
+    | None -> Filename.concat repo_root "tools/loom/causal_workflow_mid_exec.freeze.v2"
   in
   ignore (require_regular_file manifest_path);
-  let expected = "7dfe285941220f7c3ef62948ec97f87584e7f8cb473da0203a76f5b23cdeca3e" in
+  let expected = "497aeea1de9c86481f49a5ad3a46849319c5373379131ef149b3de530cfde7ed" in
   if sha256_file manifest_path <> expected then
     failf "causal-workflow-mid-exec-manifest-hash-mismatch";
   let manifest = parse_manifest manifest_path in
-  exact manifest "schema" "loom-causal-workflow-mid-exec-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-causal-workflow-mid-exec-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_AUTHORITY";

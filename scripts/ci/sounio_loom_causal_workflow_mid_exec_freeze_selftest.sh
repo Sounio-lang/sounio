@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v2"
 
 fail() {
   printf 'sounio-loom-causal-workflow-mid-exec-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -43,7 +43,7 @@ expect_commit_hash() {
 
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] ||
   fail 'freeze manifest is absent or linked'
-expect_value schema loom-causal-workflow-mid-exec-freeze-v1
+expect_value schema loom-causal-workflow-mid-exec-freeze-v2
 expect_value stage SEMANTICS_FROZEN
 expect_value producing_language Sounio
 expect_value language_role SEMANTIC_AUTHORITY
@@ -68,6 +68,12 @@ git -C "$ROOT_DIR" cat-file -e "${build_head}^{commit}" 2>/dev/null ||
   fail 'build_head_commit is not a local commit'
 git -C "$ROOT_DIR" merge-base --is-ancestor "$build_head" HEAD ||
   fail 'build_head_commit is not an ancestor of the verifying checkout'
+expect_value change_class ENTRYPOINT_INPUT_ROBUSTNESS
+expect_value semantics_module_changed false
+expect_hash "$(manifest_value predecessor_manifest_path)" "$(manifest_value predecessor_manifest_sha256)"
+[[ "$(manifest_value source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$(manifest_value predecessor_manifest_path)" | cut -d= -f2)" ]] ||
+  fail 'semantic module differs from predecessor'
+
 for key in contract source entrypoint build_script selftest; do
   expect_commit_hash "$build_head" "$(manifest_value "${key}_path")" \
     "$(manifest_value "${key}_sha256")"

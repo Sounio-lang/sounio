@@ -184,7 +184,7 @@ CAPSULE_AUTHORITY="$RELEASE/sounio-loom-kernel-principal-capsule-authority-runti
 INVOCATION_AUTHORITY="$RELEASE/sounio-loom-kernel-invocation-cell-authority-runtime"
 EXEC_GRANT_MANIFEST="$RELEASE/kernel_exec_grant_cell_authority.freeze.v1"
 RESIDENT_MANIFEST="$RELEASE/resident_membrane.runtime.v4"
-RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4"
+RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4.v2"
 for required in "$RECEIPT" "$BROKER" "$LEASE_AUTHORITY" "$CAPSULE_AUTHORITY" "$INVOCATION_AUTHORITY" \
   "$EXEC_GRANT_MANIFEST" "$RESIDENT_MANIFEST" "$RESIDENT_RUNTIME" \
   "$ROOTFS/etc/sounio/loom-principal-broker.conf" \

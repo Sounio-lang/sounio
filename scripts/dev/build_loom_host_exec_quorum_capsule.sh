@@ -74,8 +74,8 @@ mkdir -p "$BIN" "$DATA" "$AUTHORITY_ROOT/.git" "$META"
 chmod 0700 "$AUTHORITY_ROOT/.git"
 
 CONTROLLER_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
-RESIDENT_V4_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
-LANGUAGE_AUTHORITY_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+RESIDENT_V4_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
+LANGUAGE_AUTHORITY_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 FROZEN_CONTROLLER_COMMIT="$(manifest_value "$CONTROLLER_MANIFEST_SOURCE" controller_commit)"
 FROZEN_RESIDENT_V4_COMMIT="$(manifest_value "$RESIDENT_V4_MANIFEST_SOURCE" sounio_resident_v4_commit)"
 FROZEN_LANGUAGE_AUTHORITY_COMMIT="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" sounio_executable_commit)"
@@ -94,12 +94,24 @@ git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
   tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
 git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_AUTHORITY_COMMIT" |
   tar -x -C "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
+# Language authority v2 keeps the frozen v1 compiler bytes: overlay the toolchain
+# from toolchain_commit on top of the executable-commit tree.
+FROZEN_LANGUAGE_TOOLCHAIN_COMMIT="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_commit)"
+[[ "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'frozen language-authority toolchain commit is not canonical'
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" bin/souc bin/souc-lean-single-x86_64 |
+  tar -x -C "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
+[[ "$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc")" == \
+     "$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_wrapper_sha256)" && \
+   "$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc-lean-single-x86_64")" == \
+     "$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" toolchain_compiler_sha256)" ]] ||
+  fail 'frozen language-authority toolchain drifted'
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BIN/loom-kernel-principal-broker" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_OUTPUT="$BIN/loom-exec-grant-controller" \
   bash "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
-SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v4" \
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v4.v2" \
   bash "$FROZEN_RESIDENT_V4_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
 SOUNIO_LOOM_PRINCIPAL_CELL_BARRIER_INTEGRATED_OUTPUT="$BIN/loom-principal-cell-barrier-integrated" \
   bash "$ROOT_DIR/scripts/dev/build_loom_principal_cell_barrier_integrated.sh" >/dev/null
@@ -111,7 +123,7 @@ SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT="$BIN/sounio-loom-process-witness-h
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh" >/dev/null
 SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$BIN/sounio-loom-language-authority-runtime" \
   bash "$FROZEN_LANGUAGE_AUTHORITY_ROOT/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
-SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v5" \
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v5.v2" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
 SOUNIO_LOOM_EXEC_RESULT_HANDLE_OUTPUT="$BIN/sounio-loom-exec-result-handle" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_result_handle_fixture.sh" >/dev/null
@@ -166,18 +178,18 @@ install_root_file() {
 AUTHORITY_FILES=(
   tools/loom/exec_grant_controller.runtime.v1
   tools/loom/host_exec_quorum_fixture.freeze.v1
-  tools/loom/kernel_exec_grant_cell_authority.freeze.v1
+  tools/loom/kernel_exec_grant_cell_authority.freeze.v2
   tools/loom/GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md
   stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio
   tools/loom/kernel_exec_grant_cell_authority_main.sio
-  tools/loom/kernel_invocation_cell_authority.freeze.v1
-  tools/loom/execution_authority.freeze.v2
-  tools/loom/execution_outcome.freeze.v1
-  tools/loom/resident_membrane.runtime.v4
-  tools/loom/subprocess_membrane.freeze.v1
-  tools/loom/resident_authority.freeze.v1
-  tools/loom/effect_closure_authority.freeze.v1
-  tools/loom/resident_membrane.runtime.v3
+  tools/loom/kernel_invocation_cell_authority.freeze.v3
+  tools/loom/execution_authority.freeze.v3
+  tools/loom/execution_outcome.freeze.v2
+  tools/loom/resident_membrane.runtime.v4.v2
+  tools/loom/subprocess_membrane.freeze.v2
+  tools/loom/resident_authority.freeze.v2
+  tools/loom/effect_closure_authority.freeze.v2
+  tools/loom/resident_membrane.runtime.v3.v2
   tools/loom/resident_membrane_v4_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v4.sh
   scripts/ci/sounio_loom_resident_transport_v4_selftest.sh
@@ -185,17 +197,17 @@ AUTHORITY_FILES=(
   tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md
   tools/loom/process_witness_handshake_payload_main.sio
   scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh
-  tools/loom/language_authority.freeze.v1
+  tools/loom/language_authority.freeze.v2
   stdlib/coordination/loom_language_authority.sio
   tools/loom/language_authority_main.sio
   tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md
   stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio
   tools/loom/kernel_peer_activation_capsule_authority_main.sio
-  tools/loom/kernel_peer_activation_capsule_authority.freeze.v1
+  tools/loom/kernel_peer_activation_capsule_authority.freeze.v2
   tools/loom/kernel_peer_activation_capsule.runtime.v1
   tools/loom/kernel_peer_activation_capsule.current.v1
-  tools/loom/kernel_peer_material_judgment_v13.freeze.v1
-  tools/loom/resident_membrane.runtime.v5
+  tools/loom/kernel_peer_material_judgment_v13.freeze.v2
+  tools/loom/resident_membrane.runtime.v5.v2
   tools/loom/resident_membrane_v5_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v5.sh
   scripts/ci/sounio_loom_resident_transport_v5_selftest.sh
@@ -214,14 +226,14 @@ AUTHORITY_FILES=(
   scripts/ci/sounio_loom_product_exec_cell_fixture_selftest.sh
   scripts/ci/sounio_loom_product_exec_cell_fixture_freeze_selftest.sh
   tools/loom/evidence/loom-product-exec-cell-fixture-v1-20260829.txt
-  tools/loom/exec_result_handle.freeze.v1
+  tools/loom/exec_result_handle.freeze.v2
   docs/internal/concepts/loom-exec-result-handle.md
   stdlib/coordination/loom_exec_result_handle_authority.sio
   tools/loom/exec_result_handle_authority_main.sio
   scripts/dev/build_sounio_loom_exec_result_handle_fixture.sh
   scripts/ci/sounio_loom_exec_result_handle_selftest.sh
   tools/loom/evidence/loom-exec-result-handle-v1-20260830.txt
-  tools/loom/exec_intent_envelope.freeze.v1
+  tools/loom/exec_intent_envelope.freeze.v2
   tools/loom/GARDEN_EXEC_INTENT_ENVELOPE_V1.md
   docs/internal/concepts/loom-exec-intent-envelope.md
   stdlib/coordination/loom_exec_intent_envelope_authority.sio
@@ -238,7 +250,7 @@ AUTHORITY_FILES=(
   scripts/dev/build_sounio_loom_exec_operation_catalog_fixture.sh
   scripts/ci/sounio_loom_exec_operation_catalog_selftest.sh
   tools/loom/evidence/loom-exec-operation-catalog-v1-20260830.txt
-  tools/loom/exec_operation_catalog.freeze.v1
+  tools/loom/exec_operation_catalog.freeze.v2
   tools/loom/GARDEN_EXEC_RESULT_RECORD_V1.md
   docs/internal/concepts/loom-exec-result-record.md
   stdlib/coordination/loom_exec_result_record_authority.sio
@@ -246,13 +258,13 @@ AUTHORITY_FILES=(
   scripts/dev/build_sounio_loom_exec_result_record_fixture.sh
   scripts/ci/sounio_loom_exec_result_record_selftest.sh
   tools/loom/evidence/loom-exec-result-record-v1-20260830.txt
-  tools/loom/exec_result_record.freeze.v1
+  tools/loom/exec_result_record.freeze.v2
   tools/loom/exec_operation_grant_fixture_main.sio
   scripts/dev/build_sounio_loom_exec_operation_grant_fixture.sh
   scripts/ci/sounio_loom_exec_operation_grant_fixture_selftest.sh
   scripts/ci/sounio_loom_exec_operation_grant_fixture_freeze_selftest.sh
   tools/loom/evidence/loom-exec-operation-grant-fixture-v1-20260830.txt
-  tools/loom/exec_operation_grant_fixture.freeze.v1
+  tools/loom/exec_operation_grant_fixture.freeze.v2
   scripts/ci/sounio_loom_exec_operation_ingress_selftest.sh
   tools/loom/evidence/loom-exec-operation-ingress-v1-20260830.txt
   tests/verify-ir/call_a.sio
@@ -313,7 +325,7 @@ done < <(find "$AUTHORITY_ROOT" -type d -print0)
 
 BROKER_SHA256="$(sha256_file "$BIN/loom-kernel-principal-broker")"
 CONTROLLER_SHA256="$(sha256_file "$BIN/loom-exec-grant-controller")"
-RESIDENT_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v4")"
+RESIDENT_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v4.v2")"
 LOCAL_BARRIER_SHA256="$(sha256_file "$BIN/loom-principal-cell-barrier-integrated")"
 HOST_BARRIER_SHA256="$(sha256_file "$BIN/loom-host-exec-quorum-principal-cell")"
 PROCESS_WITNESS_CELL_SHA256="$(sha256_file "$BIN/loom-process-witness-principal-cell")"
@@ -322,8 +334,8 @@ PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/proce
 PRODUCT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-runtime")"
 PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256="$(sha256_file "$BIN/sounio-loom-provider-hook-fixture")"
 PRODUCT_LANGUAGE_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-language-authority-runtime")"
-PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1")"
-PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5")"
+PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v2")"
+PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5.v2")"
 PRODUCT_INGRESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1")"
 PRODUCT_INGRESS_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md")"
 PRODUCT_INGRESS_EVIDENCE_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt")"
@@ -332,38 +344,38 @@ PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/l
 PRODUCT_LANE_CELL_CANARY_EVIDENCE_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/evidence/loom-product-dynamic-user-lane-cell-host-canary-v1-20260829.txt")"
 PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_cell_fixture.freeze.v1")"
 PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256="$(sha256_file "$DATA/product-exec-cell-fixtures.v1")"
-PRODUCT_EXEC_RESULT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_result_handle.freeze.v1")"
+PRODUCT_EXEC_RESULT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_result_handle.freeze.v2")"
 PRODUCT_EXEC_RESULT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-result-handle")"
 [[ "$PRODUCT_EXEC_RESULT_MANIFEST_SHA256" == \
-     7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55 &&
+     f5caa269066ea0441ebbe4be982b9302ec2338d751b4b459e3552a3358b146a4 &&
    "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" == \
-     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_result_handle.freeze.v1" executable_sha256)" ]] ||
+     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_result_handle.freeze.v2" executable_sha256)" ]] ||
   fail 'Sounio 9033 result authority manifest or runtime drifted'
-PRODUCT_EXEC_INTENT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v1")"
+PRODUCT_EXEC_INTENT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v2")"
 PRODUCT_EXEC_INTENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-intent-envelope")"
 [[ "$PRODUCT_EXEC_INTENT_MANIFEST_SHA256" == \
-     8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e &&
+     30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33 &&
    "$PRODUCT_EXEC_INTENT_RUNTIME_SHA256" == \
-     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v1" executable_sha256)" ]] ||
+     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v2" executable_sha256)" ]] ||
   fail 'Sounio 9034 intent authority manifest or runtime drifted'
-PRODUCT_OPERATION_FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_operation_grant_fixture.freeze.v1")"
+PRODUCT_OPERATION_FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_operation_grant_fixture.freeze.v2")"
 PRODUCT_OPERATION_FIXTURE_BUNDLE_SHA256="$(sha256_file "$DATA/exec-operation-grant-fixtures.v1")"
-PRODUCT_OPERATION_CATALOG_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_operation_catalog.freeze.v1")"
+PRODUCT_OPERATION_CATALOG_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_operation_catalog.freeze.v2")"
 PRODUCT_OPERATION_CATALOG_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-operation-catalog")"
-PRODUCT_OPERATION_RESULT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_result_record.freeze.v1")"
+PRODUCT_OPERATION_RESULT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_result_record.freeze.v2")"
 PRODUCT_OPERATION_RESULT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-result-record")"
 [[ "$PRODUCT_OPERATION_FIXTURE_MANIFEST_SHA256" == \
-     4abfbc8a0fa9cdd1c2164f9f72ea4d408939b3d53497fa7fcaf008d71b1ea1e4 &&
+     b015107cbc6104306613035017f1ef916b81bf6465dd59745198e1991c68c78b &&
    "$PRODUCT_OPERATION_FIXTURE_BUNDLE_SHA256" == \
      52674ef4332a4b6d54e2d55ca9a58c55de21e6686aca82ae70b9d22b7d260af2 &&
    "$PRODUCT_OPERATION_CATALOG_MANIFEST_SHA256" == \
-     25c58880cfe568a3b55b479df4515b63589c2e4dca703c97917e5cbdef0f1561 &&
+     c0e96a89777ce8846f55fb2d55924bff1c3eb327fb71f0131a1effc04850ed45 &&
    "$PRODUCT_OPERATION_CATALOG_RUNTIME_SHA256" == \
-     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_operation_catalog.freeze.v1" executable_sha256)" &&
+     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_operation_catalog.freeze.v2" executable_sha256)" &&
    "$PRODUCT_OPERATION_RESULT_MANIFEST_SHA256" == \
-     58d4a49c5b2462261ee53cd06f3ca8e29d363c1a38bf47274fa98a67b79cc569 &&
+     e346c4d5a9263da32ad3111846158d4beb0132ad4c5919ebe6922d451ac9129d &&
    "$PRODUCT_OPERATION_RESULT_RUNTIME_SHA256" == \
-     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_result_record.freeze.v1" executable_sha256)" ]] ||
+     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_result_record.freeze.v2" executable_sha256)" ]] ||
   fail 'Sounio 9035/9036 operation authority assets drifted'
 FROZEN_CONTROLLER_RESIDENT_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_resident.ml")"
 FROZEN_CONTROLLER_CELL_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_cell.ml")"
@@ -415,7 +427,7 @@ fixture_manifest_path=authority-root/tools/loom/host_exec_quorum_fixture.freeze.
 fixture_manifest_sha256=$FIXTURE_MANIFEST_SHA256
 fixture_bundle_path=data/host-exec-quorum-fixtures.v1
 fixture_bundle_sha256=$(sha256_file "$DATA/host-exec-quorum-fixtures.v1")
-resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v4
+resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v4.v2
 resident_runtime_sha256=$RESIDENT_SHA256
 local_barrier_path=bin/loom-principal-cell-barrier-integrated
 local_barrier_sha256=$LOCAL_BARRIER_SHA256
@@ -449,26 +461,26 @@ product_exec_cell_fixture_manifest_sha256=$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SH
 product_exec_cell_fixture_bundle_path=data/product-exec-cell-fixtures.v1
 product_exec_cell_fixture_bundle_sha256=$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256
 product_exec_result_action=9033
-product_exec_result_manifest_path=authority-root/tools/loom/exec_result_handle.freeze.v1
+product_exec_result_manifest_path=authority-root/tools/loom/exec_result_handle.freeze.v2
 product_exec_result_manifest_sha256=$PRODUCT_EXEC_RESULT_MANIFEST_SHA256
 product_exec_result_runtime_path=bin/sounio-loom-exec-result-handle
 product_exec_result_runtime_sha256=$PRODUCT_EXEC_RESULT_RUNTIME_SHA256
 product_exec_intent_action=9034
-product_exec_intent_manifest_path=authority-root/tools/loom/exec_intent_envelope.freeze.v1
+product_exec_intent_manifest_path=authority-root/tools/loom/exec_intent_envelope.freeze.v2
 product_exec_intent_manifest_sha256=$PRODUCT_EXEC_INTENT_MANIFEST_SHA256
 product_exec_intent_runtime_path=bin/sounio-loom-exec-intent-envelope
 product_exec_intent_runtime_sha256=$PRODUCT_EXEC_INTENT_RUNTIME_SHA256
-product_operation_fixture_manifest_path=authority-root/tools/loom/exec_operation_grant_fixture.freeze.v1
+product_operation_fixture_manifest_path=authority-root/tools/loom/exec_operation_grant_fixture.freeze.v2
 product_operation_fixture_manifest_sha256=$PRODUCT_OPERATION_FIXTURE_MANIFEST_SHA256
 product_operation_fixture_bundle_path=data/exec-operation-grant-fixtures.v1
 product_operation_fixture_bundle_sha256=$PRODUCT_OPERATION_FIXTURE_BUNDLE_SHA256
 product_operation_catalog_action=9035
-product_operation_catalog_manifest_path=authority-root/tools/loom/exec_operation_catalog.freeze.v1
+product_operation_catalog_manifest_path=authority-root/tools/loom/exec_operation_catalog.freeze.v2
 product_operation_catalog_manifest_sha256=$PRODUCT_OPERATION_CATALOG_MANIFEST_SHA256
 product_operation_catalog_runtime_path=bin/sounio-loom-exec-operation-catalog
 product_operation_catalog_runtime_sha256=$PRODUCT_OPERATION_CATALOG_RUNTIME_SHA256
 product_operation_result_action=9036
-product_operation_result_manifest_path=authority-root/tools/loom/exec_result_record.freeze.v1
+product_operation_result_manifest_path=authority-root/tools/loom/exec_result_record.freeze.v2
 product_operation_result_manifest_sha256=$PRODUCT_OPERATION_RESULT_MANIFEST_SHA256
 product_operation_result_runtime_path=bin/sounio-loom-exec-result-record
 product_operation_result_runtime_sha256=$PRODUCT_OPERATION_RESULT_RUNTIME_SHA256
@@ -478,7 +490,7 @@ product_provider_hook_fixture_path=bin/sounio-loom-provider-hook-fixture
 product_provider_hook_fixture_sha256=$PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
 product_language_runtime_sha256=$PRODUCT_LANGUAGE_RUNTIME_SHA256
-product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v1
+product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v2
 product_language_manifest_sha256=$PRODUCT_LANGUAGE_MANIFEST_SHA256
 product_language_frozen_commit=$FROZEN_LANGUAGE_AUTHORITY_COMMIT
 product_language_frozen_source_path=authority-root/frozen/language-authority/stdlib/coordination/loom_language_authority.sio
@@ -491,7 +503,7 @@ product_language_frozen_wrapper_path=authority-root/frozen/language-authority/bi
 product_language_frozen_wrapper_sha256=$FROZEN_LANGUAGE_WRAPPER_SHA256
 product_language_frozen_compiler_path=authority-root/frozen/language-authority/bin/souc-lean-single-x86_64
 product_language_frozen_compiler_sha256=$FROZEN_LANGUAGE_COMPILER_SHA256
-product_resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v5
+product_resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v5.v2
 product_resident_runtime_sha256=$PRODUCT_RESIDENT_RUNTIME_SHA256
 product_authority_root_path=authority-root
 product_lane_cell_canary=false

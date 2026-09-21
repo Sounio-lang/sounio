@@ -26,16 +26,16 @@ MISSING_CAPSULE_JOURNAL="$TEST_ROOT/missing-capsule-serve-must-not-exist.v1"
 MISSING_INVOCATION_JOURNAL="$TEST_ROOT/missing-invocation-serve-must-not-exist.v1"
 MISSING_RESIDENT_JOURNAL="$TEST_ROOT/missing-resident-serve-must-not-exist.v1"
 SUDO_JOURNAL="$TEST_ROOT/sudo-serve-must-not-exist.v1"
-MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
-MANIFEST_SHA256='7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5'
-CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
-CAPSULE_MANIFEST_SHA256='76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f'
-INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
-INVOCATION_MANIFEST_SHA256='61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e'
-EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
-EXEC_GRANT_MANIFEST_SHA256='8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051'
-RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
-RESIDENT_MANIFEST_SHA256='f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473'
+MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v2"
+MANIFEST_SHA256='5581f29a5f48f3cfa26ea46c906ee73ef1b375ec0d58efcdad123d2e2e3601be'
+CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v2"
+CAPSULE_MANIFEST_SHA256='2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674'
+INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+INVOCATION_MANIFEST_SHA256='f876926fe2b6c554611136daee0cbb7553117b7d9933dc9b779cc3ea1aa507a5'
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+EXEC_GRANT_MANIFEST_SHA256='d56cee506a3ece576e61e62c8ba4be2936722c79ec41baec6ba4b88e731a92be'
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2"
+RESIDENT_MANIFEST_SHA256='219b135ce8fb0df8d9192cc17e08a55a5e2457798309872d2f0ec35be8e64b05'
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -304,9 +304,9 @@ grep -Fq 'ExecStart=/usr/libexec/sounio/loom-kernel-principal-broker --serve ' "
 if grep -Eq 'ExecStart=.*/(sh|bash|zsh|python|node|ruby)( |$)' "$SERVICE_UNIT"; then
   fail 'service uses a disposable-language launcher'
 fi
-grep -Fqx 'LOOM_PRINCIPAL_MANIFEST=/usr/lib/sounio/loom/kernel_principal_lease_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_MANIFEST=/usr/lib/sounio/loom/kernel_principal_lease_authority.freeze.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen manifest path'
-grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal_capsule_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal_capsule_authority.freeze.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen capsule manifest path'
 grep -Fqx 'LOOM_PRINCIPAL_INVOCATION_MANIFEST=/usr/lib/sounio/loom/kernel_invocation_cell_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen InvocationCell manifest path'
@@ -314,7 +314,7 @@ grep -Fqx 'LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST=/usr/lib/sounio/loom/kernel_exec_g
   fail 'config example omits frozen ExecGrantCell manifest path'
 grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_MANIFEST=/usr/lib/sounio/loom/resident_membrane.runtime.v4' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen resident v4 manifest path'
-grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_RUNTIME=/usr/libexec/sounio/sounio-loom-resident-membrane-runtime-v4' "$CONFIG_EXAMPLE" ||
+grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_RUNTIME=/usr/libexec/sounio/sounio-loom-resident-membrane-runtime-v4.v2' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen resident v4 runtime path'
 grep -Fq -- '--invocation-manifest ${LOOM_PRINCIPAL_INVOCATION_MANIFEST} --invocation-authority ${LOOM_PRINCIPAL_INVOCATION_AUTHORITY}' "$SERVICE_UNIT" ||
   fail 'service does not pin the InvocationCell authority'

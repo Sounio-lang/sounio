@@ -43,9 +43,9 @@ bash "$ROOT_DIR/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh" >/de
 [[ -x "$LOOM" ]] || fail 'OCaml runtime is absent'
 POLICY_ROOT="$WORK/policy"
 mkdir -p "$POLICY_ROOT/tools/loom"
-cp "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v1" \
-  "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
-chmod 600 "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
+cp "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v2" \
+  "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v2"
+chmod 600 "$POLICY_ROOT/tools/loom/generation_pinned_cutover.freeze.v2"
 
 OLD_RUNTIME="$(basename "$(readlink -f "$SHARED_RUNTIME_ROOT/current")")"
 CANDIDATE_RUNTIME="$(basename "$(readlink -f "$SHARED_RUNTIME_ROOT/native-next")")"
@@ -125,6 +125,23 @@ run_seal "$STATE" >/dev/null
 [[ "$ACTIVATION_SHA" == "$(sha256sum "$ACTIVATION" | awk '{print $1}')" ]] ||
   fail 'idempotent retry rewrote activation receipt'
 
+# Pins and activation heads sealed under the predecessor action 9048 v1 freeze stay
+# valid; a record mixing the v1 and v2 generations is refused.
+PRIOR_SEMANTICS=9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549
+PRIOR_FREEZE=0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d
+PRIOR_STATE="$(new_state freeze-v1-records)"
+run_seal "$PRIOR_STATE" >/dev/null
+for record in "$PRIOR_STATE/generation-runtime-pins/test--generation-pin.pin" \
+  "$PRIOR_STATE/generation-runtime-pins/activation.v1"; do
+  sed -i -e "s/^semantics_sha256=.*/semantics_sha256=$PRIOR_SEMANTICS/" \
+    -e "s/^freeze_sha256=.*/freeze_sha256=$PRIOR_FREEZE/" "$record"
+  chmod 600 "$record"
+done
+run_seal "$PRIOR_STATE" >/dev/null || fail 'records sealed under action 9048 v1 were refused'
+sed -i 's/^freeze_sha256=.*/freeze_sha256=0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4/' \
+  "$PRIOR_STATE/generation-runtime-pins/test--generation-pin.pin"
+expect_denied mixed-generation-pin run_seal "$PRIOR_STATE"
+
 PYTHON_STATE="$(new_state python-oracle)"
 expect_denied python-oracle-attempt env SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_GENERATION_PIN_POLICY_ROOT="$POLICY_ROOT" \
@@ -179,4 +196,4 @@ grep -q 'generation-pin-recursive-forward' \
 ! grep -q 'generation-pin-current-selector-drift' \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" ||
   fail 'sealed first-cutover pair incorrectly blocks later immutable current generations'
-printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=12 python_oracle_executed=false semantic_authority=Sounio action=9048\n'
+printf 'SOUNIO_LOOM_GENERATION_PINNED_CUTOVER_OCAML_SELFTEST PASS cases=14 python_oracle_executed=false semantic_authority=Sounio action=9048\n'

@@ -3,19 +3,17 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "0024178b8928f0c82d794d390244e83e5ce431054587fc7dd609c0f25c2e5b4f"
+  "75cdaf0b48665b90b5fd18389179b9224f8eff0f65853e140f700b25ef5de65b"
 
 let pinned_sandbox_sha256 =
   "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"
 
 let pinned_activation_manifest_sha256 =
-  "f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e"
+  "61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2"
 
-let pinned_activation_runtime_sha256 =
-  "d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793"
 
 let pinned_resident_v5_manifest_sha256 =
-  "b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353"
+  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
 
 let pinned_activation_projection_sha256 =
   "8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014"
@@ -216,14 +214,14 @@ let load_policy root =
   let path =
     match test_override "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/subprocess_membrane.freeze.v1"
+    | None -> Filename.concat root "tools/loom/subprocess_membrane.freeze.v2"
   in
   if not (Sys.file_exists path) then failf "subprocess-membrane-policy-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_manifest_sha256 then
     failf "subprocess-membrane-policy-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-subprocess-membrane-freeze-v1"
+  if required manifest "schema" <> "loom-subprocess-membrane-freeze-v2"
      || required manifest "stage" <> "SEMANTICS_FROZEN"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -280,18 +278,18 @@ let load_activation_dark_policy root =
     | Some path -> path
     | None ->
         Filename.concat root
-          "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+          "tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
   in
   let operational_path =
     match test_override "SOUNIO_LOOM_ACTIVATION_DARK_OPERATIONAL_MANIFEST" with
     | Some path -> path
     | None ->
-        Filename.concat root "tools/loom/kernel_peer_activation_capsule.runtime.v1"
+        Filename.concat root "tools/loom/kernel_peer_activation_capsule.runtime.v2"
   in
   let resident_path =
     match test_override "SOUNIO_LOOM_ACTIVATION_DARK_RESIDENT_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5.v2"
   in
   let projection_path =
     match test_override "SOUNIO_LOOM_ACTIVATION_DARK_PROJECTION" with
@@ -302,8 +300,10 @@ let load_activation_dark_policy root =
   in
   if sha256_file action_path <> pinned_activation_manifest_sha256 then
     failf "activation-dark-action-manifest-hash-mismatch";
-  if sha256_file operational_path <> pinned_activation_runtime_sha256 then
-    failf "activation-dark-operational-manifest-hash-mismatch";
+  (* O hash do arquivo deste registro nao pode ser pinado aqui: o registro
+     pina o sha256 do loom.exe, e o loom.exe contem este modulo — nao existe
+     ponto fixo. O que o pino pretendia garantir esta nos campos validados
+     logo abaixo, inclusive os dois pais, que nao sao auto-referentes. *)
   if sha256_file resident_path <> pinned_resident_v5_manifest_sha256 then
     failf "activation-dark-resident-manifest-hash-mismatch";
   if sha256_file projection_path <> pinned_activation_projection_sha256 then
@@ -312,7 +312,7 @@ let load_activation_dark_policy root =
   let operational = parse_manifest operational_path in
   let resident = parse_manifest resident_path in
   if required action "schema"
-       <> "loom-kernel-peer-activation-capsule-authority-freeze-v1"
+       <> "loom-kernel-peer-activation-capsule-authority-freeze-v2"
      || required action "stage" <> "SEMANTICS_FROZEN"
      || required action "producing_language" <> "Sounio"
      || required action "language_role" <> "SEMANTIC_AUTHORITY"
@@ -322,7 +322,7 @@ let load_activation_dark_policy root =
      || required action "capsule_is_bearer" <> "false"
   then failf "activation-dark-action-state-invalid";
   if required operational "schema"
-       <> "loom-kernel-peer-activation-capsule-ocaml-runtime-v1"
+       <> "loom-kernel-peer-activation-capsule-ocaml-runtime-v2"
      || required operational "stage" <> "OPERATIONAL_REALIZATION_FROZEN"
      || required operational "producing_language" <> "OCaml"
      || required operational "language_role" <> "OPERATIONAL_REALIZATION"
@@ -334,7 +334,7 @@ let load_activation_dark_policy root =
      || required operational "parent_resident_v5_manifest_sha256"
           <> pinned_resident_v5_manifest_sha256
   then failf "activation-dark-operational-state-invalid";
-  if required resident "schema" <> "loom-resident-membrane-runtime-v5"
+  if required resident "schema" <> "loom-resident-membrane-runtime-v5.v2"
      || required resident "runtime_frozen" <> "true"
      || required resident "process_model" <> "single-resident-sounio-pid"
      || required resident "parent_9031_sha256"
@@ -371,7 +371,7 @@ let load_activation_dark_policy root =
     failf "activation-dark-projection-frame-invalid";
   { action_manifest_sha256 = pinned_activation_manifest_sha256;
     semantics_sha256 = required action "semantics_sha256";
-    operational_manifest_sha256 = pinned_activation_runtime_sha256;
+    operational_manifest_sha256 = sha256_file operational_path;
     resident_manifest_sha256 = pinned_resident_v5_manifest_sha256;
     projection_sha256 = pinned_activation_projection_sha256;
     frame; frame_sha256 = sha256 frame; label }

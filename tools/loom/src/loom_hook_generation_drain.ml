@@ -3,10 +3,10 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1"
+  "ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61"
 
 let semantics_sha256 =
-  "00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3"
+  "c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb"
 
 let max_file_bytes = 8 * 1024 * 1024
 
@@ -182,7 +182,7 @@ let load_policy root =
   in
   let installed_manifest =
     Filename.concat installed_policy_root
-      "tools/loom/native_hook_generation_drain.freeze.v1"
+      "tools/loom/native_hook_generation_drain.freeze.v2"
   in
   let path, policy_root =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_GENERATION_DRAIN_MANIFEST" with
@@ -193,13 +193,13 @@ let load_policy root =
     | _ when Sys.file_exists installed_manifest ->
         (installed_manifest, installed_policy_root)
     | _ ->
-        (Filename.concat root "tools/loom/native_hook_generation_drain.freeze.v1", root)
+        (Filename.concat root "tools/loom/native_hook_generation_drain.freeze.v2", root)
   in
   if sha256_file "freeze-manifest" path <> pinned_manifest_sha256 then
     failf "freeze-manifest-hash-mismatch";
   let manifest = parse_fields "freeze-manifest" (read_file "freeze-manifest" path) in
   exact "freeze-manifest" manifest "schema"
-    "loom-native-hook-generation-drain-freeze-v1";
+    "loom-native-hook-generation-drain-freeze-v2";
   exact "freeze-manifest" manifest "stage" "SEMANTICS_FROZEN";
   exact "freeze-manifest" manifest "semantic_authority" "Sounio";
   exact "freeze-manifest" manifest "producing_language" "Sounio";

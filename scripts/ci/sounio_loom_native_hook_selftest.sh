@@ -6,10 +6,10 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.XXXXXX")"
 AUTHORITY_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 CUTOVER_RUNTIME="$TEST_ROOT/sounio-loom-native-hook-cutover"
-CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
+CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v2"
 CUTOVER_TOOLCHAIN_ROOT="$TEST_ROOT/cutover-toolchain"
 COORD_DIR="$TEST_ROOT/coord"
 DECISION_LOG="$TEST_ROOT/agent-hook.tsv"
@@ -142,7 +142,7 @@ for provider_config in \
   grep -Eq '"timeout"[[:space:]]*:[[:space:]]*30' "$provider_config" ||
     fail "provider hook does not preserve the 30s outer deadline: $provider_config"
 done
-frozen_executable_commit="$(sed -n 's/^sounio_executable_commit=//p' "$AUTHORITY_MANIFEST")"
+frozen_executable_commit="$(sed -n 's/^toolchain_commit=//p' "$AUTHORITY_MANIFEST")"
 [[ -n "$frozen_executable_commit" ]] || fail 'language-authority manifest omitted its executable commit'
 mkdir -p "$TOOLCHAIN_ROOT"
 git -C "$ROOT_DIR" archive "$frozen_executable_commit" \
@@ -315,7 +315,7 @@ set -e
 [[ "$MISSING_RC" -eq 2 && "$MISSING_OUTPUT" == *'Sounio-authority-policy-missing'* ]] ||
   fail "missing policy did not fail closed: rc=$MISSING_RC output=$MISSING_OUTPUT"
 
-cp "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$TEST_ROOT/tampered.freeze"
+cp "$ROOT_DIR/tools/loom/language_authority.freeze.v2" "$TEST_ROOT/tampered.freeze"
 printf '\n' >>"$TEST_ROOT/tampered.freeze"
 set +e
 TAMPER_OUTPUT="$(printf '%s\n' "$write_event" | \
@@ -424,7 +424,7 @@ grep -Fq $'decision=DENY\treason=Sounio-authority-runtime-hash-mismatch' "$DECIS
   fail "decision log omitted the runtime-tamper DENY"
 grep -Fq $'decision=DENY\treason=write-path-missing' "$DECISION_LOG" ||
   fail "decision log omitted the pathless-write DENY"
-grep -Fq $'sounio_source_sha256=545b0ae24fa78344aa96186eacaff4f9dc24ed7155adbed758cb4c85d1b3cd82\tsemantics_sha256=27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\tsemantic_authority_origin=worktree' \
+grep -Fq $'sounio_source_sha256=545b0ae24fa78344aa96186eacaff4f9dc24ed7155adbed758cb4c85d1b3cd82\tsemantics_sha256=842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\tsemantic_authority_origin=worktree' \
   "$DECISION_LOG" || fail "decision receipt omitted the authority chain"
 grep -Fq $'\ttoolchain=OCaml ' "$DECISION_LOG" ||
   fail "decision receipt omitted the toolchain"

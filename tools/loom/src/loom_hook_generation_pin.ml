@@ -3,16 +3,28 @@ open Unix
 exception Error of string
 
 let freeze_sha256 =
-  "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d"
+  "0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4"
 
 let semantics_sha256 =
-  "9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549"
+  "a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff"
 
 let sounio_source_sha256 =
   "2016d7f46e112c88d7b59b77beff4277fb5c4f023c7a2fc64b9c6282ab1d4a16"
 
 let sounio_executable_sha256 =
-  "68d3f8efd22454dc3a66242f2beafad804cfae8550fee94716c718614d1ead90"
+  "dcb31dcd1c8a11dd995286487d96cd00cd96d8d0f0808c6166c48213f49c4cc1"
+
+(* Action 9048 is re-frozen append-only: v2 changes only the entrypoint read, not
+   the semantic module. New records carry the v2 constants above; pins and
+   activation heads sealed under v1 stay valid, as an exact pair. *)
+let accepted_generations =
+  [ ("9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549",
+     "0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d");
+    ("a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff",
+     "0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4") ]
+
+let accepted_generation semantics freeze =
+  List.mem (semantics, freeze) accepted_generations
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 let test_mode () = Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1"
@@ -213,7 +225,7 @@ let policy_root source_root =
 
 let load_authority source_root =
   let root = policy_root source_root in
-  let manifest_path = Filename.concat root "tools/loom/generation_pinned_cutover.freeze.v1" in
+  let manifest_path = Filename.concat root "tools/loom/generation_pinned_cutover.freeze.v2" in
   if sha256_file manifest_path <> freeze_sha256 then failf "action-9048-freeze-drift";
   let manifest = parse_fields "action-9048-freeze" (read_governed_file manifest_path) in
   if required "action-9048-freeze" manifest "stage" <> "SEMANTICS_FROZEN"
@@ -348,8 +360,10 @@ let validate_pin state runtime_root identity =
   exact "pid_namespace" identity.pid_namespace; exact "pid" identity.pid;
   exact "pid_start" identity.pid_start; exact "identity_sha256" (identity_digest identity);
   exact "presence_sha256" (identity_digest identity);
-  exact "action" "9048"; exact "semantics_sha256" semantics_sha256;
-  exact "freeze_sha256" freeze_sha256;
+  exact "action" "9048";
+  if not (accepted_generation (required "generation-pin" fields "semantics_sha256")
+            (required "generation-pin" fields "freeze_sha256"))
+  then failf "pin-identity-drift:semantics_sha256";
   let runtime = validate_runtime runtime_root (required "generation-pin" fields "runtime_id") in
   exact "runtime_manifest_sha256" runtime.manifest_sha256;
   exact "loom_runtime_sha256" runtime.loom_sha256;
@@ -454,20 +468,23 @@ let seal ~source_root ~git_common ~old_runtime_id ~candidate_runtime_id =
              else
                classified := (name ^ ":NOT_LIVE:" ^ presence_sha) :: !classified);
       let inventory = !classified |> List.sort String.compare |> String.concat "\n" |> sha256 in
-      let receipt = String.concat "\n"
+      let receipt_for (semantics, freeze) = String.concat "\n"
           [ "schema=loom-generation-pin-set-v1"; "state=SEALED";
             "old_runtime_id=" ^ old_runtime.id; "candidate_runtime_id=" ^ candidate.id;
             "inventory_sha256=" ^ inventory;
             "pin_count=" ^ string_of_int (List.length !live);
             "semantic_authority=Sounio"; "action=9048";
-            "semantics_sha256=" ^ semantics_sha256; "freeze_sha256=" ^ freeze_sha256; "" ] in
+            "semantics_sha256=" ^ semantics; "freeze_sha256=" ^ freeze; "" ] in
+      let receipt = receipt_for (semantics_sha256, freeze_sha256) in
       let transaction = sha256 receipt in
       authority_decide state authority ~command:"hook-generation-pin-cutover-ready" 6 33554431 inventory candidate.manifest_sha256
         transaction
         "SOUNIO_GENERATION_PINNED_CUTOVER CUTOVER_READY semantic_authority=Sounio action=9048";
       let activation = Filename.concat (pin_directory state) "activation.v1" in
       if Sys.file_exists activation then (
-        if read_governed_file activation <> receipt then failf "activation-receipt-overwrite-refused")
+        let existing = read_governed_file activation in
+        if not (List.exists (fun generation -> existing = receipt_for generation) accepted_generations)
+        then failf "activation-receipt-overwrite-refused")
       else atomic_write activation receipt;
       Printf.printf "LOOM_GENERATION_PIN_SEALED pins=%d inventory_sha256=%s old_runtime=%s candidate_runtime=%s\n%!"
         (List.length !live) inventory old_runtime.id candidate.id;
@@ -497,8 +514,10 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
     activation_exact "state" "SEALED";
     activation_exact "semantic_authority" "Sounio";
     activation_exact "action" "9048";
-    activation_exact "semantics_sha256" semantics_sha256;
-    activation_exact "freeze_sha256" freeze_sha256;
+    if not (accepted_generation
+              (required "generation-pin-activation" activation_fields "semantics_sha256")
+              (required "generation-pin-activation" activation_fields "freeze_sha256"))
+    then failf "generation-pin-activation-drift:semantics_sha256";
     let old_runtime_id = required "generation-pin-activation" activation_fields "old_runtime_id" in
     let candidate_runtime_id =
       required "generation-pin-activation" activation_fields "candidate_runtime_id"
@@ -521,7 +540,12 @@ let dispatch ~source_root ~git_common ~agent ~lane ~session_id ~harness
       with_lock state (fun () ->
           if not (Sys.file_exists path) then (
             let target = selector_runtime runtimes "current" in
-            let source_digest = sha256 raw_event in
+            (* O pin e validado contra identity_digest (validate_pin, exact
+               "presence_sha256"), entao e com ele que precisa nascer. Carimbar
+               sha256 raw_event — o hash do evento, nao da identidade — fazia
+               toda sessao pos-cutover falhar em pin-identity-drift no primeiro
+               prompt. O caminho de cutover em massa ja usa identity_digest. *)
+            let source_digest = identity_digest identity in
             let pin = pin_text identity source_digest "post-cutover-birth" target in
             let transaction = sha256 (source_digest ^ sha256 pin ^ target.manifest_sha256) in
             authority_decide state authority ~command:"hook-generation-pin-birth" 5 33021951 (identity_digest identity)

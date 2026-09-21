@@ -186,14 +186,16 @@ verify_manifest_file "$RUNTIME_MANIFEST" coord_runtime_sha256 \
   "$RUNTIME_BUNDLE/bin/sounio-coord-runtime"
 AUTHORITY_ROOT="$RUNTIME_BUNDLE/policy/language-authority"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_manifest_sha256 \
-  "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1"
+  "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v2"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_source_sha256 \
   "$AUTHORITY_ROOT/stdlib/coordination/loom_language_authority.sio"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_language_authority_policy_entrypoint_sha256 \
   "$AUTHORITY_ROOT/tools/loom/language_authority_main.sio"
 CUTOVER_ROOT="$RUNTIME_BUNDLE/policy/native-hook-cutover"
+CUTOVER_FREEZE="$CUTOVER_ROOT/tools/loom/native_hook_cutover.freeze.v2"
+[[ -f "$CUTOVER_FREEZE" ]] || CUTOVER_FREEZE="$CUTOVER_ROOT/tools/loom/native_hook_cutover.freeze.v1"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_native_hook_cutover_manifest_sha256 \
-  "$CUTOVER_ROOT/tools/loom/native_hook_cutover.freeze.v1"
+  "$CUTOVER_FREEZE"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_native_hook_cutover_source_sha256 \
   "$CUTOVER_ROOT/stdlib/coordination/loom_native_hook_cutover_authority.sio"
 verify_manifest_file "$RUNTIME_MANIFEST" loom_native_hook_cutover_entrypoint_sha256 \
@@ -205,9 +207,10 @@ for provider in codex claude cursor grok; do
     "loom_native_hook_cutover_${provider}_config_sha256" \
     "$CUTOVER_ROOT/configs/${provider}.json"
 done
-[[ "$(manifest_value "$RUNTIME_MANIFEST" loom_native_hook_cutover_semantics_sha256)" == \
-  27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882 ]] ||
-  die 'staged runtime is not bound to frozen Sounio action 9045 semantics'
+case "$(manifest_value "$RUNTIME_MANIFEST" loom_native_hook_cutover_semantics_sha256)" in
+  842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998|27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882) ;;
+  *) die 'staged runtime is not bound to frozen Sounio action 9045 semantics' ;;
+esac
 [[ ! -e "$RUNTIME_BUNDLE/hooks/sounio_coord_agent_hook.py" && \
   ! -e "$RUNTIME_BUNDLE/hooks/sounio_coord_agent_hook_runtime.py" ]] ||
   die 'staged runtime still contains the Python hook bridge'

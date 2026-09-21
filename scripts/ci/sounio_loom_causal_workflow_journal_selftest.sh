@@ -6,7 +6,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-causal-workflow-journal.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_journal.runtime.v1"
+MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_journal.runtime.v2"
 
 fail() {
   printf 'sounio-loom-causal-workflow-journal-selftest: FAIL: %s\n' "$*" >&2
@@ -35,7 +35,7 @@ expect_hash() {
 }
 
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'runtime manifest is absent or linked'
-expect_value schema loom-causal-workflow-journal-runtime-v1
+expect_value schema loom-causal-workflow-journal-runtime-v2
 expect_value stage OCAML_MID_EXEC_EFFECT_PARITY
 expect_value semantic_authority Sounio
 expect_value semantic_action 9037

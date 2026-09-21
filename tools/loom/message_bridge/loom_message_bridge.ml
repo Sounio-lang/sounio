@@ -1199,10 +1199,10 @@ let verify_routing_freeze cwd authority =
   let policy_root, freeze_path =
     let installed = installed_policy_root "routing-authority" in
     let installed_freeze =
-      Filename.concat installed "tools/loom/routing_authority.freeze.v1"
+      Filename.concat installed "tools/loom/routing_authority.freeze.v2"
     in
     if Sys.file_exists installed_freeze then (installed, installed_freeze)
-    else (cwd, Filename.concat cwd "tools/loom/routing_authority.freeze.v1")
+    else (cwd, Filename.concat cwd "tools/loom/routing_authority.freeze.v2")
   in
   let fields = manifest_fields freeze_path in
   let source_path = Filename.concat policy_root (table_value fields "source_path") in
@@ -1223,13 +1223,13 @@ let verify_execution_product cwd =
     let installed = installed_policy_root "sovereign-execution" in
     let installed_product =
       Filename.concat installed
-        "tools/loom/sovereign_execution_kernel_product.runtime.v1"
+        "tools/loom/sovereign_execution_kernel_product.runtime.v2"
     in
     if Sys.file_exists installed_product then (installed, installed_product)
     else
       (cwd,
        Filename.concat cwd
-         "tools/loom/sovereign_execution_kernel_product.runtime.v1")
+         "tools/loom/sovereign_execution_kernel_product.runtime.v2")
   in
   let fields = manifest_fields product_path in
   let semantic_manifest =

@@ -22,7 +22,7 @@ BUNDLE_TWO="$TEST_ROOT/fixtures-two.v1"
 CONTROLLER_MANIFEST="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
 FIXTURE_MANIFEST="$ROOT_DIR/tools/loom/host_exec_quorum_fixture.freeze.v1"
 RESIDENT_V4_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
-LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
 FROZEN_CONTROLLER_ROOT="$TEST_ROOT/frozen-controller"
 FROZEN_RESIDENT_V4_ROOT="$TEST_ROOT/frozen-resident-v4"
 FROZEN_LANGUAGE_ROOT="$TEST_ROOT/frozen-language-authority"
@@ -78,6 +78,9 @@ git -C "$ROOT_DIR" archive "$FROZEN_CONTROLLER_COMMIT" |
 git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
   tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
 git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_COMMIT" |
+  tar -x -C "$FROZEN_LANGUAGE_ROOT"
+FROZEN_LANGUAGE_TOOLCHAIN_COMMIT="$(field "$LANGUAGE_MANIFEST" toolchain_commit)"
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_TOOLCHAIN_COMMIT" bin/souc bin/souc-lean-single-x86_64 |
   tar -x -C "$FROZEN_LANGUAGE_ROOT"
 [[ "$(sha256sum "$FROZEN_CONTROLLER_ROOT/tools/loom/src/loom_resident.ml" | cut -d ' ' -f 1)" == \
    "$(field "$CONTROLLER_MANIFEST" resident_source_sha256)" ]] ||

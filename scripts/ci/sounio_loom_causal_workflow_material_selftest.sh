@@ -8,7 +8,7 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 CELL="$ROOT_DIR/tools/loom/_build/default/src/loom-causal-workflow-material-cell"
 SOURCE="$ROOT_DIR/tests/verify-ir/call_b.sio"
 COMPILER="$ROOT_DIR/bin/souc-lean-single-x86_64"
-SEMANTICS="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1"
+SEMANTICS="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v2"
 EXPECTED_SOURCE='899d05ffe60528a6b71871e24fa0d1bc105cd033b7ae2c5a0a6d2bb808cdcad9'
 EXPECTED_ARTIFACT='eff2ac0ef28b34d6cc4f008cfb08a30ba18a0874c8654c06a3c62ec2f48a249c'
 

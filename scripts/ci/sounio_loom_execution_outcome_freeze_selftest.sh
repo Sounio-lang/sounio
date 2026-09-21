@@ -4,8 +4,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-execution-outcome-v1-20260827.txt"
+MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-execution-outcome-v2-20260914.txt"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-execution-outcome-freeze.XXXXXX")"
 RUNTIME_ONE="$TEST_ROOT/execution-outcome-one"
 RUNTIME_TWO="$TEST_ROOT/execution-outcome-two"
@@ -57,13 +57,18 @@ hash_u32_csv() {
 
 [[ -f "$MANIFEST" ]] || fail 'freeze manifest is missing'
 [[ -f "$EVIDENCE" ]] || fail 'freeze evidence is missing'
-[[ "$(field schema)" == loom-execution-outcome-freeze-v1 ]] || fail 'unknown manifest schema'
+[[ "$(field schema)" == loom-execution-outcome-freeze-v2 ]] || fail 'unknown manifest schema'
 [[ "$(field stage)" == SEMANTICS_FROZEN ]] || fail 'manifest is not frozen'
 [[ "$(field producing_language)" == Sounio ]] || fail 'producer is not Sounio'
 [[ "$(field language_role)" == SEMANTIC_AUTHORITY ]] || fail 'producer role is not semantic authority'
 [[ "$(field action)" == 9022 ]] || fail 'unexpected Sounio action'
 [[ "$(field parity_open)" == false ]] || fail 'freeze manifest opened parity'
 [[ "$(field claim_ready)" == false ]] || fail 'freeze manifest promoted a claim'
+[[ "$(field change_class)" == ENTRYPOINT_INPUT_ROBUSTNESS && "$(field semantics_module_changed)" == false ]] || fail 'unexpected v2 change class'
+[[ "$(field predecessor_manifest_path)" == tools/loom/execution_outcome.freeze.v1 ]] || fail 'unexpected predecessor'
+[[ "$(file_hash "$ROOT_DIR/$(field predecessor_manifest_path)")" == "$(field predecessor_manifest_sha256)" ]] || fail 'predecessor manifest drifted'
+[[ "$(field source_sha256)" == "$(grep -m1 '^source_sha256=' "$ROOT_DIR/$(field predecessor_manifest_path)" | cut -d= -f2)" ]] || fail 'semantic module differs from predecessor'
+[[ "$(field parent_execution_authority_manifest)" == tools/loom/execution_authority.freeze.v3 ]] || fail 'outcome v2 must descend from execution authority v3'
 for surface in exec_attached child_exec_attached commit_attached ci_attached; do
   [[ "$(field "$surface")" == false ]] || fail "$surface was promoted during freeze"
 done

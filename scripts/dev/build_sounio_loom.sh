@@ -3,16 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
-NATIVE_HOOK_CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
-EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
-EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
-SUBPROCESS_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
-RESIDENT_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1"
-RESIDENT_MEMBRANE_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2"
-RESIDENT_MEMBRANE_V3_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v3"
-RESIDENT_MEMBRANE_V5_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v5"
-LANE_HEALTH_MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
+LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v2"
+NATIVE_HOOK_CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v2"
+EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v3"
+EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v2"
+SUBPROCESS_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2"
+RESIDENT_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2"
+RESIDENT_MEMBRANE_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2"
+RESIDENT_MEMBRANE_V3_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v3.v2"
+RESIDENT_MEMBRANE_V5_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2"
+LANE_HEALTH_MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v2"
 frozen_toolchain_root=''
 execution_outcome_toolchain_root=''
 subprocess_membrane_toolchain_root=''
@@ -144,7 +144,7 @@ prepare_frozen_toolchain() {
     echo 'error: frozen Sounio authority manifests are required' >&2
     exit 1
   }
-  executable_commit="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" sounio_executable_commit)"
+  executable_commit="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_commit)"
   wrapper_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
   compiler_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_compiler_sha256)"
   execution_wrapper_sha="$(manifest_value "$EXECUTION_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
@@ -312,7 +312,7 @@ else
 fi
 [[ -f "$RESIDENT_MEMBRANE_MANIFEST" && \
   "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" schema)" == \
-    loom-resident-membrane-runtime-v1 && \
+    loom-resident-membrane-runtime-v1.v2 && \
   "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" stage)" == \
     SOUNIO_RESIDENT_REALIZATION && \
   "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" producing_language)" == Sounio ]] || {
@@ -372,7 +372,7 @@ mkdir -p "$resident_membrane_runtime_dir"
 ) 8>"$resident_membrane_runtime_dir/.resident-membrane.lock"
 [[ -f "$RESIDENT_MEMBRANE_V2_MANIFEST" && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V2_MANIFEST" schema)" == \
-    loom-resident-membrane-runtime-v2 && \
+    loom-resident-membrane-runtime-v2.v2 && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V2_MANIFEST" stage)" == \
     SOUNIO_RESIDENT_REALIZATION && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V2_MANIFEST" producing_language)" == Sounio ]] || {
@@ -381,10 +381,10 @@ mkdir -p "$resident_membrane_runtime_dir"
 }
 resident_membrane_v2_expected_sha="$(manifest_value "$RESIDENT_MEMBRANE_V2_MANIFEST" runtime_sha256)"
 resident_membrane_v2_content_dir="$resident_membrane_runtime_dir/sha256-$resident_membrane_v2_expected_sha"
-resident_membrane_v2_content_output="$resident_membrane_v2_content_dir/sounio-loom-resident-membrane-runtime-v2"
-resident_membrane_v2_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v2"
+resident_membrane_v2_content_output="$resident_membrane_v2_content_dir/sounio-loom-resident-membrane-runtime-v2.v2"
+resident_membrane_v2_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v2.v2"
 resident_membrane_v2_stage_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-v2-install.XXXXXX")"
-resident_membrane_v2_stage="$resident_membrane_v2_stage_root/sounio-loom-resident-membrane-runtime-v2"
+resident_membrane_v2_stage="$resident_membrane_v2_stage_root/sounio-loom-resident-membrane-runtime-v2.v2"
 if [[ -n "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT" ]] || {
     echo 'error: SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT is not executable' >&2
@@ -420,13 +420,13 @@ resident_membrane_v2_actual_sha="$(sha256sum "$resident_membrane_v2_stage" | awk
     chmod 0555 "$resident_membrane_v2_content_dir"
   fi
   resident_v2_link_tmp="$resident_membrane_runtime_dir/.resident-membrane-v2-link.$$"
-  ln -s "sha256-$resident_membrane_v2_expected_sha/sounio-loom-resident-membrane-runtime-v2" \
+  ln -s "sha256-$resident_membrane_v2_expected_sha/sounio-loom-resident-membrane-runtime-v2.v2" \
     "$resident_v2_link_tmp"
   mv -Tf "$resident_v2_link_tmp" "$resident_membrane_v2_output"
 ) 8>"$resident_membrane_runtime_dir/.resident-membrane-v2.lock"
 [[ -f "$RESIDENT_MEMBRANE_V3_MANIFEST" && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" schema)" == \
-    loom-resident-membrane-runtime-v3 && \
+    loom-resident-membrane-runtime-v3.v2 && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" stage)" == \
     SOUNIO_RESIDENT_REALIZATION && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" producing_language)" == Sounio ]] || {
@@ -435,10 +435,10 @@ resident_membrane_v2_actual_sha="$(sha256sum "$resident_membrane_v2_stage" | awk
 }
 resident_membrane_v3_expected_sha="$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" runtime_sha256)"
 resident_membrane_v3_content_dir="$resident_membrane_runtime_dir/sha256-$resident_membrane_v3_expected_sha"
-resident_membrane_v3_content_output="$resident_membrane_v3_content_dir/sounio-loom-resident-membrane-runtime-v3"
-resident_membrane_v3_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v3"
+resident_membrane_v3_content_output="$resident_membrane_v3_content_dir/sounio-loom-resident-membrane-runtime-v3.v2"
+resident_membrane_v3_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v3.v2"
 resident_membrane_v3_stage_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-v3-install.XXXXXX")"
-resident_membrane_v3_stage="$resident_membrane_v3_stage_root/sounio-loom-resident-membrane-runtime-v3"
+resident_membrane_v3_stage="$resident_membrane_v3_stage_root/sounio-loom-resident-membrane-runtime-v3.v2"
 if [[ -n "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT" ]] || {
     echo 'error: SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT is not executable' >&2
@@ -475,13 +475,13 @@ resident_membrane_v3_actual_sha="$(sha256sum "$resident_membrane_v3_stage" | awk
     chmod 0555 "$resident_membrane_v3_content_dir"
   fi
   resident_v3_link_tmp="$resident_membrane_runtime_dir/.resident-membrane-v3-link.$$"
-  ln -s "sha256-$resident_membrane_v3_expected_sha/sounio-loom-resident-membrane-runtime-v3" \
+  ln -s "sha256-$resident_membrane_v3_expected_sha/sounio-loom-resident-membrane-runtime-v3.v2" \
     "$resident_v3_link_tmp"
   mv -Tf "$resident_v3_link_tmp" "$resident_membrane_v3_output"
 ) 8>"$resident_membrane_runtime_dir/.resident-membrane-v3.lock"
 [[ -f "$RESIDENT_MEMBRANE_V5_MANIFEST" && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V5_MANIFEST" schema)" == \
-    loom-resident-membrane-runtime-v5 && \
+    loom-resident-membrane-runtime-v5.v2 && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V5_MANIFEST" stage)" == \
     SOUNIO_RESIDENT_REALIZATION && \
   "$(manifest_value "$RESIDENT_MEMBRANE_V5_MANIFEST" producing_language)" == Sounio ]] || {
@@ -490,10 +490,10 @@ resident_membrane_v3_actual_sha="$(sha256sum "$resident_membrane_v3_stage" | awk
 }
 resident_membrane_v5_expected_sha="$(manifest_value "$RESIDENT_MEMBRANE_V5_MANIFEST" runtime_sha256)"
 resident_membrane_v5_content_dir="$resident_membrane_runtime_dir/sha256-$resident_membrane_v5_expected_sha"
-resident_membrane_v5_content_output="$resident_membrane_v5_content_dir/sounio-loom-resident-membrane-runtime-v5"
-resident_membrane_v5_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v5"
+resident_membrane_v5_content_output="$resident_membrane_v5_content_dir/sounio-loom-resident-membrane-runtime-v5.v2"
+resident_membrane_v5_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v5.v2"
 resident_membrane_v5_stage_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-v5-install.XXXXXX")"
-resident_membrane_v5_stage="$resident_membrane_v5_stage_root/sounio-loom-resident-membrane-runtime-v5"
+resident_membrane_v5_stage="$resident_membrane_v5_stage_root/sounio-loom-resident-membrane-runtime-v5.v2"
 if [[ -n "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_PREBUILT" ]] || {
     echo 'error: SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_PREBUILT is not executable' >&2
@@ -530,7 +530,7 @@ resident_membrane_v5_actual_sha="$(sha256sum "$resident_membrane_v5_stage" | awk
     chmod 0555 "$resident_membrane_v5_content_dir"
   fi
   resident_v5_link_tmp="$resident_membrane_runtime_dir/.resident-membrane-v5-link.$$"
-  ln -s "sha256-$resident_membrane_v5_expected_sha/sounio-loom-resident-membrane-runtime-v5" \
+  ln -s "sha256-$resident_membrane_v5_expected_sha/sounio-loom-resident-membrane-runtime-v5.v2" \
     "$resident_v5_link_tmp"
   mv -Tf "$resident_v5_link_tmp" "$resident_membrane_v5_output"
 ) 8>"$resident_membrane_runtime_dir/.resident-membrane-v5.lock"

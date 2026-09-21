@@ -44,9 +44,9 @@
 namespace {
 
 constexpr std::string_view kFrozenManifestSha256 =
-    "7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5";
+    "5581f29a5f48f3cfa26ea46c906ee73ef1b375ec0d58efcdad123d2e2e3601be";
 constexpr std::string_view kFrozenCapsuleManifestSha256 =
-    "76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f";
+    "2ffc06dd24efb195e8d8fe828349b2a572ae8a2f24791948825431116f009674";
 constexpr std::string_view kFrozenInvocationCellManifestSha256 =
     "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e";
 constexpr std::string_view kFrozenExecGrantCellManifestSha256 =

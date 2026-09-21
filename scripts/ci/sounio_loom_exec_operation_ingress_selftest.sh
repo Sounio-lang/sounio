@@ -15,8 +15,8 @@ GENERATION="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 PRINCIPAL="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 DESCRIPTOR="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 GRANT="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-RECORD_MANIFEST_SHA256="58d4a49c5b2462261ee53cd06f3ca8e29d363c1a38bf47274fa98a67b79cc569"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-operation-ingress-v1-20260830.txt"
+RECORD_MANIFEST_SHA256="e346c4d5a9263da32ad3111846158d4beb0132ad4c5919ebe6922d451ac9129d"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-operation-ingress-v2-20260916.txt"
 
 fail() {
   printf 'sounio-loom-exec-operation-ingress-selftest: FAIL: %s test_root=%s\n' \
@@ -63,7 +63,7 @@ tail -n +2 "$TEST_ROOT/issued" >"$TEST_ROOT/record"
 
 LANGUAGE_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 LANGUAGE_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
-RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5"
+RESIDENT_RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime-v5.v2"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
 FROZEN_COMMIT="$(sed -n 's/^sounio_executable_commit=//p' "$LANGUAGE_MANIFEST")"
 [[ -n "$FROZEN_COMMIT" ]] || fail 'language authority commit absent'
@@ -234,9 +234,9 @@ git -C "$ROOT_DIR" merge-base --is-ancestor "$IMPLEMENTATION_COMMIT" HEAD ||
   fail 'checked-in implementation commit is not an ancestor of HEAD'
 for binding in \
   "result:$RESULT" \
-  "sounio_operation_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1" | cut -d ' ' -f 1)" \
-  "sounio_result_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_result_record.freeze.v1" | cut -d ' ' -f 1)" \
-  "sounio_grant_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v1" | cut -d ' ' -f 1)" \
+  "sounio_operation_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v2" | cut -d ' ' -f 1)" \
+  "sounio_result_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_result_record.freeze.v2" | cut -d ' ' -f 1)" \
+  "sounio_grant_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v2" | cut -d ' ' -f 1)" \
   "operational_ingress_source_sha256:$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" | cut -d ' ' -f 1)" \
   "operational_record_source_sha256:$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_result_record.ml" | cut -d ' ' -f 1)" \
   "operational_hook_source_sha256:$(sha256sum "$ROOT_DIR/tools/loom/src/loom_hook.ml" | cut -d ' ' -f 1)" \

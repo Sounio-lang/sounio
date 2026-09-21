@@ -9,7 +9,7 @@ HOOK_SOURCE="$ROOT_DIR/tools/loom/src/loom_hook.ml"
 INGRESS="$ROOT_DIR/tools/loom/product_exec_ingress_dark.runtime.v1"
 HOST_GRANT="$ROOT_DIR/tools/loom/host_exec_quorum_host.runtime.v1"
 PROCESS_WITNESS="$ROOT_DIR/tools/loom/process_witness_host.runtime.v1"
-PEER_MATERIAL="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1"
+PEER_MATERIAL="$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2"
 
 fail() {
   printf 'sounio-loom-product-dynamic-user-exec-counterexample-selftest: FAIL reason=%s\n' \

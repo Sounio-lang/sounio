@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_attest_grant_fixture.freeze.v1"
+MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_attest_grant_fixture.freeze.v2"
 
 fail() {
   printf 'sounio-loom-causal-workflow-attest-grant-fixture-freeze-selftest: FAIL: %s\n' "$*" >&2
@@ -27,7 +27,7 @@ expect_hash() {
     fail "$1 binding drifted"
 }
 
-expect schema loom-causal-workflow-attest-grant-fixture-freeze-v1
+expect schema loom-causal-workflow-attest-grant-fixture-freeze-v2
 expect stage SEMANTICS_FROZEN
 expect producing_language Sounio
 expect language_role SEMANTIC_FIXTURE_PRODUCER

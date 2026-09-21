@@ -8,8 +8,8 @@ TEST_PARENT="$ROOT_DIR/tools/loom/_build"
 mkdir -p "$TEST_PARENT"
 TEST_ROOT="$(mktemp -d "$TEST_PARENT/exec-intent-projection.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-MANIFEST="$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v1"
-EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-intent-projection-v1-20260830.txt"
+MANIFEST="$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v2"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-exec-intent-projection-v2-20260916.txt"
 
 fail() {
   printf 'sounio-loom-exec-intent-projection-selftest: FAIL: %s test_root=%s\n' \
@@ -27,7 +27,7 @@ manifest_value() {
 
 manifest_sha256="$(sha256sum "$MANIFEST" | cut -d ' ' -f 1)"
 [[ "$manifest_sha256" == \
-   8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e ]] ||
+   30365e3e8e506c6286ff2ad2d776f4d3fbb360a284a57eed77e28c039739ac33 ]] ||
   fail 'frozen Sounio manifest hash drifted'
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null

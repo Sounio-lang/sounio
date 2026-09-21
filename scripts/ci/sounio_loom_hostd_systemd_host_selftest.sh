@@ -266,7 +266,7 @@ if [[ "$PHASE" == prepare ]]; then
     "$BUNDLE_DIR/bundle-manifest.v1" exec_cell_capsule_sha256)"
   [[ -x "$INSTALLER" && -x "$STAGED_PREFIX/bin/sounio-loom-runtime" &&
      -x "$STAGED_PREFIX/bin/sounio-loom-host-boot-reconciler" &&
-     -x "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5" &&
+     -x "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5.v2" &&
      -d "$STAGED_PREFIX/policy/product-activation" &&
      -f "$EXEC_CELL_CAPSULE" && ! -L "$EXEC_CELL_CAPSULE" &&
      "$EXEC_CELL_CAPSULE_SHA256" =~ ^[0-9a-f]{64}$ &&
@@ -278,7 +278,7 @@ if [[ "$PHASE" == prepare ]]; then
     --unit-dir /etc/systemd/system --unit-name "$HOSTD_UNIT" --user root \
     --runtime "$STAGED_PREFIX/bin/sounio-loom-runtime" \
     --authority "$STAGED_PREFIX/bin/sounio-loom-host-boot-reconciler" \
-    --resident "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5" \
+    --resident "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5.v2" \
     --policy-root "$STAGED_PREFIX/policy/product-activation" \
     --exec-cell-capsule "$EXEC_CELL_CAPSULE" \
     --exec-cell-capsule-sha256 "$EXEC_CELL_CAPSULE_SHA256" --activate \

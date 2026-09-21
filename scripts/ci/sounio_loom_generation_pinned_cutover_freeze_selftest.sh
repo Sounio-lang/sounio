@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-MANIFEST="$ROOT/tools/loom/generation_pinned_cutover.freeze.v1"
+MANIFEST="$ROOT/tools/loom/generation_pinned_cutover.freeze.v2"
 
 fail() { printf 'sounio-loom-generation-pinned-cutover-freeze-selftest: FAIL: %s\n' "$*" >&2; exit 1; }
 value() {
@@ -24,7 +24,7 @@ expect_commit() {
     fail "$path not bound to $commit"
 }
 
-expect schema loom-generation-pinned-cutover-freeze-v1
+expect schema loom-generation-pinned-cutover-freeze-v2
 expect stage SEMANTICS_FROZEN
 expect semantic_authority Sounio
 expect producing_language Sounio
@@ -46,6 +46,11 @@ expect parity_open false
 expect claim_ready false
 expect global_cutover_complete false
 
+expect change_class ENTRYPOINT_INPUT_ROBUSTNESS
+expect semantics_module_changed false
+expect_hash predecessor_manifest
+[[ "$(value source_sha256)" == "$(sed -n 's/^source_sha256=//p' "$ROOT/$(value predecessor_manifest_path)")" ]] ||
+  fail 'semantic module differs from predecessor'
 for key in garden source entrypoint build_script selftest freeze_selftest \
   first_manifest first_evidence frozen_evidence parent_9046_freeze \
   parent_9047_freeze toolchain_wrapper toolchain_compiler; do expect_hash "$key"; done

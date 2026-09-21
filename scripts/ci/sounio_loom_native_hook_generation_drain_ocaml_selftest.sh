@@ -213,8 +213,8 @@ set -e
   "$runtime_output" == *'"authority_observed":false'* ]] ||
   fail "runtime tamper was not refused before authority execution: $runtime_output"
 
-tampered_manifest="$TEST_ROOT/native_hook_generation_drain.freeze.v1"
-cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" "$tampered_manifest"
+tampered_manifest="$TEST_ROOT/native_hook_generation_drain.freeze.v2"
+cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v2" "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e
 manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \

@@ -117,13 +117,13 @@ done
 
 grep -Fq $'\tevent=PEER_ACTIVATION_CAPSULE\t' "$RECEIPTS" ||
   fail 'peer-activation receipt is missing'
-grep -Fq $'\tparent_9031_manifest_sha256=f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e\t' \
+grep -Fq $'\tparent_9031_manifest_sha256=61a0140d6438dc01b69005a15e4f2614537cae90041fc180496dd185cc9f22e2\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen action 9031'
-grep -Fq $'\tresident_manifest_sha256=b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353\t' \
+grep -Fq $'\tresident_manifest_sha256=19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e\t' \
   "$RECEIPTS" || fail 'receipt omitted frozen resident v5 manifest'
 
 tampered_manifest="$TEST_ROOT/action-9031.freeze.v1"
-cp "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1" \
+cp "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2" \
   "$tampered_manifest"
 printf '\n' >> "$tampered_manifest"
 set +e
@@ -139,7 +139,7 @@ set -e
   fail "action 9031 manifest tamper did not fail before spawn: $manifest_output"
 
 tampered_resident_manifest="$TEST_ROOT/resident-v5.runtime"
-cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5" \
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" \
   "$tampered_resident_manifest"
 printf '\n' >> "$tampered_resident_manifest"
 set +e

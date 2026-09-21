@@ -25,7 +25,7 @@ expect_hash() {
 }
 
 [[ -x "$SOUC" ]] || fail "Sounio compiler is missing: $SOUC"
-expect_hash "$SOURCE" 3383ad078cbdc3d029a1c96a6a3bd20928b206f6a634d2a2d4afced0c693accb
+expect_hash "$SOURCE" a2e30c1463f7ea1101d32d602304948d11e9afc4b29a83c055f66e09f1552281
 expect_hash "$SEMANTIC_MANIFEST" b3557d850ce0dc13c900f8dbb10c33f824ac25e908cb4a48dd2ef913267194c2
 expect_hash "$MATERIAL_MANIFEST" 7ffdff3f9dd48753502e9151a117fdcac8ea5149ef4772aaea5594269c54b301
 expect_hash "$ACTION_9025_MANIFEST" c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91

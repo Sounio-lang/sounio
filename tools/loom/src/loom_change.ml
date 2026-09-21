@@ -3,10 +3,10 @@ open Unix
 exception Error of string
 
 let semantic_manifest_sha256 =
-  "c84c5e7ff608f86ac51872de143516b0feb0981d0ee962583e2c62f66cbbacfb"
+  "c0c886cea32a075080c203cca6ea45ddeea6555a7e2b3183fea20c333ad30f9a"
 
 let material_manifest_sha256 =
-  "662e01af4aed45ab22a0cfce283fd7aa9ec8775a65a2fb5a7a94a02c2c174c00"
+  "b80afc1c8329fe0126f3fff52b49e3ebf89b52931deef96bf4ca55c670e9ec99"
 
 let max_mutation_bytes = 1024 * 1024
 let grant_ttl_us = 120_000_000L
@@ -591,7 +591,7 @@ let policy_root root =
   | _ ->
       let worktree = Unix.realpath root in
       let local =
-        Filename.concat worktree "tools/loom/sovereign_material_change.freeze.v2"
+        Filename.concat worktree "tools/loom/sovereign_material_change.freeze.v3"
       in
       if Sys.file_exists local then worktree
       else
@@ -601,19 +601,19 @@ let policy_root root =
         in
         if Sys.file_exists
              (Filename.concat capsule
-                "tools/loom/sovereign_material_change.freeze.v2")
+                "tools/loom/sovereign_material_change.freeze.v3")
         then Unix.realpath capsule
         else failf "sovereign-change-policy-root-missing"
 
 let load_gate root =
   let selected = policy_root root in
   let manifest_path =
-    Filename.concat selected "tools/loom/sovereign_change_kernel.freeze.v1"
+    Filename.concat selected "tools/loom/sovereign_change_kernel.freeze.v2"
   in
   if Loom_exec.sha256_file manifest_path <> semantic_manifest_sha256 then
     failf "change-semantic-manifest-hash-mismatch";
   let manifest = Loom_exec.parse_manifest manifest_path in
-  exact manifest "schema" "loom-sovereign-change-kernel-freeze-v1";
+  exact manifest "schema" "loom-sovereign-change-kernel-freeze-v2";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "semantic_authority" "Sounio";
   exact manifest "action" "9043";
@@ -670,12 +670,12 @@ let admit gate mode =
 let load_material_gate root =
   let selected = policy_root root in
   let manifest_path =
-    Filename.concat selected "tools/loom/sovereign_material_change.freeze.v2"
+    Filename.concat selected "tools/loom/sovereign_material_change.freeze.v3"
   in
   if Loom_exec.sha256_file manifest_path <> material_manifest_sha256 then
     failf "material-change-semantic-manifest-hash-mismatch";
   let manifest = Loom_exec.parse_manifest manifest_path in
-  exact manifest "schema" "loom-sovereign-material-change-freeze-v2";
+  exact manifest "schema" "loom-sovereign-material-change-freeze-v3";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "semantic_authority" "Sounio";
   exact manifest "action" "9044";

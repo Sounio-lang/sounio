@@ -3,19 +3,19 @@ open Unix
 exception Error of string
 
 let pinned_runtime_manifest_sha256 =
-  "458f9d0294dc3a5a484b04eb532d412e32d1cf0cebe99292e90bfb49670abcf1"
+  "23499dc339bfc1457b984e716419853fe7c8631b897b65d6e981bbb0b868c7d4"
 
 let pinned_runtime_v2_manifest_sha256 =
-  "b17bc0d8bd3ff118e8d6d72d223d3744349f44fc1cffdd74906e6c7a176bb60d"
+  "ce58633ff9986805d52ede266e0577c6a4fa7ac69adbee7b6d5d708de801bc02"
 
 let pinned_runtime_v3_manifest_sha256 =
-  "6d5e8d1fd0d6b3badf707ed438804a9e1b46dc74862e09e2f98d143c40665431"
+  "f8314f6356473a61d5002ae366453ac4af136c38f8f54f348804c5d5c92c0c2b"
 
 let pinned_runtime_v4_manifest_sha256 =
-  "f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473"
+  "2d45def31864d5ba2932edbc3eb5600d814d69ce040334c011c380763f265fd1"
 
 let pinned_runtime_v5_manifest_sha256 =
-  "b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353"
+  "19598e7261fe4d0e447d4cebb76a8b4b047e59fdf53bd9d1a30803c6b15a421e"
 
 let max_file_bytes = 8 * 1024 * 1024
 let max_frame_bytes = 65_535
@@ -184,14 +184,14 @@ let load_policy root =
   let path =
     match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v1"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v1.v2"
   in
   if not (Sys.file_exists path) then failf "resident-runtime-manifest-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_runtime_manifest_sha256 then
     failf "resident-runtime-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-resident-membrane-runtime-v1"
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v1.v2"
      || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -235,14 +235,14 @@ let load_policy_v2 root =
   let path =
     match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v2"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v2.v2"
   in
   if not (Sys.file_exists path) then failf "resident-runtime-v2-manifest-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_runtime_v2_manifest_sha256 then
     failf "resident-runtime-v2-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-resident-membrane-runtime-v2"
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v2.v2"
      || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -282,7 +282,7 @@ let load_policy_v2 root =
     "resident-v2-gate-script-hash-mismatch";
   let runtime, runtime_sha256 =
     runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_RUNTIME"
-      ~sibling_name:"sounio-loom-resident-membrane-runtime-v2" root manifest
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v2.v2" root manifest
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
@@ -295,14 +295,14 @@ let load_policy_v3 root =
   let path =
     match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v3"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v3.v2"
   in
   if not (Sys.file_exists path) then failf "resident-runtime-v3-manifest-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_runtime_v3_manifest_sha256 then
     failf "resident-runtime-v3-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-resident-membrane-runtime-v3"
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v3.v2"
      || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -350,7 +350,7 @@ let load_policy_v3 root =
     "resident-v3-gate-script-hash-mismatch";
   let runtime, runtime_sha256 =
     runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_RUNTIME"
-      ~sibling_name:"sounio-loom-resident-membrane-runtime-v3" root manifest
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v3.v2" root manifest
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
@@ -363,14 +363,14 @@ let load_policy_v4 root =
   let path =
     match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v4"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v4.v2"
   in
   if not (Sys.file_exists path) then failf "resident-runtime-v4-manifest-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_runtime_v4_manifest_sha256 then
     failf "resident-runtime-v4-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-resident-membrane-runtime-v4"
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v4.v2"
      || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -422,7 +422,7 @@ let load_policy_v4 root =
     "resident-v4-gate-script-hash-mismatch";
   let runtime, runtime_sha256 =
     runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_RUNTIME"
-      ~sibling_name:"sounio-loom-resident-membrane-runtime-v4" root manifest
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v4.v2" root manifest
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
@@ -436,14 +436,14 @@ let load_policy_v5 root =
   let path =
     match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_MANIFEST" with
     | Some path -> path
-    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5"
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5.v2"
   in
   if not (Sys.file_exists path) then failf "resident-runtime-v5-manifest-missing";
   let manifest_sha256 = sha256_file path in
   if manifest_sha256 <> pinned_runtime_v5_manifest_sha256 then
     failf "resident-runtime-v5-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  if required manifest "schema" <> "loom-resident-membrane-runtime-v5"
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v5.v2"
      || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
      || required manifest "producing_language" <> "Sounio"
      || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
@@ -515,7 +515,7 @@ let load_policy_v5 root =
   then failf "resident-v5-action-9031-binding-invalid";
   let runtime, runtime_sha256 =
     runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_RUNTIME"
-      ~sibling_name:"sounio-loom-resident-membrane-runtime-v5" root manifest
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v5.v2" root manifest
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;

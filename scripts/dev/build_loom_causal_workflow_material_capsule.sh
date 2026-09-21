@@ -89,10 +89,10 @@ MATERIAL_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_material.runtime
 [[ "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" stage)" == MATERIAL_PARITY_MID_EXEC_PROBE_READY && \
    "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" semantic_authority)" == Sounio && \
    "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" semantic_freeze_commit)" == "$MID_EXEC_FREEZE_COMMIT" && \
-   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1")" && \
-   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1" semantics_sha256)" && \
-   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1")" && \
-   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1" semantics_sha256)" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v2")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v2" semantics_sha256)" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v2")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v2" semantics_sha256)" && \
    "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" known_p0_count)" == 0 && \
    "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" known_p0_fails_closed)" == true && \
    "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" controller_recovery)" == false && \
@@ -184,14 +184,14 @@ AUTHORITY_FILES=(
   tests/verify-ir/call_b.sio
   tools/loom/kernel_exec_grant_cell_authority.freeze.v1
   tools/loom/host_exec_quorum_fixture.freeze.v1
-  tools/loom/exec_intent_envelope.freeze.v1
-  tools/loom/exec_operation_grant_fixture.freeze.v1
-  tools/loom/exec_operation_catalog.freeze.v1
-  tools/loom/exec_result_record.freeze.v1
-  tools/loom/causal_workflow_kernel.freeze.v1
-  tools/loom/causal_workflow_mid_exec.freeze.v1
+  tools/loom/exec_intent_envelope.freeze.v2
+  tools/loom/exec_operation_grant_fixture.freeze.v2
+  tools/loom/exec_operation_catalog.freeze.v2
+  tools/loom/exec_result_record.freeze.v2
+  tools/loom/causal_workflow_kernel.freeze.v2
+  tools/loom/causal_workflow_mid_exec.freeze.v2
   tools/loom/causal_workflow_run_grant_fixture.freeze.v1
-  tools/loom/causal_workflow_attest_grant_fixture.freeze.v1
+  tools/loom/causal_workflow_attest_grant_fixture.freeze.v2
   tools/loom/causal_workflow_journal.runtime.v1
 	  tools/loom/causal_workflow_material.runtime.v1
 	  tools/loom/exec_grant_controller.runtime.v1
@@ -267,23 +267,23 @@ done
 # through the 9035 catalog before issuing the 9036 result record. Copy every
 # direct file/hash edge those three OCaml validators consume. This is an
 # executable dependency closure, not a second source of semantic truth.
-EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v1"
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v2"
 install_manifest_closure "$EXEC_GRANT_MANIFEST" \
   garden source authority_manifest catalog_manifest result_manifest \
   build_script selftest freeze_selftest evidence toolchain_wrapper toolchain_compiler
 
-EXEC_CATALOG_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1"
+EXEC_CATALOG_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v2"
 install_manifest_closure "$EXEC_CATALOG_MANIFEST" \
   garden contract source entrypoint build_script selftest evidence \
   parent_9030_manifest parent_9031_manifest parent_9033_manifest \
   parent_9034_manifest toolchain_wrapper toolchain_compiler
 
-EXEC_RESULT_MANIFEST="$ROOT_DIR/tools/loom/exec_result_record.freeze.v1"
+EXEC_RESULT_MANIFEST="$ROOT_DIR/tools/loom/exec_result_record.freeze.v2"
 install_manifest_closure "$EXEC_RESULT_MANIFEST" \
   garden contract source entrypoint build_script selftest evidence \
   parent_9035_manifest toolchain_wrapper toolchain_compiler
 
-CAUSAL_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1"
+CAUSAL_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v2"
 CAUSAL_DEPENDENCY_KEYS=(
   garden
   contract
@@ -313,8 +313,8 @@ for key in "${CAUSAL_DEPENDENCY_KEYS[@]}"; do
     fail "causal authority dependency drifted: $key"
 done
 
-MID_EXEC_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1"
-[[ "$(git -C "$ROOT_DIR" show "$MID_EXEC_FREEZE_COMMIT:tools/loom/causal_workflow_mid_exec.freeze.v1" | sha256sum | cut -d ' ' -f 1)" == \
+MID_EXEC_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v2"
+[[ "$(git -C "$ROOT_DIR" show "$MID_EXEC_FREEZE_COMMIT:tools/loom/causal_workflow_mid_exec.freeze.v2" | sha256sum | cut -d ' ' -f 1)" == \
    "$(sha256_file "$MID_EXEC_MANIFEST")" ]] ||
   fail 'committed Sounio mid-exec freeze manifest drifted after freeze commit'
 install_manifest_closure "$MID_EXEC_MANIFEST" \
@@ -520,7 +520,7 @@ journal_runtime_path=release/bin/loom-causal-workflow-journal-fixture
 causal_workflow_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel
 mid_exec_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-mid-exec
 mid_exec_runtime_sha256=$(sha256_file "$MID_EXEC_RUNTIME")
-mid_exec_manifest_path=release/authority-root/tools/loom/causal_workflow_mid_exec.freeze.v1
+mid_exec_manifest_path=release/authority-root/tools/loom/causal_workflow_mid_exec.freeze.v2
 mid_exec_manifest_sha256=$(sha256_file "$MID_EXEC_MANIFEST")
 mid_exec_semantics_sha256=$(manifest_value "$MID_EXEC_MANIFEST" semantics_sha256)
 mid_exec_release_frame_sha256=$(printf '%s\n' "$(manifest_value "$MID_EXEC_MANIFEST" wire_schema) $(manifest_value "$MID_EXEC_MANIFEST" release_stage_word) $(manifest_value "$MID_EXEC_MANIFEST" release_word0) $(manifest_value "$MID_EXEC_MANIFEST" release_word1)" | sha256sum | cut -d ' ' -f 1)
@@ -534,15 +534,15 @@ host_probe_path=release/gates/run_loom_causal_workflow_material_host_probe.sh
 host_probe_sha256=$(sha256_file "$GATES/run_loom_causal_workflow_material_host_probe.sh")
 controller_runtime_manifest_path=release/authority-root/tools/loom/exec_grant_controller.runtime.v1
 resident_runtime_manifest_path=release/authority-root/tools/loom/resident_membrane.runtime.v4
-operation_fixture_manifest_path=release/authority-root/tools/loom/exec_operation_grant_fixture.freeze.v1
+operation_fixture_manifest_path=release/authority-root/tools/loom/exec_operation_grant_fixture.freeze.v2
 operation_fixture_bundle_path=release/data/operation-grant-fixtures.v1
-operation_catalog_manifest_path=release/authority-root/tools/loom/exec_operation_catalog.freeze.v1
-operation_result_manifest_path=release/authority-root/tools/loom/exec_result_record.freeze.v1
+operation_catalog_manifest_path=release/authority-root/tools/loom/exec_operation_catalog.freeze.v2
+operation_result_manifest_path=release/authority-root/tools/loom/exec_result_record.freeze.v2
 causal_run_grant_manifest_path=release/authority-root/tools/loom/causal_workflow_run_grant_fixture.freeze.v1
 causal_run_grant_bundle_path=release/data/causal-run-grant-fixtures.v1
-causal_attest_grant_manifest_path=release/authority-root/tools/loom/causal_workflow_attest_grant_fixture.freeze.v1
+causal_attest_grant_manifest_path=release/authority-root/tools/loom/causal_workflow_attest_grant_fixture.freeze.v2
 causal_attest_grant_bundle_path=release/data/causal-attest-grant-fixtures.v1
-causal_workflow_manifest_path=release/authority-root/tools/loom/causal_workflow_kernel.freeze.v1
+causal_workflow_manifest_path=release/authority-root/tools/loom/causal_workflow_kernel.freeze.v2
 payload_entries_path=meta/payload.entries.v1
 payload_entries_sha256=$(sha256_file "$ENTRIES")
 payload_entry_count=$(wc -l < "$ENTRIES" | tr -d ' ')

@@ -3,7 +3,7 @@ open Unix
 exception Error of string
 
 let pinned_manifest_sha256 =
-  "25c58880cfe568a3b55b479df4515b63589c2e4dca703c97917e5cbdef0f1561"
+  "c0e96a89777ce8846f55fb2d55924bff1c3eb327fb71f0131a1effc04850ed45"
 
 type entry = {
   name : string;
@@ -78,6 +78,7 @@ let sha256_file = Loom_exec_intent.sha256_file
 let parse_manifest = Loom_exec_intent.parse_manifest
 let required = Loom_exec_intent.required
 let exact = Loom_exec_intent.exact
+let exact_frozen_schema = Loom_exec_intent.exact_frozen_schema
 let decimal = Loom_exec_intent.decimal
 let digest = Loom_exec_intent.digest
 let require_regular_file = Loom_exec_intent.require_regular_file
@@ -87,7 +88,7 @@ let configured_path ~name ~default =
 
 let manifest_path root =
   configured_path ~name:"SOUNIO_LOOM_EXEC_OPERATION_CATALOG_MANIFEST"
-    ~default:(Filename.concat root "tools/loom/exec_operation_catalog.freeze.v1")
+    ~default:(Filename.concat root "tools/loom/exec_operation_catalog.freeze.v2")
 
 let verify_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required manifest path_key) in
@@ -142,7 +143,7 @@ let load ~root =
   if sha256_file path <> pinned_manifest_sha256 then
     failf "exec-catalog-manifest-hash-mismatch";
   let manifest = parse_manifest path in
-  exact manifest "schema" "loom-exec-operation-catalog-freeze-v1";
+  exact_frozen_schema manifest "schema" "loom-exec-operation-catalog-freeze";
   exact manifest "stage" "SEMANTICS_FROZEN";
   exact manifest "producing_language" "Sounio";
   exact manifest "language_role" "SEMANTIC_AUTHORITY";

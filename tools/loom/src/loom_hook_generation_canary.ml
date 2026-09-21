@@ -5,7 +5,13 @@ exception Error of string
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let semantics_9045_sha256 =
-  "27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882"
+  "842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998"
+
+(* Action 9045 v2 is an append-only re-freeze with the same semantic module; hook
+   receipts admitted under the v1 predecessor stay accepted. *)
+let accepted_semantics_9045_sha256 =
+  [ semantics_9045_sha256;
+    "27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882" ]
 
 let provider_bit = function
   | "codex" -> 1
@@ -222,7 +228,9 @@ let decision_counts provider candidate text =
       exact label fields "schema" "loom-agent-hook-receipt-v1";
       exact label fields "decision" "ALLOW";
       exact label fields "provider" provider;
-      exact label fields "semantics_sha256" semantics_9045_sha256;
+      (let observed = required label fields "semantics_sha256" in
+       if not (List.mem observed accepted_semantics_9045_sha256) then
+         failf "%s-field-invalid:%s:%s" label "semantics_sha256" observed);
       exact label fields "semantic_authority_language" "Sounio";
       exact label fields "semantic_authority_role" "SEMANTIC_AUTHORITY";
       exact label fields "toolchain_sha256" candidate.loom_runtime_sha256;
