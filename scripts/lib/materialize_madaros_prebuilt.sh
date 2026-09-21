@@ -81,7 +81,11 @@ sounio_materialize_madaros_prebuilt() {
 
   if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" ]] \
      && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size" ]]; then
-    return 0
+    # Stamp exists and matches recorded hash+size, but re-verify the ELF hasn't been
+    # modified (same-size corruption or replacement would not be caught by size alone).
+    if [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
+      return 0
+    fi
   fi
 
   if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
