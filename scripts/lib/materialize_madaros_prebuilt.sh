@@ -43,13 +43,14 @@ _sounio_madaros_sha256() {
   fi
 }
 
-_sounio_madaros_stat_inode_mtime() {
-  # Get inode and mtime in a cross-platform way (GNU vs BSD stat).
-  # GNU stat: stat -c '%i %Y' (mtime as seconds since epoch)
-  # BSD stat: stat -f '%i %m' (inode and mtime, also as seconds)
-  if stat -c '%i %Y' "$1" 2>/dev/null; then
+_sounio_madaros_stat_inode_mtime_ctime() {
+  # Get inode, mtime, and ctime in a cross-platform way (GNU vs BSD stat).
+  # ctime (change time) is more reliable than mtime for detecting modifications.
+  # GNU stat: stat -c '%i %Y %Z' (inode, mtime, ctime - all seconds since epoch)
+  # BSD stat: stat -f '%i %m %c' (inode, mtime, ctime - all as seconds)
+  if stat -c '%i %Y %Z' "$1" 2>/dev/null; then
     return 0
-  elif stat -f '%i %m' "$1" 2>/dev/null; then
+  elif stat -f '%i %m %c' "$1" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -86,33 +87,39 @@ sounio_materialize_madaros_prebuilt() {
     return 78
   fi
 
-  local size="" inode="" mtime=""
+  local size="" inode="" mtime="" ctime=""
   if [[ -f "$elf" ]]; then
     size="$(wc -c < "$elf" 2>/dev/null | tr -d ' ')" || size=""
-    # Get inode and mtime to detect file replacements and modifications
-    # (same-size corruption is caught by hash fallback if mtime changes).
+    # Get inode, mtime, and ctime to detect file replacements and modifications.
+    # ctime (change time) is more reliable than mtime for detecting file changes.
+    # Even with metadata match, verify hash to catch same-second in-place rewrites.
     local stat_out
-    stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
+    stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
     if [[ -n "$stat_out" ]]; then
       inode="${stat_out%% *}"
-      mtime="${stat_out##* }"
+      local rest="${stat_out#* }"
+      mtime="${rest%% *}"
+      ctime="${rest##* }"
     fi
   fi
 
-  # Fast path: if stamp exists, file metadata matches, trust the stamp (no re-hash).
-  # Fallback: if metadata changed, re-hash to catch modifications.
+  # Fast path: if stamp exists with metadata match, verify hash as fallback.
+  # This catches same-second in-place modifications that metadata alone cannot detect.
   if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" ]] \
-     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime" ]]; then
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]] \
+     && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
     return 0
   fi
 
   if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
     chmod 755 "$elf" 2>/dev/null || true
     local stat_out
-    stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
+    stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
     inode="${stat_out%% *}"
-    mtime="${stat_out##* }"
-    printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+    local rest="${stat_out#* }"
+    mtime="${rest%% *}"
+    ctime="${rest##* }"
+    printf '%s %s %s %s %s\n' "$want" "$size" "$inode" "$mtime" "$ctime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
     return 0
   fi
 
@@ -142,10 +149,12 @@ sounio_materialize_madaros_prebuilt() {
   fi
   size="$(wc -c < "$elf" | tr -d ' ')"
   local stat_out
-  stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
+  stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
   inode="${stat_out%% *}"
-  mtime="${stat_out##* }"
-  printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+  local rest="${stat_out#* }"
+  mtime="${rest%% *}"
+  ctime="${rest##* }"
+  printf '%s %s %s %s %s\n' "$want" "$size" "$inode" "$mtime" "$ctime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
   echo "madaros prebuilt: materialized bin/madaros-linux-x86_64 from bin/madaros-linux-x86_64.gz (sha256 ${want:0:12}, $size bytes)" >&2
   return 0
 }
