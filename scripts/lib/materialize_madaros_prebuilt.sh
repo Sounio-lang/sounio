@@ -43,6 +43,18 @@ _sounio_madaros_sha256() {
   fi
 }
 
+_sounio_madaros_stat_inode_mtime() {
+  # Get inode and mtime in a cross-platform way (GNU vs BSD stat).
+  # GNU stat: stat -c '%i %Y' (mtime as seconds since epoch)
+  # BSD stat: stat -f '%i %m' (inode and mtime, also as seconds)
+  if stat -c '%i %Y' "$1" 2>/dev/null; then
+    return 0
+  elif stat -f '%i %m' "$1" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 sounio_materialize_madaros_prebuilt() {
   local root verify=0
   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -80,7 +92,7 @@ sounio_materialize_madaros_prebuilt() {
     # Get inode and mtime to detect file replacements and modifications
     # (same-size corruption is caught by hash fallback if mtime changes).
     local stat_out
-    stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+    stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
     if [[ -n "$stat_out" ]]; then
       inode="${stat_out%% *}"
       mtime="${stat_out##* }"
@@ -97,7 +109,7 @@ sounio_materialize_madaros_prebuilt() {
   if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
     chmod 755 "$elf" 2>/dev/null || true
     local stat_out
-    stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+    stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
     inode="${stat_out%% *}"
     mtime="${stat_out##* }"
     printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
@@ -130,7 +142,7 @@ sounio_materialize_madaros_prebuilt() {
   fi
   size="$(wc -c < "$elf" | tr -d ' ')"
   local stat_out
-  stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+  stat_out="$(_sounio_madaros_stat_inode_mtime "$elf")" || stat_out=""
   inode="${stat_out%% *}"
   mtime="${stat_out##* }"
   printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
