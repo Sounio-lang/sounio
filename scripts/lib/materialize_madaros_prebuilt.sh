@@ -84,7 +84,7 @@ sounio_materialize_madaros_prebuilt() {
     return 0
   fi
 
-  if [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
+  if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
     chmod 755 "$elf" 2>/dev/null || true
     printf '%s %s\n' "$want" "$size" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
     return 0
